@@ -31,10 +31,26 @@ claunch create work            # create a profile named "work"
 claunch login work             # run `claude setup-token` for that profile
 claunch run work               # launch Claude Code using that profile
 claunch run work -- --help     # pass args through to claude
+claunch usage work             # query subscription usage for the profile
 claunch list                   # list profiles
 claunch path work              # print the profile's CLAUDE_CONFIG_DIR
 claunch remove work            # delete a profile (and its tokens)
 ```
+
+### Usage reporting
+
+`claunch usage <name>` reads the profile's OAuth login token and queries the
+Anthropic usage endpoint (the same one Claude Code uses), printing per-window
+utilization:
+
+```text
+usage for profile 'work' (subscription: max)
+  five_hour          [##------------------]   9.0%  (resets in 4h34m)
+  seven_day          [--------------------]   2.0%  (resets in 5h44m)
+```
+
+Add `--json` to get the raw API response. The query runs against the token of
+that profile only, so each profile reports its own account's usage.
 
 ### How it works
 
@@ -48,8 +64,9 @@ claunch remove work            # delete a profile (and its tokens)
 
 | Environment variable   | Purpose                                            |
 | ---------------------- | -------------------------------------------------- |
-| `CLAUDE_LAUNCHER_HOME` | Base directory for profiles (default `~/.claude-launcher`). |
-| `CLAUDE_LAUNCHER_BIN`  | Path/name of the `claude` executable (default `claude`).    |
+| `CLAUDE_LAUNCHER_HOME`      | Base directory for profiles (default `~/.claude-launcher`). |
+| `CLAUDE_LAUNCHER_BIN`       | Path/name of the `claude` executable (default `claude`).    |
+| `CLAUDE_LAUNCHER_USAGE_URL` | Usage endpoint (default `https://api.anthropic.com/api/oauth/usage`). |
 
 ## License
 
