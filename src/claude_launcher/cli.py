@@ -1,0 +1,182 @@
+"""Command-line interface for claude-launcher.
+
+This module only parses arguments and formats output; all behaviour lives in the
+``profile``, ``runner`` and ``usage`` modules.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import datetime, timezone
+from typing import List, Optional
+
+from . import __version__, profile, runner, usage
+from .credentials import CredentialsError
+
+
+# --------------------------------------------------------------------------- #
+# command handlers
+# --------------------------------------------------------------------------- #
+def _cmd_create(args: argparse.Namespace) -> int:
+    p = profile.create(args.name)
+    print(f"created profile {p.name!r} at {p.config_dir}")
+    print(f"next: claunch login {p.name}")
+    return 0
+
+
+def _cmd_remove(args: argparse.Namespace) -> int:
+    p = profile.remove(args.name)
+    print(f"removed profile {p.name!r} ({p.config_dir})")
+    return 0
+
+
+def _cmd_list(_args: argparse.Namespace) -> int:
+    profiles = profile.list_all()
+    if not profiles:
+        print("no profiles yet; create one with 'claunch create <name>'")
+        return 0
+    for p in profiles:
+        creds = (p.config_dir / ".credentials.json").is_file()
+        flag = "logged in" if creds else "no token"
+        print(f"{p.name:<20} [{flag}]  {p.config_dir}")
+    return 0
+
+
+def _cmd_path(args: argparse.Namespace) -> int:
+    p = profile.require(args.name)
+    print(p.config_dir)
+    return 0
+
+
+def _cmd_login(args: argparse.Namespace) -> int:
+    p = profile.require(args.name)
+    print(f"running 'claude setup-token' for profile {p.name!r}...", file=sys.stderr)
+    return runner.login(p)
+
+
+def _cmd_run(args: argparse.Namespace) -> int:
+    p = profile.require(args.name)
+    passthrough = _strip_separator(args.args)
+    return runner.run(p, passthrough)
+
+
+def _cmd_usage(args: argparse.Namespace) -> int:
+    p = profile.require(args.name)
+    report = usage.fetch(p)
+    if args.json:
+        import json
+
+        print(json.dumps(report.raw, indent=2))
+        return 0
+    _print_usage(p.name, report)
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# formatting helpers
+# --------------------------------------------------------------------------- #
+def _strip_separator(args: Optional[List[str]]) -> List[str]:
+    """Drop a leading ``--`` that argparse keeps in REMAINDER."""
+    args = list(args or [])
+    if args and args[0] == "--":
+        return args[1:]
+    return args
+
+
+def _fmt_reset(resets_at: Optional[str]) -> str:
+    if not resets_at:
+        return ""
+    try:
+        dt = datetime.fromisoformat(resets_at.replace("Z", "+00:00"))
+    except ValueError:
+        return f"(resets {resets_at})"
+    delta = dt - datetime.now(timezone.utc)
+    mins = int(delta.total_seconds() // 60)
+    if mins <= 0:
+        return "(resetting)"
+    if mins < 60:
+        return f"(resets in {mins}m)"
+    return f"(resets in {mins // 60}h{mins % 60:02d}m)"
+
+
+def _print_usage(name: str, report: usage.UsageReport) -> None:
+    sub = report.subscription_type or "unknown"
+    print(f"usage for profile {name!r} (subscription: {sub})")
+    active = [w for w in report.windows if w.utilization > 0 or w.resets_at]
+    windows = active or report.windows
+    if not windows:
+        print("  no usage windows reported")
+        return
+    for w in windows:
+        bar = _bar(w.utilization)
+        print(f"  {w.name:<18} {bar} {w.utilization:5.1f}%  {_fmt_reset(w.resets_at)}")
+
+
+def _bar(pct: float, width: int = 20) -> str:
+    filled = max(0, min(width, round(pct / 100 * width)))
+    return "[" + "#" * filled + "-" * (width - filled) + "]"
+
+
+# --------------------------------------------------------------------------- #
+# parser
+# --------------------------------------------------------------------------- #
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        prog="claunch",
+        description="Run Claude Code under isolated, per-profile login tokens and config.",
+    )
+    parser.add_argument("--version", action="version", version=f"claude-launcher {__version__}")
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_create = sub.add_parser("create", help="create a new profile")
+    p_create.add_argument("name")
+    p_create.set_defaults(func=_cmd_create)
+
+    p_remove = sub.add_parser("remove", help="delete a profile and its tokens")
+    p_remove.add_argument("name")
+    p_remove.set_defaults(func=_cmd_remove)
+
+    p_list = sub.add_parser("list", help="list profiles")
+    p_list.set_defaults(func=_cmd_list)
+
+    p_path = sub.add_parser("path", help="print a profile's CLAUDE_CONFIG_DIR")
+    p_path.add_argument("name")
+    p_path.set_defaults(func=_cmd_path)
+
+    p_login = sub.add_parser("login", help="log in via 'claude setup-token'")
+    p_login.add_argument("name")
+    p_login.set_defaults(func=_cmd_login)
+
+    p_run = sub.add_parser("run", help="launch claude with the profile (args after -- are passed through)")
+    p_run.add_argument("name")
+    p_run.add_argument("args", nargs=argparse.REMAINDER, help="arguments forwarded to claude")
+    p_run.set_defaults(func=_cmd_run)
+
+    p_usage = sub.add_parser("usage", help="query subscription usage for a profile")
+    p_usage.add_argument("name")
+    p_usage.add_argument("--json", action="store_true", help="print raw JSON")
+    p_usage.set_defaults(func=_cmd_usage)
+
+    return parser
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    try:
+        return args.func(args)
+    except (
+        profile.ProfileError,
+        runner.RunnerError,
+        usage.UsageError,
+        CredentialsError,
+    ) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+
+
+if __name__ == "__main__":
+    sys.exit(main())

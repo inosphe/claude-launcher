@@ -34,6 +34,11 @@ def _spawn(profile: Profile, args: Sequence[str]) -> int:
             f"could not find {config.claude_bin()!r} executable; "
             f"is Claude Code installed? (override with {config.LAUNCHER_BIN_ENV})"
         ) from exc
+    except OSError as exc:
+        raise RunnerError(
+            f"could not launch {config.claude_bin()!r}: {exc} "
+            f"(override the executable with {config.LAUNCHER_BIN_ENV})"
+        ) from exc
     return completed.returncode
 
 
