@@ -9,19 +9,15 @@ pass a resolved :class:`~claude_launcher.profile.Profile`.
 from __future__ import annotations
 
 import os
-import re
 import subprocess
 import sys
-from typing import Optional, Sequence
+from typing import Sequence
 
 from . import config, credentials
 from .profile import Profile
 
 #: Environment variable Claude Code reads for a setup-token login.
 OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
-
-#: setup-token output looks like ``sk-ant-oat01-...``; capture it from the stream.
-_TOKEN_RE = re.compile(r"sk-ant-oat[\w-]+")
 
 
 class RunnerError(Exception):
@@ -60,50 +56,27 @@ def _spawn(profile: Profile, args: Sequence[str], *, with_token: bool) -> int:
 
 
 def login(profile: Profile) -> int:
-    """Run ``claude setup-token`` and store the printed token in the profile.
+    """Run ``claude setup-token`` interactively for the profile.
 
-    The child's combined output is streamed to the terminal in real time (so the
-    interactive OAuth prompts stay visible) while we scan it for the token.
+    ``setup-token`` renders a full-screen TUI and drives an interactive OAuth
+    flow, so its stdio is left attached to the terminal (no piping/capture).
+    Claude Code persists the resulting login inside the profile's
+    ``CLAUDE_CONFIG_DIR``; if it instead only prints a token, the user can store
+    it with ``claunch set-token``.
     """
-    cmd = [config.claude_bin(), "setup-token"]
-    try:
-        proc = subprocess.Popen(
-            cmd,
-            env=_child_env(profile, with_token=False),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-    except FileNotFoundError as exc:
-        raise RunnerError(
-            f"could not find {config.claude_bin()!r} executable; "
-            f"is Claude Code installed? (override with {config.LAUNCHER_BIN_ENV})"
-        ) from exc
-    except OSError as exc:
-        raise RunnerError(f"could not launch {config.claude_bin()!r}: {exc}") from exc
-
-    token: Optional[str] = None
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        sys.stdout.write(line)
-        sys.stdout.flush()
-        match = _TOKEN_RE.search(line)
-        if match:
-            token = match.group(0)
-    code = proc.wait()
-
-    if token:
-        credentials.save_token(profile, token)
+    code = _spawn(profile, ["setup-token"], with_token=False)
+    if code != 0:
+        return code
+    if credentials.has_token(profile):
         print(
-            f"\nstored token for profile {profile.name!r} "
-            f"(used as {OAUTH_TOKEN_ENV} on 'claunch run')",
+            f"\nprofile {profile.name!r} is logged in.",
             file=sys.stderr,
         )
-    elif code == 0:
+    else:
         print(
-            f"\nwarning: no token detected in output for profile {profile.name!r}; "
-            f"nothing stored. Capture it manually with 'claunch set-token {profile.name}'.",
+            f"\nlogin finished but no token was saved for profile {profile.name!r}. "
+            f"If setup-token printed a token, store it with:\n"
+            f"    claunch set-token {profile.name} <token>",
             file=sys.stderr,
         )
     return code
