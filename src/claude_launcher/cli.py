@@ -206,12 +206,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_create.set_defaults(func=_cmd_create)
 
     p_remove = sub.add_parser(
-        "remove", aliases=["delete"], help="delete a profile and its tokens"
+        "remove", aliases=["delete", "rm"], help="delete a profile and its tokens"
     )
     p_remove.add_argument("name")
     p_remove.set_defaults(func=_cmd_remove)
 
-    p_list = sub.add_parser("list", help="list profiles")
+    p_list = sub.add_parser("list", aliases=["ls"], help="list profiles")
     p_list.set_defaults(func=_cmd_list)
 
     p_path = sub.add_parser("path", help="print a profile's CLAUDE_CONFIG_DIR")

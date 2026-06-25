@@ -39,14 +39,28 @@ claunch usage work      # show this profile's subscription usage
 | ------- | ----------- |
 | `create <name>`        | Create a profile, seed global config, apply the env template. |
 | `login <name>`         | Run `claude setup-token` for the profile. |
-| `run <name> [-- ...]`  | Launch `claude` for the profile; args after `--` pass through. |
+| `run <name> [args...]` | Launch `claude` for the profile; any extra args pass through. |
 | `env <name> [...]`     | View/edit the profile's claude env vars (see below). |
 | `template [--init]`    | Show or write the default env template. |
 | `usage <name>`         | Query subscription usage (`--json` for the raw response). |
 | `set-token <name> [t]` | Store a token manually (pasted, or piped via stdin). |
-| `list`                 | List profiles and whether each is logged in. |
+| `list`                 | List profiles and whether each is logged in (alias: `ls`). |
 | `path <name>`          | Print the profile's `CLAUDE_CONFIG_DIR`. |
-| `remove <name>`        | Delete a profile and its tokens (alias: `delete`). |
+| `remove <name>`        | Delete a profile and its tokens (aliases: `delete`, `rm`). |
+
+### Passing arguments to claude
+
+Anything after the profile name on `run` is forwarded to `claude` as-is — no `--`
+separator needed:
+
+```bash
+claunch run work --resume
+claunch run work --teammate-mode
+claunch run work -p "summarize this repo" --model opus
+```
+
+Use a leading `--` only if an argument would otherwise be read by `claunch`
+itself (e.g. `claunch run work -- --help` to show claude's help).
 
 ## Login & tokens
 
