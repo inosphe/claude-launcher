@@ -76,6 +76,20 @@ def _ancestors_nearest_first(profile: Profile) -> List[Profile]:
     return list(reversed(chain(profile)[:-1]))
 
 
+def descendants(profile: Profile) -> List[Profile]:
+    """All profiles that have ``profile`` somewhere in their parent chain."""
+    out: List[Profile] = []
+    for candidate in profile_mod.list_all():
+        if candidate.name == profile.name:
+            continue
+        try:
+            if any(a.name == profile.name for a in chain(candidate)):
+                out.append(candidate)
+        except LineageError:
+            continue
+    return out
+
+
 def set_parent(profile: Profile, parent_name: str) -> None:
     """Point ``profile`` at ``parent_name`` (must exist, no cycles)."""
     parent = profile_mod.require(parent_name)

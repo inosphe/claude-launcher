@@ -211,6 +211,19 @@ parent in with `setup-token` — those tokens are long-lived.) Cycles and missin
 parents are rejected. Use `claunch parent <name> <parent>` to re-parent an
 existing profile or `--clear` to detach it.
 
+**What inheritance covers.** `env` and the login token are resolved live at
+launch, so changing them on a parent affects children immediately. **Skills and
+MCP servers are *files* in each profile's own config dir**, which Claude Code
+reads from a single `CLAUDE_CONFIG_DIR` — they can't be merged live, so they are
+*copied*: `create --parent` copies the parent's skills + MCP into the new child,
+and `claunch migrate <parent> --recursive` re-copies into the parent and every
+descendant when you add more later.
+
+| Inherited live (env, token) | Copied point-in-time (skills, MCP) |
+| --------------------------- | ---------------------------------- |
+| change parent → children see it next run | `create --parent` seeds from parent |
+| `env --effective` shows the merge | `migrate <parent> --recursive` re-syncs the tree |
+
 ## Migrating skills & MCP servers
 
 Seeding copies the global `settings.json`, so the MCP servers defined there come
@@ -223,6 +236,7 @@ claunch migrate work                 # from ~/.claude (global skills + MCP)
 claunch migrate work ./my-project    # from a project's .claude/ and .mcp.json
 claunch migrate work --mcp           # MCP servers only (--skills for skills only)
 claunch migrate work --plugins       # also copy the plugins/ directory
+claunch migrate company --recursive  # also into every child profile (see Inheritance)
 claunch migrate work --dry-run       # preview without copying
 ```
 

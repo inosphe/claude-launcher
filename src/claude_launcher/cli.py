@@ -49,6 +49,15 @@ def _cmd_create(args: argparse.Namespace) -> int:
     if args.parent:
         lineage.set_parent(p, args.parent)
         print(f"inherits from parent {args.parent!r} (env + login)")
+        parent = profile.require(args.parent)
+        copied = migrate_mod.migrate(p, parent.config_dir, skills=True, mcp=True)
+        bits = []
+        if copied.skills:
+            bits.append(f"skills: {', '.join(copied.skills)}")
+        if copied.mcp_servers:
+            bits.append(f"mcp: {', '.join(copied.mcp_servers)}")
+        if bits:
+            print(f"copied from parent ({'; '.join(bits)})")
     else:
         template.ensure_file()
         applied = template.apply_to(p)
@@ -163,23 +172,29 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
     selected = args.skills or args.mcp or args.plugins
     do_skills = args.skills or not selected
     do_mcp = args.mcp or not selected
-    result = migrate_mod.migrate(
-        p,
-        source,
-        skills=do_skills,
-        mcp=do_mcp,
-        plugins=args.plugins,
-        dry_run=args.dry_run,
-    )
+
+    targets = [p]
+    if args.recursive:
+        targets += lineage.descendants(p)
+
     verb = "would migrate" if args.dry_run else "migrated"
-    print(f"{verb} from {source} into {p.name!r}:")
-    if do_skills:
-        print(f"  skills: {', '.join(result.skills) if result.skills else '(none)'}")
-    if do_mcp:
-        servers = ", ".join(result.mcp_servers) if result.mcp_servers else "(none)"
-        print(f"  mcp servers: {servers}")
-    if args.plugins:
-        print(f"  plugins: {'copied' if result.plugins else '(none)'}")
+    for target in targets:
+        result = migrate_mod.migrate(
+            target,
+            source,
+            skills=do_skills,
+            mcp=do_mcp,
+            plugins=args.plugins,
+            dry_run=args.dry_run,
+        )
+        print(f"{verb} from {source} into {target.name!r}:")
+        if do_skills:
+            print(f"  skills: {', '.join(result.skills) if result.skills else '(none)'}")
+        if do_mcp:
+            servers = ", ".join(result.mcp_servers) if result.mcp_servers else "(none)"
+            print(f"  mcp servers: {servers}")
+        if args.plugins:
+            print(f"  plugins: {'copied' if result.plugins else '(none)'}")
     return 0
 
 
@@ -437,6 +452,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_migrate.add_argument("--mcp", action="store_true", help="migrate MCP servers only")
     p_migrate.add_argument(
         "--plugins", action="store_true", help="also copy the plugins directory"
+    )
+    p_migrate.add_argument(
+        "--recursive",
+        action="store_true",
+        help="also migrate into all child profiles that inherit from this one",
     )
     p_migrate.add_argument(
         "--dry-run", action="store_true", help="show what would be migrated"
