@@ -36,7 +36,6 @@ class UsageWindow:
 
 @dataclass(frozen=True)
 class UsageReport:
-    subscription_type: Optional[str]
     windows: List[UsageWindow]
     raw: dict
 
@@ -87,10 +86,6 @@ def _parse_windows(payload: dict) -> List[UsageWindow]:
 
 def fetch(profile: Profile) -> UsageReport:
     """Fetch and parse the usage report for ``profile``."""
-    token = credentials.load(profile)
-    payload = _request(config.usage_url(), token.access_token)
-    return UsageReport(
-        subscription_type=token.subscription_type,
-        windows=_parse_windows(payload),
-        raw=payload,
-    )
+    token = credentials.access_token(profile)
+    payload = _request(config.usage_url(), token)
+    return UsageReport(windows=_parse_windows(payload), raw=payload)

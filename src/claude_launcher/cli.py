@@ -11,7 +11,7 @@ import sys
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from . import __version__, profile, runner, usage
+from . import __version__, credentials, profile, runner, usage
 from .credentials import CredentialsError
 
 
@@ -37,8 +37,7 @@ def _cmd_list(_args: argparse.Namespace) -> int:
         print("no profiles yet; create one with 'claunch create <name>'")
         return 0
     for p in profiles:
-        creds = (p.config_dir / ".credentials.json").is_file()
-        flag = "logged in" if creds else "no token"
+        flag = "logged in" if credentials.has_token(p) else "no token"
         print(f"{p.name:<20} [{flag}]  {p.config_dir}")
     return 0
 
@@ -53,6 +52,16 @@ def _cmd_login(args: argparse.Namespace) -> int:
     p = profile.require(args.name)
     print(f"running 'claude setup-token' for profile {p.name!r}...", file=sys.stderr)
     return runner.login(p)
+
+
+def _cmd_set_token(args: argparse.Namespace) -> int:
+    p = profile.require(args.name)
+    token = args.token
+    if not token:
+        token = sys.stdin.readline()
+    credentials.save_token(p, token)
+    print(f"stored token for profile {p.name!r}")
+    return 0
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
@@ -101,8 +110,7 @@ def _fmt_reset(resets_at: Optional[str]) -> str:
 
 
 def _print_usage(name: str, report: usage.UsageReport) -> None:
-    sub = report.subscription_type or "unknown"
-    print(f"usage for profile {name!r} (subscription: {sub})")
+    print(f"usage for profile {name!r}")
     active = [w for w in report.windows if w.utilization > 0 or w.resets_at]
     windows = active or report.windows
     if not windows:
@@ -147,6 +155,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_login = sub.add_parser("login", help="log in via 'claude setup-token'")
     p_login.add_argument("name")
     p_login.set_defaults(func=_cmd_login)
+
+    p_set = sub.add_parser(
+        "set-token",
+        help="store a setup-token manually (paste it or pipe via stdin)",
+    )
+    p_set.add_argument("name")
+    p_set.add_argument("token", nargs="?", help="token value; read from stdin if omitted")
+    p_set.set_defaults(func=_cmd_set_token)
 
     p_run = sub.add_parser("run", help="launch claude with the profile (args after -- are passed through)")
     p_run.add_argument("name")
