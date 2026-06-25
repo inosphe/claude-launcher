@@ -24,6 +24,22 @@ uv tool install .
 
 This puts `claunch` on your PATH. The `claude` CLI must already be installed.
 
+### Development / live patching
+
+Install editable so the tool imports straight from this repo instead of a copy:
+
+```bash
+uv tool install --force --editable .
+```
+
+Now source edits take effect on the **next** `claunch` invocation — no reinstall.
+Because nothing is copied into uv's tool venv, the source files are never locked,
+so you can patch the launcher **while a `claunch run` session is active**. The
+running session keeps the code it started with (Python loads modules into memory
+at launch); the patch applies to the next command you run. The `claude`
+subprocess is independent of the launcher, so editing launcher code never
+disturbs a live session.
+
 ## Quick start
 
 ```bash
