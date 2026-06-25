@@ -80,6 +80,23 @@ def access_token(profile: Profile) -> str:
     return token
 
 
+def credentials_token(profile: Profile) -> Optional[str]:
+    """The access token from a ``/login`` ``.credentials.json`` (or ``None``)."""
+    return _credentials_access_token(profile)
+
+
+def scopes(profile: Profile) -> Optional[list]:
+    """OAuth scopes recorded in ``.credentials.json`` (``None`` for setup-tokens)."""
+    path = profile.config_dir / CREDENTIALS_FILENAME
+    if not path.is_file():
+        return None
+    try:
+        oauth = json.loads(path.read_text(encoding="utf-8")).get("claudeAiOauth")
+    except (OSError, json.JSONDecodeError):
+        return None
+    return oauth.get("scopes") if isinstance(oauth, dict) else None
+
+
 def own_token(profile: Profile) -> Optional[str]:
     """The profile's own token (stored setup-token first, then login creds)."""
     return stored_token(profile) or _credentials_access_token(profile)

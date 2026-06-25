@@ -336,7 +336,8 @@ def _fmt_reset(resets_at: Optional[str]) -> str:
 
 
 def _print_usage(name: str, report: usage.UsageReport) -> None:
-    print(f"usage for profile {name!r}")
+    suffix = "  (via rate-limit headers)" if report.source == "ratelimit-headers" else ""
+    print(f"usage for profile {name!r}{suffix}")
     active = [w for w in report.windows if w.utilization > 0 or w.resets_at]
     windows = active or report.windows
     if not windows:
@@ -344,7 +345,10 @@ def _print_usage(name: str, report: usage.UsageReport) -> None:
         return
     for w in windows:
         bar = _bar(w.utilization)
-        print(f"  {w.name:<18} {bar} {w.utilization:5.1f}%  {_fmt_reset(w.resets_at)}")
+        note = _fmt_reset(w.resets_at)
+        if w.status and w.status not in ("allowed", "ok"):
+            note = f"{note}  [{w.status}]".strip()
+        print(f"  {w.name:<18} {bar} {w.utilization:5.1f}%  {note}")
 
 
 def _bar(pct: float, width: int = 20) -> str:

@@ -317,6 +317,13 @@ usage for profile 'work'
 Add `--json` for the raw API response. The query uses only that profile's token,
 so each profile reports its own account's usage.
 
+**setup-token note.** The free `/api/oauth/usage` endpoint requires the
+`user:profile` scope, which `claude setup-token` tokens don't carry. For those
+(the launcher's default), `usage` instead reads the `anthropic-ratelimit-unified-*`
+headers from a minimal `claude` API call (1 output token) — the output is marked
+`(via rate-limit headers)`. The throwaway model defaults to Haiku; override it
+with `CLAUDE_LAUNCHER_USAGE_MODEL`.
+
 ## How it works
 
 - Profiles live under `~/.claude-launcher/profiles/<name>` (override the base
@@ -345,6 +352,7 @@ A profile directory typically holds:
 | `CLAUDE_LAUNCHER_HOME`      | Base directory for profiles (default `~/.claude-launcher`). |
 | `CLAUDE_LAUNCHER_BIN`       | Path/name of the `claude` executable (default `claude`). |
 | `CLAUDE_LAUNCHER_USAGE_URL` | Usage endpoint (default `https://api.anthropic.com/api/oauth/usage`). |
+| `CLAUDE_LAUNCHER_USAGE_MODEL` | Model for the setup-token usage fallback call (default Haiku). |
 | `CLAUDE_LAUNCHER_SEED`      | Config dir new profiles seed from (default `CLAUDE_CONFIG_DIR` or `~/.claude`). |
 | `CLAUDE_LAUNCHER_SYNC_FILE` | YAML file for `export`/`import` (default `~/.claunch.yaml`). |
 

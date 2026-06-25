@@ -137,16 +137,25 @@ def injectable_token(profile: Profile) -> Optional[str]:
     return None
 
 
+def resolve_token(profile: Profile):
+    """Return ``(token, has_profile_scope)`` for the profile (own first, then up).
+
+    Setup-tokens carry no scope metadata and lack ``user:profile``, so they are
+    reported as unscoped; ``.credentials.json`` tokens are scoped per their file.
+    """
+    for p in [profile, *_ancestors_nearest_first(profile)]:
+        stored = credentials.stored_token(p)
+        if stored:
+            return stored, False
+        creds = credentials.credentials_token(p)
+        if creds:
+            return creds, "user:profile" in (credentials.scopes(p) or [])
+    return None, False
+
+
 def lookup_token(profile: Profile) -> Optional[str]:
     """Any usable token for the profile (own first, then inherited)."""
-    own = credentials.own_token(profile)
-    if own:
-        return own
-    for ancestor in _ancestors_nearest_first(profile):
-        token = credentials.own_token(ancestor)
-        if token:
-            return token
-    return None
+    return resolve_token(profile)[0]
 
 
 def login_state(profile: Profile) -> str:

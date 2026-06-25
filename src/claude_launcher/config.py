@@ -54,6 +54,11 @@ def usage_url() -> str:
     )
 
 
+def usage_model() -> str:
+    """Model for the minimal call that reads rate-limit headers (setup-token fallback)."""
+    return os.environ.get("CLAUDE_LAUNCHER_USAGE_MODEL", "claude-haiku-4-5-20251001")
+
+
 def default_config_dir() -> Path:
     """Claude Code's default config dir (the source for seeding new profiles)."""
     override = os.environ.get(CLAUDE_CONFIG_DIR_ENV)
