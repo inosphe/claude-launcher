@@ -65,7 +65,7 @@ claunch usage work      # show this profile's subscription usage
 | ------- | ----------- |
 | `create <name>`        | Create a profile (`--parent` to inherit), seed config, apply template. |
 | `login <name>`         | Run `claude setup-token` for the profile. |
-| `run <name> [args...]` | Launch `claude` for the profile; any extra args pass through. |
+| `run <name> [args...]` | Launch `claude` for the profile (`--borrow NAME`; extra args pass through). |
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
@@ -92,6 +92,21 @@ claunch run work -p "summarize this repo" --model opus
 
 Use a leading `--` only if an argument would otherwise be read by `claunch`
 itself (e.g. `claunch run work -- --help` to show claude's help).
+
+### Borrowing another profile's token
+
+Run a profile but authenticate with **another profile's** login, just for that
+run — the running profile's config dir, env and skills are unchanged, only the
+token is swapped:
+
+```bash
+claunch run company --borrow company2
+claunch run company --borrow company2 --resume   # extra args still pass through
+```
+
+Nothing is persisted: it only sets `CLAUDE_CODE_OAUTH_TOKEN` from the borrowed
+profile for this one launch. The borrowed profile must have a token (its own or
+inherited). To forward a literal `--borrow` to claude, put it after `--`.
 
 ## Login & tokens
 

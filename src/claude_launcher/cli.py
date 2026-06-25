@@ -256,8 +256,15 @@ def _cmd_set_token(args: argparse.Namespace) -> int:
 
 def _cmd_run(args: argparse.Namespace) -> int:
     p = profile.require(args.name)
-    passthrough = _strip_separator(args.args)
-    return runner.run(p, passthrough)
+    # `args` is argparse.REMAINDER, so it also captures launcher flags like
+    # --borrow that appear after the profile name; pull those out here, then
+    # drop a leading `--` separator before forwarding the rest to claude.
+    borrow_name, rest = _extract_borrow(args.args)
+    passthrough = _strip_separator(rest)
+    borrow = profile.require(borrow_name) if borrow_name else None
+    if borrow is not None:
+        print(f"borrowing {borrow.name!r} token for this run", file=sys.stderr)
+    return runner.run(p, passthrough, borrow=borrow)
 
 
 def _cmd_usage(args: argparse.Namespace) -> int:
@@ -281,6 +288,35 @@ def _strip_separator(args: Optional[List[str]]) -> List[str]:
     if args and args[0] == "--":
         return args[1:]
     return args
+
+
+def _extract_borrow(args: List[str]) -> "tuple[Optional[str], List[str]]":
+    """Pull a ``--borrow NAME`` / ``--borrow=NAME`` flag out of run passthrough.
+
+    Stops at a ``--`` separator so anything explicitly forwarded to claude after
+    it is left untouched.
+    """
+    borrow: Optional[str] = None
+    rest: List[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == "--":
+            rest.extend(args[i:])
+            break
+        if token == "--borrow":
+            if i + 1 >= len(args):
+                raise profile.ProfileError("--borrow requires a profile name")
+            borrow = args[i + 1]
+            i += 2
+            continue
+        if token.startswith("--borrow="):
+            borrow = token.split("=", 1)[1]
+            i += 1
+            continue
+        rest.append(token)
+        i += 1
+    return borrow, rest
 
 
 def _fmt_reset(resets_at: Optional[str]) -> str:
@@ -371,9 +407,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_set.add_argument("token", nargs="?", help="token value; read from stdin if omitted")
     p_set.set_defaults(func=_cmd_set_token)
 
-    p_run = sub.add_parser("run", help="launch claude with the profile (args after -- are passed through)")
+    p_run = sub.add_parser(
+        "run",
+        help="launch claude with the profile (extra args pass through; "
+        "--borrow NAME uses another profile's token for this run only)",
+    )
     p_run.add_argument("name")
-    p_run.add_argument("args", nargs=argparse.REMAINDER, help="arguments forwarded to claude")
+    p_run.add_argument(
+        "args",
+        nargs=argparse.REMAINDER,
+        help="--borrow NAME and/or arguments forwarded to claude",
+    )
     p_run.set_defaults(func=_cmd_run)
 
     p_env = sub.add_parser(
