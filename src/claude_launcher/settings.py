@@ -1,0 +1,65 @@
+"""Read and edit a profile's ``settings.json`` (Claude Code's native settings).
+
+Claude Code applies the ``"env"`` map in ``settings.json`` to its session, so this
+module is how the launcher stores per-profile environment variables. It only
+touches ``<CLAUDE_CONFIG_DIR>/settings.json`` and performs no process or network
+work.
+"""
+
+from __future__ import annotations
+
+import json
+from typing import Dict, Iterable, Mapping
+
+from .profile import Profile
+
+SETTINGS_FILENAME = "settings.json"
+
+
+def _path(profile: Profile):
+    return profile.config_dir / SETTINGS_FILENAME
+
+
+def load(profile: Profile) -> dict:
+    """Return the parsed settings, or ``{}`` if missing/unreadable."""
+    path = _path(profile)
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save(profile: Profile, data: dict) -> None:
+    _path(profile).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+
+def get_env(profile: Profile) -> Dict[str, str]:
+    env = load(profile).get("env")
+    return {str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {}
+
+
+def set_env(profile: Profile, updates: Mapping[str, str]) -> Dict[str, str]:
+    """Merge ``updates`` into the profile's ``env`` and persist."""
+    data = load(profile)
+    env = data.get("env")
+    if not isinstance(env, dict):
+        env = {}
+    env.update({str(k): str(v) for k, v in updates.items()})
+    data["env"] = env
+    save(profile, data)
+    return get_env(profile)
+
+
+def unset_env(profile: Profile, keys: Iterable[str]) -> Dict[str, str]:
+    """Remove ``keys`` from the profile's ``env`` and persist."""
+    data = load(profile)
+    env = data.get("env")
+    if isinstance(env, dict):
+        for key in keys:
+            env.pop(key, None)
+        data["env"] = env
+        save(profile, data)
+    return get_env(profile)

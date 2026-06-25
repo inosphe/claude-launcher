@@ -13,7 +13,7 @@ import subprocess
 import sys
 from typing import Sequence
 
-from . import config, credentials
+from . import config, credentials, settings
 from .profile import Profile
 
 #: Environment variable Claude Code reads for a setup-token login.
@@ -27,6 +27,9 @@ class RunnerError(Exception):
 def _child_env(profile: Profile, *, with_token: bool) -> dict:
     env = os.environ.copy()
     env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
+    # Per-profile env vars (from settings.json "env") take precedence over the
+    # inherited shell environment — that is the point of an isolated profile.
+    env.update(settings.get_env(profile))
     if with_token:
         token = credentials.stored_token(profile)
         if token:

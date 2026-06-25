@@ -37,9 +37,11 @@ claunch usage work      # show this profile's subscription usage
 
 | Command | Description |
 | ------- | ----------- |
-| `create <name>`        | Create a profile and seed it from your global config. |
+| `create <name>`        | Create a profile, seed global config, apply the env template. |
 | `login <name>`         | Run `claude setup-token` for the profile. |
 | `run <name> [-- ...]`  | Launch `claude` for the profile; args after `--` pass through. |
+| `env <name> [...]`     | View/edit the profile's claude env vars (see below). |
+| `template [--init]`    | Show or write the default env template. |
 | `usage <name>`         | Query subscription usage (`--json` for the raw response). |
 | `set-token <name> [t]` | Store a token manually (pasted, or piped via stdin). |
 | `list`                 | List profiles and whether each is logged in. |
@@ -79,6 +81,42 @@ with its own setup-token.
 claunch create work                 # seed from CLAUDE_CONFIG_DIR or ~/.claude
 claunch create work --seed-from DIR # seed from a specific config dir
 claunch create work --no-seed       # start fully fresh (onboarding will run)
+```
+
+## Per-profile environment variables
+
+Each profile can set Claude Code environment variables, stored in its
+`settings.json` `"env"` block. `claunch run` also exports them into claude's
+process, so they take effect immediately and **override** any value inherited
+from your shell.
+
+```bash
+claunch env work                                  # list this profile's env vars
+claunch env work CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000   # set one or more
+claunch env work --unset FOO BAR                  # remove vars
+claunch env work --apply-template                 # merge the template defaults
+```
+
+### Default template
+
+New profiles get a default env block from `<launcher home>/template.json`. The
+built-in defaults are:
+
+```json
+{
+  "env": {
+    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000"
+  }
+}
+```
+
+Edit that file (or run `claunch template --init` to create it) to change the
+defaults for future profiles. **Existing profiles are not changed automatically**
+— apply the current defaults to one with:
+
+```bash
+claunch env <name> --apply-template
 ```
 
 ## Usage reporting

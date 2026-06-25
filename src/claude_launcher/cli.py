@@ -13,7 +13,7 @@ from typing import List, Optional
 
 from pathlib import Path
 
-from . import __version__, credentials, profile, runner, seed, usage
+from . import __version__, credentials, profile, runner, seed, settings, template, usage
 from .credentials import CredentialsError
 
 
@@ -30,6 +30,10 @@ def _cmd_create(args: argparse.Namespace) -> int:
             print(f"seeded global config ({', '.join(copied)}); onboarding skipped")
         else:
             print("no global config found to seed; first run will show onboarding")
+    template.ensure_file()
+    applied = template.apply_to(p)
+    if applied:
+        print(f"applied template env: {', '.join(sorted(applied))}")
     print(f"next: claunch login {p.name}")
     return 0
 
@@ -61,6 +65,47 @@ def _cmd_login(args: argparse.Namespace) -> int:
     p = profile.require(args.name)
     print(f"running 'claude setup-token' for profile {p.name!r}...", file=sys.stderr)
     return runner.login(p)
+
+
+def _cmd_env(args: argparse.Namespace) -> int:
+    p = profile.require(args.name)
+    if args.apply_template:
+        template.apply_to(p)
+    if args.unset:
+        settings.unset_env(p, args.unset)
+    if args.assignments:
+        updates = {}
+        for item in args.assignments:
+            if "=" not in item:
+                print(f"error: expected KEY=VALUE, got {item!r}", file=sys.stderr)
+                return 1
+            key, value = item.split("=", 1)
+            if not key:
+                print(f"error: empty key in {item!r}", file=sys.stderr)
+                return 1
+            updates[key] = value
+        settings.set_env(p, updates)
+    env = settings.get_env(p)
+    if not env:
+        print(f"profile {p.name!r} has no env vars set")
+        return 0
+    for key in sorted(env):
+        print(f"{key}={env[key]}")
+    return 0
+
+
+def _cmd_template(args: argparse.Namespace) -> int:
+    if args.init:
+        template.ensure_file()
+    path = template.template_path()
+    suffix = "" if path.is_file() else "  (not created; using built-in defaults)"
+    print(f"template: {path}{suffix}")
+    env = template.env()
+    if env:
+        print("default env:")
+        for key in sorted(env):
+            print(f"  {key}={env[key]}")
+    return 0
 
 
 def _cmd_set_token(args: argparse.Namespace) -> int:
@@ -189,6 +234,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("name")
     p_run.add_argument("args", nargs=argparse.REMAINDER, help="arguments forwarded to claude")
     p_run.set_defaults(func=_cmd_run)
+
+    p_env = sub.add_parser(
+        "env", help="view or edit a profile's claude env vars (settings.json)"
+    )
+    p_env.add_argument("name")
+    p_env.add_argument(
+        "assignments", nargs="*", metavar="KEY=VALUE", help="env vars to set"
+    )
+    p_env.add_argument(
+        "--unset", nargs="+", metavar="KEY", help="env vars to remove"
+    )
+    p_env.add_argument(
+        "--apply-template",
+        action="store_true",
+        help="merge the template's default env into the profile",
+    )
+    p_env.set_defaults(func=_cmd_env)
+
+    p_tpl = sub.add_parser(
+        "template", help="show or initialize the default profile template"
+    )
+    p_tpl.add_argument(
+        "--init", action="store_true", help="write the default template file"
+    )
+    p_tpl.set_defaults(func=_cmd_template)
 
     p_usage = sub.add_parser("usage", help="query subscription usage for a profile")
     p_usage.add_argument("name")
