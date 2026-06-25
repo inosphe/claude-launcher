@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import time
 from typing import Optional
 
 from .profile import Profile
@@ -82,3 +83,27 @@ def access_token(profile: Profile) -> str:
 def has_token(profile: Profile) -> bool:
     """Whether the profile has any usable token (stored or from login)."""
     return stored_token(profile) is not None or _credentials_access_token(profile) is not None
+
+
+def token_state(profile: Profile) -> str:
+    """Coarse login state for display: ``"ok"``, ``"expired"`` or ``"none"``.
+
+    A launcher-stored setup-token has no expiry metadata, so it always reads as
+    ``"ok"``. A ``/login`` ``.credentials.json`` is checked against its
+    ``expiresAt`` timestamp.
+    """
+    if stored_token(profile) is not None:
+        return "ok"
+    path = profile.config_dir / CREDENTIALS_FILENAME
+    if not path.is_file():
+        return "none"
+    try:
+        oauth = json.loads(path.read_text(encoding="utf-8")).get("claudeAiOauth")
+    except (OSError, json.JSONDecodeError):
+        return "none"
+    if not isinstance(oauth, dict) or not oauth.get("accessToken"):
+        return "none"
+    expires_at = oauth.get("expiresAt")
+    if isinstance(expires_at, (int, float)) and expires_at <= int(time.time() * 1000):
+        return "expired"
+    return "ok"

@@ -11,7 +11,8 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from typing import Sequence
+from dataclasses import dataclass
+from typing import Optional, Sequence
 
 from . import config, credentials, settings
 from .profile import Profile
@@ -22,6 +23,16 @@ OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
 class RunnerError(Exception):
     """Raised when the ``claude`` executable cannot be launched."""
+
+
+@dataclass(frozen=True)
+class Heartbeat:
+    """Result of a non-interactive ``claude -p`` health check."""
+
+    ok: bool
+    code: Optional[int]
+    reason: str
+    output: str
 
 
 def _child_env(profile: Profile, *, with_token: bool) -> dict:
@@ -88,3 +99,37 @@ def login(profile: Profile) -> int:
 def run(profile: Profile, args: Sequence[str] = ()) -> int:
     """Launch ``claude`` (optionally with passthrough ``args``) for the profile."""
     return _spawn(profile, list(args), with_token=True)
+
+
+def heartbeat(
+    profile: Profile, prompt: str = "heartbeat", timeout: float = 120.0
+) -> Heartbeat:
+    """Run ``claude -p <prompt>`` non-interactively and report whether it worked.
+
+    Captures output instead of attaching the terminal, so a broken/expired login
+    fails fast rather than dropping into an interactive prompt.
+    """
+    cmd = [config.claude_bin(), "-p", prompt]
+    try:
+        completed = subprocess.run(
+            cmd,
+            env=_child_env(profile, with_token=True),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout,
+        )
+    except FileNotFoundError as exc:
+        raise RunnerError(
+            f"could not find {config.claude_bin()!r} executable; "
+            f"is Claude Code installed? (override with {config.LAUNCHER_BIN_ENV})"
+        ) from exc
+    except subprocess.TimeoutExpired:
+        return Heartbeat(ok=False, code=None, reason=f"timed out after {int(timeout)}s", output="")
+
+    output = (completed.stdout or "").strip()
+    if completed.returncode == 0:
+        return Heartbeat(ok=True, code=0, reason="ok", output=output)
+    reason = (completed.stderr or "").strip() or output or f"exit {completed.returncode}"
+    return Heartbeat(ok=False, code=completed.returncode, reason=reason, output=output)

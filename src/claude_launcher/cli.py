@@ -59,9 +59,10 @@ def _cmd_list(_args: argparse.Namespace) -> int:
     if not profiles:
         print("no profiles yet; create one with 'claunch create <name>'")
         return 0
+    labels = {"ok": "logged in", "expired": "token expired", "none": "no token"}
     for p in profiles:
-        flag = "logged in" if credentials.has_token(p) else "no token"
-        print(f"{p.name:<20} [{flag}]  {p.config_dir}")
+        flag = labels[credentials.token_state(p)]
+        print(f"{p.name:<20} [{flag:<13}]  {p.config_dir}")
     return 0
 
 
@@ -116,6 +117,28 @@ def _cmd_template(args: argparse.Namespace) -> int:
         for key in sorted(env):
             print(f"  {key}={env[key]}")
     return 0
+
+
+def _cmd_validate(args: argparse.Namespace) -> int:
+    targets = [profile.require(args.name)] if args.name else profile.list_all()
+    if not targets:
+        print("no profiles to validate")
+        return 0
+    failed = 0
+    for p in targets:
+        if not credentials.has_token(p):
+            failed += 1
+            print(f"{p.name:<20} FAIL  no token (run 'claunch login {p.name}')")
+            continue
+        result = runner.heartbeat(p, prompt=args.prompt, timeout=args.timeout)
+        if result.ok:
+            snippet = " ".join(result.output.split())[:50]
+            print(f"{p.name:<20} OK    {snippet}")
+        else:
+            failed += 1
+            reason = " ".join(result.reason.split())[:60]
+            print(f"{p.name:<20} FAIL  {reason}")
+    return 1 if failed else 0
 
 
 def _cmd_export(args: argparse.Namespace) -> int:
@@ -315,6 +338,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not seed global config into newly created profiles",
     )
     p_import.set_defaults(func=_cmd_import)
+
+    p_validate = sub.add_parser(
+        "validate",
+        help="check login health via 'claude -p heartbeat' (all profiles if no name)",
+    )
+    p_validate.add_argument("name", nargs="?", help="profile to validate (default: all)")
+    p_validate.add_argument(
+        "--prompt", default="heartbeat", help="prompt to send (default: heartbeat)"
+    )
+    p_validate.add_argument(
+        "--timeout", type=float, default=120.0, help="seconds per profile (default: 120)"
+    )
+    p_validate.set_defaults(func=_cmd_validate)
 
     p_usage = sub.add_parser("usage", help="query subscription usage for a profile")
     p_usage.add_argument("name")

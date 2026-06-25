@@ -60,9 +60,10 @@ claunch usage work      # show this profile's subscription usage
 | `template [--init]`    | Show or write the default env template. |
 | `export [path]`        | Write all profile settings to YAML (default `~/.claunch.yaml`). |
 | `import [path]`        | Apply profile settings from YAML (`--prune`, `--no-seed`). |
+| `validate [name]`      | Health-check logins via `claude -p heartbeat` (all if no name). |
 | `usage <name>`         | Query subscription usage (`--json` for the raw response). |
 | `set-token <name> [t]` | Store a token manually (pasted, or piped via stdin). |
-| `list`                 | List profiles and whether each is logged in (alias: `ls`). |
+| `list`                 | List profiles and each login's state (alias: `ls`). |
 | `path <name>`          | Print the profile's `CLAUDE_CONFIG_DIR`. |
 | `remove <name>`        | Delete a profile and its tokens (aliases: `delete`, `rm`). |
 
@@ -96,8 +97,28 @@ claunch set-token work sk-ant-oat01-...   # or omit the value to paste via stdin
 ```
 
 The token is saved at `<profile>/.launcher-token` (`0600`) and exported as
-`CLAUDE_CODE_OAUTH_TOKEN` on `claunch run`. `claunch list` shows `[logged in]`
-once a profile has either a stored token or a `.credentials.json`.
+`CLAUDE_CODE_OAUTH_TOKEN` on `claunch run`.
+
+`claunch list` shows each profile's login state — `[logged in]`, `[token
+expired]` (a `.credentials.json` past its `expiresAt`), or `[no token]`:
+
+```text
+work       [logged in    ]  .../profiles/work
+personal   [no token     ]  .../profiles/personal
+```
+
+To check that a login actually works (not just that a token exists), run a live
+heartbeat:
+
+```bash
+claunch validate work    # one profile
+claunch validate         # all profiles
+```
+
+`validate` runs `claude -p "heartbeat"` for each profile (with its config, env
+and token) and reports `OK` with a snippet of the reply, or `FAIL` with the
+reason; it exits non-zero if any profile fails. Profiles without a token fail
+fast without calling the API. Tune with `--prompt` and `--timeout`.
 
 ## Seeding (skip onboarding)
 
