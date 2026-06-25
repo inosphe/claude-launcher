@@ -12,6 +12,7 @@ interactive `/login` flow, so each profile keeps its own credentials.
 [Seeding](#seeding-skip-onboarding) ·
 [Env vars](#per-profile-environment-variables) ·
 [Inheritance](#inheritance-parent-profiles) ·
+[Migrate](#migrating-skills--mcp-servers) ·
 [Sync](#sync-profiles-export--import) · [Usage](#usage-reporting) ·
 [How it works](#how-it-works) · [Configuration](#configuration)
 
@@ -68,6 +69,7 @@ claunch usage work      # show this profile's subscription usage
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
+| `migrate <name> [src]` | Copy skills/MCP servers from a global or local path. |
 | `export [path]`        | Write all profile settings to YAML (default `~/.claunch.yaml`). |
 | `import [path]`        | Apply profile settings from YAML (`--prune`, `--no-seed`). |
 | `validate [name]`      | Health-check logins via `claude -p heartbeat` (all if no name). |
@@ -208,6 +210,28 @@ no token of its own resolves to the nearest ancestor that has one, so
 parent in with `setup-token` — those tokens are long-lived.) Cycles and missing
 parents are rejected. Use `claunch parent <name> <parent>` to re-parent an
 existing profile or `--clear` to detach it.
+
+## Migrating skills & MCP servers
+
+Seeding copies the global `settings.json`, so the MCP servers defined there come
+along — but **skills live in a separate `skills/` directory** and **project/local
+MCP servers live outside `settings.json`**, so they aren't seeded. `claunch
+migrate` pulls those into a profile from any source path:
+
+```bash
+claunch migrate work                 # from ~/.claude (global skills + MCP)
+claunch migrate work ./my-project    # from a project's .claude/ and .mcp.json
+claunch migrate work --mcp           # MCP servers only (--skills for skills only)
+claunch migrate work --plugins       # also copy the plugins/ directory
+claunch migrate work --dry-run       # preview without copying
+```
+
+The source may be a Claude config dir (`~/.claude`, or another profile via
+`claunch path <name>`) or a project directory. Skills are merged into the
+profile's `skills/`; MCP servers are gathered from `settings.json`,
+`settings.local.json`, `.claude.json` and a project-root `.mcp.json`, then merged
+into the profile's `settings.json`. Default migrates skills + MCP; pass `--skills`
+or `--mcp` to narrow it.
 
 ## Sync profiles (export / import)
 

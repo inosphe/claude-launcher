@@ -17,6 +17,7 @@ from . import (
     __version__,
     credentials,
     lineage,
+    migrate as migrate_mod,
     profile,
     runner,
     seed,
@@ -27,6 +28,7 @@ from . import (
 )
 from .credentials import CredentialsError
 from .lineage import LineageError
+from .migrate import MigrateError
 
 
 # --------------------------------------------------------------------------- #
@@ -151,6 +153,33 @@ def _cmd_template(args: argparse.Namespace) -> int:
         print("default env:")
         for key in sorted(env):
             print(f"  {key}={env[key]}")
+    return 0
+
+
+def _cmd_migrate(args: argparse.Namespace) -> int:
+    p = profile.require(args.name)
+    source = Path(args.source).expanduser() if args.source else migrate_mod.default_source()
+    # Default to skills + mcp when no selector is given; plugins only on request.
+    selected = args.skills or args.mcp or args.plugins
+    do_skills = args.skills or not selected
+    do_mcp = args.mcp or not selected
+    result = migrate_mod.migrate(
+        p,
+        source,
+        skills=do_skills,
+        mcp=do_mcp,
+        plugins=args.plugins,
+        dry_run=args.dry_run,
+    )
+    verb = "would migrate" if args.dry_run else "migrated"
+    print(f"{verb} from {source} into {p.name!r}:")
+    if do_skills:
+        print(f"  skills: {', '.join(result.skills) if result.skills else '(none)'}")
+    if do_mcp:
+        servers = ", ".join(result.mcp_servers) if result.mcp_servers else "(none)"
+        print(f"  mcp servers: {servers}")
+    if args.plugins:
+        print(f"  plugins: {'copied' if result.plugins else '(none)'}")
     return 0
 
 
@@ -394,6 +423,26 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_import.set_defaults(func=_cmd_import)
 
+    p_migrate = sub.add_parser(
+        "migrate",
+        help="copy skills/MCP servers from a global or local path into a profile",
+    )
+    p_migrate.add_argument("name")
+    p_migrate.add_argument(
+        "source",
+        nargs="?",
+        help="config dir or project dir to migrate from (default: ~/.claude)",
+    )
+    p_migrate.add_argument("--skills", action="store_true", help="migrate skills only")
+    p_migrate.add_argument("--mcp", action="store_true", help="migrate MCP servers only")
+    p_migrate.add_argument(
+        "--plugins", action="store_true", help="also copy the plugins directory"
+    )
+    p_migrate.add_argument(
+        "--dry-run", action="store_true", help="show what would be migrated"
+    )
+    p_migrate.set_defaults(func=_cmd_migrate)
+
     p_validate = sub.add_parser(
         "validate",
         help="check login health via 'claude -p heartbeat' (all profiles if no name)",
@@ -439,6 +488,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         CredentialsError,
         sync.SyncError,
         LineageError,
+        MigrateError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

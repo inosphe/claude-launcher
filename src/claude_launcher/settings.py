@@ -53,6 +53,18 @@ def set_env(profile: Profile, updates: Mapping[str, str]) -> Dict[str, str]:
     return get_env(profile)
 
 
+def merge_mcp_servers(profile: Profile, servers: Mapping[str, dict]) -> Dict[str, dict]:
+    """Merge MCP server definitions into the profile's ``settings.json``."""
+    data = load(profile)
+    existing = data.get("mcpServers")
+    if not isinstance(existing, dict):
+        existing = {}
+    existing.update(servers)
+    data["mcpServers"] = existing
+    save(profile, data)
+    return existing
+
+
 def replace_env(profile: Profile, env: Mapping[str, str]) -> Dict[str, str]:
     """Set the profile's ``env`` to exactly ``env`` (authoritative sync)."""
     data = load(profile)
