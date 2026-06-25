@@ -7,7 +7,7 @@ requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{ name = "claude-launcher" }]
 keywords = ["claude", "claude-code", "launcher", "profile", "cli"]
-dependencies = []
+dependencies = ["pyyaml>=6"]
 
 [project.scripts]
 claunch = "claude_launcher.cli:main"

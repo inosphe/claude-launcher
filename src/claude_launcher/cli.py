@@ -13,7 +13,17 @@ from typing import List, Optional
 
 from pathlib import Path
 
-from . import __version__, credentials, profile, runner, seed, settings, template, usage
+from . import (
+    __version__,
+    credentials,
+    profile,
+    runner,
+    seed,
+    settings,
+    sync,
+    template,
+    usage,
+)
 from .credentials import CredentialsError
 
 
@@ -105,6 +115,30 @@ def _cmd_template(args: argparse.Namespace) -> int:
         print("default env:")
         for key in sorted(env):
             print(f"  {key}={env[key]}")
+    return 0
+
+
+def _cmd_export(args: argparse.Namespace) -> int:
+    path = Path(args.path).expanduser() if args.path else None
+    written = sync.export_to(path)
+    count = len(profile.list_all())
+    print(f"exported {count} profile(s) to {written}")
+    return 0
+
+
+def _cmd_import(args: argparse.Namespace) -> int:
+    path = Path(args.path).expanduser() if args.path else None
+    summary = sync.import_from(path, prune=args.prune, do_seed=not args.no_seed)
+    if summary.template_applied:
+        print("applied template from file")
+    if summary.created:
+        print(f"created: {', '.join(summary.created)}")
+    if summary.updated:
+        print(f"updated: {', '.join(summary.updated)}")
+    if summary.removed:
+        print(f"removed (pruned): {', '.join(summary.removed)}")
+    if not (summary.created or summary.updated or summary.removed):
+        print("nothing to import")
     return 0
 
 
@@ -260,6 +294,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_tpl.set_defaults(func=_cmd_template)
 
+    p_export = sub.add_parser(
+        "export", help="write all profile settings to a YAML file (~/.claunch.yaml)"
+    )
+    p_export.add_argument("path", nargs="?", help="output file (default: ~/.claunch.yaml)")
+    p_export.set_defaults(func=_cmd_export)
+
+    p_import = sub.add_parser(
+        "import", help="apply profile settings from a YAML file (~/.claunch.yaml)"
+    )
+    p_import.add_argument("path", nargs="?", help="input file (default: ~/.claunch.yaml)")
+    p_import.add_argument(
+        "--prune",
+        action="store_true",
+        help="delete local profiles that are absent from the file",
+    )
+    p_import.add_argument(
+        "--no-seed",
+        action="store_true",
+        help="do not seed global config into newly created profiles",
+    )
+    p_import.set_defaults(func=_cmd_import)
+
     p_usage = sub.add_parser("usage", help="query subscription usage for a profile")
     p_usage.add_argument("name")
     p_usage.add_argument("--json", action="store_true", help="print raw JSON")
@@ -290,6 +346,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         runner.RunnerError,
         usage.UsageError,
         CredentialsError,
+        sync.SyncError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

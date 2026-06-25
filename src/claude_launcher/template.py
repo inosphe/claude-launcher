@@ -54,6 +54,21 @@ def ensure_file() -> Path:
     return path
 
 
+def save(data: dict) -> Path:
+    """Persist a full template dict to the template file."""
+    path = template_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return path
+
+
+def set_env(env_map: dict) -> Path:
+    """Update only the template's ``env`` block, keeping other keys."""
+    data = load()
+    data["env"] = {str(k): str(v) for k, v in env_map.items()}
+    return save(data)
+
+
 def env() -> Dict[str, str]:
     block = load().get("env")
     return {str(k): str(v) for k, v in block.items()} if isinstance(block, dict) else {}

@@ -53,6 +53,14 @@ def set_env(profile: Profile, updates: Mapping[str, str]) -> Dict[str, str]:
     return get_env(profile)
 
 
+def replace_env(profile: Profile, env: Mapping[str, str]) -> Dict[str, str]:
+    """Set the profile's ``env`` to exactly ``env`` (authoritative sync)."""
+    data = load(profile)
+    data["env"] = {str(k): str(v) for k, v in env.items()}
+    save(profile, data)
+    return get_env(profile)
+
+
 def unset_env(profile: Profile, keys: Iterable[str]) -> Dict[str, str]:
     """Remove ``keys`` from the profile's ``env`` and persist."""
     data = load(profile)

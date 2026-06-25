@@ -24,6 +24,9 @@ LAUNCHER_USAGE_URL_ENV = "CLAUDE_LAUNCHER_USAGE_URL"
 #: Override the config dir new profiles are seeded from.
 LAUNCHER_SEED_ENV = "CLAUDE_LAUNCHER_SEED"
 
+#: Override the YAML file used by ``claunch export`` / ``import``.
+LAUNCHER_SYNC_ENV = "CLAUDE_LAUNCHER_SYNC_FILE"
+
 _DEFAULT_HOME = Path.home() / ".claude-launcher"
 
 
@@ -61,4 +64,10 @@ def seed_source_dir() -> Path:
     """Config dir a freshly created profile copies its global settings from."""
     override = os.environ.get(LAUNCHER_SEED_ENV)
     return Path(override).expanduser() if override else default_config_dir()
+
+
+def sync_file() -> Path:
+    """YAML file that ``export``/``import`` read and write (default ``~/.claunch.yaml``)."""
+    override = os.environ.get(LAUNCHER_SYNC_ENV)
+    return Path(override).expanduser() if override else Path.home() / ".claunch.yaml"
 

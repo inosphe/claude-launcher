@@ -58,6 +58,8 @@ claunch usage work      # show this profile's subscription usage
 | `run <name> [args...]` | Launch `claude` for the profile; any extra args pass through. |
 | `env <name> [...]`     | View/edit the profile's claude env vars (see below). |
 | `template [--init]`    | Show or write the default env template. |
+| `export [path]`        | Write all profile settings to YAML (default `~/.claunch.yaml`). |
+| `import [path]`        | Apply profile settings from YAML (`--prune`, `--no-seed`). |
 | `usage <name>`         | Query subscription usage (`--json` for the raw response). |
 | `set-token <name> [t]` | Store a token manually (pasted, or piped via stdin). |
 | `list`                 | List profiles and whether each is logged in (alias: `ls`). |
@@ -149,6 +151,43 @@ defaults for future profiles. **Existing profiles are not changed automatically*
 claunch env <name> --apply-template
 ```
 
+## Sync profiles (export / import)
+
+Keep every profile's settings in one YAML file — `~/.claunch.yaml` by default —
+so you can version it or copy it between machines.
+
+```bash
+claunch export                 # write ~/.claunch.yaml
+claunch import                 # recreate/update profiles from ~/.claunch.yaml
+claunch import other.yaml      # use a specific file
+claunch import --prune         # also delete local profiles absent from the file
+claunch import --no-seed       # don't seed global config into new profiles
+```
+
+The file captures the profile list, each profile's `env`, and the default
+template:
+
+```yaml
+version: 1
+template:
+  env:
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400000"
+profiles:
+  work:
+    env:
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000"
+  personal:
+    env: {}
+```
+
+`import` is authoritative: it creates missing profiles (seeded from your global
+config), sets each profile's `env` to exactly what the file says, and with
+`--prune` removes profiles the file doesn't list. **Login tokens are never
+exported** — they are secrets and stay per-machine, so run `claunch login` on
+each machine after importing. Override the default path with
+`CLAUDE_LAUNCHER_SYNC_FILE`.
+
 ## Usage reporting
 
 `claunch usage <name>` reads the profile's OAuth token and queries the Anthropic
@@ -191,6 +230,7 @@ A profile directory typically holds:
 | `CLAUDE_LAUNCHER_BIN`       | Path/name of the `claude` executable (default `claude`). |
 | `CLAUDE_LAUNCHER_USAGE_URL` | Usage endpoint (default `https://api.anthropic.com/api/oauth/usage`). |
 | `CLAUDE_LAUNCHER_SEED`      | Config dir new profiles seed from (default `CLAUDE_CONFIG_DIR` or `~/.claude`). |
+| `CLAUDE_LAUNCHER_SYNC_FILE` | YAML file for `export`/`import` (default `~/.claunch.yaml`). |
 
 ## License
 
