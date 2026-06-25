@@ -1,24 +1,17 @@
 # claude-launcher
 
-`claude-launcher` (command: `claunch`) lets you run [Claude Code](https://claude.com/claude-code)
-under **multiple isolated profiles**. Each profile owns its own login token and
+`claude-launcher` (command: `claunch`) runs [Claude Code](https://claude.com/claude-code)
+under **multiple isolated profiles**. Each profile owns its own login and
 configuration by pointing `CLAUDE_CONFIG_DIR` at a dedicated directory.
 
 Logging in uses `claude setup-token` (a long-lived OAuth token) instead of the
 interactive `/login` flow, so each profile keeps its own credentials.
 
-> **Where the token lives.** `claude setup-token` only *prints* the token — it
-> does not write `.credentials.json`. Claude Code consumes it via the
-> `CLAUDE_CODE_OAUTH_TOKEN` environment variable. So `claunch login` captures the
-> printed token and stores it at `<profile>/.launcher-token` (`0600`), and
-> `claunch run` injects it as `CLAUDE_CODE_OAUTH_TOKEN`. You don't store it
-> anywhere yourself.
-
 ## Why
 
-Claude Code stores credentials and settings under a single config directory by
-default. If you need to switch between accounts (e.g. personal vs. work, or
-multiple Max subscriptions), they collide. `claunch` gives each profile its own
+By default Claude Code keeps credentials and settings under a single config
+directory. If you switch between accounts (personal vs. work, or multiple Max
+subscriptions), they collide. `claunch` gives every profile its own
 `CLAUDE_CONFIG_DIR`, so tokens and settings never mix.
 
 ## Install
@@ -29,29 +22,58 @@ uv tool install claude-launcher
 uv tool install .
 ```
 
-This puts `claunch` on your PATH. Requires the `claude` CLI to be installed.
+This puts `claunch` on your PATH. The `claude` CLI must already be installed.
 
-## Usage
+## Quick start
 
 ```bash
-claunch create work            # create a profile (seeds global config; see below)
-claunch login work             # run `claude setup-token`, capture + store the token
-claunch run work               # launch Claude Code using that profile
-claunch run work -- --help     # pass args through to claude
-claunch usage work             # query subscription usage for the profile
-claunch list                   # list profiles
-claunch path work              # print the profile's CLAUDE_CONFIG_DIR
-claunch remove work            # delete a profile and its tokens (alias: delete)
+claunch create work     # create a profile (seeds your global config)
+claunch login work      # log in via `claude setup-token`
+claunch run work        # launch Claude Code as that profile
+claunch usage work      # show this profile's subscription usage
 ```
 
-### Seeding (skip onboarding)
+## Commands
+
+| Command | Description |
+| ------- | ----------- |
+| `create <name>`        | Create a profile and seed it from your global config. |
+| `login <name>`         | Run `claude setup-token` for the profile. |
+| `run <name> [-- ...]`  | Launch `claude` for the profile; args after `--` pass through. |
+| `usage <name>`         | Query subscription usage (`--json` for the raw response). |
+| `set-token <name> [t]` | Store a token manually (pasted, or piped via stdin). |
+| `list`                 | List profiles and whether each is logged in. |
+| `path <name>`          | Print the profile's `CLAUDE_CONFIG_DIR`. |
+| `remove <name>`        | Delete a profile and its tokens (alias: `delete`). |
+
+## Login & tokens
+
+`claude setup-token` runs an interactive flow (it renders a full-screen TUI), so
+`claunch login` hands the terminal straight to it — no output is intercepted.
+When it finishes, the login is stored inside the profile's `CLAUDE_CONFIG_DIR`,
+and `claunch run` uses it automatically.
+
+`setup-token` is meant for non-interactive use via the `CLAUDE_CODE_OAUTH_TOKEN`
+environment variable. If a run prints a token instead of persisting a login,
+store it once and `claunch run` will inject it for you:
+
+```bash
+claunch set-token work sk-ant-oat01-...   # or omit the value to paste via stdin
+```
+
+The token is saved at `<profile>/.launcher-token` (`0600`) and exported as
+`CLAUDE_CODE_OAUTH_TOKEN` on `claunch run`. `claunch list` shows `[logged in]`
+once a profile has either a stored token or a `.credentials.json`.
+
+## Seeding (skip onboarding)
 
 A profile is a fresh `CLAUDE_CONFIG_DIR`, so Claude Code would replay onboarding /
 landing on first run. To avoid that, `claunch create` copies your global config
-into the new profile — carrying over the onboarding flags (`hasCompletedOnboarding`
-etc.), UI preferences and `settings.json`, while **stripping** account- and
-project-specific data (`oauthAccount`, `projects`, cached API-key responses) so
-profiles stay isolated. Each profile still logs in with its own setup-token.
+into the new profile — carrying over the onboarding flags
+(`hasCompletedOnboarding` etc.), UI preferences and `settings.json`, while
+**stripping** account- and project-specific data (`oauthAccount`, `projects`,
+cached API-key responses) so profiles stay isolated. Each profile still logs in
+with its own setup-token.
 
 ```bash
 claunch create work                 # seed from CLAUDE_CONFIG_DIR or ~/.claude
@@ -59,45 +81,36 @@ claunch create work --seed-from DIR # seed from a specific config dir
 claunch create work --no-seed       # start fully fresh (onboarding will run)
 ```
 
-### Usage reporting
+## Usage reporting
 
-`claunch usage <name>` reads the profile's OAuth login token and queries the
-Anthropic usage endpoint (the same one Claude Code uses), printing per-window
-utilization:
+`claunch usage <name>` reads the profile's OAuth token and queries the Anthropic
+usage endpoint (the same one Claude Code uses), printing per-window utilization:
 
 ```text
-usage for profile 'work' (subscription: max)
+usage for profile 'work'
   five_hour          [##------------------]   9.0%  (resets in 4h34m)
   seven_day          [--------------------]   2.0%  (resets in 5h44m)
 ```
 
-Add `--json` to get the raw API response. The query runs against the token of
-that profile only, so each profile reports its own account's usage.
+Add `--json` for the raw API response. The query uses only that profile's token,
+so each profile reports its own account's usage.
 
-If auto-capture ever fails (e.g. the interactive flow renders the token in a way
-the launcher can't read), store it manually:
-
-```bash
-claude setup-token                       # run it yourself, copy the token
-claunch set-token work sk-ant-oat01-...  # or omit the value to paste via stdin
-```
-
-### How it works
+## How it works
 
 - Profiles live under `~/.claude-launcher/profiles/<name>` (override the base
-  with `CLAUDE_LAUNCHER_HOME`). That directory is the profile's `CLAUDE_CONFIG_DIR`.
-- `claunch login`/`run` export `CLAUDE_CONFIG_DIR=<profile dir>` before invoking
-  `claude`, so each profile's settings stay isolated.
-- The setup-token is stored at `<profile>/.launcher-token` and injected as
-  `CLAUDE_CODE_OAUTH_TOKEN` on `claunch run`, which is how Claude Code
-  authenticates non-interactively.
+  with `CLAUDE_LAUNCHER_HOME`). That directory **is** the profile's
+  `CLAUDE_CONFIG_DIR`.
+- `login` / `run` export `CLAUDE_CONFIG_DIR=<profile dir>` before invoking
+  `claude`, keeping each profile's credentials and settings isolated.
+- `run` also exports `CLAUDE_CODE_OAUTH_TOKEN` when a token has been stored for
+  the profile, so it authenticates non-interactively.
 
 ## Configuration
 
-| Environment variable   | Purpose                                            |
-| ---------------------- | -------------------------------------------------- |
+| Environment variable        | Purpose |
+| --------------------------- | ------- |
 | `CLAUDE_LAUNCHER_HOME`      | Base directory for profiles (default `~/.claude-launcher`). |
-| `CLAUDE_LAUNCHER_BIN`       | Path/name of the `claude` executable (default `claude`).    |
+| `CLAUDE_LAUNCHER_BIN`       | Path/name of the `claude` executable (default `claude`). |
 | `CLAUDE_LAUNCHER_USAGE_URL` | Usage endpoint (default `https://api.anthropic.com/api/oauth/usage`). |
 | `CLAUDE_LAUNCHER_SEED`      | Config dir new profiles seed from (default `CLAUDE_CONFIG_DIR` or `~/.claude`). |
 
