@@ -21,6 +21,9 @@ LAUNCHER_BIN_ENV = "CLAUDE_LAUNCHER_BIN"
 #: Override the endpoint used by ``claunch usage``.
 LAUNCHER_USAGE_URL_ENV = "CLAUDE_LAUNCHER_USAGE_URL"
 
+#: Override the config dir new profiles are seeded from.
+LAUNCHER_SEED_ENV = "CLAUDE_LAUNCHER_SEED"
+
 _DEFAULT_HOME = Path.home() / ".claude-launcher"
 
 
@@ -46,3 +49,16 @@ def usage_url() -> str:
         LAUNCHER_USAGE_URL_ENV,
         "https://api.anthropic.com/api/oauth/usage",
     )
+
+
+def default_config_dir() -> Path:
+    """Claude Code's default config dir (the source for seeding new profiles)."""
+    override = os.environ.get(CLAUDE_CONFIG_DIR_ENV)
+    return Path(override).expanduser() if override else Path.home() / ".claude"
+
+
+def seed_source_dir() -> Path:
+    """Config dir a freshly created profile copies its global settings from."""
+    override = os.environ.get(LAUNCHER_SEED_ENV)
+    return Path(override).expanduser() if override else default_config_dir()
+

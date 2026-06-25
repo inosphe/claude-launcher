@@ -11,7 +11,9 @@ import sys
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from . import __version__, credentials, profile, runner, usage
+from pathlib import Path
+
+from . import __version__, credentials, profile, runner, seed, usage
 from .credentials import CredentialsError
 
 
@@ -21,6 +23,13 @@ from .credentials import CredentialsError
 def _cmd_create(args: argparse.Namespace) -> int:
     p = profile.create(args.name)
     print(f"created profile {p.name!r} at {p.config_dir}")
+    if not args.no_seed:
+        source = Path(args.seed_from).expanduser() if args.seed_from else None
+        copied = seed.seed_profile(p, source)
+        if copied:
+            print(f"seeded global config ({', '.join(copied)}); onboarding skipped")
+        else:
+            print("no global config found to seed; first run will show onboarding")
     print(f"next: claunch login {p.name}")
     return 0
 
@@ -137,11 +146,23 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"claude-launcher {__version__}")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_create = sub.add_parser("create", help="create a new profile")
+    p_create = sub.add_parser("create", help="create a new profile (seeds global config)")
     p_create.add_argument("name")
+    p_create.add_argument(
+        "--no-seed",
+        action="store_true",
+        help="do not copy global config; start the profile fully fresh",
+    )
+    p_create.add_argument(
+        "--seed-from",
+        metavar="DIR",
+        help="config dir to seed from (default: CLAUDE_CONFIG_DIR or ~/.claude)",
+    )
     p_create.set_defaults(func=_cmd_create)
 
-    p_remove = sub.add_parser("remove", help="delete a profile and its tokens")
+    p_remove = sub.add_parser(
+        "remove", aliases=["delete"], help="delete a profile and its tokens"
+    )
     p_remove.add_argument("name")
     p_remove.set_defaults(func=_cmd_remove)
 
@@ -177,7 +198,19 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _harden_console() -> None:
+    """Avoid UnicodeEncodeError on non-UTF-8 consoles (e.g. Windows cp949)."""
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            try:
+                reconfigure(errors="replace")
+            except (ValueError, OSError):
+                pass
+
+
 def main(argv: Optional[List[str]] = None) -> int:
+    _harden_console()
     parser = build_parser()
     args = parser.parse_args(argv)
     try:

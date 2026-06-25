@@ -34,14 +34,29 @@ This puts `claunch` on your PATH. Requires the `claude` CLI to be installed.
 ## Usage
 
 ```bash
-claunch create work            # create a profile named "work"
+claunch create work            # create a profile (seeds global config; see below)
 claunch login work             # run `claude setup-token`, capture + store the token
 claunch run work               # launch Claude Code using that profile
 claunch run work -- --help     # pass args through to claude
 claunch usage work             # query subscription usage for the profile
 claunch list                   # list profiles
 claunch path work              # print the profile's CLAUDE_CONFIG_DIR
-claunch remove work            # delete a profile (and its tokens)
+claunch remove work            # delete a profile and its tokens (alias: delete)
+```
+
+### Seeding (skip onboarding)
+
+A profile is a fresh `CLAUDE_CONFIG_DIR`, so Claude Code would replay onboarding /
+landing on first run. To avoid that, `claunch create` copies your global config
+into the new profile — carrying over the onboarding flags (`hasCompletedOnboarding`
+etc.), UI preferences and `settings.json`, while **stripping** account- and
+project-specific data (`oauthAccount`, `projects`, cached API-key responses) so
+profiles stay isolated. Each profile still logs in with its own setup-token.
+
+```bash
+claunch create work                 # seed from CLAUDE_CONFIG_DIR or ~/.claude
+claunch create work --seed-from DIR # seed from a specific config dir
+claunch create work --no-seed       # start fully fresh (onboarding will run)
 ```
 
 ### Usage reporting
@@ -84,6 +99,7 @@ claunch set-token work sk-ant-oat01-...  # or omit the value to paste via stdin
 | `CLAUDE_LAUNCHER_HOME`      | Base directory for profiles (default `~/.claude-launcher`). |
 | `CLAUDE_LAUNCHER_BIN`       | Path/name of the `claude` executable (default `claude`).    |
 | `CLAUDE_LAUNCHER_USAGE_URL` | Usage endpoint (default `https://api.anthropic.com/api/oauth/usage`). |
+| `CLAUDE_LAUNCHER_SEED`      | Config dir new profiles seed from (default `CLAUDE_CONFIG_DIR` or `~/.claude`). |
 
 ## License
 
