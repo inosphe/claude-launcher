@@ -140,8 +140,18 @@ so each profile reports its own account's usage.
   `CLAUDE_CONFIG_DIR`.
 - `login` / `run` export `CLAUDE_CONFIG_DIR=<profile dir>` before invoking
   `claude`, keeping each profile's credentials and settings isolated.
-- `run` also exports `CLAUDE_CODE_OAUTH_TOKEN` when a token has been stored for
-  the profile, so it authenticates non-interactively.
+- `run` exports the profile's `settings.json` `env` vars into claude's process
+  (overriding the inherited shell), plus `CLAUDE_CODE_OAUTH_TOKEN` when a token
+  has been stored — so it authenticates and runs non-interactively.
+
+A profile directory typically holds:
+
+| File | Origin |
+| ---- | ------ |
+| `.claude.json`      | Seeded from your global config (onboarding flags, prefs). |
+| `settings.json`     | Seeded global settings + the profile's `env` block. |
+| `.launcher-token`   | OAuth token stored by `set-token` (`0600`). |
+| `.credentials.json` | Written by Claude Code itself after an interactive login. |
 
 ## Configuration
 
