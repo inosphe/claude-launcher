@@ -80,9 +80,19 @@ def access_token(profile: Profile) -> str:
     return token
 
 
+def own_token(profile: Profile) -> Optional[str]:
+    """The profile's own token (stored setup-token first, then login creds)."""
+    return stored_token(profile) or _credentials_access_token(profile)
+
+
+def has_own_credentials(profile: Profile) -> bool:
+    """Whether the profile has a ``/login``-written ``.credentials.json`` token."""
+    return _credentials_access_token(profile) is not None
+
+
 def has_token(profile: Profile) -> bool:
     """Whether the profile has any usable token (stored or from login)."""
-    return stored_token(profile) is not None or _credentials_access_token(profile) is not None
+    return own_token(profile) is not None
 
 
 def token_state(profile: Profile) -> str:

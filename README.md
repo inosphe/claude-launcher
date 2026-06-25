@@ -11,6 +11,7 @@ interactive `/login` flow, so each profile keeps its own credentials.
 [Commands](#commands) · [Login & tokens](#login--tokens) ·
 [Seeding](#seeding-skip-onboarding) ·
 [Env vars](#per-profile-environment-variables) ·
+[Inheritance](#inheritance-parent-profiles) ·
 [Sync](#sync-profiles-export--import) · [Usage](#usage-reporting) ·
 [How it works](#how-it-works) · [Configuration](#configuration)
 
@@ -61,10 +62,11 @@ claunch usage work      # show this profile's subscription usage
 
 | Command | Description |
 | ------- | ----------- |
-| `create <name>`        | Create a profile, seed global config, apply the env template. |
+| `create <name>`        | Create a profile (`--parent` to inherit), seed config, apply template. |
 | `login <name>`         | Run `claude setup-token` for the profile. |
 | `run <name> [args...]` | Launch `claude` for the profile; any extra args pass through. |
-| `env <name> [...]`     | View/edit the profile's claude env vars (see below). |
+| `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
+| `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
 | `export [path]`        | Write all profile settings to YAML (default `~/.claunch.yaml`). |
 | `import [path]`        | Apply profile settings from YAML (`--prune`, `--no-seed`). |
@@ -180,6 +182,33 @@ defaults for future profiles. **Existing profiles are not changed automatically*
 claunch env <name> --apply-template
 ```
 
+## Inheritance (parent profiles)
+
+A profile can inherit from a **parent**, so you can build a base profile once and
+spin off variants. Children inherit the parent's `env` (child keys win) and its
+login token (when the child has none of its own) — log in once on the parent and
+share it across working profiles.
+
+```bash
+claunch create company                       # base profile
+claunch login company                        # log in once
+claunch env company COMPANY_REGION=eu        # base env
+
+claunch create company_work --parent company    # inherits env + login
+claunch create company_review --parent company
+claunch env company_work CLAUDE_CODE_AUTO_COMPACT_WINDOW=200000   # override
+
+claunch parent company_work          # show parent / chain
+claunch env company_work --effective # env actually used (merged)
+```
+
+`claunch list` marks children with `[inherited]` and their parent. A profile with
+no token of its own resolves to the nearest ancestor that has one, so
+`run`/`validate`/`usage` all work on children. (For a shared login, log the
+parent in with `setup-token` — those tokens are long-lived.) Cycles and missing
+parents are rejected. Use `claunch parent <name> <parent>` to re-parent an
+existing profile or `--clear` to detach it.
+
 ## Sync profiles (export / import)
 
 Keep every profile's settings in one YAML file — `~/.claunch.yaml` by default —
@@ -203,7 +232,11 @@ template:
     CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400000"
 profiles:
-  work:
+  company:
+    env:
+      COMPANY_REGION: "eu"
+  company_work:
+    parent: company
     env:
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000"
   personal:
@@ -211,8 +244,8 @@ profiles:
 ```
 
 `import` is authoritative: it creates missing profiles (seeded from your global
-config), sets each profile's `env` to exactly what the file says, and with
-`--prune` removes profiles the file doesn't list. **Login tokens are never
+config), sets each profile's `env` to exactly what the file says, restores
+`parent` links, and with `--prune` removes profiles the file doesn't list. **Login tokens are never
 exported** — they are secrets and stay per-machine, so run `claunch login` on
 each machine after importing. Override the default path with
 `CLAUDE_LAUNCHER_SYNC_FILE`.
@@ -249,6 +282,7 @@ A profile directory typically holds:
 | `.claude.json`      | Seeded from your global config (onboarding flags, prefs). |
 | `settings.json`     | Seeded global settings + the profile's `env` block. |
 | `.launcher-token`   | OAuth token stored by `set-token` (`0600`). |
+| `.launcher.json`    | Launcher metadata (e.g. the profile's `parent`). |
 | `.credentials.json` | Written by Claude Code itself after an interactive login. |
 
 ## Configuration

@@ -11,6 +11,7 @@ Schema::
       env: {KEY: VALUE, ...}
     profiles:
       <name>:
+        parent: <other profile>   # optional
         env: {KEY: VALUE, ...}
 """
 
@@ -22,7 +23,7 @@ from typing import List, Optional
 
 import yaml
 
-from . import config, profile, seed, settings, template
+from . import config, lineage, profile, seed, settings, template
 
 SYNC_VERSION = 1
 
@@ -43,9 +44,17 @@ def _resolve(path: Optional[Path]) -> Path:
     return path or config.sync_file()
 
 
+def _profile_entry(p) -> dict:
+    entry: dict = {"env": settings.get_env(p)}
+    parent = lineage.get_parent(p)
+    if parent:
+        entry["parent"] = parent
+    return entry
+
+
 def build_document() -> dict:
     """Snapshot current profiles + template as a plain (YAML-ready) dict."""
-    profiles = {p.name: {"env": settings.get_env(p)} for p in profile.list_all()}
+    profiles = {p.name: _profile_entry(p) for p in profile.list_all()}
     return {
         "version": SYNC_VERSION,
         "template": {"env": template.env()},
@@ -111,6 +120,7 @@ def import_from(
     existing = {p.name for p in profile.list_all()}
     wanted = set()
 
+    # Pass 1: create/update every profile and set its own env.
     for name, pdata in raw_profiles.items():
         name = str(name)
         wanted.add(name)
@@ -124,6 +134,15 @@ def import_from(
                 seed.seed_profile(p)
             summary.created.append(name)
         settings.replace_env(p, env)
+
+    # Pass 2: wire up parents now that all profiles exist.
+    for name, pdata in raw_profiles.items():
+        p = profile.require(str(name))
+        parent = (pdata or {}).get("parent")
+        if parent:
+            lineage.set_parent(p, str(parent))
+        else:
+            lineage.clear_parent(p)
 
     if prune:
         for name in sorted(existing - wanted):

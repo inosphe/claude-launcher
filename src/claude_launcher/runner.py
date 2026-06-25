@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from . import config, credentials, settings
+from . import config, credentials, lineage
 from .profile import Profile
 
 #: Environment variable Claude Code reads for a setup-token login.
@@ -38,11 +38,11 @@ class Heartbeat:
 def _child_env(profile: Profile, *, with_token: bool) -> dict:
     env = os.environ.copy()
     env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
-    # Per-profile env vars (from settings.json "env") take precedence over the
-    # inherited shell environment — that is the point of an isolated profile.
-    env.update(settings.get_env(profile))
+    # Per-profile env vars (inherited from any parent, then the profile's own)
+    # take precedence over the shell — that is the point of an isolated profile.
+    env.update(lineage.effective_env(profile))
     if with_token:
-        token = credentials.stored_token(profile)
+        token = lineage.injectable_token(profile)
         if token:
             env[OAUTH_TOKEN_ENV] = token
     else:

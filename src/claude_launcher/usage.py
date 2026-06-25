@@ -13,7 +13,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import List, Optional
 
-from . import config, credentials
+from . import config, credentials, lineage
 from .profile import Profile
 
 _OAUTH_BETA = "oauth-2025-04-20"
@@ -85,7 +85,11 @@ def _parse_windows(payload: dict) -> List[UsageWindow]:
 
 
 def fetch(profile: Profile) -> UsageReport:
-    """Fetch and parse the usage report for ``profile``."""
-    token = credentials.access_token(profile)
+    """Fetch and parse the usage report for ``profile`` (token may be inherited)."""
+    token = lineage.lookup_token(profile)
+    if not token:
+        raise credentials.CredentialsError(
+            f"no token for profile {profile.name!r}; run 'claunch login {profile.name}' first"
+        )
     payload = _request(config.usage_url(), token)
     return UsageReport(windows=_parse_windows(payload), raw=payload)

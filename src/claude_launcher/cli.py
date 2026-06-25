@@ -16,6 +16,7 @@ from pathlib import Path
 from . import (
     __version__,
     credentials,
+    lineage,
     profile,
     runner,
     seed,
@@ -25,12 +26,15 @@ from . import (
     usage,
 )
 from .credentials import CredentialsError
+from .lineage import LineageError
 
 
 # --------------------------------------------------------------------------- #
 # command handlers
 # --------------------------------------------------------------------------- #
 def _cmd_create(args: argparse.Namespace) -> int:
+    if args.parent:
+        profile.require(args.parent)  # fail before creating if parent is missing
     p = profile.create(args.name)
     print(f"created profile {p.name!r} at {p.config_dir}")
     if not args.no_seed:
@@ -40,10 +44,14 @@ def _cmd_create(args: argparse.Namespace) -> int:
             print(f"seeded global config ({', '.join(copied)}); onboarding skipped")
         else:
             print("no global config found to seed; first run will show onboarding")
-    template.ensure_file()
-    applied = template.apply_to(p)
-    if applied:
-        print(f"applied template env: {', '.join(sorted(applied))}")
+    if args.parent:
+        lineage.set_parent(p, args.parent)
+        print(f"inherits from parent {args.parent!r} (env + login)")
+    else:
+        template.ensure_file()
+        applied = template.apply_to(p)
+        if applied:
+            print(f"applied template env: {', '.join(sorted(applied))}")
     print(f"next: claunch login {p.name}")
     return 0
 
@@ -59,10 +67,17 @@ def _cmd_list(_args: argparse.Namespace) -> int:
     if not profiles:
         print("no profiles yet; create one with 'claunch create <name>'")
         return 0
-    labels = {"ok": "logged in", "expired": "token expired", "none": "no token"}
+    labels = {
+        "ok": "logged in",
+        "expired": "token expired",
+        "inherited": "inherited",
+        "none": "no token",
+    }
     for p in profiles:
-        flag = labels[credentials.token_state(p)]
-        print(f"{p.name:<20} [{flag:<13}]  {p.config_dir}")
+        flag = labels[lineage.login_state(p)]
+        parent = lineage.get_parent(p)
+        note = f"  (parent: {parent})" if parent else ""
+        print(f"{p.name:<20} [{flag:<13}]  {p.config_dir}{note}")
     return 0
 
 
@@ -96,12 +111,32 @@ def _cmd_env(args: argparse.Namespace) -> int:
                 return 1
             updates[key] = value
         settings.set_env(p, updates)
-    env = settings.get_env(p)
+    env = lineage.effective_env(p) if args.effective else settings.get_env(p)
     if not env:
-        print(f"profile {p.name!r} has no env vars set")
+        scope = "effective" if args.effective else "own"
+        print(f"profile {p.name!r} has no {scope} env vars set")
         return 0
     for key in sorted(env):
         print(f"{key}={env[key]}")
+    return 0
+
+
+def _cmd_parent(args: argparse.Namespace) -> int:
+    p = profile.require(args.name)
+    if args.clear:
+        lineage.clear_parent(p)
+        print(f"cleared parent of {p.name!r}")
+        return 0
+    if args.parent:
+        lineage.set_parent(p, args.parent)
+        print(f"{p.name!r} now inherits from {args.parent!r}")
+        return 0
+    parent = lineage.get_parent(p)
+    if parent:
+        names = " -> ".join(a.name for a in lineage.chain(p))
+        print(f"parent: {parent}    (chain: {names})")
+    else:
+        print(f"profile {p.name!r} has no parent")
     return 0
 
 
@@ -126,7 +161,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         return 0
     failed = 0
     for p in targets:
-        if not credentials.has_token(p):
+        if lineage.lookup_token(p) is None:
             failed += 1
             print(f"{p.name:<20} FAIL  no token (run 'claunch login {p.name}')")
             continue
@@ -260,6 +295,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="config dir to seed from (default: CLAUDE_CONFIG_DIR or ~/.claude)",
     )
+    p_create.add_argument(
+        "--parent",
+        metavar="NAME",
+        help="inherit env and login from an existing parent profile",
+    )
     p_create.set_defaults(func=_cmd_create)
 
     p_remove = sub.add_parser(
@@ -307,7 +347,22 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="merge the template's default env into the profile",
     )
+    p_env.add_argument(
+        "--effective",
+        action="store_true",
+        help="show env merged from parents (what 'run' actually uses)",
+    )
     p_env.set_defaults(func=_cmd_env)
+
+    p_parent = sub.add_parser(
+        "parent", help="show, set or clear a profile's parent"
+    )
+    p_parent.add_argument("name")
+    p_parent.add_argument("parent", nargs="?", help="parent profile to inherit from")
+    p_parent.add_argument(
+        "--clear", action="store_true", help="remove the profile's parent"
+    )
+    p_parent.set_defaults(func=_cmd_parent)
 
     p_tpl = sub.add_parser(
         "template", help="show or initialize the default profile template"
@@ -383,6 +438,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         usage.UsageError,
         CredentialsError,
         sync.SyncError,
+        LineageError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
