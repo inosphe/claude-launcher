@@ -7,6 +7,13 @@ configuration by pointing `CLAUDE_CONFIG_DIR` at a dedicated directory.
 Logging in uses `claude setup-token` (a long-lived OAuth token) instead of the
 interactive `/login` flow, so each profile keeps its own credentials.
 
+**Contents:** [Install](#install) · [Quick start](#quick-start) ·
+[Commands](#commands) · [Login & tokens](#login--tokens) ·
+[Seeding](#seeding-skip-onboarding) ·
+[Env vars](#per-profile-environment-variables) ·
+[Sync](#sync-profiles-export--import) · [Usage](#usage-reporting) ·
+[How it works](#how-it-works) · [Configuration](#configuration)
+
 ## Why
 
 By default Claude Code keeps credentials and settings under a single config
@@ -46,6 +53,7 @@ disturbs a live session.
 claunch create work     # create a profile (seeds your global config)
 claunch login work      # log in via `claude setup-token`
 claunch run work        # launch Claude Code as that profile
+claunch validate work   # confirm the login works (claude -p heartbeat)
 claunch usage work      # show this profile's subscription usage
 ```
 
