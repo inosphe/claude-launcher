@@ -12,6 +12,7 @@ interactive `/login` flow, so each profile keeps its own credentials.
 [Seeding](#seeding-skip-onboarding) ·
 [Env vars](#per-profile-environment-variables) ·
 [Inheritance](#inheritance-parent-profiles) ·
+[Providers](#api-providers-third-party-backends) ·
 [Migrate](#migrating-skills--mcp-servers) ·
 [Sync](#sync-profiles-export--import) · [Usage](#usage-reporting) ·
 [How it works](#how-it-works) · [Configuration](#configuration)
@@ -74,6 +75,8 @@ claunch usage work      # show this profile's subscription usage
 | `import [path]`        | Apply profile settings from YAML (`--prune`, `--no-seed`). |
 | `validate [name]`      | Health-check logins via `claude -p heartbeat` (all if no name). |
 | `usage <name>`         | Query subscription usage (`--json` for the raw response). |
+| `set-provider [p] <provider>` | Select a provider globally, or for one profile; `default` = Anthropic. |
+| `providers`            | List API providers from the config file and the active one. |
 | `set-token <name> [t]` | Store a token manually (pasted, or piped via stdin). |
 | `list`                 | List profiles and each login's state (alias: `ls`). |
 | `path <name>`          | Print the profile's `CLAUDE_CONFIG_DIR`. |
@@ -107,6 +110,11 @@ claunch run company --borrow company2 --resume   # extra args still pass through
 Nothing is persisted: it only sets `CLAUDE_CODE_OAUTH_TOKEN` from the borrowed
 profile for this one launch. The borrowed profile must have a token (its own or
 inherited). To forward a literal `--borrow` to claude, put it after `--`.
+
+`--borrow` also borrows the lender's **[provider](#api-providers-third-party-backends)**:
+if `company2` is configured to use a third-party backend, `--borrow company2`
+adopts that backend (base URL, model overrides and its auth) for the run — so a
+borrowed provider profile needs no Anthropic OAuth token of its own.
 
 ## Login & tokens
 
@@ -239,6 +247,86 @@ descendant when you add more later.
 | change parent → children see it next run | `create --parent` seeds from parent |
 | `env --effective` shows the merge | `migrate <parent> --recursive` re-syncs the tree |
 
+## API providers (third-party backends)
+
+A **provider** points Claude Code at a particular API backend — Anthropic by
+default, or a third party such as a GLM endpoint — by supplying a bundle of
+environment variables (an `ANTHROPIC_BASE_URL`, model overrides and an auth
+token). Providers are defined and selected **in the global config file**
+(`~/.claunch.yaml`, the same file `export`/`import` use), which the launcher reads
+live at launch. You can edit that file directly, or use `set-provider` (below),
+which just records the selection in it.
+
+```yaml
+providers:
+  fireworks-glm5p2:
+    env:
+      ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference"
+      ANTHROPIC_MODEL: "accounts/fireworks/models/glm-5p2"
+      ANTHROPIC_DEFAULT_OPUS_MODEL: "accounts/fireworks/models/glm-5p2"
+      ANTHROPIC_DEFAULT_SONNET_MODEL: "accounts/fireworks/models/glm-5p2"
+      ANTHROPIC_DEFAULT_HAIKU_MODEL: "accounts/fireworks/models/glm-5p2"
+      CLAUDE_CODE_SUBAGENT_MODEL: "accounts/fireworks/models/glm-5p2"
+      ANTHROPIC_API_KEY: ""
+      ANTHROPIC_AUTH_TOKEN: "fw_..."
+      CLAUDE_CODE_OAUTH_TOKEN: ""
+
+provider: fireworks-glm5p2     # use it for every profile by default (optional)
+
+profiles:
+  work:
+    provider: fireworks-glm5p2  # ...or per profile (overrides the global one)
+  personal:
+    provider: default           # pin one profile back to plain Anthropic
+```
+
+**Selecting a provider.** The effective provider for a run is the first of:
+the profile's own `provider`, an ancestor's (inheritance, like `env`), the
+top-level `provider`, then the built-in `default`. The built-in `default` is
+plain Anthropic with no overrides — the launcher injects the profile's OAuth
+token as usual. For any other provider the launcher applies its `env` as a
+**low-priority backend default** — above the shell but *below* the profile's own
+`env`, so a per-profile (or template/inherited) value always wins over the
+provider for the same key. The provider's `env` carries auth, so the launcher
+does **not** inject `CLAUDE_CODE_OAUTH_TOKEN` — set the provider's own
+`ANTHROPIC_AUTH_TOKEN` (and clear `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` as
+above) instead.
+
+The resulting precedence for a run is: shell env < provider `env` < profile `env`
+(template + inherited + own) < the injected OAuth token (for `default`).
+
+**Selecting from the CLI.** `set-provider` writes the selection into the config
+file for you — no manual YAML editing needed:
+
+```bash
+claunch set-provider fireworks-glm5p2        # global default (top-level provider:)
+claunch set-provider work fireworks-glm5p2   # just the 'work' profile
+claunch set-provider work default            # clear that profile's override
+claunch set-provider default                 # clear the global default
+```
+
+`run`/`validate` use the provider; **`login` always targets Anthropic** (it never
+applies a provider, so `claude setup-token` keeps working). Inspect what's
+configured with:
+
+```bash
+claunch providers
+```
+
+```text
+config file: /home/you/.claunch.yaml
+global provider: default
+available providers:
+  default
+  fireworks-glm5p2  -> https://api.fireworks.ai/inference
+profiles using a provider:
+  work                 fireworks-glm5p2
+```
+
+> **Secrets.** A provider's auth token lives in `~/.claunch.yaml` in plaintext.
+> Unlike login tokens (which are never exported), provider definitions *are* part
+> of that file, so treat it as a secret if you commit or copy it between machines.
+
 ## Migrating skills & MCP servers
 
 Seeding copies the global `settings.json`, so the MCP servers defined there come
@@ -302,6 +390,10 @@ config), sets each profile's `env` to exactly what the file says, restores
 exported** — they are secrets and stay per-machine, so run `claunch login` on
 each machine after importing. Override the default path with
 `CLAUDE_LAUNCHER_SYNC_FILE`.
+
+The [`providers`](#api-providers-third-party-backends) block and any `provider`
+selections live in this same file; `export` preserves them verbatim (it never
+strips a provider's auth token, unlike login tokens).
 
 ## Usage reporting
 

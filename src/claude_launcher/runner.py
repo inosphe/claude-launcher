@@ -14,7 +14,7 @@ import sys
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from . import config, credentials, lineage
+from . import config, credentials, lineage, providers
 from .profile import Profile
 
 #: Environment variable Claude Code reads for a setup-token login.
@@ -40,21 +40,35 @@ def _child_env(
 ) -> dict:
     env = os.environ.copy()
     env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
+    if with_token:
+        # A `--borrow` swaps both the token *and* the provider: the running
+        # profile's config dir, env and skills stay put, but auth (and the
+        # backend it talks to) comes from the borrowed profile.
+        auth_source = borrow if borrow is not None else profile
+        provider = providers.resolve_name(auth_source)
+        # Provider env is a low-priority backend default: it sits above the
+        # shell but *below* the profile's own env, applied next, which can
+        # override any provider key (e.g. CLAUDE_CODE_AUTO_COMPACT_WINDOW).
+        env.update(providers.provider_env(provider))
     # Per-profile env vars (inherited from any parent, then the profile's own)
-    # take precedence over the shell — that is the point of an isolated profile.
+    # take precedence over the shell and the provider — that is the point of an
+    # isolated profile.
     env.update(lineage.effective_env(profile))
     if with_token:
-        if borrow is not None:
-            # Borrow another profile's token just for this run; everything else
-            # (config dir, env, skills) stays the running profile's.
-            env[OAUTH_TOKEN_ENV] = lineage.lookup_token(borrow)
-        else:
-            token = lineage.injectable_token(profile)
-            if token:
-                env[OAUTH_TOKEN_ENV] = token
+        if provider == providers.DEFAULT_PROVIDER:
+            # Plain Anthropic: inject the (own/inherited/borrowed) OAuth token.
+            if borrow is not None:
+                env[OAUTH_TOKEN_ENV] = lineage.lookup_token(borrow)
+            else:
+                token = lineage.injectable_token(profile)
+                if token:
+                    env[OAUTH_TOKEN_ENV] = token
+        # else: the provider supplies its own auth (e.g. ANTHROPIC_AUTH_TOKEN);
+        # leave CLAUDE_CODE_OAUTH_TOKEN exactly as the provider set it.
     else:
         # During login the profile may hold a stale token; don't let it shadow
-        # the fresh setup-token flow.
+        # the fresh setup-token flow. Login always targets Anthropic, so no
+        # provider override is applied here.
         env.pop(OAUTH_TOKEN_ENV, None)
     return env
 
@@ -115,11 +129,15 @@ def run(
     profile: Profile, args: Sequence[str] = (), *, borrow: Optional[Profile] = None
 ) -> int:
     """Launch ``claude`` for the profile, optionally borrowing another's token."""
-    if borrow is not None and lineage.lookup_token(borrow) is None:
-        raise RunnerError(
-            f"profile {borrow.name!r} has no token to borrow "
-            f"(run 'claunch login {borrow.name}' first)"
-        )
+    if borrow is not None:
+        # A non-default provider carries its own auth, so it needs no OAuth
+        # token; only require one when the borrowed profile is plain Anthropic.
+        needs_token = providers.resolve_name(borrow) == providers.DEFAULT_PROVIDER
+        if needs_token and lineage.lookup_token(borrow) is None:
+            raise RunnerError(
+                f"profile {borrow.name!r} has no token to borrow "
+                f"(run 'claunch login {borrow.name}' first)"
+            )
     return _spawn(profile, list(args), with_token=True, borrow=borrow)
 
 

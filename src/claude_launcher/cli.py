@@ -15,10 +15,12 @@ from pathlib import Path
 
 from . import (
     __version__,
+    config,
     credentials,
     lineage,
     migrate as migrate_mod,
     profile,
+    providers,
     runner,
     seed,
     settings,
@@ -29,6 +31,7 @@ from . import (
 from .credentials import CredentialsError
 from .lineage import LineageError
 from .migrate import MigrateError
+from .providers import ProviderError
 
 
 # --------------------------------------------------------------------------- #
@@ -263,8 +266,58 @@ def _cmd_run(args: argparse.Namespace) -> int:
     passthrough = _strip_separator(rest)
     borrow = profile.require(borrow_name) if borrow_name else None
     if borrow is not None:
-        print(f"borrowing {borrow.name!r} token for this run", file=sys.stderr)
+        prov = providers.resolve_name(borrow)
+        if prov != providers.DEFAULT_PROVIDER:
+            print(
+                f"borrowing {borrow.name!r} provider ({prov}) for this run",
+                file=sys.stderr,
+            )
+        else:
+            print(f"borrowing {borrow.name!r} token for this run", file=sys.stderr)
     return runner.run(p, passthrough, borrow=borrow)
+
+
+def _cmd_set_provider(args: argparse.Namespace) -> int:
+    # One positional => set the global provider; two => scope it to a profile.
+    # Either way this just records the choice in the config file (~/.claunch.yaml).
+    if args.provider is None:
+        name = args.name_or_provider
+        providers.set_active(name)
+        if name == providers.DEFAULT_PROVIDER:
+            print("global provider reset to 'default' (anthropic)")
+        else:
+            print(f"global provider set to {name!r}")
+        return 0
+    p = profile.require(args.name_or_provider)
+    name = args.provider
+    providers.set_profile_selection(p, name)
+    if name == providers.DEFAULT_PROVIDER:
+        print(f"cleared provider override on {p.name!r} (uses global/default)")
+    else:
+        print(f"profile {p.name!r} now uses provider {name!r}")
+    return 0
+
+
+def _cmd_providers(_args: argparse.Namespace) -> int:
+    registry = providers.registry()
+    global_choice = providers.active() or providers.DEFAULT_PROVIDER
+    print(f"config file: {config.sync_file()}")
+    print(f"global provider: {global_choice}")
+    print("available providers:")
+    for name in sorted(registry):
+        url = registry[name].get("ANTHROPIC_BASE_URL", "")
+        suffix = f"  -> {url}" if url else ""
+        print(f"  {name}{suffix}")
+    rows = []
+    for p in profile.list_all():
+        eff = providers.resolve_name(p)
+        if eff != providers.DEFAULT_PROVIDER:
+            rows.append((p.name, eff))
+    if rows:
+        print("profiles using a provider:")
+        for n, v in rows:
+            print(f"  {n:<20} {v}")
+    return 0
 
 
 def _cmd_usage(args: argparse.Namespace) -> int:
@@ -529,6 +582,31 @@ def build_parser() -> argparse.ArgumentParser:
     p_usage.add_argument("--json", action="store_true", help="print raw JSON")
     p_usage.set_defaults(func=_cmd_usage)
 
+    p_setprov = sub.add_parser(
+        "set-provider",
+        help="select a provider globally ('set-provider NAME') or for one profile "
+        "('set-provider PROFILE NAME'); records it in the config file; "
+        "use 'default' for plain Anthropic",
+    )
+    p_setprov.add_argument(
+        "name_or_provider",
+        metavar="PROFILE|PROVIDER",
+        help="provider name (global), or a profile name when PROVIDER follows",
+    )
+    p_setprov.add_argument(
+        "provider",
+        nargs="?",
+        metavar="PROVIDER",
+        help="provider to set on the named profile",
+    )
+    p_setprov.set_defaults(func=_cmd_set_provider)
+
+    p_provs = sub.add_parser(
+        "providers",
+        help="list API providers from the config file and which one is active",
+    )
+    p_provs.set_defaults(func=_cmd_providers)
+
     return parser
 
 
@@ -557,6 +635,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         sync.SyncError,
         LineageError,
         MigrateError,
+        ProviderError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

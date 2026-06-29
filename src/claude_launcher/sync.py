@@ -44,22 +44,54 @@ def _resolve(path: Optional[Path]) -> Path:
     return path or config.sync_file()
 
 
-def _profile_entry(p) -> dict:
+def _existing() -> dict:
+    """Best-effort read of the current sync file (``{}`` if missing/invalid).
+
+    Provider definitions (``providers``) and selections (``provider`` globally and
+    per profile) live only in this file, so a rebuild must carry them forward.
+    """
+    path = config.sync_file()
+    if not path.is_file():
+        return {}
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _profile_entry(p, prev_profiles: dict) -> dict:
     entry: dict = {"env": settings.get_env(p)}
     parent = lineage.get_parent(p)
     if parent:
         entry["parent"] = parent
+    prev = prev_profiles.get(p.name)
+    if isinstance(prev, dict) and prev.get("provider"):
+        entry["provider"] = str(prev["provider"])  # selection lives only here
     return entry
 
 
 def build_document() -> dict:
-    """Snapshot current profiles + template as a plain (YAML-ready) dict."""
-    profiles = {p.name: _profile_entry(p) for p in profile.list_all()}
-    return {
+    """Snapshot current profiles + template as a plain (YAML-ready) dict.
+
+    Provider definitions and selections are preserved verbatim from the existing
+    file, since the launcher reads them live and nothing else stores them.
+    """
+    prev = _existing()
+    prev_profiles = prev.get("profiles")
+    if not isinstance(prev_profiles, dict):
+        prev_profiles = {}
+    profiles = {p.name: _profile_entry(p, prev_profiles) for p in profile.list_all()}
+    doc = {
         "version": SYNC_VERSION,
         "template": {"env": template.env()},
         "profiles": profiles,
     }
+    if isinstance(prev.get("providers"), dict):
+        doc["providers"] = prev["providers"]
+    if prev.get("provider"):
+        doc["provider"] = str(prev["provider"])
+    return doc
 
 
 def export_to(path: Optional[Path] = None) -> Path:

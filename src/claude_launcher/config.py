@@ -24,7 +24,8 @@ LAUNCHER_USAGE_URL_ENV = "CLAUDE_LAUNCHER_USAGE_URL"
 #: Override the config dir new profiles are seeded from.
 LAUNCHER_SEED_ENV = "CLAUDE_LAUNCHER_SEED"
 
-#: Override the YAML file used by ``claunch export`` / ``import``.
+#: Override the YAML file used by ``claunch export`` / ``import`` (also holds
+#: provider definitions and selection).
 LAUNCHER_SYNC_ENV = "CLAUDE_LAUNCHER_SYNC_FILE"
 
 _DEFAULT_HOME = Path.home() / ".claude-launcher"
