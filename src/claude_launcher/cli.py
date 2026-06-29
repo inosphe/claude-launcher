@@ -257,6 +257,28 @@ def _cmd_set_token(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_get_token(args: argparse.Namespace) -> int:
+    p = profile.require(args.name)
+    if args.own:
+        token = credentials.own_token(p)
+        if not token:
+            raise CredentialsError(
+                f"profile {p.name!r} has no token of its own "
+                f"(run 'claunch login {p.name}' first)"
+            )
+    else:
+        token = lineage.lookup_token(p)
+        if not token:
+            raise CredentialsError(
+                f"no token for profile {p.name!r}; "
+                f"run 'claunch login {p.name}' first"
+            )
+    # Bare value on stdout so it pipes cleanly (e.g. into env or a clipboard);
+    # the token is a secret, so nothing else is printed on this stream.
+    print(token)
+    return 0
+
+
 def _cmd_run(args: argparse.Namespace) -> int:
     p = profile.require(args.name)
     # `args` is argparse.REMAINDER, so it also captures launcher flags like
@@ -463,6 +485,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_set.add_argument("name")
     p_set.add_argument("token", nargs="?", help="token value; read from stdin if omitted")
     p_set.set_defaults(func=_cmd_set_token)
+
+    p_get = sub.add_parser(
+        "get-token",
+        help="print a profile's OAuth token to stdout (resolves inheritance; "
+        "use --own to require the profile's own token)",
+    )
+    p_get.add_argument("name")
+    p_get.add_argument(
+        "--own",
+        action="store_true",
+        help="print only the profile's own token, without inheriting a parent's",
+    )
+    p_get.set_defaults(func=_cmd_get_token)
 
     p_run = sub.add_parser(
         "run",

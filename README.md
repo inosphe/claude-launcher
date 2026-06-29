@@ -78,6 +78,7 @@ claunch usage work      # show this profile's subscription usage
 | `set-provider [p] <provider>` | Select a provider globally, or for one profile; `default` = Anthropic. |
 | `providers`            | List API providers from the config file and the active one. |
 | `set-token <name> [t]` | Store a token manually (pasted, or piped via stdin). |
+| `get-token <name>`     | Print the profile's OAuth token (resolves inheritance; `--own`). |
 | `list`                 | List profiles and each login's state (alias: `ls`). |
 | `path <name>`          | Print the profile's `CLAUDE_CONFIG_DIR`. |
 | `remove <name>`        | Delete a profile and its tokens (aliases: `delete`, `rm`). |
@@ -133,6 +134,14 @@ claunch set-token work sk-ant-oat01-...   # or omit the value to paste via stdin
 
 The token is saved at `<profile>/.launcher-token` (`0600`) and exported as
 `CLAUDE_CODE_OAUTH_TOKEN` on `claunch run`.
+
+`get-token` prints it back out on stdout — the value alone, so it pipes cleanly:
+
+```bash
+claunch get-token work                       # resolves inheritance (own, then a parent's)
+claunch get-token work --own                 # only the profile's own token, no inheriting
+export CLAUDE_CODE_OAUTH_TOKEN="$(claunch get-token work)"
+```
 
 `claunch list` shows each profile's login state — `[logged in]`, `[token
 expired]` (a `.credentials.json` past its `expiresAt`), or `[no token]`:
