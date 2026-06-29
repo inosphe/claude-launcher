@@ -1,9 +1,14 @@
-"""Read and edit a profile's ``settings.json`` (Claude Code's native settings).
+"""Per-profile environment variables, plus the profile's native ``settings.json``.
 
-Claude Code applies the ``"env"`` map in ``settings.json`` to its session, so this
-module is how the launcher stores per-profile environment variables. It only
-touches ``<CLAUDE_CONFIG_DIR>/settings.json`` and performs no process or network
-work.
+A profile's launcher-managed ``env`` lives in the central config file
+(``~/.claunch.yaml``, see :mod:`store`), not in the profile directory — the
+launcher injects it into ``claude``'s process at launch. The ``get_env`` /
+``set_env`` / ``replace_env`` / ``unset_env`` helpers here read and write that
+central store.
+
+``load`` / ``save`` / ``merge_mcp_servers`` still touch the profile's own
+``<CLAUDE_CONFIG_DIR>/settings.json`` — that file is Claude Code's, and its
+``mcpServers`` block is read by Claude Code directly, so it stays per-profile.
 """
 
 from __future__ import annotations
@@ -11,6 +16,7 @@ from __future__ import annotations
 import json
 from typing import Dict, Iterable, Mapping
 
+from . import store
 from .profile import Profile
 
 SETTINGS_FILENAME = "settings.json"
@@ -21,7 +27,7 @@ def _path(profile: Profile):
 
 
 def load(profile: Profile) -> dict:
-    """Return the parsed settings, or ``{}`` if missing/unreadable."""
+    """Return the profile's native ``settings.json``, or ``{}`` if missing."""
     path = _path(profile)
     if not path.is_file():
         return {}
@@ -37,24 +43,37 @@ def save(profile: Profile, data: dict) -> None:
 
 
 def get_env(profile: Profile) -> Dict[str, str]:
-    env = load(profile).get("env")
+    """The profile's own launcher env (from the central store)."""
+    env = store.profile_entry(profile.name).get("env")
     return {str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {}
 
 
 def set_env(profile: Profile, updates: Mapping[str, str]) -> Dict[str, str]:
-    """Merge ``updates`` into the profile's ``env`` and persist."""
-    data = load(profile)
-    env = data.get("env")
-    if not isinstance(env, dict):
-        env = {}
+    """Merge ``updates`` into the profile's env and persist to the store."""
+    env = get_env(profile)
     env.update({str(k): str(v) for k, v in updates.items()})
-    data["env"] = env
-    save(profile, data)
-    return get_env(profile)
+    store.set_profile_field(profile.name, "env", env)
+    return env
+
+
+def replace_env(profile: Profile, env: Mapping[str, str]) -> Dict[str, str]:
+    """Set the profile's env to exactly ``env`` (authoritative sync)."""
+    new = {str(k): str(v) for k, v in env.items()}
+    store.set_profile_field(profile.name, "env", new)
+    return new
+
+
+def unset_env(profile: Profile, keys: Iterable[str]) -> Dict[str, str]:
+    """Remove ``keys`` from the profile's env and persist to the store."""
+    env = get_env(profile)
+    for key in keys:
+        env.pop(key, None)
+    store.set_profile_field(profile.name, "env", env)
+    return env
 
 
 def merge_mcp_servers(profile: Profile, servers: Mapping[str, dict]) -> Dict[str, dict]:
-    """Merge MCP server definitions into the profile's ``settings.json``."""
+    """Merge MCP server definitions into the profile's native ``settings.json``."""
     data = load(profile)
     existing = data.get("mcpServers")
     if not isinstance(existing, dict):
@@ -63,23 +82,3 @@ def merge_mcp_servers(profile: Profile, servers: Mapping[str, dict]) -> Dict[str
     data["mcpServers"] = existing
     save(profile, data)
     return existing
-
-
-def replace_env(profile: Profile, env: Mapping[str, str]) -> Dict[str, str]:
-    """Set the profile's ``env`` to exactly ``env`` (authoritative sync)."""
-    data = load(profile)
-    data["env"] = {str(k): str(v) for k, v in env.items()}
-    save(profile, data)
-    return get_env(profile)
-
-
-def unset_env(profile: Profile, keys: Iterable[str]) -> Dict[str, str]:
-    """Remove ``keys`` from the profile's ``env`` and persist."""
-    data = load(profile)
-    env = data.get("env")
-    if isinstance(env, dict):
-        for key in keys:
-            env.pop(key, None)
-        data["env"] = env
-        save(profile, data)
-    return get_env(profile)

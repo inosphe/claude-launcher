@@ -1,23 +1,29 @@
-"""Default settings template applied to every new profile.
+"""Bootstrap template used to initialize ``~/.claunch.yaml`` the first time.
 
-The template lives at ``<launcher home>/template.json`` and currently carries the
-default ``env`` block. ``create`` applies it to new profiles; it can also be
-re-applied to existing ones (``claunch env <name> --apply-template``). Edit the
-file to change the defaults for future profiles.
+``~/.claunch.yaml`` is the launcher's source of truth (see :mod:`store`), but it
+has to start from *something*. That seed is ``template.yaml`` in the launcher
+home: a full config skeleton whose ``template.env`` block becomes the default env
+for new profiles. Edit it to change the defaults a brand-new install starts with.
+
+Once ``~/.claunch.yaml`` exists it is authoritative and read live; this file is
+only consulted to create it (and as the source for ``claunch template --init``).
+The *live* default-env (what new profiles actually get) is the ``template`` block
+inside ``~/.claunch.yaml``, exposed here as :func:`env` / :func:`set_env`.
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Dict
 
-from . import config, settings
+import yaml
+
+from . import config, settings, store
 from .profile import Profile
 
-TEMPLATE_FILENAME = "template.json"
+TEMPLATE_FILENAME = "template.yaml"
 
-#: Built-in defaults used until a template file is written.
+#: Built-in defaults used until a ``template.yaml`` is written.
 DEFAULT_ENV: Dict[str, str] = {
     "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000",
@@ -28,50 +34,53 @@ def template_path() -> Path:
     return config.launcher_home() / TEMPLATE_FILENAME
 
 
-def default_template() -> dict:
-    return {"env": dict(DEFAULT_ENV)}
+def default_document() -> dict:
+    """The initial ``~/.claunch.yaml`` document (from ``template.yaml`` or built-in).
 
-
-def load() -> dict:
-    """Return the template (from disk if present, else the built-in default)."""
+    This is a complete, valid config skeleton: a ``template.env`` block of
+    defaults plus an empty ``profiles`` map. Providers/selections start absent.
+    """
     path = template_path()
     if path.is_file():
         try:
-            data = json.loads(path.read_text(encoding="utf-8"))
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
             if isinstance(data, dict):
+                data.setdefault("version", store.VERSION)
+                data.setdefault("template", {"env": dict(DEFAULT_ENV)})
+                data.setdefault("profiles", {})
                 return data
-        except (OSError, json.JSONDecodeError):
+        except (OSError, yaml.YAMLError):
             pass
-    return default_template()
+    return {
+        "version": store.VERSION,
+        "template": {"env": dict(DEFAULT_ENV)},
+        "profiles": {},
+    }
 
 
 def ensure_file() -> Path:
-    """Write the default template file if it does not exist yet."""
+    """Write a default ``template.yaml`` if one does not exist yet."""
     path = template_path()
     if not path.is_file():
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(default_template(), indent=2) + "\n", encoding="utf-8")
+        text = yaml.safe_dump(
+            default_document(),
+            sort_keys=True,
+            allow_unicode=True,
+            default_flow_style=False,
+        )
+        path.write_text(text, encoding="utf-8")
     return path
-
-
-def save(data: dict) -> Path:
-    """Persist a full template dict to the template file."""
-    path = template_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-    return path
-
-
-def set_env(env_map: dict) -> Path:
-    """Update only the template's ``env`` block, keeping other keys."""
-    data = load()
-    data["env"] = {str(k): str(v) for k, v in env_map.items()}
-    return save(data)
 
 
 def env() -> Dict[str, str]:
-    block = load().get("env")
-    return {str(k): str(v) for k, v in block.items()} if isinstance(block, dict) else {}
+    """The live default env for new profiles (``template.env`` in the store)."""
+    return store.template_env()
+
+
+def set_env(env_map: Dict[str, str]) -> None:
+    """Update the live template's ``env`` block in the store."""
+    store.set_template_env({str(k): str(v) for k, v in env_map.items()})
 
 
 def apply_to(profile: Profile) -> Dict[str, str]:

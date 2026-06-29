@@ -10,6 +10,10 @@ venv/
 # uv
 uv.lock
 
+# pytest
+.pytest_cache/
+.pytest-tmp/
+
 # OS
 .DS_Store
 Thumbs.db

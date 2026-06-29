@@ -14,7 +14,7 @@ interactive `/login` flow, so each profile keeps its own credentials.
 [Inheritance](#inheritance-parent-profiles) ·
 [Providers](#api-providers-third-party-backends) ·
 [Migrate](#migrating-skills--mcp-servers) ·
-[Sync](#sync-profiles-export--import) · [Usage](#usage-reporting) ·
+[Config file](#configuration-source-of-truth) · [Usage](#usage-reporting) ·
 [How it works](#how-it-works) · [Configuration](#configuration)
 
 ## Why
@@ -71,11 +71,10 @@ claunch usage work      # show this profile's subscription usage
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
 | `migrate <name> [src]` | Copy skills/MCP servers from a global or local path. |
-| `export [path]`        | Write all profile settings to YAML (default `~/.claunch.yaml`). |
-| `import [path]`        | Apply profile settings from YAML (`--prune`, `--no-seed`). |
+| `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claunch.yaml`. |
 | `validate [name]`      | Health-check logins via `claude -p heartbeat` (all if no name). |
 | `usage <name>`         | Query subscription usage (`--json` for the raw response). |
-| `set-provider [p] <provider>` | Select a provider globally, or for one profile; `default` = Anthropic. |
+| `set-provider [p] <provider>` | Pin a provider globally or per profile (`--clear` to inherit). |
 | `providers`            | List API providers from the config file and the active one. |
 | `set-token <name> [t]` | Store a token manually (pasted, or piped via stdin). |
 | `get-token <name>`     | Print the profile's OAuth token (resolves inheritance; `--own`). |
@@ -182,10 +181,10 @@ claunch create work --no-seed       # start fully fresh (onboarding will run)
 
 ## Per-profile environment variables
 
-Each profile can set Claude Code environment variables, stored in its
-`settings.json` `"env"` block. `claunch run` also exports them into claude's
-process, so they take effect immediately and **override** any value inherited
-from your shell.
+Each profile can set Claude Code environment variables. They live in the central
+config file (`~/.claunch.yaml`, the launcher's [source of truth](#configuration-source-of-truth)),
+and `claunch run` exports them into claude's process, so they take effect
+immediately and **override** any value inherited from your shell.
 
 ```bash
 claunch env work                                  # list this profile's env vars
@@ -196,21 +195,21 @@ claunch env work --apply-template                 # merge the template defaults
 
 ### Default template
 
-New profiles get a default env block from `<launcher home>/template.json`. The
-built-in defaults are:
+New profiles get a default env block from the `template` section of
+`~/.claunch.yaml`. On a brand-new install that file is created from a bootstrap
+seed, `<launcher home>/template.yaml`, whose built-in defaults are:
 
-```json
-{
-  "env": {
-    "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "0",
-    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000"
-  }
-}
+```yaml
+template:
+  env:
+    CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS: "0"
+    CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400000"
 ```
 
-Edit that file (or run `claunch template --init` to create it) to change the
-defaults for future profiles. **Existing profiles are not changed automatically**
-— apply the current defaults to one with:
+`template.yaml` only *seeds* `~/.claunch.yaml` the first time; afterwards the
+live `template` block in `~/.claunch.yaml` is authoritative (edit it directly, or
+run `claunch template --init` to write the bootstrap seed). **Existing profiles
+are not changed automatically** — apply the current defaults to one with:
 
 ```bash
 claunch env <name> --apply-template
@@ -261,10 +260,10 @@ descendant when you add more later.
 A **provider** points Claude Code at a particular API backend — Anthropic by
 default, or a third party such as a GLM endpoint — by supplying a bundle of
 environment variables (an `ANTHROPIC_BASE_URL`, model overrides and an auth
-token). Providers are defined and selected **in the global config file**
-(`~/.claunch.yaml`, the same file `export`/`import` use), which the launcher reads
-live at launch. You can edit that file directly, or use `set-provider` (below),
-which just records the selection in it.
+token). Providers are defined and selected **in the config file**
+(`~/.claunch.yaml`, the launcher's [source of truth](#configuration-source-of-truth)),
+which the launcher reads live at launch. You can edit that file directly, or use
+`set-provider` (below), which just records the selection in it.
 
 ```yaml
 providers:
@@ -291,9 +290,11 @@ profiles:
 
 **Selecting a provider.** The effective provider for a run is the first of:
 the profile's own `provider`, an ancestor's (inheritance, like `env`), the
-top-level `provider`, then the built-in `default`. The built-in `default` is
-plain Anthropic with no overrides — the launcher injects the profile's OAuth
-token as usual. For any other provider the launcher applies its `env` as a
+top-level `provider`, then the built-in `default`. Selecting `default` on a
+profile is itself a choice — it **pins** that profile to plain Anthropic even
+when a global or inherited provider is set (the `personal` example above). The
+built-in `default` is plain Anthropic with no overrides — the launcher injects
+the profile's OAuth token as usual. For any other provider the launcher applies its `env` as a
 **low-priority backend default** — above the shell but *below* the profile's own
 `env`, so a per-profile (or template/inherited) value always wins over the
 provider for the same key. The provider's `env` carries auth, so the launcher
@@ -310,8 +311,9 @@ file for you — no manual YAML editing needed:
 ```bash
 claunch set-provider fireworks-glm5p2        # global default (top-level provider:)
 claunch set-provider work fireworks-glm5p2   # just the 'work' profile
-claunch set-provider work default            # clear that profile's override
-claunch set-provider default                 # clear the global default
+claunch set-provider work default            # pin 'work' to plain Anthropic
+claunch set-provider work --clear            # drop 'work's override (inherit)
+claunch set-provider --clear                 # clear the global default
 ```
 
 `run`/`validate` use the provider; **`login` always targets Anthropic** (it never
@@ -333,7 +335,7 @@ profiles using a provider:
 ```
 
 > **Secrets.** A provider's auth token lives in `~/.claunch.yaml` in plaintext.
-> Unlike login tokens (which are never exported), provider definitions *are* part
+> Unlike login tokens (which stay per-machine), provider definitions *are* part
 > of that file, so treat it as a secret if you commit or copy it between machines.
 
 ## Migrating skills & MCP servers
@@ -359,21 +361,12 @@ profile's `skills/`; MCP servers are gathered from `settings.json`,
 into the profile's `settings.json`. Default migrates skills + MCP; pass `--skills`
 or `--mcp` to narrow it.
 
-## Sync profiles (export / import)
+## Configuration source of truth
 
-Keep every profile's settings in one YAML file — `~/.claunch.yaml` by default —
-so you can version it or copy it between machines.
-
-```bash
-claunch export                 # write ~/.claunch.yaml
-claunch import                 # recreate/update profiles from ~/.claunch.yaml
-claunch import other.yaml      # use a specific file
-claunch import --prune         # also delete local profiles absent from the file
-claunch import --no-seed       # don't seed global config into new profiles
-```
-
-The file captures the profile list, each profile's `env`, and the default
-template:
+Every launcher-managed setting lives in **one file, `~/.claunch.yaml`**, which
+the launcher reads live at launch — there is no separate "export" step, because
+this file *is* the state. It holds the profile list, each profile's `env`,
+`parent` and `provider`, the default `template`, and any provider definitions:
 
 ```yaml
 version: 1
@@ -393,16 +386,32 @@ profiles:
     env: {}
 ```
 
-`import` is authoritative: it creates missing profiles (seeded from your global
-config), sets each profile's `env` to exactly what the file says, restores
-`parent` links, and with `--prune` removes profiles the file doesn't list. **Login tokens are never
-exported** — they are secrets and stay per-machine, so run `claunch login` on
-each machine after importing. Override the default path with
-`CLAUDE_LAUNCHER_SYNC_FILE`.
+A profile **exists** when its directory exists; this file holds the config
+attached to it. Commands write here as you go (`env`, `parent`, `set-provider`,
+`create`, `remove`), and on every run the launcher reconciles: it **materializes**
+any profile the file declares but whose directory is missing (creating and
+seeding it), so a config copied to a new machine just works — no import command.
 
-The [`providers`](#api-providers-third-party-backends) block and any `provider`
-selections live in this same file; `export` preserves them verbatim (it never
-strips a provider's auth token, unlike login tokens).
+```bash
+cp ~/.claunch.yaml  /backups/                 # back it up / version it / copy it
+# on the new machine, drop it in place; the next command creates the dirs:
+claunch list
+claunch login work                            # tokens are per-machine (below)
+```
+
+**Login tokens are never stored here** — they are secrets, kept per-profile and
+per-machine, so run `claunch login` on each machine. Provider auth tokens *are*
+in this file (see the [secrets note](#api-providers-third-party-backends)).
+Override the file's path with `CLAUDE_LAUNCHER_SYNC_FILE`.
+
+**Pruning.** Reconciliation only ever *creates* directories. To delete local
+profile directories that the file no longer lists (the destructive direction),
+run it explicitly:
+
+```bash
+claunch prune --dry-run        # show orphan dirs (not declared in ~/.claunch.yaml)
+claunch prune                  # delete them
+```
 
 ## Usage reporting
 
@@ -432,18 +441,20 @@ with `CLAUDE_LAUNCHER_USAGE_MODEL`.
   `CLAUDE_CONFIG_DIR`.
 - `login` / `run` export `CLAUDE_CONFIG_DIR=<profile dir>` before invoking
   `claude`, keeping each profile's credentials and settings isolated.
-- `run` exports the profile's `settings.json` `env` vars into claude's process
-  (overriding the inherited shell), plus `CLAUDE_CODE_OAUTH_TOKEN` when a token
-  has been stored — so it authenticates and runs non-interactively.
+- `run` exports the profile's `env` vars (from `~/.claunch.yaml`) into claude's
+  process (overriding the inherited shell), plus `CLAUDE_CODE_OAUTH_TOKEN` when a
+  token has been stored — so it authenticates and runs non-interactively.
+- Launcher config (`env`, `parent`, `provider`, template, providers) lives in
+  `~/.claunch.yaml`, **not** in the profile directory; the profile dir holds only
+  Claude Code's own files plus per-machine login tokens.
 
 A profile directory typically holds:
 
 | File | Origin |
 | ---- | ------ |
 | `.claude.json`      | Seeded from your global config (onboarding flags, prefs). |
-| `settings.json`     | Seeded global settings + the profile's `env` block. |
+| `settings.json`     | Seeded global settings (and any migrated `mcpServers`). |
 | `.launcher-token`   | OAuth token stored by `set-token` (`0600`). |
-| `.launcher.json`    | Launcher metadata (e.g. the profile's `parent`). |
 | `.credentials.json` | Written by Claude Code itself after an interactive login. |
 
 ## Configuration
@@ -455,7 +466,7 @@ A profile directory typically holds:
 | `CLAUDE_LAUNCHER_USAGE_URL` | Usage endpoint (default `https://api.anthropic.com/api/oauth/usage`). |
 | `CLAUDE_LAUNCHER_USAGE_MODEL` | Model for the setup-token usage fallback call (default Haiku). |
 | `CLAUDE_LAUNCHER_SEED`      | Config dir new profiles seed from (default `CLAUDE_CONFIG_DIR` or `~/.claude`). |
-| `CLAUDE_LAUNCHER_SYNC_FILE` | YAML file for `export`/`import` (default `~/.claunch.yaml`). |
+| `CLAUDE_LAUNCHER_SYNC_FILE` | The config source of truth (default `~/.claunch.yaml`). |
 
 ## License
 

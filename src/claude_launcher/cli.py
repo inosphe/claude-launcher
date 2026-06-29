@@ -15,16 +15,18 @@ from pathlib import Path
 
 from . import (
     __version__,
+    bootstrap,
     config,
     credentials,
     lineage,
     migrate as migrate_mod,
     profile,
     providers,
+    prune as prune_mod,
     runner,
     seed,
     settings,
-    sync,
+    store,
     template,
     usage,
 )
@@ -157,14 +159,18 @@ def _cmd_parent(args: argparse.Namespace) -> int:
 def _cmd_template(args: argparse.Namespace) -> int:
     if args.init:
         template.ensure_file()
+    # The live default env lives in ~/.claunch.yaml; template.yaml only seeds it.
+    print(f"source of truth: {store.path()}")
     path = template.template_path()
-    suffix = "" if path.is_file() else "  (not created; using built-in defaults)"
-    print(f"template: {path}{suffix}")
+    suffix = "" if path.is_file() else "  (not created; built-in defaults used to bootstrap)"
+    print(f"bootstrap template: {path}{suffix}")
     env = template.env()
     if env:
-        print("default env:")
+        print("default env (applied to new profiles):")
         for key in sorted(env):
             print(f"  {key}={env[key]}")
+    else:
+        print("default env: (none)")
     return 0
 
 
@@ -223,27 +229,17 @@ def _cmd_validate(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
-def _cmd_export(args: argparse.Namespace) -> int:
-    path = Path(args.path).expanduser() if args.path else None
-    written = sync.export_to(path)
-    count = len(profile.list_all())
-    print(f"exported {count} profile(s) to {written}")
-    return 0
-
-
-def _cmd_import(args: argparse.Namespace) -> int:
-    path = Path(args.path).expanduser() if args.path else None
-    summary = sync.import_from(path, prune=args.prune, do_seed=not args.no_seed)
-    if summary.template_applied:
-        print("applied template from file")
-    if summary.created:
-        print(f"created: {', '.join(summary.created)}")
-    if summary.updated:
-        print(f"updated: {', '.join(summary.updated)}")
-    if summary.removed:
-        print(f"removed (pruned): {', '.join(summary.removed)}")
-    if not (summary.created or summary.updated or summary.removed):
-        print("nothing to import")
+def _cmd_prune(args: argparse.Namespace) -> int:
+    targets = prune_mod.orphans()
+    if not targets:
+        print("nothing to prune; every profile dir is declared in the store")
+        return 0
+    for p in targets:
+        if args.dry_run:
+            print(f"would remove {p.name!r} ({p.config_dir})")
+        else:
+            profile.remove(p.name)
+            print(f"removed {p.name!r} ({p.config_dir})")
     return 0
 
 
@@ -300,8 +296,26 @@ def _cmd_run(args: argparse.Namespace) -> int:
 
 
 def _cmd_set_provider(args: argparse.Namespace) -> int:
-    # One positional => set the global provider; two => scope it to a profile.
-    # Either way this just records the choice in the config file (~/.claunch.yaml).
+    # Records the choice in the config file (~/.claunch.yaml). Forms:
+    #   set-provider NAME            -> global provider
+    #   set-provider PROFILE NAME    -> pin a profile (NAME may be 'default')
+    #   set-provider PROFILE --clear -> drop a profile's override (inherit)
+    #   set-provider --clear         -> drop the global provider
+    if args.clear:
+        if args.provider is not None:
+            print("error: --clear takes no PROVIDER", file=sys.stderr)
+            return 1
+        if args.name_or_provider is None:
+            providers.clear_active()
+            print("cleared global provider (back to 'default')")
+            return 0
+        p = profile.require(args.name_or_provider)
+        providers.clear_profile_selection(p)
+        print(f"cleared provider override on {p.name!r} (inherits global/default)")
+        return 0
+    if args.name_or_provider is None:
+        print("error: provider name required", file=sys.stderr)
+        return 1
     if args.provider is None:
         name = args.name_or_provider
         providers.set_active(name)
@@ -314,7 +328,7 @@ def _cmd_set_provider(args: argparse.Namespace) -> int:
     name = args.provider
     providers.set_profile_selection(p, name)
     if name == providers.DEFAULT_PROVIDER:
-        print(f"cleared provider override on {p.name!r} (uses global/default)")
+        print(f"profile {p.name!r} pinned to 'default' (anthropic)")
     else:
         print(f"profile {p.name!r} now uses provider {name!r}")
     return 0
@@ -552,27 +566,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_tpl.set_defaults(func=_cmd_template)
 
-    p_export = sub.add_parser(
-        "export", help="write all profile settings to a YAML file (~/.claunch.yaml)"
+    p_prune = sub.add_parser(
+        "prune",
+        help="delete local profile dirs not declared in the store (~/.claunch.yaml)",
     )
-    p_export.add_argument("path", nargs="?", help="output file (default: ~/.claunch.yaml)")
-    p_export.set_defaults(func=_cmd_export)
-
-    p_import = sub.add_parser(
-        "import", help="apply profile settings from a YAML file (~/.claunch.yaml)"
-    )
-    p_import.add_argument("path", nargs="?", help="input file (default: ~/.claunch.yaml)")
-    p_import.add_argument(
-        "--prune",
+    p_prune.add_argument(
+        "--dry-run",
         action="store_true",
-        help="delete local profiles that are absent from the file",
+        help="show what would be removed without deleting anything",
     )
-    p_import.add_argument(
-        "--no-seed",
-        action="store_true",
-        help="do not seed global config into newly created profiles",
-    )
-    p_import.set_defaults(func=_cmd_import)
+    p_prune.set_defaults(func=_cmd_prune)
 
     p_migrate = sub.add_parser(
         "migrate",
@@ -625,6 +628,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_setprov.add_argument(
         "name_or_provider",
+        nargs="?",
         metavar="PROFILE|PROVIDER",
         help="provider name (global), or a profile name when PROVIDER follows",
     )
@@ -632,7 +636,12 @@ def build_parser() -> argparse.ArgumentParser:
         "provider",
         nargs="?",
         metavar="PROVIDER",
-        help="provider to set on the named profile",
+        help="provider to pin on the named profile ('default' = plain Anthropic)",
+    )
+    p_setprov.add_argument(
+        "--clear",
+        action="store_true",
+        help="drop the override (profile inherits, or global resets to default)",
     )
     p_setprov.set_defaults(func=_cmd_set_provider)
 
@@ -661,16 +670,19 @@ def main(argv: Optional[List[str]] = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        # Read the source of truth and reconcile local state (migrate any legacy
+        # config, materialize declared-but-missing profile dirs) before running.
+        bootstrap.run()
         return args.func(args)
     except (
         profile.ProfileError,
         runner.RunnerError,
         usage.UsageError,
         CredentialsError,
-        sync.SyncError,
         LineageError,
         MigrateError,
         ProviderError,
+        store.StoreError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

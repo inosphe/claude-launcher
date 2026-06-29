@@ -1,51 +1,29 @@
 """Profile inheritance: a profile may declare a parent and inherit from it.
 
-A child profile (e.g. ``company_work``) names a parent (``company``) in its
-launcher metadata (``<CLAUDE_CONFIG_DIR>/.launcher.json``). At launch the child
+A child profile (e.g. ``company_work``) names a parent (``company``) in the
+central config file (``~/.claunch.yaml``, see :mod:`store`). At launch the child
 inherits the parent's environment variables (child keys win) and, when it has no
 token of its own, the parent's login token — so you can log in once on a parent
 and share it across several working profiles.
 
-This module owns the metadata file and all chain resolution. It performs no
-subprocess or network work.
+This module owns chain resolution and reads/writes the ``parent`` field via the
+store. It performs no subprocess or network work.
 """
 
 from __future__ import annotations
 
-import json
 from typing import Dict, List, Optional
 
-from . import credentials, profile as profile_mod, settings
+from . import credentials, profile as profile_mod, settings, store
 from .profile import Profile
-
-META_FILENAME = ".launcher.json"
 
 
 class LineageError(Exception):
     """Raised for missing parents or parent cycles."""
 
 
-def _meta_path(profile: Profile):
-    return profile.config_dir / META_FILENAME
-
-
-def read_meta(profile: Profile) -> dict:
-    path = _meta_path(profile)
-    if not path.is_file():
-        return {}
-    try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
-def write_meta(profile: Profile, data: dict) -> None:
-    _meta_path(profile).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-
-
 def get_parent(profile: Profile) -> Optional[str]:
-    parent = read_meta(profile).get("parent")
+    parent = store.profile_entry(profile.name).get("parent")
     return str(parent) if parent else None
 
 
@@ -99,15 +77,11 @@ def set_parent(profile: Profile, parent_name: str) -> None:
         raise LineageError(
             f"setting parent {parent_name!r} would create a cycle"
         )
-    meta = read_meta(profile)
-    meta["parent"] = parent.name
-    write_meta(profile, meta)
+    store.set_profile_field(profile.name, "parent", parent.name)
 
 
 def clear_parent(profile: Profile) -> None:
-    meta = read_meta(profile)
-    if meta.pop("parent", None) is not None:
-        write_meta(profile, meta)
+    store.set_profile_field(profile.name, "parent", None)
 
 
 def effective_env(profile: Profile) -> Dict[str, str]:

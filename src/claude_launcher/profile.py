@@ -49,11 +49,14 @@ def resolve(name: str) -> Profile:
 
 
 def create(name: str) -> Profile:
-    """Create a profile directory, failing if it already exists."""
+    """Create a profile directory and register it in the store."""
+    from . import store
+
     profile = resolve(name)
     if profile.exists():
         raise ProfileError(f"profile {profile.name!r} already exists")
     profile.config_dir.mkdir(parents=True, exist_ok=False)
+    store.ensure_profile(profile.name)
     return profile
 
 
@@ -68,9 +71,12 @@ def require(name: str) -> Profile:
 
 
 def remove(name: str) -> Profile:
-    """Delete a profile directory and everything inside it."""
+    """Delete a profile directory and its store entry."""
+    from . import store
+
     profile = require(name)
     shutil.rmtree(profile.config_dir)
+    store.remove_profile(profile.name)
     return profile
 
 

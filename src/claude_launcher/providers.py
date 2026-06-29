@@ -1,11 +1,10 @@
-"""Named API providers, configured in the global launcher config file.
+"""Named API providers, configured in the central launcher config file.
 
 A *provider* is a named bundle of environment variables — typically an
 ``ANTHROPIC_BASE_URL`` plus model overrides and an auth token — that points
 Claude Code at a particular API backend (e.g. a third-party GLM endpoint).
-Providers are defined and selected entirely in the launcher's global config YAML
-(``~/.claunch.yaml`` by default — the same file ``claunch export``/``import``
-use), which the launcher reads live at launch:
+Providers are defined and selected in ``~/.claunch.yaml`` (the launcher's source
+of truth, see :mod:`store`), which the launcher reads live at launch:
 
     providers:
       fireworks-glm5p2:
@@ -28,9 +27,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional
 
-import yaml
-
-from . import config, lineage, settings
+from . import lineage, store
 from .profile import Profile
 
 #: The built-in "no override" provider — plain Anthropic, launcher injects token.
@@ -41,21 +38,9 @@ class ProviderError(Exception):
     """Raised for unknown providers or a malformed config file."""
 
 
-def _load_config() -> dict:
-    """Parse the global launcher YAML, tolerating a missing/invalid file."""
-    path = config.sync_file()
-    if not path.is_file():
-        return {}
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def registry(doc: Optional[dict] = None) -> Dict[str, Dict[str, str]]:
     """Map of provider name -> env, from the config file plus built-in default."""
-    doc = _load_config() if doc is None else doc
+    doc = store.load() if doc is None else doc
     out: Dict[str, Dict[str, str]] = {DEFAULT_PROVIDER: {}}
     raw = doc.get("providers")
     if isinstance(raw, dict):
@@ -87,23 +72,19 @@ def _require_known(name: str) -> str:
 
 def active(doc: Optional[dict] = None) -> Optional[str]:
     """The global default provider (top-level ``provider:``), or ``None``."""
-    doc = _load_config() if doc is None else doc
+    doc = store.load() if doc is None else doc
     name = doc.get("provider")
     return str(name) if name else None
 
 
 def _profile_selection(profile_name: str, doc: dict) -> Optional[str]:
-    profiles = doc.get("profiles")
-    if isinstance(profiles, dict):
-        entry = profiles.get(profile_name)
-        if isinstance(entry, dict) and entry.get("provider"):
-            return str(entry["provider"])
-    return None
+    sel = store.profile_entry(profile_name, doc).get("provider")
+    return str(sel) if sel else None
 
 
 def resolve_name(profile: Profile, doc: Optional[dict] = None) -> str:
     """Effective provider for ``profile``: own → ancestor → global → default."""
-    doc = _load_config() if doc is None else doc
+    doc = store.load() if doc is None else doc
     for p in reversed(lineage.chain(profile)):  # self first, then up to the root
         sel = _profile_selection(p.name, doc)
         if sel:
@@ -113,55 +94,43 @@ def resolve_name(profile: Profile, doc: Optional[dict] = None) -> str:
 
 def effective_env(profile: Profile) -> Dict[str, str]:
     """Provider env vars that ``run`` should layer on for ``profile``."""
-    doc = _load_config()
+    doc = store.load()
     return provider_env(resolve_name(profile, doc), doc)
 
 
 # --------------------------------------------------------------------------- #
 # writing the selection back to the config file (used by `set-provider`)
 # --------------------------------------------------------------------------- #
-def _write_config(doc: dict) -> None:
-    """Persist the config doc with the same formatting ``export`` uses."""
-    path = config.sync_file()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    text = yaml.safe_dump(
-        doc, sort_keys=True, allow_unicode=True, default_flow_style=False
-    )
-    path.write_text(text, encoding="utf-8")
-
-
 def set_active(name: str) -> None:
-    """Set (or clear, with ``default``) the global provider in the config file."""
+    """Set the global provider. ``default`` resets it (there is no higher level)."""
     _require_known(name)
-    doc = _load_config()
-    if name == DEFAULT_PROVIDER:
-        doc.pop("provider", None)
-    else:
-        doc["provider"] = name
-    doc.setdefault("version", 1)
-    _write_config(doc)
+
+    def _mutate(doc: dict) -> None:
+        if name == DEFAULT_PROVIDER:
+            doc.pop("provider", None)
+        else:
+            doc["provider"] = name
+
+    store.update(_mutate)
+
+
+def clear_active() -> None:
+    """Remove the global provider selection (back to the built-in default)."""
+    store.update(lambda doc: doc.pop("provider", None))
 
 
 def set_profile_selection(profile: Profile, name: str) -> None:
-    """Set (or clear, with ``default``) a profile's provider in the config file."""
+    """Pin ``profile`` to ``name``.
+
+    ``name`` may be any provider including ``default`` — selecting ``default``
+    *pins* the profile to plain Anthropic, overriding an ancestor's or the global
+    provider. To instead drop the override and inherit, use
+    :func:`clear_profile_selection`.
+    """
     _require_known(name)
-    doc = _load_config()
-    profiles = doc.get("profiles")
-    if not isinstance(profiles, dict):
-        profiles = {}
-    entry = profiles.get(profile.name)
-    if not isinstance(entry, dict):
-        # Seed a full entry from live state so a later `import` (which sets env
-        # authoritatively) won't wipe this profile's env down to empty.
-        entry = {"env": settings.get_env(profile)}
-        parent = lineage.get_parent(profile)
-        if parent:
-            entry["parent"] = parent
-    if name == DEFAULT_PROVIDER:
-        entry.pop("provider", None)
-    else:
-        entry["provider"] = name
-    profiles[profile.name] = entry
-    doc["profiles"] = profiles
-    doc.setdefault("version", 1)
-    _write_config(doc)
+    store.set_profile_field(profile.name, "provider", name)
+
+
+def clear_profile_selection(profile: Profile) -> None:
+    """Remove ``profile``'s provider override so it inherits global/default."""
+    store.set_profile_field(profile.name, "provider", None)
