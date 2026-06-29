@@ -170,8 +170,10 @@ landing on first run. To avoid that, `claunch create` copies your global config
 into the new profile — carrying over the onboarding flags
 (`hasCompletedOnboarding` etc.), UI preferences and `settings.json`, while
 **stripping** account- and project-specific data (`oauthAccount`, `projects`,
-cached API-key responses) so profiles stay isolated. Each profile still logs in
-with its own setup-token.
+cached API-key responses) so profiles stay isolated. The `settings.json` `env`
+block is also stripped — launcher env is owned by `~/.claunch.yaml`, and new
+profiles get their defaults from the [template](#default-template), not from your
+global env. Each profile still logs in with its own setup-token.
 
 ```bash
 claunch create work                 # seed from CLAUDE_CONFIG_DIR or ~/.claude

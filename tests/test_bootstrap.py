@@ -59,6 +59,50 @@ def test_migration_is_idempotent(home):
     assert store.load() == first
 
 
+def test_legacy_live_values_win_over_stale_yaml(home, config_file):
+    # An old export snapshot with a now-stale env, plus newer live settings.json.
+    store.save({"version": 1, "profiles": {"old": {"env": {"K": "STALE"}}}})
+    d = _make_profile_dir(home, "old")
+    (d / "settings.json").write_text(
+        json.dumps({"env": {"K": "FRESH"}}), encoding="utf-8"
+    )
+    bootstrap.run()
+    # The live value must win; the stale snapshot must not be kept.
+    assert store.profile_entry("old")["env"] == {"K": "FRESH"}
+
+
+def test_migration_preserves_provider_selection(home, config_file):
+    store.save({"version": 1, "profiles": {"old": {"provider": "glm"}}})
+    d = _make_profile_dir(home, "old")
+    (d / "settings.json").write_text(
+        json.dumps({"env": {"K": "v"}}), encoding="utf-8"
+    )
+    bootstrap.run()
+    entry = store.profile_entry("old")
+    assert entry["provider"] == "glm"
+    assert entry["env"] == {"K": "v"}
+
+
+def test_token_only_profile_is_registered(home):
+    # A legitimate profile with a token but no env/parent must still land in the
+    # store, so prune does not treat it as an orphan.
+    d = _make_profile_dir(home, "tok")
+    (d / ".launcher-token").write_text("sk-ant-oat01-X\n", encoding="utf-8")
+    bootstrap.run()
+    assert "tok" in store.profiles()
+
+
+def test_migration_runs_once_via_marker(home):
+    d = _make_profile_dir(home, "p")
+    (d / "settings.json").write_text(json.dumps({"env": {"A": "1"}}), encoding="utf-8")
+    bootstrap.run()
+    # Simulate the user later removing the entry by hand; the marker stops the
+    # migration from re-registering it (which would defeat prune).
+    store.remove_profile("p")
+    bootstrap.run()
+    assert "p" not in store.profiles()
+
+
 def test_reconcile_materializes_declared_profile(home, config_file):
     # A config naming a profile with no directory (e.g. copied from elsewhere).
     store.save({"version": 1, "profiles": {"copied": {"env": {"A": "1"}}}})

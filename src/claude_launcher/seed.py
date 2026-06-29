@@ -57,7 +57,18 @@ def _seed_settings(source_dir: Path, profile: Profile) -> bool:
     if not src.is_file():
         return False
     dest = profile.config_dir / SETTINGS_FILENAME
-    dest.write_text(src.read_text(encoding="utf-8"), encoding="utf-8")
+    text = src.read_text(encoding="utf-8")
+    # The launcher's env lives in ~/.claunch.yaml (the source of truth); never
+    # carry an "env" block over from the seed source, or Claude Code would read
+    # it directly and shadow the store. Other keys (mcpServers, etc.) are kept.
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError:
+        data = None
+    if isinstance(data, dict) and "env" in data:
+        data.pop("env", None)
+        text = json.dumps(data, indent=2) + "\n"
+    dest.write_text(text, encoding="utf-8")
     return True
 
 

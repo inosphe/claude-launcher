@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import pytest
 import yaml
 
 from claude_launcher import store
@@ -53,11 +54,25 @@ def test_template_env_helpers(home):
     assert store.template_env() == {"K": "v"}
 
 
-def test_malformed_file_tolerated(config_file):
-    config_file.write_text(": not valid yaml :\n", encoding="utf-8")
-    # load() must not raise on a broken file.
-    doc = store.load()
-    assert isinstance(doc, dict)
+def test_malformed_file_raises_not_overwrites(config_file):
+    config_file.write_text("{ this: is: not: valid", encoding="utf-8")
+    original = config_file.read_text(encoding="utf-8")
+    # A present-but-unparseable file must raise, never be silently treated as
+    # empty (which the next write would clobber).
+    with pytest.raises(store.StoreError):
+        store.load()
+    assert config_file.read_text(encoding="utf-8") == original
+
+
+def test_non_mapping_top_level_raises(config_file):
+    config_file.write_text("- a\n- b\n", encoding="utf-8")
+    with pytest.raises(store.StoreError):
+        store.load()
+
+
+def test_empty_file_is_ok(config_file):
+    config_file.write_text("", encoding="utf-8")
+    assert store.load()["version"] == store.VERSION
 
 
 def test_save_is_stable_yaml(config_file):

@@ -49,24 +49,30 @@ def path() -> Path:
     return config.sync_file()
 
 
-def _read(p: Path) -> dict:
-    try:
-        data = yaml.safe_load(p.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
-        return {}
-    return data if isinstance(data, dict) else {}
-
-
 def load() -> dict:
-    """Return the live config document (``{}``-ish default if the file is absent).
+    """Return the live config document (an empty default if the file is absent).
 
     Reads fresh each call — the file is small and the CLI is short-lived, so this
     keeps every command seeing the current state without a cache to invalidate.
+
+    A *missing* file is fine (a fresh install). A file that is present but
+    unparseable raises :class:`StoreError` rather than being silently treated as
+    empty — this is now the only state file, so a transient parse error must not
+    let the next write clobber it.
     """
     p = path()
-    doc = _read(p) if p.is_file() else {}
-    doc.setdefault("version", VERSION)
-    return doc
+    if not p.is_file():
+        return {"version": VERSION}
+    try:
+        data = yaml.safe_load(p.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise StoreError(f"cannot read config file {p}: {exc}") from exc
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise StoreError(f"config file {p} must be a mapping at the top level")
+    data.setdefault("version", VERSION)
+    return data
 
 
 def save(doc: dict) -> None:
