@@ -66,7 +66,7 @@ claunch usage work      # show this profile's subscription usage
 | ------- | ----------- |
 | `create <name>`        | Create a profile (`--parent` to inherit), seed config, apply template. |
 | `login <name>`         | Run `claude setup-token` for the profile. |
-| `run <name> [args...]` | Launch `claude` for the profile (`--borrow NAME`; extra args pass through). |
+| `run <name> [args...]` | Launch `claude` for the profile (`--borrow NAME`, `--add-prompt`; extra args pass through). |
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
@@ -95,6 +95,23 @@ claunch run work -p "summarize this repo" --model opus
 
 Use a leading `--` only if an argument would otherwise be read by `claunch`
 itself (e.g. `claunch run work -- --help` to show claude's help).
+
+### Appending context to the system prompt
+
+`--add-prompt` opens your editor (`$VISUAL`/`$EDITOR`, or Notepad/vi) so you can
+type multi-line context for a single run. What you save is forwarded to
+`claude --append-system-prompt`, so it is **appended** to Claude Code's built-in
+system prompt (it does not replace it, and it is separate from `CLAUDE.md`):
+
+```bash
+claunch run work --add-prompt
+claunch run work --add-prompt --resume   # other args still pass through
+```
+
+Everything from the `# ---- >8 ----` scissors line down in the editor is
+ignored, so Markdown `#` headings in your text are preserved. Save an empty body
+to launch without adding anything. To forward a literal `--add-prompt` to
+claude, put it after `--`.
 
 ### Borrowing another profile's token
 

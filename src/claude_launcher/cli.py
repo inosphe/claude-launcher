@@ -21,6 +21,7 @@ from . import (
     lineage,
     migrate as migrate_mod,
     profile,
+    prompt_input,
     providers,
     prune as prune_mod,
     runner,
@@ -33,6 +34,7 @@ from . import (
 from .credentials import CredentialsError
 from .lineage import LineageError
 from .migrate import MigrateError
+from .prompt_input import PromptInputError
 from .providers import ProviderError
 
 
@@ -278,10 +280,23 @@ def _cmd_get_token(args: argparse.Namespace) -> int:
 def _cmd_run(args: argparse.Namespace) -> int:
     p = profile.require(args.name)
     # `args` is argparse.REMAINDER, so it also captures launcher flags like
-    # --borrow that appear after the profile name; pull those out here, then
-    # drop a leading `--` separator before forwarding the rest to claude.
+    # --borrow / --add-prompt that appear after the profile name; pull those out
+    # here, then drop a leading `--` separator before forwarding the rest.
     borrow_name, rest = _extract_borrow(args.args)
+    add_prompt, rest = _extract_add_prompt(rest)
     passthrough = _strip_separator(rest)
+    if add_prompt:
+        text = prompt_input.collect()
+        if text:
+            # Prepend so it reaches claude even alongside REMAINDER passthrough;
+            # --append-system-prompt *adds* to the built-in prompt (never replaces).
+            passthrough = ["--append-system-prompt", text, *passthrough]
+            print("added context to the system prompt for this run", file=sys.stderr)
+        else:
+            print(
+                "no prompt entered; launching without --append-system-prompt",
+                file=sys.stderr,
+            )
     borrow = profile.require(borrow_name) if borrow_name else None
     if borrow is not None:
         prov = providers.resolve_name(borrow)
@@ -408,6 +423,25 @@ def _extract_borrow(args: List[str]) -> "tuple[Optional[str], List[str]]":
     return borrow, rest
 
 
+def _extract_add_prompt(args: List[str]) -> "tuple[bool, List[str]]":
+    """Pull a boolean ``--add-prompt`` flag out of run passthrough.
+
+    Like :func:`_extract_borrow`, it stops at a ``--`` separator so a literal
+    ``--add-prompt`` explicitly forwarded to claude is left untouched.
+    """
+    found = False
+    rest: List[str] = []
+    for i, token in enumerate(args):
+        if token == "--":
+            rest.extend(args[i:])
+            break
+        if token == "--add-prompt":
+            found = True
+            continue
+        rest.append(token)
+    return found, rest
+
+
 def _fmt_reset(resets_at: Optional[str]) -> str:
     if not resets_at:
         return ""
@@ -516,13 +550,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_run = sub.add_parser(
         "run",
         help="launch claude with the profile (extra args pass through; "
-        "--borrow NAME uses another profile's token for this run only)",
+        "--borrow NAME uses another profile's token for this run only; "
+        "--add-prompt opens an editor to append text to the system prompt)",
     )
     p_run.add_argument("name")
     p_run.add_argument(
         "args",
         nargs=argparse.REMAINDER,
-        help="--borrow NAME and/or arguments forwarded to claude",
+        help="--borrow NAME, --add-prompt, and/or arguments forwarded to claude",
     )
     p_run.set_defaults(func=_cmd_run)
 
@@ -681,6 +716,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         CredentialsError,
         LineageError,
         MigrateError,
+        PromptInputError,
         ProviderError,
         store.StoreError,
     ) as exc:
