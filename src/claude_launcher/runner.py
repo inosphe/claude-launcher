@@ -57,12 +57,18 @@ def _child_env(
     if with_token:
         if provider == providers.DEFAULT_PROVIDER:
             # Plain Anthropic: inject the (own/inherited/borrowed) OAuth token.
-            if borrow is not None:
-                env[OAUTH_TOKEN_ENV] = lineage.lookup_token(borrow)
+            token = (
+                lineage.lookup_token(borrow)
+                if borrow is not None
+                else lineage.injectable_token(profile)
+            )
+            if token:
+                env[OAUTH_TOKEN_ENV] = token
             else:
-                token = lineage.injectable_token(profile)
-                if token:
-                    env[OAUTH_TOKEN_ENV] = token
+                # No token to inject — the profile (or borrowed profile) logs in
+                # interactively via /login. Don't set the var to None, and don't
+                # let a stale shell/profile token shadow the fresh login flow.
+                env.pop(OAUTH_TOKEN_ENV, None)
         # else: the provider supplies its own auth (e.g. ANTHROPIC_AUTH_TOKEN);
         # leave CLAUDE_CODE_OAUTH_TOKEN exactly as the provider set it.
     else:
@@ -131,12 +137,15 @@ def run(
     """Launch ``claude`` for the profile, optionally borrowing another's token."""
     if borrow is not None:
         # A non-default provider carries its own auth, so it needs no OAuth
-        # token; only require one when the borrowed profile is plain Anthropic.
+        # token; only the plain-Anthropic borrow relies on one.
         needs_token = providers.resolve_name(borrow) == providers.DEFAULT_PROVIDER
         if needs_token and lineage.lookup_token(borrow) is None:
-            raise RunnerError(
-                f"profile {borrow.name!r} has no token to borrow "
-                f"(run 'claunch login {borrow.name}' first)"
+            # An empty token is allowed: launch anyway so the user can /login
+            # interactively inside Claude Code instead of hard-failing here.
+            print(
+                f"warning: profile {borrow.name!r} has no token to borrow; "
+                f"log in with /login, or run 'claunch login {borrow.name}' first",
+                file=sys.stderr,
             )
     return _spawn(profile, list(args), with_token=True, borrow=borrow)
 
