@@ -17,6 +17,10 @@ from pathlib import Path
 from aiohttp import web
 
 from .. import __version__, profile as profile_mod
+from ..cflow import engine as cflow_engine, state as cflow_state
+from ..cflow.engine import CflowError
+from ..cflow.model import WorkflowError
+from ..cflow.state import StateError
 from ..profile import ProfileError
 from .harness import HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
@@ -78,6 +82,7 @@ def build_app(manager: SessionManager, token: str, *, started_at: float) -> web.
     r.add_get("/api/daemon", h_daemon_info)
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
     r.add_get("/api/profiles", h_profiles)
+    r.add_get("/api/cflow", h_cflow_runs)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_get("/api/sessions/{name}", h_session_get)
@@ -133,6 +138,51 @@ async def h_daemon_shutdown(request: web.Request) -> web.Response:
 
 async def h_profiles(request: web.Request) -> web.Response:
     return web.json_response({"profiles": [p.name for p in profile_mod.list_all()]})
+
+
+#: Recent step reports included per run in the /api/cflow payload.
+_CFLOW_REPORT_TAIL = 10
+
+
+async def h_cflow_runs(request: web.Request) -> web.Response:
+    """cflow runs in the directories of managed sessions (plus ``?cwd=``).
+
+    A cflow run lives in a working directory, not in a session — but the
+    sessions the daemon manages are where agent runs happen, so their cwds
+    are the natural monitoring scope. ``?cwd=`` inspects any explicit
+    directory (reported even when idle).
+    """
+    manager: SessionManager = request.app["manager"]
+    by_cwd: dict = {}
+    for session in manager.list():
+        by_cwd.setdefault(session.sdef.cwd, []).append(session.sdef.name)
+    explicit = request.query.get("cwd")
+    if explicit:
+        by_cwd.setdefault(explicit, [])
+
+    runs = []
+    for cwd, names in by_cwd.items():
+        entry = {"cwd": cwd, "sessions": names}
+        try:
+            payload = cflow_engine.status(cwd)
+        except (CflowError, WorkflowError, StateError, OSError) as exc:
+            runs.append({**entry, "status": "error", "error": str(exc)})
+            continue
+        if payload.get("status") == "idle" and cwd != explicit:
+            continue
+        reports = [
+            {
+                "step": e.get("step"),
+                "visit": e.get("visit"),
+                "summary": e.get("summary"),
+                "details": e.get("details"),
+                "at": e.get("at"),
+            }
+            for e in cflow_state.read_journal(cwd, run_id=payload.get("run"))
+            if e.get("event") == "step_report"
+        ]
+        runs.append({**entry, **payload, "reports": reports[-_CFLOW_REPORT_TAIL:]})
+    return web.json_response({"runs": runs})
 
 
 async def h_sessions_list(request: web.Request) -> web.Response:

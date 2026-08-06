@@ -34,6 +34,37 @@ body {
 .dot.exited { background: #6e7681; }
 #session-list .meta { color: #7d8590; font-size: 11px; margin-left: auto; }
 
+#cflow-panel { border-top: 1px solid #2a2e36; max-height: 45%; overflow-y: auto; flex: none; }
+#cflow-panel h3 {
+  font-size: 12px; text-transform: uppercase; color: #7d8590;
+  padding: 10px 16px 4px;
+}
+#cflow-list { list-style: none; }
+#cflow-list li { padding: 8px 16px 10px; border-bottom: 1px solid #22262d; font-size: 13px; }
+#cflow-list li.clickable { cursor: pointer; }
+#cflow-list li.clickable:hover { background: #22262d; }
+.cflow-head { display: flex; align-items: center; gap: 8px; }
+.cflow-head .meta { margin-left: auto; color: #7d8590; font-size: 11px; }
+.cflow-line { font-size: 12px; color: #9da5b0; margin-top: 3px; }
+.cflow-line.report {
+  color: #b9c2cc; border-left: 2px solid #30363d; padding-left: 7px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cflow-line.dim {
+  color: #6e7681; font-size: 11px;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cflow-line.error { color: #ff7b72; }
+.cflow-hint {
+  display: inline-block; margin-top: 5px; padding: 2px 7px; font-size: 11px;
+  font-family: Cascadia Mono, Consolas, Menlo, monospace;
+  color: #d29922; background: #14161a; border: 1px solid #30363d; border-radius: 4px;
+}
+.dot.wf-running { background: #58a6ff; }
+.dot.wf-waiting { background: #d29922; }
+.dot.wf-done { background: #3fb950; }
+.dot.wf-error { background: #ff7b72; }
+
 #new-session { padding: 12px 16px; border-top: 1px solid #2a2e36; }
 #new-session h3 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 8px; }
 #new-session label { display: block; font-size: 12px; color: #9da5b0; margin-bottom: 6px; }

@@ -78,6 +78,9 @@ def _cmd_status(args: argparse.Namespace) -> int:
         visit = payload.get("visit")
         note = f"  (visit {visit})" if visit and visit > 1 else ""
         print(f"step:     {payload['step_id']}{note}")
+    report = payload.get("report")
+    if report:
+        print(f"report:   {report.get('summary')}")
     print(f"steps completed: {payload.get('steps_completed')}")
     revisited = {
         s: n for s, n in (payload.get("visits") or {}).items() if n > 1

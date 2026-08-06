@@ -4,8 +4,8 @@ Speaks newline-delimited JSON-RPC 2.0 on stdin/stdout — just enough of the MCP
 surface (initialize / tools/list / tools/call / ping) for Claude Code and
 compatible clients, with no SDK dependency.
 
-Exposed tools: ``start``, ``next``, ``select``, ``status``. There is
-deliberately **no approve tool** and no user-side select confirmation here:
+Exposed tools: ``start``, ``report``, ``next``, ``select``, ``status``. There
+is deliberately **no approve tool** and no user-side select confirmation here:
 human gates are only operable via the CLI (``claunch cflow approve|select``),
 outside the agent's reach.
 """
@@ -48,22 +48,41 @@ TOOLS = [
         },
     },
     {
-        "name": "next",
+        "name": "report",
         "description": (
-            "Report the current step as finished (with a short outcome summary) "
-            "and receive the next one. Runs the step's verify command first, "
-            "if any, and refuses to advance when it fails. Also used to "
-            "re-fetch the current position after a gate was approved."
+            "File the completion report for the current step BEFORE advancing: "
+            "what actually happened, including failures. Journaled and shown "
+            "live on the daemon web dashboard; 'next' is refused until it is "
+            "filed. Re-filing overwrites (e.g. after fixing a failed verify)."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": "2-4 sentences on what was actually done (journaled)",
-                }
+                    "description": "2-4 honest sentences on the step's outcome",
+                },
+                "details": {
+                    "type": "string",
+                    "description": (
+                        "optional evidence/specifics: commands run, test names, "
+                        "failure lines, files touched"
+                    ),
+                },
             },
+            "required": ["summary"],
         },
+    },
+    {
+        "name": "next",
+        "description": (
+            "Advance past the current step and receive the next one. Requires "
+            "the step's completion report to be filed first (see 'report'), "
+            "then runs the step's verify command, if any, refusing to advance "
+            "when it fails. Also used to re-fetch the current position after a "
+            "gate was approved."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
     },
     {
         "name": "select",
@@ -99,8 +118,12 @@ def _call_tool(name: str, args: dict) -> dict:
             context=args.get("context") or None,
             force=bool(args.get("force")),
         )
+    if name == "report":
+        return engine.report(
+            str(args.get("summary") or ""), args.get("details") or None
+        )
     if name == "next":
-        return engine.next_step(args.get("summary") or None)
+        return engine.next_step()
     if name == "select":
         return engine.select(
             str(args.get("option") or ""), args.get("reason") or None, by="agent"

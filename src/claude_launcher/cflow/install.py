@@ -37,14 +37,21 @@ candidates (`claunch cflow ls`) and ask which one to run.
 1. Call the MCP tool `start` with `{workflow, context}` (context = the extra
    arguments plus anything relevant the user said about the task).
 2. The server feeds ONE step at a time. Execute the returned `instructions`
-   completely, then call `next` with a `summary` — 2–4 honest sentences on
-   what actually happened (it becomes the permanent journal and later PR
-   text). Failures belong in the summary too.
+   completely, then file the step's completion report — `report {summary,
+   details}` — and advance with `next {}`. The summary is 2–4 honest
+   sentences on what actually happened; put evidence in `details` (commands
+   run, test names, failure lines, files touched). Reports are journaled,
+   shown live on the daemon web dashboard, and become the PR text. Failures
+   belong in the report too.
 3. Act on the returned `status`:
-   - `step` — do the work, then `next {summary}`.
+   - `step` — do the work, then `report {summary, details}`, then `next {}`.
+   - `report_required` — you called `next` without filing the step's
+     report; call `report` first.
    - `verify_failed` — the step's verify command failed; its output is
-     included. Fix the underlying problem and call `next` again. Never claim
-     success: the server re-runs the command itself.
+     included and your report was discarded (the outcome it described did
+     not survive). Fix the underlying problem, file a new `report`, and
+     call `next` again. Never claim success: the server re-runs the command
+     itself.
    - `select` with `chooser: agent` — decide per the prompt's criteria and
      call `select {option, reason}`.
    - `select` with `chooser: user`, or `waiting_selection` — call `select`
@@ -67,7 +74,9 @@ candidates (`claunch cflow ls`) and ask which one to run.
 - Workflows may loop (a `visit` counter > 1 means you are on another pass).
   Gates and selects apply on EVERY visit — a previous approval does not
   carry over.
-- Summaries must reflect reality, including what failed or was skipped.
+- Reports must reflect reality, including what failed or was skipped. They
+  are watched live by humans — write them as status updates for a reviewer,
+  not as praise for yourself.
 - Approvals and user selections happen OUTSIDE your tools (CLI / `!`
   commands); nothing you can call grants them.
 - If a tool returns an error about no active run, `start` one; if it says a

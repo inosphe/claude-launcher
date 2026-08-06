@@ -693,6 +693,13 @@ The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
 a session list (status badges, create/kill) plus a **live xterm.js terminal**
 attached over WebSocket — full input and output, multiple viewers allowed.
 
+The sidebar also shows a **Workflows** panel monitoring the
+[cflow](#cflow-declarative-agent-workflows) runs in the managed sessions'
+working directories: current step and visit count, the agent's latest step
+**reports** (hover for details), and — when a run is blocked on a human —
+the exact `claunch cflow approve` / `select` command that unblocks it.
+Clicking a run attaches its session's terminal.
+
 - **Auth is mandatory** (even on loopback): the CLI reads the token from
   `~/.claude-launcher/daemon/token` automatically; the browser asks once for
   `claunch daemon token` and stores an HttpOnly cookie. API clients send
@@ -718,6 +725,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | profile names (for the UI's create form) |
+| GET    | `/api/cflow`                   | cflow runs in session cwds (status, step reports); `?cwd=` inspects any directory |
 
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`); runtime
@@ -761,9 +769,18 @@ claunch cflow example                  # scaffold .claunch/workflows/feature-dev
 ```
 
 The agent's loop (taught by the `/cflow` skill):
-`start {workflow, context}` → work → `next {summary}` → … → `done`. Each
-summary lands in `.cflow/journal.jsonl`, so the finished run yields a full,
-honest changelog (useful for the PR body).
+`start {workflow, context}` → work → `report {summary, details}` →
+`next {}` → … → `done`. The **report is not optional**: `next` refuses to
+advance until the step's completion report is filed, and a failed `verify`
+discards the report (the outcome it described did not survive), so every
+advance leaves an explicit, machine-checked account of what happened. Reports
+land in `.cflow/journal.jsonl` and stream live to the
+[web dashboard](#web-ui--http-api), so the finished run yields a full, honest
+changelog (useful for the PR body).
+
+Ready-to-copy workflow patterns (linear + verify, triage branching, review
+loops, gated releases, unattended orchestration) live in the
+[cflow cookbook](docs4users/cflow-cookbook.md).
 
 ### Workflow YAML: a graph, not a tree
 
@@ -846,10 +863,11 @@ mid-run can't corrupt a running position.
 | `select` (`chooser: user`) | a human | the agent's pick is only a *proposal*; the run blocks until `claunch cflow select <option>` confirms (any option) |
 | `gate:` | a human | the step's instructions are withheld until `claunch cflow approve` |
 | `verify:` | a machine | the server runs the command on `next`; non-zero exit refuses to advance and returns the output |
+| `report` | the agent | required before `next`; journaled, shown live on the web dashboard, discarded by a failed `verify` |
 
 **Approvals are not agent-callable, by design.** The MCP surface is only
-`start` / `next` / `select` / `status` — there is no approve tool, so a gate
-cannot be talked past. While blocked, the agent stops its turn and tells you
+`start` / `report` / `next` / `select` / `status` — there is no approve tool,
+so a gate cannot be talked past. While blocked, the agent stops its turn and tells you
 how to unblock; inside a chat session you can approve without leaving:
 
 ```text

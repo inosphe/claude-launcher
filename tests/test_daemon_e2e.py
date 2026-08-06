@@ -127,6 +127,69 @@ def test_restore_relaunches_recorded_sessions(home, tmp_path):
     asyncio.run(run())
 
 
+def test_api_cflow_monitoring(home, tmp_path):
+    """The dashboard endpoint surfaces runs (and their step reports) by cwd."""
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.cflow import engine as cflow_engine
+
+    (tmp_path / "wf.yaml").write_text(
+        "name: demo\nsteps:\n  one:\n    instructions: do one\n    next: two\n"
+        "  two:\n    instructions: do two\n",
+        encoding="utf-8",
+    )
+    cflow_engine.start("wf.yaml", context="demo task", cwd=str(tmp_path))
+    cflow_engine.report("one is done", "evidence here", cwd=str(tmp_path))
+    cflow_engine.next_step(cwd=str(tmp_path))
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            bearer = {"Authorization": "Bearer sekrit"}
+            resp = await client.get("/api/cflow")
+            assert resp.status == 401  # authed like everything else
+
+            # no sessions -> nothing scanned
+            resp = await client.get("/api/cflow", headers=bearer)
+            assert (await resp.json())["runs"] == []
+
+            # explicit cwd inspection
+            resp = await client.get(
+                "/api/cflow", params={"cwd": str(tmp_path)}, headers=bearer
+            )
+            runs = (await resp.json())["runs"]
+            assert len(runs) == 1
+            assert runs[0]["workflow"] == "demo"
+            assert runs[0]["status"] == "step"
+            assert runs[0]["step_id"] == "two"
+            assert runs[0]["sessions"] == []
+            assert runs[0]["reports"][-1]["summary"] == "one is done"
+            assert runs[0]["reports"][-1]["details"] == "evidence here"
+
+            # a managed session in that cwd puts the run in the default scan
+            mgr.create(SessionDef(name="wf1", harness="py", cwd=str(tmp_path)))
+            resp = await client.get("/api/cflow", headers=bearer)
+            runs = (await resp.json())["runs"]
+            assert len(runs) == 1
+            assert runs[0]["sessions"] == ["wf1"]
+
+            # a session whose cwd has no run stays out of the listing
+            other = tmp_path / "other"
+            other.mkdir()
+            mgr.create(SessionDef(name="idle1", harness="py", cwd=str(other)))
+            resp = await client.get("/api/cflow", headers=bearer)
+            assert len((await resp.json())["runs"]) == 1
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_api_end_to_end(home, tmp_path):
     _register_py_harness()
     from aiohttp.test_utils import TestClient, TestServer

@@ -19,6 +19,11 @@ Enforcement lives here, not in prompts:
   MCP-callable approve — an agent-callable approval is not a gate.
 - ``select`` with ``chooser: user`` records the agent's call as a *proposal*
   and blocks until ``claunch cflow select`` confirms (any option).
+- ``next`` is refused until the step's completion **report** is filed
+  (``report {summary, details?}``) — every advance therefore leaves an
+  explicit, timestamped account of what happened, which the daemon web
+  dashboard shows live next to the run. A failed verify clears the report:
+  the outcome it described did not survive, so the fix must be re-reported.
 """
 
 from __future__ import annotations
@@ -58,12 +63,25 @@ def _limit(workflow: Workflow, state: dict, step_id: str) -> int:
     return workflow.max_visits * (1 + extensions)
 
 
+def _current_report(state: dict, step_id: str) -> Optional[dict]:
+    """The filed report for this step *and visit*, if any."""
+    report = state.get("report")
+    if (
+        report
+        and report.get("step") == step_id
+        and report.get("visit") == _visits(state, step_id)
+    ):
+        return report
+    return None
+
+
 def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> None:
     """Advance to ``target`` (None = termination)."""
     state["delivered"] = False
     state["gate_approved"] = False
     state["gate_logged"] = None
     state["pending_select"] = None
+    state["report"] = None
     if target is None:
         state["current"] = None
         state["status"] = "done"
@@ -78,7 +96,7 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
 def _done_payload(state: dict, cwd: Optional[str]) -> dict:
     entries = state_mod.read_journal(cwd, run_id=state["run_id"])
     summaries = [
-        {"step": e.get("step"), "summary": e.get("summary")}
+        {"step": e.get("step"), "summary": e.get("summary"), "details": e.get("details")}
         for e in entries
         if e.get("event") == "step_completed"
     ]
@@ -197,7 +215,10 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
         **base,
         "status": "step",
         "instructions": step.instructions,
-        "note": "do this step now, then call 'next' with a short summary of the outcome",
+        "note": (
+            "do this step now, then file its outcome with 'report' "
+            "{summary, details?} and advance with 'next'"
+        ),
     }
     if step.verify:
         payload["verify"] = (
@@ -249,6 +270,7 @@ def start(
         "gate_approved": False,
         "gate_logged": None,
         "pending_select": None,
+        "report": None,
         "completed": 0,
         "visits": {workflow.start: 1},
         "loop_extensions": {},
@@ -291,7 +313,49 @@ def _blocked(workflow: Workflow, state: dict) -> Optional[str]:
     return None
 
 
-def next_step(summary: Optional[str] = None, *, cwd: Optional[str] = None) -> dict:
+def report(
+    summary: str,
+    details: Optional[str] = None,
+    *,
+    cwd: Optional[str] = None,
+) -> dict:
+    """File the completion report for the current step (required by 'next')."""
+    workflow, state = _load(cwd)
+    if state["status"] in ("done", "aborted"):
+        return _done_payload(state, cwd)
+    step = workflow.step(state["current"])
+    if _blocked(workflow, state) or not state["delivered"]:
+        raise CflowError(
+            f"step {step.id!r} has not been delivered yet — nothing to report; "
+            f"call 'next' or 'status' first"
+        )
+    if step.is_select:
+        raise CflowError(
+            f"current step {step.id!r} is a decision point — use 'select' "
+            f"(its reason is the record), not 'report'"
+        )
+    summary = (summary or "").strip()
+    if not summary:
+        raise CflowError("a report needs a non-empty 'summary'")
+    entry = {
+        "step": step.id,
+        "visit": _visits(state, step.id),
+        "summary": summary,
+        "details": (details or "").strip() or None,
+        "at": state_mod.utcnow(),
+    }
+    state["report"] = entry
+    state_mod.save_state(state, cwd)
+    state_mod.journal("step_report", {"run": state["run_id"], **entry}, cwd)
+    return {
+        **_base(state),
+        "step_id": step.id,
+        "status": "reported",
+        "note": "report recorded; call 'next' to advance",
+    }
+
+
+def next_step(*, cwd: Optional[str] = None) -> dict:
     workflow, state = _load(cwd)
     if state["status"] in ("done", "aborted"):
         return _done_payload(state, cwd)
@@ -299,8 +363,7 @@ def next_step(summary: Optional[str] = None, *, cwd: Optional[str] = None) -> di
 
     if not state["delivered"] or _blocked(workflow, state):
         # Nothing has been handed out yet (fresh arrival, or a gate/loop guard
-        # is closed): (re)attempt delivery. Any summary refers to an
-        # already-recorded step, never to unseen content.
+        # is closed): (re)attempt delivery.
         return _payload(workflow, state, cwd, mutate=True)
 
     if step.is_select:
@@ -308,7 +371,22 @@ def next_step(summary: Optional[str] = None, *, cwd: Optional[str] = None) -> di
         payload["note"] = "this is a decision point — use the 'select' tool, not 'next'"
         return payload
 
-    # Completing a delivered executable step: machine gate first.
+    # Completing a delivered executable step: the report comes first, so the
+    # journal/dashboard always carry an explicit account of what happened.
+    filed = _current_report(state, step.id)
+    if filed is None:
+        return {
+            **_base(state),
+            "step_id": step.id,
+            "status": "report_required",
+            "note": (
+                "no completion report filed for this step yet — call 'report' "
+                "with {summary, details?} describing what actually happened, "
+                "then call 'next' again"
+            ),
+        }
+
+    # Machine gate second: verify must confirm the reported outcome.
     if step.verify:
         result = _run_verify(step, cwd)
         if result is not None:
@@ -317,6 +395,10 @@ def next_step(summary: Optional[str] = None, *, cwd: Optional[str] = None) -> di
                 {"run": state["run_id"], "step": step.id, **result},
                 cwd,
             )
+            # The report described an outcome that did not survive verify;
+            # after fixing, the (different) outcome must be re-reported.
+            state["report"] = None
+            state_mod.save_state(state, cwd)
             return {
                 **_base(state),
                 "step_id": step.id,
@@ -324,8 +406,9 @@ def next_step(summary: Optional[str] = None, *, cwd: Optional[str] = None) -> di
                 "command": step.verify.command,
                 **result,
                 "note": (
-                    "the step's verify command failed; fix the problem and call "
-                    "'next' again (the command will be re-run)"
+                    "the step's verify command failed; fix the problem, file a "
+                    "new 'report', and call 'next' again (the command will be "
+                    "re-run)"
                 ),
             }
         state_mod.journal(
@@ -340,7 +423,8 @@ def next_step(summary: Optional[str] = None, *, cwd: Optional[str] = None) -> di
             "run": state["run_id"],
             "step": step.id,
             "visit": _visits(state, step.id),
-            "summary": (summary or "").strip(),
+            "summary": filed["summary"],
+            "details": filed.get("details"),
         },
         cwd,
     )
@@ -492,6 +576,11 @@ def status(cwd: Optional[str] = None) -> dict:
     workflow, state = _load(cwd)
     payload = _payload(workflow, state, cwd, mutate=False)
     payload["visits"] = dict(state["visits"])
+    payload["started_at"] = state.get("started_at")
+    if state.get("context"):
+        payload["context"] = state["context"]
+    if state.get("current") and _current_report(state, state["current"]):
+        payload["report"] = state["report"]
     return payload
 
 

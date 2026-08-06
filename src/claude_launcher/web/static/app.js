@@ -86,6 +86,110 @@ async function refreshSessions() {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* cflow workflow monitoring                                          */
+/* ------------------------------------------------------------------ */
+function wfDotClass(status) {
+  if (status === "step" || status === "select" || status === "reported") return "wf-running";
+  if (status === "waiting_approval" || status === "waiting_selection" || status === "report_required") return "wf-waiting";
+  if (status === "done") return "wf-done";
+  if (status === "error" || status === "aborted") return "wf-error";
+  return "wf-running";
+}
+
+function shortenPath(p) {
+  const parts = (p || "").split(/[\\/]+/).filter(Boolean);
+  return parts.length > 2 ? "…/" + parts.slice(-2).join("/") : p;
+}
+
+function cflowLine(text, cls) {
+  const el = document.createElement("div");
+  el.className = `cflow-line${cls ? " " + cls : ""}`;
+  el.textContent = text;
+  return el;
+}
+
+function cflowHint(cmd) {
+  const el = document.createElement("code");
+  el.className = "cflow-hint";
+  el.textContent = cmd;
+  return el;
+}
+
+async function refreshCflow() {
+  let data;
+  try {
+    const resp = await api("/api/cflow");
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  const runs = data.runs || [];
+  $("cflow-panel").classList.toggle("hidden", runs.length === 0);
+  const list = $("cflow-list");
+  list.innerHTML = "";
+  for (const r of runs) {
+    const li = document.createElement("li");
+
+    const head = document.createElement("div");
+    head.className = "cflow-head";
+    const dot = document.createElement("span");
+    dot.className = `dot ${wfDotClass(r.status)}`;
+    const name = document.createElement("span");
+    name.textContent = r.workflow || "(workflow)";
+    const st = document.createElement("span");
+    st.className = "meta";
+    st.textContent =
+      r.status === "waiting_approval" && r.reason === "loop_limit"
+        ? "loop limit" : r.status;
+    head.append(dot, name, st);
+    li.appendChild(head);
+
+    if (r.step_id) {
+      const visit = r.visit > 1 ? ` · visit ${r.visit}` : "";
+      li.appendChild(cflowLine(
+        `step: ${r.title || r.step_id}${visit} · ${r.steps_completed ?? 0} done`
+      ));
+    }
+
+    // Latest step reports: the agent's own account of each finished step
+    // (plus the current step's filed-but-not-advanced report, if any).
+    const reports = (r.reports || []).slice(-3);
+    for (const rep of reports) {
+      const line = cflowLine(`${rep.step}: ${rep.summary || ""}`, "report");
+      if (rep.details) line.title = rep.details;
+      li.appendChild(line);
+    }
+
+    const cwdLine = cflowLine(shortenPath(r.cwd), "dim");
+    cwdLine.title = r.cwd;
+    li.appendChild(cwdLine);
+    if ((r.sessions || []).length) {
+      li.appendChild(cflowLine(`session: ${r.sessions.join(", ")}`, "dim"));
+      li.classList.add("clickable");
+      li.addEventListener("click", () => attach(r.sessions[0]));
+    }
+
+    if (r.status === "waiting_approval") {
+      li.appendChild(cflowHint("claunch cflow approve"));
+    } else if (r.status === "waiting_selection" || r.status === "select") {
+      if (r.proposal) {
+        li.appendChild(cflowLine(
+          `agent proposes: ${r.proposal.option} — ${r.proposal.reason || ""}`
+        ));
+      }
+      if (r.status === "waiting_selection" || r.chooser === "user") {
+        const opts = (r.options || []).map((o) => o.name).join("|");
+        li.appendChild(cflowHint(`claunch cflow select <${opts}>`));
+      }
+    } else if (r.status === "error") {
+      li.appendChild(cflowLine(r.error || "error", "error"));
+    }
+
+    list.appendChild(li);
+  }
+}
+
 async function refreshProfiles() {
   try {
     const resp = await api("/api/profiles");
@@ -231,8 +335,9 @@ async function boot() {
   }
   refreshProfiles();
   refreshSessions();
+  refreshCflow();
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(refreshSessions, 2000);
+  pollTimer = setInterval(() => { refreshSessions(); refreshCflow(); }, 2000);
 }
 
 boot();

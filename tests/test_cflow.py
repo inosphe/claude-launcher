@@ -109,6 +109,12 @@ def _write(proj, name, text):
     return path
 
 
+def _advance(summary, details=None):
+    """The full completion protocol for one executable step: report, then next."""
+    engine.report(summary, details)
+    return engine.next_step()
+
+
 # --------------------------------------------------------------------------- #
 # model: parsing + graph validation
 # --------------------------------------------------------------------------- #
@@ -213,7 +219,7 @@ steps:
 
 
 # --------------------------------------------------------------------------- #
-# engine: linear flow
+# engine: linear flow + reports
 # --------------------------------------------------------------------------- #
 def test_linear_run(flow_dir):
     _write(flow_dir, "linear", LINEAR)
@@ -222,14 +228,56 @@ def test_linear_run(flow_dir):
     assert payload["step_id"] == "one"
     assert payload["visit"] == 1
 
-    payload = engine.next_step("did one")
+    payload = _advance("did one", details="evidence: foo.py touched")
     assert payload["status"] == "step"
     assert payload["step_id"] == "two"
 
-    payload = engine.next_step("did two")
+    payload = _advance("did two")
     assert payload["status"] == "done"
     summaries = {e["step"]: e["summary"] for e in payload["journal"]}
     assert summaries == {"one": "did one", "two": "did two"}
+    details = {e["step"]: e["details"] for e in payload["journal"]}
+    assert details["one"] == "evidence: foo.py touched"
+
+
+def test_next_requires_report(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    payload = engine.next_step()
+    assert payload["status"] == "report_required"
+    assert payload["step_id"] == "one"
+    # still stuck on the same step until a report is filed
+    assert engine.next_step()["status"] == "report_required"
+
+    payload = engine.report("did one")
+    assert payload["status"] == "reported"
+    assert engine.next_step()["step_id"] == "two"
+
+
+def test_report_needs_summary_and_delivery(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    with pytest.raises(CflowError, match="non-empty"):
+        engine.report("   ")
+
+    # re-filing overwrites; the completed step carries the latest account
+    engine.report("first take")
+    engine.report("second take")
+    engine.next_step()
+    completed = [
+        e for e in state_mod.read_journal() if e["event"] == "step_completed"
+    ]
+    assert completed[0]["summary"] == "second take"
+    filed = [e for e in state_mod.read_journal() if e["event"] == "step_report"]
+    assert [e["summary"] for e in filed] == ["first take", "second take"]
+
+
+def test_status_shows_filed_report(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    assert "report" not in engine.status()
+    engine.report("one is done")
+    assert engine.status()["report"]["summary"] == "one is done"
 
 
 def test_start_twice_requires_force(flow_dir):
@@ -255,21 +303,23 @@ def test_status_is_readonly(flow_dir):
 def test_gate_blocks_until_cli_approves(flow_dir):
     _write(flow_dir, "gated", GATED)
     engine.start("gated")
-    payload = engine.next_step("worked")
+    payload = _advance("worked")
     assert payload["status"] == "waiting_approval"
     assert payload["reason"] == "gate"
     assert "instructions" not in payload  # gated content is withheld
 
-    # the agent hammering next() gets the same wall
-    payload = engine.next_step("please?")
+    # the agent hammering next() gets the same wall, and cannot report either
+    payload = engine.next_step()
     assert payload["status"] == "waiting_approval"
+    with pytest.raises(CflowError, match="not been delivered"):
+        engine.report("pretending")
 
     engine.approve(by="user")
     payload = engine.next_step()
     assert payload["status"] == "step"
     assert payload["step_id"] == "ship"
 
-    payload = engine.next_step("shipped")
+    payload = _advance("shipped")
     assert payload["status"] == "done"
 
 
@@ -283,19 +333,19 @@ def test_approve_without_gate_errors(flow_dir):
 def test_gate_reapproves_on_every_visit(flow_dir):
     _write(flow_dir, "gloop", GATED_LOOP)
     engine.start("gloop")
-    engine.next_step("fixed round 1")
+    _advance("fixed round 1")
     assert engine.status()["status"] == "waiting_approval"
     engine.approve(by="user")
     payload = engine.next_step()
     assert payload["step_id"] == "review"
-    payload = engine.next_step("relayed verdict")
+    payload = _advance("relayed verdict")
     assert payload["status"] == "select"
     payload = engine.select("no", "reviewer wants changes", by="agent")
     assert payload["step_id"] == "fix"
     assert payload["visit"] == 2
 
     # second pass: the gate closes again — one approval is not forever
-    payload = engine.next_step("fixed round 2")
+    payload = _advance("fixed round 2")
     assert payload["status"] == "waiting_approval"
     engine.approve(by="user")
     payload = engine.next_step()
@@ -317,9 +367,9 @@ def test_agent_select_routes_and_shared_target(flow_dir):
 
     payload = engine.select("a", "path a fits", by="agent")
     assert (payload["status"], payload["step_id"]) == ("step", "a1")
-    payload = engine.next_step("did a1")
+    payload = _advance("did a1")
     assert payload["step_id"] == "common"
-    payload = engine.next_step("done")
+    payload = _advance("done")
     assert payload["status"] == "done"
 
 
@@ -333,9 +383,12 @@ def test_select_can_jump_straight_to_shared_step(flow_dir):
 def test_next_on_select_step_redirects(flow_dir):
     _write(flow_dir, "branched", BRANCHED)
     engine.start("branched")
-    payload = engine.next_step("trying to skip")
+    payload = engine.next_step()
     assert payload["status"] == "select"
     assert "select" in payload["note"]
+    # reports have no place at a decision point either
+    with pytest.raises(CflowError, match="decision point"):
+        engine.report("choosing a")
 
 
 def test_user_chooser_blocks_agent_selection(flow_dir):
@@ -369,10 +422,10 @@ def test_loop_iterates_and_select_exits(flow_dir):
     _write(flow_dir, "loop", LOOP)
     payload = engine.start("loop")
     assert payload.get("workflow_warnings")  # cycle warning surfaced at start
-    engine.next_step("round 1")
+    _advance("round 1")
     payload = engine.select("again", "not good yet", by="agent")
     assert (payload["step_id"], payload["visit"]) == ("impl", 2)
-    engine.next_step("round 2")
+    _advance("round 2")
     payload = engine.select("done", "good now", by="agent")
     assert payload["status"] == "done"
 
@@ -380,9 +433,9 @@ def test_loop_iterates_and_select_exits(flow_dir):
 def test_loop_limit_pauses_and_approve_extends(flow_dir):
     _write(flow_dir, "loop", LOOP)  # max_visits: 2
     engine.start("loop")
-    engine.next_step("round 1")
+    _advance("round 1")
     engine.select("again", by="agent")  # impl visit 2
-    engine.next_step("round 2")
+    _advance("round 2")
     payload = engine.select("again", by="agent")  # impl visit 3 > limit
     assert payload["status"] == "waiting_approval"
     assert payload["reason"] == "loop_limit"
@@ -413,12 +466,14 @@ def test_verify_blocks_then_passes(flow_dir):
     _write(flow_dir, "verified", _verified_yaml())
     engine.start("verified")
 
-    payload = engine.next_step("claims it works")
+    payload = _advance("claims it works")
     assert payload["status"] == "verify_failed"
     assert payload["exit_code"] == 1
 
+    # the failed verify discarded the report: the fix must be re-reported
     (flow_dir / "ok.txt").write_text("done", encoding="utf-8")
-    payload = engine.next_step("now it works")
+    assert engine.next_step()["status"] == "report_required"
+    payload = _advance("now it works")
     assert payload["status"] == "done"
     events = [e["event"] for e in state_mod.read_journal()]
     assert "verify_failed" in events
@@ -451,7 +506,8 @@ def test_mcp_initialize_and_tools():
     assert resp["result"]["serverInfo"]["name"] == "cflow"
     resp = _rpc("tools/list")
     names = {t["name"] for t in resp["result"]["tools"]}
-    assert names == {"start", "next", "select", "status"}  # no approve, by design
+    # no approve, by design
+    assert names == {"start", "report", "next", "select", "status"}
 
 
 def test_mcp_tool_call_flow(flow_dir):
@@ -461,7 +517,17 @@ def test_mcp_tool_call_flow(flow_dir):
     payload = json.loads(resp["result"]["content"][0]["text"])
     assert payload["step_id"] == "one"
 
-    resp = _rpc("tools/call", {"name": "next", "arguments": {"summary": "ok"}})
+    # next without a report is refused; report, then next advances
+    resp = _rpc("tools/call", {"name": "next", "arguments": {}})
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    assert payload["status"] == "report_required"
+
+    resp = _rpc("tools/call", {"name": "report",
+                               "arguments": {"summary": "ok", "details": "d"}})
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    assert payload["status"] == "reported"
+
+    resp = _rpc("tools/call", {"name": "next", "arguments": {}})
     payload = json.loads(resp["result"]["content"][0]["text"])
     assert payload["step_id"] == "two"
 
