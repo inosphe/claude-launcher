@@ -9,6 +9,14 @@ let term = null;
 let fitAddon = null;
 let sessionsCache = [];
 
+/* Base path of the current page: "/" when served directly, "/t/<name>/" when
+ * reached through a relay tunnel. All API/WS/static requests are resolved
+ * against it so the same assets work in both cases. */
+const BASE = location.pathname.replace(/[^/]*$/, "");
+function url(path) {
+  return BASE + String(path).replace(/^\//, "");
+}
+
 /* ------------------------------------------------------------------ */
 /* auth                                                               */
 /* ------------------------------------------------------------------ */
@@ -23,7 +31,7 @@ let reloginPromise = null;
 async function tryStoredLogin() {
   const token = localStorage.getItem(TOKEN_KEY);
   if (!token) return false;
-  const resp = await fetch("/api/auth/session", {
+  const resp = await fetch(url("/api/auth/session"), {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
@@ -43,10 +51,10 @@ function relogin() {
 }
 
 async function api(path, opts = {}) {
-  let resp = await fetch(path, { credentials: "same-origin", ...opts });
+  let resp = await fetch(url(path), { credentials: "same-origin", ...opts });
   if (resp.status === 401) {
     if (await relogin()) {
-      resp = await fetch(path, { credentials: "same-origin", ...opts });
+      resp = await fetch(url(path), { credentials: "same-origin", ...opts });
       if (resp.status !== 401) return resp;
     }
     showAuth();
@@ -67,7 +75,7 @@ $("auth-token").addEventListener("keydown", (e) => {
 
 async function doAuth() {
   const token = $("auth-token").value.trim();
-  const resp = await fetch("/api/auth/session", {
+  const resp = await fetch(url("/api/auth/session"), {
     method: "POST",
     credentials: "same-origin",
     headers: { "Content-Type": "application/json" },
@@ -335,7 +343,9 @@ function attach(name) {
   fitAddon.fit();
 
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(`${proto}://${location.host}/api/sessions/${encodeURIComponent(name)}/ws`);
+  ws = new WebSocket(
+    `${proto}://${location.host}${url(`/api/sessions/${encodeURIComponent(name)}/ws`)}`
+  );
   ws.binaryType = "arraybuffer";
 
   const encoder = new TextEncoder();

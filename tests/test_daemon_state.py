@@ -98,3 +98,18 @@ def test_daemon_config_overrides(home):
     assert cfg["idle_threshold"] == 2.0
     store.set_daemon_field("host", None)
     assert store.daemon_config()["host"] == "127.0.0.1"
+
+
+def test_relay_config_set_and_clear(home):
+    assert store.relay_config() == {}
+    store.set_relay_field("url", "wss://relay.example.com")
+    store.set_relay_field("name", "work-pc")
+    cfg = store.relay_config()
+    assert cfg["url"] == "wss://relay.example.com"
+    assert cfg["name"] == "work-pc"
+    # lives under the daemon block so daemon_config sees it nested
+    assert store.daemon_config()["relay"]["url"] == "wss://relay.example.com"
+    # clearing the last key drops the relay block entirely
+    store.set_relay_field("url", None)
+    store.set_relay_field("name", None)
+    assert store.relay_config() == {}

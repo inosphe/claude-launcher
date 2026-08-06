@@ -292,6 +292,52 @@ def _parse_value(raw: str):
     return raw
 
 
+#: Settable ``daemon.relay`` uplink keys (token is write-only via config file /
+#: CLAUNCH_RELAY_TOKEN, never printed back).
+_RELAY_KEYS = ("url", "name", "token", "verify_tls")
+
+
+def _cmd_daemon_relay(args: argparse.Namespace) -> int:
+    cfg = store.relay_config()
+    if not args.key:
+        url = cfg.get("url") or "(unset)"
+        name = cfg.get("name") or "(hostname)"
+        has_token = bool(os.environ.get("CLAUNCH_RELAY_TOKEN") or cfg.get("token"))
+        verify = cfg.get("verify_tls", True)
+        print(f"url:        {url}")
+        print(f"name:       {name}")
+        print(f"token:      {'set' if has_token else '(unset)'}")
+        print(f"verify_tls: {verify}")
+        if not has_token:
+            print(
+                "\nset a token with 'claunch daemon relay token <TOKEN>' or the "
+                "CLAUNCH_RELAY_TOKEN env var (matches relay.toml backend_token)",
+                file=sys.stderr,
+            )
+        return 0
+    if args.key not in _RELAY_KEYS:
+        print(
+            f"error: unknown relay setting {args.key!r} (known: {', '.join(_RELAY_KEYS)})",
+            file=sys.stderr,
+        )
+        return 1
+    if args.value is None:
+        if args.key == "token":
+            print("set" if (os.environ.get("CLAUNCH_RELAY_TOKEN") or cfg.get("token")) else "(unset)")
+        else:
+            print(cfg.get(args.key, ""))
+        return 0
+    clear = args.value == "" or args.value.lower() == "none"
+    store.set_relay_field(args.key, None if clear else _parse_value(args.value))
+    if args.key == "token" and not clear:
+        print("token = set")
+    else:
+        print(f"{args.key} = {'(cleared)' if clear else args.value}")
+    if daemon_client.connect() is not None:
+        print("(restart the daemon to apply: claunch daemon restart)", file=sys.stderr)
+    return 0
+
+
 def _cmd_web(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     url = client.base_url + "/"
@@ -425,6 +471,14 @@ def register(sub) -> None:
     p_cfg.add_argument("key", nargs="?")
     p_cfg.add_argument("value", nargs="?")
     p_cfg.set_defaults(func=_cmd_daemon_config)
+
+    p_relay = dsub.add_parser(
+        "relay",
+        help="show or set the relay uplink (reach this daemon from outside the LAN)",
+    )
+    p_relay.add_argument("key", nargs="?", help="url | name | token | verify_tls")
+    p_relay.add_argument("value", nargs="?", help="new value ('' or none to clear)")
+    p_relay.set_defaults(func=_cmd_daemon_relay)
 
     p_web = sub.add_parser("web", help="print the web UI URL")
     p_web.add_argument("--open", action="store_true", help="also open it in the browser")

@@ -73,12 +73,22 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     runtime_state.write_daemon_json(host, actual_port)
     log.info("listening on http://%s:%s", host, actual_port)
 
+    uplink, uplink_task = _start_uplink(actual_port)
+
     try:
         await app["shutdown_event"].wait()
         log.info("shutdown requested")
     except asyncio.CancelledError:
         log.info("cancelled; shutting down")
     finally:
+        if uplink is not None:
+            uplink.stop()
+        if uplink_task is not None:
+            uplink_task.cancel()
+            try:
+                await uplink_task
+            except (asyncio.CancelledError, Exception):
+                pass
         runtime_state.remove_daemon_json()
         await manager.shutdown_all()
         await runner.cleanup()
@@ -104,6 +114,23 @@ def _acquire_with_grace(
         if time.monotonic() >= deadline:
             return False
         time.sleep(poll)
+
+
+def _start_uplink(actual_port: int):
+    """Start the relay uplink task if a ``daemon.relay`` block is configured.
+
+    The uplink always dials the loopback address so the tunnel can't widen the
+    daemon's own network exposure, regardless of the daemon's bind host.
+    """
+    from . import relay_uplink
+
+    uplink = relay_uplink.config_from_env_and_dict(
+        store.relay_config(), local_host="127.0.0.1", local_port=actual_port
+    )
+    if uplink is None:
+        return None, None
+    log.info("starting relay uplink → %s (backend %r)", uplink.url, uplink.name)
+    return uplink, asyncio.ensure_future(uplink.run())
 
 
 def main(argv=None) -> int:

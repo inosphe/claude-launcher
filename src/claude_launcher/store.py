@@ -189,6 +189,40 @@ def daemon_config(doc: Optional[dict] = None) -> dict:
     return merged
 
 
+def relay_config(doc: Optional[dict] = None) -> dict:
+    """The ``daemon.relay`` uplink block (empty dict if unset).
+
+    Recognized keys: ``url`` (relay ws/wss address), ``token`` (backend
+    registration token — prefer the ``CLAUNCH_RELAY_TOKEN`` env var),
+    ``name`` (directory label; defaults to hostname), ``verify_tls``.
+    """
+    doc = load() if doc is None else doc
+    block = daemon_config(doc).get("relay")
+    return dict(block) if isinstance(block, dict) else {}
+
+
+def set_relay_field(key: str, value) -> None:
+    """Set (or clear, when ``value`` is ``None``) one ``daemon.relay`` setting."""
+
+    def _mutate(doc: dict) -> None:
+        daemon = doc.get("daemon")
+        if not isinstance(daemon, dict):
+            daemon = {}
+            doc["daemon"] = daemon
+        block = daemon.get("relay")
+        if not isinstance(block, dict):
+            block = {}
+            daemon["relay"] = block
+        if value is None:
+            block.pop(key, None)
+            if not block:
+                daemon.pop("relay", None)
+        else:
+            block[key] = value
+
+    update(_mutate)
+
+
 def set_daemon_field(key: str, value) -> None:
     """Set (or clear, when ``value`` is ``None``) one ``daemon`` setting."""
 
