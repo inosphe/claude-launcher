@@ -12,7 +12,7 @@ store. It performs no subprocess or network work.
 
 from __future__ import annotations
 
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from . import credentials, profile as profile_mod, settings, store
 from .profile import Profile
@@ -65,6 +65,42 @@ def descendants(profile: Profile) -> List[Profile]:
                 out.append(candidate)
         except LineageError:
             continue
+    return out
+
+
+def tree() -> List[Tuple[Profile, int]]:
+    """All profiles as ``(profile, depth)`` pairs in parent-before-child order.
+
+    Roots come first (sorted by name) and each profile is followed by its
+    children, one depth level deeper. A profile whose parent is missing — or
+    whose chain forms a cycle — is treated as a root so nothing is dropped.
+    """
+    profiles = profile_mod.list_all()
+    known = {p.name for p in profiles}
+    children: Dict[str, List[Profile]] = {}
+    roots: List[Profile] = []
+    for p in profiles:
+        parent = get_parent(p)
+        if parent and parent in known:
+            children.setdefault(parent, []).append(p)
+        else:
+            roots.append(p)
+
+    out: List[Tuple[Profile, int]] = []
+    seen = set()
+
+    def walk(p: Profile, depth: int) -> None:
+        if p.name in seen:  # cycle guard
+            return
+        seen.add(p.name)
+        out.append((p, depth))
+        for child in children.get(p.name, []):
+            walk(child, depth + 1)
+
+    for root in roots:
+        walk(root, 0)
+    for p in profiles:  # anything left over sits in a parent cycle
+        walk(p, 0)
     return out
 
 

@@ -82,9 +82,27 @@ def _cmd_remove(args: argparse.Namespace) -> int:
     return 0
 
 
+def _provider_cell(p: profile.Profile, doc: dict) -> str:
+    """Provider column for ``list``: ``name`` if pinned here, ``(name)`` if inherited.
+
+    Plain Anthropic that nobody pinned shows as ``-``; a broken parent chain shows
+    as ``?`` rather than aborting the listing.
+    """
+    own = store.profile_entry(p.name, doc).get("provider")
+    if own:
+        return str(own)
+    try:
+        effective = providers.resolve_name(p, doc)
+    except LineageError:
+        return "?"
+    if effective == providers.DEFAULT_PROVIDER:
+        return "-"
+    return f"({effective})"
+
+
 def _cmd_list(_args: argparse.Namespace) -> int:
-    profiles = profile.list_all()
-    if not profiles:
+    rows = lineage.tree()
+    if not rows:
         print("no profiles yet; create one with 'claunch create <name>'")
         return 0
     labels = {
@@ -93,11 +111,27 @@ def _cmd_list(_args: argparse.Namespace) -> int:
         "inherited": "inherited",
         "none": "no token",
     }
-    for p in profiles:
-        flag = labels[lineage.login_state(p)]
+    names = {p.name: "  " * depth + p.name for p, depth in rows}
+    width = max(20, max(len(n) for n in names.values()))
+    known = {p.name for p, _ in rows}
+    doc = store.load()
+    provs = {p.name: _provider_cell(p, doc) for p, _ in rows}
+    pwidth = max(len(v) for v in provs.values())
+    for p, depth in rows:
+        try:
+            flag = labels[lineage.login_state(p)]
+        except LineageError:  # broken lineage must not abort the listing
+            flag = "parent cycle"
         parent = lineage.get_parent(p)
-        note = f"  (parent: {parent})" if parent else ""
-        print(f"{p.name:<20} [{flag:<13}]  {p.config_dir}{note}")
+        # the indent already shows a resolved parent; only call out broken links
+        note = ""
+        if parent and depth == 0:
+            why = "missing" if parent not in known else "cycle"
+            note = f"  (parent: {parent}, {why})"
+        print(
+            f"{names[p.name]:<{width}} [{flag:<13}]  "
+            f"{provs[p.name]:<{pwidth}}  {p.config_dir}{note}"
+        )
     return 0
 
 
