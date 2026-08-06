@@ -39,10 +39,10 @@ def _find_relay_exe() -> Path | None:
     if env and Path(env).is_file():
         return Path(env)
     exe = "psmux-relay.exe" if os.name == "nt" else "psmux-relay"
-    # sibling psmux-relay worktree, both debug and release
+    # sibling mux-relay worktree (and its main checkout), both debug and release
     roots = [
-        Path("F:/works/psmux-relay/.claude/worktrees/relay-tunnel/target"),
-        Path("F:/works/psmux-relay/target"),
+        Path("F:/works/mux-relay/.claude/worktrees/relay-tunnel/target"),
+        Path("F:/works/mux-relay/target"),
     ]
     for root in roots:
         for prof in ("debug", "release"):
