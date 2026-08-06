@@ -36,6 +36,49 @@ def global_workflows_dir() -> Path:
     return config.launcher_home() / "workflows"
 
 
+def runs_registry_path() -> Path:
+    return config.launcher_home() / "cflow_runs.json"
+
+
+def register_run_dir(cwd: Optional[str] = None) -> None:
+    """Record this directory in the machine-local registry of cflow runs.
+
+    The daemon web dashboard scans the registry, so runs are monitorable no
+    matter where they were started (a managed session, a plain terminal, an
+    orchestrator script). Best-effort: registry loss only affects listing.
+    """
+    target = str(Path(cwd or os.getcwd()).resolve())
+    entries = [d for d in _read_registry() if d != target]
+    entries.append(target)
+    _write_registry(entries)
+
+
+def known_run_dirs() -> List[str]:
+    """Registered directories that still hold run state (pruned on read)."""
+    entries = _read_registry()
+    alive = [d for d in entries if (Path(d) / ".cflow" / "state.json").is_file()]
+    if alive != entries:
+        _write_registry(alive)
+    return alive
+
+
+def _read_registry() -> List[str]:
+    try:
+        entries = json.loads(runs_registry_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [str(e) for e in entries if isinstance(e, str)] if isinstance(entries, list) else []
+
+
+def _write_registry(entries: List[str]) -> None:
+    path = runs_registry_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(entries, indent=2), encoding="utf-8")
+    except OSError:
+        pass
+
+
 def cflow_dir(cwd: Optional[str] = None) -> Path:
     return Path(cwd or os.getcwd()) / ".cflow"
 

@@ -125,9 +125,16 @@ async function refreshCflow() {
     return;
   }
   const runs = data.runs || [];
-  $("cflow-panel").classList.toggle("hidden", runs.length === 0);
+  $("cflow-panel").classList.remove("hidden");
   const list = $("cflow-list");
   list.innerHTML = "";
+  if (runs.length === 0) {
+    const li = document.createElement("li");
+    li.className = "cflow-empty";
+    li.textContent = "no cflow runs — start one with /cflow in a session";
+    list.appendChild(li);
+    return;
+  }
   for (const r of runs) {
     const li = document.createElement("li");
 

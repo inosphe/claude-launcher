@@ -277,6 +277,7 @@ def start(
     }
     state_mod.snapshot_workflow(text, cwd)
     state_mod.save_state(state, cwd)
+    state_mod.register_run_dir(cwd)
     state_mod.journal(
         "started",
         {

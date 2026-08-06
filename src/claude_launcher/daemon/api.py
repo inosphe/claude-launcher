@@ -153,19 +153,21 @@ _CFLOW_REPORT_TAIL = 10
 
 
 async def h_cflow_runs(request: web.Request) -> web.Response:
-    """cflow runs in the directories of managed sessions (plus ``?cwd=``).
-
-    A cflow run lives in a working directory, not in a session — but the
-    sessions the daemon manages are where agent runs happen, so their cwds
-    are the natural monitoring scope. ``?cwd=`` inspects any explicit
-    directory (reported even when idle).
+    """All monitorable cflow runs: the machine-local run registry (every
+    directory a run was started in), plus the cwds of managed sessions
+    (annotated with their session names), plus an explicit ``?cwd=``
+    (reported even when idle).
     """
     manager: SessionManager = request.app["manager"]
     by_cwd: dict = {}
     for session in manager.list():
-        by_cwd.setdefault(session.sdef.cwd, []).append(session.sdef.name)
+        key = str(Path(session.sdef.cwd).resolve())
+        by_cwd.setdefault(key, []).append(session.sdef.name)
+    for run_dir in cflow_state.known_run_dirs():
+        by_cwd.setdefault(run_dir, [])
     explicit = request.query.get("cwd")
     if explicit:
+        explicit = str(Path(explicit).resolve())
         by_cwd.setdefault(explicit, [])
 
     runs = []

@@ -698,12 +698,13 @@ The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
 a session list (status badges, create/kill) plus a **live xterm.js terminal**
 attached over WebSocket — full input and output, multiple viewers allowed.
 
-The sidebar also shows a **Workflows** panel monitoring the
-[cflow](#cflow-declarative-agent-workflows) runs in the managed sessions'
-working directories: current step and visit count, the agent's latest step
-**reports** (hover for details), and — when a run is blocked on a human —
-the exact `claunch cflow approve` / `select` command that unblocks it.
-Clicking a run attaches its session's terminal.
+The sidebar also shows a **Workflows** panel monitoring every
+[cflow](#cflow-declarative-agent-workflows) run started on this machine
+(each `start` registers its directory; managed sessions running in that
+directory are listed alongside): current step and visit count, the agent's
+latest step **reports** (hover for details), and — when a run is blocked on
+a human — the exact `claunch cflow approve` / `select` command that
+unblocks it. Clicking a run attaches its session's terminal.
 
 - **Auth is mandatory** (even on loopback): the CLI reads the token from
   `~/.claude-launcher/daemon/token` automatically; the browser asks once for
@@ -730,7 +731,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | profile names (for the UI's create form) |
-| GET    | `/api/cflow`                   | cflow runs in session cwds (status, step reports); `?cwd=` inspects any directory |
+| GET    | `/api/cflow`                   | all registered cflow runs + session cwds (status, step reports); `?cwd=` inspects any directory |
 
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`); runtime

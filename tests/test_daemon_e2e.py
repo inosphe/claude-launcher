@@ -153,14 +153,8 @@ def test_api_cflow_monitoring(home, tmp_path):
             resp = await client.get("/api/cflow")
             assert resp.status == 401  # authed like everything else
 
-            # no sessions -> nothing scanned
+            # the run registered itself at start: visible without any session
             resp = await client.get("/api/cflow", headers=bearer)
-            assert (await resp.json())["runs"] == []
-
-            # explicit cwd inspection
-            resp = await client.get(
-                "/api/cflow", params={"cwd": str(tmp_path)}, headers=bearer
-            )
             runs = (await resp.json())["runs"]
             assert len(runs) == 1
             assert runs[0]["workflow"] == "demo"
@@ -169,6 +163,12 @@ def test_api_cflow_monitoring(home, tmp_path):
             assert runs[0]["sessions"] == []
             assert runs[0]["reports"][-1]["summary"] == "one is done"
             assert runs[0]["reports"][-1]["details"] == "evidence here"
+
+            # explicit ?cwd= inspection also works (and does not duplicate)
+            resp = await client.get(
+                "/api/cflow", params={"cwd": str(tmp_path)}, headers=bearer
+            )
+            assert len((await resp.json())["runs"]) == 1
 
             # a managed session in that cwd puts the run in the default scan
             mgr.create(SessionDef(name="wf1", harness="py", cwd=str(tmp_path)))

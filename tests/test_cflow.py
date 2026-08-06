@@ -481,6 +481,19 @@ def test_verify_blocks_then_passes(flow_dir):
 
 
 # --------------------------------------------------------------------------- #
+# run registry (dashboard discovery)
+# --------------------------------------------------------------------------- #
+def test_start_registers_run_dir_and_prunes(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    assert str(flow_dir.resolve()) in state_mod.known_run_dirs()
+
+    # clearing the run state prunes the registry on the next read
+    engine.reset()
+    assert str(flow_dir.resolve()) not in state_mod.known_run_dirs()
+
+
+# --------------------------------------------------------------------------- #
 # engine: abort / reset
 # --------------------------------------------------------------------------- #
 def test_abort_and_reset(flow_dir):
