@@ -213,6 +213,9 @@ def test_api_end_to_end(home, tmp_path):
             # browser cookie flow
             resp = await client.post("/api/auth/session", json={"token": "wrong"})
             assert resp.status == 401
+            # non-ASCII wrong token must be a 401, not a compare_digest 500
+            resp = await client.post("/api/auth/session", json={"token": "비밀토큰"})
+            assert resp.status == 401
             resp = await client.post("/api/auth/session", json={"token": "sekrit"})
             assert resp.status == 200
             resp = await client.get("/api/sessions")  # cookie jar now has it

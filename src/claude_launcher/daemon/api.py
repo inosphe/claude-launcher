@@ -36,6 +36,14 @@ def json_error(status: int, message: str) -> web.Response:
     return web.json_response({"error": message}, status=status)
 
 
+def _token_eq(supplied: str, expected: str) -> bool:
+    # compare_digest rejects non-ASCII *strings* with a TypeError (a pasted
+    # wrong token must yield 401, not a 500) — compare bytes instead.
+    return secrets.compare_digest(
+        supplied.encode("utf-8"), expected.encode("utf-8")
+    )
+
+
 @web.middleware
 async def error_middleware(request: web.Request, handler):
     try:
@@ -55,7 +63,7 @@ def build_auth_middleware(token: str, cookie_sessions: set):
         if not path.startswith("/api/") or path == "/api/health" or path == "/api/auth/session":
             return await handler(request)
         auth = request.headers.get("Authorization", "")
-        if auth.startswith("Bearer ") and secrets.compare_digest(auth[7:], token):
+        if auth.startswith("Bearer ") and _token_eq(auth[7:], token):
             return await handler(request)
         cookie = request.cookies.get(COOKIE_NAME)
         if cookie and cookie in cookie_sessions:
@@ -108,7 +116,7 @@ async def h_health(request: web.Request) -> web.Response:
 async def h_auth_session(request: web.Request) -> web.Response:
     body = await _json_body(request)
     supplied = str(body.get("token") or "")
-    if not secrets.compare_digest(supplied, request.app["token"]):
+    if not _token_eq(supplied, request.app["token"]):
         return json_error(401, "bad token")
     session_id = secrets.token_urlsafe(32)
     request.app["cookie_sessions"].add(session_id)

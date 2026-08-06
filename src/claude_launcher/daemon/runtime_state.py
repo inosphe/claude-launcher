@@ -78,6 +78,20 @@ def _chmod_private(path) -> None:
         pass
 
 
+def lock_is_free() -> bool:
+    """Probe (acquire + release) whether the daemon singleton lock is unheld.
+
+    Used by ``stop()`` to wait for the daemon *process* to actually exit:
+    ``daemon.json`` disappears early in shutdown, but the lock is only
+    released when the process dies after draining its sessions.
+    """
+    lock = SingletonLock()
+    if not lock.acquire():
+        return False
+    lock.release()
+    return True
+
+
 class SingletonLock:
     """An OS-level exclusive lock held for the daemon's lifetime.
 

@@ -42,6 +42,45 @@ def test_singleton_lock_excludes_second_holder(home):
     lock2.release()
 
 
+def test_lock_is_free_probe(home):
+    assert runtime_state.lock_is_free() is True
+    lock = runtime_state.SingletonLock()
+    assert lock.acquire() is True
+    assert runtime_state.lock_is_free() is False
+    lock.release()
+    assert runtime_state.lock_is_free() is True
+    # the probe itself must not leave the lock held
+    lock2 = runtime_state.SingletonLock()
+    assert lock2.acquire() is True
+    lock2.release()
+
+
+def test_acquire_with_grace_waits_for_predecessor(home):
+    """A dying daemon's lock is waited out; a serving daemon wins instantly."""
+    import threading
+    import time as time_mod
+
+    from claude_launcher.daemon.__main__ import _acquire_with_grace
+
+    holder = runtime_state.SingletonLock()
+    assert holder.acquire() is True
+
+    # nobody is serving (no daemon.json): grace times out -> False
+    contender = runtime_state.SingletonLock()
+    assert _acquire_with_grace(contender, timeout=0.5, poll=0.05) is False
+
+    # predecessor releases mid-grace: the contender gets the lock
+    timer = threading.Timer(0.3, holder.release)
+    timer.start()
+    try:
+        start = time_mod.monotonic()
+        assert _acquire_with_grace(contender, timeout=5.0, poll=0.05) is True
+        assert time_mod.monotonic() - start < 4.0
+    finally:
+        timer.cancel()
+        contender.release()
+
+
 def test_daemon_config_defaults(home):
     cfg = store.daemon_config()
     assert cfg["host"] == "127.0.0.1"

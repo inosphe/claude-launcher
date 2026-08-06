@@ -109,6 +109,12 @@ def _health_ok(base_url: str) -> bool:
         return False
 
 
+def is_serving() -> bool:
+    """True when an announced daemon actually answers health checks."""
+    doc = runtime_state.read_daemon_json()
+    return bool(doc) and _health_ok(_base_url(doc))
+
+
 def connect() -> Optional[DaemonClient]:
     """A client for the running daemon, or None if it isn't up."""
     doc = runtime_state.read_daemon_json()
@@ -175,10 +181,18 @@ def stop(*, timeout: float = 10.0) -> bool:
     client.post("/api/daemon/shutdown", timeout=5.0)
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if runtime_state.read_daemon_json() is None and not _health_ok(client.base_url):
+        # daemon.json disappears early in shutdown; the singleton lock is only
+        # released when the process has fully exited (sessions drained). Wait
+        # for the lock too, or an immediate restart's fresh daemon loses the
+        # lock race against the dying predecessor and exits.
+        if (
+            runtime_state.read_daemon_json() is None
+            and not _health_ok(client.base_url)
+            and runtime_state.lock_is_free()
+        ):
             return True
         time.sleep(0.1)
-    return True  # request accepted; daemon is draining sessions
+    return True  # request accepted; daemon is still draining sessions
 
 
 def status() -> Optional[dict]:

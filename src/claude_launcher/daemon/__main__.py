@@ -15,7 +15,7 @@ import time
 
 from aiohttp import web
 
-from .. import store
+from .. import daemon_client, store
 from . import paths, runtime_state
 from .api import build_app
 from .manager import SessionManager
@@ -82,6 +82,27 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     return 0
 
 
+def _acquire_with_grace(
+    lock: runtime_state.SingletonLock, *, timeout: float = 15.0, poll: float = 0.2
+) -> bool:
+    """Acquire the singleton lock, waiting out a predecessor that is draining.
+
+    A restart stops the old daemon and spawns the new one right away, but the
+    old process keeps holding the lock while its sessions shut down. Retry for
+    a grace window instead of losing that race — while still exiting fast in
+    the plain double-start case, where the lock holder is actually serving.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        if lock.acquire():
+            return True
+        if daemon_client.is_serving():
+            return False
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(poll)
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="claunch-daemon")
     parser.add_argument(
@@ -93,8 +114,11 @@ def main(argv=None) -> int:
     _setup_logging(args.foreground)
 
     lock = runtime_state.SingletonLock()
-    if not lock.acquire():
-        log.info("another daemon already holds the lock; exiting")
+    if not _acquire_with_grace(lock):
+        log.info(
+            "another daemon holds the lock (already serving, or a predecessor "
+            "did not exit in time); exiting"
+        )
         return 0
 
     cfg = store.daemon_config()
