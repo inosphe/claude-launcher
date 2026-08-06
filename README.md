@@ -16,6 +16,7 @@ interactive `/login` flow, so each profile keeps its own credentials.
 [Migrate](#migrating-skills--mcp-servers) ·
 [Config file](#configuration-source-of-truth) · [Usage](#usage-reporting) ·
 [Sessions](#managed-sessions-tmux-style-daemon) · [Web UI & API](#web-ui--http-api) ·
+[Workflows](#cflow-declarative-agent-workflows) ·
 [How it works](#how-it-works) · [Configuration](#configuration)
 
 ## Why
@@ -86,7 +87,9 @@ claunch usage work      # show this profile's subscription usage
 Plus the **[managed-session commands](#managed-sessions-tmux-style-daemon)** —
 `new-session`, `sessions`, `send-keys`, `capture-pane`, `wait-for`,
 `kill-session`, `resize`, `daemon ...`, `web` — which run harnesses in
-daemon-owned PTYs instead of the current terminal.
+daemon-owned PTYs instead of the current terminal, and the
+**[cflow commands](#cflow-declarative-agent-workflows)** (`claunch cflow ...`)
+for declarative agent workflows with human gates.
 
 ### Passing arguments to claude
 
@@ -741,6 +744,138 @@ so each profile reports its own account's usage.
 headers from a minimal `claude` API call (1 output token) — the output is marked
 `(via rate-limit headers)`. The throwaway model defaults to Haiku; override it
 with `CLAUDE_LAUNCHER_USAGE_MODEL`.
+
+## cflow (declarative agent workflows)
+
+**cflow** runs an agent through a workflow you declare in YAML — N design
+steps, M implementation steps, L test/review steps, then ship — **one step at
+a time**, over MCP. The agent never sees the whole plan; it calls `cflow`
+tools to receive each step, report results, and take branches, while humans
+keep the controls that matter.
+
+```bash
+claunch cflow install --profile work   # register MCP server + /cflow skill
+claunch cflow example                  # scaffold .claunch/workflows/feature-dev.yaml
+# then, inside claude:
+#   /cflow feature-dev add rate limiting to the API
+```
+
+The agent's loop (taught by the `/cflow` skill):
+`start {workflow, context}` → work → `next {summary}` → … → `done`. Each
+summary lands in `.cflow/journal.jsonl`, so the finished run yields a full,
+honest changelog (useful for the PR body).
+
+### Workflow YAML: a graph, not a tree
+
+Steps are defined **once** in a mapping and wired by id (`next` pointers), so
+a workflow is a directed graph: branches can share steps without duplicating
+content, and edges may point *backwards* — a cycle models iteration
+("review → rework → review"), with a `select` as the loop's exit condition.
+
+```yaml
+name: feature-dev
+description: design -> (triage) implement -> test -> review loop -> ship
+start: design                     # optional (defaults to the first step)
+max_visits: 25                    # optional loop guard, per step per run
+steps:
+  design:
+    instructions: |
+      Analyze the request and write a short design note before coding.
+    next: triage
+
+  triage:                         # a branch point
+    select:
+      prompt: Assess the risk of the planned change.
+      chooser: user               # agent | user — who decides
+      options:
+        auto:  {description: low risk — go autonomous,  next: impl}
+        human: {description: higher risk — human review, next: impl}
+
+  impl:                           # shared by both options — defined once
+    instructions: Implement the design (or address the latest feedback).
+    next: test
+
+  test:
+    instructions: Run and extend the tests.
+    verify: "uv run pytest -q"    # machine gate: next() refused until exit 0
+    next: review
+
+  review:
+    gate: present the diff and wait for human review   # re-required per visit
+    instructions: Relay the review feedback into follow-ups.
+    next: verdict
+
+  verdict:
+    select:
+      prompt: Ready, or another pass?
+      chooser: user
+      options:
+        ready:  {description: ship it,           next: ship}
+        rework: {description: loop back,         next: impl}   # a cycle
+
+  ship:
+    gate: approve committing and opening a PR
+    instructions: Commit and draft the PR from the run journal.
+    next: end                     # explicit termination ('end' is reserved)
+```
+
+**Termination & cycles.** Omitting `next` (or writing `next: end`) ends the
+run. Loading validates the graph: unknown targets are **errors**; a start
+that can never reach a termination (only possible with cycles) is an
+**error** — at least one reachable end must be described. Cycles themselves
+are legal but **warned** (shown by `cflow show` and in the `start` payload),
+as are steps trapped in never-ending regions and unreachable steps.
+
+**Loops at runtime.** Every step's visit count is tracked (`cflow status`
+shows `loops: impl x3`). Gates and user-selections apply **per visit** — a
+review gate inside a loop closes again on every pass. Arriving at a step
+beyond `max_visits` (default 25) pauses the run like a gate until a human
+extends it with `claunch cflow approve`, so an agent-driven loop cannot spin
+forever.
+
+Files live in `.claunch/workflows/*.yaml` (project) or
+`~/.claude-launcher/workflows/` (global); one active run per directory, with
+state and journal under `.cflow/`. `start` snapshots the YAML, so editing it
+mid-run can't corrupt a running position.
+
+### Control points
+
+| Mechanism | Who | Enforced how |
+| --------- | --- | ------------ |
+| `select` (`chooser: agent`) | the agent | picks an option with a journaled reason |
+| `select` (`chooser: user`) | a human | the agent's pick is only a *proposal*; the run blocks until `claunch cflow select <option>` confirms (any option) |
+| `gate:` | a human | the step's instructions are withheld until `claunch cflow approve` |
+| `verify:` | a machine | the server runs the command on `next`; non-zero exit refuses to advance and returns the output |
+
+**Approvals are not agent-callable, by design.** The MCP surface is only
+`start` / `next` / `select` / `status` — there is no approve tool, so a gate
+cannot be talked past. While blocked, the agent stops its turn and tells you
+how to unblock; inside a chat session you can approve without leaving:
+
+```text
+! claunch cflow approve
+! claunch cflow select human
+```
+
+then nudge the agent (any message) to continue. The same CLI works from
+outside — a supervising script or another agent can watch
+`claunch cflow status --json`, approve gates, and nudge the worker session via
+`claunch send-keys` — cflow composes with [managed sessions](#managed-sessions-tmux-style-daemon)
+for multi-agent orchestration.
+
+### cflow commands
+
+| Command | Description |
+| ------- | ----------- |
+| `cflow ls` / `show <wf>` | List workflows / print a workflow's step tree. |
+| `cflow status [--json]`  | Active run: current step, state, how to unblock. |
+| `cflow approve`          | Approve the current human gate (CLI-only, on purpose). |
+| `cflow select <opt> [--reason]` | Confirm (or override) a user-chooser branch. |
+| `cflow journal [-n N]`   | Print the run journal (JSONL). |
+| `cflow abort` / `reset`  | Abort the run / clear run state (journal kept). |
+| `cflow install --profile P \| --project [DIR]` | Register the MCP server + `/cflow` skill. |
+| `cflow example [name]`   | Scaffold the example workflow above. |
+| `cflow mcp`              | The stdio MCP server itself (spawned by claude). |
 
 ## How it works
 

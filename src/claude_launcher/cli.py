@@ -16,6 +16,7 @@ from pathlib import Path
 from . import (
     __version__,
     bootstrap,
+    cli_cflow,
     cli_sessions,
     config,
     credentials,
@@ -32,6 +33,9 @@ from . import (
     template,
     usage,
 )
+from .cflow.engine import CflowError
+from .cflow.model import WorkflowError
+from .cflow.state import StateError as CflowStateError
 from .daemon_client import DaemonClientError
 from .credentials import CredentialsError
 from .lineage import LineageError
@@ -730,6 +734,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_provs.set_defaults(func=_cmd_providers)
 
     cli_sessions.register(sub)
+    cli_cflow.register(sub)
 
     return parser
 
@@ -765,6 +770,9 @@ def main(argv: Optional[List[str]] = None) -> int:
         ProviderError,
         store.StoreError,
         DaemonClientError,
+        CflowError,
+        WorkflowError,
+        CflowStateError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

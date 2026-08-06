@@ -1,0 +1,68 @@
+name: feature-dev
+description: design -> (triage) implement -> test -> review loop -> ship
+start: design
+steps:
+  design:
+    title: Design
+    instructions: |
+      Analyze the request and the relevant code. Write a short design note
+      (goal, approach, files to touch, risks) before changing anything.
+      Keep it concise enough to paste into a PR description later.
+    next: triage
+
+  triage:
+    title: Risk triage
+    select:
+      prompt: |
+        Assess the scope and risk of the planned change. Consider: blast
+        radius, reversibility, whether tests cover the touched area.
+      chooser: user
+      options:
+        auto:
+          description: low risk - implement autonomously, self-review only
+          next: impl
+        human:
+          description: higher risk - a human reviews each pass
+          next: impl
+
+  impl:
+    title: Implement
+    instructions: |
+      Implement the design (or address the latest review feedback).
+      Keep commits small and focused.
+    next: test
+
+  test:
+    title: Test
+    instructions: |
+      Run the test suite; add or extend tests covering the change.
+    verify: "uv run pytest -q"
+    next: review
+
+  review:
+    title: Review
+    gate: present the diff summary and wait for human review
+    instructions: |
+      Relay the review feedback you received into concrete follow-ups.
+    next: verdict
+
+  verdict:
+    title: Review verdict
+    select:
+      prompt: Is the change ready, or does it need another pass?
+      chooser: user
+      options:
+        ready:
+          description: reviewer satisfied - ship it
+          next: ship
+        rework:
+          description: needs another implement/test/review pass
+          next: impl        # intentional cycle; the verdict is the exit
+
+  ship:
+    title: Ship
+    gate: approve committing and opening a PR
+    instructions: |
+      Commit the work with a clear message and prepare the PR description
+      from the run journal (design note, decisions, review outcomes).
+    next: end
