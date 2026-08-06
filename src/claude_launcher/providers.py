@@ -25,7 +25,7 @@ supply auth instead of the launcher injecting the profile's OAuth token.
 
 from __future__ import annotations
 
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 from . import lineage, store
 from .profile import Profile
@@ -84,12 +84,24 @@ def _profile_selection(profile_name: str, doc: dict) -> Optional[str]:
 
 def resolve_name(profile: Profile, doc: Optional[dict] = None) -> str:
     """Effective provider for ``profile``: own → ancestor → global → default."""
+    return resolve_with_source(profile, doc)[0]
+
+
+def resolve_with_source(
+    profile: Profile, doc: Optional[dict] = None
+) -> Tuple[str, str]:
+    """Effective provider plus a human-readable note on where it came from."""
     doc = store.load() if doc is None else doc
     for p in reversed(lineage.chain(profile)):  # self first, then up to the root
         sel = _profile_selection(p.name, doc)
         if sel:
-            return sel
-    return active(doc) or DEFAULT_PROVIDER
+            if p.name == profile.name:
+                return sel, f"set on profile {p.name!r}"
+            return sel, f"inherited from profile {p.name!r}"
+    name = active(doc)
+    if name:
+        return name, "global default"
+    return DEFAULT_PROVIDER, "built-in default"
 
 
 def effective_env(profile: Profile) -> Dict[str, str]:

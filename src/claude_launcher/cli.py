@@ -319,6 +319,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # --borrow / --add-prompt that appear after the profile name; pull those out
     # here, then drop a leading `--` separator before forwarding the rest.
     borrow_name, rest = _extract_borrow(args.args)
+    provider_name, rest = _extract_value_flag(rest, "--provider")
     add_prompt, rest = _extract_add_prompt(rest)
     passthrough = _strip_separator(rest)
     if add_prompt:
@@ -334,16 +335,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
     borrow = profile.require(borrow_name) if borrow_name else None
+    if provider_name:
+        providers.provider_env(provider_name)  # fail fast on an unknown name
     if borrow is not None:
-        prov = providers.resolve_name(borrow)
-        if prov != providers.DEFAULT_PROVIDER:
-            print(
-                f"borrowing {borrow.name!r} provider ({prov}) for this run",
-                file=sys.stderr,
-            )
-        else:
-            print(f"borrowing {borrow.name!r} token for this run", file=sys.stderr)
-    return runner.run(p, passthrough, borrow=borrow)
+        prov = provider_name or providers.resolve_name(borrow)
+        what = "token" if prov == providers.DEFAULT_PROVIDER else "auth"
+        print(f"borrowing {borrow.name!r} {what} for this run", file=sys.stderr)
+    return runner.run(p, passthrough, borrow=borrow, provider=provider_name)
 
 
 def _cmd_set_provider(args: argparse.Namespace) -> int:
@@ -430,13 +428,15 @@ def _strip_separator(args: Optional[List[str]]) -> List[str]:
     return args
 
 
-def _extract_borrow(args: List[str]) -> "tuple[Optional[str], List[str]]":
-    """Pull a ``--borrow NAME`` / ``--borrow=NAME`` flag out of run passthrough.
+def _extract_value_flag(
+    args: List[str], flag: str
+) -> "tuple[Optional[str], List[str]]":
+    """Pull a ``<flag> VALUE`` / ``<flag>=VALUE`` option out of run passthrough.
 
     Stops at a ``--`` separator so anything explicitly forwarded to claude after
     it is left untouched.
     """
-    borrow: Optional[str] = None
+    value: Optional[str] = None
     rest: List[str] = []
     i = 0
     while i < len(args):
@@ -444,19 +444,24 @@ def _extract_borrow(args: List[str]) -> "tuple[Optional[str], List[str]]":
         if token == "--":
             rest.extend(args[i:])
             break
-        if token == "--borrow":
+        if token == flag:
             if i + 1 >= len(args):
-                raise profile.ProfileError("--borrow requires a profile name")
-            borrow = args[i + 1]
+                raise profile.ProfileError(f"{flag} requires a value")
+            value = args[i + 1]
             i += 2
             continue
-        if token.startswith("--borrow="):
-            borrow = token.split("=", 1)[1]
+        if token.startswith(flag + "="):
+            value = token.split("=", 1)[1]
             i += 1
             continue
         rest.append(token)
         i += 1
-    return borrow, rest
+    return value, rest
+
+
+def _extract_borrow(args: List[str]) -> "tuple[Optional[str], List[str]]":
+    """Pull a ``--borrow NAME`` / ``--borrow=NAME`` flag out of run passthrough."""
+    return _extract_value_flag(args, "--borrow")
 
 
 def _extract_add_prompt(args: List[str]) -> "tuple[bool, List[str]]":
@@ -587,13 +592,15 @@ def build_parser() -> argparse.ArgumentParser:
         "run",
         help="launch claude with the profile (extra args pass through; "
         "--borrow NAME uses another profile's token for this run only; "
+        "--provider NAME overrides the API provider for this run only; "
         "--add-prompt opens an editor to append text to the system prompt)",
     )
     p_run.add_argument("name")
     p_run.add_argument(
         "args",
         nargs=argparse.REMAINDER,
-        help="--borrow NAME, --add-prompt, and/or arguments forwarded to claude",
+        help="--borrow NAME, --provider NAME, --add-prompt, and/or arguments "
+        "forwarded to claude",
     )
     p_run.set_defaults(func=_cmd_run)
 

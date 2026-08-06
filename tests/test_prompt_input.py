@@ -56,7 +56,7 @@ def test_run_injects_append_system_prompt(home, monkeypatch, capsys):
     monkeypatch.setattr(prompt_input, "collect", lambda *a, **k: "review carefully")
     captured = {}
 
-    def fake_spawn(profile, args, *, with_token, borrow=None):
+    def fake_spawn(profile, args, *, with_token, borrow=None, provider_override=None):
         captured["args"] = list(args)
         return 0
 
@@ -78,7 +78,7 @@ def test_run_empty_prompt_skips_injection(home, monkeypatch, capsys):
     monkeypatch.setattr(prompt_input, "collect", lambda *a, **k: "")
     captured = {}
 
-    def fake_spawn(profile, args, *, with_token, borrow=None):
+    def fake_spawn(profile, args, *, with_token, borrow=None, provider_override=None):
         captured["args"] = list(args)
         return 0
 

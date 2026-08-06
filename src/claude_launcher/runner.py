@@ -20,6 +20,9 @@ from .profile import Profile
 #: Environment variable Claude Code reads for a setup-token login.
 OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 
+#: Bearer token Claude Code sends to a custom (provider-overridden) backend.
+AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
+
 
 class RunnerError(Exception):
     """Raised when the ``claude`` executable cannot be launched."""
@@ -41,32 +44,52 @@ def child_env(
     with_token: bool,
     borrow: Optional[Profile] = None,
     base_env: Optional[dict] = None,
+    provider_override: Optional[str] = None,
 ) -> dict:
     """The full environment for a ``claude`` child of ``profile``.
 
     Public so the session daemon can assemble an identical environment when it
     spawns claude under a managed PTY. ``base_env`` defaults to this process's
     environment (for the daemon that means sessions inherit the *daemon's* env,
-    like tmux server semantics).
+    like tmux server semantics). ``provider_override`` (``run --provider``)
+    replaces the config-file provider resolution for this call only.
     """
     env = dict(os.environ if base_env is None else base_env)
     env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
+    provider_env: dict = {}
     if with_token:
         # A `--borrow` swaps both the token *and* the provider: the running
         # profile's config dir, env and skills stay put, but auth (and the
-        # backend it talks to) comes from the borrowed profile.
+        # backend it talks to) comes from the borrowed profile. An explicit
+        # --provider beats both.
         auth_source = borrow if borrow is not None else profile
-        provider = providers.resolve_name(auth_source)
+        provider = provider_override or providers.resolve_name(auth_source)
         # Provider env is a low-priority backend default: it sits above the
         # shell but *below* the profile's own env, applied next, which can
         # override any provider key (e.g. CLAUDE_CODE_AUTO_COMPACT_WINDOW).
-        env.update(providers.provider_env(provider))
+        provider_env = providers.provider_env(provider)
+        env.update(provider_env)
     # Per-profile env vars (inherited from any parent, then the profile's own)
     # take precedence over the shell and the provider — that is the point of an
     # isolated profile.
-    env.update(lineage.effective_env(profile))
+    profile_env = lineage.effective_env(profile)
+    env.update(profile_env)
     if with_token:
-        if provider == providers.DEFAULT_PROVIDER:
+        if provider != providers.DEFAULT_PROVIDER:
+            # A provider is overriding the backend: auth comes from the
+            # profile's stored `set-token` secret (own, inherited, or the
+            # borrowed profile's), which OVERRIDES any plaintext
+            # ANTHROPIC_AUTH_TOKEN in the config file — so backend keys can
+            # live in the per-machine 0600 token file instead of the yaml.
+            stored = lineage.stored_auth_token(auth_source)
+            if stored:
+                env[AUTH_TOKEN_ENV] = stored
+            # A custom backend never uses the Anthropic OAuth var; drop any
+            # shell leftover unless the config file set it explicitly (the
+            # provider pattern pins it to "").
+            if OAUTH_TOKEN_ENV not in {**provider_env, **profile_env}:
+                env.pop(OAUTH_TOKEN_ENV, None)
+        else:
             # Plain Anthropic: inject the (own/inherited/borrowed) OAuth token.
             token = (
                 lineage.lookup_token(borrow)
@@ -80,8 +103,6 @@ def child_env(
                 # interactively via /login. Don't set the var to None, and don't
                 # let a stale shell/profile token shadow the fresh login flow.
                 env.pop(OAUTH_TOKEN_ENV, None)
-        # else: the provider supplies its own auth (e.g. ANTHROPIC_AUTH_TOKEN);
-        # leave CLAUDE_CODE_OAUTH_TOKEN exactly as the provider set it.
     else:
         # During login the profile may hold a stale token; don't let it shadow
         # the fresh setup-token flow. Login always targets Anthropic, so no
@@ -96,11 +117,18 @@ def _spawn(
     *,
     with_token: bool,
     borrow: Optional[Profile] = None,
+    provider_override: Optional[str] = None,
 ) -> int:
     cmd = [config.claude_bin(), *args]
     try:
         completed = subprocess.run(
-            cmd, env=child_env(profile, with_token=with_token, borrow=borrow)
+            cmd,
+            env=child_env(
+                profile,
+                with_token=with_token,
+                borrow=borrow,
+                provider_override=provider_override,
+            ),
         )
     except FileNotFoundError as exc:
         raise RunnerError(
@@ -143,14 +171,38 @@ def login(profile: Profile) -> int:
 
 
 def run(
-    profile: Profile, args: Sequence[str] = (), *, borrow: Optional[Profile] = None
+    profile: Profile,
+    args: Sequence[str] = (),
+    *,
+    borrow: Optional[Profile] = None,
+    provider: Optional[str] = None,
 ) -> int:
-    """Launch ``claude`` for the profile, optionally borrowing another's token."""
-    if borrow is not None:
-        # A non-default provider carries its own auth, so it needs no OAuth
-        # token; only the plain-Anthropic borrow relies on one.
-        needs_token = providers.resolve_name(borrow) == providers.DEFAULT_PROVIDER
-        if needs_token and lineage.lookup_token(borrow) is None:
+    """Launch ``claude`` for the profile, optionally borrowing another's token.
+
+    ``provider`` (from ``run --provider``) overrides the config-file provider
+    resolution for this run only.
+    """
+    auth_source = borrow if borrow is not None else profile
+    if provider:
+        name, source = provider, "--provider"
+    else:
+        name, source = providers.resolve_with_source(auth_source)
+    if name != providers.DEFAULT_PROVIDER:
+        # Tell the user why auth behaves differently on this run: with a
+        # provider overriding the backend, the stored set-token (if any) is
+        # exported as ANTHROPIC_AUTH_TOKEN instead of the OAuth injection.
+        stored = lineage.stored_auth_token(auth_source)
+        via = (
+            "auth: stored set-token exported as ANTHROPIC_AUTH_TOKEN"
+            if stored
+            else "auth: no stored set-token; using the provider's env as configured"
+        )
+        print(
+            f"provider {name!r} active ({source}); {via}",
+            file=sys.stderr,
+        )
+    elif borrow is not None:
+        if lineage.lookup_token(borrow) is None:
             # An empty token is allowed: launch anyway so the user can /login
             # interactively inside Claude Code instead of hard-failing here.
             print(
@@ -158,7 +210,9 @@ def run(
                 f"log in with /login, or run 'claunch login {borrow.name}' first",
                 file=sys.stderr,
             )
-    return _spawn(profile, list(args), with_token=True, borrow=borrow)
+    return _spawn(
+        profile, list(args), with_token=True, borrow=borrow, provider_override=provider
+    )
 
 
 def heartbeat(

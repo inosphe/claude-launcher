@@ -168,6 +168,22 @@ def lookup_token(profile: Profile) -> Optional[str]:
     return resolve_token(profile)[0]
 
 
+def stored_auth_token(profile: Profile) -> Optional[str]:
+    """The nearest ``set-token`` value (own first, then up the parent chain).
+
+    Only launcher-*stored* tokens (``.launcher-token``) are considered — not
+    ``.credentials.json`` logins, which are Anthropic OAuth by definition. This
+    is the secret exported as ``ANTHROPIC_AUTH_TOKEN`` when a non-default
+    provider is active for the run, so third-party API keys can live in the
+    per-machine ``0600`` token file instead of in ``~/.claunch.yaml`` plaintext.
+    """
+    for p in [profile, *_ancestors_nearest_first(profile)]:
+        token = credentials.stored_token(p)
+        if token:
+            return token
+    return None
+
+
 def login_state(profile: Profile) -> str:
     """Display state: ``"ok"``, ``"expired"``, ``"inherited"`` or ``"none"``."""
     own = credentials.token_state(profile)

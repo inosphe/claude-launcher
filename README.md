@@ -67,7 +67,7 @@ claunch usage work      # show this profile's subscription usage
 | ------- | ----------- |
 | `create <name>`        | Create a profile (`--parent` to inherit), seed config, apply template. |
 | `login <name>`         | Run `claude setup-token` for the profile. |
-| `run <name> [args...]` | Launch `claude` for the profile (`--borrow NAME`, `--add-prompt`; extra args pass through). |
+| `run <name> [args...]` | Launch `claude` for the profile (`--borrow NAME`, `--provider NAME`, `--add-prompt`; extra args pass through). |
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
@@ -322,13 +322,48 @@ built-in `default` is plain Anthropic with no overrides — the launcher injects
 the profile's OAuth token as usual. For any other provider the launcher applies its `env` as a
 **low-priority backend default** — above the shell but *below* the profile's own
 `env`, so a per-profile (or template/inherited) value always wins over the
-provider for the same key. The provider's `env` carries auth, so the launcher
-does **not** inject `CLAUDE_CODE_OAUTH_TOKEN` — set the provider's own
-`ANTHROPIC_AUTH_TOKEN` (and clear `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` as
-above) instead.
+provider for the same key. The provider carries its own auth, so the launcher
+does **not** inject `CLAUDE_CODE_OAUTH_TOKEN` — supply the backend key with
+`claunch set-token` (recommended; see *keeping backend keys out of the config
+file* below) or as a plaintext `ANTHROPIC_AUTH_TOKEN` in the provider's `env`
+(clearing `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` as above).
 
 The resulting precedence for a run is: shell env < provider `env` < profile `env`
 (template + inherited + own) < the injected OAuth token (for `default`).
+
+**Keeping backend keys out of the config file.** Whenever a **non-default
+provider is active** for the run (selected on the profile, inherited, the
+global default, or forced with `run --provider`), the launcher looks up the
+profile's **stored token** — the `set-token` value in the per-machine `0600`
+`.launcher-token` file, resolved like a login token (own first, then inherited
+from a parent; `--borrow` uses the lender's) — and injects it as
+`ANTHROPIC_AUTH_TOKEN`, **overriding** any plaintext value in the yaml. So a
+provider needs no secret in the file at all:
+
+```yaml
+providers:
+  fireworks-glm5p2:
+    env:
+      ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference"
+      ANTHROPIC_MODEL: "accounts/fireworks/models/glm-5p2"
+      # no ANTHROPIC_AUTH_TOKEN here — supplied by set-token per machine
+```
+
+```bash
+claunch set-provider work fireworks-glm5p2
+claunch set-token work fw_...        # the backend API key, stored 0600
+claunch run work
+```
+
+A plaintext `ANTHROPIC_AUTH_TOKEN` in the yaml still works when the profile has
+no stored token (backwards compatible), but the stored token always wins when
+both exist. The trigger is the **provider selection itself** — env vars like
+`ANTHROPIC_BASE_URL` set in a profile's `env` (or inherited from the shell)
+don't change auth handling on their own. `run` tells you when this happens:
+
+```text
+provider 'fireworks-glm5p2' active (set on profile 'work'); auth: stored set-token exported as ANTHROPIC_AUTH_TOKEN
+```
 
 **Selecting from the CLI.** `set-provider` writes the selection into the config
 file for you — no manual YAML editing needed:
@@ -339,6 +374,14 @@ claunch set-provider work fireworks-glm5p2   # just the 'work' profile
 claunch set-provider work default            # pin 'work' to plain Anthropic
 claunch set-provider work --clear            # drop 'work's override (inherit)
 claunch set-provider --clear                 # clear the global default
+```
+
+For a **single run**, override the resolution without touching the config file
+(`default` works too, to force plain Anthropic for one run):
+
+```bash
+claunch run work --provider fireworks-glm5p2
+claunch run work --provider default --resume     # other args still pass through
 ```
 
 `run`/`validate` use the provider; **`login` always targets Anthropic** (it never
@@ -359,9 +402,10 @@ profiles using a provider:
   work                 fireworks-glm5p2
 ```
 
-> **Secrets.** A provider's auth token lives in `~/.claunch.yaml` in plaintext.
-> Unlike login tokens (which stay per-machine), provider definitions *are* part
-> of that file, so treat it as a secret if you commit or copy it between machines.
+> **Secrets.** Prefer keeping backend keys **out** of `~/.claunch.yaml` via
+> `set-token` (above) — the file is meant to be copied between machines. If you
+> do put an `ANTHROPIC_AUTH_TOKEN` in a provider's `env`, it is plaintext:
+> treat the file as a secret when committing or copying it.
 
 ## Migrating skills & MCP servers
 
