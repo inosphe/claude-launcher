@@ -660,10 +660,15 @@ done
 
 Sessions die with the daemon (the tmux model), but their *definitions* persist.
 On the next daemon start, sessions created with `--restore` (the default; flip
-with `daemon config restore false`) are relaunched — the claude harness gets
-`--continue`, resuming the most recent conversation for that cwd within that
-profile. Raw output logs survive under
-`~/.claude-launcher/daemon/sessions/<name>/` either way.
+with `daemon config restore false`) are relaunched. A claude session's
+conversation id is pinned at creation (`--session-id <uuid>`, recorded in the
+definition), and a restore reopens exactly that conversation with
+`--resume <uuid>` — never `--continue`, which would grab whatever conversation
+in the same cwd + profile happens to be the most recent (and can belong to a
+different session). If the session's own args already pick a conversation
+(`--resume`/`--continue`/`--session-id`), they win and nothing is pinned. Raw
+output logs survive under `~/.claude-launcher/daemon/sessions/<name>/` either
+way.
 
 ### Other harnesses (codex, pi, ...)
 

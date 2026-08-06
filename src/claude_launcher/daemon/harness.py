@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import os
 import sys
+import uuid
 from dataclasses import dataclass, field, replace
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 from .. import profile as profile_mod, runner, store
 from .. import config as launcher_config
@@ -57,6 +58,11 @@ class SessionDef:
     restore: bool = True
     cols: int = 120
     rows: int = 30
+    #: The claude conversation UUID pinned at creation (``--session-id``), so a
+    #: restore resumes *this session's own* conversation (``--resume <id>``) —
+    #: never ``--continue``, which grabs whatever conversation in the same
+    #: cwd+profile happens to be the most recent and can hijack another one.
+    conversation_id: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -69,6 +75,7 @@ class SessionDef:
             "restore": self.restore,
             "cols": self.cols,
             "rows": self.rows,
+            "conversation_id": self.conversation_id,
         }
 
     @classmethod
@@ -83,11 +90,24 @@ class SessionDef:
             restore=bool(data.get("restore", True)),
             cols=int(data.get("cols") or 120),
             rows=int(data.get("rows") or 30),
+            conversation_id=data.get("conversation_id") or None,
         )
 
 
-def normalize(sdef: SessionDef) -> SessionDef:
-    """Fill defaults (cwd) and validate the definition against config."""
+#: Args that already steer which conversation claude opens; when the caller
+#: passes any of these, the daemon must not pin or restore an id of its own.
+_CONVERSATION_FLAGS = ("--continue", "-c", "--resume", "-r", "--session-id")
+
+
+def _steers_conversation(args: Iterable[str]) -> bool:
+    return any(
+        a in _CONVERSATION_FLAGS or a.startswith(("--resume=", "--session-id="))
+        for a in args
+    )
+
+
+def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
+    """Fill defaults (cwd, pinned conversation) and validate against config."""
     cwd = sdef.cwd or os.getcwd()
     sdef = replace(sdef, cwd=cwd)
     if sdef.harness == CLAUDE_HARNESS:
@@ -95,6 +115,14 @@ def normalize(sdef: SessionDef) -> SessionDef:
             raise HarnessError(
                 "the claude harness needs a profile (pass --profile NAME)"
             )
+        # Pin a fresh conversation id at creation only — an id invented while
+        # *restoring* an old (id-less) definition would resume nothing.
+        if (
+            not restoring
+            and not sdef.conversation_id
+            and not _steers_conversation(sdef.args)
+        ):
+            sdef = replace(sdef, conversation_id=str(uuid.uuid4()))
     elif sdef.harness not in store.harnesses():
         known = ", ".join(sorted([CLAUDE_HARNESS, *store.harnesses()]))
         raise HarnessError(
@@ -109,10 +137,11 @@ def build_command(
 ) -> Tuple[List[str], Dict[str, str], str]:
     """Resolve a definition to the ``(argv, env, cwd)`` to spawn.
 
-    ``restoring`` relaunches a previously running claude session with
-    ``--continue`` so it picks the most recent conversation for that cwd within
-    the profile's config dir — cwd and ``CLAUDE_CONFIG_DIR`` are both pinned by
-    the definition, so this is deterministic.
+    A fresh claude session is started with ``--session-id <uuid>`` (the id
+    pinned in the definition); ``restoring`` relaunches it with ``--resume``
+    of that same id, so a restore always reopens *this session's own*
+    conversation. Definitions predating the pin fall back to ``--continue``
+    (most recent conversation for that cwd + profile).
     """
     if sdef.harness == CLAUDE_HARNESS:
         prof = profile_mod.require(sdef.profile)
@@ -121,8 +150,14 @@ def build_command(
         }
         env = runner.child_env(prof, with_token=True, base_env=base)
         argv = [launcher_config.claude_bin()]
-        if restoring and "--continue" not in sdef.args and "--resume" not in sdef.args:
-            argv.append("--continue")
+        if not _steers_conversation(sdef.args):
+            if restoring:
+                if sdef.conversation_id:
+                    argv.extend(["--resume", sdef.conversation_id])
+                else:
+                    argv.append("--continue")
+            elif sdef.conversation_id:
+                argv.extend(["--session-id", sdef.conversation_id])
         argv.extend(sdef.args)
     else:
         entry = store.harnesses().get(sdef.harness) or {}

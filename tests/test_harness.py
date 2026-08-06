@@ -15,6 +15,7 @@ def test_sessiondef_roundtrip():
     sdef = SessionDef(
         name="work", harness="claude", profile="p", cwd="/tmp",
         args=("--resume",), env={"A": "1"}, restore=False, cols=80, rows=24,
+        conversation_id="11111111-2222-3333-4444-555555555555",
     )
     assert SessionDef.from_dict(sdef.to_dict()) == sdef
 
@@ -44,11 +45,36 @@ def test_claude_command_uses_profile_env(home, monkeypatch, tmp_path):
     assert cwd == str(tmp_path)
 
 
-def test_claude_restore_appends_continue(home, tmp_path):
+def test_claude_fresh_start_pins_conversation_id(home, tmp_path):
+    import uuid
+
+    profile.create("work")
+    sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+    assert sdef.conversation_id
+    uuid.UUID(sdef.conversation_id)  # a valid UUID for --session-id
+    argv, _, _ = harness.build_command(sdef)
+    assert argv[argv.index("--session-id") + 1] == sdef.conversation_id
+
+
+def test_claude_restore_resumes_own_conversation(home, tmp_path):
+    """A restore must reopen the session's own conversation — never grab the
+    cwd's most recent one (--continue), which can hijack another session."""
     profile.create("work")
     sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
     argv, _, _ = harness.build_command(sdef, restoring=True)
+    assert "--continue" not in argv
+    assert argv[argv.index("--resume") + 1] == sdef.conversation_id
+    assert "--session-id" not in argv
+
+
+def test_claude_restore_of_legacy_def_falls_back_to_continue(home, tmp_path):
+    profile.create("work")
+    legacy = {"name": "x", "profile": "work", "cwd": str(tmp_path)}  # no id recorded
+    sdef = harness.normalize(SessionDef.from_dict(legacy), restoring=True)
+    assert sdef.conversation_id is None  # never invent an id while restoring
+    argv, _, _ = harness.build_command(sdef, restoring=True)
     assert "--continue" in argv
+    assert "--resume" not in argv
 
 
 def test_claude_restore_respects_explicit_resume(home, tmp_path):
@@ -56,9 +82,11 @@ def test_claude_restore_respects_explicit_resume(home, tmp_path):
     sdef = harness.normalize(
         SessionDef(name="x", profile="work", cwd=str(tmp_path), args=("--resume", "abc"))
     )
+    assert sdef.conversation_id is None  # caller's args steer the conversation
     argv, _, _ = harness.build_command(sdef, restoring=True)
     assert "--continue" not in argv
-    assert "--resume" in argv
+    assert argv.count("--resume") == 1
+    assert argv[argv.index("--resume") + 1] == "abc"
 
 
 def test_generic_harness_from_config(home, tmp_path):

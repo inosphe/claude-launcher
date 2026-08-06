@@ -2,8 +2,8 @@
 
 Sessions die with the daemon (the tmux model), but their *definitions* are
 persisted to ``sessions.json`` so a restarting daemon can relaunch the ones
-marked ``restore`` — the claude harness comes back with ``--continue`` and
-recovers its conversation.
+marked ``restore`` — the claude harness comes back with ``--resume`` of the
+conversation id pinned at creation, recovering its own conversation.
 """
 
 from __future__ import annotations
@@ -43,7 +43,8 @@ class SessionManager:
         if name in self._sessions:
             raise ManagerError(f"session {name!r} already exists")
         sdef = harness_mod.normalize(
-            SessionDef.from_dict({**sdef.to_dict(), "name": name})
+            SessionDef.from_dict({**sdef.to_dict(), "name": name}),
+            restoring=restoring,
         )
         argv, env, cwd = harness_mod.build_command(sdef, restoring=restoring)
         session = Session(
