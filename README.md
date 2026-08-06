@@ -701,10 +701,14 @@ attached over WebSocket — full input and output, multiple viewers allowed.
 The sidebar also shows a **Workflows** panel monitoring every
 [cflow](#cflow-declarative-agent-workflows) run started on this machine
 (each `start` registers its directory; managed sessions running in that
-directory are listed alongside): current step and visit count, the agent's
-latest step **reports** (hover for details), and — when a run is blocked on
-a human — the exact `claunch cflow approve` / `select` command that
-unblocks it. Clicking a run attaches its session's terminal.
+directory are listed alongside). Clicking a run opens its **dashboard page**
+(`#/wf/<dir>`): a live diagram of the workflow graph (current step
+highlighted, visit counts, gate/verify/select markers, cycle back-edges),
+the run's step **reports** with details, the journal, links to attach the
+session's terminal — and action buttons: **Approve** for gates and loop
+limits, and the option buttons for user-chooser selections. Web actions go
+through the same authenticated human channel as the CLI; the agent still
+has no way to approve.
 
 - **Auth is mandatory** (even on loopback): the CLI reads the token from
   `~/.claude-launcher/daemon/token` automatically; the browser asks once for
@@ -732,6 +736,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | profile names (for the UI's create form) |
 | GET    | `/api/cflow`                   | all registered cflow runs + session cwds (status, step reports); `?cwd=` inspects any directory |
+| GET    | `/api/cflow/run`               | `?cwd=` — run detail: status, workflow graph, reports, journal |
+| POST   | `/api/cflow/approve`           | `{cwd}` — approve the gate / extend the loop limit |
+| POST   | `/api/cflow/select`            | `{cwd, option, reason?}` — confirm a user-chooser branch |
 
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`); runtime
@@ -866,14 +873,15 @@ mid-run can't corrupt a running position.
 | Mechanism | Who | Enforced how |
 | --------- | --- | ------------ |
 | `select` (`chooser: agent`) | the agent | picks an option with a journaled reason |
-| `select` (`chooser: user`) | a human | the agent's pick is only a *proposal*; the run blocks until `claunch cflow select <option>` confirms (any option) |
-| `gate:` | a human | the step's instructions are withheld until `claunch cflow approve` |
+| `select` (`chooser: user`) | a human | the agent's pick is only a *proposal*; the run blocks until `claunch cflow select <option>` (or a dashboard option button) confirms — any option |
+| `gate:` | a human | the step's instructions are withheld until `claunch cflow approve` (or the dashboard's Approve button) |
 | `verify:` | a machine | the server runs the command on `next`; non-zero exit refuses to advance and returns the output |
 | `report` | the agent | required before `next`; journaled, shown live on the web dashboard, discarded by a failed `verify` |
 
 **Approvals are not agent-callable, by design.** The MCP surface is only
 `start` / `report` / `next` / `select` / `status` — there is no approve tool,
-so a gate cannot be talked past. While blocked, the agent stops its turn and tells you
+so a gate cannot be talked past. Humans approve through the CLI or the
+token-authenticated web dashboard; both are outside the agent's reach. While blocked, the agent stops its turn and tells you
 how to unblock; inside a chat session you can approve without leaving:
 
 ```text
@@ -893,7 +901,7 @@ for multi-agent orchestration.
 | ------- | ----------- |
 | `cflow ls` / `show <wf>` | List workflows / print a workflow's step tree. |
 | `cflow status [--json]`  | Active run: current step, state, how to unblock. |
-| `cflow approve`          | Approve the current human gate (CLI-only, on purpose). |
+| `cflow approve`          | Approve the current human gate (human-only: CLI or web dashboard). |
 | `cflow select <opt> [--reason]` | Confirm (or override) a user-chooser branch. |
 | `cflow journal [-n N]`   | Print the run journal (JSONL). |
 | `cflow abort` / `reset`  | Abort the run / clear run state (journal kept). |

@@ -132,10 +132,10 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
                 f"(limit {_limit(workflow, state, step.id)})"
             ),
             "how_to_unblock": (
-                "a human must run 'claunch cflow approve' to extend the loop "
-                "limit (inside a chat session: '! claunch cflow approve'). "
-                "Stop your turn, explain why the loop keeps repeating, and "
-                "wait to be nudged."
+                "a human must extend the loop limit: 'claunch cflow approve' "
+                "(inside a chat session: '! claunch cflow approve') or the "
+                "Approve button on the daemon web dashboard. Stop your turn, "
+                "explain why the loop keeps repeating, and wait to be nudged."
             ),
         }
         if mutate and state.get("gate_logged") != f"loop:{step.id}:{visit}":
@@ -154,8 +154,9 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
             "reason": "gate",
             "gate": step.gate,
             "how_to_unblock": (
-                "a human must run 'claunch cflow approve' in this directory "
-                "(inside a chat session: '! claunch cflow approve'); the agent "
+                "a human must approve: 'claunch cflow approve' in this "
+                "directory (inside a chat session: '! claunch cflow approve') "
+                "or the Approve button on the daemon web dashboard; the agent "
                 "cannot approve. Stop your turn, present your work so far, and "
                 "wait to be nudged."
             ),
@@ -183,8 +184,9 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
                 "proposal": pending,
                 "how_to_unblock": (
                     "a human must confirm with 'claunch cflow select <option>' "
-                    "(inside a chat session: '! claunch cflow select <option>'). "
-                    "Stop your turn, present your recommendation and reasoning, "
+                    "(inside a chat session: '! claunch cflow select <option>') "
+                    "or an option button on the daemon web dashboard. Stop "
+                    "your turn, present your recommendation and reasoning, "
                     "and wait to be nudged."
                 ),
             }

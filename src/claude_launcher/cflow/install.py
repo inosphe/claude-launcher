@@ -57,12 +57,13 @@ candidates (`claunch cflow ls`) and ask which one to run.
    - `select` with `chooser: user`, or `waiting_selection` — call `select`
      once to record your RECOMMENDATION with reasoning, then STOP your turn:
      present the options and your pick, and tell the user to confirm with
-     `! claunch cflow select <option>` (they may pick a different one).
+     `! claunch cflow select <option>` or from the daemon web dashboard
+     (they may pick a different one).
    - `waiting_approval` — a human gate (or the loop guard, when `reason` is
      `loop_limit`). STOP your turn: present the work so far (for a loop
      limit, explain why the loop keeps repeating) and tell the user to
-     approve with `! claunch cflow approve`. You cannot approve and must not
-     simulate approval.
+     approve with `! claunch cflow approve` or the web dashboard's Approve
+     button. You cannot approve and must not simulate approval.
    - `done` — report the run using the returned journal and finish.
 4. Resuming after a stop: when nudged (any user message), call `status`
    first to see whether the gate/selection was granted, then continue with

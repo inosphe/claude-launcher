@@ -190,6 +190,90 @@ def test_api_cflow_monitoring(home, tmp_path):
     asyncio.run(run())
 
 
+def test_api_cflow_actions(home, tmp_path):
+    """The run-detail endpoint, and human approve/select over the web API."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.cflow import engine as cflow_engine
+
+    gated = tmp_path / "gated"
+    gated.mkdir()
+    (gated / "wf.yaml").write_text(
+        "name: gated\nsteps:\n  ship:\n    gate: approve shipping\n"
+        "    instructions: ship it\n",
+        encoding="utf-8",
+    )
+    cflow_engine.start("wf.yaml", cwd=str(gated))
+
+    chooser = tmp_path / "chooser"
+    chooser.mkdir()
+    (chooser / "wf.yaml").write_text(
+        "name: pick\nsteps:\n  triage:\n    select:\n      prompt: pick\n"
+        "      chooser: user\n      options:\n"
+        "        a: {description: A, next: work}\n"
+        "        b: {description: B, next: work}\n"
+        "  work:\n    instructions: do it\n",
+        encoding="utf-8",
+    )
+    cflow_engine.start("wf.yaml", cwd=str(chooser))
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            bearer = {"Authorization": "Bearer sekrit"}
+
+            # detail: live status + the full graph for the diagram
+            resp = await client.get(
+                "/api/cflow/run", params={"cwd": str(gated)}, headers=bearer
+            )
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["run"]["status"] == "waiting_approval"
+            assert [s["id"] for s in doc["workflow"]["steps"]] == ["ship"]
+            assert doc["workflow"]["steps"][0]["gate"] == "approve shipping"
+
+            resp = await client.get("/api/cflow/run", headers=bearer)
+            assert resp.status == 400  # cwd required
+
+            # approve over HTTP opens the gate; the agent then fetches the step
+            resp = await client.post(
+                "/api/cflow/approve", json={"cwd": str(gated)}, headers=bearer
+            )
+            assert resp.status == 200
+            assert (await resp.json())["status"] == "approved"
+            assert cflow_engine.next_step(cwd=str(gated))["status"] == "step"
+
+            # approving with nothing waiting is a clean 400, not a 500
+            resp = await client.post(
+                "/api/cflow/approve", json={"cwd": str(gated)}, headers=bearer
+            )
+            assert resp.status == 400
+
+            # user-chooser select over HTTP: bad option 400, good option confirms
+            resp = await client.post(
+                "/api/cflow/select",
+                json={"cwd": str(chooser), "option": "zzz"},
+                headers=bearer,
+            )
+            assert resp.status == 400
+            resp = await client.post(
+                "/api/cflow/select",
+                json={"cwd": str(chooser), "option": "b", "reason": "picked b"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["status"] == "selected"
+            assert cflow_engine.next_step(cwd=str(chooser))["step_id"] == "work"
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_api_end_to_end(home, tmp_path):
     _register_py_harness()
     from aiohttp.test_utils import TestClient, TestServer

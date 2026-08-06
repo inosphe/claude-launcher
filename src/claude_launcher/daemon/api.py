@@ -48,7 +48,14 @@ def _token_eq(supplied: str, expected: str) -> bool:
 async def error_middleware(request: web.Request, handler):
     try:
         return await handler(request)
-    except (ManagerError, HarnessError, ProfileError) as exc:
+    except (
+        ManagerError,
+        HarnessError,
+        ProfileError,
+        CflowError,
+        WorkflowError,
+        StateError,
+    ) as exc:
         return json_error(400, str(exc))
     except SessionGone as exc:
         return json_error(409, str(exc))
@@ -91,6 +98,9 @@ def build_app(manager: SessionManager, token: str, *, started_at: float) -> web.
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
     r.add_get("/api/profiles", h_profiles)
     r.add_get("/api/cflow", h_cflow_runs)
+    r.add_get("/api/cflow/run", h_cflow_run_detail)
+    r.add_post("/api/cflow/approve", h_cflow_approve)
+    r.add_post("/api/cflow/select", h_cflow_select)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_get("/api/sessions/{name}", h_session_get)
@@ -193,6 +203,118 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
         ]
         runs.append({**entry, **payload, "reports": reports[-_CFLOW_REPORT_TAIL:]})
     return web.json_response({"runs": runs})
+
+
+def _sessions_in(manager: SessionManager, cwd: str) -> list:
+    return [
+        s.sdef.name
+        for s in manager.list()
+        if str(Path(s.sdef.cwd).resolve()) == cwd
+    ]
+
+
+def _serialize_workflow(wf) -> dict:
+    steps = []
+    for s in wf.steps.values():
+        entry = {
+            "id": s.id,
+            "title": s.title,
+            "gate": s.gate,
+            "verify": s.verify.command if s.verify else None,
+            "next": s.next,
+            "select": None,
+        }
+        if s.select:
+            entry["select"] = {
+                "prompt": s.select.prompt,
+                "chooser": s.select.chooser,
+                "options": [
+                    {"name": o.name, "description": o.description, "next": o.next}
+                    for o in s.select.options.values()
+                ],
+            }
+        steps.append(entry)
+    return {
+        "name": wf.name,
+        "description": wf.description,
+        "start": wf.start,
+        "max_visits": wf.max_visits,
+        "warnings": wf.warnings,
+        "steps": steps,
+    }
+
+
+async def h_cflow_run_detail(request: web.Request) -> web.Response:
+    """Everything the dashboard's run page needs: live status, the full
+    workflow graph, the step reports, and the run journal."""
+    raw = request.query.get("cwd")
+    if not raw:
+        return json_error(400, "'cwd' query parameter required")
+    cwd = str(Path(raw).resolve())
+    manager: SessionManager = request.app["manager"]
+    payload = cflow_engine.status(cwd)
+    if payload.get("status") == "idle":
+        return web.json_response(
+            {"cwd": cwd, "status": "idle", "sessions": _sessions_in(manager, cwd)}
+        )
+    workflow = _serialize_workflow(cflow_state.load_snapshot(cwd))
+    journal = cflow_state.read_journal(cwd, run_id=payload.get("run"))
+    reports = [
+        {
+            "step": e.get("step"),
+            "visit": e.get("visit"),
+            "summary": e.get("summary"),
+            "details": e.get("details"),
+            "at": e.get("at"),
+        }
+        for e in journal
+        if e.get("event") == "step_report"
+    ]
+    return web.json_response(
+        {
+            "cwd": cwd,
+            "sessions": _sessions_in(manager, cwd),
+            "run": payload,
+            "workflow": workflow,
+            "reports": reports,
+            "journal": journal[-200:],
+        }
+    )
+
+
+async def _cflow_action_cwd(request: web.Request):
+    body = await _json_body(request)
+    raw = str(body.get("cwd") or "")
+    if not raw:
+        return None, json_error(400, "'cwd' required in the JSON body")
+    return (str(Path(raw).resolve()), body), None
+
+
+async def h_cflow_approve(request: web.Request) -> web.Response:
+    """Approve the current gate / extend the loop limit — a human acting
+    through the authenticated dashboard, same trust channel as the CLI.
+    (Deliberately still not reachable by the agent: the MCP surface has no
+    approve, and agents have no dashboard token.)"""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, _ = resolved
+    return web.json_response(cflow_engine.approve(by="web", cwd=cwd))
+
+
+async def h_cflow_select(request: web.Request) -> web.Response:
+    """Confirm (or override) a user-chooser branch from the dashboard."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, body = resolved
+    option = str(body.get("option") or "")
+    if not option:
+        return json_error(400, "'option' required in the JSON body")
+    reason = str(body.get("reason") or "") or None
+    return web.json_response(
+        cflow_engine.select(option, reason, by="web", cwd=cwd)
+    )
 
 
 async def h_sessions_list(request: web.Request) -> web.Response:
