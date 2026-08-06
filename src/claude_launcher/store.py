@@ -166,6 +166,57 @@ def remove_profile(name: str) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# daemon / harnesses sections
+# --------------------------------------------------------------------------- #
+#: Defaults for the ``daemon`` config block. ``host`` stays loopback unless the
+#: user opts into LAN exposure; auth is mandatory either way.
+DAEMON_DEFAULTS = {
+    "host": "127.0.0.1",
+    "port": 8377,
+    "idle_threshold": 2.0,
+    "scrollback_lines": 5000,
+    "restore": True,
+}
+
+
+def daemon_config(doc: Optional[dict] = None) -> dict:
+    """The effective ``daemon`` settings (defaults merged under the file's)."""
+    doc = load() if doc is None else doc
+    block = doc.get("daemon")
+    merged = dict(DAEMON_DEFAULTS)
+    if isinstance(block, dict):
+        merged.update(block)
+    return merged
+
+
+def set_daemon_field(key: str, value) -> None:
+    """Set (or clear, when ``value`` is ``None``) one ``daemon`` setting."""
+
+    def _mutate(doc: dict) -> None:
+        block = doc.get("daemon")
+        if not isinstance(block, dict):
+            block = {}
+            doc["daemon"] = block
+        if value is None:
+            block.pop(key, None)
+            if not block:
+                doc.pop("daemon", None)
+        else:
+            block[key] = value
+
+    update(_mutate)
+
+
+def harnesses(doc: Optional[dict] = None) -> Dict[str, dict]:
+    """User-defined harnesses (``claude`` is built-in and need not be listed)."""
+    doc = load() if doc is None else doc
+    section = doc.get("harnesses")
+    if not isinstance(section, dict):
+        return {}
+    return {str(k): v for k, v in section.items() if isinstance(v, dict)}
+
+
+# --------------------------------------------------------------------------- #
 # template section
 # --------------------------------------------------------------------------- #
 def template_env(doc: Optional[dict] = None) -> Dict[str, str]:

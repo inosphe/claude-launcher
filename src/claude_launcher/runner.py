@@ -35,10 +35,21 @@ class Heartbeat:
     output: str
 
 
-def _child_env(
-    profile: Profile, *, with_token: bool, borrow: Optional[Profile] = None
+def child_env(
+    profile: Profile,
+    *,
+    with_token: bool,
+    borrow: Optional[Profile] = None,
+    base_env: Optional[dict] = None,
 ) -> dict:
-    env = os.environ.copy()
+    """The full environment for a ``claude`` child of ``profile``.
+
+    Public so the session daemon can assemble an identical environment when it
+    spawns claude under a managed PTY. ``base_env`` defaults to this process's
+    environment (for the daemon that means sessions inherit the *daemon's* env,
+    like tmux server semantics).
+    """
+    env = dict(os.environ if base_env is None else base_env)
     env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
     if with_token:
         # A `--borrow` swaps both the token *and* the provider: the running
@@ -89,7 +100,7 @@ def _spawn(
     cmd = [config.claude_bin(), *args]
     try:
         completed = subprocess.run(
-            cmd, env=_child_env(profile, with_token=with_token, borrow=borrow)
+            cmd, env=child_env(profile, with_token=with_token, borrow=borrow)
         )
     except FileNotFoundError as exc:
         raise RunnerError(
@@ -162,7 +173,7 @@ def heartbeat(
     try:
         completed = subprocess.run(
             cmd,
-            env=_child_env(profile, with_token=True),
+            env=child_env(profile, with_token=True),
             capture_output=True,
             text=True,
             encoding="utf-8",

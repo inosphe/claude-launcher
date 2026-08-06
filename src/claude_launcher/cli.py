@@ -16,6 +16,7 @@ from pathlib import Path
 from . import (
     __version__,
     bootstrap,
+    cli_sessions,
     config,
     credentials,
     lineage,
@@ -31,6 +32,7 @@ from . import (
     template,
     usage,
 )
+from .daemon_client import DaemonClientError
 from .credentials import CredentialsError
 from .lineage import LineageError
 from .migrate import MigrateError
@@ -686,6 +688,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_provs.set_defaults(func=_cmd_providers)
 
+    cli_sessions.register(sub)
+
     return parser
 
 
@@ -719,6 +723,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         PromptInputError,
         ProviderError,
         store.StoreError,
+        DaemonClientError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

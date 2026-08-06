@@ -15,6 +15,7 @@ interactive `/login` flow, so each profile keeps its own credentials.
 [Providers](#api-providers-third-party-backends) ·
 [Migrate](#migrating-skills--mcp-servers) ·
 [Config file](#configuration-source-of-truth) · [Usage](#usage-reporting) ·
+[Sessions](#managed-sessions-tmux-style-daemon) · [Web UI & API](#web-ui--http-api) ·
 [How it works](#how-it-works) · [Configuration](#configuration)
 
 ## Why
@@ -81,6 +82,11 @@ claunch usage work      # show this profile's subscription usage
 | `list`                 | List profiles and each login's state (alias: `ls`). |
 | `path <name>`          | Print the profile's `CLAUDE_CONFIG_DIR`. |
 | `remove <name>`        | Delete a profile and its tokens (aliases: `delete`, `rm`). |
+
+Plus the **[managed-session commands](#managed-sessions-tmux-style-daemon)** —
+`new-session`, `sessions`, `send-keys`, `capture-pane`, `wait-for`,
+`kill-session`, `resize`, `daemon ...`, `web` — which run harnesses in
+daemon-owned PTYs instead of the current terminal.
 
 ### Passing arguments to claude
 
@@ -431,6 +437,245 @@ run it explicitly:
 claunch prune --dry-run        # show orphan dirs (not declared in ~/.claunch.yaml)
 claunch prune                  # delete them
 ```
+
+## Managed sessions (tmux-style daemon)
+
+`claunch` can run harnesses (`claude` first; any CLI agent via config) inside
+**daemon-managed PTY sessions** — a tmux-server equivalent that also works on
+Windows (ConPTY). Sessions belong to a background daemon, so they survive the
+terminal that created them, can be driven programmatically (`send-keys` /
+`capture-pane` / `wait-for`), and are viewable live in the browser.
+
+```bash
+claunch new-session -s work --profile work     # daemon auto-starts, claude spawns in a PTY
+claunch send-keys work "fix the failing test" Enter
+claunch wait-for work --idle --timeout 600     # block until claude stops producing output
+claunch capture-pane work                      # print the rendered screen
+claunch sessions                               # list sessions + status
+claunch kill-session work
+```
+
+That `send-keys → wait-for → capture-pane` triple closes the automation loop:
+external scripts (or another agent) can drive interactive claude sessions
+without a human at the keyboard.
+
+### Session commands
+
+| Command | Description |
+| ------- | ----------- |
+| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, trailing args pass to the harness). |
+| `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. |
+| `send-keys [-l] S KEYS...` | tmux semantics: `Enter`, `Escape`, `Tab`, `C-c`, `M-x`, `Up`... are keys; everything else is literal text. `-l` sends all args literally. `-t S` also accepted. |
+| `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |
+| `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
+| `kill-session S`      | Terminate a running session, or deregister an exited one (`--force` skips graceful terminate). |
+| `resize S COLS ROWS`  | Resize the session's terminal. |
+| `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
+| `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
+| `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claunch.yaml`). |
+| `web [--open]`        | Print (and open) the web UI URL. |
+
+### Idle detection
+
+Raw output never goes quiet under a TUI (claude animates a spinner and a
+clock), so the daemon renders every session's output through a terminal
+emulator and samples the *screen content*: rows that flap on most samples are
+classified as animation and ignored; the session is **idle** once no other row
+has changed for `idle_threshold` seconds (default 2.0; per-call override with
+`wait-for --idle-threshold`). For cautious automation against claude, ~4s is a
+good threshold.
+
+### Scripted workflows (blocking, sequential)
+
+Every session command is designed to be scripted: they **block until done and
+report success in their exit code**, so plain `bat`/`sh` scripts (or a
+Makefile, or CI) can chain steps with `&&` / `||` — no polling loops needed.
+
+| Command | Blocks until | Exit code |
+| ------- | ------------ | --------- |
+| `new-session` | the daemon is up and the PTY is spawned | `0` created / non-zero on error |
+| `send-keys`   | the bytes are written to the PTY | `0` written / non-zero on error |
+| `wait-for --idle` | screen quiet for `--idle-threshold` secs (or session exit) | `0` reached / `1` timeout |
+| `wait-for --exited` | the process exits | `0` exited / `1` timeout |
+| `capture-pane` | output printed to stdout | `0` / non-zero on error |
+
+The basic building block is the **send → wait → capture** loop:
+
+```sh
+claunch send-keys work "run the tests and fix failures" Enter
+sleep 2                                                        # see "robustness" below
+claunch wait-for work --idle --timeout 1800 --idle-threshold 5
+claunch capture-pane work > step1.txt
+```
+
+#### Multi-step example (sh)
+
+```sh
+#!/usr/bin/env sh
+set -e                       # abort the workflow on any failed step/timeout
+S=wf1
+
+claunch new-session -s "$S" --profile work -c ~/proj
+claunch wait-for "$S" --idle --timeout 60          # wait for the TUI to boot
+
+step() {                     # send a prompt, wait for the answer, dump it
+  claunch send-keys "$S" "$1" Enter
+  sleep 2
+  claunch wait-for "$S" --idle --timeout 1800 --idle-threshold 5
+  claunch capture-pane "$S"
+}
+
+step "run the tests and fix any failures"       > step1.txt
+step "now update the README for those changes"  > step2.txt
+step "summarize what you changed in one line"   > step3.txt
+
+claunch kill-session "$S"
+```
+
+#### Multi-step example (bat)
+
+```bat
+@echo off
+set S=wf1
+
+claunch new-session -s %S% --profile work -c C:\proj || exit /b 1
+claunch wait-for %S% --idle --timeout 60 || exit /b 1
+
+claunch send-keys %S% "run the tests and fix any failures" Enter || exit /b 1
+timeout /t 2 /nobreak >nul
+claunch wait-for %S% --idle --timeout 1800 --idle-threshold 5 || exit /b 1
+claunch capture-pane %S% > step1.txt
+
+claunch send-keys %S% "now update the README for those changes" Enter || exit /b 1
+timeout /t 2 /nobreak >nul
+claunch wait-for %S% --idle --timeout 600 --idle-threshold 5 || exit /b 1
+claunch capture-pane %S% > step2.txt
+
+claunch kill-session %S%
+```
+
+#### One-shot jobs: prefer `--exited`
+
+For batch prompts that don't need an interactive session, pass the prompt to
+the harness itself (everything after the session options is forwarded) and
+wait for **process exit** — this skips the idle heuristic entirely, so there
+is nothing to misjudge:
+
+```sh
+claunch new-session -s job1 --profile work -- -p "summarize this repo"
+claunch wait-for job1 --exited --timeout 600
+claunch capture-pane job1 --history > result.txt   # include scrolled-off lines
+claunch kill-session job1                          # deregister the exited session
+```
+
+Several one-shot jobs can fan out in parallel and then be joined one by one —
+each `wait-for` simply returns immediately once its session is already done:
+
+```sh
+for i in 1 2 3; do
+  claunch new-session -s "job$i" --profile work -- -p "task $i ..."
+done
+for i in 1 2 3; do
+  claunch wait-for "job$i" --exited --timeout 900
+  claunch capture-pane "job$i" --history > "result$i.txt"
+  claunch kill-session "job$i"
+done
+```
+
+#### Robustness notes
+
+- **Don't `wait-for --idle` in the same instant as `send-keys`.** Between
+  pressing Enter and the harness starting to render its answer there is a
+  short quiet gap; with a small threshold that gap can be misread as idle.
+  A `sleep 2` after `send-keys` plus `--idle-threshold 5` closes it in
+  practice.
+- **Idle means "stopped painting", not "succeeded".** For decisions, inspect
+  the capture: ask the prompt to end with a marker and grep for it —
+
+  ```sh
+  claunch send-keys "$S" "... reply DONE-OK on success or DONE-FAIL" Enter
+  sleep 2
+  claunch wait-for "$S" --idle --timeout 900 --idle-threshold 5
+  claunch capture-pane "$S" | grep -q "DONE-OK" || exit 1
+  ```
+
+  or parse `capture-pane --json` (`lines`, `cursor`, `status`) from a real
+  scripting language. The same loop over the [HTTP API](#web-ui--http-api)
+  (`/keys`, `/wait`, `/capture`) avoids shelling out entirely.
+- **`wait-for --idle` also returns when the session exits** (so a crashed
+  harness doesn't hang the script); check `claunch sessions` or the `--json`
+  status if you need to tell the two apart.
+- **Timeouts end the wait, not the session.** After a `wait-for` timeout the
+  harness keeps running — decide in the script whether to keep waiting,
+  capture what's there, or `kill-session`.
+
+### Restore on daemon restart
+
+Sessions die with the daemon (the tmux model), but their *definitions* persist.
+On the next daemon start, sessions created with `--restore` (the default; flip
+with `daemon config restore false`) are relaunched — the claude harness gets
+`--continue`, resuming the most recent conversation for that cwd within that
+profile. Raw output logs survive under
+`~/.claude-launcher/daemon/sessions/<name>/` either way.
+
+### Other harnesses (codex, pi, ...)
+
+Declare them in `~/.claunch.yaml`; the `claude` harness is built in:
+
+```yaml
+harnesses:
+  codex:
+    command: codex          # string or argv list
+    args: []                # optional, before the session's own args
+    env: {KEY: VALUE}       # optional overrides
+```
+
+```bash
+claunch new-session -s cdx --harness codex -c ~/proj
+```
+
+Sessions inherit the **daemon's** environment (tmux-server semantics), then the
+harness `env`, then the session's own `--env` overrides. The claude harness
+builds its environment exactly like `claunch run` (profile config dir,
+provider, token) and additionally strips nested-session markers so a claude
+launched from inside another claude session still persists transcripts.
+
+## Web UI & HTTP API
+
+The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
+a session list (status badges, create/kill) plus a **live xterm.js terminal**
+attached over WebSocket — full input and output, multiple viewers allowed.
+
+- **Auth is mandatory** (even on loopback): the CLI reads the token from
+  `~/.claude-launcher/daemon/token` automatically; the browser asks once for
+  `claunch daemon token` and stores an HttpOnly cookie. API clients send
+  `Authorization: Bearer <token>`. Tokens never appear in URLs.
+- **Binding** defaults to `127.0.0.1`. For LAN/phone access:
+  `claunch daemon config host 0.0.0.0` then `claunch daemon restart` (the
+  token is then the only barrier — prefer a TLS reverse proxy on hostile
+  networks).
+
+REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
+
+| Method | Path | Purpose |
+| ------ | ---- | ------- |
+| GET    | `/api/health`                  | liveness (unauthenticated) |
+| POST   | `/api/auth/session`            | token → HttpOnly cookie (browser login) |
+| GET    | `/api/daemon`                  | version/uptime/session count |
+| POST   | `/api/daemon/shutdown`         | graceful stop |
+| GET/POST | `/api/sessions`              | list / create |
+| GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
+| POST   | `/api/sessions/{name}/keys`    | `{keys: [...], literal}` — send-keys |
+| GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |
+| GET    | `/api/sessions/{name}/wait`    | long-poll `?state=idle\|exited&timeout=&threshold=` |
+| POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
+| GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
+| GET    | `/api/profiles`                | profile names (for the UI's create form) |
+
+Daemon settings live under `daemon:` in `~/.claunch.yaml`
+(`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`); runtime
+state (pid/port file, auth token, session logs) stays machine-local under
+`~/.claude-launcher/daemon/`.
 
 ## Usage reporting
 

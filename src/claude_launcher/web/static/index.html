@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>claunch sessions</title>
+<link rel="stylesheet" href="/static/vendor/xterm.css">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="auth-overlay" class="hidden">
+  <div class="auth-box">
+    <h2>claunch daemon</h2>
+    <p>Paste the API token (<code>claunch daemon token</code>):</p>
+    <input id="auth-token" type="password" autocomplete="off" spellcheck="false">
+    <button id="auth-submit">Sign in</button>
+    <p id="auth-error" class="error hidden">Bad token.</p>
+  </div>
+</div>
+
+<div id="layout">
+  <aside id="sidebar">
+    <header>
+      <h1>claunch</h1>
+      <span id="daemon-info"></span>
+    </header>
+    <ul id="session-list"></ul>
+    <form id="new-session">
+      <h3>New session</h3>
+      <label>Name <input name="name" placeholder="(auto)"></label>
+      <label>Harness <input name="harness" value="claude"></label>
+      <label>Profile <select name="profile"></select></label>
+      <label>Directory <input name="cwd" placeholder="(daemon cwd)"></label>
+      <label>Args <input name="args" placeholder="--resume ..."></label>
+      <button type="submit">Create</button>
+      <p id="create-error" class="error hidden"></p>
+    </form>
+  </aside>
+  <main id="main">
+    <div id="term-header" class="hidden">
+      <span id="term-title"></span>
+      <span id="term-status" class="badge"></span>
+      <button id="term-kill">kill</button>
+    </div>
+    <div id="terminal"></div>
+    <div id="placeholder">Select or create a session.</div>
+  </main>
+</div>
+
+<script src="/static/vendor/xterm.js"></script>
+<script src="/static/vendor/addon-fit.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
