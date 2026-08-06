@@ -102,7 +102,9 @@ class RelayUplink:
     # --------------------------------------------------------------------- #
     async def _session(self) -> None:
         """One connect → register → serve cycle. Returns on disconnect."""
-        ssl = None if self.verify_tls else False
+        # aiohttp ignores this for ws:// (non-TLS); False disables verification
+        # for wss:// against a self-signed relay (README's cert-less model).
+        ssl = True if self.verify_tls else False
         timeout = aiohttp.ClientTimeout(total=None, sock_connect=CONNECT_TIMEOUT)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.ws_connect(

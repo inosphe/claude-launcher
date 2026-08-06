@@ -563,7 +563,35 @@ without a human at the keyboard.
 | `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
 | `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claunch.yaml`). |
+| `daemon relay [KEY [VALUE]]` | Show or set the relay uplink (reach this daemon from outside the LAN — see below). |
 | `web [--open]`        | Print (and open) the web UI URL. |
+
+### Reaching the daemon from outside the LAN (relay uplink)
+
+The web UI normally binds loopback. To reach it from your phone or another
+network without opening an inbound port, the daemon can dial an outbound
+WebSocket to a [psmux-relay](https://github.com/inosphe/mux-relay) and register
+itself as a named backend. A browser then logs into the relay and opens
+`https://relay.example.com/t/<name>/` to get this daemon's full web UI. Because
+the daemon only ever dials **loopback**, the tunnel can't widen its network
+exposure, and its own token/cookie auth still applies — the relay login is a
+second, outer gate.
+
+```powershell
+# on each machine running the daemon:
+claunch daemon relay url wss://relay.example.com
+claunch daemon relay name work-pc          # directory label (default: hostname)
+$env:CLAUNCH_RELAY_TOKEN = "<backend_token>"   # matches relay.toml backend_token
+#   (or persist it: claunch daemon relay token <backend_token>)
+claunch daemon restart
+```
+
+The `backend_token` is a machine secret set on the relay (its `relay.toml`),
+**separate** from the browser login password. Prefer the `CLAUNCH_RELAY_TOKEN`
+env var so it need not live in `~/.claunch.yaml`. For a self-signed relay,
+`claunch daemon relay verify_tls false` accepts its certificate. The uplink
+reconnects on its own (keepalive ping, receive watchdog, backoff+jitter); while
+the relay is down the local daemon is unaffected.
 
 ### Idle detection
 
