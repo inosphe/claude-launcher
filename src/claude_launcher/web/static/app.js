@@ -522,10 +522,19 @@ function wfActions(data) {
       `agent is working on '${run.step_id}' — nothing needs a human right now`
     ));
   }
-  if ((data.sessions || []).length && run.status !== "done" && run.status !== "aborted") {
+  if (run.status !== "done" && run.status !== "aborted") {
     const btn = el("button", "wf-btn nudge", "Nudge session");
-    btn.title = "type the resume line into the run's session(s) again";
-    btn.addEventListener("click", () => nudgeRun(data.cwd));
+    if ((data.sessions || []).length) {
+      btn.title = "type the resume line into the run's session(s) again";
+      btn.addEventListener("click", () => nudgeRun(data.cwd));
+    } else {
+      btn.disabled = true;
+      btn.title = "nothing to nudge: no managed session runs in this directory";
+      box.appendChild(el(
+        "p", "wf-note",
+        "no managed session in this directory — nudge the agent wherever it runs"
+      ));
+    }
     box.appendChild(btn);
   }
   return box;
