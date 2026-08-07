@@ -58,7 +58,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     if args.attach:
         from . import attach as attach_mod
 
-        return attach_mod.attach(client, info["name"])
+        return attach_mod.attach(client, info["name"], detach_key=args.detach_key)
     print(
         f"attach: claunch attach {info['name']}  |  browser: {client.base_url}/  "
         f"|  capture: claunch capture-pane {info['name']}"
@@ -106,7 +106,21 @@ def _cmd_attach(args: argparse.Namespace) -> int:
         name = live[0]
     from . import attach as attach_mod
 
-    return attach_mod.attach(client, name)
+    return attach_mod.attach(client, name, detach_key=args.detach_key)
+
+
+def _cmd_respawn(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    info = client.post(f"/api/sessions/{args.session}/respawn")
+    print(
+        f"session {info['name']!r} respawned (pid {info.get('pid')})"
+        + (" — resuming its conversation" if info.get("harness") == "claude" else "")
+    )
+    if args.attach:
+        from . import attach as attach_mod
+
+        return attach_mod.attach(client, info["name"], detach_key=args.detach_key)
+    return 0
 
 
 def _cmd_send_keys(args: argparse.Namespace) -> int:
@@ -318,6 +332,7 @@ def register(sub) -> None:
         "-a", "--attach", action="store_true",
         help="attach this terminal to the new session right away (detach: Ctrl+])",
     )
+    _add_detach_key(p_new)
     p_new.add_argument(
         "args", nargs=argparse.REMAINDER,
         help="extra arguments passed to the harness (prefix with -- if they start with -)",
@@ -337,7 +352,20 @@ def register(sub) -> None:
         "session", nargs="?",
         help="session name (may be omitted when exactly one session is running)",
     )
+    _add_detach_key(p_attach)
     p_attach.set_defaults(func=_cmd_attach_dispatch)
+
+    p_respawn = sub.add_parser(
+        "respawn",
+        help="relaunch an exited session (claude resumes its own conversation)",
+    )
+    p_respawn.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
+    p_respawn.add_argument("session", nargs="?")
+    p_respawn.add_argument(
+        "-a", "--attach", action="store_true", help="attach once respawned"
+    )
+    _add_detach_key(p_respawn)
+    p_respawn.set_defaults(func=_cmd_respawn_dispatch)
 
     p_send = sub.add_parser(
         "send-keys",
@@ -421,12 +449,26 @@ def _resolve_target(args: argparse.Namespace) -> bool:
     return True
 
 
+def _add_detach_key(parser) -> None:
+    parser.add_argument(
+        "--detach-key", default="C-]", metavar="KEY",
+        help='detach chord for attach, e.g. "C-]" (default) or "C-d" — the '
+             "bound key is consumed and no longer reaches the session",
+    )
+
+
 def _cmd_attach_dispatch(args: argparse.Namespace) -> int:
     # ``-t`` tmux muscle memory; unlike the others, no session at all is fine
     # (attach auto-picks when exactly one session is running).
     if getattr(args, "session_t", None):
         args.session = args.session_t
     return _cmd_attach(args)
+
+
+def _cmd_respawn_dispatch(args: argparse.Namespace) -> int:
+    if not _resolve_target(args):
+        return 1
+    return _cmd_respawn(args)
 
 
 def _cmd_send_keys_dispatch(args: argparse.Namespace) -> int:

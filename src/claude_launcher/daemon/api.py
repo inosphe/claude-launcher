@@ -111,6 +111,7 @@ def build_app(manager: SessionManager, token: str, *, started_at: float) -> web.
     r.add_post("/api/sessions", h_sessions_create)
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_delete("/api/sessions/{name}", h_session_delete)
+    r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_get("/api/sessions/{name}/capture", h_session_capture)
     r.add_get("/api/sessions/{name}/wait", h_session_wait)
@@ -438,6 +439,12 @@ async def h_session_delete(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     force = request.query.get("force") in ("1", "true")
     session = manager.kill(request.match_info["name"], force=force)
+    return web.json_response(session.info())
+
+
+async def h_session_respawn(request: web.Request) -> web.Response:
+    manager: SessionManager = request.app["manager"]
+    session = manager.respawn(request.match_info["name"])
     return web.json_response(session.info())
 
 

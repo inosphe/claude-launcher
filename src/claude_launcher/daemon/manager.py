@@ -84,6 +84,26 @@ class SessionManager:
         self.persist()
         return session
 
+    def respawn(self, name: str) -> Session:
+        """Relaunch an exited session under its original definition.
+
+        Restore semantics apply: the claude harness comes back with
+        ``--resume`` of the conversation id pinned at creation, so quitting
+        the program by accident (double ``Ctrl+C``) is recoverable — same
+        conversation, same session name.
+        """
+        session = self.get(name)
+        if not session.exited:
+            raise ManagerError(
+                f"session {name!r} is still running (attach to it, or kill it first)"
+            )
+        del self._sessions[name]
+        try:
+            return self.create(session.sdef, restoring=True)
+        except Exception:
+            self._sessions[name] = session  # keep the exited record on failure
+            raise
+
     async def shutdown_all(self) -> None:
         self.persist()  # record which sessions were alive, for restore
         for session in list(self._sessions.values()):

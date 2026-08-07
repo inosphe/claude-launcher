@@ -205,6 +205,46 @@ def test_api_cflow_monitoring(home, tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_api_session_respawn(home, tmp_path):
+    """An exited session relaunches under its own name and definition;
+    respawning a live one is refused."""
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            session = mgr.create(SessionDef(name="rz", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(session, "READY")
+
+            resp = await client.post("/api/sessions/rz/respawn", headers=bearer)
+            assert resp.status == 400  # still running
+
+            await session.send_keys(["quit", "Enter"])
+            await session.wait_for("exited", timeout=10.0, threshold=0.5)
+
+            resp = await client.post("/api/sessions/rz/respawn", headers=bearer)
+            assert resp.status == 200
+            info = await resp.json()
+            assert info["name"] == "rz"
+            assert info["status"] != "exited"
+
+            revived = mgr.get("rz")
+            assert revived is not session
+            await _wait_screen(revived, "READY")
+            await revived.send_keys(["back", "Enter"])
+            await _wait_screen(revived, "echo:back")
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_shutdown_not_blocked_by_open_websocket(home, tmp_path):
     """A dashboard tab left open must not stall daemon teardown (it used to
     wait aiohttp's 60s shutdown timeout per lingering terminal socket)."""
