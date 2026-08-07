@@ -175,12 +175,13 @@ class RelayUplink:
                 except (ConnectionError, OSError):
                     await self._drop_stream(m.sid, notify=True)
         elif m.kind == w.STREAM_EOF:
-            st = self._streams.get(m.sid)
-            if st is not None:
-                try:
-                    st.writer.write_eof()
-                except (OSError, RuntimeError):
-                    pass
+            # Relay signals "browser finished sending the request" — but we must
+            # NOT half-close (write_eof) the loopback socket. The daemon's HTTP
+            # server already knows the request is complete from framing
+            # (end-of-headers / Content-Length); a TCP FIN here instead reads as
+            # a client disconnect and aiohttp abandons the response, so the relay
+            # proxies an empty reply → 502. Teardown happens on STREAM_CLOSE.
+            pass
         elif m.kind == w.STREAM_CLOSE:
             await self._drop_stream(m.sid, notify=False)
         elif m.kind == w.PING:

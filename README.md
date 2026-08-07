@@ -586,6 +586,16 @@ $env:CLAUNCH_RELAY_TOKEN = "<backend_token>"   # matches relay.toml backend_toke
 claunch daemon restart
 ```
 
+The daemon starts the uplink automatically once `url` and a token are set, so a
+plain `claunch daemon restart` brings it online — no separate process to run.
+Then, from anywhere, open the relay, sign in, and pick the machine by its `name`
+from the directory (`/dir`) — or go straight to
+`https://relay.example.com/t/<name>/` for its full web UI. Every machine you
+configure this way appears in the same directory, so one relay fronts many
+daemons. This requires a running
+[mux-relay](https://github.com/inosphe/mux-relay) with a `backend_token`; the
+relay writes one into its `relay.toml` on first start if none is set.
+
 The `backend_token` is a machine secret set on the relay (its `relay.toml`),
 **separate** from the browser login password. Prefer the `CLAUNCH_RELAY_TOKEN`
 env var so it need not live in `~/.claunch.yaml`. For a self-signed relay,

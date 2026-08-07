@@ -8,6 +8,8 @@ let ws = null;
 let term = null;
 let fitAddon = null;
 let sessionsCache = [];
+let applyingRemoteResize = false; // guards against echoing a server-driven resize
+let fitTimer = null;              // debounces viewport-driven fit() calls
 
 /* Base path of the current page: "/" when served directly, "/t/<name>/" when
  * reached through a relay tunnel. All API/WS/static requests are resolved
@@ -353,6 +355,9 @@ function attach(name) {
     if (ws && ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(data));
   });
   term.onResize(({ cols, rows }) => {
+    // A resize we applied from a server broadcast must not be echoed back, or
+    // two viewers (or a stale echo over a high-latency relay) ping-pong forever.
+    if (applyingRemoteResize) return;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ type: "resize", cols, rows }));
     }
@@ -363,15 +368,25 @@ function attach(name) {
       let msg;
       try { msg = JSON.parse(ev.data); } catch { return; }
       if (msg.type === "init") {
-        term.resize(msg.cols, msg.rows);
+        // Seed the grid with the session's current size without echoing it back;
+        // the fit() below sends this viewer's own size as the single resize.
+        applyingRemoteResize = true;
+        try { term.resize(msg.cols, msg.rows); }
+        finally { applyingRemoteResize = false; }
         setStatusBadge(msg.status);
         // Adopt the viewer's size once attached.
-        setTimeout(() => { fitAddon.fit(); }, 50);
+        setTimeout(() => { if (fitAddon) fitAddon.fit(); }, 50);
       } else if (msg.type === "state") {
         setStatusBadge(msg.status);
       } else if (msg.type === "resize") {
-        if (term.cols !== msg.cols || term.rows !== msg.rows) {
-          term.resize(msg.cols, msg.rows);
+        // Only a background viewer adopts another viewer's size; a visible
+        // viewer's own fit stays authoritative. Otherwise a stale echo arriving
+        // late over the relay fights the local fit and the grid churns. On focus
+        // regain, resyncTerminal() re-asserts this viewer's size.
+        if (document.hidden && (term.cols !== msg.cols || term.rows !== msg.rows)) {
+          applyingRemoteResize = true;
+          try { term.resize(msg.cols, msg.rows); }
+          finally { applyingRemoteResize = false; }
         }
       } else if (msg.type === "exit") {
         setStatusBadge("exited");
@@ -386,8 +401,13 @@ function attach(name) {
   };
 }
 
+// Debounce viewport-driven fits. On a phone the visual viewport jitters (URL
+// bar collapsing, keyboard) and firing fit() on every event floods the session
+// with resizes — most visible over a relay, where each round-trip lags.
 window.addEventListener("resize", () => {
-  if (fitAddon) fitAddon.fit();
+  if (!fitAddon) return;
+  clearTimeout(fitTimer);
+  fitTimer = setTimeout(() => { if (fitAddon) fitAddon.fit(); }, 150);
 });
 
 /* Another viewer (e.g. `claunch attach`) may have resized the session while
