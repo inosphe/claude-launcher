@@ -345,6 +345,21 @@ window.addEventListener("resize", () => {
   if (fitAddon) fitAddon.fit();
 });
 
+/* Another viewer (e.g. `claunch attach`) may have resized the session while
+   this tab was in the background, leaving the grid garbled. On focus regain,
+   re-assert this viewer's size and ask the daemon for a fresh repaint —
+   event-driven only, no polling. */
+function resyncTerminal() {
+  if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
+  fitAddon.fit(); // fires term.onResize -> server resize when dims changed
+  ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+  ws.send(JSON.stringify({ type: "repaint" }));
+}
+window.addEventListener("focus", resyncTerminal);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) resyncTerminal();
+});
+
 /* ------------------------------------------------------------------ */
 /* workflow detail page (#/wf/<cwd>) — diagram, reports, actions      */
 /* ------------------------------------------------------------------ */

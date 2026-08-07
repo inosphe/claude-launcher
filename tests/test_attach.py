@@ -27,6 +27,15 @@ def test_split_detach():
     assert attach_mod.split_detach(b"") == (b"", False)
 
 
+def test_strip_focus_events():
+    assert attach_mod.strip_focus_events(b"abc") == (b"abc", False)
+    assert attach_mod.strip_focus_events(b"\x1b[Iabc") == (b"abc", True)
+    assert attach_mod.strip_focus_events(b"a\x1b[Ob") == (b"ab", False)
+    assert attach_mod.strip_focus_events(b"\x1b[O\x1b[I") == (b"", True)
+    # a bare ESC (real keypress) must pass through untouched
+    assert attach_mod.strip_focus_events(b"\x1b") == (b"\x1b", False)
+
+
 def test_ws_url():
     assert (
         attach_mod.ws_url("http://127.0.0.1:8377", "s0")
@@ -47,6 +56,7 @@ def test_attach_bridge_roundtrip_and_detach(home, tmp_path, monkeypatch):
     chunks = []
     ready = threading.Event()
     echoed = threading.Event()
+    repainted = threading.Event()
 
     def fake_write(text):
         chunks.append(text)
@@ -55,6 +65,8 @@ def test_attach_bridge_roundtrip_and_detach(home, tmp_path, monkeypatch):
             ready.set()
         if "echo:hello" in joined:
             echoed.set()
+        if joined.count("\x1b[2J\x1b[H") >= 2:  # initial seed + requested one
+            repainted.set()
 
     reads = {"n": 0}
 
@@ -65,6 +77,9 @@ def test_attach_bridge_roundtrip_and_detach(home, tmp_path, monkeypatch):
             return b"hello\r"
         if reads["n"] == 2:
             assert echoed.wait(15), "echo never came back over the socket"
+            return b"\x1b[I"  # focus regained -> resize re-assert + repaint
+        if reads["n"] == 3:
+            assert repainted.wait(15), "focus-in never triggered a repaint"
             return b"\x1d"  # detach
         return b""
 

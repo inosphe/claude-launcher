@@ -7,7 +7,9 @@ Protocol (matches the SPA's app.js and any non-browser client):
   frame repainting the current screen so a fresh viewer sees live state.
 - client -> server, binary: keystrokes/paste, written verbatim to the PTY.
 - text frames are JSON control messages:
-  client: ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"ping"}``.
+  client: ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"repaint"}``
+  (resend the current screen — used by viewers on focus regain, since another
+  viewer may have resized the session meanwhile), ``{"type":"ping"}``.
   server: ``{"type":"state","status":...}``, ``{"type":"exit","code":...}``,
   ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"pong"}``.
 
@@ -104,5 +106,7 @@ async def _handle_control(ws: web.WebSocketResponse, session: Session, raw: str)
             session.resize(int(msg["cols"]), int(msg["rows"]))
         except (KeyError, ValueError, TypeError, SessionGone):
             pass
+    elif kind == "repaint":
+        await ws.send_bytes(session.screen.repaint_sequence())
     elif kind == "ping":
         await ws.send_str(json.dumps({"type": "pong"}))

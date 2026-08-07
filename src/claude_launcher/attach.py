@@ -33,12 +33,38 @@ RESIZE_POLL = 0.5
 _STDIN_CHUNK = 4096
 
 
+#: Focus reporting (DECSET 1004): the local terminal is asked to emit these on
+#: focus changes so the bridge can re-assert its size and request a repaint
+#: after another viewer (web dashboard) resized the session — event-driven, no
+#: polling of session state.
+FOCUS_ON = "\x1b[?1004h"
+FOCUS_OFF = "\x1b[?1004l"
+_FOCUS_IN = b"\x1b[I"
+_FOCUS_OUT = b"\x1b[O"
+
+
 def split_detach(data: bytes) -> Tuple[bytes, bool]:
     """Payload up to the first detach byte, and whether it was pressed."""
     idx = data.find(DETACH_BYTE)
     if idx < 0:
         return data, False
     return data[:idx], True
+
+
+def strip_focus_events(data: bytes) -> Tuple[bytes, bool]:
+    """Remove focus in/out reports from ``data``; True when focus-in was seen.
+
+    The session's programs never enabled focus reporting themselves (the
+    bridge did, locally), so the reports must not reach the PTY. Only complete
+    sequences are matched — terminals emit them atomically, and holding back
+    a trailing ``ESC`` would delay a real Escape keypress.
+    """
+    focus_in = _FOCUS_IN in data
+    if focus_in:
+        data = data.replace(_FOCUS_IN, b"")
+    if _FOCUS_OUT in data:
+        data = data.replace(_FOCUS_OUT, b"")
+    return data, focus_in
 
 
 def ws_url(base_url: str, name: str) -> str:
@@ -190,6 +216,17 @@ async def _attach_async(base_url: str, token: str, name: str) -> dict:
                 await ws.close()
                 return
             payload, detach = split_detach(data)
+            payload, focus_in = strip_focus_events(payload)
+            if focus_in:
+                # Focus regained: another viewer may have resized the session
+                # meanwhile — re-assert this terminal's size, then repaint.
+                size = shutil.get_terminal_size()
+                await ws.send_str(
+                    json.dumps(
+                        {"type": "resize", "cols": size.columns, "rows": size.lines}
+                    )
+                )
+                await ws.send_str(json.dumps({"type": "repaint"}))
             if payload:
                 await ws.send_bytes(payload)
             if detach:
@@ -274,12 +311,15 @@ def attach(client, name: str) -> int:
 
     outcome = {"reason": "closed"}
     with _RawTerminal():
+        _write_text(FOCUS_ON)
         try:
             outcome = asyncio.run(_attach_async(client.base_url, client.token, name))
         except KeyboardInterrupt:
             outcome = {"reason": "detach"}
         except Exception as exc:  # restore the terminal before reporting
             outcome = {"reason": "error", "detail": str(exc)}
+        finally:
+            _write_text(FOCUS_OFF)
 
     reason = outcome.get("reason")
     if reason == "exit":
