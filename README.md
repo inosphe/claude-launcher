@@ -1004,6 +1004,7 @@ outside — a supervising script or another agent can watch
 | `cflow select <opt> [--reason]` | Confirm (or override) a user-chooser branch. |
 | `cflow goto <step> [--reason]` | Force the current step (`end` finishes; journaled, re-gates, auto-nudges). On the dashboard: click a diagram node. |
 | `cflow journal [-n N]`   | Print the run journal (JSONL). |
+| `cflow archive`          | Retire the run (finished or not) into `.cflow/.../archive/`, freeing the slot for a new start. Active runs are aborted first; a new `start` auto-archives finished runs. On the dashboard: the Archive button + start picker. |
 | `cflow abort` / `reset`  | Abort the run / clear run state (journal kept). |
 | `cflow install --profile P \| --project [DIR]` | Register the MCP server + `/cflow` skill. |
 | `cflow example [name]`   | Scaffold the example workflow above. |

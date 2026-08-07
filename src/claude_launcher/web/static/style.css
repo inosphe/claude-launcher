@@ -145,9 +145,27 @@ body {
 .wf-btn.force:disabled:hover { background: #7d4e11; }
 .wf-btn.clear { background: #30363d; color: #c6cdd5; padding: 3px 10px; font-size: 11px; }
 .wf-btn.clear:hover { background: #3c444d; }
+.wf-btn.archive { background: #6e2f36; margin-top: 8px; }
+.wf-btn.archive:hover { background: #8b3a44; }
 .wf-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .wf-btn:disabled:hover { background: #30363d; }
 .wf-actions .wf-note { margin-top: 8px; }
+
+.wf-start {
+  margin: 14px 0; padding: 12px 16px; background: #1b1e24;
+  border: 1px solid #2a2e36; border-radius: 8px; max-width: 720px;
+}
+.wf-start h3 {
+  font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
+}
+.wf-start-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+.wf-start-select, .wf-start-context {
+  background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
+  border-radius: 5px; padding: 6px 9px; font-size: 13px;
+}
+.wf-start-select { max-width: 320px; }
+.wf-start-context { flex: 1 1 200px; }
+.wf-start .wf-note { margin-top: 8px; }
 
 .wf-cols { display: flex; gap: 26px; align-items: flex-start; flex-wrap: wrap; }
 .wf-diagram { flex: 0 0 480px; max-width: 100%; }

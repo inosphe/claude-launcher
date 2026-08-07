@@ -24,9 +24,11 @@ TOOLS = [
     {
         "name": "start",
         "description": (
-            "Start (or force-restart) a claunch workflow in the current "
-            "directory. Returns the first step. Workflows are YAML files in "
-            ".claunch/workflows/ (project) or ~/.claude-launcher/workflows/."
+            "Start a claunch workflow in the current directory. Returns the "
+            "first step. Workflows are YAML files in .claunch/workflows/ "
+            "(project) or ~/.claude-launcher/workflows/. Errors if a run is "
+            "still active here — resume it instead, or have it archived "
+            "first; finished (done/aborted) runs are archived automatically."
         ),
         "inputSchema": {
             "type": "object",
@@ -41,7 +43,11 @@ TOOLS = [
                 },
                 "force": {
                     "type": "boolean",
-                    "description": "abandon an existing active run and start fresh",
+                    "description": (
+                        "abort the active run, archive it (journal included), "
+                        "and start fresh — pass only with the user's explicit "
+                        "go-ahead, never on your own initiative"
+                    ),
                 },
             },
             "required": ["workflow"],

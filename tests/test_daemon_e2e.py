@@ -409,6 +409,79 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
             assert resp.status == 200
             assert (await resp.json())["status"] == "selected"
             assert cflow_engine.next_step(cwd=str(chooser))["step_id"] == "work"
+
+            # workflow listing feeds the dashboard's start picker
+            wfdir = chooser / ".claunch" / "workflows"
+            wfdir.mkdir(parents=True)
+            (wfdir / "tiny.yaml").write_text(
+                "name: tiny\ndescription: one step\n"
+                "steps:\n  only:\n    instructions: do\n",
+                encoding="utf-8",
+            )
+            resp = await client.get(
+                "/api/cflow/workflows", params={"cwd": str(chooser)}, headers=bearer
+            )
+            assert resp.status == 200
+            flows = (await resp.json())["workflows"]
+            assert any(f["name"] == "tiny" and f["steps"] == 1 for f in flows)
+
+            # web start over a still-active run: clean 400 pointing at archive
+            resp = await client.post(
+                "/api/cflow/start",
+                json={"cwd": str(chooser), "workflow": "tiny"},
+                headers=bearer,
+            )
+            assert resp.status == 400
+            assert "archive" in (await resp.json())["error"]
+
+            # archive retires the active run (aborting it) and frees the slot
+            resp = await client.post(
+                "/api/cflow/archive", json={"cwd": str(chooser)}, headers=bearer
+            )
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["status"] == "archived"
+            assert doc["was"] == "running"
+            resp = await client.post(  # nothing left to archive -> 400, not 500
+                "/api/cflow/archive", json={"cwd": str(chooser)}, headers=bearer
+            )
+            assert resp.status == 400
+
+            # slot is free: web start works; a default-scope run has no
+            # session of its own to nudge
+            resp = await client.post(
+                "/api/cflow/start",
+                json={"cwd": str(chooser), "workflow": "tiny", "context": "web"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["status"] == "step"
+            assert doc["step_id"] == "only"
+            assert doc["nudged_sessions"] == []
+
+            # for a session-bound run, archive + start nudges the session so
+            # its agent picks the new workflow up
+            gwfdir = gated / ".claunch" / "workflows"
+            gwfdir.mkdir(parents=True)
+            (gwfdir / "tiny.yaml").write_text(
+                "name: tiny\nsteps:\n  only:\n    instructions: do\n",
+                encoding="utf-8",
+            )
+            resp = await client.post(
+                "/api/cflow/archive",
+                json={"cwd": str(gated), "scope": "n1"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            resp = await client.post(
+                "/api/cflow/start",
+                json={"cwd": str(gated), "scope": "n1", "workflow": "tiny"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["nudged_sessions"] == ["n1"]
+            await _wait_screen(worker, "echo:cflow: a new workflow run")
         finally:
             await mgr.shutdown_all()
             await client.close()

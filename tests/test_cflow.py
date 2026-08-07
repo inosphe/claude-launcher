@@ -286,8 +286,60 @@ def test_start_twice_requires_force(flow_dir):
     engine.start("linear")
     with pytest.raises(CflowError, match="already active"):
         engine.start("linear")
+    with pytest.raises(CflowError, match="archive"):  # guidance in the error
+        engine.start("linear")
     payload = engine.start("linear", force=True)
     assert payload["step_id"] == "one"
+    # the forced-out run was retired into the archive, not discarded
+    archive = flow_dir / ".cflow" / "runs" / "default" / "archive"
+    entries = list(archive.iterdir())
+    assert len(entries) == 1
+    old = json.loads((entries[0] / "state.json").read_text(encoding="utf-8"))
+    assert old["status"] == "aborted"
+    events = [
+        json.loads(line)["event"]
+        for line in (entries[0] / "journal.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert events[-2:] == ["aborted", "archived"]
+
+
+def test_archive_frees_the_slot(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    started = engine.start("linear")
+    payload = engine.archive()
+    assert payload["status"] == "archived"
+    assert payload["was"] == "running"
+    assert payload["run"] == started["run"]
+    assert not state_mod.has_run()
+
+    # the slot is free: a new run starts cleanly, with a fresh journal
+    fresh = engine.start("linear")
+    assert fresh["step_id"] == "one"
+    assert fresh["run"] != started["run"]
+    events = [e["event"] for e in state_mod.read_journal()]
+    assert "archived" not in events
+
+
+def test_archive_without_run_errors(flow_dir):
+    with pytest.raises(state_mod.StateError, match="no active cflow run"):
+        engine.archive()
+
+
+def test_start_auto_archives_finished_run(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    _advance("did one")
+    assert _advance("did two")["status"] == "done"
+
+    # no error, no force: the finished run is archived out of the way
+    payload = engine.start("linear")
+    assert payload["step_id"] == "one"
+    archive = flow_dir / ".cflow" / "runs" / "default" / "archive"
+    entries = list(archive.iterdir())
+    assert len(entries) == 1
+    old = json.loads((entries[0] / "state.json").read_text(encoding="utf-8"))
+    assert old["status"] == "done"  # auto-archive does not rewrite history
 
 
 def test_status_is_readonly(flow_dir):

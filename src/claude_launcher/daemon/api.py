@@ -17,7 +17,7 @@ from pathlib import Path
 from aiohttp import web
 
 from .. import __version__, profile as profile_mod
-from ..cflow import engine as cflow_engine, state as cflow_state
+from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
 from ..cflow.state import StateError
@@ -103,6 +103,9 @@ def build_app(manager: SessionManager, token: str, *, started_at: float) -> web.
     r.add_get("/api/profiles", h_profiles)
     r.add_get("/api/cflow", h_cflow_runs)
     r.add_get("/api/cflow/run", h_cflow_run_detail)
+    r.add_get("/api/cflow/workflows", h_cflow_workflows)
+    r.add_post("/api/cflow/start", h_cflow_start)
+    r.add_post("/api/cflow/archive", h_cflow_archive)
     r.add_post("/api/cflow/approve", h_cflow_approve)
     r.add_post("/api/cflow/select", h_cflow_select)
     r.add_post("/api/cflow/nudge", h_cflow_nudge)
@@ -339,6 +342,56 @@ async def _nudge_sessions(
             continue
         nudged.append(name)
     return nudged
+
+
+async def h_cflow_workflows(request: web.Request) -> web.Response:
+    """Workflows startable in a directory (project + global) — feeds the
+    dashboard's start picker."""
+    raw = request.query.get("cwd")
+    if not raw:
+        return json_error(400, "'cwd' query parameter required")
+    cwd = str(Path(raw).resolve())
+    flows = []
+    for name, path in cflow_state.list_workflows(cwd):
+        entry = {"name": name, "path": str(path)}
+        try:
+            wf = cflow_model.load(path)
+            entry["description"] = wf.description
+            entry["steps"] = wf.step_count()
+        except WorkflowError as exc:
+            entry["error"] = str(exc)
+        flows.append(entry)
+    return web.json_response({"workflows": flows})
+
+
+async def h_cflow_start(request: web.Request) -> web.Response:
+    """Start a run from the dashboard, then nudge the scope's session so its
+    agent picks the run up. 400 while a run is still active in (cwd, scope) —
+    archive it first; the web deliberately has no force path."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    workflow = str(body.get("workflow") or "")
+    if not workflow:
+        return json_error(400, "'workflow' required in the JSON body")
+    context = str(body.get("context") or "") or None
+    payload = cflow_engine.start(workflow, context=context, cwd=cwd, scope=scope)
+    payload["nudged_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, cflow_engine.NUDGE_STARTED
+    )
+    return web.json_response(payload)
+
+
+async def h_cflow_archive(request: web.Request) -> web.Response:
+    """Retire the run (finished or not) into the scope's archive folder,
+    freeing the slot for a new start. An active run is aborted first."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, _ = resolved
+    payload = cflow_engine.archive(by="web", cwd=cwd, scope=scope)
+    return web.json_response(payload)
 
 
 async def h_cflow_approve(request: web.Request) -> web.Response:

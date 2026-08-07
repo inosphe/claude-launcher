@@ -1,4 +1,5 @@
-"""The cflow state machine: start / next / select / approve / status / abort.
+"""The cflow state machine: start / next / select / approve / status / abort
+/ archive.
 
 Position is simply the current node of the workflow graph plus per-run
 counters. Cycles are legal (they model iteration; selects are the loop
@@ -45,6 +46,9 @@ VERIFY_OUTPUT_TAIL = 4000
 NUDGE_APPROVED = "cflow: approved - continue per the /cflow protocol"
 NUDGE_SELECTED = "cflow: selection confirmed - continue per the /cflow protocol"
 NUDGE_CONTINUE = "cflow: continue per the /cflow protocol"
+NUDGE_STARTED = (
+    "cflow: a new workflow run was started - continue per the /cflow protocol"
+)
 
 
 def nudge_for_state(step_id: str) -> str:
@@ -277,6 +281,20 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
 # --------------------------------------------------------------------------- #
 # operations
 # --------------------------------------------------------------------------- #
+def _archive_current(state: dict, by: str, cwd: Optional[str]) -> str:
+    """Retire the loaded run into the scope's archive folder. A still-active
+    run is aborted first so its final status is honest; the journal moves
+    with the run, so the next run starts a fresh one."""
+    if state.get("status") not in ("done", "aborted"):
+        state["status"] = "aborted"
+        state_mod.save_state(state, cwd)
+        state_mod.journal(
+            "aborted", {"run": state["run_id"], "by": by, "reason": "archived"}, cwd
+        )
+    state_mod.journal("archived", {"run": state["run_id"], "by": by}, cwd)
+    return str(state_mod.archive_run(cwd))
+
+
 @_scoped_op
 def start(
     workflow_ref: str,
@@ -287,12 +305,19 @@ def start(
 ) -> dict:
     if state_mod.has_run(cwd):
         old = state_mod.load_state(cwd)
-        if old.get("status") not in ("done", "aborted") and not force:
+        active = old.get("status") not in ("done", "aborted")
+        if active and not force:
             raise CflowError(
                 f"a run of {old.get('workflow')!r} is already active here "
-                f"(step {old.get('current')}); resume it via 'status'/'next', "
-                f"or abort with 'claunch cflow abort' (or pass force=true)"
+                f"(step {old.get('current')}); resume it via 'status'/'next'. "
+                f"To start fresh the active run must be retired first: a human "
+                f"archives it with 'claunch cflow archive' (or the dashboard's "
+                f"Archive button), or pass force=true to abort+archive it — "
+                f"only with the user's explicit go-ahead"
             )
+        # Finished runs never block a new start; a forced start retires the
+        # active run the same way. Either way the history is kept, not lost.
+        _archive_current(old, "force" if active else "auto", cwd)
     path = state_mod.find_workflow(workflow_ref, cwd)
     text = path.read_text(encoding="utf-8")
     workflow = model.parse(text, default_name=path.stem)
@@ -685,6 +710,23 @@ def abort(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     state_mod.save_state(state, cwd)
     state_mod.journal("aborted", {"run": state["run_id"], "by": by}, cwd)
     return _done_payload(state, cwd)
+
+
+@_scoped_op
+def archive(*, by: str = "user", cwd: Optional[str] = None) -> dict:
+    """Retire the current run — finished or not — into the scope's archive
+    folder, freeing the slot for a new ``start``. An active run is aborted
+    first; state, workflow snapshot, and journal all move together."""
+    state = state_mod.load_state(cwd)
+    was = state.get("status")
+    dest = _archive_current(state, by, cwd)
+    return {
+        "run": state["run_id"],
+        "workflow": state.get("workflow"),
+        "status": "archived",
+        "was": was,
+        "archived_to": dest,
+    }
 
 
 @_scoped_op

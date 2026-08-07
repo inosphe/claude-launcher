@@ -209,6 +209,15 @@ def _cmd_abort(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_archive(args: argparse.Namespace) -> int:
+    payload = engine.archive(by="user", scope=_resolve_scope(args))
+    print(f"archived run {payload.get('run')} -> {payload.get('archived_to')}")
+    if payload.get("was") not in ("done", "aborted"):
+        print("note: the run was still active; it was aborted before archiving")
+    print("the slot is free — a new run can be started here")
+    return 0
+
+
 def _cmd_reset(args: argparse.Namespace) -> int:
     engine.reset(scope=_resolve_scope(args))
     print("cleared cflow run state (journal kept)")
@@ -307,6 +316,13 @@ def register(sub) -> None:
 
     q = _scoped(csub.add_parser("abort", help="abort the active run"))
     q.set_defaults(func=_cmd_abort)
+
+    q = _scoped(csub.add_parser(
+        "archive",
+        help="retire the run (finished or not) into .cflow/.../archive/, "
+        "freeing the slot for a new start",
+    ))
+    q.set_defaults(func=_cmd_archive)
 
     q = _scoped(csub.add_parser("reset", help="clear run state (keeps the journal)"))
     q.set_defaults(func=_cmd_reset)

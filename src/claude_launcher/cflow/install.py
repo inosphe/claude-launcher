@@ -96,9 +96,17 @@ candidates (`claunch cflow ls`) and ask which one to run.
 - A human may force the run's position while you are stopped
   (`claunch cflow goto <step>`). Whatever `status` serves after a nudge IS
   the current truth — even if it revisits a step you already finished.
-- If a tool returns an error about no active run, `start` one; if it says a
-  run is already active, resume it instead of forcing a restart unless the
-  user explicitly wants a fresh run.
+- If a tool returns an error about no active run, `start` one. If `start`
+  errors because a run is ALREADY ACTIVE, do not retry and do not force:
+  call `status` and resume that run — unless the user explicitly asked for
+  a new/different workflow. In that case the active run must be retired
+  first: ask the user to archive it (`! claunch cflow archive`, or the
+  Archive button on the daemon web dashboard), or — only with the user's
+  explicit go-ahead — call `start` with `force: true`, which aborts the
+  active run and archives it (state + journal are kept, not lost). Never
+  pass `force` on your own initiative.
+- Finished (done/aborted) runs never block: `start` archives them
+  automatically and begins the new run.
 """
 
 

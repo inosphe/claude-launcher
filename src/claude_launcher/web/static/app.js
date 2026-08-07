@@ -523,11 +523,13 @@ async function cflowAction(path, body) {
 
 function renderWf(data) {
   const view = $("wf-view");
-  view.innerHTML = "";
   if (data.status === "idle") {
-    view.appendChild(el("p", "wf-note", `no active cflow run in ${data.cwd}`));
+    // Built once and left alone: the 2s poll must not wipe the user's
+    // in-progress picker/context input.
+    if (!view.querySelector(".wf-start")) renderWfIdle(view, data);
     return;
   }
+  view.innerHTML = "";
   const run = data.run || {};
   const wf = data.workflow || { steps: [] };
 
@@ -701,7 +703,101 @@ function wfActions(data) {
     }
     box.appendChild(btn);
   }
+
+  const finished = run.status === "done" || run.status === "aborted";
+  const arch = el(
+    "button", "wf-btn archive",
+    finished ? "Archive run" : "Abort & archive run"
+  );
+  arch.title =
+    "move this run's state and journal into .cflow archive, " +
+    "freeing the slot for a new workflow";
+  arch.addEventListener("click", () => {
+    const q = finished
+      ? "Archive this finished run?\n\nIts state and journal move into " +
+        ".cflow archive; a new workflow can then be started here."
+      : "This run is still ACTIVE.\n\nAbort it and archive its state and " +
+        "journal? The agent driving it loses the run.";
+    if (confirm(q)) {
+      cflowAction("/api/cflow/archive", { cwd: data.cwd, scope: data.scope });
+    }
+  });
+  box.appendChild(arch);
   return box;
+}
+
+/* Idle (cwd, scope): offer to start a new run. Starting nudges the scope's
+   session so its agent picks the workflow up per the /cflow protocol. */
+async function renderWfIdle(view, data) {
+  view.innerHTML = "";
+  view.appendChild(el("p", "wf-note", `no active cflow run in ${data.cwd}`));
+  const box = el("div", "wf-start");
+  view.appendChild(box); // present immediately so the poll doesn't rebuild
+  const cwd = data.cwd;
+  const scope = data.scope || "default";
+  box.appendChild(el("h3", null,
+    scope !== "default" ? `Start a workflow — session ${scope}` : "Start a workflow"));
+
+  let flows = [];
+  try {
+    const resp = await api(`/api/cflow/workflows?cwd=${encodeURIComponent(cwd)}`);
+    flows = ((await resp.json()).workflows || []).filter((w) => !w.error);
+  } catch { return; }
+  if (wfCwd !== cwd) return; // navigated away while loading
+  if (!flows.length) {
+    box.appendChild(el(
+      "p", "wf-note",
+      "no workflows found — add one under .claunch/workflows/ " +
+      "or scaffold with 'claunch cflow example'"
+    ));
+    return;
+  }
+
+  const sel = document.createElement("select");
+  sel.className = "wf-start-select";
+  for (const w of flows) {
+    const opt = document.createElement("option");
+    opt.value = w.name;
+    opt.textContent = w.description ? `${w.name} — ${w.description}` : w.name;
+    sel.appendChild(opt);
+  }
+  const ctx = document.createElement("input");
+  ctx.type = "text";
+  ctx.className = "wf-start-context";
+  ctx.placeholder = "context for the run (optional)";
+  const btn = el("button", "wf-btn approve", "Start");
+  btn.addEventListener("click", async () => {
+    const workflow = sel.value;
+    const who = scope !== "default" ? ` for session '${scope}'` : "";
+    if (!confirm(`Start workflow '${workflow}'${who}?`)) return;
+    try {
+      const resp = await api("/api/cflow/start", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ cwd, scope, workflow, context: ctx.value.trim() }),
+      });
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        alert(doc.error || `HTTP ${resp.status}`);
+        return;
+      }
+      if (!(doc.nudged_sessions || []).length) {
+        alert(
+          "run started, but no live session was nudged — tell the agent " +
+          "to continue (it picks the run up via the /cflow protocol)"
+        );
+      }
+    } catch { return; }
+    refreshWf();
+    refreshCflow();
+  });
+  const row = el("div", "wf-start-row");
+  row.append(sel, ctx, btn);
+  box.appendChild(row);
+  box.appendChild(el(
+    "p", "wf-note",
+    "starting nudges this run's session so its agent picks the workflow up"
+  ));
 }
 
 async function nudgeRun(cwd, scope) {

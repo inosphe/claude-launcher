@@ -8,6 +8,9 @@ Runs are keyed by **(working directory, scope)** and stored under
 - ``state.json``   — cursor, status, approvals, pending selection
 - ``journal.jsonl``— append-only event log (started, delivered, completed,
   verify results, selections, approvals, done/aborted)
+- ``archive/<stamp>-<run_id>/`` — retired runs, one folder each holding the
+  three files above; ``archive`` (or a new ``start`` over a finished run)
+  moves them there, freeing the slot
 
 The *scope* maps a run 1:1 to the agent session driving it: the daemon
 exports ``CLAUNCH_SESSION=<name>`` into every managed session (tmux's
@@ -268,6 +271,31 @@ def clear_state(cwd: Optional[str] = None) -> None:
             path.unlink()
         except OSError:
             pass
+
+
+#: Files that make up one run inside its scope directory.
+RUN_FILES = ("state.json", "workflow.yaml", "journal.jsonl")
+
+
+def archive_run(cwd: Optional[str] = None) -> Path:
+    """Retire the scope's current run: move its files (journal included)
+    into ``archive/<stamp>-<run_id>/`` inside the scope directory, freeing
+    the (cwd, scope) slot for a new ``start``. Returns the archive folder."""
+    state = load_state(cwd)  # StateError if there is nothing to archive
+    sdir = scope_dir(cwd)
+    run_id = str(state.get("run_id") or "run")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    target = sdir / "archive" / f"{stamp}-{run_id}"
+    n = 0
+    while target.exists():
+        n += 1
+        target = sdir / "archive" / f"{stamp}-{run_id}-{n}"
+    target.mkdir(parents=True)
+    for name in RUN_FILES:
+        src = sdir / name
+        if src.is_file():
+            src.rename(target / name)
+    return target
 
 
 def snapshot_workflow(text: str, cwd: Optional[str] = None) -> None:

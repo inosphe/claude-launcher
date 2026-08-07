@@ -293,6 +293,8 @@ steps: a typo in some `next`, or leftovers to delete).
 
 **Edit, re-show, restart.** A run snapshots the YAML at `start`, so editing
 the file never corrupts an active run — but it also means edits only apply
-to the *next* run (`claunch cflow abort`, then `/cflow <name> ...` again).
+to the *next* run (`claunch cflow archive` to retire the active run —
+finished or not — into `.cflow/.../archive/`, then `/cflow <name> ...`
+again; the web dashboard's Archive button and start picker do the same).
 Iterate on a workflow by running `claunch cflow show <name>` after each edit
 until the graph and warnings look right.
