@@ -44,10 +44,32 @@ def test_values_coerced_to_str(home):
     assert settings.get_env(p) == {"N": "5"}
 
 
-def test_merge_mcp_servers_writes_native_settings(home):
+def test_merge_mcp_servers_writes_user_scope_claude_json(home):
+    """Claude Code ignores mcpServers in settings.json; the user-scope home
+    inside CLAUDE_CONFIG_DIR is .claude.json (claude mcp add --scope user)."""
     p = profile.create("work")
+    (p.config_dir / ".claude.json").write_text(
+        json.dumps({"oauthAccount": "keep-me"}), encoding="utf-8"
+    )
     settings.merge_mcp_servers(p, {"srv": {"command": "x"}})
-    data = json.loads((p.config_dir / "settings.json").read_text(encoding="utf-8"))
-    assert data["mcpServers"]["srv"] == {"command": "x"}
+    doc = json.loads((p.config_dir / ".claude.json").read_text(encoding="utf-8"))
+    assert doc["mcpServers"]["srv"] == {"command": "x"}
+    assert doc["oauthAccount"] == "keep-me"  # unrelated claude state preserved
+    assert "mcpServers" not in settings.load(p)  # never settings.json
     # mcp config must NOT leak into the env store.
     assert "mcpServers" not in store.profile_entry("work")
+
+
+def test_merge_mcp_servers_cleans_stale_settings_entry(home):
+    """Entries an older launcher wrote into settings.json are moved out —
+    but only same-named ones; foreign entries there are not ours to touch."""
+    p = profile.create("work")
+    settings.save(
+        p, {"mcpServers": {"srv": {"command": "old"}, "other": {"command": "keep"}}}
+    )
+    settings.merge_mcp_servers(p, {"srv": {"command": "new"}})
+    stale = settings.load(p)["mcpServers"]
+    assert "srv" not in stale
+    assert stale["other"] == {"command": "keep"}
+    doc = json.loads((p.config_dir / ".claude.json").read_text(encoding="utf-8"))
+    assert doc["mcpServers"]["srv"] == {"command": "new"}

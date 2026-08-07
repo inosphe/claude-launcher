@@ -1,7 +1,9 @@
 """Install cflow into a profile or a project: MCP registration + /cflow skill.
 
 - MCP: registers ``cflow`` as a stdio server running ``claunch cflow mcp``
-  (into a profile's ``settings.json`` ``mcpServers``, or a project ``.mcp.json``).
+  (into a profile's user-scope ``.claude.json`` ``mcpServers`` — the location
+  Claude Code actually reads, not ``settings.json`` — or a project
+  ``.mcp.json``).
 - Skill: writes ``skills/cflow/SKILL.md`` so ``/cflow <workflow> [context]``
   primes the agent with the execution protocol.
 """
@@ -9,13 +11,24 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 from typing import List
 
 from .. import settings
 from ..profile import Profile
 
-MCP_SERVER = {"command": "claunch", "args": ["cflow", "mcp"]}
+
+def mcp_server_def() -> dict:
+    """The stdio server entry for the cflow MCP bridge.
+
+    On Windows ``claunch`` on PATH is typically a ``.bat``/``.cmd`` shim,
+    which Claude Code's spawn (no shell) cannot exec directly — wrap in
+    ``cmd /c``.
+    """
+    if sys.platform == "win32":
+        return {"command": "cmd", "args": ["/c", "claunch", "cflow", "mcp"]}
+    return {"command": "claunch", "args": ["cflow", "mcp"]}
 
 SKILL_MD = """\
 ---
@@ -92,8 +105,8 @@ candidates (`claunch cflow ls`) and ask which one to run.
 def install_into_profile(profile: Profile) -> List[str]:
     """Register the MCP server + skill inside a profile's config dir."""
     done = []
-    settings.merge_mcp_servers(profile, {"cflow": dict(MCP_SERVER)})
-    done.append(f"mcp server 'cflow' -> {profile.config_dir / 'settings.json'}")
+    settings.merge_mcp_servers(profile, {"cflow": mcp_server_def()})
+    done.append(f"mcp server 'cflow' -> {profile.config_dir / settings.CLAUDE_JSON}")
     done.append(f"skill -> {_write_skill(profile.config_dir / 'skills')}")
     return done
 
@@ -110,7 +123,7 @@ def install_into_project(project_dir: Path) -> List[str]:
         doc = {}
     servers = doc.setdefault("mcpServers", {})
     if isinstance(servers, dict):
-        servers["cflow"] = dict(MCP_SERVER)
+        servers["cflow"] = mcp_server_def()
     mcp_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
     done.append(f"mcp server 'cflow' -> {mcp_path}")
     done.append(f"skill -> {_write_skill(project_dir / '.claude' / 'skills')}")

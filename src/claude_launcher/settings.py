@@ -6,9 +6,11 @@ launcher injects it into ``claude``'s process at launch. The ``get_env`` /
 ``set_env`` / ``replace_env`` / ``unset_env`` helpers here read and write that
 central store.
 
-``load`` / ``save`` / ``merge_mcp_servers`` still touch the profile's own
-``<CLAUDE_CONFIG_DIR>/settings.json`` — that file is Claude Code's, and its
-``mcpServers`` block is read by Claude Code directly, so it stays per-profile.
+``load`` / ``save`` touch the profile's own ``<CLAUDE_CONFIG_DIR>/settings.json``
+(Claude Code's settings file). ``merge_mcp_servers`` is different: Claude Code
+does NOT read ``mcpServers`` from ``settings.json`` — user-scope MCP servers
+live in ``<CLAUDE_CONFIG_DIR>/.claude.json`` (what ``claude mcp add --scope
+user`` writes), so that is where it merges.
 """
 
 from __future__ import annotations
@@ -72,13 +74,47 @@ def unset_env(profile: Profile, keys: Iterable[str]) -> Dict[str, str]:
     return env
 
 
+CLAUDE_JSON = ".claude.json"
+
+
 def merge_mcp_servers(profile: Profile, servers: Mapping[str, dict]) -> Dict[str, dict]:
-    """Merge MCP server definitions into the profile's native ``settings.json``."""
-    data = load(profile)
-    existing = data.get("mcpServers")
+    """Merge MCP servers into the profile's user-scope config (``.claude.json``).
+
+    Claude Code silently ignores ``mcpServers`` in ``settings.json``; the
+    user-scope location inside ``CLAUDE_CONFIG_DIR`` is ``.claude.json``.
+    Same-named entries that earlier launcher versions wrote into
+    ``settings.json`` are dropped so no dead config lingers (other entries
+    there are left untouched — they are not ours).
+    """
+    path = profile.config_dir / CLAUDE_JSON
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        doc = {}
+    if not isinstance(doc, dict):
+        doc = {}
+    existing = doc.get("mcpServers")
     if not isinstance(existing, dict):
         existing = {}
     existing.update(servers)
-    data["mcpServers"] = existing
-    save(profile, data)
+    doc["mcpServers"] = existing
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    _drop_stale_settings_servers(profile, servers)
     return existing
+
+
+def _drop_stale_settings_servers(profile: Profile, servers: Mapping[str, dict]) -> None:
+    data = load(profile)
+    stale = data.get("mcpServers")
+    if not isinstance(stale, dict):
+        return
+    hit = False
+    for name in servers:
+        if name in stale:
+            del stale[name]
+            hit = True
+    if not hit:
+        return
+    if not stale:
+        del data["mcpServers"]
+    save(profile, data)
