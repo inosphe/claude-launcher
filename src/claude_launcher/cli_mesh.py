@@ -126,7 +126,15 @@ def _cmd_leave(args: argparse.Namespace) -> int:
 
 def _cmd_send(args: argparse.Namespace) -> int:
     text = sys.stdin.read() if args.text == ["-"] else " ".join(args.text)
-    if not text.strip():
+    sections = {}
+    for item in args.section or []:
+        handle, sep, sec_text = item.partition("=")
+        if not sep or not handle or not sec_text:
+            print(f"error: --section needs HANDLE=TEXT, got {item!r}",
+                  file=sys.stderr)
+            return 1
+        sections[handle] = sec_text
+    if not text.strip() and not sections:
         print("error: empty message", file=sys.stderr)
         return 1
     sender = args.sender or _own_session(args)
@@ -138,16 +146,18 @@ def _cmd_send(args: argparse.Namespace) -> int:
         )
         return 1
     client = daemon_client.ensure_running()
-    result = client.post(
-        f"/api/mesh/{args.mesh}/messages",
-        {
-            "from": sender,
-            "to": args.to,
-            "body": text,
-            "external": bool(args.external),
-            "type": args.type,
-        },
-    )
+    payload = {
+        "from": sender,
+        "to": args.to,
+        "body": text if text.strip() else "",
+        "external": bool(args.external),
+        "type": args.type,
+    }
+    if args.reply_to:
+        payload["reply_to"] = args.reply_to
+    if sections:
+        payload["sections"] = sections
+    result = client.post(f"/api/mesh/{args.mesh}/messages", payload)
     recipients = result.get("recipients", [])
     queued = result.get("queued_remote", [])
     line = f"sent {result.get('id')} to {', '.join(recipients) or '(nobody)'}"
@@ -271,7 +281,9 @@ def _cmd_history(args: argparse.Namespace) -> int:
         body = str(m.get("body") or "")
         intent = str(m.get("type") or "say")
         tag = f" [{intent}]" if intent != "say" else ""
-        print(f"[{m.get('ts')}] {m.get('from')} -> {to_s}{tag}: {body}")
+        if m.get("reply_to"):
+            tag += f" [re {m['reply_to']}]"
+        print(f"[{m.get('ts')}] {m.get('id')} {m.get('from')} -> {to_s}{tag}: {body}")
     return 0
 
 
@@ -324,6 +336,13 @@ def register(sub) -> None:
     p.add_argument("--type", default="say",
                    help="message intent: say (default), ask, or the no-reply "
                         "fyi/ack -- recipients owe no answer to fyi/ack")
+    p.add_argument("--reply-to", dest="reply_to", metavar="MSGID",
+                   help="thread this message to an earlier message id "
+                        "(ids are shown in delivery blocks and history)")
+    p.add_argument("--section", action="append", metavar="HANDLE=TEXT",
+                   help="batch send: per-recipient addendum; the main text "
+                        "becomes the shared preamble and each recipient is "
+                        "delivered only its own slice (repeatable)")
     p.set_defaults(func=_cmd_send)
 
     p = msub.add_parser(
