@@ -24,9 +24,19 @@
   <aside id="sidebar">
     <header>
       <h1>claunch</h1>
+      <span id="relay-badge" class="badge hidden"></span>
       <span id="daemon-info"></span>
     </header>
     <ul id="session-list"></ul>
+    <div id="mesh-panel">
+      <h3>Mesh</h3>
+      <ul id="mesh-list"></ul>
+      <form id="new-mesh">
+        <input name="name" placeholder="new mesh name" autocomplete="off">
+        <button type="submit">Create</button>
+        <p id="mesh-error" class="error hidden"></p>
+      </form>
+    </div>
     <div id="cflow-panel" class="hidden">
       <h3>Workflows</h3>
       <ul id="cflow-list"></ul>
@@ -50,6 +60,7 @@
     </div>
     <div id="terminal"></div>
     <div id="wf-view" class="hidden"></div>
+    <div id="mesh-view" class="hidden"></div>
     <div id="placeholder">Select or create a session.</div>
   </main>
 </div>

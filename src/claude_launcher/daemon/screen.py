@@ -7,8 +7,9 @@ pyte keeps an authoritative rendered grid (plus scrollback history) that the
 capture and idle-detection features read.
 
 pyte does not track DECCKM (application cursor keys, private mode 1), which
-``send-keys`` needs to encode arrow keys the way the running program expects —
-so this module watches the byte stream for ``CSI ? 1 h/l`` itself.
+``send-keys`` needs to encode arrow keys the way the running program expects,
+nor bracketed paste (private mode 2004), which paste injection needs — so this
+module watches the byte stream for ``CSI ? Pm h/l`` itself.
 """
 
 from __future__ import annotations
@@ -76,6 +77,7 @@ class ScreenState:
         self._stream = pyte.ByteStream(self._screen)
         self._mode_tail = b""
         self.app_cursor_keys = False
+        self.bracketed_paste = False
 
     @property
     def cols(self) -> int:
@@ -95,6 +97,8 @@ class ScreenState:
             params = match.group(1).split(b";")
             if b"1" in params:
                 self.app_cursor_keys = match.group(2) == b"h"
+            if b"2004" in params:
+                self.bracketed_paste = match.group(2) == b"h"
         self._mode_tail = window[-_TAIL:]
 
     def resize(self, cols: int, rows: int) -> None:

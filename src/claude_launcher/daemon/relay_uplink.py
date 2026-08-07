@@ -70,6 +70,10 @@ class RelayUplink:
         self._send_lock = asyncio.Lock()
         self._last_recv = 0.0
         self._stop = asyncio.Event()
+        #: True while registered with the relay (surfaced as relay status in
+        #: the API/CLI/web so users always see whether the mesh can span
+        #: machines right now).
+        self.connected = False
 
     async def run(self) -> None:
         """Reconnect loop. Runs until :meth:`stop` is called."""
@@ -118,12 +122,14 @@ class RelayUplink:
                     log.warning("relay rejected REGISTER (bad token?) — will retry")
                     return
                 log.info("registered with relay as %r at %s", self.name, self.url)
+                self.connected = True
 
                 ping = asyncio.ensure_future(self._keepalive())
                 watchdog = asyncio.ensure_future(self._watchdog())
                 try:
                     await self._recv_loop(ws)
                 finally:
+                    self.connected = False
                     ping.cancel()
                     watchdog.cancel()
                     await self._close_all_streams()

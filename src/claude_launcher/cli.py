@@ -17,6 +17,7 @@ from . import (
     __version__,
     bootstrap,
     cli_cflow,
+    cli_mesh,
     cli_sessions,
     config,
     credentials,
@@ -734,6 +735,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_provs.set_defaults(func=_cmd_providers)
 
     cli_sessions.register(sub)
+    cli_mesh.register(sub)
     cli_cflow.register(sub)
 
     return parser

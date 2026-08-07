@@ -19,6 +19,7 @@ from .. import daemon_client, store
 from . import paths, runtime_state
 from .api import build_app
 from .manager import SessionManager
+from .mesh import MeshManager
 
 log = logging.getLogger("claunch.daemon")
 
@@ -50,8 +51,30 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     if restored:
         log.info("restored sessions: %s", ", ".join(restored))
 
+    mesh_manager = MeshManager(manager)
+    mesh_manager.load_all()
+
     token = runtime_state.load_or_create_token()
-    app = build_app(manager, token, started_at=time.monotonic())
+    relay_state = {"uplink": None}
+
+    def _relay_state() -> dict:
+        uplink = relay_state["uplink"]
+        if uplink is None:
+            return {"configured": False, "connected": False, "name": None}
+        return {
+            "configured": True,
+            "connected": uplink.connected,
+            "name": uplink.name,
+            "url": uplink.url,
+        }
+
+    app = build_app(
+        manager,
+        token,
+        started_at=time.monotonic(),
+        mesh=mesh_manager,
+        relay_state=_relay_state,
+    )
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -74,6 +97,8 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     log.info("listening on http://%s:%s", host, actual_port)
 
     uplink, uplink_task = _start_uplink(actual_port)
+    relay_state["uplink"] = uplink
+    mesh_manager.start()
 
     try:
         await app["shutdown_event"].wait()
@@ -89,6 +114,7 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
                 await uplink_task
             except (asyncio.CancelledError, Exception):
                 pass
+        await mesh_manager.shutdown()
         runtime_state.remove_daemon_json()
         await manager.shutdown_all()
         await runner.cleanup()

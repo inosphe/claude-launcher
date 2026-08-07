@@ -326,7 +326,10 @@ function attach(name) {
   detach();
   currentName = name;
   stopWfPoll();
-  if (location.hash.startsWith("#/wf/")) history.replaceState(null, "", "#");
+  stopMeshPoll();
+  if (location.hash.startsWith("#/wf/") || location.hash.startsWith("#/mesh/")) {
+    history.replaceState(null, "", "#");
+  }
   showView("terminal");
   $("term-title").textContent = name;
   document.querySelectorAll("#session-list li").forEach((li) =>
@@ -439,7 +442,10 @@ function showView(name) {
   $("term-header").classList.toggle("hidden", !(showTerm && currentName));
   $("terminal").classList.toggle("hidden", !showTerm);
   $("wf-view").classList.toggle("hidden", name !== "wf");
-  $("placeholder").classList.toggle("hidden", showTerm || name === "wf");
+  $("mesh-view").classList.toggle("hidden", name !== "mesh");
+  $("placeholder").classList.toggle(
+    "hidden", showTerm || name === "wf" || name === "mesh"
+  );
 }
 
 function stopWfPoll() {
@@ -487,12 +493,17 @@ function selectWfStep(step) {
 function route() {
   const h = location.hash || "";
   if (h.startsWith("#/wf/")) {
+    stopMeshPoll();
     const token = decodeURIComponent(h.slice(5));
     const sep = token.indexOf("|");
     if (sep >= 0) openWorkflow(token.slice(sep + 1), token.slice(0, sep));
     else openWorkflow(token, "default"); // pre-scope links
+  } else if (h.startsWith("#/mesh/")) {
+    stopWfPoll();
+    openMesh(decodeURIComponent(h.slice(7)));
   } else {
     stopWfPoll();
+    stopMeshPoll();
     showView(currentName && term ? "terminal" : "placeholder");
   }
 }
@@ -1011,6 +1022,317 @@ function wfDiagramSvg(wf, run, selected) {
 }
 
 /* ------------------------------------------------------------------ */
+/* mesh: group sessions, message between them                         */
+/* ------------------------------------------------------------------ */
+let meshName = null;      // mesh open in the detail view
+let meshPollTimer = null;
+let meshCache = [];       // sidebar list payload
+
+/* Relay connectivity is surfaced permanently in the header: mesh can only
+   span machines while the uplink is registered, so the state must never be
+   more than one glance away. */
+function renderRelayBadge(relay) {
+  const badge = $("relay-badge");
+  if (!relay) return;
+  badge.classList.remove("hidden");
+  if (!relay.configured) {
+    badge.textContent = "relay: off";
+    badge.className = "badge relay-off";
+    badge.title = "no relay uplink configured — sessions and mesh are local to this machine";
+  } else if (relay.connected) {
+    badge.textContent = `relay: ${relay.name}`;
+    badge.className = "badge relay-on";
+    badge.title = `connected to ${relay.url || "the relay"} as '${relay.name}'`;
+  } else {
+    badge.textContent = "relay: down";
+    badge.className = "badge relay-down";
+    badge.title = `uplink to ${relay.url || "the relay"} is disconnected — remote machines unreachable`;
+  }
+}
+
+async function refreshMeshList() {
+  let data;
+  try {
+    const resp = await api("/api/mesh");
+    data = await resp.json();
+  } catch {
+    return;
+  }
+  renderRelayBadge(data.relay);
+  meshCache = data.meshes || [];
+  const list = $("mesh-list");
+  list.innerHTML = "";
+  if (!meshCache.length) {
+    const li = el("li", "mesh-empty", "no meshes — create one below");
+    list.appendChild(li);
+  }
+  for (const m of meshCache) {
+    const li = document.createElement("li");
+    li.className = "clickable";
+    if (m.name === meshName) li.classList.add("active");
+    const label = el("span", null, m.name);
+    const meta = el(
+      "span", "meta",
+      `${m.members.length} member${m.members.length === 1 ? "" : "s"} · ${m.messages} msg`
+    );
+    li.append(label, meta);
+    li.addEventListener("click", () => {
+      location.hash = "#/mesh/" + encodeURIComponent(m.name);
+    });
+    list.appendChild(li);
+  }
+}
+
+$("new-mesh").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const name = f.name.value.trim();
+  if (!name) return;
+  const resp = await api("/api/mesh", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ name }),
+  });
+  const err = $("mesh-error");
+  if (!resp.ok) {
+    const doc = await resp.json().catch(() => ({}));
+    err.textContent = doc.error || `HTTP ${resp.status}`;
+    err.classList.remove("hidden");
+    return;
+  }
+  err.classList.add("hidden");
+  f.name.value = "";
+  await refreshMeshList();
+  location.hash = "#/mesh/" + encodeURIComponent(name);
+});
+
+function stopMeshPoll() {
+  if (meshPollTimer) { clearInterval(meshPollTimer); meshPollTimer = null; }
+  meshName = null;
+}
+
+async function openMesh(name) {
+  if (meshPollTimer) clearInterval(meshPollTimer);
+  meshName = name;
+  showView("mesh");
+  $("mesh-view").innerHTML = "<p class='wf-note'>loading…</p>";
+  await refreshMeshView();
+  meshPollTimer = setInterval(refreshMeshView, 2000);
+}
+
+async function refreshMeshView() {
+  if (!meshName) return;
+  let info, history;
+  try {
+    const [r1, r2] = await Promise.all([
+      api(`/api/mesh/${encodeURIComponent(meshName)}`),
+      api(`/api/mesh/${encodeURIComponent(meshName)}/messages?limit=100`),
+    ]);
+    info = await r1.json();
+    if (!r1.ok) {
+      $("mesh-view").innerHTML = "";
+      $("mesh-view").appendChild(el("p", "wf-warning", info.error || "cannot load mesh"));
+      return;
+    }
+    history = r2.ok ? (await r2.json()).messages || [] : [];
+  } catch {
+    return;
+  }
+  renderRelayBadge(info.relay);
+  renderMesh(info, history);
+}
+
+/* The send/add forms must survive the 2s poll: rebuild everything except a
+   form the user is currently typing in. */
+function formInUse(root) {
+  return root.contains(document.activeElement) &&
+    ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
+}
+
+function renderMesh(info, history) {
+  const view = $("mesh-view");
+  if (formInUse(view)) return; // don't wipe in-progress input
+  view.innerHTML = "";
+
+  const head = el("div", "wf-head");
+  head.appendChild(el("h2", null, `mesh: ${info.name}`));
+  const rm = el("button", "wf-btn archive", "Remove mesh");
+  rm.addEventListener("click", async () => {
+    if (!confirm(`Remove mesh '${info.name}'? Its history is retired on disk.`)) return;
+    await api(`/api/mesh/${encodeURIComponent(info.name)}`, { method: "DELETE" });
+    location.hash = "#";
+    refreshMeshList();
+  });
+  head.appendChild(rm);
+  view.appendChild(head);
+  view.appendChild(el(
+    "p", "wf-desc",
+    "messages are typed into recipients' terminals by the daemon — " +
+    "agents reply with: claunch mesh send " + info.name + " <to|*> \"...\""
+  ));
+
+  // members table
+  const members = info.members || [];
+  const box = el("div", "mesh-members");
+  box.appendChild(el("h3", null, "Members"));
+  if (!members.length) {
+    box.appendChild(el("p", "wf-note", "no members yet — enrol a session below"));
+  }
+  for (const m of members) {
+    const row = el("div", "mesh-member");
+    const dot = el("span", `dot ${meshDotClass(m.reachability)}`);
+    const name = el("span", "mesh-handle", m.handle);
+    const role = el("span", "mesh-role", m.role);
+    const where = el(
+      "span", "mesh-session mono",
+      (m.machine ? m.machine + "/" : "") + m.session
+    );
+    if (!m.machine) {
+      where.classList.add("linkish");
+      where.title = "attach this session's terminal";
+      where.addEventListener("click", () => attach(m.session));
+    }
+    const state = el("span", "meta", m.reachability +
+      (m.pending ? ` · ${m.pending} pending` : ""));
+    const kick = el("button", "mesh-kick", "×");
+    kick.title = `remove '${m.handle}' from the mesh`;
+    kick.addEventListener("click", async () => {
+      if (!confirm(`Remove member '${m.handle}'?`)) return;
+      await api(
+        `/api/mesh/${encodeURIComponent(info.name)}/members/${encodeURIComponent(m.handle)}`,
+        { method: "DELETE" }
+      );
+      refreshMeshView();
+      refreshMeshList();
+    });
+    row.append(dot, name, role, where, state, kick);
+    box.appendChild(row);
+  }
+
+  // enrol form: any live session not already a member
+  const taken = new Set(members.filter((m) => !m.machine).map((m) => m.session));
+  const candidates = sessionsCache.filter(
+    (s) => s.status !== "exited" && !taken.has(s.name)
+  );
+  const addRow = el("div", "mesh-add");
+  const sel = document.createElement("select");
+  for (const s of candidates) {
+    const opt = document.createElement("option");
+    opt.value = s.name;
+    opt.textContent = s.name;
+    sel.appendChild(opt);
+  }
+  const handle = document.createElement("input");
+  handle.placeholder = "handle (default: session name)";
+  const addBtn = el("button", "wf-btn option", "Add to mesh");
+  addBtn.disabled = !candidates.length;
+  if (!candidates.length) addBtn.title = "no unenrolled live sessions";
+  addBtn.addEventListener("click", async () => {
+    const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/members`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ session: sel.value, handle: handle.value.trim() }),
+    });
+    if (!resp.ok) {
+      const doc = await resp.json().catch(() => ({}));
+      alert(doc.error || `HTTP ${resp.status}`);
+      return;
+    }
+    handle.value = "";
+    refreshMeshView();
+    refreshMeshList();
+  });
+  addRow.append(sel, handle, addBtn);
+  box.appendChild(addRow);
+  view.appendChild(box);
+
+  // send box: as the human operator, or on behalf of a member
+  const send = el("div", "mesh-send");
+  send.appendChild(el("h3", null, "Send message"));
+  const from = document.createElement("select");
+  {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "from: operator (you)";
+    from.appendChild(opt);
+  }
+  for (const m of members) {
+    const opt = document.createElement("option");
+    opt.value = m.handle;
+    opt.textContent = `from: ${m.handle}`;
+    from.appendChild(opt);
+  }
+  const to = document.createElement("select");
+  {
+    const opt = document.createElement("option");
+    opt.value = "*";
+    opt.textContent = "to: * (everyone)";
+    to.appendChild(opt);
+  }
+  for (const m of members) {
+    const opt = document.createElement("option");
+    opt.value = m.handle;
+    opt.textContent = `to: ${m.handle}`;
+    to.appendChild(opt);
+  }
+  const text = document.createElement("textarea");
+  text.placeholder = "message — delivered by typing into the recipient's terminal";
+  text.rows = 3;
+  const sendBtn = el("button", "wf-btn approve", "Send");
+  sendBtn.addEventListener("click", async () => {
+    const body = text.value.trim();
+    if (!body) return;
+    const external = !from.value;
+    const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/messages`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        from: from.value || "operator",
+        to: to.value === "*" ? "*" : to.value,
+        body,
+        external,
+      }),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(doc.error || `HTTP ${resp.status}`);
+      return;
+    }
+    text.value = "";
+    text.blur();
+    refreshMeshView();
+  });
+  const row = el("div", "mesh-send-row");
+  row.append(from, to);
+  send.append(row, text, sendBtn);
+  view.appendChild(send);
+
+  // message log (latest last, like a chat)
+  const logBox = el("div", "mesh-log");
+  logBox.appendChild(el("h3", null, `Messages (${info.messages})`));
+  if (!history.length) logBox.appendChild(el("p", "wf-note", "no messages yet"));
+  for (const m of history) {
+    const line = el("div", "mesh-msg");
+    const meta = el("div", "mesh-msg-meta");
+    const toS = m.to === "*" ? "everyone" : (Array.isArray(m.to) ? m.to.join(", ") : m.to);
+    meta.appendChild(el("span", "mesh-msg-from", m.from));
+    meta.appendChild(el("span", null, `→ ${toS}`));
+    meta.appendChild(el("span", "mesh-msg-at", (m.ts || "").replace("T", " ")));
+    line.appendChild(meta);
+    line.appendChild(el("div", "mesh-msg-body", m.body || ""));
+    logBox.appendChild(line);
+  }
+  view.appendChild(logBox);
+}
+
+function meshDotClass(reachability) {
+  if (reachability === "idle") return "idle";
+  if (reachability === "busy" || reachability === "starting") return "busy";
+  if (reachability === "remote") return "starting";
+  return "exited"; // exited / missing / unknown
+}
+
+/* ------------------------------------------------------------------ */
 /* boot                                                               */
 /* ------------------------------------------------------------------ */
 let pollTimer = null;
@@ -1019,15 +1341,21 @@ async function boot() {
     const resp = await api("/api/daemon");
     const info = await resp.json();
     $("daemon-info").textContent = `v${info.version}`;
+    renderRelayBadge(info.relay);
   } catch {
     return; // auth overlay is up
   }
   refreshProfiles();
   refreshSessions();
+  refreshMeshList();
   refreshCflow();
   route();
   if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(() => { refreshSessions(); refreshCflow(); }, 2000);
+  pollTimer = setInterval(() => {
+    refreshSessions();
+    refreshMeshList();
+    refreshCflow();
+  }, 2000);
 }
 
 boot();

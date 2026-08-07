@@ -12,6 +12,7 @@ running program controls — the caller passes the session's current mode.
 
 from __future__ import annotations
 
+import re
 from typing import Dict, Iterable, Tuple
 
 
@@ -115,6 +116,36 @@ def _encode_key(arg: str, app_cursor: bool) -> bytes:
         # keys — mirror tmux, where "a" sends "a".
         raise LookupError(arg)
     return _encode_name(arg, app_cursor)
+
+
+#: C0 controls and DEL, except tab and the newline forms handled explicitly.
+#: Stripping (not escaping) — pasted text must not be able to smuggle an ESC
+#: sequence (or a premature paste-end marker) into the recipient's terminal.
+_PASTE_CTRL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
+
+_PASTE_START = b"\x1b[200~"
+_PASTE_END = b"\x1b[201~"
+
+
+def encode_paste(text: str, *, bracketed: bool, enter: bool = False) -> bytes:
+    """Encode ``text`` as one paste, so embedded newlines don't submit per line.
+
+    Newlines become CR — what a real terminal sends for pasted line breaks;
+    other control characters are stripped (see ``_PASTE_CTRL_RE``). When the
+    running program has opted into bracketed paste (DECSET 2004, tracked by
+    :class:`~claude_launcher.daemon.screen.ScreenState`), the payload is
+    wrapped in the paste markers so the program treats those CRs as text
+    rather than submissions. ``enter`` appends a submitting CR *after* the
+    paste.
+    """
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    normalized = _PASTE_CTRL_RE.sub("", normalized)
+    payload = normalized.replace("\n", "\r").encode("utf-8")
+    if bracketed:
+        payload = _PASTE_START + payload + _PASTE_END
+    if enter:
+        payload += b"\r"
+    return payload
 
 
 def encode_keys(args: Iterable[str], *, literal: bool = False, app_cursor: bool = False) -> bytes:

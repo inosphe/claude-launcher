@@ -51,3 +51,13 @@ def session_dir(name: str) -> Path:
 def session_log(name: str) -> Path:
     """Append-only raw PTY output log for a session."""
     return session_dir(name) / "output.log"
+
+
+def mesh_root() -> Path:
+    """Root for mesh state (definitions, message logs, delivery cursors)."""
+    return daemon_dir() / "mesh"
+
+
+def mesh_dir(name: str) -> Path:
+    """Per-mesh directory: ``mesh.json``, ``log.jsonl``, ``cursors.json``."""
+    return mesh_root() / name

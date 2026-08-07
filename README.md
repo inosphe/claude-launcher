@@ -776,6 +776,42 @@ builds its environment exactly like `claunch run` (profile config dir,
 provider, token) and additionally strips nested-session markers so a claude
 launched from inside another claude session still persists transcripts.
 
+## Mesh (session-to-session messaging)
+
+Group sessions into a **mesh** and let the agents inside them message each
+other. Delivery is the daemon **typing into the recipient's terminal**
+(bracketed paste + Enter, coalesced while the recipient is mid-turn using the
+idle tracker) — receivers need no watcher, no polling, no hooks and no MCP
+server; arrival *is* the wake-up. Any harness works. Design notes:
+`docs/mesh-design.md`.
+
+```bash
+claunch mesh create dev
+claunch mesh join dev --session alpha --as leader     # or from inside a
+claunch mesh join dev --as worker_1                   # session: $CLAUNCH_SESSION
+claunch mesh send dev '*' "kickoff: read the plan in docs/"   # broadcast
+claunch mesh send dev worker_1 "build the thing"              # direct
+claunch mesh members dev
+claunch mesh history dev
+```
+
+- Inside a session, `join`/`send`/`leave` need no identity flags —
+  `$CLAUNCH_SESSION` names the caller. Handles default to the session name;
+  roles are inferred from the handle's leading word (`worker_1` → worker,
+  `moderator` → leader).
+- The recipient sees one fenced YAML block per burst (marked
+  `machine-generated, not typed by the user`) listing sender, body and how to
+  reply. Undelivered messages persist (per-member cursors survive daemon
+  restarts) and land after `respawn` if the member's session was down.
+- The web UI has a **Mesh** panel: create meshes, enrol sessions with
+  handle/role, watch per-member reachability and pending counts, read the
+  message log, and send as the human operator.
+- Every session/mesh command prints a **relay status** line
+  (`relay: connected as 'work-pc'` / `relay: DISCONNECTED ...`), because a
+  mesh can only span machines while the relay uplink is registered.
+  Cross-machine meshes (daemon-to-daemon federation over the relay) are the
+  next phase — today members are sessions of one daemon.
+
 ## Web UI & HTTP API
 
 The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
@@ -814,12 +850,17 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET/POST | `/api/sessions`              | list / create |
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
-| POST   | `/api/sessions/{name}/keys`    | `{keys: [...], literal}` — send-keys |
+| POST   | `/api/sessions/{name}/keys`    | `{keys: [...], literal}` — send-keys; or `{paste, enter}` — one bracketed paste (multiline-safe) |
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |
 | GET    | `/api/sessions/{name}/wait`    | long-poll `?state=idle\|exited&timeout=&threshold=` |
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | profile names (for the UI's create form) |
+| GET/POST | `/api/mesh`                  | list meshes (+ relay status) / create `{name}` |
+| GET/DELETE | `/api/mesh/{mesh}`         | members + reachability / remove |
+| POST   | `/api/mesh/{mesh}/members`     | `{session, handle?, role?}` — enrol a session |
+| DELETE | `/api/mesh/{mesh}/members/{handle}` | remove a member |
+| GET/POST | `/api/mesh/{mesh}/messages`  | history (`?limit=`) / send `{from, to, body, external?}` |
 | GET    | `/api/cflow`                   | all registered cflow runs, keyed (cwd, scope), with status + step reports; `?cwd=[&scope=]` inspects explicitly |
 | GET    | `/api/cflow/run`               | `?cwd=&scope=` — run detail: status, workflow graph, reports, journal |
 | POST   | `/api/cflow/approve`           | `{cwd, scope}` — approve the gate / extend the loop limit |

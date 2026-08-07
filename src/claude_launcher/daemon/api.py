@@ -24,6 +24,7 @@ from ..cflow.state import StateError
 from ..profile import ProfileError
 from .harness import HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
+from .mesh import MeshConflict, MeshError, MeshManager
 from .session import SessionGone
 from . import ws as ws_mod
 
@@ -48,6 +49,8 @@ def _token_eq(supplied: str, expected: str) -> bool:
 async def error_middleware(request: web.Request, handler):
     try:
         return await handler(request)
+    except (SessionGone, MeshConflict) as exc:
+        return json_error(409, str(exc))
     except (
         ManagerError,
         HarnessError,
@@ -55,10 +58,9 @@ async def error_middleware(request: web.Request, handler):
         CflowError,
         WorkflowError,
         StateError,
+        MeshError,
     ) as exc:
         return json_error(400, str(exc))
-    except SessionGone as exc:
-        return json_error(409, str(exc))
     except web.HTTPException:
         raise
 
@@ -80,12 +82,25 @@ def build_auth_middleware(token: str, cookie_sessions: set):
     return auth_middleware
 
 
-def build_app(manager: SessionManager, token: str, *, started_at: float) -> web.Application:
+def _relay_unconfigured() -> dict:
+    return {"configured": False, "connected": False, "name": None}
+
+
+def build_app(
+    manager: SessionManager,
+    token: str,
+    *,
+    started_at: float,
+    mesh: MeshManager | None = None,
+    relay_state=None,
+) -> web.Application:
     cookie_sessions: set = set()
     app = web.Application(
         middlewares=[error_middleware, build_auth_middleware(token, cookie_sessions)]
     )
     app["manager"] = manager
+    app["mesh"] = mesh if mesh is not None else MeshManager(manager)
+    app["relay_state"] = relay_state if relay_state is not None else _relay_unconfigured
     app["token"] = token
     app["cookie_sessions"] = cookie_sessions
     app["started_at"] = started_at
@@ -110,6 +125,14 @@ def build_app(manager: SessionManager, token: str, *, started_at: float) -> web.
     r.add_post("/api/cflow/select", h_cflow_select)
     r.add_post("/api/cflow/nudge", h_cflow_nudge)
     r.add_post("/api/cflow/goto", h_cflow_goto)
+    r.add_get("/api/mesh", h_mesh_list)
+    r.add_post("/api/mesh", h_mesh_create)
+    r.add_get("/api/mesh/{mesh}", h_mesh_get)
+    r.add_delete("/api/mesh/{mesh}", h_mesh_delete)
+    r.add_post("/api/mesh/{mesh}/members", h_mesh_join)
+    r.add_delete("/api/mesh/{mesh}/members/{handle}", h_mesh_leave)
+    r.add_post("/api/mesh/{mesh}/messages", h_mesh_send)
+    r.add_get("/api/mesh/{mesh}/messages", h_mesh_history)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_get("/api/sessions/{name}", h_session_get)
@@ -164,6 +187,7 @@ async def h_daemon_info(request: web.Request) -> web.Response:
             "version": __version__,
             "uptime": round(time.monotonic() - request.app["started_at"], 1),
             "sessions": len(manager.list()),
+            "relay": request.app["relay_state"](),
         }
     )
 
@@ -460,6 +484,93 @@ async def h_cflow_goto(request: web.Request) -> web.Response:
     return web.json_response(payload)
 
 
+# --------------------------------------------------------------------------- #
+# mesh
+# --------------------------------------------------------------------------- #
+def _mesh_mgr(request: web.Request) -> MeshManager:
+    return request.app["mesh"]
+
+
+async def h_mesh_list(request: web.Request) -> web.Response:
+    mm = _mesh_mgr(request)
+    return web.json_response(
+        {
+            "meshes": [mm.mesh_info(m) for m in mm.list()],
+            "relay": request.app["relay_state"](),
+        }
+    )
+
+
+async def h_mesh_create(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    mesh = _mesh_mgr(request).create(str(body.get("name") or ""))
+    return web.json_response(_mesh_mgr(request).mesh_info(mesh), status=201)
+
+
+async def h_mesh_get(request: web.Request) -> web.Response:
+    mm = _mesh_mgr(request)
+    mesh = mm.get(request.match_info["mesh"])
+    return web.json_response(
+        {**mm.mesh_info(mesh), "relay": request.app["relay_state"]()}
+    )
+
+
+async def h_mesh_delete(request: web.Request) -> web.Response:
+    _mesh_mgr(request).delete(request.match_info["mesh"])
+    return web.json_response({"ok": True})
+
+
+async def h_mesh_join(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    session = str(body.get("session") or "")
+    if not session:
+        return json_error(400, "'session' required in the JSON body")
+    member = _mesh_mgr(request).join(
+        request.match_info["mesh"],
+        session,
+        handle=str(body.get("handle") or ""),
+        role=str(body.get("role") or ""),
+    )
+    return web.json_response(member.to_dict(), status=201)
+
+
+async def h_mesh_leave(request: web.Request) -> web.Response:
+    member = _mesh_mgr(request).leave(
+        request.match_info["mesh"], request.match_info["handle"]
+    )
+    return web.json_response({"ok": True, "handle": member.handle})
+
+
+async def h_mesh_send(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    sender = str(body.get("from") or "")
+    to = body.get("to")
+    text = body.get("body")
+    if not sender:
+        return json_error(400, "'from' required (a handle or a session name)")
+    if not isinstance(to, (str, list)) or not to:
+        return json_error(400, "'to' must be '*', a handle, or a list of handles")
+    if not isinstance(text, str):
+        return json_error(400, "'body' must be a string")
+    result = _mesh_mgr(request).send(
+        request.match_info["mesh"],
+        sender,
+        to,
+        text,
+        external=bool(body.get("external")),
+    )
+    return web.json_response({**result, "relay": request.app["relay_state"]()})
+
+
+async def h_mesh_history(request: web.Request) -> web.Response:
+    try:
+        limit = int(request.query.get("limit", 50))
+    except ValueError:
+        return json_error(400, "limit must be an integer")
+    messages = _mesh_mgr(request).history(request.match_info["mesh"], limit)
+    return web.json_response({"messages": messages})
+
+
 async def h_sessions_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     return web.json_response({"sessions": [s.info() for s in manager.list()]})
@@ -508,6 +619,12 @@ async def h_session_respawn(request: web.Request) -> web.Response:
 async def h_session_keys(request: web.Request) -> web.Response:
     session = _session(request)
     body = await _json_body(request)
+    paste = body.get("paste")
+    if paste is not None:
+        if not isinstance(paste, str):
+            return json_error(400, "'paste' must be a string")
+        data = await session.paste(paste, enter=bool(body.get("enter")))
+        return web.json_response({"ok": True, "bytes": len(data)})
     keys = body.get("keys")
     if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
         return json_error(400, "'keys' must be a list of strings")
