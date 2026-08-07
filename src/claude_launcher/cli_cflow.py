@@ -13,7 +13,7 @@ import json
 import sys
 from pathlib import Path
 
-from . import profile as profile_mod
+from . import daemon_client, profile as profile_mod
 from .cflow import engine, install, model, state as state_mod
 
 
@@ -104,9 +104,49 @@ def _cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _nudge_via_daemon(message: str) -> list:
+    """Best-effort: type a resume nudge into this directory's managed
+    sessions (needs the daemon; silently a no-op when it isn't running)."""
+    try:
+        client = daemon_client.connect()
+    except Exception:
+        return []
+    if client is None:
+        return []
+    here = Path.cwd().resolve()
+    try:
+        sessions = (client.get("/api/sessions") or {}).get("sessions") or []
+    except daemon_client.DaemonClientError:
+        return []
+    nudged = []
+    for s in sessions:
+        try:
+            same = Path(str(s.get("cwd") or "")).resolve() == here
+        except OSError:
+            same = False
+        if not same or s.get("status") == "exited":
+            continue
+        try:
+            client.post(f"/api/sessions/{s['name']}/keys", {"keys": [message, "Enter"]})
+        except daemon_client.DaemonClientError:
+            continue
+        nudged.append(str(s["name"]))
+    return nudged
+
+
+def _report_unblock(action: str, message: str) -> None:
+    nudged = _nudge_via_daemon(message)
+    if nudged:
+        print(f"{action}; nudged session(s): {', '.join(nudged)}")
+    else:
+        print(f"{action}; nudge the agent to continue")
+
+
 def _cmd_approve(_args: argparse.Namespace) -> int:
     payload = engine.approve(by="user")
-    print(f"approved gate at step {payload.get('step_id')!r}; nudge the agent to continue")
+    _report_unblock(
+        f"approved gate at step {payload.get('step_id')!r}", engine.NUDGE_APPROVED
+    )
     return 0
 
 
@@ -115,7 +155,7 @@ def _cmd_select(args: argparse.Namespace) -> int:
     if payload.get("status") in ("done", "aborted"):
         print(f"selected {args.option!r}; workflow is {payload['status']}")
     else:
-        print(f"selected {args.option!r}; nudge the agent to continue")
+        _report_unblock(f"selected {args.option!r}", engine.NUDGE_SELECTED)
     return 0
 
 

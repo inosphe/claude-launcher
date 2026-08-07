@@ -889,11 +889,14 @@ how to unblock; inside a chat session you can approve without leaving:
 ! claunch cflow select human
 ```
 
-then nudge the agent (any message) to continue. The same CLI works from
+When the agent runs as a [managed session](#managed-sessions-tmux-style-daemon)
+in the run's directory, approving/selecting (CLI or dashboard) also
+**auto-nudges** it — a resume line is typed into the session via send-keys, so
+the stopped agent picks the run back up on its own. Elsewhere (e.g. `!` inside
+the chat itself) nudge the agent with any message. The same CLI works from
 outside — a supervising script or another agent can watch
-`claunch cflow status --json`, approve gates, and nudge the worker session via
-`claunch send-keys` — cflow composes with [managed sessions](#managed-sessions-tmux-style-daemon)
-for multi-agent orchestration.
+`claunch cflow status --json`, approve gates, and drive the worker session via
+`claunch send-keys` for multi-agent orchestration.
 
 ### cflow commands
 

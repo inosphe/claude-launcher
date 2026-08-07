@@ -509,7 +509,8 @@ function wfActions(data) {
         });
         box.appendChild(btn);
       }
-      box.appendChild(el("p", "wf-note", "confirming here unblocks the agent (nudge it to continue)"));
+      box.appendChild(el("p", "wf-note",
+        "confirming unblocks the agent; its managed session is nudged automatically"));
     } else {
       box.appendChild(el("p", "wf-note", "the agent decides this branch on its own"));
     }

@@ -55,7 +55,10 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
-    site = web.TCPSite(runner, host, port)
+    # Default shutdown_timeout is 60s per lingering connection — far longer
+    # than the restart flow's patience (stop waits 10s, the successor's lock
+    # grace is 15s). Keep teardown well inside that budget.
+    site = web.TCPSite(runner, host, port, shutdown_timeout=3.0)
     try:
         await site.start()
     except OSError as exc:

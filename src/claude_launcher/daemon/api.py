@@ -90,6 +90,10 @@ def build_app(manager: SessionManager, token: str, *, started_at: float) -> web.
     app["cookie_sessions"] = cookie_sessions
     app["started_at"] = started_at
     app["shutdown_event"] = asyncio.Event()
+    app["websockets"] = set()
+    # Open terminal sockets never close on their own; without this, runner
+    # cleanup waits its shutdown timeout for every browser tab left open.
+    app.on_shutdown.append(_close_websockets)
 
     r = app.router
     r.add_get("/api/health", h_health)
@@ -114,6 +118,16 @@ def build_app(manager: SessionManager, token: str, *, started_at: float) -> web.
     if _STATIC_DIR.is_dir():
         r.add_static("/static", _STATIC_DIR)
     return app
+
+
+async def _close_websockets(app: web.Application) -> None:
+    from aiohttp import WSCloseCode
+
+    for ws in set(app["websockets"]):
+        try:
+            await ws.close(code=WSCloseCode.GOING_AWAY, message=b"daemon shutdown")
+        except Exception:
+            pass
 
 
 # --------------------------------------------------------------------------- #
@@ -290,6 +304,21 @@ async def _cflow_action_cwd(request: web.Request):
     return (str(Path(raw).resolve()), body), None
 
 
+async def _nudge_sessions(manager: SessionManager, cwd: str, message: str) -> list:
+    """Type a resume nudge into the live managed sessions in this directory,
+    so an agent that stopped its turn at the gate picks the run back up."""
+    nudged = []
+    for session in manager.list():
+        if session.exited or str(Path(session.sdef.cwd).resolve()) != cwd:
+            continue
+        try:
+            await session.send_keys([message, "Enter"])
+        except Exception:
+            continue
+        nudged.append(session.sdef.name)
+    return nudged
+
+
 async def h_cflow_approve(request: web.Request) -> web.Response:
     """Approve the current gate / extend the loop limit — a human acting
     through the authenticated dashboard, same trust channel as the CLI.
@@ -299,7 +328,12 @@ async def h_cflow_approve(request: web.Request) -> web.Response:
     if err:
         return err
     cwd, _ = resolved
-    return web.json_response(cflow_engine.approve(by="web", cwd=cwd))
+    payload = cflow_engine.approve(by="web", cwd=cwd)
+    if payload.get("status") == "approved":
+        payload["nudged_sessions"] = await _nudge_sessions(
+            request.app["manager"], cwd, cflow_engine.NUDGE_APPROVED
+        )
+    return web.json_response(payload)
 
 
 async def h_cflow_select(request: web.Request) -> web.Response:
@@ -312,9 +346,12 @@ async def h_cflow_select(request: web.Request) -> web.Response:
     if not option:
         return json_error(400, "'option' required in the JSON body")
     reason = str(body.get("reason") or "") or None
-    return web.json_response(
-        cflow_engine.select(option, reason, by="web", cwd=cwd)
-    )
+    payload = cflow_engine.select(option, reason, by="web", cwd=cwd)
+    if payload.get("status") == "selected":
+        payload["nudged_sessions"] = await _nudge_sessions(
+            request.app["manager"], cwd, cflow_engine.NUDGE_SELECTED
+        )
+    return web.json_response(payload)
 
 
 async def h_sessions_list(request: web.Request) -> web.Response:

@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import threading
 import time
 from datetime import datetime, timezone
 from typing import Dict, List, Optional, Set, Tuple
@@ -79,19 +80,29 @@ class Session:
         self.pty = pty_backend.spawn(argv, env=env, cwd=cwd, cols=sdef.cols, rows=sdef.rows)
         self.pid = self.pty.pid
 
-        self._reader = self._loop.run_in_executor(None, self._read_pump)
+        # A dedicated *daemon* thread, NOT the loop's default executor: at
+        # daemon exit asyncio joins executor threads, and a reader stuck in a
+        # blocking ConPTY read would hold the whole process (and its singleton
+        # lock) hostage. A daemon thread can never block interpreter exit.
+        self._reader = threading.Thread(
+            target=self._read_pump, name=f"pty-read-{sdef.name}", daemon=True
+        )
+        self._reader.start()
         self._sampler = self._loop.create_task(self._sample_loop())
 
     # ------------------------------------------------------------------ #
     # output pipeline (reader thread -> loop)
     # ------------------------------------------------------------------ #
     def _read_pump(self) -> None:  # runs on the reader thread
-        while True:
-            chunk = self.pty.read()
-            if not chunk:
-                break
-            self._loop.call_soon_threadsafe(self._on_output, chunk)
-        self._loop.call_soon_threadsafe(self._on_eof)
+        try:
+            while True:
+                chunk = self.pty.read()
+                if not chunk:
+                    break
+                self._loop.call_soon_threadsafe(self._on_output, chunk)
+            self._loop.call_soon_threadsafe(self._on_eof)
+        except RuntimeError:
+            pass  # event loop already closed (daemon teardown)
 
     def _on_output(self, chunk: bytes) -> None:
         if self.exited:

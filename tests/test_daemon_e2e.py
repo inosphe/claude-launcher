@@ -190,8 +190,37 @@ def test_api_cflow_monitoring(home, tmp_path):
     asyncio.run(run())
 
 
+def test_shutdown_not_blocked_by_open_websocket(home, tmp_path):
+    """A dashboard tab left open must not stall daemon teardown (it used to
+    wait aiohttp's 60s shutdown timeout per lingering terminal socket)."""
+    _register_py_harness()
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        session = mgr.create(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+        await _wait_screen(session, "READY")
+        ws = await client.ws_connect(
+            "/api/sessions/w1/ws", headers={"Authorization": "Bearer sekrit"}
+        )
+        msg = await ws.receive(timeout=10)  # init control frame
+        assert msg.type == aiohttp.WSMsgType.TEXT
+
+        start = time.monotonic()
+        await mgr.shutdown_all()
+        await asyncio.wait_for(client.close(), timeout=15)
+        assert time.monotonic() - start < 15
+
+    asyncio.run(run())
+
+
 def test_api_cflow_actions(home, tmp_path):
     """The run-detail endpoint, and human approve/select over the web API."""
+    _register_py_harness()
     from aiohttp.test_utils import TestClient, TestServer
 
     from claude_launcher.cflow import engine as cflow_engine
@@ -238,12 +267,21 @@ def test_api_cflow_actions(home, tmp_path):
             resp = await client.get("/api/cflow/run", headers=bearer)
             assert resp.status == 400  # cwd required
 
+            # a live session in the run's directory gets nudged on approve
+            worker = mgr.create(
+                SessionDef(name="n1", harness="py", cwd=str(gated))
+            )
+            await _wait_screen(worker, "READY")
+
             # approve over HTTP opens the gate; the agent then fetches the step
             resp = await client.post(
                 "/api/cflow/approve", json={"cwd": str(gated)}, headers=bearer
             )
             assert resp.status == 200
-            assert (await resp.json())["status"] == "approved"
+            doc = await resp.json()
+            assert doc["status"] == "approved"
+            assert doc["nudged_sessions"] == ["n1"]
+            await _wait_screen(worker, "echo:cflow: approved")
             assert cflow_engine.next_step(cwd=str(gated))["status"] == "step"
 
             # approving with nothing waiting is a clean 400, not a 500

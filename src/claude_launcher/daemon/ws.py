@@ -36,6 +36,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     ws = web.WebSocketResponse(heartbeat=30)
     await ws.prepare(request)
 
+    request.app["websockets"].add(ws)
     queue = session.subscribe()
     try:
         await ws.send_str(
@@ -69,6 +70,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
             except (asyncio.CancelledError, Exception):
                 pass
     finally:
+        request.app["websockets"].discard(ws)
         session.unsubscribe(queue)
         if not ws.closed:
             await ws.close()

@@ -38,6 +38,12 @@ from .model import Step, Workflow
 #: Kept from a verify command's combined output when reporting failure.
 VERIFY_OUTPUT_TAIL = 4000
 
+#: Typed into the run directory's managed sessions after a human unblocks the
+#: run, so a stopped agent resumes without a manual nudge. Per the /cflow
+#: skill, any user message makes the agent re-check 'status' first.
+NUDGE_APPROVED = "cflow: approved - continue per the /cflow protocol"
+NUDGE_SELECTED = "cflow: selection confirmed - continue per the /cflow protocol"
+
 
 class CflowError(Exception):
     """Raised for protocol misuse (wrong tool for the current position)."""
