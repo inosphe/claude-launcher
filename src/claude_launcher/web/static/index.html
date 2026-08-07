@@ -14,6 +14,8 @@
     <p>Paste the API token (<code>claunch daemon token</code>):</p>
     <input id="auth-token" type="password" autocomplete="off" spellcheck="false">
     <button id="auth-submit">Sign in</button>
+    <p class="auth-note">This browser remembers the token, so daemon restarts
+      won't ask again (until <code>claunch daemon token --rotate</code>).</p>
     <p id="auth-error" class="error hidden">Bad token.</p>
   </div>
 </div>

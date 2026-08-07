@@ -190,6 +190,7 @@ body {
   padding: 26px 30px; width: 340px;
 }
 .auth-box h2 { font-size: 16px; margin-bottom: 10px; }
+.auth-box .auth-note { font-size: 11px; color: #6b7280; margin-top: 10px; margin-bottom: 0; }
 .auth-box p { font-size: 13px; color: #9da5b0; margin-bottom: 10px; }
 .auth-box input { width: 100%; padding: 7px 9px; font-size: 13px;
   background: #14161a; color: #d8dbe0; border: 1px solid #30363d; border-radius: 4px; }

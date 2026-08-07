@@ -12,9 +12,43 @@ let sessionsCache = [];
 /* ------------------------------------------------------------------ */
 /* auth                                                               */
 /* ------------------------------------------------------------------ */
+/* The login cookie lives in the daemon's memory, so every daemon restart
+   invalidates it. The pasted token itself stays valid until rotated —
+   remember it in localStorage and re-login transparently on 401, so the
+   paste-the-token prompt only ever shows for a fresh browser or after
+   `claunch daemon token --rotate`. */
+const TOKEN_KEY = "claunch_token";
+let reloginPromise = null;
+
+async function tryStoredLogin() {
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (!token) return false;
+  const resp = await fetch("/api/auth/session", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ token }),
+  });
+  if (resp.ok) return true;
+  if (resp.status === 401) localStorage.removeItem(TOKEN_KEY); // rotated
+  return false;
+}
+
+function relogin() {
+  // Memoized: concurrent 401s (session + cflow polls) share one attempt.
+  if (!reloginPromise) {
+    reloginPromise = tryStoredLogin().finally(() => { reloginPromise = null; });
+  }
+  return reloginPromise;
+}
+
 async function api(path, opts = {}) {
-  const resp = await fetch(path, { credentials: "same-origin", ...opts });
+  let resp = await fetch(path, { credentials: "same-origin", ...opts });
   if (resp.status === 401) {
+    if (await relogin()) {
+      resp = await fetch(path, { credentials: "same-origin", ...opts });
+      if (resp.status !== 401) return resp;
+    }
     showAuth();
     throw new Error("unauthorized");
   }
@@ -43,6 +77,7 @@ async function doAuth() {
     $("auth-error").classList.remove("hidden");
     return;
   }
+  localStorage.setItem(TOKEN_KEY, token); // survive daemon restarts
   $("auth-error").classList.add("hidden");
   $("auth-overlay").classList.add("hidden");
   $("auth-token").value = "";
