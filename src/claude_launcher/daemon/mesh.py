@@ -183,10 +183,14 @@ class MeshManager:
         *,
         settle: float = DEFAULT_SETTLE,
         busy_hold: float = DEFAULT_BUSY_HOLD,
+        root: Optional[Path] = None,
     ) -> None:
         self.manager = manager
         self.settle = settle
         self.busy_hold = busy_hold
+        # Storage root override (tests run several daemons in one process);
+        # None = the daemon's global mesh directory.
+        self._root = root
         self._meshes: Dict[str, Mesh] = {}
         self._workers: Dict[str, asyncio.Task] = {}
         self._started = False
@@ -202,8 +206,14 @@ class MeshManager:
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
+    def _mesh_root(self) -> Path:
+        return self._root if self._root is not None else paths.mesh_root()
+
+    def _mesh_dir(self, name: str) -> Path:
+        return self._mesh_root() / name
+
     def load_all(self) -> None:
-        root = paths.mesh_root()
+        root = self._mesh_root()
         if not root.is_dir():
             return
         for entry in sorted(root.iterdir()):
@@ -264,7 +274,7 @@ class MeshManager:
         del self._meshes[name]
         # Retire the directory rather than deleting history: rename with a
         # timestamp suffix so a recreated mesh starts clean.
-        d = paths.mesh_dir(mesh.name)
+        d = self._mesh_dir(mesh.name)
         if d.is_dir():
             stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
             try:
@@ -710,11 +720,24 @@ class MeshManager:
                     "reachability": self._reachability(m),
                 }
             )
+        peers = []
+        for machine in sorted(mesh.links):
+            status = mesh.peer_status.get(machine) or {}
+            peers.append(
+                {
+                    "machine": machine,
+                    "linked_at": mesh.links[machine].get("created_at", ""),
+                    "ok": status.get("ok"),
+                    "error": status.get("error"),
+                    "queued": len(self.pending_for_machine(mesh, machine)),
+                }
+            )
         return {
             "name": mesh.name,
             "created_at": mesh.created_at,
             "members": members,
             "messages": len(mesh.messages),
+            "peers": peers,
         }
 
     def _reachability(self, member: Member) -> str:
@@ -852,7 +875,7 @@ class MeshManager:
         return mesh
 
     def _persist_def(self, mesh: Mesh) -> None:
-        d = paths.mesh_dir(mesh.name)
+        d = self._mesh_dir(mesh.name)
         try:
             d.mkdir(parents=True, exist_ok=True)
             doc = {
@@ -870,7 +893,7 @@ class MeshManager:
 
     def _persist_cursors(self, mesh: Mesh) -> None:
         try:
-            (paths.mesh_dir(mesh.name) / "cursors.json").write_text(
+            (self._mesh_dir(mesh.name) / "cursors.json").write_text(
                 json.dumps(
                     {"members": mesh.cursors, "peers": mesh.peer_cursors}, indent=2
                 ),
@@ -880,7 +903,7 @@ class MeshManager:
             log.warning("mesh %r: cannot persist cursors: %s", mesh.name, exc)
 
     def _append_log(self, mesh: Mesh, msg: dict) -> None:
-        d = paths.mesh_dir(mesh.name)
+        d = self._mesh_dir(mesh.name)
         try:
             d.mkdir(parents=True, exist_ok=True)
             with open(d / "log.jsonl", "a", encoding="utf-8") as fh:

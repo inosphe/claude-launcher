@@ -152,6 +152,32 @@ def _cmd_send(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_invite(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    result = client.post(f"/api/mesh/{args.mesh}/invite", {})
+    print(
+        f"invite code for mesh {args.mesh!r} (machine {result.get('machine')!r}):"
+    )
+    print(result.get("code"))
+    print(
+        "redeem on the peer machine with: claunch mesh link <code>",
+        file=sys.stderr,
+    )
+    _print_relay(result.get("relay"))
+    return 0
+
+
+def _cmd_link(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    result = client.post("/api/mesh/link", {"code": args.code})
+    print(
+        f"linked mesh {result.get('mesh')!r} with peer {result.get('peer')!r} "
+        f"({result.get('members')} member(s) total)"
+    )
+    _print_relay(result.get("relay"))
+    return 0
+
+
 def _cmd_members(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     info = client.get(f"/api/mesh/{args.mesh}")
@@ -166,6 +192,15 @@ def _cmd_members(args: argparse.Namespace) -> int:
             f"{m['handle']:<16} {m['role']:<10} {where + '/' + m['session']:<28} "
             f"[{m['reachability']}]{pending_s}"
         )
+    for p in info.get("peers", []):
+        if p.get("ok") is False:
+            state = f"unreachable ({p.get('error')})"
+        elif p.get("ok"):
+            state = "ok"
+        else:
+            state = "linked (no traffic yet)"
+        queued = f" -- {p['queued']} message(s) queued" if p.get("queued") else ""
+        print(f"peer daemon {p['machine']:<12} [{state}]{queued}")
     _print_relay(info.get("relay"))
     return 0
 
@@ -228,6 +263,19 @@ def register(sub) -> None:
     p.add_argument("--external", action="store_true",
                    help="send as a non-member (e.g. a human operator)")
     p.set_defaults(func=_cmd_send)
+
+    p = msub.add_parser(
+        "invite",
+        help="mint a code another machine's daemon can redeem to link this mesh",
+    )
+    p.add_argument("mesh")
+    p.set_defaults(func=_cmd_invite)
+
+    p = msub.add_parser(
+        "link", help="redeem an invite code -- link this daemon into a peer's mesh"
+    )
+    p.add_argument("code")
+    p.set_defaults(func=_cmd_link)
 
     p = msub.add_parser("members", help="list a mesh's members and reachability")
     p.add_argument("mesh")

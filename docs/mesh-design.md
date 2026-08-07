@@ -1,6 +1,6 @@
 # Mesh: session-to-session messaging
 
-Status: design agreed, phase 1 (local mesh) in progress.
+Status: phase 1 (local mesh) and phase 2 (federation over the relay) implemented.
 
 Mesh lets claunch sessions — the agents running inside them — exchange
 messages. Sessions are grouped into a *mesh* (on the web dashboard or via the
@@ -101,13 +101,17 @@ Machine-local runtime state, next to the other daemon state:
 
 ```
 ~/.claude-launcher/daemon/mesh/<mesh>/
-  mesh.json      {name, created_at, members: {handle: {session, machine, role, joined_at}}}
-  log.jsonl      append-only message log (one line per send)
-  cursors.json   {handle: delivered-index} for local members
+  mesh.json      {name, created_at, members: {handle: {session, machine, role, joined_at}},
+                  links: {machine: {token_in, token_out, created_at}},
+                  invites: {token: minted_at}}
+  log.jsonl      append-only message log (one line per send or peer ingest)
+  cursors.json   {members: {handle: delivered-index}, peers: {machine: forwarded-index}}
 ```
 
-Message logs are per-daemon; federation (phase 2) exchanges messages, not
-files.
+Message logs are per-daemon; federation exchanges messages, not files. Both
+cursor maps index into the same log, so local delivery and peer forwarding
+share one durability model (the phase-1 flat cursors format is migrated on
+load).
 
 ## HTTP surface (phase 1)
 
@@ -126,6 +130,44 @@ All under the existing auth (Bearer token / web cookie):
 Plus a prerequisite: `POST /api/sessions/{name}/keys` accepts
 `{"paste": "multi\nline text", "enter": true}` — bracketed-paste injection, so
 multiline content does not submit once per newline.
+
+## Federation (phase 2)
+
+Linking two daemons' copies of a mesh is invite-based:
+
+1. `POST /api/mesh/{mesh}/invite` on daemon A mints a single-use invite code
+   (base64 of `{mesh, machine, token}`); the human carries it to machine B.
+2. `POST /api/mesh/link {code}` on daemon B performs the handshake **over the
+   relay's backend bridge**: B opens `PEER_OPEN` to A and POSTs
+   `/peer/mesh/link {mesh, machine, token, reply_token, members}`. A consumes
+   the invite, stores the link `{token_in: invite, token_out: reply_token}`,
+   and replies with its local member list. Both sides now hold a mesh-scoped
+   token pair — never each other's daemon Bearer tokens.
+
+Peer traffic rides three daemon endpoints deliberately outside `/api/` (so the
+daemon-token middleware does not apply; each handler checks the per-link mesh
+token itself):
+
+- `POST /peer/mesh/link` — invite redemption (above)
+- `POST /peer/mesh/messages` — batch message forward, deduped by message id
+- `POST /peer/mesh/members` — member-list fanout on join/leave
+
+Transport: one raw HTTP/1.1 request per bridged stream (`Connection: close` +
+`Content-Length`), through `RelayUplink.peer_http` — the relay's `PEER_OPEN`
+extension (see mux-relay `docs/tunnel-protocol.md` §4.1; opt-in via
+`allow_backend_peering`, capability-gated by the REGISTER_OK caps bit).
+
+Forwarding rules:
+
+- Each message carries an `origin` machine; only the originating daemon
+  forwards it to peers, so broadcasts never echo between daemons.
+- The per-peer cursor (`cursors.json` `peers`) marks what a peer has
+  acknowledged; a failed flush backs off (5s doubling to 60s) and retries —
+  relay down simply means messages queue durably until reconnect, and the
+  sender is told `queued_remote` immediately.
+- Remote members surface as `remote-connected` / `remote-disconnected`
+  reachability depending on the live uplink state; linked peers (with queue
+  depth and last error) appear in mesh views, the CLI and the web panel.
 
 ## Delivery pipeline
 
@@ -167,6 +209,8 @@ claunch mesh leave <mesh> [--session NAME | --as HANDLE]
 claunch mesh send <mesh> <to|*> <text...>       # sender = $CLAUNCH_SESSION
 claunch mesh members <mesh>
 claunch mesh history <mesh> [-n N]
+claunch mesh invite <mesh>                      # mint a code for a peer daemon
+claunch mesh link <code>                        # redeem it on the other machine
 ```
 
 `join`/`send`/`leave` default the session to `$CLAUNCH_SESSION` so an agent
@@ -176,12 +220,12 @@ relay status trailer (`relay: connected as work-pc` / `relay: not configured`
 
 ## Phases
 
-1. **Local mesh MVP** (this change): paste mode, mesh module + API + CLI +
+1. **Local mesh MVP** (done): paste mode, mesh module + API + CLI +
    web panel, local delivery, relay status surfacing.
-2. **Federation**: `/api/mesh/peer/*` link handshake over the relay tunnel
-   (propose/accept, mesh-scoped tokens), remote member entries
-   (machine/session), forwarding sends to peer daemons, outbox queue with
-   redelivery on relay reconnect, per-member reachability.
+2. **Federation** (done): invite/link handshake over the relay's backend
+   bridge (mesh-scoped tokens), remote member entries (machine/session),
+   forwarding sends to peer daemons, durable queue with redelivery on relay
+   reconnect, per-member reachability. See "Federation (phase 2)" above.
 3. **Policy layer**: heartbeat ("you were asked and have not replied"),
    task-poll for idle workers, stall warnings to leaders — daemon-resident,
    per-mesh config editable on the web (ports interconnect's `NudgeTimer` /

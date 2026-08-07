@@ -809,8 +809,14 @@ claunch mesh history dev
 - Every session/mesh command prints a **relay status** line
   (`relay: connected as 'work-pc'` / `relay: DISCONNECTED ...`), because a
   mesh can only span machines while the relay uplink is registered.
-  Cross-machine meshes (daemon-to-daemon federation over the relay) are the
-  next phase — today members are sessions of one daemon.
+- **Cross-machine meshes**: with both daemons registered on the same relay
+  (and `allow_backend_peering` enabled on it), run `claunch mesh invite dev`
+  on one machine and `claunch mesh link <code>` on the other. The daemons
+  exchange mesh-scoped tokens (never their API tokens) and forward messages
+  to each other over the relay's backend bridge; members show as
+  `work-pc/s0`-style addresses. If the relay drops, local messaging keeps
+  working and cross-machine messages queue durably until reconnect
+  (senders see `queued for remote` immediately).
 
 ## Web UI & HTTP API
 
@@ -861,6 +867,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/mesh/{mesh}/members`     | `{session, handle?, role?}` — enrol a session |
 | DELETE | `/api/mesh/{mesh}/members/{handle}` | remove a member |
 | GET/POST | `/api/mesh/{mesh}/messages`  | history (`?limit=`) / send `{from, to, body, external?}` |
+| POST   | `/api/mesh/{mesh}/invite`      | mint a single-use cross-machine invite code |
+| POST   | `/api/mesh/link`               | `{code}` — redeem an invite: link this daemon into the mesh |
+| POST   | `/peer/mesh/*`                 | daemon↔daemon federation (link/messages/members) — authenticated by per-link mesh tokens, not the API token |
 | GET    | `/api/cflow`                   | all registered cflow runs, keyed (cwd, scope), with status + step reports; `?cwd=[&scope=]` inspects explicitly |
 | GET    | `/api/cflow/run`               | `?cwd=&scope=` — run detail: status, workflow graph, reports, journal |
 | POST   | `/api/cflow/approve`           | `{cwd, scope}` — approve the gate / extend the loop limit |

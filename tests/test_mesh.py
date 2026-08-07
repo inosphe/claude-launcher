@@ -388,8 +388,228 @@ def test_mesh_api(home, tmp_path):
                 headers=bearer,
             )
             assert resp.status == 200
+
+            # invite needs a relay identity — none here → 400, not a crash
+            resp = await client.post("/api/mesh", json={"name": "fed"}, headers=bearer)
+            assert resp.status == 201
+            resp = await client.post("/api/mesh/fed/invite", headers=bearer)
+            assert resp.status == 400
+            assert "relay" in (await resp.json())["error"]
+            resp = await client.post("/api/mesh/link", json={}, headers=bearer)
+            assert resp.status == 400
+
+            # peer endpoints sit outside /api: no daemon auth needed, the
+            # per-link mesh token is the (only) gate — a bad one is a 400
+            resp = await client.post(
+                "/peer/mesh/messages",
+                json={"mesh": "fed", "machine": "pcX", "token": "bad", "messages": []},
+            )
+            assert resp.status == 400
         finally:
             await mgr.shutdown_all()
             await client.close()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# federation: two mesh managers wired with an in-process peer transport
+# --------------------------------------------------------------------------- #
+def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
+    """What the /peer/* HTTP handlers do, minus the HTTP."""
+    if path == "/peer/mesh/link":
+        return mm.peer_link_accept(
+            body["mesh"], body["machine"], body["token"],
+            body["reply_token"], body.get("members") or [],
+        )
+    if path == "/peer/mesh/messages":
+        return mm.peer_messages_accept(
+            body["mesh"], body["machine"], body["token"],
+            body.get("messages") or [],
+        )
+    if path == "/peer/mesh/members":
+        return mm.peer_members_accept(
+            body["mesh"], body["machine"], body["token"],
+            body.get("members") or [],
+        )
+    raise AssertionError(f"unexpected peer path {path!r}")
+
+
+def _federate(machines: dict) -> None:
+    """Give each manager an identity and a direct transport to the others."""
+    async def call(machine, path, body):
+        return _dispatch_peer(machines[machine], path, body)
+
+    for name, mm in machines.items():
+        mm.machine = name
+        mm.peer_transport = call
+        mm.relay_connected = lambda: True
+
+
+def test_invite_and_link_require_relay_identity(home):
+    mgr = _manager()
+    mm = MeshManager(mgr)
+    mm.create("m")
+    with pytest.raises(MeshError):
+        mm.invite("m")  # no relay identity
+
+    async def run():
+        with pytest.raises(MeshError):
+            await mm.link("whatever")
+
+    asyncio.run(run())
+
+
+def test_federation_link_and_remote_delivery(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a = MeshManager(mgr, root=tmp_path / "meshA")
+        mm_b = MeshManager(mgr, root=tmp_path / "meshB")
+        _federate({"pcA": mm_a, "pcB": mm_b})
+
+        mgr.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
+
+        mm_a.create("m1")
+        mm_a.join("m1", "sa", handle="alice")
+        code = mm_a.invite("m1")["code"]
+
+        result = await mm_b.link(code)
+        assert result["peer"] == "pcA"
+        mesh_a, mesh_b = mm_a.get("m1"), mm_b.get("m1")
+        # tokens were exchanged, and each side adopted the other's members
+        assert "pcB" in mesh_a.links and "pcA" in mesh_b.links
+        assert mesh_a.links["pcB"]["token_in"] == mesh_b.links["pcA"]["token_out"]
+        assert mesh_a.links["pcB"]["token_out"] == mesh_b.links["pcA"]["token_in"]
+        assert mesh_b.members["alice"].machine == "pcA"
+        with pytest.raises(MeshError):
+            await mm_b.link(code)  # invites are single-use
+
+        # B enrols its own session; the member push makes it visible on A
+        mm_b.join("m1", "sb", handle="bob")
+        await mm_b._push_members(mesh_b)
+        assert mesh_a.members["bob"].machine == "pcB"
+        assert mm_a.mesh_info(mesh_a)["peers"][0]["machine"] == "pcB"
+
+        # a remote-addressed message crosses on flush…
+        sent = mm_b.send("m1", "bob", "alice", "hello across")
+        assert sent["remote"] == ["alice"]
+        assert sent["queued_remote"] == []  # relay is up
+        await mm_b._flush_peer(mesh_b, "pcA")
+        assert [m["body"] for m in mesh_a.pending("alice")] == ["hello across"]
+        assert mesh_b.peer_status["pcA"]["ok"] is True
+
+        # …exactly once: the cursor advanced, and replays dedupe by id
+        await mm_b._flush_peer(mesh_b, "pcA")
+        assert len([m for m in mesh_a.messages if m["body"] == "hello across"]) == 1
+        replay = mm_a.peer_messages_accept(
+            "m1", "pcB", mesh_a.links["pcB"]["token_in"],
+            [{k: sent[k] for k in ("id", "ts", "from", "to", "body")}],
+        )
+        assert replay["accepted"] == 0
+
+        # the reverse direction: A's broadcast reaches bob, and A does NOT
+        # echo B's own message back (origin gate)
+        mm_a.send("m1", "alice", "*", "ack from A")
+        assert [m["body"] for m in mm_a.pending_for_machine(mesh_a, "pcB")] == [
+            "ack from A"  # only A's own message — never B's, per the origin gate
+        ]
+        await mm_a._flush_peer(mesh_a, "pcB")
+        bodies_b = [m["body"] for m in mesh_b.messages]
+        assert "ack from A" in bodies_b
+        assert bodies_b.count("hello across") == 1  # no echo
+
+        # a wrong peer token is rejected
+        with pytest.raises(MeshError):
+            mm_a.peer_messages_accept("m1", "pcB", "forged", [])
+
+        # links, peer cursors and remote members survive a reload
+        mm_b2 = MeshManager(mgr, root=tmp_path / "meshB")
+        mm_b2.load_all()
+        loaded = mm_b2.get("m1")
+        assert "pcA" in loaded.links
+        assert loaded.members["alice"].machine == "pcA"
+        assert loaded.peer_cursors["pcA"] == mesh_b.peer_cursors["pcA"]
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_federation_queue_and_reconnect(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a = MeshManager(mgr, root=tmp_path / "meshA")
+        mm_b = MeshManager(mgr, root=tmp_path / "meshB")
+        _federate({"pcA": mm_a, "pcB": mm_b})
+
+        mgr.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
+        mm_a.create("m1")
+        mm_a.join("m1", "sa", handle="alice")
+        await mm_b.link(mm_a.invite("m1")["code"])
+        mm_b.join("m1", "sb", handle="bob")
+        mesh_b = mm_b.get("m1")
+
+        # relay drops: sends are accepted but queue for the peer
+        calls = []
+
+        async def broken(machine, path, body):
+            calls.append(path)
+            raise MeshError("relay down")
+
+        mm_b.peer_transport = broken
+        mm_b.relay_connected = lambda: False
+
+        sent = mm_b.send("m1", "bob", "alice", "while offline")
+        assert sent["queued_remote"] == ["alice"]
+        await mm_b._flush_peer(mesh_b, "pcA")
+        status = mesh_b.peer_status["pcA"]
+        assert status["ok"] is False and status["backoff"] > 0
+        assert mm_b.pending_for_machine(mesh_b, "pcA") != []
+        # the flusher backs off — an immediate retry doesn't even dial
+        n = len(calls)
+        await mm_b._flush_peer(mesh_b, "pcA")
+        assert len(calls) == n
+
+        # reconnect: the queue drains and the peer marks healthy again
+        _federate({"pcA": mm_a, "pcB": mm_b})
+        mesh_b.peer_status["pcA"]["retry_at"] = 0.0
+        await mm_b._flush_peer(mesh_b, "pcA")
+        assert [m["body"] for m in mm_a.get("m1").pending("alice")] == [
+            "while offline"
+        ]
+        assert mesh_b.peer_status["pcA"]["ok"] is True
+        assert mm_b.pending_for_machine(mesh_b, "pcA") == []
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_cursors_phase1_format_migrates(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        root = tmp_path / "meshold"
+        mm = MeshManager(mgr, root=root)
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+        mm.create("old")
+        mm.join("old", "s1", handle="w1")
+        # rewrite cursors in the phase-1 flat format
+        (root / "old" / "cursors.json").write_text(
+            json.dumps({"w1": 3}), encoding="utf-8"
+        )
+        mm2 = MeshManager(mgr, root=root)
+        mm2.load_all()
+        loaded = mm2.get("old")
+        assert loaded.cursors == {"w1": 3}
+        assert loaded.peer_cursors == {}
+        await mgr.shutdown_all()
 
     asyncio.run(run())

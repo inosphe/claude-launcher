@@ -261,13 +261,14 @@ body {
 
 /* mesh detail view */
 #mesh-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
-.mesh-members, .mesh-send {
+.mesh-members, .mesh-send, .mesh-fed {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
 }
-.mesh-members h3, .mesh-send h3, .mesh-log h3 {
+.mesh-members h3, .mesh-send h3, .mesh-log h3, .mesh-fed h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
 }
+.mesh-fed input { font-family: SFMono-Regular, Consolas, monospace; font-size: 11px; }
 .mesh-member {
   display: flex; align-items: center; gap: 10px; padding: 6px 0;
   border-bottom: 1px solid #22262d; font-size: 13px;

@@ -1246,6 +1246,67 @@ function renderMesh(info, history) {
   box.appendChild(addRow);
   view.appendChild(box);
 
+  // federation: linked peer daemons + invite/link controls
+  const fed = el("div", "mesh-fed");
+  fed.appendChild(el("h3", null, "Peer daemons"));
+  const peers = info.peers || [];
+  if (!peers.length) {
+    fed.appendChild(el(
+      "p", "wf-note",
+      "not linked to any other machine — mint an invite here and redeem it " +
+      "on the peer with 'claunch mesh link <code>' (both daemons need a relay uplink)"
+    ));
+  }
+  for (const p of peers) {
+    const row = el("div", "mesh-member");
+    const ok = p.ok === true;
+    const state = p.ok === false ? `unreachable — ${p.error || "?"}` :
+      (ok ? "ok" : "linked, no traffic yet");
+    row.appendChild(el("span", `dot ${ok ? "idle" : (p.ok === false ? "exited" : "starting")}`));
+    row.appendChild(el("span", "mesh-handle mono", p.machine));
+    row.appendChild(el("span", "meta", state + (p.queued ? ` · ${p.queued} queued` : "")));
+    fed.appendChild(row);
+  }
+  const fedRow = el("div", "mesh-add");
+  const inviteBtn = el("button", "wf-btn option", "Invite peer…");
+  const codeOut = document.createElement("input");
+  codeOut.readOnly = true;
+  codeOut.placeholder = "invite code appears here — copy to the peer machine";
+  codeOut.addEventListener("focus", () => codeOut.select());
+  inviteBtn.addEventListener("click", async () => {
+    const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/invite`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
+    codeOut.value = doc.code || "";
+    codeOut.focus();
+  });
+  fedRow.append(inviteBtn, codeOut);
+  fed.appendChild(fedRow);
+  const linkRow = el("div", "mesh-add");
+  const codeIn = document.createElement("input");
+  codeIn.placeholder = "paste an invite code from another machine";
+  const linkBtn = el("button", "wf-btn option", "Link");
+  linkBtn.addEventListener("click", async () => {
+    const code = codeIn.value.trim();
+    if (!code) return;
+    const resp = await api("/api/mesh/link", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ code }),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
+    codeIn.value = "";
+    codeIn.blur();
+    refreshMeshView();
+    refreshMeshList();
+  });
+  linkRow.append(codeIn, linkBtn);
+  fed.appendChild(linkRow);
+  view.appendChild(fed);
+
   // send box: as the human operator, or on behalf of a member
   const send = el("div", "mesh-send");
   send.appendChild(el("h3", null, "Send message"));
@@ -1328,8 +1389,8 @@ function renderMesh(info, history) {
 function meshDotClass(reachability) {
   if (reachability === "idle") return "idle";
   if (reachability === "busy" || reachability === "starting") return "busy";
-  if (reachability === "remote") return "starting";
-  return "exited"; // exited / missing / unknown
+  if (reachability === "remote-connected") return "starting";
+  return "exited"; // exited / missing / remote-disconnected / unknown
 }
 
 /* ------------------------------------------------------------------ */
