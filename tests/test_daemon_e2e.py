@@ -284,6 +284,14 @@ def test_api_cflow_actions(home, tmp_path):
             await _wait_screen(worker, "echo:cflow: approved")
             assert cflow_engine.next_step(cwd=str(gated))["status"] == "step"
 
+            # manual (repeat) nudge from the dashboard
+            resp = await client.post(
+                "/api/cflow/nudge", json={"cwd": str(gated)}, headers=bearer
+            )
+            assert resp.status == 200
+            assert (await resp.json())["nudged_sessions"] == ["n1"]
+            await _wait_screen(worker, "echo:cflow: continue")
+
             # approving with nothing waiting is a clean 400, not a 500
             resp = await client.post(
                 "/api/cflow/approve", json={"cwd": str(gated)}, headers=bearer

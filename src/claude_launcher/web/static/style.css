@@ -134,6 +134,8 @@ body {
 .wf-btn.approve:hover { background: #2ea043; }
 .wf-btn.option { background: #1f6feb; }
 .wf-btn.option:hover { background: #388bfd; }
+.wf-btn.nudge { background: #30363d; color: #c6cdd5; margin-top: 8px; }
+.wf-btn.nudge:hover { background: #3c444d; }
 .wf-actions .wf-note { margin-top: 8px; }
 
 .wf-cols { display: flex; gap: 26px; align-items: flex-start; flex-wrap: wrap; }

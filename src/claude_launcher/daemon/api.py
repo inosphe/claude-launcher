@@ -105,6 +105,7 @@ def build_app(manager: SessionManager, token: str, *, started_at: float) -> web.
     r.add_get("/api/cflow/run", h_cflow_run_detail)
     r.add_post("/api/cflow/approve", h_cflow_approve)
     r.add_post("/api/cflow/select", h_cflow_select)
+    r.add_post("/api/cflow/nudge", h_cflow_nudge)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_get("/api/sessions/{name}", h_session_get)
@@ -352,6 +353,19 @@ async def h_cflow_select(request: web.Request) -> web.Response:
             request.app["manager"], cwd, cflow_engine.NUDGE_SELECTED
         )
     return web.json_response(payload)
+
+
+async def h_cflow_nudge(request: web.Request) -> web.Response:
+    """Manually (re-)nudge the run directory's sessions from the dashboard —
+    for when an auto-nudge was missed, or the agent simply stalled."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, _ = resolved
+    nudged = await _nudge_sessions(
+        request.app["manager"], cwd, cflow_engine.NUDGE_CONTINUE
+    )
+    return web.json_response({"ok": True, "nudged_sessions": nudged})
 
 
 async def h_sessions_list(request: web.Request) -> web.Response:

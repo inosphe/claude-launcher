@@ -522,7 +522,34 @@ function wfActions(data) {
       `agent is working on '${run.step_id}' — nothing needs a human right now`
     ));
   }
+  if ((data.sessions || []).length && run.status !== "done" && run.status !== "aborted") {
+    const btn = el("button", "wf-btn nudge", "Nudge session");
+    btn.title = "type the resume line into the run's session(s) again";
+    btn.addEventListener("click", () => nudgeRun(data.cwd));
+    box.appendChild(btn);
+  }
   return box;
+}
+
+async function nudgeRun(cwd) {
+  let doc = {};
+  try {
+    const resp = await api("/api/cflow/nudge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ cwd }),
+    });
+    doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(doc.error || `HTTP ${resp.status}`);
+      return;
+    }
+  } catch {
+    return;
+  }
+  if (!(doc.nudged_sessions || []).length) {
+    alert("no live session in this run's directory to nudge");
+  }
 }
 
 function wfReports(data) {

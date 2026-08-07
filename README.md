@@ -739,6 +739,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/cflow/run`               | `?cwd=` — run detail: status, workflow graph, reports, journal |
 | POST   | `/api/cflow/approve`           | `{cwd}` — approve the gate / extend the loop limit |
 | POST   | `/api/cflow/select`            | `{cwd, option, reason?}` — confirm a user-chooser branch |
+| POST   | `/api/cflow/nudge`             | `{cwd}` — re-type the resume line into the run's sessions |
 
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`); runtime
@@ -892,8 +893,10 @@ how to unblock; inside a chat session you can approve without leaving:
 When the agent runs as a [managed session](#managed-sessions-tmux-style-daemon)
 in the run's directory, approving/selecting (CLI or dashboard) also
 **auto-nudges** it — a resume line is typed into the session via send-keys, so
-the stopped agent picks the run back up on its own. Elsewhere (e.g. `!` inside
-the chat itself) nudge the agent with any message. The same CLI works from
+the stopped agent picks the run back up on its own. The run page also has a
+**Nudge session** button to re-send that line manually whenever the agent
+stalls. Elsewhere (e.g. `!` inside the chat itself) nudge the agent with any
+message. The same CLI works from
 outside — a supervising script or another agent can watch
 `claunch cflow status --json`, approve gates, and drive the worker session via
 `claunch send-keys` for multi-agent orchestration.

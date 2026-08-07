@@ -43,6 +43,7 @@ VERIFY_OUTPUT_TAIL = 4000
 #: skill, any user message makes the agent re-check 'status' first.
 NUDGE_APPROVED = "cflow: approved - continue per the /cflow protocol"
 NUDGE_SELECTED = "cflow: selection confirmed - continue per the /cflow protocol"
+NUDGE_CONTINUE = "cflow: continue per the /cflow protocol"
 
 
 class CflowError(Exception):
