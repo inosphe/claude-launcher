@@ -322,6 +322,8 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
             assert doc["run"]["status"] == "waiting_approval"
             assert [s["id"] for s in doc["workflow"]["steps"]] == ["ship"]
             assert doc["workflow"]["steps"][0]["gate"] == "approve shipping"
+            # the dashboard shows each step's instructions in the detail panel
+            assert doc["workflow"]["steps"][0]["instructions"] == "ship it"
 
             resp = await client.get("/api/cflow/run", headers=bearer)
             assert resp.status == 400  # cwd required

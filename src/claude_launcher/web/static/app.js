@@ -718,6 +718,29 @@ function wfReports(data) {
   }
   box.appendChild(head);
 
+  if (wfSelectedStep && wfSelectedStep !== "end") {
+    const step = ((data.workflow || {}).steps || [])
+      .find((s) => s.id === wfSelectedStep);
+    if (step && (step.instructions || step.select || step.gate)) {
+      const inst = el("div", "wf-instructions");
+      inst.appendChild(el("h4", null, "Instructions"));
+      if (step.gate) inst.appendChild(el("p", "wf-instructions-gate", `gate: ${step.gate}`));
+      if (step.instructions) {
+        inst.appendChild(el("pre", "wf-instructions-text", step.instructions.trimEnd()));
+      }
+      if (step.select) {
+        inst.appendChild(el(
+          "p", "wf-instructions-select",
+          `select (${step.select.chooser}): ${step.select.prompt.trim()}`
+        ));
+      }
+      if (step.verify) {
+        inst.appendChild(el("p", "wf-instructions-verify mono", `verify: ${step.verify}`));
+      }
+      box.appendChild(inst);
+    }
+  }
+
   const reports = (data.reports || []).slice(); // journal order: oldest first
   if (!reports.length) box.appendChild(el("p", "wf-note", "no reports yet"));
   if (wfSelectedStep && reports.length &&

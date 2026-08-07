@@ -246,6 +246,7 @@ def _serialize_workflow(wf) -> dict:
         entry = {
             "id": s.id,
             "title": s.title,
+            "instructions": s.instructions,
             "gate": s.gate,
             "verify": s.verify.command if s.verify else None,
             "next": s.next,
