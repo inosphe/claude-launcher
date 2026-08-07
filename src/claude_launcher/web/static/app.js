@@ -1121,6 +1121,7 @@ function wfDiagramSvg(wf, run, selected) {
 let meshName = null;      // mesh open in the detail view
 let meshPollTimer = null;
 let meshCache = [];       // sidebar list payload
+let meshInviteCodes = {}; // mesh -> last minted invite code (survives rerenders)
 
 /* Relay connectivity is surfaced permanently in the header: mesh can only
    span machines while the uplink is registered, so the state must never be
@@ -1366,6 +1367,10 @@ function renderMesh(info, history) {
   const codeOut = document.createElement("input");
   codeOut.readOnly = true;
   codeOut.placeholder = "invite code appears here — copy to the peer machine";
+  // The view is rebuilt by the 2s poll, which can detach this input while
+  // the invite request is in flight — so the code lives in meshInviteCodes
+  // (module state) and every rebuild re-renders it from there.
+  codeOut.value = meshInviteCodes[info.name] || "";
   codeOut.addEventListener("focus", () => codeOut.select());
   inviteBtn.addEventListener("click", async () => {
     const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/invite`, {
@@ -1373,8 +1378,8 @@ function renderMesh(info, history) {
     });
     const doc = await resp.json().catch(() => ({}));
     if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
-    codeOut.value = doc.code || "";
-    codeOut.focus();
+    meshInviteCodes[info.name] = doc.code || "";
+    refreshMeshView();
   });
   fedRow.append(inviteBtn, codeOut);
   fed.appendChild(fedRow);
