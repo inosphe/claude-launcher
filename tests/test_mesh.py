@@ -442,6 +442,75 @@ def test_mesh_api(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# batch sections + reply_to
+# --------------------------------------------------------------------------- #
+def test_batch_sections_and_reply_to(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr)
+        mm.create("b")
+        for n, h in (("s1", "leader"), ("s2", "w1"), ("s3", "w2")):
+            mgr.create(SessionDef(name=n, harness="py", cwd=str(tmp_path)))
+            mm.join("b", n, handle=h)
+
+        sent = mm.send(
+            "b", "leader", ["w1", "w2"], "sprint goal: finish auth.",
+            sections={
+                "w1": "you take the login API.",
+                "w2": {"text": "you take token refresh.", "type": "fyi"},
+            },
+        )
+        assert sent["batched"] is True and sent["notice"] is None
+        # ONE log entry, composite body, shared+sections stored
+        msg = mm.get("b").messages[-1]
+        assert msg["body"] == (
+            "sprint goal: finish auth.\n\n@w1: you take the login API.\n\n"
+            "@w2: you take token refresh."
+        )
+        assert msg["shared"] == "sprint goal: finish auth."
+
+        # delivery slices per recipient: own section only, per-section intent
+        block_w1 = format_delivery("b", "w1", [msg])
+        assert "login API" in block_w1 and "token refresh" not in block_w1
+        assert "needs_reply: true" in block_w1  # top-level 'say'
+        assert msg["id"] in block_w1  # ids surface so reply_to is usable
+        block_w2 = format_delivery("b", "w2", [msg])
+        assert "token refresh" in block_w2 and "login API" not in block_w2
+        assert "type: fyi" in block_w2
+        assert "needs_reply: false" in block_w2  # w2's slice is fyi
+
+        # reply_to threads and is shown in the delivery block
+        reply = mm.send("b", "w1", "leader", "on it", type="ack",
+                        reply_to=msg["id"])
+        assert reply["reply_to"] == msg["id"]
+        assert f"reply_to: {msg['id']}" in format_delivery(
+            "b", "leader", [mm.get("b").messages[-1]]
+        )
+
+        # validation: section for a non-recipient / the sender / empty slice
+        with pytest.raises(MeshError):
+            mm.send("b", "leader", ["w1"], "x", sections={"w2": "not in to"})
+        with pytest.raises(MeshError):
+            mm.send("b", "leader", "*", "x", sections={"leader": "self"})
+        with pytest.raises(MeshError):
+            mm.send("b", "leader", ["w1", "w2"], "", sections={"w1": "only w1"})
+        # sections-only send (empty shared body) is fine when all are covered
+        ok = mm.send("b", "leader", ["w1"], "", sections={"w1": "solo"})
+        assert ok["batched"] is True
+
+        # the separable advisory: @-addressing several recipients un-batched
+        sep = mm.send("b", "leader", ["w1", "w2"], "@w1 do X. @w2 do Y.")
+        assert "BATCH" in (sep["notice"] or "")
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
 # federation: two mesh managers wired with an in-process peer transport
 # --------------------------------------------------------------------------- #
 def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
@@ -551,6 +620,19 @@ def test_federation_link_and_remote_delivery(home, tmp_path):
         bodies_b = [m["body"] for m in mesh_b.messages]
         assert "ack from A" in bodies_b
         assert bodies_b.count("hello across") == 1  # no echo
+
+        # batch fields and reply_to survive the hop, so the remote daemon
+        # can slice deliveries for its own members
+        mm_b.send(
+            "m1", "bob", "alice", "shared bit",
+            sections={"alice": {"text": "your slice", "type": "ask"}},
+            reply_to="msg-000000000000",
+        )
+        await mm_b._flush_peer(mesh_b, "pcA")
+        got = mesh_a.messages[-1]
+        assert got["sections"]["alice"]["text"] == "your slice"
+        assert got["shared"] == "shared bit"
+        assert got["reply_to"] == "msg-000000000000"
 
         # a wrong peer token is rejected
         with pytest.raises(MeshError):

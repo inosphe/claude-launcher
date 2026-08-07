@@ -52,6 +52,27 @@ TOOLS = [
                         "peers don't reply-all"
                     ),
                 },
+                "reply_to": {
+                    "type": "string",
+                    "description": (
+                        "id of the message this answers (ids appear in "
+                        "delivery blocks and history)"
+                    ),
+                },
+                "sections": {
+                    "type": "object",
+                    "description": (
+                        "BATCH send: {handle: text} or {handle: {text, type}} "
+                        "per-recipient addenda. 'body' becomes the shared "
+                        "preamble; each recipient is delivered only body + "
+                        "its own section (never another's instructions), and "
+                        "the log keeps one composite message. Every section "
+                        "key must be in 'to' (or covered by '*'). A section "
+                        "'type' overrides the top-level intent for that "
+                        "recipient — e.g. fyi for the peer who only needs to "
+                        "know, ask for the one who must act."
+                    ),
+                },
             },
             "required": ["mesh", "to", "body"],
         },
@@ -113,15 +134,17 @@ def _call_tool(name: str, args: dict) -> dict:
         to = to_raw if to_raw == "*" or "," not in to_raw else [
             t.strip() for t in to_raw.split(",") if t.strip()
         ]
-        result = _client().post(
-            f"/api/mesh/{mesh}/messages",
-            {
-                "from": sender,
-                "to": to,
-                "body": str(args.get("body") or ""),
-                "type": str(args.get("type") or "say"),
-            },
-        )
+        payload = {
+            "from": sender,
+            "to": to,
+            "body": str(args.get("body") or ""),
+            "type": str(args.get("type") or "say"),
+        }
+        if args.get("reply_to"):
+            payload["reply_to"] = str(args["reply_to"])
+        if isinstance(args.get("sections"), dict):
+            payload["sections"] = args["sections"]
+        result = _client().post(f"/api/mesh/{mesh}/messages", payload)
         relay = result.pop("relay", None)
         result["relay"] = _relay_summary(relay)
         return result

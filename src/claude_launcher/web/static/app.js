@@ -1492,6 +1492,12 @@ function renderMesh(info, history) {
     if (m.type && m.type !== "say") {
       meta.appendChild(el("span", "mesh-msg-type", m.type));
     }
+    if (m.reply_to) {
+      meta.appendChild(el("span", "mesh-msg-type", `re ${m.reply_to}`));
+    }
+    if (m.sections) {
+      meta.appendChild(el("span", "mesh-msg-type", "batch"));
+    }
     meta.appendChild(el("span", "mesh-msg-at", (m.ts || "").replace("T", " ")));
     line.appendChild(meta);
     line.appendChild(el("div", "mesh-msg-body", m.body || ""));

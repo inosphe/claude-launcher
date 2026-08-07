@@ -98,6 +98,89 @@ def type_notice(message_type) -> Optional[str]:
     )
 
 
+def msg_type_for(msg: dict, handle: str) -> str:
+    """The intent ``handle`` experiences: its section's type, else the top one."""
+    sec = (msg.get("sections") or {}).get(handle)
+    if isinstance(sec, dict) and sec.get("type"):
+        return str(sec["type"])
+    return str(msg.get("type") or "say")
+
+
+def _slice_body(shared: str, section_text: Optional[str]) -> str:
+    """A recipient's slice: the shared preamble and its own section."""
+    return "\n\n".join(p for p in (shared, section_text) if p)
+
+
+def _composite_body(shared: str, sections: dict) -> str:
+    """The full batch text kept in the log: shared + every @handle section."""
+    parts = [shared] if shared else []
+    parts += [f"@{h}: {sec['text']}" for h, sec in sections.items()]
+    return "\n\n".join(parts)
+
+
+def _separable_notice(body: str, recipients: List[str]) -> Optional[str]:
+    """Nudge toward a BATCH send when one body @-addresses several recipients."""
+    if len(recipients) < 2 or not body:
+        return None
+    tagged = [
+        r for r in recipients if re.search(rf"@{re.escape(r)}(?![\w-])", body)
+    ]
+    if len(tagged) < 2:
+        return None
+    return (
+        f"this one body @-addresses {len(tagged)} recipients "
+        f"({', '.join(tagged)}) — that looks like per-recipient content. Send "
+        "it as a BATCH (sections={'<handle>': '<their part>'}) so each peer "
+        "reads only its own slice plus the shared body."
+    )
+
+
+def _normalize_sections(
+    sections, recipients: List[str], sender: str
+) -> Optional[dict]:
+    """Validate/normalize a batch ``sections`` map, or None if absent.
+
+    Every key must be an actual recipient of this send (not the sender, not
+    someone left out of ``to``) so a section can never be silently
+    undeliverable — interconnect's contract, verbatim.
+    """
+    if not sections:
+        return None
+    if not isinstance(sections, dict):
+        raise MeshError(
+            "sections must be a mapping of handle -> text (or handle -> {text, type})"
+        )
+    rcpt_set = set(recipients)
+    norm: dict = {}
+    for h, v in sections.items():
+        h = str(h)
+        if isinstance(v, str):
+            sec = {"text": v}
+        elif isinstance(v, dict):
+            text = v.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise MeshError(f"sections[{h!r}] needs a non-empty 'text'")
+            sec = {"text": text}
+            if v.get("type"):
+                sec["type"] = str(v["type"]).strip().lower()
+        else:
+            raise MeshError(
+                f"sections[{h!r}] must be a string or a {{text, type}} object"
+            )
+        sec["text"] = _CTRL_RE.sub("", sec["text"]).strip()
+        if not sec["text"]:
+            raise MeshError(f"sections[{h!r}] needs a non-empty 'text'")
+        if h == sender:
+            raise MeshError("a section cannot target the sender")
+        if h not in rcpt_set:
+            raise MeshError(
+                f"sections names {h!r}, who is not a recipient of this send — "
+                "add them to 'to' (or use '*'), or drop the section"
+            )
+        norm[h] = sec
+    return norm
+
+
 #: Wait for a message burst to go quiet before delivering (seconds).
 DEFAULT_SETTLE = 2.0
 
@@ -445,6 +528,8 @@ class MeshManager:
         *,
         external: bool = False,
         type: str = "say",
+        reply_to: Optional[str] = None,
+        sections: Optional[dict] = None,
     ) -> dict:
         """Append a message to the mesh log and wake the delivery worker.
 
@@ -452,6 +537,13 @@ class MeshManager:
         admits a non-member sender (the human on the dashboard). ``to`` is
         ``"*"``, a handle, or a list of handles. ``type`` is the message
         *intent* (``say``/``ask`` invite a reply; ``fyi``/``ack`` do not).
+        ``reply_to`` threads this message to an earlier message id.
+
+        ``sections`` turns this into a BATCH send: ``{handle: text}`` (or
+        ``{handle: {text, type}}``) of per-recipient addenda. ``body`` becomes
+        the shared preamble; each recipient is *delivered* only ``body`` plus
+        its own section, while the log keeps the full composite as ONE
+        message (one id, one entry). A section may carry its own intent.
         """
         mesh = self.get(name)
         member = self.resolve_sender(name, sender)
@@ -462,11 +554,21 @@ class MeshManager:
             )
         from_handle = member.handle if member is not None else sender
         body = _CTRL_RE.sub("", str(body)).strip()
-        if not body:
-            raise MeshError("empty message body")
         recipients = self._resolve_recipients(mesh, from_handle, to)
         if not recipients:
             raise MeshError(f"mesh {name!r} has no other members to deliver to")
+        norm_sections = _normalize_sections(sections, recipients, from_handle)
+        if norm_sections is None and not body:
+            raise MeshError("empty message body")
+        if norm_sections is not None:
+            for rcpt in recipients:
+                sec = norm_sections.get(rcpt)
+                if not _slice_body(body, sec["text"] if sec else None):
+                    raise MeshError(
+                        f"recipient {rcpt!r} would receive an empty message — "
+                        "give a shared body, a section for them, or drop them "
+                        "from 'to'"
+                    )
         intent = str(type or "say").strip().lower() or "say"
         msg = {
             "id": "msg-" + uuid.uuid4().hex[:12],
@@ -474,11 +576,22 @@ class MeshManager:
             "from": from_handle,
             "to": to if isinstance(to, str) else list(to),
             "type": intent,
-            "body": body,
+            # The log keeps the full composite; delivery slices per recipient
+            # from ``shared`` + ``sections`` (see format_delivery).
+            "body": (
+                _composite_body(body, norm_sections)
+                if norm_sections is not None
+                else body
+            ),
             # Origin machine: only the originating daemon forwards a message
             # to its peers, so a broadcast never echoes back and forth.
             "origin": self.machine,
         }
+        if reply_to:
+            msg["reply_to"] = str(reply_to)
+        if norm_sections is not None:
+            msg["shared"] = body
+            msg["sections"] = norm_sections
         mesh.messages.append(msg)
         mesh.seen_ids.add(msg["id"])
         mesh.last_append = time.monotonic()
@@ -492,6 +605,20 @@ class MeshManager:
             mesh._first_pending.setdefault(handle, now)
         mesh.wake.set()
         remote = [h for h in recipients if h in mesh.members and not mesh.members[h].local]
+        advisories = []
+        if norm_sections is None:
+            sep = _separable_notice(body, recipients)
+            if sep:
+                advisories.append(sep)
+        note = type_notice(intent)
+        if not note and norm_sections:
+            for sec in norm_sections.values():
+                if sec.get("type"):
+                    note = type_notice(sec["type"])
+                    if note:
+                        break
+        if note:
+            advisories.append(note)
         return {
             **msg,
             "recipients": recipients,
@@ -499,9 +626,11 @@ class MeshManager:
             # they are queued (durably, via the peer cursor) until reconnect.
             "queued_remote": remote if not self.relay_connected() else [],
             "remote": remote,
+            "batched": norm_sections is not None,
             "expects_reply": expects_reply(intent),
-            # Advisory, not an error: an unknown intent invites reply-all.
-            "notice": type_notice(intent),
+            # Advisory, not an error: an unknown intent invites reply-all,
+            # and a body @-addressing several recipients wants to be a batch.
+            "notice": " ".join(advisories) if advisories else None,
         }
 
     def _resolve_recipients(
@@ -673,6 +802,25 @@ class MeshManager:
                 "body": _CTRL_RE.sub("", m["body"]),
                 "origin": machine,
             }
+            if m.get("reply_to"):
+                msg["reply_to"] = str(m["reply_to"])
+            # Batch fields ride along so this daemon can slice deliveries
+            # for its own local members.
+            if isinstance(m.get("sections"), dict):
+                sections = {
+                    str(h): {
+                        "text": _CTRL_RE.sub("", str(sec.get("text") or "")),
+                        **(
+                            {"type": str(sec["type"]).strip().lower()}
+                            if sec.get("type") else {}
+                        ),
+                    }
+                    for h, sec in m["sections"].items()
+                    if isinstance(sec, dict) and sec.get("text")
+                }
+                if sections:
+                    msg["sections"] = sections
+                    msg["shared"] = _CTRL_RE.sub("", str(m.get("shared") or ""))
             mesh.messages.append(msg)
             mesh.seen_ids.add(mid)
             self._append_log(mesh, msg)
@@ -943,8 +1091,8 @@ class MeshManager:
         st["last_delivered"] = now
         # Only a reply-*expecting* delivery arms the heartbeat: draining
         # fyi/ack traffic leaves the member owing nothing (interconnect's
-        # expects_reply contract).
-        if any(expects_reply(m.get("type")) for m in pending):
+        # expects_reply contract). Sectioned messages count per recipient.
+        if any(expects_reply(msg_type_for(m, member.handle)) for m in pending):
             st["last_asked"] = now
         self._persist_cursors(mesh)
         log.info(
@@ -1068,18 +1216,29 @@ def format_delivery(mesh_name: str, handle: str, msgs: List[dict]) -> str:
     """The fenced YAML block typed into the recipient's terminal."""
     batch = []
     for m in msgs:
-        body = str(m.get("body") or "")
+        if m.get("sections") is not None:
+            # batch message: this recipient reads only the shared preamble
+            # plus its own slice — never another member's instructions
+            sec = (m.get("sections") or {}).get(handle)
+            body = _slice_body(
+                str(m.get("shared") or ""),
+                sec.get("text") if isinstance(sec, dict) else None,
+            )
+        else:
+            body = str(m.get("body") or "")
         if len(body) > MAX_DELIVERY_BODY:
             body = body[:MAX_DELIVERY_BODY] + " …[clipped — see mesh history]"
-        entry: dict = {"from": m.get("from")}
+        entry: dict = {"id": m.get("id"), "from": m.get("from")}
         if m.get("to") != "*":
             entry["to"] = m.get("to")
-        intent = str(m.get("type") or "say").strip().lower() or "say"
+        intent = str(msg_type_for(m, handle)).strip().lower() or "say"
         if intent != "say":
             entry["type"] = intent
+        if m.get("reply_to"):
+            entry["reply_to"] = m["reply_to"]
         entry["body"] = _Literal(body) if "\n" in body else body
         batch.append(entry)
-    needs_reply = any(expects_reply(m.get("type")) for m in msgs)
+    needs_reply = any(expects_reply(msg_type_for(m, handle)) for m in msgs)
     doc = {
         "mesh": mesh_name,
         "to": handle,

@@ -840,6 +840,17 @@ claunch mesh history dev
   accepted but draw an advisory (a role name in `type` silently invites
   reply-all). Available on the CLI (`--type`), MCP `send`, the web send box,
   and the API (`type` field).
+- **Batch sections** (ported from interconnect): one send can carry a shared
+  preamble (`body`) plus per-recipient addenda — each recipient's terminal
+  receives only the shared part and *its own* slice, never another member's
+  instructions, while history keeps one composite message (one id). A section
+  may override the intent per recipient (`fyi` for the peer who only needs to
+  know, `ask` for the one who must act). CLI: repeatable
+  `--section HANDLE=TEXT`; MCP/API: a `sections` object (`{handle: text}` or
+  `{handle: {text, type}}`). Sending an un-batched body that @-addresses
+  several recipients draws an advisory suggesting a batch. Every message also
+  carries an **id** (shown in delivery blocks and history), and `--reply-to
+  MSGID` / the `reply_to` field threads an answer to it.
 - **Join briefing**: newly enrolled members get an idle-gated briefing block
   typed into their terminal (mesh, their handle/role, member list, how to
   send) — so a session enrolled from the web knows it joined something.

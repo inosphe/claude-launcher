@@ -82,7 +82,14 @@ Kept (as concepts or ported logic):
 
 - mesh/channel + membership, handle/role conventions
 - message shape (`id`, `ts`, `from`, `to` = `*` | handle | list, `type`,
-  `body`), append-only `log.jsonl` history
+  `body`, `reply_to?`), append-only `log.jsonl` history
+- batch `sections` (`{handle: text|{text, type}}`): the log stores ONE
+  composite message (plus `shared` + `sections` fields); *delivery* slices
+  per recipient — shared preamble + own section only — and a section's
+  `type` overrides the top-level intent for that recipient. Section keys
+  must be actual recipients of the send (never silently undeliverable).
+  Slicing happens at delivery time, so a federated batch crosses machines
+  as one message and the remote daemon slices for its own local members
 - message intents: `say`/`ask` invite a reply, `fyi`/`ack`/`ping` do not
   (`expects_reply` is derived on read, never stored — interconnect's
   contract); unknown types are accepted but draw a reply-all advisory.
