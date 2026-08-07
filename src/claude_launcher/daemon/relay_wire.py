@@ -29,6 +29,19 @@ STREAM_OPEN = 0x12
 STREAM_DATA = 0x13
 STREAM_EOF = 0x14
 STREAM_CLOSE = 0x15
+PEER_OPEN = 0x16
+PEER_OPEN_OK = 0x17
+PEER_OPEN_ERR = 0x18
+
+#: REGISTER_OK capability bits. Old relays send an empty body (caps 0); the
+#: bit MUST be checked before sending PEER_OPEN — an old relay silently drops
+#: unknown message types, so an unchecked request hangs without any error.
+CAP_PEERING = 0x01
+
+#: PEER_OPEN_ERR codes.
+PEER_ERR_UNKNOWN_BACKEND = 1
+PEER_ERR_DISABLED = 2
+PEER_ERR_UNREACHABLE = 3
 
 # channel (flags & 0b11): Control=0, Tunnel=3
 _CH_CONTROL = 0
@@ -67,6 +80,17 @@ def stream_close(room_id: bytes, sid: int) -> bytes:
     return _frame(room_id, _CH_TUNNEL, bytes([STREAM_CLOSE]) + struct.pack(">I", sid))
 
 
+def peer_open(room_id: bytes, req_id: int, name: str) -> bytes:
+    """Ask the relay to bridge a stream to another registered backend."""
+    name_b = name.encode("utf-8")
+    if len(name_b) > 255:
+        raise ValueError("backend name too long (max 255 bytes)")
+    payload = (
+        bytes([PEER_OPEN]) + struct.pack(">I", req_id) + bytes([len(name_b)]) + name_b
+    )
+    return _frame(room_id, _CH_TUNNEL, payload)
+
+
 def pong(room_id: bytes, token: int) -> bytes:
     return _frame(room_id, _CH_CONTROL, bytes([PONG]) + struct.pack(">Q", token))
 
@@ -93,6 +117,9 @@ class Msg:
     sid: int = 0
     data: bytes = b""
     token: int = 0
+    caps: int = 0  # REGISTER_OK capability bits
+    req: int = 0  # PEER_OPEN_OK/ERR request correlation id
+    code: int = 0  # PEER_OPEN_ERR code
 
 
 def decode_payload(payload: bytes) -> Optional[Msg]:
@@ -102,7 +129,9 @@ def decode_payload(payload: bytes) -> Optional[Msg]:
     ty = payload[0]
     body = payload[1:]
     if ty == REGISTER_OK:
-        return Msg(REGISTER_OK)
+        # Optional [caps u8] body; old relays send none (caps 0), trailing
+        # bytes beyond the first are future extensions and are ignored.
+        return Msg(REGISTER_OK, caps=body[0] if body else 0)
     if ty in (STREAM_OPEN, STREAM_EOF, STREAM_CLOSE):
         if len(body) < 4:
             return None
@@ -111,6 +140,15 @@ def decode_payload(payload: bytes) -> Optional[Msg]:
         if len(body) < 4:
             return None
         return Msg(STREAM_DATA, sid=struct.unpack(">I", body[:4])[0], data=body[4:])
+    if ty == PEER_OPEN_OK:
+        if len(body) < 8:
+            return None
+        req, sid = struct.unpack(">II", body[:8])
+        return Msg(PEER_OPEN_OK, req=req, sid=sid)
+    if ty == PEER_OPEN_ERR:
+        if len(body) < 5:
+            return None
+        return Msg(PEER_OPEN_ERR, req=struct.unpack(">I", body[:4])[0], code=body[4])
     if ty in (PING, PONG):
         if len(body) < 8:
             return None

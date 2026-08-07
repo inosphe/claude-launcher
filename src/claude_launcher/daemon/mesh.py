@@ -21,14 +21,16 @@ injects one fenced YAML block and advances that member's durable cursor.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import re
+import secrets
 import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 
 import yaml
 
@@ -69,6 +71,10 @@ DEFAULT_BUSY_HOLD = 60.0
 
 #: Worker rescan cadence while messages are pending (seconds).
 _POLL = 1.0
+
+#: Peer flush retry backoff after a failure (seconds, doubling to the cap).
+_PEER_BACKOFF_BASE = 5.0
+_PEER_BACKOFF_MAX = 60.0
 
 
 def utcnow() -> str:
@@ -137,6 +143,17 @@ class Mesh:
         self.members: Dict[str, Member] = {}
         self.messages: List[dict] = []  # in-memory mirror of log.jsonl
         self.cursors: Dict[str, int] = {}  # handle -> delivered log index
+        #: Federation links, peer machine -> {token_in, token_out, created_at}.
+        #: token_in authenticates the peer's calls to us; token_out is what we
+        #: present when calling them (exchanged by the link handshake).
+        self.links: Dict[str, dict] = {}
+        #: Outstanding invite tokens (created here, consumed by a peer's link).
+        self.invites: Dict[str, str] = {}
+        #: Per-peer forward cursor into ``messages`` (what they have received).
+        self.peer_cursors: Dict[str, int] = {}
+        #: Runtime peer flush status: machine -> {ok, error, retry_at, backoff}.
+        self.peer_status: Dict[str, dict] = {}
+        self.seen_ids: set = set()  # message-id dedupe for peer deliveries
         self.wake = asyncio.Event()
         self.last_append = 0.0  # monotonic time of the last log append
         self._first_pending: Dict[str, float] = {}  # handle -> monotonic
@@ -173,6 +190,14 @@ class MeshManager:
         self._meshes: Dict[str, Mesh] = {}
         self._workers: Dict[str, asyncio.Task] = {}
         self._started = False
+        #: Federation wiring, set by the daemon entrypoint once the uplink
+        #: exists. ``machine`` is this daemon's relay name — the machine-level
+        #: qualifier in global addresses like ``work-pc/s0``; empty means no
+        #: relay configured, so the mesh is local-only.
+        self.machine: str = ""
+        #: async (machine, path, body) -> dict; raises on failure.
+        self.peer_transport: Optional[Callable] = None
+        self.relay_connected: Callable[[], bool] = lambda: False
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -280,6 +305,7 @@ class MeshManager:
         mesh.cursors[handle] = len(mesh.messages)
         self._persist_def(mesh)
         self._persist_cursors(mesh)
+        self._push_members_soon(mesh)
         return member
 
     def leave(self, name: str, handle: str) -> Member:
@@ -291,6 +317,7 @@ class MeshManager:
         mesh._first_pending.pop(handle, None)
         self._persist_def(mesh)
         self._persist_cursors(mesh)
+        self._push_members_soon(mesh)
         return member
 
     def resolve_sender(self, name: str, sender: str) -> Optional[Member]:
@@ -341,20 +368,26 @@ class MeshManager:
             "from": from_handle,
             "to": to if isinstance(to, str) else list(to),
             "body": body,
+            # Origin machine: only the originating daemon forwards a message
+            # to its peers, so a broadcast never echoes back and forth.
+            "origin": self.machine,
         }
         mesh.messages.append(msg)
+        mesh.seen_ids.add(msg["id"])
         mesh.last_append = time.monotonic()
         self._append_log(mesh, msg)
         now = time.monotonic()
         for handle in recipients:
             mesh._first_pending.setdefault(handle, now)
         mesh.wake.set()
+        remote = [h for h in recipients if h in mesh.members and not mesh.members[h].local]
         return {
             **msg,
             "recipients": recipients,
-            "queued_remote": [
-                h for h in recipients if not mesh.members[h].local
-            ],
+            # Remote recipients ride the peer flusher; when the relay is down
+            # they are queued (durably, via the peer cursor) until reconnect.
+            "queued_remote": remote if not self.relay_connected() else [],
+            "remote": remote,
         }
 
     def _resolve_recipients(
@@ -373,6 +406,295 @@ class MeshManager:
     def history(self, name: str, limit: int = 50) -> List[dict]:
         mesh = self.get(name)
         return mesh.messages[-limit:] if limit > 0 else list(mesh.messages)
+
+    # ------------------------------------------------------------------ #
+    # federation (relay-optional: every daemon owns its local side; links
+    # are agreements negotiated over the relay while it is up)
+    # ------------------------------------------------------------------ #
+    def _require_machine(self) -> str:
+        if not self.machine:
+            raise MeshError(
+                "cross-machine mesh needs a relay identity — configure the "
+                "relay uplink first (claunch daemon relay url/name/token)"
+            )
+        return self.machine
+
+    def invite(self, name: str) -> dict:
+        """Mint an invite code a peer daemon redeems with ``mesh link``.
+
+        The invite token doubles as the peer's credential for calling us
+        (token_in) once the link handshake completes — the handshake's
+        reply_token becomes our credential for calling them.
+        """
+        mesh = self.get(name)
+        machine = self._require_machine()
+        token = secrets.token_urlsafe(18)
+        mesh.invites[token] = utcnow()
+        self._persist_def(mesh)
+        code = base64.urlsafe_b64encode(
+            json.dumps(
+                {"v": 1, "mesh": mesh.name, "machine": machine, "token": token}
+            ).encode("utf-8")
+        ).decode("ascii")
+        return {"code": code, "mesh": mesh.name, "machine": machine}
+
+    async def link(self, code: str) -> dict:
+        """Redeem an invite code: handshake with the origin daemon over the
+        relay, exchanging mesh-scoped tokens and member lists."""
+        machine = self._require_machine()
+        if self.peer_transport is None:
+            raise MeshError("relay uplink is not running — cannot reach peers")
+        try:
+            doc = json.loads(base64.urlsafe_b64decode(code.strip().encode("ascii")))
+            peer = str(doc["machine"])
+            mesh_name = str(doc["mesh"])
+            token = str(doc["token"])
+        except Exception:
+            raise MeshError("invalid invite code") from None
+        if peer == machine:
+            raise MeshError("this invite was minted by this very daemon")
+        if mesh_name in self._meshes:
+            mesh = self._meshes[mesh_name]
+        else:
+            mesh = self.create(mesh_name)
+        reply_token = secrets.token_urlsafe(18)
+        payload = await self.peer_transport(
+            peer,
+            "/peer/mesh/link",
+            {
+                "mesh": mesh_name,
+                "machine": machine,
+                "token": token,
+                "reply_token": reply_token,
+                "members": [m.to_dict() for m in mesh.members.values() if m.local],
+            },
+        )
+        mesh.links[peer] = {
+            "token_out": token,  # we authenticate to them with the invite token
+            "token_in": reply_token,  # they authenticate to us with our reply
+            "created_at": utcnow(),
+        }
+        mesh.peer_cursors.setdefault(peer, len(mesh.messages))
+        self._merge_remote_members(mesh, peer, payload.get("members") or [])
+        self._persist_cursors(mesh)
+        return {
+            "mesh": mesh_name,
+            "peer": peer,
+            "members": len(mesh.members),
+        }
+
+    def _check_peer_token(self, mesh: Mesh, machine: str, token: str) -> None:
+        link = mesh.links.get(machine)
+        expected = link.get("token_in") if link else None
+        if expected is None or not secrets.compare_digest(
+            str(token).encode("utf-8"), str(expected).encode("utf-8")
+        ):
+            raise MeshError("bad mesh peer token")
+
+    def peer_link_accept(
+        self,
+        name: str,
+        machine: str,
+        token: str,
+        reply_token: str,
+        members: List[dict],
+    ) -> dict:
+        """Handle a peer daemon redeeming one of our invites."""
+        mesh = self.get(name)
+        if not _NAME_RE.match(machine or ""):
+            raise MeshError("invalid peer machine name")
+        matched = next(
+            (t for t in mesh.invites if secrets.compare_digest(
+                t.encode("utf-8"), str(token).encode("utf-8"))),
+            None,
+        )
+        if matched is None:
+            raise MeshError("unknown or already-used invite token")
+        del mesh.invites[matched]
+        mesh.links[machine] = {
+            "token_in": matched,  # they call us with the invite token
+            "token_out": str(reply_token),  # we call them with their reply
+            "created_at": utcnow(),
+        }
+        mesh.peer_cursors.setdefault(machine, len(mesh.messages))
+        self._merge_remote_members(mesh, machine, members)
+        self._persist_cursors(mesh)
+        log.info("mesh %r: linked with peer %r", mesh.name, machine)
+        return {
+            "machine": self._require_machine(),
+            "members": [m.to_dict() for m in mesh.members.values() if m.local],
+        }
+
+    def peer_messages_accept(
+        self, name: str, machine: str, token: str, messages: List[dict]
+    ) -> dict:
+        """Ingest a batch of messages forwarded by a linked peer daemon."""
+        mesh = self.get(name)
+        self._check_peer_token(mesh, machine, token)
+        accepted = 0
+        now = time.monotonic()
+        for m in messages:
+            mid = str(m.get("id") or "")
+            if not mid or mid in mesh.seen_ids or not isinstance(m.get("body"), str):
+                continue
+            msg = {
+                "id": mid,
+                "ts": str(m.get("ts") or utcnow()),
+                "from": str(m.get("from") or machine),
+                "to": m.get("to") if isinstance(m.get("to"), (str, list)) else "*",
+                "body": _CTRL_RE.sub("", m["body"]),
+                "origin": machine,
+            }
+            mesh.messages.append(msg)
+            mesh.seen_ids.add(mid)
+            self._append_log(mesh, msg)
+            accepted += 1
+            for handle, member in mesh.members.items():
+                if member.local and mesh.addressed_to(msg, handle):
+                    mesh._first_pending.setdefault(handle, now)
+        if accepted:
+            mesh.last_append = time.monotonic()
+            mesh.wake.set()
+        return {"ok": True, "accepted": accepted}
+
+    def peer_members_accept(
+        self, name: str, machine: str, token: str, members: List[dict]
+    ) -> dict:
+        """Replace our view of a linked peer's local members."""
+        mesh = self.get(name)
+        self._check_peer_token(mesh, machine, token)
+        self._merge_remote_members(mesh, machine, members)
+        return {"ok": True}
+
+    def _merge_remote_members(
+        self, mesh: Mesh, machine: str, members: List[dict]
+    ) -> None:
+        """Adopt the peer's *local* members as our remote entries for it."""
+        for handle in [
+            h for h, m in mesh.members.items() if m.machine == machine
+        ]:
+            del mesh.members[handle]
+            mesh.cursors.pop(handle, None)
+        for doc in members:
+            if not isinstance(doc, dict) or doc.get("machine"):
+                continue  # only the peer's own local members; no transitivity
+            handle = str(doc.get("handle") or "")
+            if not _NAME_RE.match(handle):
+                continue
+            if handle in mesh.members:
+                log.warning(
+                    "mesh %r: handle %r from peer %r clashes with an existing "
+                    "member — skipped", mesh.name, handle, machine,
+                )
+                continue
+            mesh.members[handle] = Member(
+                handle,
+                str(doc.get("session") or ""),
+                machine=machine,
+                role=str(doc.get("role") or ""),
+                joined_at=str(doc.get("joined_at") or ""),
+            )
+        self._persist_def(mesh)
+
+    def _push_members_soon(self, mesh: Mesh) -> None:
+        """Best-effort fanout of our member list to linked peers (on change)."""
+        if not mesh.links or self.peer_transport is None:
+            return
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        asyncio.ensure_future(self._push_members(mesh))
+
+    async def _push_members(self, mesh: Mesh) -> None:
+        payload = [m.to_dict() for m in mesh.members.values() if m.local]
+        for machine, link in list(mesh.links.items()):
+            try:
+                await self.peer_transport(
+                    machine,
+                    "/peer/mesh/members",
+                    {
+                        "mesh": mesh.name,
+                        "machine": self.machine,
+                        "token": link["token_out"],
+                        "members": payload,
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001 — next flush retries implicitly
+                log.debug("mesh %r: member push to %r failed: %s",
+                          mesh.name, machine, exc)
+
+    def pending_for_machine(self, mesh: Mesh, machine: str) -> List[dict]:
+        """Locally-originated messages a linked peer has not received yet."""
+        start = mesh.peer_cursors.get(machine, 0)
+        out = []
+        for m in mesh.messages[start:]:
+            if not self.machine or m.get("origin", "") != self.machine:
+                continue
+            if self._machine_addressed(mesh, m, machine):
+                out.append(m)
+        return out
+
+    def _machine_addressed(self, mesh: Mesh, msg: dict, machine: str) -> bool:
+        to = msg.get("to")
+        sender = msg.get("from")
+        for handle, member in mesh.members.items():
+            if member.machine != machine or handle == sender:
+                continue
+            if to == "*" or to == handle or (isinstance(to, list) and handle in to):
+                return True
+        return False
+
+    async def _flush_peer(self, mesh: Mesh, machine: str) -> None:
+        status = mesh.peer_status.setdefault(
+            machine, {"ok": None, "error": None, "retry_at": 0.0, "backoff": 0.0}
+        )
+        now = time.monotonic()
+        if now < status["retry_at"]:
+            return
+        pending = self.pending_for_machine(mesh, machine)
+        target = len(mesh.messages)
+        if not pending:
+            mesh.peer_cursors[machine] = target
+            return
+        link = mesh.links.get(machine)
+        if link is None or self.peer_transport is None:
+            return
+        try:
+            await self.peer_transport(
+                machine,
+                "/peer/mesh/messages",
+                {
+                    "mesh": mesh.name,
+                    "machine": self.machine,
+                    "token": link["token_out"],
+                    "messages": pending,
+                },
+            )
+        except Exception as exc:  # noqa: BLE001 — queue and retry with backoff
+            backoff = min(
+                (status["backoff"] or _PEER_BACKOFF_BASE / 2) * 2, _PEER_BACKOFF_MAX
+            )
+            mesh.peer_status[machine] = {
+                "ok": False,
+                "error": str(exc),
+                "retry_at": now + backoff,
+                "backoff": backoff,
+            }
+            log.info(
+                "mesh %r: %d message(s) queued for peer %r (%s); retry in %.0fs",
+                mesh.name, len(pending), machine, exc, backoff,
+            )
+            return
+        mesh.peer_cursors[machine] = target
+        mesh.peer_status[machine] = {
+            "ok": True, "error": None, "retry_at": 0.0, "backoff": 0.0,
+        }
+        self._persist_cursors(mesh)
+        log.info(
+            "mesh %r: forwarded %d message(s) to peer %r",
+            mesh.name, len(pending), machine,
+        )
 
     # ------------------------------------------------------------------ #
     # views
@@ -397,7 +719,9 @@ class MeshManager:
 
     def _reachability(self, member: Member) -> str:
         if not member.local:
-            return "remote"  # federation refines this to connected/disconnected
+            return (
+                "remote-connected" if self.relay_connected() else "remote-disconnected"
+            )
         try:
             session = self.manager.get(member.session)
         except ManagerError:
@@ -432,6 +756,15 @@ class MeshManager:
                         log.exception(
                             "mesh %r: delivery to %r failed", mesh.name, handle
                         )
+                if self.peer_transport is not None:
+                    for machine in list(mesh.links):
+                        try:
+                            await self._flush_peer(mesh, machine)
+                        except Exception:  # noqa: BLE001
+                            log.exception(
+                                "mesh %r: peer flush to %r failed",
+                                mesh.name, machine,
+                            )
         except asyncio.CancelledError:
             pass
 
@@ -474,6 +807,13 @@ class MeshManager:
         for entry in (doc.get("members") or {}).values():
             member = Member.from_dict(entry)
             mesh.members[member.handle] = member
+        mesh.links = {
+            str(k): dict(v) for k, v in (doc.get("links") or {}).items()
+            if isinstance(v, dict)
+        }
+        mesh.invites = {
+            str(k): str(v) for k, v in (doc.get("invites") or {}).items()
+        }
         log_path = d / "log.jsonl"
         if log_path.is_file():
             for line in log_path.read_text(encoding="utf-8").splitlines():
@@ -481,16 +821,28 @@ class MeshManager:
                 if not line:
                     continue
                 try:
-                    mesh.messages.append(json.loads(line))
+                    msg = json.loads(line)
                 except ValueError:
                     continue
+                mesh.messages.append(msg)
+                if msg.get("id"):
+                    mesh.seen_ids.add(str(msg["id"]))
         cursors_path = d / "cursors.json"
         if cursors_path.is_file():
             try:
                 raw = json.loads(cursors_path.read_text(encoding="utf-8"))
-                mesh.cursors = {str(k): int(v) for k, v in raw.items()}
+                if "members" in raw or "peers" in raw:
+                    mesh.cursors = {
+                        str(k): int(v) for k, v in (raw.get("members") or {}).items()
+                    }
+                    mesh.peer_cursors = {
+                        str(k): int(v) for k, v in (raw.get("peers") or {}).items()
+                    }
+                else:  # phase-1 format: a flat {handle: index} map
+                    mesh.cursors = {str(k): int(v) for k, v in raw.items()}
             except (ValueError, TypeError):
                 mesh.cursors = {}
+                mesh.peer_cursors = {}
         # Anything undelivered at load time counts as pending from now.
         now = time.monotonic()
         for handle, member in mesh.members.items():
@@ -507,6 +859,8 @@ class MeshManager:
                 "name": mesh.name,
                 "created_at": mesh.created_at,
                 "members": {h: m.to_dict() for h, m in sorted(mesh.members.items())},
+                "links": mesh.links,
+                "invites": mesh.invites,
             }
             (d / "mesh.json").write_text(
                 json.dumps(doc, indent=2), encoding="utf-8"
@@ -517,7 +871,10 @@ class MeshManager:
     def _persist_cursors(self, mesh: Mesh) -> None:
         try:
             (paths.mesh_dir(mesh.name) / "cursors.json").write_text(
-                json.dumps(mesh.cursors, indent=2), encoding="utf-8"
+                json.dumps(
+                    {"members": mesh.cursors, "peers": mesh.peer_cursors}, indent=2
+                ),
+                encoding="utf-8",
             )
         except OSError as exc:
             log.warning("mesh %r: cannot persist cursors: %s", mesh.name, exc)

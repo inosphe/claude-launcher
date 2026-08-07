@@ -242,7 +242,7 @@ def test_delivery_injects_into_recipient_terminal(home, tmp_path):
         cursors = json.loads(
             (paths.mesh_dir("m1") / "cursors.json").read_text(encoding="utf-8")
         )
-        assert cursors["worker_1"] == 1
+        assert cursors["members"]["worker_1"] == 1
 
         await mm.shutdown()
         await mgr.shutdown_all()

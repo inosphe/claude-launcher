@@ -36,12 +36,25 @@ BACKOFF_MAX = 30.0
 _STABLE_AFTER = 30.0  # a connection alive this long resets backoff
 
 
+class PeerError(Exception):
+    """Raised when a peer-bridged request cannot be made or fails."""
+
+
 class _Stream:
     """One relay stream bound to a loopback TCP connection to the daemon."""
 
     def __init__(self, sid: int, writer: asyncio.StreamWriter) -> None:
         self.sid = sid
         self.writer = writer
+
+
+class _PeerStream:
+    """An outbound bridged stream (this daemon → relay → peer backend)."""
+
+    def __init__(self, sid: int) -> None:
+        self.sid = sid
+        self.chunks: list = []
+        self.done = asyncio.Event()  # set on EOF/CLOSE (response complete)
 
 
 class RelayUplink:
@@ -74,6 +87,12 @@ class RelayUplink:
         #: the API/CLI/web so users always see whether the mesh can span
         #: machines right now).
         self.connected = False
+        #: True when the relay advertised CAP_PEERING in REGISTER_OK — checked
+        #: before every PEER_OPEN (an old relay drops unknown types silently).
+        self.peering = False
+        self._peer_streams: Dict[int, _PeerStream] = {}
+        self._peer_waiters: Dict[int, asyncio.Future] = {}
+        self._next_req = 1
 
     async def run(self) -> None:
         """Reconnect loop. Runs until :meth:`stop` is called."""
@@ -130,9 +149,11 @@ class RelayUplink:
                     await self._recv_loop(ws)
                 finally:
                     self.connected = False
+                    self.peering = False
                     ping.cancel()
                     watchdog.cancel()
                     await self._close_all_streams()
+                    self._fail_peer_state()
                     self._ws = None
 
     async def _await_register_ok(self, ws) -> bool:
@@ -147,6 +168,7 @@ class RelayUplink:
             decoded = w.decode_payload(payload)
             if decoded and decoded.kind == w.REGISTER_OK:
                 self._last_recv = time.monotonic()
+                self.peering = bool(decoded.caps & w.CAP_PEERING)
                 # Any frames after REGISTER_OK in the same message are handled
                 # by the recv loop; stash the decoder so we don't lose them.
                 self._decoder = decoder
@@ -169,6 +191,23 @@ class RelayUplink:
     async def _handle(self, payload: bytes) -> None:
         m = w.decode_payload(payload)
         if m is None:
+            return
+        if m.kind in (w.PEER_OPEN_OK, w.PEER_OPEN_ERR):
+            waiter = self._peer_waiters.pop(m.req, None)
+            if waiter is not None and not waiter.done():
+                if m.kind == w.PEER_OPEN_OK:
+                    waiter.set_result(m.sid)
+                else:
+                    waiter.set_exception(PeerError(_peer_err_text(m.code)))
+            return
+        # A sid we initiated (peer bridge) takes precedence: those streams
+        # collect response bytes instead of piping to the loopback daemon.
+        peer = self._peer_streams.get(m.sid) if m.sid else None
+        if peer is not None and m.kind in (w.STREAM_DATA, w.STREAM_EOF, w.STREAM_CLOSE):
+            if m.kind == w.STREAM_DATA:
+                peer.chunks.append(m.data)
+            else:
+                peer.done.set()
             return
         if m.kind == w.STREAM_OPEN:
             await self._open_stream(m.sid)
@@ -240,6 +279,64 @@ class RelayUplink:
         for sid in list(self._streams):
             await self._drop_stream(sid, notify=False)
 
+    # --------------------------------------------------------------------- #
+    # peer bridges (this daemon → relay → another backend)
+    # --------------------------------------------------------------------- #
+    async def peer_http(self, peer: str, request: bytes, *, timeout: float = 30.0) -> bytes:
+        """One raw HTTP/1.1 request over a relay bridge to backend ``peer``.
+
+        The request must be self-delimiting (``Connection: close`` +
+        ``Content-Length``), mirroring the relay ingress convention of
+        1 request = 1 stream. Returns the raw response bytes (head + body).
+        Raises :class:`PeerError` when the relay is down or too old
+        (no CAP_PEERING), the peer is unknown/unreachable, or the bridge
+        dies before the response completes.
+        """
+        if self._ws is None or not self.connected:
+            raise PeerError("relay uplink is not connected")
+        if not self.peering:
+            raise PeerError(
+                "relay does not allow backend peering "
+                "(enable allow_backend_peering in relay.toml, or upgrade the relay)"
+            )
+        req_id = self._next_req
+        self._next_req = ((self._next_req + 1) & 0xFFFFFFFF) or 1
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._peer_waiters[req_id] = fut
+        await self._raw_send(w.peer_open(self._room, req_id, peer))
+        try:
+            sid = await asyncio.wait_for(fut, timeout=CONNECT_TIMEOUT)
+        except asyncio.TimeoutError:
+            self._peer_waiters.pop(req_id, None)
+            raise PeerError(f"PEER_OPEN to {peer!r} timed out") from None
+        ps = _PeerStream(sid)
+        self._peer_streams[sid] = ps
+        try:
+            for frame in w.iter_stream_data(self._room, sid, request):
+                await self._raw_send(frame)
+            await self._raw_send(w.stream_eof(self._room, sid))
+            try:
+                await asyncio.wait_for(ps.done.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                raise PeerError(f"peer {peer!r} response timed out") from None
+            resp = b"".join(ps.chunks)
+            if not resp:
+                raise PeerError(f"peer {peer!r} closed the bridge without a response")
+            return resp
+        finally:
+            self._peer_streams.pop(sid, None)
+            await self._raw_send(w.stream_close(self._room, sid))
+
+    def _fail_peer_state(self) -> None:
+        """Uplink died: fail pending PEER_OPENs, complete in-flight bridges."""
+        for fut in self._peer_waiters.values():
+            if not fut.done():
+                fut.set_exception(PeerError("relay uplink disconnected"))
+        self._peer_waiters.clear()
+        for ps in self._peer_streams.values():
+            ps.done.set()
+        self._peer_streams.clear()
+
     async def _keepalive(self) -> None:
         while True:
             await asyncio.sleep(PING_INTERVAL)
@@ -266,6 +363,14 @@ class RelayUplink:
                 await ws.send_bytes(frame)
             except (ConnectionError, OSError, RuntimeError, aiohttp.ClientError):
                 pass
+
+
+def _peer_err_text(code: int) -> str:
+    return {
+        w.PEER_ERR_UNKNOWN_BACKEND: "peer backend is not registered with the relay",
+        w.PEER_ERR_DISABLED: "relay has backend peering disabled (allow_backend_peering)",
+        w.PEER_ERR_UNREACHABLE: "peer backend is unreachable",
+    }.get(code, f"peer open failed (code {code})")
 
 
 def config_from_env_and_dict(cfg: dict, *, local_host: str, local_port: int
