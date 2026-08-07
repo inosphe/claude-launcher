@@ -540,7 +540,8 @@ While attached, `Ctrl+C` (and everything else) goes to the program inside,
 exactly like tmux/ssh — so hitting it twice quits *claude itself*, ending the
 session. That's not the attach killing anything, and it isn't fatal either:
 `claunch respawn <name>` relaunches the session with `--resume` of its pinned
-conversation, picking up where it left off. `Ctrl+]` is the one key the
+conversation, picking up where it left off (the web UI's **resume** button on
+an exited session does the same). `Ctrl+]` is the one key the
 bridge keeps for itself — chosen precisely because nothing else uses it.
 
 That `send-keys → wait-for → capture-pane` triple closes the automation loop:
@@ -554,7 +555,7 @@ without a human at the keyboard.
 | `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `-a/--attach` to attach immediately, trailing args pass to the harness). |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
-| `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. |
+| `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
 | `send-keys [-l] S KEYS...` | tmux semantics: `Enter`, `Escape`, `Tab`, `C-c`, `M-x`, `Up`... are keys; everything else is literal text. `-l` sends all args literally. `-t S` also accepted. |
 | `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
@@ -781,6 +782,14 @@ launched from inside another claude session still persists transcripts.
 The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
 a session list (status badges, create/kill) plus a **live xterm.js terminal**
 attached over WebSocket — full input and output, multiple viewers allowed.
+
+An **exited** session is not a dead end in the browser either: open it and the
+header offers **resume**, the `claunch respawn` of the UI — the session comes
+back under its own name, claude with `--resume` of its pinned conversation, and
+the tab reattaches to the new terminal (a resume done elsewhere, from the CLI
+or another tab, is followed automatically). There `kill` becomes **remove**,
+which only drops the daemon's record — it asks first, since that is what makes
+the session unresumable.
 
 The sidebar also shows a **Workflows** panel monitoring every
 [cflow](#cflow-declarative-agent-workflows) run started on this machine

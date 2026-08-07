@@ -8,6 +8,7 @@ let ws = null;
 let term = null;
 let fitAddon = null;
 let sessionsCache = [];
+let attachedPid = null;           // pid of the incarnation this socket is bound to
 let applyingRemoteResize = false; // guards against echoing a server-driven resize
 let fitTimer = null;              // debounces viewport-driven fit() calls
 
@@ -121,13 +122,24 @@ async function refreshSessions() {
     meta.textContent = s.status === "exited"
       ? `exit ${s.exit_code ?? "?"}`
       : (s.profile || s.harness);
+    if (s.status === "exited") li.title = "exited — open it to resume";
     li.append(dot, label, meta);
     li.addEventListener("click", () => attach(s.name));
     list.appendChild(li);
   }
-  if (currentName) {
-    const cur = sessionsCache.find((s) => s.name === currentName);
-    if (cur) setStatusBadge(cur.status);
+  const cur = currentName && sessionsCache.find((s) => s.name === currentName);
+  if (cur && attachedPid && cur.pid !== attachedPid) {
+    // Someone else (a `claunch respawn`, another tab) resumed this session:
+    // our socket is bound to the replaced, now-dead child, so follow the new
+    // one instead of showing its frozen last screen. Only while the terminal
+    // is the visible view — reattaching must not yank the user off a
+    // workflow page (it stays pending until they come back).
+    if (!$("terminal").classList.contains("hidden")) attach(currentName);
+  } else if (cur && !(ws && ws.readyState === WebSocket.OPEN)) {
+    // Otherwise an open socket stays authoritative: it sees this session's
+    // every state change first-hand (an exit reaches it seconds before the
+    // next poll), so a stale entry can't flicker the resume/kill controls.
+    setStatusBadge(cur.status);
   }
 }
 
@@ -304,8 +316,50 @@ $("new-session").addEventListener("submit", async (e) => {
 
 $("term-kill").addEventListener("click", async () => {
   if (!currentName) return;
-  await api(`/api/sessions/${encodeURIComponent(currentName)}`, { method: "DELETE" });
+  const name = currentName;
+  // On an exited session DELETE deregisters the record rather than killing
+  // anything — that is the one path that makes the session unresumable, so
+  // it asks first (killing a live program keeps its existing behaviour).
+  const exited = $("term-status").textContent === "exited";
+  if (exited && !confirm(
+    `Remove exited session '${name}'?\n\nThe daemon forgets it, so it can no ` +
+    `longer be resumed from here.`
+  )) return;
+  await api(`/api/sessions/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (exited) {
+    detach();
+    currentName = null;
+    showView("placeholder");
+  }
   refreshSessions();
+});
+
+/* Resume: relaunch an exited session under its own name and definition. The
+   claude harness comes back with `--resume` of the conversation pinned at
+   creation, so quitting it by accident (double Ctrl+C) is recoverable from the
+   browser too, not just via `claunch respawn`. */
+$("term-resume").addEventListener("click", async () => {
+  if (!currentName) return;
+  const name = currentName;
+  const btn = $("term-resume");
+  btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/respawn`, { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(info.error || `HTTP ${resp.status}`);
+      return;
+    }
+    // The old child (and this tab's socket with it) is gone: the respawn
+    // spawned a fresh PTY under the same name, so reattach to it. Detaching
+    // first drops the stale pid, so the poll leaves the reattach to us.
+    detach();
+    await refreshSessions();
+    attach(info.name || name);
+  } catch { /* auth overlay is up */ }
+  finally { btn.disabled = false; }
 });
 
 /* ------------------------------------------------------------------ */
@@ -315,11 +369,21 @@ function setStatusBadge(status) {
   const badge = $("term-status");
   badge.textContent = status;
   badge.className = `badge ${status}`;
+  // An exited session is revivable, not attachable — offer resume, and make
+  // kill what it actually is there: dropping the daemon's record of it.
+  const exited = status === "exited";
+  $("term-resume").classList.toggle("hidden", !exited);
+  const kill = $("term-kill");
+  kill.textContent = exited ? "remove" : "kill";
+  kill.title = exited
+    ? "forget this exited session (it can no longer be resumed here)"
+    : "terminate the program running in this session";
 }
 
 function detach() {
   if (ws) { ws.onclose = null; ws.close(); ws = null; }
   if (term) { term.dispose(); term = null; fitAddon = null; }
+  attachedPid = null; // re-learned from the next socket's init frame
 }
 
 function attach(name) {
@@ -329,6 +393,9 @@ function attach(name) {
   if (location.hash.startsWith("#/wf/")) history.replaceState(null, "", "#");
   showView("terminal");
   $("term-title").textContent = name;
+  // Seed the header from the list until the socket's `init` says otherwise,
+  // so the previous session's controls never linger on this one.
+  setStatusBadge((sessionsCache.find((s) => s.name === name) || {}).status || "starting");
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
   );
@@ -373,6 +440,7 @@ function attach(name) {
         applyingRemoteResize = true;
         try { term.resize(msg.cols, msg.rows); }
         finally { applyingRemoteResize = false; }
+        attachedPid = msg.pid || null;
         setStatusBadge(msg.status);
         // Adopt the viewer's size once attached.
         setTimeout(() => { if (fitAddon) fitAddon.fit(); }, 50);
@@ -390,7 +458,10 @@ function attach(name) {
         }
       } else if (msg.type === "exit") {
         setStatusBadge("exited");
-        term.write(`\r\n\x1b[90m[session exited (code ${msg.code})]\x1b[0m\r\n`);
+        term.write(
+          `\r\n\x1b[90m[session exited (code ${msg.code})] ` +
+          `- press "resume" above to relaunch it\x1b[0m\r\n`
+        );
       }
     } else {
       term.write(new Uint8Array(ev.data));

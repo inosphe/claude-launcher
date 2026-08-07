@@ -245,6 +245,49 @@ def test_api_session_respawn(home, tmp_path):
     asyncio.run(run())
 
 
+def test_ws_init_identifies_the_incarnation(home, tmp_path):
+    """The terminal socket's init frame carries the child's pid, so a viewer
+    can tell its socket is bound to a session that has since been respawned
+    (same name, new child) — that is how the web UI follows a resume."""
+    _register_py_harness()
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            session = mgr.create(SessionDef(name="w2", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(session, "READY")
+
+            ws = await client.ws_connect("/api/sessions/w2/ws", headers=bearer)
+            msg = await ws.receive(timeout=10)
+            assert msg.type == aiohttp.WSMsgType.TEXT
+            init = json.loads(msg.data)
+            assert init["type"] == "init"
+            assert init["pid"] == session.pid
+            await ws.close()
+
+            await session.send_keys(["quit", "Enter"])
+            await session.wait_for("exited", timeout=10.0, threshold=0.5)
+            resp = await client.post("/api/sessions/w2/respawn", headers=bearer)
+            assert resp.status == 200
+
+            ws = await client.ws_connect("/api/sessions/w2/ws", headers=bearer)
+            msg = await ws.receive(timeout=10)
+            revived = json.loads(msg.data)
+            assert revived["pid"] == mgr.get("w2").pid != init["pid"]
+            await ws.close()
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_shutdown_not_blocked_by_open_websocket(home, tmp_path):
     """A dashboard tab left open must not stall daemon teardown (it used to
     wait aiohttp's 60s shutdown timeout per lingering terminal socket)."""
