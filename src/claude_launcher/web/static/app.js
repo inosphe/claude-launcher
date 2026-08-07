@@ -401,6 +401,8 @@ document.addEventListener("visibilitychange", () => {
 let wfCwd = null;
 let wfScope = "default";
 let wfPollTimer = null;
+let wfSelectedStep = null; // node picked in the diagram (null = show all)
+let wfLastData = null;     // last payload, for instant re-render on selection
 
 function showView(name) {
   const showTerm = name === "terminal";
@@ -419,6 +421,8 @@ async function openWorkflow(cwd, scope) {
   if (wfPollTimer) clearInterval(wfPollTimer);
   wfCwd = cwd;
   wfScope = scope || "default";
+  wfSelectedStep = null;
+  wfLastData = null;
   showView("wf");
   $("wf-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshWf();
@@ -441,7 +445,13 @@ async function refreshWf() {
   } catch {
     return;
   }
+  wfLastData = data;
   renderWf(data);
+}
+
+function selectWfStep(step) {
+  wfSelectedStep = step;
+  if (wfLastData) renderWf(wfLastData);
 }
 
 function route() {
@@ -524,13 +534,42 @@ function renderWf(data) {
 
   view.appendChild(wfActions(data));
 
+  // drop a stale selection if the workflow changed under us
+  if (
+    wfSelectedStep && wfSelectedStep !== "end" &&
+    !(wf.steps || []).some((s) => s.id === wfSelectedStep)
+  ) {
+    wfSelectedStep = null;
+  }
+
   const cols = el("div", "wf-cols");
   const dia = el("div", "wf-diagram");
-  dia.innerHTML = wfDiagramSvg(wf, run);
+  dia.innerHTML = wfDiagramSvg(wf, run, wfSelectedStep);
   const finished = run.status === "done" || run.status === "aborted";
   dia.querySelectorAll("g.wfd-node[data-step]").forEach((g) => {
     g.addEventListener("click", () => {
       const step = g.dataset.step;
+      selectWfStep(wfSelectedStep === step ? null : step); // click again = clear
+    });
+  });
+  cols.appendChild(dia);
+  dia.appendChild(el(
+    "p", "wf-note",
+    "click a step to inspect its reports (click again to clear)"
+  ));
+
+  const forceBtn = el(
+    "button", "wf-btn force",
+    !wfSelectedStep
+      ? "Force set state (select a step first)"
+      : wfSelectedStep === "end"
+        ? "Force-finish this run"
+        : `Force run to '${wfSelectedStep}'`
+  );
+  forceBtn.disabled = !wfSelectedStep;
+  if (wfSelectedStep) {
+    const step = wfSelectedStep;
+    forceBtn.addEventListener("click", () => {
       const q = step === "end"
         ? "Force-FINISH this workflow run?"
         : `Force the run's current step to '${step}'?` +
@@ -540,12 +579,9 @@ function renderWf(data) {
         cflowAction("/api/cflow/goto", { cwd: data.cwd, scope: data.scope, step });
       }
     });
-  });
-  cols.appendChild(dia);
-  dia.appendChild(el(
-    "p", "wf-note",
-    "click a step to force the run there (override; journaled + auto-nudge)"
-  ));
+  }
+  dia.appendChild(forceBtn);
+
   cols.appendChild(wfReports(data));
   view.appendChild(cols);
 
@@ -614,8 +650,17 @@ function wfActions(data) {
   if (run.status !== "done" && run.status !== "aborted") {
     const btn = el("button", "wf-btn nudge", "Nudge session");
     if ((data.sessions || []).length) {
-      btn.title = "type the resume line into the run's own session again";
-      btn.addEventListener("click", () => nudgeRun(data.cwd, data.scope));
+      const msg = data.nudge_message || "cflow: continue per the /cflow protocol";
+      const targets = (data.sessions || []).join(", ");
+      btn.title = `type "${msg}" + Enter into session ${targets}`;
+      btn.addEventListener("click", () => {
+        if (confirm(
+          `Nudge session '${targets}'?\n\nThis types the following line ` +
+          `into its terminal and presses Enter:\n\n    ${msg}`
+        )) {
+          nudgeRun(data.cwd, data.scope);
+        }
+      });
     } else {
       btn.disabled = true;
       btn.title = "nothing to nudge: this run has no live session of its own";
@@ -652,17 +697,37 @@ async function nudgeRun(cwd, scope) {
 
 function wfReports(data) {
   const box = el("div", "wf-reports");
-  box.appendChild(el("h3", null, "Step reports"));
+  const head = el("div", "wf-reports-head");
+  head.appendChild(el("h3", null,
+    wfSelectedStep ? `Step reports — ${wfSelectedStep}` : "Step reports"));
+  if (wfSelectedStep) {
+    const clear = el("button", "wf-btn clear", "Show all");
+    clear.title = "clear the step selection and expand every report";
+    clear.addEventListener("click", () => selectWfStep(null));
+    head.appendChild(clear);
+  }
+  box.appendChild(head);
+
   const reports = (data.reports || []).slice().reverse();
   if (!reports.length) box.appendChild(el("p", "wf-note", "no reports yet"));
+  if (wfSelectedStep && reports.length &&
+      !reports.some((r) => r.step === wfSelectedStep)) {
+    box.appendChild(el("p", "wf-note", `no reports for '${wfSelectedStep}' yet`));
+  }
   for (const r of reports) {
-    const card = el("div", "wf-report");
-    const head = el("div", "wf-report-head");
-    head.appendChild(el("span", "wf-report-step", r.visit > 1 ? `${r.step} ×${r.visit}` : r.step));
-    head.appendChild(el("span", "wf-report-at", (r.at || "").replace("T", " ")));
-    card.appendChild(head);
-    card.appendChild(el("p", "wf-report-summary", r.summary || ""));
-    if (r.details) card.appendChild(el("pre", "wf-report-details", r.details));
+    const expanded = !wfSelectedStep || r.step === wfSelectedStep;
+    const card = el("div", expanded ? "wf-report" : "wf-report folded");
+    const rhead = el("div", "wf-report-head");
+    rhead.appendChild(el("span", "wf-report-step", r.visit > 1 ? `${r.step} ×${r.visit}` : r.step));
+    rhead.appendChild(el("span", "wf-report-at", (r.at || "").replace("T", " ")));
+    card.appendChild(rhead);
+    if (expanded) {
+      card.appendChild(el("p", "wf-report-summary", r.summary || ""));
+      if (r.details) card.appendChild(el("pre", "wf-report-details", r.details));
+    } else {
+      card.title = `show reports for '${r.step}'`;
+      card.addEventListener("click", () => selectWfStep(r.step));
+    }
     box.appendChild(card);
   }
   return box;
@@ -675,7 +740,7 @@ function escXml(s) {
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-function wfDiagramSvg(wf, run) {
+function wfDiagramSvg(wf, run, selected) {
   const steps = wf.steps || [];
   const byId = {};
   for (const s of steps) byId[s.id] = s;
@@ -758,6 +823,7 @@ function wfDiagramSvg(wf, run) {
       && run.status !== "done" && run.status !== "aborted";
     if (active) cls.push("current");
     else if (visits[id]) cls.push("visited");
+    if (id === selected) cls.push("selected");
     const flags = [];
     if (s.gate) flags.push("gate");
     if (s.verify) flags.push("verify");
@@ -785,8 +851,9 @@ function wfDiagramSvg(wf, run) {
   }
   if (hasEnd) {
     const y = yTop("end");
+    const endCls = selected === "end" ? "wfd-node end selected" : "wfd-node end";
     parts.push(
-      `<g class="wfd-node end" data-step="end"><rect x="${(W - 90) / 2}" y="${y}" width="90" height="30" rx="15"/>` +
+      `<g class="${endCls}" data-step="end"><rect x="${(W - 90) / 2}" y="${y}" width="90" height="30" rx="15"/>` +
       `<text class="wfd-title" x="${W / 2}" y="${y + 20}" text-anchor="middle">end</text></g>`
     );
   }

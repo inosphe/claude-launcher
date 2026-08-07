@@ -308,6 +308,9 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
             "workflow": workflow,
             "reports": reports,
             "journal": journal[-200:],
+            # exactly what the manual Nudge button would type — shown to the
+            # user for confirmation before sending
+            "nudge_message": cflow_engine.NUDGE_CONTINUE,
         }
     )
 

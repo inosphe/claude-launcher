@@ -140,6 +140,11 @@ body {
 .wf-btn.option:hover { background: #388bfd; }
 .wf-btn.nudge { background: #30363d; color: #c6cdd5; margin-top: 8px; }
 .wf-btn.nudge:hover { background: #3c444d; }
+.wf-btn.force { background: #7d4e11; margin-top: 10px; }
+.wf-btn.force:hover { background: #9e6214; }
+.wf-btn.force:disabled:hover { background: #7d4e11; }
+.wf-btn.clear { background: #30363d; color: #c6cdd5; padding: 3px 10px; font-size: 11px; }
+.wf-btn.clear:hover { background: #3c444d; }
 .wf-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .wf-btn:disabled:hover { background: #30363d; }
 .wf-actions .wf-note { margin-top: 8px; }
@@ -152,6 +157,8 @@ body {
 .wfd-node rect { fill: #1b1e24; stroke: #30363d; stroke-width: 1.5; }
 .wfd-node.visited rect { stroke: #2f6f43; }
 .wfd-node.current rect { fill: #14233a; stroke: #58a6ff; stroke-width: 2; }
+.wfd-node.selected rect { stroke: #d29922; stroke-width: 2.5; stroke-dasharray: 6 3; }
+.wfd-node.current.selected rect { fill: #14233a; }
 .wfd-node.end rect { fill: none; stroke: #4d5566; stroke-dasharray: 4 3; }
 .wfd-title { fill: #d8dbe0; font-size: 13px; }
 .wfd-flags { fill: #7d8590; font-size: 10px; }
@@ -167,6 +174,14 @@ body {
   background: #1b1e24; border: 1px solid #2a2e36; border-radius: 8px;
   padding: 10px 14px; margin-bottom: 10px;
 }
+.wf-reports-head {
+  display: flex; align-items: center; justify-content: space-between;
+  margin-bottom: 8px;
+}
+.wf-reports-head h3 { margin-bottom: 0; }
+.wf-report.folded { padding: 6px 12px; opacity: 0.6; cursor: pointer; }
+.wf-report.folded:hover { opacity: 1; border-color: #4d5566; }
+.wf-report.folded .wf-report-head { margin-bottom: 0; }
 .wf-report-head { display: flex; justify-content: space-between; margin-bottom: 5px; }
 .wf-report-step { font-size: 13px; color: #58a6ff; }
 .wf-report-at { font-size: 11px; color: #6e7681; }
