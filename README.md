@@ -559,7 +559,8 @@ without a human at the keyboard.
 | `send-keys [-l] S KEYS...` | tmux semantics: `Enter`, `Escape`, `Tab`, `C-c`, `M-x`, `Up`... are keys; everything else is literal text. `-l` sends all args literally. `-t S` also accepted. |
 | `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
-| `kill-session S`      | Terminate a running session, or deregister an exited one (`--force` skips graceful terminate). |
+| `kill-session S`      | Terminate a running session, or drop the record of an exited one (`--force` skips graceful terminate). |
+| `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their output logs, freeing their auto-generated names. |
 | `resize S COLS ROWS`  | Resize the session's terminal. |
 | `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
@@ -752,6 +753,27 @@ different session). If the session's own args already pick a conversation
 output logs survive under `~/.claude-launcher/daemon/sessions/<name>/` either
 way.
 
+**A restart never loses a session.** Whatever is *not* relaunched — it had
+already exited, it was created `--no-restore`, or its relaunch failed — comes
+back as an **exited record** rather than being forgotten: still listed, still
+carrying its pinned conversation, so `claunch respawn <name>` (or the web UI's
+resume) revives it days later. Attaching to such a record shows the final
+screen it left behind, replayed from its log.
+
+Records therefore accumulate, and only you drop them:
+
+```bash
+claunch kill-session s0     # drop one record (or kill it, if still running)
+claunch clear-sessions      # drop every exited record; running sessions stay
+claunch clear-sessions --logs   # ...and delete their output logs too
+```
+
+Dropping a record is the one thing that makes a session unresumable, which is
+why nothing does it automatically. Auto-generated names (`s0`, `s1`, ...) skip
+anything still taken — including exited records and the session directories
+left on disk — so a name is never silently recycled onto another session's
+log; `--logs` is what frees those numbers again.
+
 ### Other harnesses (codex, pi, ...)
 
 Declare them in `~/.claunch.yaml`; the `claude` harness is built in:
@@ -789,7 +811,8 @@ back under its own name, claude with `--resume` of its pinned conversation, and
 the tab reattaches to the new terminal (a resume done elsewhere, from the CLI
 or another tab, is followed automatically). There `kill` becomes **remove**,
 which only drops the daemon's record — it asks first, since that is what makes
-the session unresumable.
+the session unresumable. Since exited sessions are kept across daemon restarts,
+the sidebar also offers **clear N exited** to drop them all at once.
 
 The sidebar also shows a **Workflows** panel monitoring every
 [cflow](#cflow-declarative-agent-workflows) run started on this machine
@@ -821,6 +844,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/daemon`                  | version/uptime/session count |
 | POST   | `/api/daemon/shutdown`         | graceful stop |
 | GET/POST | `/api/sessions`              | list / create |
+| DELETE | `/api/sessions`                | clear all exited records (`?logs=1` deletes their logs) |
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
 | POST   | `/api/sessions/{name}/keys`    | `{keys: [...], literal}` — send-keys |

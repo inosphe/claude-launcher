@@ -127,6 +127,13 @@ async function refreshSessions() {
     li.addEventListener("click", () => attach(s.name));
     list.appendChild(li);
   }
+  // Exited sessions are kept indefinitely so they stay resumable; dropping
+  // them is the user's call, in bulk, from here.
+  const dead = sessionsCache.filter((s) => s.status === "exited");
+  const clear = $("clear-exited");
+  clear.classList.toggle("hidden", dead.length === 0);
+  clear.textContent = `clear ${dead.length} exited`;
+
   const cur = currentName && sessionsCache.find((s) => s.name === currentName);
   if (cur && attachedPid && cur.pid !== attachedPid) {
     // Someone else (a `claunch respawn`, another tab) resumed this session:
@@ -327,6 +334,22 @@ $("term-kill").addEventListener("click", async () => {
   )) return;
   await api(`/api/sessions/${encodeURIComponent(name)}`, { method: "DELETE" });
   if (exited) {
+    detach();
+    currentName = null;
+    showView("placeholder");
+  }
+  refreshSessions();
+});
+
+$("clear-exited").addEventListener("click", async () => {
+  const dead = sessionsCache.filter((s) => s.status === "exited").map((s) => s.name);
+  if (!dead.length) return;
+  if (!confirm(
+    `Drop the records of ${dead.length} exited session(s)?\n\n${dead.join(", ")}\n\n` +
+    `They can no longer be resumed. Running sessions are untouched.`
+  )) return;
+  await api("/api/sessions", { method: "DELETE" });
+  if (currentName && dead.includes(currentName)) {
     detach();
     currentName = null;
     showView("placeholder");

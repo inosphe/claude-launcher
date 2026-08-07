@@ -85,6 +85,13 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
             f"{s['name']:<16} [{state:<10}] {s['harness']:<8} {prof:<12} "
             f"{s['cols']}x{s['rows']}  {s.get('cwd', '')}"
         )
+    dead = [s["name"] for s in sessions if s["status"] == "exited"]
+    if dead:
+        print(
+            f"\n{len(dead)} exited session(s) kept for respawn: "
+            f"'claunch respawn {dead[0]}' revives one, "
+            f"'claunch clear-sessions' drops them all"
+        )
     return 0
 
 
@@ -120,6 +127,20 @@ def _cmd_respawn(args: argparse.Namespace) -> int:
         from . import attach as attach_mod
 
         return attach_mod.attach(client, info["name"])
+    return 0
+
+
+def _cmd_clear_sessions(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    doc = client.delete("/api/sessions" + ("?logs=1" if args.logs else ""))
+    removed = doc.get("removed") or []
+    if not removed:
+        print("no exited sessions to clear")
+        return 0
+    print(
+        f"cleared {len(removed)} exited session record(s): {', '.join(removed)}"
+        + (" (output logs deleted too)" if args.logs else "")
+    )
     return 0
 
 
@@ -229,7 +250,11 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         print(f"version:  {info.get('version')}")
         print(f"started:  {info.get('started_at')}")
         print(f"uptime:   {info.get('uptime')}s")
-        print(f"sessions: {info.get('sessions')}")
+        running = info.get("running")
+        print(
+            f"sessions: {info.get('sessions')}"
+            + (f" ({running} running, rest exited)" if running is not None else "")
+        )
         print(f"log:      {daemon_paths.log_file()}")
         return 0
     raise AssertionError(f"unknown daemon action {action!r}")
@@ -452,6 +477,18 @@ def register(sub) -> None:
     p_kill.add_argument("session", nargs="?")
     p_kill.add_argument("--force", action="store_true", help="skip graceful terminate")
     p_kill.set_defaults(func=_cmd_kill_session_dispatch)
+
+    p_clear = sub.add_parser(
+        "clear-sessions",
+        aliases=["clear"],
+        help="drop the records of all exited sessions (running ones are kept)",
+    )
+    p_clear.add_argument(
+        "--logs",
+        action="store_true",
+        help="also delete their captured output logs, freeing their names for reuse",
+    )
+    p_clear.set_defaults(func=_cmd_clear_sessions)
 
     p_resize = sub.add_parser("resize", help="resize a session's terminal")
     p_resize.add_argument("session")
