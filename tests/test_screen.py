@@ -78,3 +78,22 @@ def test_repaint_sequence_contains_content():
     seq = s.repaint_sequence()
     assert seq.startswith(b"\x1b[2J\x1b[H")
     assert b"hi there" in seq
+
+
+def test_repaint_sequence_restores_colors():
+    """The repaint seed must carry colors/attributes — TUIs only redraw what
+    changes, so a plain-text seed leaves attached viewers monochrome."""
+    s = ScreenState(40, 5)
+    s.feed(b"\x1b[1;31mred\x1b[0m plain \x1b[42mbg\x1b[0m")
+    seq = s.repaint_sequence()
+    assert b"\x1b[0;1;31mred" in seq       # bold red run
+    assert b"\x1b[0m plain " in seq        # default run reverts attributes
+    assert b"\x1b[0;42mbg" in seq          # green background run
+
+
+def test_repaint_sequence_truecolor_and_bright():
+    s = ScreenState(40, 5)
+    s.feed(b"\x1b[38;5;196mX\x1b[0m \x1b[91mY\x1b[0m")
+    seq = s.repaint_sequence()
+    assert b"\x1b[0;38;2;255;0;0mX" in seq  # 256-color palette -> truecolor
+    assert b"\x1b[0;91mY" in seq            # bright red

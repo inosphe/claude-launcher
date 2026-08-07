@@ -329,7 +329,7 @@ def register(sub) -> None:
 
     p_attach = sub.add_parser(
         "attach",
-        aliases=["attach-session"],
+        aliases=["attach-session", "a"],
         help="attach this terminal to a session, tmux-style (detach: Ctrl+])",
     )
     p_attach.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
