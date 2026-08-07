@@ -25,31 +25,6 @@ from typing import Optional, Tuple
 #: dropped, like tmux's prefix).
 DETACH_BYTE = b"\x1d"
 DETACH_LABEL = "Ctrl+]"
-DEFAULT_DETACH_KEY = "C-]"
-
-
-def parse_detach_key(spec: str) -> Tuple[bytes, str]:
-    """``"C-]"`` / ``"ctrl-d"`` / ``"^D"`` -> (control byte, display label).
-
-    The bound key is consumed by the bridge and never reaches the session —
-    binding e.g. ``C-c`` or ``C-d`` deliberately takes that chord away from
-    the inner program. Raises :class:`ValueError` for anything that is not a
-    single control chord.
-    """
-    s = spec.strip()
-    ch = None
-    for prefix in ("C-", "c-", "ctrl-", "Ctrl-", "CTRL-", "^"):
-        if s.startswith(prefix) and len(s) == len(prefix) + 1:
-            ch = s[-1]
-            break
-    if ch is None:
-        raise ValueError(
-            f"invalid detach key {spec!r}: use a control chord like 'C-]' or 'C-d'"
-        )
-    code = ord(ch.upper()) - 64
-    if not 1 <= code <= 31:
-        raise ValueError(f"invalid detach key {spec!r}: {ch!r} has no Ctrl chord")
-    return bytes([code]), f"Ctrl+{ch.upper() if ch.isalpha() else ch}"
 
 #: Local terminal size poll cadence — there is no SIGWINCH on Windows, so the
 #: size is polled on every platform for one concurrency model.
@@ -68,9 +43,9 @@ _FOCUS_IN = b"\x1b[I"
 _FOCUS_OUT = b"\x1b[O"
 
 
-def split_detach(data: bytes, detach_byte: bytes = DETACH_BYTE) -> Tuple[bytes, bool]:
+def split_detach(data: bytes) -> Tuple[bytes, bool]:
     """Payload up to the first detach byte, and whether it was pressed."""
-    idx = data.find(detach_byte)
+    idx = data.find(DETACH_BYTE)
     if idx < 0:
         return data, False
     return data[:idx], True
@@ -210,9 +185,7 @@ class _RawTerminal:
 # --------------------------------------------------------------------------- #
 # the bridge
 # --------------------------------------------------------------------------- #
-async def _attach_async(
-    base_url: str, token: str, name: str, detach_byte: bytes = DETACH_BYTE
-) -> dict:
+async def _attach_async(base_url: str, token: str, name: str) -> dict:
     """Bridge stdin/stdout to the session's terminal WebSocket.
 
     Returns an outcome dict: ``{"reason": "detach" | "exit" | "closed",
@@ -242,7 +215,7 @@ async def _attach_async(
                 outcome["reason"] = "detach"
                 await ws.close()
                 return
-            payload, detach = split_detach(data, detach_byte)
+            payload, detach = split_detach(data)
             payload, focus_in = strip_focus_events(payload)
             if focus_in:
                 # Focus regained: another viewer may have resized the session
@@ -316,7 +289,7 @@ async def _attach_async(
     return outcome
 
 
-def attach(client, name: str, *, detach_key: str = DEFAULT_DETACH_KEY) -> int:
+def attach(client, name: str) -> int:
     """Attach the calling terminal to session ``name``; 0 on detach/exit."""
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         print(
@@ -324,11 +297,6 @@ def attach(client, name: str, *, detach_key: str = DEFAULT_DETACH_KEY) -> int:
             "(use capture-pane/send-keys from scripts)",
             file=sys.stderr,
         )
-        return 1
-    try:
-        detach_byte, detach_label = parse_detach_key(detach_key)
-    except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
         return 1
     info = client.get(f"/api/sessions/{name}")
     if info.get("status") == "exited":
@@ -340,15 +308,13 @@ def attach(client, name: str, *, detach_key: str = DEFAULT_DETACH_KEY) -> int:
             file=sys.stderr,
         )
         return 1
-    print(f"[claunch] attached to {name!r} — detach: {detach_label}", file=sys.stderr)
+    print(f"[claunch] attached to {name!r} — detach: {DETACH_LABEL}", file=sys.stderr)
 
     outcome = {"reason": "closed"}
     with _RawTerminal():
         _write_text(FOCUS_ON)
         try:
-            outcome = asyncio.run(
-                _attach_async(client.base_url, client.token, name, detach_byte)
-            )
+            outcome = asyncio.run(_attach_async(client.base_url, client.token, name))
         except KeyboardInterrupt:
             outcome = {"reason": "detach"}
         except Exception as exc:  # restore the terminal before reporting

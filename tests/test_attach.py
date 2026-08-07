@@ -12,8 +12,6 @@ import asyncio
 import threading
 import time
 
-import pytest
-
 from claude_launcher import attach as attach_mod
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
@@ -36,21 +34,6 @@ def test_strip_focus_events():
     assert attach_mod.strip_focus_events(b"\x1b[O\x1b[I") == (b"", True)
     # a bare ESC (real keypress) must pass through untouched
     assert attach_mod.strip_focus_events(b"\x1b") == (b"\x1b", False)
-
-
-def test_parse_detach_key():
-    assert attach_mod.parse_detach_key("C-]") == (b"\x1d", "Ctrl+]")
-    assert attach_mod.parse_detach_key("ctrl-d") == (b"\x04", "Ctrl+D")
-    assert attach_mod.parse_detach_key("^C") == (b"\x03", "Ctrl+C")
-    assert attach_mod.parse_detach_key("C-x") == (b"\x18", "Ctrl+X")
-    for bad in ("d", "C-", "C-dd", "F1", "C-1"):
-        with pytest.raises(ValueError):
-            attach_mod.parse_detach_key(bad)
-
-
-def test_split_detach_custom_byte():
-    assert attach_mod.split_detach(b"ab\x04cd", b"\x04") == (b"ab", True)
-    assert attach_mod.split_detach(b"ab\x1dcd", b"\x04") == (b"ab\x1dcd", False)
 
 
 def test_ws_url():

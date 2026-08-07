@@ -540,10 +540,8 @@ While attached, `Ctrl+C` (and everything else) goes to the program inside,
 exactly like tmux/ssh — so hitting it twice quits *claude itself*, ending the
 session. That's not the attach killing anything, and it isn't fatal either:
 `claunch respawn <name>` relaunches the session with `--resume` of its pinned
-conversation, picking up where it left off. Prefer a different escape hatch?
-`--detach-key C-d` rebinds the detach chord (the bound key is consumed by the
-bridge and no longer reaches the session — the default `C-]` is chosen
-precisely because nothing uses it).
+conversation, picking up where it left off. `Ctrl+]` is the one key the
+bridge keeps for itself — chosen precisely because nothing else uses it.
 
 That `send-keys → wait-for → capture-pane` triple closes the automation loop:
 external scripts (or another agent) can drive interactive claude sessions
@@ -555,7 +553,7 @@ without a human at the keyboard.
 | ------- | ----------- |
 | `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `-a/--attach` to attach immediately, trailing args pass to the harness). |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. |
-| `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running; rebind with `--detach-key C-d`). Omit `S` when exactly one session is running. `-t S` also accepted. |
+| `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. |
 | `send-keys [-l] S KEYS...` | tmux semantics: `Enter`, `Escape`, `Tab`, `C-c`, `M-x`, `Up`... are keys; everything else is literal text. `-l` sends all args literally. `-t S` also accepted. |
 | `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |

@@ -58,7 +58,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     if args.attach:
         from . import attach as attach_mod
 
-        return attach_mod.attach(client, info["name"], detach_key=args.detach_key)
+        return attach_mod.attach(client, info["name"])
     print(
         f"attach: claunch attach {info['name']}  |  browser: {client.base_url}/  "
         f"|  capture: claunch capture-pane {info['name']}"
@@ -106,7 +106,7 @@ def _cmd_attach(args: argparse.Namespace) -> int:
         name = live[0]
     from . import attach as attach_mod
 
-    return attach_mod.attach(client, name, detach_key=args.detach_key)
+    return attach_mod.attach(client, name)
 
 
 def _cmd_respawn(args: argparse.Namespace) -> int:
@@ -119,7 +119,7 @@ def _cmd_respawn(args: argparse.Namespace) -> int:
     if args.attach:
         from . import attach as attach_mod
 
-        return attach_mod.attach(client, info["name"], detach_key=args.detach_key)
+        return attach_mod.attach(client, info["name"])
     return 0
 
 
@@ -332,7 +332,6 @@ def register(sub) -> None:
         "-a", "--attach", action="store_true",
         help="attach this terminal to the new session right away (detach: Ctrl+])",
     )
-    _add_detach_key(p_new)
     p_new.add_argument(
         "args", nargs=argparse.REMAINDER,
         help="extra arguments passed to the harness (prefix with -- if they start with -)",
@@ -352,7 +351,6 @@ def register(sub) -> None:
         "session", nargs="?",
         help="session name (may be omitted when exactly one session is running)",
     )
-    _add_detach_key(p_attach)
     p_attach.set_defaults(func=_cmd_attach_dispatch)
 
     p_respawn = sub.add_parser(
@@ -364,7 +362,6 @@ def register(sub) -> None:
     p_respawn.add_argument(
         "-a", "--attach", action="store_true", help="attach once respawned"
     )
-    _add_detach_key(p_respawn)
     p_respawn.set_defaults(func=_cmd_respawn_dispatch)
 
     p_send = sub.add_parser(
@@ -447,14 +444,6 @@ def _resolve_target(args: argparse.Namespace) -> bool:
         print("error: no session given", file=sys.stderr)
         return False
     return True
-
-
-def _add_detach_key(parser) -> None:
-    parser.add_argument(
-        "--detach-key", default="C-]", metavar="KEY",
-        help='detach chord for attach, e.g. "C-]" (default) or "C-d" — the '
-             "bound key is consumed and no longer reaches the session",
-    )
 
 
 def _cmd_attach_dispatch(args: argparse.Namespace) -> int:
