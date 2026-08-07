@@ -28,6 +28,7 @@ Enforcement lives here, not in prompts:
 
 from __future__ import annotations
 
+import functools
 import secrets
 import subprocess
 from typing import Optional
@@ -55,6 +56,27 @@ def nudge_for_state(step_id: str) -> str:
 
 class CflowError(Exception):
     """Raised for protocol misuse (wrong tool for the current position)."""
+
+
+def _scoped_op(fn):
+    """Give a public operation an optional ``scope=`` kwarg.
+
+    Runs are keyed by (cwd, scope); the scope defaults to the ambient one
+    (the session's ``CLAUNCH_SESSION`` env, inherited by the MCP server) and
+    is overridden explicitly by human channels (CLI ``-t``, web ``scope``).
+    The override is installed for the duration of the call so every state
+    access inside resolves against the same run.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, scope: Optional[str] = None, **kwargs):
+        token = state_mod.push_scope(scope)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            state_mod.pop_scope(token)
+
+    return wrapper
 
 
 # --------------------------------------------------------------------------- #
@@ -255,6 +277,7 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
 # --------------------------------------------------------------------------- #
 # operations
 # --------------------------------------------------------------------------- #
+@_scoped_op
 def start(
     workflow_ref: str,
     context: Optional[str] = None,
@@ -330,6 +353,7 @@ def _blocked(workflow: Workflow, state: dict) -> Optional[str]:
     return None
 
 
+@_scoped_op
 def report(
     summary: str,
     details: Optional[str] = None,
@@ -372,6 +396,7 @@ def report(
     }
 
 
+@_scoped_op
 def next_step(*, cwd: Optional[str] = None) -> dict:
     workflow, state = _load(cwd)
     if state["status"] in ("done", "aborted"):
@@ -477,6 +502,7 @@ def _run_verify(step: Step, cwd: Optional[str]) -> Optional[dict]:
     }
 
 
+@_scoped_op
 def select(
     option: str,
     reason: Optional[str] = None,
@@ -540,6 +566,7 @@ def select(
     }
 
 
+@_scoped_op
 def goto(
     step_id: str,
     *,
@@ -586,6 +613,7 @@ def goto(
     }
 
 
+@_scoped_op
 def approve(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     """Unblock the current gate or loop guard. CLI-only — not exposed over MCP."""
     workflow, state = _load(cwd)
@@ -633,6 +661,7 @@ def approve(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     raise CflowError(f"current step {step.id!r} has nothing waiting for approval")
 
 
+@_scoped_op
 def status(cwd: Optional[str] = None) -> dict:
     if not state_mod.has_run(cwd):
         return {"status": "idle", "note": "no active cflow run in this directory"}
@@ -647,6 +676,7 @@ def status(cwd: Optional[str] = None) -> dict:
     return payload
 
 
+@_scoped_op
 def abort(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     workflow, state = _load(cwd)
     if state["status"] in ("done", "aborted"):
@@ -657,6 +687,7 @@ def abort(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     return _done_payload(state, cwd)
 
 
+@_scoped_op
 def reset(cwd: Optional[str] = None) -> None:
     """Clear run state (the journal is kept for the record)."""
     state_mod.clear_state(cwd)

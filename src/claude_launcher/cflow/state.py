@@ -1,12 +1,22 @@
 """Run state, journal, and workflow discovery for cflow.
 
-One active run per working directory, stored under ``<cwd>/.cflow/``:
+Runs are keyed by **(working directory, scope)** and stored under
+``<cwd>/.cflow/runs/<scope>/``:
 
 - ``workflow.yaml`` — a snapshot of the workflow taken at ``start`` (mid-run
   edits to the source file cannot corrupt a running position)
 - ``state.json``   — cursor, status, approvals, pending selection
 - ``journal.jsonl``— append-only event log (started, delivered, completed,
   verify results, selections, approvals, done/aborted)
+
+The *scope* maps a run 1:1 to the agent session driving it: the daemon
+exports ``CLAUNCH_SESSION=<name>`` into every managed session (tmux's
+``$TMUX`` equivalent), the claude → MCP-server process chain inherits it,
+and this module resolves it automatically — so three sessions in the same
+project directory drive three independent runs. Outside a managed session
+the scope falls back to ``default`` (one run per directory, the original
+behaviour; a legacy flat ``.cflow/`` layout is migrated on first access).
+Humans override the ambient scope explicitly (CLI ``-t``, web ``scope``).
 
 Workflow files are looked up by name in the project first, then globally:
 ``<cwd>/.claunch/workflows/*.yaml`` → ``~/.claude-launcher/workflows/*.yaml``.
@@ -15,6 +25,7 @@ An explicit path (ending in .yaml/.yml) is used as-is.
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 from datetime import datetime, timezone
@@ -27,9 +38,34 @@ from . import model
 #: Directory (relative to a project) holding its workflow declarations.
 PROJECT_WORKFLOWS = Path(".claunch") / "workflows"
 
+#: Environment variable the daemon sets in every managed session.
+SESSION_ENV = "CLAUNCH_SESSION"
+
+#: Scope used outside any managed session (and for pre-scope layouts).
+DEFAULT_SCOPE = "default"
+
+_scope_override: contextvars.ContextVar = contextvars.ContextVar(
+    "cflow_scope", default=None
+)
+
 
 class StateError(Exception):
     """Raised for missing/corrupt run state."""
+
+
+def current_scope() -> str:
+    """The ambient scope: explicit override > session env > default."""
+    return _scope_override.get() or os.environ.get(SESSION_ENV) or DEFAULT_SCOPE
+
+
+def push_scope(scope: Optional[str]):
+    """Set an explicit scope override; returns a token for :func:`pop_scope`."""
+    return _scope_override.set(scope) if scope else None
+
+
+def pop_scope(token) -> None:
+    if token is not None:
+        _scope_override.reset(token)
 
 
 def global_workflows_dir() -> Path:
@@ -40,37 +76,57 @@ def runs_registry_path() -> Path:
     return config.launcher_home() / "cflow_runs.json"
 
 
-def register_run_dir(cwd: Optional[str] = None) -> None:
-    """Record this directory in the machine-local registry of cflow runs.
+def register_run_dir(cwd: Optional[str] = None, scope: Optional[str] = None) -> None:
+    """Record this run's (directory, scope) in the machine-local registry.
 
     The daemon web dashboard scans the registry, so runs are monitorable no
     matter where they were started (a managed session, a plain terminal, an
     orchestrator script). Best-effort: registry loss only affects listing.
     """
-    target = str(Path(cwd or os.getcwd()).resolve())
-    entries = [d for d in _read_registry() if d != target]
+    target = {
+        "cwd": str(Path(cwd or os.getcwd()).resolve()),
+        "scope": scope or current_scope(),
+    }
+    entries = [e for e in _read_registry() if e != target]
     entries.append(target)
     _write_registry(entries)
 
 
-def known_run_dirs() -> List[str]:
-    """Registered directories that still hold run state (pruned on read)."""
+def _run_alive(cwd: str, scope: str) -> bool:
+    base = Path(cwd) / ".cflow"
+    if (base / "runs" / scope / "state.json").is_file():
+        return True
+    # legacy flat layout counts as the default scope until migrated
+    return scope == DEFAULT_SCOPE and (base / "state.json").is_file()
+
+
+def known_runs() -> List[Tuple[str, str]]:
+    """Registered ``(cwd, scope)`` pairs that still hold run state
+    (pruned on read)."""
     entries = _read_registry()
-    alive = [d for d in entries if (Path(d) / ".cflow" / "state.json").is_file()]
+    alive = [e for e in entries if _run_alive(e["cwd"], e["scope"])]
     if alive != entries:
         _write_registry(alive)
-    return alive
+    return [(e["cwd"], e["scope"]) for e in alive]
 
 
-def _read_registry() -> List[str]:
+def _read_registry() -> List[Dict[str, str]]:
     try:
         entries = json.loads(runs_registry_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return []
-    return [str(e) for e in entries if isinstance(e, str)] if isinstance(entries, list) else []
+    if not isinstance(entries, list):
+        return []
+    out: List[Dict[str, str]] = []
+    for e in entries:
+        if isinstance(e, str):  # pre-scope registry format
+            out.append({"cwd": e, "scope": DEFAULT_SCOPE})
+        elif isinstance(e, dict) and e.get("cwd"):
+            out.append({"cwd": str(e["cwd"]), "scope": str(e.get("scope") or DEFAULT_SCOPE)})
+    return out
 
 
-def _write_registry(entries: List[str]) -> None:
+def _write_registry(entries: List[Dict[str, str]]) -> None:
     path = runs_registry_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -83,16 +139,52 @@ def cflow_dir(cwd: Optional[str] = None) -> Path:
     return Path(cwd or os.getcwd()) / ".cflow"
 
 
-def _state_path(cwd: Optional[str]) -> Path:
-    return cflow_dir(cwd) / "state.json"
+def scope_dir(cwd: Optional[str] = None, scope: Optional[str] = None) -> Path:
+    scope = scope or current_scope()
+    target = cflow_dir(cwd) / "runs" / scope
+    if scope == DEFAULT_SCOPE:
+        _migrate_legacy(cflow_dir(cwd), target)
+    return target
 
 
-def _snapshot_path(cwd: Optional[str]) -> Path:
-    return cflow_dir(cwd) / "workflow.yaml"
+def _migrate_legacy(base: Path, target: Path) -> None:
+    """Move a pre-scope flat ``.cflow/`` layout into ``runs/default/``."""
+    if not (base / "state.json").is_file() or (target / "state.json").is_file():
+        return
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        for name in ("state.json", "workflow.yaml", "journal.jsonl"):
+            src = base / name
+            if src.is_file():
+                src.rename(target / name)
+    except OSError:
+        pass
 
 
-def journal_path(cwd: Optional[str] = None) -> Path:
-    return cflow_dir(cwd) / "journal.jsonl"
+def scopes_in(cwd: Optional[str] = None) -> List[str]:
+    """Scopes with run state in this directory (legacy layout = default)."""
+    base = cflow_dir(cwd)
+    out: List[str] = []
+    if (base / "state.json").is_file():
+        out.append(DEFAULT_SCOPE)
+    runs = base / "runs"
+    if runs.is_dir():
+        for entry in sorted(runs.iterdir()):
+            if (entry / "state.json").is_file() and entry.name not in out:
+                out.append(entry.name)
+    return out
+
+
+def _state_path(cwd: Optional[str], scope: Optional[str] = None) -> Path:
+    return scope_dir(cwd, scope) / "state.json"
+
+
+def _snapshot_path(cwd: Optional[str], scope: Optional[str] = None) -> Path:
+    return scope_dir(cwd, scope) / "workflow.yaml"
+
+
+def journal_path(cwd: Optional[str] = None, scope: Optional[str] = None) -> Path:
+    return scope_dir(cwd, scope) / "journal.jsonl"
 
 
 # --------------------------------------------------------------------------- #
@@ -184,8 +276,8 @@ def snapshot_workflow(text: str, cwd: Optional[str] = None) -> None:
     path.write_text(text, encoding="utf-8")
 
 
-def load_snapshot(cwd: Optional[str] = None) -> model.Workflow:
-    path = _snapshot_path(cwd)
+def load_snapshot(cwd: Optional[str] = None, scope: Optional[str] = None) -> model.Workflow:
+    path = _snapshot_path(cwd, scope)
     if not path.is_file():
         raise StateError("cflow run state exists but the workflow snapshot is missing")
     return model.load(path)
@@ -201,8 +293,13 @@ def journal(event: str, data: Optional[Dict] = None, cwd: Optional[str] = None) 
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def read_journal(cwd: Optional[str] = None, run_id: Optional[str] = None) -> List[dict]:
-    path = journal_path(cwd)
+def read_journal(
+    cwd: Optional[str] = None,
+    scope: Optional[str] = None,
+    *,
+    run_id: Optional[str] = None,
+) -> List[dict]:
+    path = journal_path(cwd, scope)
     if not path.is_file():
         return []
     out = []

@@ -149,7 +149,14 @@ async function refreshCflow() {
     st.textContent =
       r.status === "waiting_approval" && r.reason === "loop_limit"
         ? "loop limit" : r.status;
-    head.append(dot, name, st);
+    head.append(dot, name);
+    if (r.scope && r.scope !== "default") {
+      const scope = document.createElement("span");
+      scope.className = "cflow-scope";
+      scope.textContent = r.scope;
+      head.appendChild(scope);
+    }
+    head.appendChild(st);
     li.appendChild(head);
 
     if (r.step_id) {
@@ -173,7 +180,7 @@ async function refreshCflow() {
     li.appendChild(cwdLine);
     li.classList.add("clickable");
     li.addEventListener("click", () => {
-      location.hash = "#/wf/" + encodeURIComponent(r.cwd);
+      location.hash = "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`);
     });
     if ((r.sessions || []).length) {
       const sess = cflowLine(`session: ${r.sessions.join(", ")}`, "dim");
@@ -342,6 +349,7 @@ window.addEventListener("resize", () => {
 /* workflow detail page (#/wf/<cwd>) — diagram, reports, actions      */
 /* ------------------------------------------------------------------ */
 let wfCwd = null;
+let wfScope = "default";
 let wfPollTimer = null;
 
 function showView(name) {
@@ -357,9 +365,10 @@ function stopWfPoll() {
   wfCwd = null;
 }
 
-async function openWorkflow(cwd) {
+async function openWorkflow(cwd, scope) {
   if (wfPollTimer) clearInterval(wfPollTimer);
   wfCwd = cwd;
+  wfScope = scope || "default";
   showView("wf");
   $("wf-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshWf();
@@ -370,7 +379,9 @@ async function refreshWf() {
   if (!wfCwd) return;
   let data;
   try {
-    const resp = await api(`/api/cflow/run?cwd=${encodeURIComponent(wfCwd)}`);
+    const resp = await api(
+      `/api/cflow/run?cwd=${encodeURIComponent(wfCwd)}&scope=${encodeURIComponent(wfScope)}`
+    );
     data = await resp.json();
     if (!resp.ok) {
       $("wf-view").innerHTML = "";
@@ -386,7 +397,10 @@ async function refreshWf() {
 function route() {
   const h = location.hash || "";
   if (h.startsWith("#/wf/")) {
-    openWorkflow(decodeURIComponent(h.slice(5)));
+    const token = decodeURIComponent(h.slice(5));
+    const sep = token.indexOf("|");
+    if (sep >= 0) openWorkflow(token.slice(sep + 1), token.slice(0, sep));
+    else openWorkflow(token, "default"); // pre-scope links
   } else {
     stopWfPoll();
     showView(currentName && term ? "terminal" : "placeholder");
@@ -439,6 +453,9 @@ function renderWf(data) {
   if (wf.description) view.appendChild(el("p", "wf-desc", wf.description));
 
   const meta = el("div", "wf-meta");
+  if (data.scope && data.scope !== "default") {
+    meta.appendChild(el("span", "cflow-scope", `session ${data.scope}`));
+  }
   meta.appendChild(el("span", null, `run ${run.run || "?"}`));
   meta.appendChild(el("span", null, `started ${(run.started_at || "?").replace("T", " ")}`));
   meta.appendChild(el("span", null, `${run.steps_completed ?? 0} steps done`));
@@ -469,7 +486,9 @@ function renderWf(data) {
         : `Force the run's current step to '${step}'?` +
           (finished ? " (this reopens the finished run)" : "") +
           " The session will be nudged to continue from there.";
-      if (confirm(q)) cflowAction("/api/cflow/goto", { cwd: data.cwd, step });
+      if (confirm(q)) {
+        cflowAction("/api/cflow/goto", { cwd: data.cwd, scope: data.scope, step });
+      }
     });
   });
   cols.appendChild(dia);
@@ -503,7 +522,9 @@ function wfActions(data) {
       const q = isLoop
         ? `Extend the loop limit at step '${run.step_id}'?`
         : `Approve the gate at step '${run.step_id}'?`;
-      if (confirm(q)) cflowAction("/api/cflow/approve", { cwd: data.cwd });
+      if (confirm(q)) {
+        cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope });
+      }
     });
     box.appendChild(btn);
   } else if (run.status === "waiting_selection" || run.status === "select") {
@@ -520,7 +541,9 @@ function wfActions(data) {
         btn.title = o.description || "";
         btn.addEventListener("click", () => {
           if (confirm(`Select '${o.name}'?`)) {
-            cflowAction("/api/cflow/select", { cwd: data.cwd, option: o.name });
+            cflowAction("/api/cflow/select", {
+              cwd: data.cwd, scope: data.scope, option: o.name,
+            });
           }
         });
         box.appendChild(btn);
@@ -541,14 +564,14 @@ function wfActions(data) {
   if (run.status !== "done" && run.status !== "aborted") {
     const btn = el("button", "wf-btn nudge", "Nudge session");
     if ((data.sessions || []).length) {
-      btn.title = "type the resume line into the run's session(s) again";
-      btn.addEventListener("click", () => nudgeRun(data.cwd));
+      btn.title = "type the resume line into the run's own session again";
+      btn.addEventListener("click", () => nudgeRun(data.cwd, data.scope));
     } else {
       btn.disabled = true;
-      btn.title = "nothing to nudge: no managed session runs in this directory";
+      btn.title = "nothing to nudge: this run has no live session of its own";
       box.appendChild(el(
         "p", "wf-note",
-        "no managed session in this directory — nudge the agent wherever it runs"
+        "this run is not bound to a live managed session — nudge the agent wherever it runs"
       ));
     }
     box.appendChild(btn);
@@ -556,13 +579,13 @@ function wfActions(data) {
   return box;
 }
 
-async function nudgeRun(cwd) {
+async function nudgeRun(cwd, scope) {
   let doc = {};
   try {
     const resp = await api("/api/cflow/nudge", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ cwd }),
+      body: JSON.stringify({ cwd, scope }),
     });
     doc = await resp.json().catch(() => ({}));
     if (!resp.ok) {

@@ -231,25 +231,29 @@ orchestrator drive that session from outside. The division of labor:
 - the **script** watches for pauses and supplies the human-side keystrokes
   (or forwards them to an actual human).
 
+Run state is keyed per session (`CLAUNCH_SESSION`, exported by the daemon),
+so several workers in the same project directory drive independent runs;
+from outside a session, target one with `-t <session>`.
+
 ```sh
 claunch new-session -s worker -- claude
 claunch send-keys -t worker '/cflow bugfix fix issue #123' Enter
 
 while true; do
   claunch wait-for -t worker --idle-threshold 5      # agent stopped typing
-  status=$(claunch cflow status --json | python -c \
+  status=$(claunch cflow status -t worker --json | python -c \
     "import json,sys; print(json.load(sys.stdin)['status'])")
   case "$status" in
     done|aborted|idle) break ;;
     waiting_approval)                 # a gate (or loop limit)
-      claunch cflow status            # show a human what's being asked
+      claunch cflow status -t worker  # show a human what's being asked
       exit 2 ;;                       # ... or approve here if policy allows
     waiting_selection)
-      claunch cflow status; exit 3 ;;
+      claunch cflow status -t worker; exit 3 ;;
     *) claunch send-keys -t worker 'continue per /cflow protocol' Enter ;;
   esac
 done
-claunch cflow journal
+claunch cflow journal -t worker
 ```
 
 Exiting on `waiting_approval` (rather than auto-approving) keeps the gate

@@ -45,6 +45,20 @@ def test_claude_command_uses_profile_env(home, monkeypatch, tmp_path):
     assert cwd == str(tmp_path)
 
 
+def test_session_identity_env_exported(home, tmp_path):
+    """CLAUNCH_SESSION (tmux's $TMUX equivalent) marks every session; cflow
+    keys run state by it so sessions get 1:1 workflow runs."""
+    profile.create("work")
+    sdef = harness.normalize(SessionDef(name="sx", profile="work", cwd=str(tmp_path)))
+    _, env, _ = harness.build_command(sdef)
+    assert env["CLAUNCH_SESSION"] == "sx"
+
+    store.update(lambda doc: doc.update({"harnesses": {"h": {"command": "h"}}}))
+    sdef = harness.normalize(SessionDef(name="hx", harness="h", cwd=str(tmp_path)))
+    _, env, _ = harness.build_command(sdef)
+    assert env["CLAUNCH_SESSION"] == "hx"
+
+
 def test_claude_fresh_start_pins_conversation_id(home, tmp_path):
     import uuid
 

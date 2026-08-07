@@ -178,29 +178,47 @@ async def h_profiles(request: web.Request) -> web.Response:
 _CFLOW_REPORT_TAIL = 10
 
 
+def _scope_sessions(manager: SessionManager, cwd: str, scope: str) -> list:
+    """The session this run maps 1:1 to (scope == session name), if alive."""
+    for session in manager.list():
+        if (
+            session.sdef.name == scope
+            and not session.exited
+            and str(Path(session.sdef.cwd).resolve()) == cwd
+        ):
+            return [scope]
+    return []
+
+
 async def h_cflow_runs(request: web.Request) -> web.Response:
-    """All monitorable cflow runs: the machine-local run registry (every
-    directory a run was started in), plus the cwds of managed sessions
-    (annotated with their session names), plus an explicit ``?cwd=``
-    (reported even when idle).
+    """All monitorable cflow runs, keyed by (directory, scope): the
+    machine-local run registry, plus every scope with state in an explicit
+    ``?cwd=`` (reported even when idle). A run's ``scope`` is the managed
+    session it belongs to (``default`` = started outside any session).
     """
     manager: SessionManager = request.app["manager"]
-    by_cwd: dict = {}
-    for session in manager.list():
-        key = str(Path(session.sdef.cwd).resolve())
-        by_cwd.setdefault(key, []).append(session.sdef.name)
-    for run_dir in cflow_state.known_run_dirs():
-        by_cwd.setdefault(run_dir, [])
+    keys: list = []
+    for cwd, scope in cflow_state.known_runs():
+        if (cwd, scope) not in keys:
+            keys.append((cwd, scope))
     explicit = request.query.get("cwd")
     if explicit:
         explicit = str(Path(explicit).resolve())
-        by_cwd.setdefault(explicit, [])
+        scopes = cflow_state.scopes_in(explicit) or [cflow_state.DEFAULT_SCOPE]
+        wanted = request.query.get("scope")
+        for scope in [wanted] if wanted else scopes:
+            if (explicit, scope) not in keys:
+                keys.append((explicit, scope))
 
     runs = []
-    for cwd, names in by_cwd.items():
-        entry = {"cwd": cwd, "sessions": names}
+    for cwd, scope in keys:
+        entry = {
+            "cwd": cwd,
+            "scope": scope,
+            "sessions": _scope_sessions(manager, cwd, scope),
+        }
         try:
-            payload = cflow_engine.status(cwd)
+            payload = cflow_engine.status(cwd, scope=scope)
         except (CflowError, WorkflowError, StateError, OSError) as exc:
             runs.append({**entry, "status": "error", "error": str(exc)})
             continue
@@ -214,19 +232,11 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
                 "details": e.get("details"),
                 "at": e.get("at"),
             }
-            for e in cflow_state.read_journal(cwd, run_id=payload.get("run"))
+            for e in cflow_state.read_journal(cwd, scope, run_id=payload.get("run"))
             if e.get("event") == "step_report"
         ]
         runs.append({**entry, **payload, "reports": reports[-_CFLOW_REPORT_TAIL:]})
     return web.json_response({"runs": runs})
-
-
-def _sessions_in(manager: SessionManager, cwd: str) -> list:
-    return [
-        s.sdef.name
-        for s in manager.list()
-        if str(Path(s.sdef.cwd).resolve()) == cwd
-    ]
 
 
 def _serialize_workflow(wf) -> dict:
@@ -267,14 +277,16 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
     if not raw:
         return json_error(400, "'cwd' query parameter required")
     cwd = str(Path(raw).resolve())
+    scope = request.query.get("scope") or cflow_state.DEFAULT_SCOPE
     manager: SessionManager = request.app["manager"]
-    payload = cflow_engine.status(cwd)
+    sessions = _scope_sessions(manager, cwd, scope)
+    payload = cflow_engine.status(cwd, scope=scope)
     if payload.get("status") == "idle":
         return web.json_response(
-            {"cwd": cwd, "status": "idle", "sessions": _sessions_in(manager, cwd)}
+            {"cwd": cwd, "scope": scope, "status": "idle", "sessions": sessions}
         )
-    workflow = _serialize_workflow(cflow_state.load_snapshot(cwd))
-    journal = cflow_state.read_journal(cwd, run_id=payload.get("run"))
+    workflow = _serialize_workflow(cflow_state.load_snapshot(cwd, scope))
+    journal = cflow_state.read_journal(cwd, scope, run_id=payload.get("run"))
     reports = [
         {
             "step": e.get("step"),
@@ -289,7 +301,8 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "cwd": cwd,
-            "sessions": _sessions_in(manager, cwd),
+            "scope": scope,
+            "sessions": sessions,
             "run": payload,
             "workflow": workflow,
             "reports": reports,
@@ -303,21 +316,23 @@ async def _cflow_action_cwd(request: web.Request):
     raw = str(body.get("cwd") or "")
     if not raw:
         return None, json_error(400, "'cwd' required in the JSON body")
-    return (str(Path(raw).resolve()), body), None
+    scope = str(body.get("scope") or "") or cflow_state.DEFAULT_SCOPE
+    return (str(Path(raw).resolve()), scope, body), None
 
 
-async def _nudge_sessions(manager: SessionManager, cwd: str, message: str) -> list:
-    """Type a resume nudge into the live managed sessions in this directory,
-    so an agent that stopped its turn at the gate picks the run back up."""
+async def _nudge_sessions(
+    manager: SessionManager, cwd: str, scope: str, message: str
+) -> list:
+    """Type a resume nudge into the run's own session (scope == session
+    name, 1:1), so an agent that stopped its turn picks the run back up.
+    Default-scope runs belong to no session — nothing to nudge."""
     nudged = []
-    for session in manager.list():
-        if session.exited or str(Path(session.sdef.cwd).resolve()) != cwd:
-            continue
+    for name in _scope_sessions(manager, cwd, scope):
         try:
-            await session.send_keys([message, "Enter"])
+            await manager.get(name).send_keys([message, "Enter"])
         except Exception:
             continue
-        nudged.append(session.sdef.name)
+        nudged.append(name)
     return nudged
 
 
@@ -329,11 +344,11 @@ async def h_cflow_approve(request: web.Request) -> web.Response:
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
-    cwd, _ = resolved
-    payload = cflow_engine.approve(by="web", cwd=cwd)
+    cwd, scope, _ = resolved
+    payload = cflow_engine.approve(by="web", cwd=cwd, scope=scope)
     if payload.get("status") == "approved":
         payload["nudged_sessions"] = await _nudge_sessions(
-            request.app["manager"], cwd, cflow_engine.NUDGE_APPROVED
+            request.app["manager"], cwd, scope, cflow_engine.NUDGE_APPROVED
         )
     return web.json_response(payload)
 
@@ -343,15 +358,15 @@ async def h_cflow_select(request: web.Request) -> web.Response:
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
-    cwd, body = resolved
+    cwd, scope, body = resolved
     option = str(body.get("option") or "")
     if not option:
         return json_error(400, "'option' required in the JSON body")
     reason = str(body.get("reason") or "") or None
-    payload = cflow_engine.select(option, reason, by="web", cwd=cwd)
+    payload = cflow_engine.select(option, reason, by="web", cwd=cwd, scope=scope)
     if payload.get("status") == "selected":
         payload["nudged_sessions"] = await _nudge_sessions(
-            request.app["manager"], cwd, cflow_engine.NUDGE_SELECTED
+            request.app["manager"], cwd, scope, cflow_engine.NUDGE_SELECTED
         )
     return web.json_response(payload)
 
@@ -362,9 +377,9 @@ async def h_cflow_nudge(request: web.Request) -> web.Response:
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
-    cwd, _ = resolved
+    cwd, scope, _ = resolved
     nudged = await _nudge_sessions(
-        request.app["manager"], cwd, cflow_engine.NUDGE_CONTINUE
+        request.app["manager"], cwd, scope, cflow_engine.NUDGE_CONTINUE
     )
     return web.json_response({"ok": True, "nudged_sessions": nudged})
 
@@ -375,14 +390,14 @@ async def h_cflow_goto(request: web.Request) -> web.Response:
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
-    cwd, body = resolved
+    cwd, scope, body = resolved
     step = str(body.get("step") or "")
     if not step:
         return json_error(400, "'step' required in the JSON body")
     reason = str(body.get("reason") or "") or None
-    payload = cflow_engine.goto(step, by="web", reason=reason, cwd=cwd)
+    payload = cflow_engine.goto(step, by="web", reason=reason, cwd=cwd, scope=scope)
     payload["nudged_sessions"] = await _nudge_sessions(
-        request.app["manager"], cwd, cflow_engine.nudge_for_state(step)
+        request.app["manager"], cwd, scope, cflow_engine.nudge_for_state(step)
     )
     return web.json_response(payload)
 

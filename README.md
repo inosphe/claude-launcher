@@ -711,7 +711,10 @@ claunch new-session -s cdx --harness codex -c ~/proj
 ```
 
 Sessions inherit the **daemon's** environment (tmux-server semantics), then the
-harness `env`, then the session's own `--env` overrides. The claude harness
+harness `env`, then the session's own `--env` overrides. Every session also
+gets `CLAUNCH_SESSION=<name>` (tmux's `$TMUX` equivalent) — child processes
+can tell which session they live in, and [cflow](#cflow-declarative-agent-workflows)
+keys its run state by it. The claude harness
 builds its environment exactly like `claunch run` (profile config dir,
 provider, token) and additionally strips nested-session markers so a claude
 launched from inside another claude session still persists transcripts.
@@ -759,12 +762,12 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | profile names (for the UI's create form) |
-| GET    | `/api/cflow`                   | all registered cflow runs + session cwds (status, step reports); `?cwd=` inspects any directory |
-| GET    | `/api/cflow/run`               | `?cwd=` — run detail: status, workflow graph, reports, journal |
-| POST   | `/api/cflow/approve`           | `{cwd}` — approve the gate / extend the loop limit |
-| POST   | `/api/cflow/select`            | `{cwd, option, reason?}` — confirm a user-chooser branch |
-| POST   | `/api/cflow/nudge`             | `{cwd}` — re-type the resume line into the run's sessions |
-| POST   | `/api/cflow/goto`              | `{cwd, step, reason?}` — force the current step (`end` finishes) + nudge |
+| GET    | `/api/cflow`                   | all registered cflow runs, keyed (cwd, scope), with status + step reports; `?cwd=[&scope=]` inspects explicitly |
+| GET    | `/api/cflow/run`               | `?cwd=&scope=` — run detail: status, workflow graph, reports, journal |
+| POST   | `/api/cflow/approve`           | `{cwd, scope}` — approve the gate / extend the loop limit |
+| POST   | `/api/cflow/select`            | `{cwd, scope, option, reason?}` — confirm a user-chooser branch |
+| POST   | `/api/cflow/nudge`             | `{cwd, scope}` — re-type the resume line into the run's own session |
+| POST   | `/api/cflow/goto`              | `{cwd, scope, step, reason?}` — force the current step (`end` finishes) + nudge |
 
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`); runtime
@@ -890,9 +893,16 @@ extends it with `claunch cflow approve`, so an agent-driven loop cannot spin
 forever.
 
 Files live in `.claunch/workflows/*.yaml` (project) or
-`~/.claude-launcher/workflows/` (global); one active run per directory, with
-state and journal under `.cflow/`. `start` snapshots the YAML, so editing it
-mid-run can't corrupt a running position.
+`~/.claude-launcher/workflows/` (global). Runs are keyed by **(directory,
+session)**: the daemon exports `CLAUNCH_SESSION=<name>` into every managed
+session (tmux's `$TMUX` equivalent), the claude → MCP chain inherits it, and
+run state lands in `.cflow/runs/<session>/` — so three sessions in the same
+project drive three independent runs, each 1:1 with its session. Outside a
+managed session the scope falls back to `default` (one run per directory).
+Human commands resolve the target the same way; from an unrelated terminal
+pick one explicitly with `-t/--session` (ambiguity is an error, not a
+guess). `start` snapshots the YAML, so editing it mid-run can't corrupt a
+running position.
 
 ### Control points
 

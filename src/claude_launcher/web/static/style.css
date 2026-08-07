@@ -48,6 +48,10 @@ body {
 #cflow-list li.clickable { cursor: pointer; }
 #cflow-list li.clickable:hover { background: #22262d; }
 .cflow-head { display: flex; align-items: center; gap: 8px; }
+.cflow-scope {
+  font-size: 11px; padding: 1px 7px; border-radius: 9px;
+  background: #172947; color: #58a6ff;
+}
 .cflow-head .meta { margin-left: auto; color: #7d8590; font-size: 11px; }
 .cflow-line { font-size: 12px; color: #9da5b0; margin-top: 3px; }
 .cflow-line.report {

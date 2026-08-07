@@ -127,8 +127,10 @@ def test_restore_relaunches_recorded_sessions(home, tmp_path):
     asyncio.run(run())
 
 
-def test_api_cflow_monitoring(home, tmp_path):
-    """The dashboard endpoint surfaces runs (and their step reports) by cwd."""
+def test_api_cflow_monitoring(home, tmp_path, monkeypatch):
+    """The dashboard endpoint surfaces runs (and their step reports) keyed
+    by (cwd, scope); a run maps 1:1 to the session named like its scope."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     _register_py_harness()
     from aiohttp.test_utils import TestClient, TestServer
 
@@ -139,9 +141,9 @@ def test_api_cflow_monitoring(home, tmp_path):
         "  two:\n    instructions: do two\n",
         encoding="utf-8",
     )
-    cflow_engine.start("wf.yaml", context="demo task", cwd=str(tmp_path))
-    cflow_engine.report("one is done", "evidence here", cwd=str(tmp_path))
-    cflow_engine.next_step(cwd=str(tmp_path))
+    cflow_engine.start("wf.yaml", context="demo task", cwd=str(tmp_path), scope="wf1")
+    cflow_engine.report("one is done", "evidence here", cwd=str(tmp_path), scope="wf1")
+    cflow_engine.next_step(cwd=str(tmp_path), scope="wf1")
 
     async def run():
         mgr = _manager()
@@ -158,9 +160,10 @@ def test_api_cflow_monitoring(home, tmp_path):
             runs = (await resp.json())["runs"]
             assert len(runs) == 1
             assert runs[0]["workflow"] == "demo"
+            assert runs[0]["scope"] == "wf1"
             assert runs[0]["status"] == "step"
             assert runs[0]["step_id"] == "two"
-            assert runs[0]["sessions"] == []
+            assert runs[0]["sessions"] == []  # its session is not alive yet
             assert runs[0]["reports"][-1]["summary"] == "one is done"
             assert runs[0]["reports"][-1]["details"] == "evidence here"
 
@@ -170,19 +173,31 @@ def test_api_cflow_monitoring(home, tmp_path):
             )
             assert len((await resp.json())["runs"]) == 1
 
-            # a managed session in that cwd puts the run in the default scan
+            # the session named like the scope binds 1:1 to the run
             mgr.create(SessionDef(name="wf1", harness="py", cwd=str(tmp_path)))
             resp = await client.get("/api/cflow", headers=bearer)
             runs = (await resp.json())["runs"]
             assert len(runs) == 1
             assert runs[0]["sessions"] == ["wf1"]
 
+            # an unrelated session in that cwd binds to nothing: a second
+            # run in ITS scope lists separately, and neither leaks sessions
+            mgr.create(SessionDef(name="wf2", harness="py", cwd=str(tmp_path)))
+            cflow_engine.start("wf.yaml", cwd=str(tmp_path), scope="wf2")
+            resp = await client.get("/api/cflow", headers=bearer)
+            runs = {r["scope"]: r for r in (await resp.json())["runs"]}
+            assert set(runs) == {"wf1", "wf2"}
+            assert runs["wf1"]["sessions"] == ["wf1"]
+            assert runs["wf2"]["sessions"] == ["wf2"]
+            assert runs["wf1"]["step_id"] == "two"
+            assert runs["wf2"]["step_id"] == "one"  # independent positions
+
             # a session whose cwd has no run stays out of the listing
             other = tmp_path / "other"
             other.mkdir()
             mgr.create(SessionDef(name="idle1", harness="py", cwd=str(other)))
             resp = await client.get("/api/cflow", headers=bearer)
-            assert len((await resp.json())["runs"]) == 1
+            assert len((await resp.json())["runs"]) == 2
         finally:
             await mgr.shutdown_all()
             await client.close()
@@ -218,8 +233,9 @@ def test_shutdown_not_blocked_by_open_websocket(home, tmp_path):
     asyncio.run(run())
 
 
-def test_api_cflow_actions(home, tmp_path):
+def test_api_cflow_actions(home, tmp_path, monkeypatch):
     """The run-detail endpoint, and human approve/select over the web API."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     _register_py_harness()
     from aiohttp.test_utils import TestClient, TestServer
 
@@ -232,7 +248,7 @@ def test_api_cflow_actions(home, tmp_path):
         "    instructions: ship it\n",
         encoding="utf-8",
     )
-    cflow_engine.start("wf.yaml", cwd=str(gated))
+    cflow_engine.start("wf.yaml", cwd=str(gated), scope="n1")
 
     chooser = tmp_path / "chooser"
     chooser.mkdir()
@@ -256,10 +272,13 @@ def test_api_cflow_actions(home, tmp_path):
 
             # detail: live status + the full graph for the diagram
             resp = await client.get(
-                "/api/cflow/run", params={"cwd": str(gated)}, headers=bearer
+                "/api/cflow/run",
+                params={"cwd": str(gated), "scope": "n1"},
+                headers=bearer,
             )
             assert resp.status == 200
             doc = await resp.json()
+            assert doc["scope"] == "n1"
             assert doc["run"]["status"] == "waiting_approval"
             assert [s["id"] for s in doc["workflow"]["steps"]] == ["ship"]
             assert doc["workflow"]["steps"][0]["gate"] == "approve shipping"
@@ -267,7 +286,7 @@ def test_api_cflow_actions(home, tmp_path):
             resp = await client.get("/api/cflow/run", headers=bearer)
             assert resp.status == 400  # cwd required
 
-            # a live session in the run's directory gets nudged on approve
+            # the run's own session (name == scope) gets nudged on approve
             worker = mgr.create(
                 SessionDef(name="n1", harness="py", cwd=str(gated))
             )
@@ -275,18 +294,24 @@ def test_api_cflow_actions(home, tmp_path):
 
             # approve over HTTP opens the gate; the agent then fetches the step
             resp = await client.post(
-                "/api/cflow/approve", json={"cwd": str(gated)}, headers=bearer
+                "/api/cflow/approve",
+                json={"cwd": str(gated), "scope": "n1"},
+                headers=bearer,
             )
             assert resp.status == 200
             doc = await resp.json()
             assert doc["status"] == "approved"
             assert doc["nudged_sessions"] == ["n1"]
             await _wait_screen(worker, "echo:cflow: approved")
-            assert cflow_engine.next_step(cwd=str(gated))["status"] == "step"
+            assert (
+                cflow_engine.next_step(cwd=str(gated), scope="n1")["status"] == "step"
+            )
 
             # manual (repeat) nudge from the dashboard
             resp = await client.post(
-                "/api/cflow/nudge", json={"cwd": str(gated)}, headers=bearer
+                "/api/cflow/nudge",
+                json={"cwd": str(gated), "scope": "n1"},
+                headers=bearer,
             )
             assert resp.status == 200
             assert (await resp.json())["nudged_sessions"] == ["n1"]
@@ -295,13 +320,14 @@ def test_api_cflow_actions(home, tmp_path):
             # forced state set (goto) from the dashboard: re-gates + nudges
             resp = await client.post(
                 "/api/cflow/goto",
-                json={"cwd": str(gated), "step": "nope"},
+                json={"cwd": str(gated), "scope": "n1", "step": "nope"},
                 headers=bearer,
             )
             assert resp.status == 400
             resp = await client.post(
                 "/api/cflow/goto",
-                json={"cwd": str(gated), "step": "ship", "reason": "redo"},
+                json={"cwd": str(gated), "scope": "n1", "step": "ship",
+                      "reason": "redo"},
                 headers=bearer,
             )
             assert resp.status == 200
@@ -313,12 +339,16 @@ def test_api_cflow_actions(home, tmp_path):
 
             # the forced revisit re-closed the gate: approve opens it again...
             resp = await client.post(
-                "/api/cflow/approve", json={"cwd": str(gated)}, headers=bearer
+                "/api/cflow/approve",
+                json={"cwd": str(gated), "scope": "n1"},
+                headers=bearer,
             )
             assert resp.status == 200
             # ...and with nothing left waiting, approve is a clean 400, not a 500
             resp = await client.post(
-                "/api/cflow/approve", json={"cwd": str(gated)}, headers=bearer
+                "/api/cflow/approve",
+                json={"cwd": str(gated), "scope": "n1"},
+                headers=bearer,
             )
             assert resp.status == 400
 

@@ -100,6 +100,7 @@ def flow_dir(home, tmp_path, monkeypatch):
     proj = tmp_path / "proj"
     (proj / ".claunch" / "workflows").mkdir(parents=True)
     monkeypatch.chdir(proj)
+    monkeypatch.delenv(state_mod.SESSION_ENV, raising=False)
     return proj
 
 
@@ -535,11 +536,60 @@ def test_goto_end_finishes_and_goto_reopens(flow_dir):
 def test_start_registers_run_dir_and_prunes(flow_dir):
     _write(flow_dir, "linear", LINEAR)
     engine.start("linear")
-    assert str(flow_dir.resolve()) in state_mod.known_run_dirs()
+    assert (str(flow_dir.resolve()), "default") in state_mod.known_runs()
 
     # clearing the run state prunes the registry on the next read
     engine.reset()
-    assert str(flow_dir.resolve()) not in state_mod.known_run_dirs()
+    assert (str(flow_dir.resolve()), "default") not in state_mod.known_runs()
+
+
+# --------------------------------------------------------------------------- #
+# scopes: one run per session, not per directory
+# --------------------------------------------------------------------------- #
+def test_scopes_isolate_runs_per_session(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear", scope="s1")
+    engine.start("linear", scope="s2")  # no already-active clash across scopes
+
+    engine.report("one done in s1", scope="s1")
+    engine.next_step(scope="s1")
+    assert engine.status(scope="s1")["step_id"] == "two"
+    assert engine.status(scope="s2")["step_id"] == "one"  # untouched
+    assert engine.status()["status"] == "idle"  # default scope untouched
+
+    assert set(state_mod.scopes_in()) == {"s1", "s2"}
+    runs = state_mod.known_runs()
+    assert (str(flow_dir.resolve()), "s1") in runs
+    assert (str(flow_dir.resolve()), "s2") in runs
+
+
+def test_scope_resolves_from_session_env(flow_dir, monkeypatch):
+    """The daemon exports CLAUNCH_SESSION; claude's MCP server inherits it,
+    so the run keys itself to the session with no explicit plumbing."""
+    _write(flow_dir, "linear", LINEAR)
+    monkeypatch.setenv(state_mod.SESSION_ENV, "sx")
+    engine.start("linear")
+    assert (flow_dir / ".cflow" / "runs" / "sx" / "state.json").is_file()
+    assert engine.status()["status"] == "step"  # same ambient scope
+
+    monkeypatch.delenv(state_mod.SESSION_ENV)
+    assert engine.status()["status"] == "idle"  # a different (default) scope
+    assert engine.status(scope="sx")["status"] == "step"  # explicit override
+
+
+def test_legacy_flat_layout_migrates_to_default_scope(flow_dir):
+    import shutil
+
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    base = flow_dir / ".cflow"
+    for name in ("state.json", "workflow.yaml", "journal.jsonl"):
+        (base / "runs" / "default" / name).rename(base / name)
+    shutil.rmtree(base / "runs")
+
+    assert engine.status()["status"] == "step"  # transparently migrated
+    assert (base / "runs" / "default" / "state.json").is_file()
+    assert not (base / "state.json").exists()
 
 
 # --------------------------------------------------------------------------- #

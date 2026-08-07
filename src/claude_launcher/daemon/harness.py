@@ -169,6 +169,10 @@ def build_command(
         env.update(
             {str(k): str(v) for k, v in (entry.get("env") or {}).items()}
         )
+    # The session's identity, tmux's ``$TMUX`` equivalent. Children (claude,
+    # its MCP servers, `!` shells) inherit it — cflow keys its run state by
+    # it, mapping each session 1:1 to its own workflow run.
+    env["CLAUNCH_SESSION"] = sdef.name
     env.update(sdef.env)
     if sys.platform != "win32":
         env.setdefault("TERM", "xterm-256color")
