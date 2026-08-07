@@ -43,6 +43,15 @@ TOOLS = [
                     "description": "'*', a member handle, or comma-separated handles",
                 },
                 "body": {"type": "string", "description": "message text"},
+                "type": {
+                    "type": "string",
+                    "description": (
+                        "message INTENT (not your role or a label): 'say' "
+                        "(default) or 'ask' invite a reply; 'fyi' and 'ack' "
+                        "do not — use them for status/acknowledgements so "
+                        "peers don't reply-all"
+                    ),
+                },
             },
             "required": ["mesh", "to", "body"],
         },
@@ -106,7 +115,12 @@ def _call_tool(name: str, args: dict) -> dict:
         ]
         result = _client().post(
             f"/api/mesh/{mesh}/messages",
-            {"from": sender, "to": to, "body": str(args.get("body") or "")},
+            {
+                "from": sender,
+                "to": to,
+                "body": str(args.get("body") or ""),
+                "type": str(args.get("type") or "say"),
+            },
         )
         relay = result.pop("relay", None)
         result["relay"] = _relay_summary(relay)

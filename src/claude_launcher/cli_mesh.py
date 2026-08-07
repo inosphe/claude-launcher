@@ -140,14 +140,24 @@ def _cmd_send(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     result = client.post(
         f"/api/mesh/{args.mesh}/messages",
-        {"from": sender, "to": args.to, "body": text, "external": bool(args.external)},
+        {
+            "from": sender,
+            "to": args.to,
+            "body": text,
+            "external": bool(args.external),
+            "type": args.type,
+        },
     )
     recipients = result.get("recipients", [])
     queued = result.get("queued_remote", [])
     line = f"sent {result.get('id')} to {', '.join(recipients) or '(nobody)'}"
+    if args.type != "say":
+        line += f" [{args.type}]"
     if queued:
         line += f" -- queued for remote: {', '.join(queued)}"
     print(line)
+    if result.get("notice"):
+        print(f"notice: {result['notice']}", file=sys.stderr)
     _print_relay(result.get("relay"))
     return 0
 
@@ -259,7 +269,9 @@ def _cmd_history(args: argparse.Namespace) -> int:
         to = m.get("to")
         to_s = to if isinstance(to, str) else ",".join(to)
         body = str(m.get("body") or "")
-        print(f"[{m.get('ts')}] {m.get('from')} -> {to_s}: {body}")
+        intent = str(m.get("type") or "say")
+        tag = f" [{intent}]" if intent != "say" else ""
+        print(f"[{m.get('ts')}] {m.get('from')} -> {to_s}{tag}: {body}")
     return 0
 
 
@@ -309,6 +321,9 @@ def register(sub) -> None:
     p.add_argument("--session", help="sender session (default: $CLAUNCH_SESSION)")
     p.add_argument("--external", action="store_true",
                    help="send as a non-member (e.g. a human operator)")
+    p.add_argument("--type", default="say",
+                   help="message intent: say (default), ask, or the no-reply "
+                        "fyi/ack -- recipients owe no answer to fyi/ack")
     p.set_defaults(func=_cmd_send)
 
     p = msub.add_parser(

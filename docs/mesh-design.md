@@ -81,8 +81,13 @@ a required component of mesh either. The model is a federation:
 Kept (as concepts or ported logic):
 
 - mesh/channel + membership, handle/role conventions
-- message shape (`id`, `ts`, `from`, `to` = `*` | handle | list, `body`),
-  append-only `log.jsonl` history
+- message shape (`id`, `ts`, `from`, `to` = `*` | handle | list, `type`,
+  `body`), append-only `log.jsonl` history
+- message intents: `say`/`ask` invite a reply, `fyi`/`ack`/`ping` do not
+  (`expects_reply` is derived on read, never stored — interconnect's
+  contract); unknown types are accepted but draw a reply-all advisory.
+  A delivery batch of only no-reply intents is marked `needs_reply: false`
+  ("no reply expected"), and such deliveries never arm the heartbeat
 - per-member delivery cursors into the log (durable "what was delivered")
 - settle-based burst coalescing before delivery
 - (phase 3) heartbeat / task-poll / stall-warning *policies*, running in the

@@ -61,6 +61,43 @@ MAX_DELIVERY_BODY = 2000
 #: newline survive; everything else has no business in a terminal injection).
 _CTRL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
+#: Message intents that do not invite a reply (interconnect's spec, verbatim):
+#: a recipient drains ``fyi``/``ack``/``ping`` without answering — this is how
+#: the mesh stops every peer from replying to every utterance. Everything
+#: else — ``ask``, the default ``say``, or any custom type — invites reply.
+REPLY_OPTIONAL_TYPES = frozenset({"fyi", "ack", "ping"})
+
+#: The known message INTENTS. Other types are still accepted (and count as
+#: reply-expected) but draw an advisory — see :func:`type_notice`.
+INTENT_TYPES = frozenset({"say", "ask"}) | REPLY_OPTIONAL_TYPES
+
+
+def expects_reply(message_type) -> bool:
+    """Whether a message of this ``type`` invites a reply.
+
+    Derived on read, never stored (interconnect's convention) — the on-disk
+    message model is unchanged and messages written before ``type`` existed
+    still classify correctly.
+    """
+    return str(message_type or "say").strip().lower() not in REPLY_OPTIONAL_TYPES
+
+
+def type_notice(message_type) -> Optional[str]:
+    """Advise when ``type`` is not a known intent (usually a role leaked in).
+
+    Non-blocking: an unrecognized type counts as reply-expected and so
+    quietly invites a reply-all the author probably did not intend.
+    """
+    if str(message_type or "say").strip().lower() in INTENT_TYPES:
+        return None
+    return (
+        f"type {message_type!r} is not a known intent (ask/say/fyi/ack) — it "
+        "counts as reply-expected. 'type' is the message INTENT, not your "
+        "role or a label; use 'fyi'/'ack' for no-reply status so peers "
+        "don't reply-all."
+    )
+
+
 #: Wait for a message burst to go quiet before delivering (seconds).
 DEFAULT_SETTLE = 2.0
 
@@ -407,12 +444,14 @@ class MeshManager:
         body: str,
         *,
         external: bool = False,
+        type: str = "say",
     ) -> dict:
         """Append a message to the mesh log and wake the delivery worker.
 
         ``sender`` is a member handle or a local session name; ``external``
         admits a non-member sender (the human on the dashboard). ``to`` is
-        ``"*"``, a handle, or a list of handles.
+        ``"*"``, a handle, or a list of handles. ``type`` is the message
+        *intent* (``say``/``ask`` invite a reply; ``fyi``/``ack`` do not).
         """
         mesh = self.get(name)
         member = self.resolve_sender(name, sender)
@@ -428,11 +467,13 @@ class MeshManager:
         recipients = self._resolve_recipients(mesh, from_handle, to)
         if not recipients:
             raise MeshError(f"mesh {name!r} has no other members to deliver to")
+        intent = str(type or "say").strip().lower() or "say"
         msg = {
             "id": "msg-" + uuid.uuid4().hex[:12],
             "ts": utcnow(),
             "from": from_handle,
             "to": to if isinstance(to, str) else list(to),
+            "type": intent,
             "body": body,
             # Origin machine: only the originating daemon forwards a message
             # to its peers, so a broadcast never echoes back and forth.
@@ -458,6 +499,9 @@ class MeshManager:
             # they are queued (durably, via the peer cursor) until reconnect.
             "queued_remote": remote if not self.relay_connected() else [],
             "remote": remote,
+            "expects_reply": expects_reply(intent),
+            # Advisory, not an error: an unknown intent invites reply-all.
+            "notice": type_notice(intent),
         }
 
     def _resolve_recipients(
@@ -625,6 +669,7 @@ class MeshManager:
                 "ts": str(m.get("ts") or utcnow()),
                 "from": str(m.get("from") or machine),
                 "to": m.get("to") if isinstance(m.get("to"), (str, list)) else "*",
+                "type": str(m.get("type") or "say").strip().lower() or "say",
                 "body": _CTRL_RE.sub("", m["body"]),
                 "origin": machine,
             }
@@ -893,9 +938,14 @@ class MeshManager:
             return
         mesh.cursors[member.handle] = len(mesh.messages)
         mesh._first_pending.pop(member.handle, None)
-        mesh.activity.setdefault(member.handle, {"anchor": time.monotonic()})[
-            "last_delivered"
-        ] = time.monotonic()
+        now = time.monotonic()
+        st = mesh.activity.setdefault(member.handle, {"anchor": now})
+        st["last_delivered"] = now
+        # Only a reply-*expecting* delivery arms the heartbeat: draining
+        # fyi/ack traffic leaves the member owing nothing (interconnect's
+        # expects_reply contract).
+        if any(expects_reply(m.get("type")) for m in pending):
+            st["last_asked"] = now
         self._persist_cursors(mesh)
         log.info(
             "mesh %r: delivered %d message(s) to %r (session %r)",
@@ -1024,16 +1074,23 @@ def format_delivery(mesh_name: str, handle: str, msgs: List[dict]) -> str:
         entry: dict = {"from": m.get("from")}
         if m.get("to") != "*":
             entry["to"] = m.get("to")
+        intent = str(m.get("type") or "say").strip().lower() or "say"
+        if intent != "say":
+            entry["type"] = intent
         entry["body"] = _Literal(body) if "\n" in body else body
         batch.append(entry)
+    needs_reply = any(expects_reply(m.get("type")) for m in msgs)
     doc = {
         "mesh": mesh_name,
         "to": handle,
         "messages": len(batch),
+        "needs_reply": needs_reply,
         "batch": batch,
         "note": (
             "mesh messages delivered to your terminal — reply with: "
             f'claunch mesh send {mesh_name} <handle|*> "..."'
+            if needs_reply
+            else "fyi/ack only — no reply expected; drain and continue"
         ),
     }
     dumped = yaml.dump(
