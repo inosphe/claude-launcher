@@ -19,6 +19,7 @@ from claude_launcher.daemon import paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
+from claude_launcher.daemon.session import SessionGone
 
 CHILD = (
     "import sys\n"
@@ -123,6 +124,139 @@ def test_restore_relaunches_recorded_sessions(home, tmp_path):
         session = mgr2.get("phoenix")
         await _wait_screen(session, "READY")
         await mgr2.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_restart_keeps_exited_sessions_respawnable(home, tmp_path):
+    """A daemon restart must never *lose* a session: what it does not relaunch
+    (already exited, or --no-restore) comes back as an exited record that can
+    still be respawned, with its pinned definition intact."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        gone = mgr.create(SessionDef(name="gone", harness="py", cwd=str(tmp_path)))
+        await _wait_screen(gone, "READY")
+        await gone.send_keys(["quit", "Enter"])
+        await gone.wait_for("exited", timeout=10.0, threshold=0.5)
+        mgr.create(SessionDef(name="opted-out", harness="py", cwd=str(tmp_path),
+                              restore=False))
+        await mgr.shutdown_all()
+
+        mgr2 = _manager()  # the "restarted daemon"
+        assert mgr2.restore_all() == []
+        assert sorted(s.sdef.name for s in mgr2.list()) == ["gone", "opted-out"]
+        record = mgr2.get("gone")
+        assert record.exited and record.status() == "exited"
+        assert record.sdef.cwd == str(tmp_path)
+        assert record.info()["status"] == "exited"
+        # the retired record still shows what the session last printed
+        assert "READY" in "\n".join(record.capture())
+        # and it is a record, not a child: driving it is refused, not crashed
+        with pytest.raises(SessionGone):
+            await record.send_keys(["x"])
+
+        revived = mgr2.respawn("gone")
+        await _wait_screen(revived, "READY")
+        assert not revived.exited
+
+        # a second restart keeps carrying the remaining record
+        await mgr2.shutdown_all()
+        mgr3 = _manager()
+        mgr3.restore_all()
+        assert mgr3.get("opted-out").exited
+        await mgr3.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_ws_attach_to_a_retired_record(home, tmp_path):
+    """A viewer can open a session the daemon only has a *record* of: it gets
+    the final screen and an 'exited' status (resume is the way out from there)
+    instead of a broken socket."""
+    _register_py_harness()
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        session = mgr.create(SessionDef(name="ghost", harness="py", cwd=str(tmp_path)))
+        last_pid = session.pid
+        await _wait_screen(session, "READY")
+        await session.send_keys(["quit", "Enter"])
+        await session.wait_for("exited", timeout=10.0, threshold=0.5)
+        await mgr.shutdown_all()
+
+        mgr2 = _manager()  # the restarted daemon keeps it as a record
+        mgr2.restore_all()
+        assert mgr2.get("ghost").exited
+        app = build_app(mgr2, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            ws = await client.ws_connect(
+                "/api/sessions/ghost/ws", headers={"Authorization": "Bearer sekrit"}
+            )
+            init = json.loads((await ws.receive(timeout=10)).data)
+            assert init["type"] == "init" and init["status"] == "exited"
+            # the pid of the child it *had*: an incarnation tag that survives
+            # the restart, so a viewer can spot a later respawn
+            assert init["pid"] == last_pid
+            repaint = await ws.receive(timeout=10)
+            assert repaint.type == aiohttp.WSMsgType.BINARY
+            assert b"READY" in repaint.data  # its last screen, replayed from the log
+            await ws.close()
+        finally:
+            await mgr2.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_clear_drops_only_exited_records(home, tmp_path):
+    """Clearing is the user's explicit cleanup: exited records go, running
+    sessions stay, and --logs frees the auto-generated names again."""
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            dead = mgr.create(SessionDef(name="", harness="py", cwd=str(tmp_path)))
+            live = mgr.create(SessionDef(name="", harness="py", cwd=str(tmp_path)))
+            assert [dead.sdef.name, live.sdef.name] == ["s0", "s1"]
+            await _wait_screen(dead, "READY")
+            await dead.send_keys(["quit", "Enter"])
+            await dead.wait_for("exited", timeout=10.0, threshold=0.5)
+
+            # a fresh auto-name never reuses a taken one
+            assert mgr.create(SessionDef(name="", harness="py", cwd=str(tmp_path))).sdef.name == "s2"
+
+            resp = await client.delete("/api/sessions", headers=bearer)
+            assert resp.status == 200
+            assert (await resp.json())["removed"] == ["s0"]
+            assert sorted(s.sdef.name for s in mgr.list()) == ["s1", "s2"]
+            assert paths.session_dir("s0").is_dir()  # its log survives the record
+
+            # the name stays taken while that log is on disk
+            assert mgr.create(SessionDef(name="", harness="py", cwd=str(tmp_path))).sdef.name == "s3"
+
+            info = await (await client.get("/api/daemon", headers=bearer)).json()
+            assert info["sessions"] == 3 and info["running"] == 3
+
+            mgr.kill("s3")
+            await mgr.get("s3").wait_for("exited", timeout=10.0, threshold=0.5)
+            resp = await client.delete("/api/sessions?logs=1", headers=bearer)
+            assert (await resp.json())["removed"] == ["s3"]
+            assert not paths.session_dir("s3").is_dir()
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
 
     asyncio.run(run())
 
@@ -238,6 +372,49 @@ def test_api_session_respawn(home, tmp_path):
             await _wait_screen(revived, "READY")
             await revived.send_keys(["back", "Enter"])
             await _wait_screen(revived, "echo:back")
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ws_init_identifies_the_incarnation(home, tmp_path):
+    """The terminal socket's init frame carries the child's pid, so a viewer
+    can tell its socket is bound to a session that has since been respawned
+    (same name, new child) — that is how the web UI follows a resume."""
+    _register_py_harness()
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            session = mgr.create(SessionDef(name="w2", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(session, "READY")
+
+            ws = await client.ws_connect("/api/sessions/w2/ws", headers=bearer)
+            msg = await ws.receive(timeout=10)
+            assert msg.type == aiohttp.WSMsgType.TEXT
+            init = json.loads(msg.data)
+            assert init["type"] == "init"
+            assert init["pid"] == session.pid
+            await ws.close()
+
+            await session.send_keys(["quit", "Enter"])
+            await session.wait_for("exited", timeout=10.0, threshold=0.5)
+            resp = await client.post("/api/sessions/w2/respawn", headers=bearer)
+            assert resp.status == 200
+
+            ws = await client.ws_connect("/api/sessions/w2/ws", headers=bearer)
+            msg = await ws.receive(timeout=10)
+            revived = json.loads(msg.data)
+            assert revived["pid"] == mgr.get("w2").pid != init["pid"]
+            await ws.close()
         finally:
             await mgr.shutdown_all()
             await client.close()

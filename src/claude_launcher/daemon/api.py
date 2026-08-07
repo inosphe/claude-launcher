@@ -147,6 +147,7 @@ def build_app(
     r.add_post("/peer/mesh/members", h_peer_members)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_sessions_create)
+    r.add_delete("/api/sessions", h_sessions_clear)
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
@@ -194,11 +195,15 @@ async def h_auth_session(request: web.Request) -> web.Response:
 
 async def h_daemon_info(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
+    sessions = manager.list()
     return web.json_response(
         {
             "version": __version__,
             "uptime": round(time.monotonic() - request.app["started_at"], 1),
-            "sessions": len(manager.list()),
+            # 'sessions' counts records, most of which may be exited ones kept
+            # for respawn; 'running' is how many have a live child.
+            "sessions": len(sessions),
+            "running": sum(1 for s in sessions if not s.exited),
             "relay": request.app["relay_state"](),
         }
     )
@@ -667,6 +672,20 @@ async def h_sessions_create(request: web.Request) -> web.Response:
             return json_error(409, str(exc))
         raise
     return web.json_response(session.info(), status=201)
+
+
+async def h_sessions_clear(request: web.Request) -> web.Response:
+    """Drop the records of all exited sessions (``?logs=1`` also deletes their
+    captured output). Running sessions are untouched.
+
+    The daemon keeps exited sessions around indefinitely so they stay
+    respawnable, so this is the explicit cleanup — nothing else discards them
+    in bulk.
+    """
+    manager: SessionManager = request.app["manager"]
+    logs = request.query.get("logs") in ("1", "true")
+    removed = manager.clear(logs=logs)
+    return web.json_response({"removed": removed, "logs": logs})
 
 
 def _session(request: web.Request):

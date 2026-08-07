@@ -47,9 +47,16 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     failed = manager.restore_all()
     for name in failed:
         log.warning("failed to restore session %r", name)
-    restored = [s.sdef.name for s in manager.list()]
+    restored = [s.sdef.name for s in manager.list() if not s.exited]
+    retired = [s.sdef.name for s in manager.list() if s.exited]
     if restored:
         log.info("restored sessions: %s", ", ".join(restored))
+    if retired:
+        log.info(
+            "kept %d exited session record(s), respawnable: %s",
+            len(retired),
+            ", ".join(retired),
+        )
 
     mesh_manager = MeshManager(manager)
     mesh_manager.load_all()

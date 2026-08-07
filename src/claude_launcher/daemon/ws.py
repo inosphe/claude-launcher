@@ -3,8 +3,9 @@
 Protocol (matches the SPA's app.js and any non-browser client):
 
 - server -> client, binary: raw PTY output bytes (feed straight to xterm.js).
-  On connect the server first sends a JSON ``init`` text frame, then one binary
-  frame repainting the current screen so a fresh viewer sees live state.
+  On connect the server first sends a JSON ``init`` text frame
+  (``{"type":"init","cols":..,"rows":..,"status":..,"pid":..}``), then one
+  binary frame repainting the current screen so a fresh viewer sees live state.
 - client -> server, binary: keystrokes/paste, written verbatim to the PTY.
 - text frames are JSON control messages:
   client: ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"repaint"}``
@@ -48,6 +49,10 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                     "cols": session.sdef.cols,
                     "rows": session.sdef.rows,
                     "status": session.status(),
+                    # Identifies *this incarnation*: a respawn keeps the name
+                    # but spawns a new child, so a viewer can tell its socket
+                    # is bound to a session that has since been replaced.
+                    "pid": session.pid,
                 }
             )
         )

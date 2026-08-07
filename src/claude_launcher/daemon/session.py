@@ -65,6 +65,7 @@ class Session:
         self.created_at = _utcnow()
         self.last_output_at: Optional[str] = None
         self.exit_code: Optional[int] = None
+        self.exited_at: Optional[str] = None
         self.exited = False
         self._started_mono = time.monotonic()
         self._subscribers: Set[asyncio.Queue] = set()
@@ -135,6 +136,7 @@ class Session:
     def _finish(self) -> None:
         self.exited = True
         self.exit_code = self.pty.exit_code()
+        self.exited_at = _utcnow()
         self._status = STATUS_EXITED
         if self._sampler:
             self._sampler.cancel()
@@ -151,7 +153,7 @@ class Session:
             "name": self.sdef.name,
             "argv": self.argv,
             "created_at": self.created_at,
-            "exited_at": _utcnow(),
+            "exited_at": self.exited_at,
             "exit_code": self.exit_code,
         }
         try:
@@ -314,8 +316,135 @@ class Session:
             "exit_code": self.exit_code,
             "created_at": self.created_at,
             "last_output_at": self.last_output_at,
+            "exited_at": self.exited_at,
         }
 
 
 class SessionGone(Exception):
     """Raised when acting on a session whose child already exited."""
+
+
+class DeadSession:
+    """The record of a session that is no longer running.
+
+    Sessions die with the daemon, but their *definitions* outlive it, and so
+    does the right to revive them: on restart everything the previous daemon
+    did not relaunch — already exited, created ``--no-restore``, or a relaunch
+    that failed — comes back as one of these instead of being forgotten, so
+    ``claunch respawn`` (and the web UI's resume) still reach it. Only the user
+    drops such a record, via ``kill-session`` or ``clear-sessions``.
+
+    It answers the read-only surface a viewer needs (list, capture, attach to
+    read the final screen — replayed from the raw log) and raises
+    :class:`SessionGone` for anything that needs a live child.
+    """
+
+    #: How much of the raw log is replayed to rebuild the last screen: enough
+    #: for a full-screen TUI repaint, small enough that attaching stays quick.
+    REPLAY_TAIL_BYTES = 256 * 1024
+
+    exited = True
+
+    def __init__(
+        self,
+        sdef: SessionDef,
+        *,
+        exit_code: Optional[int] = None,
+        pid: Optional[int] = None,
+        created_at: Optional[str] = None,
+        last_output_at: Optional[str] = None,
+        exited_at: Optional[str] = None,
+        scrollback: int = 5000,
+        idle_threshold: float = 2.0,
+    ) -> None:
+        self.sdef = sdef
+        self.exit_code = exit_code
+        self.pid = pid
+        self.created_at = created_at or _utcnow()
+        self.last_output_at = last_output_at
+        self.exited_at = exited_at
+        self.idle_threshold = idle_threshold
+        self._scrollback = scrollback
+        self._screen: Optional[ScreenState] = None
+
+    @property
+    def screen(self) -> ScreenState:
+        """The session's last screen, rebuilt on first use.
+
+        Replaying a log through pyte is not free, and most records are never
+        looked at — so this stays unbuilt until someone captures or attaches.
+        """
+        if self._screen is None:
+            screen = ScreenState(
+                self.sdef.cols, self.sdef.rows, history=self._scrollback
+            )
+            self._replay_into(screen)
+            self._screen = screen
+        return self._screen
+
+    def _replay_into(self, screen: ScreenState) -> None:
+        path = paths.session_log(self.sdef.name)
+        try:
+            size = path.stat().st_size
+            with open(path, "rb") as fh:
+                if size > self.REPLAY_TAIL_BYTES:
+                    fh.seek(size - self.REPLAY_TAIL_BYTES)
+                screen.feed(fh.read())
+        except OSError:
+            pass  # no log (or unreadable): an empty screen is honest enough
+
+    # ------------------------------------------------------------------ #
+    # the live surface: nothing to drive any more
+    # ------------------------------------------------------------------ #
+    def _gone(self) -> SessionGone:
+        return SessionGone(
+            f"session {self.sdef.name!r} has exited "
+            f"(respawn it to get a live terminal back)"
+        )
+
+    async def send_keys(self, args: List[str], *, literal: bool = False) -> bytes:
+        raise self._gone()
+
+    async def write_bytes(self, data: bytes) -> None:
+        raise self._gone()
+
+    def resize(self, cols: int, rows: int) -> None:
+        raise self._gone()
+
+    def kill(self, *, force: bool = False) -> None:
+        return None
+
+    async def shutdown(self, grace: float = 5.0) -> None:
+        return None
+
+    # ------------------------------------------------------------------ #
+    # the passive surface: same answers a live session would give
+    # ------------------------------------------------------------------ #
+    def status(self, threshold: Optional[float] = None) -> str:
+        return STATUS_EXITED
+
+    def idle_since(self) -> Optional[float]:
+        return None
+
+    def capture(self, *, history: bool = False) -> List[str]:
+        return self.screen.render_history() if history else self.screen.render_screen()
+
+    async def wait_for(self, state: str, *, timeout: float, threshold: float) -> str:
+        return STATUS_EXITED  # exited satisfies both 'idle' and 'exited'
+
+    def subscribe(self) -> asyncio.Queue:
+        return asyncio.Queue(maxsize=1)  # nothing will ever be published to it
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        return None
+
+    def info(self) -> dict:
+        return {
+            **self.sdef.to_dict(),
+            "status": STATUS_EXITED,
+            "pid": self.pid,
+            "exit_code": self.exit_code,
+            "created_at": self.created_at,
+            "last_output_at": self.last_output_at,
+            "exited_at": self.exited_at,
+        }
