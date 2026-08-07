@@ -109,7 +109,7 @@ claunch usage work      # show this profile's subscription usage
 | `remove <name>`        | Delete a profile and its tokens (aliases: `delete`, `rm`). |
 
 Plus the **[managed-session commands](#managed-sessions-tmux-style-daemon)** —
-`new-session`, `sessions`, `send-keys`, `capture-pane`, `wait-for`,
+`new-session`, `attach`, `sessions`, `send-keys`, `capture-pane`, `wait-for`,
 `kill-session`, `resize`, `daemon ...`, `web` — which run harnesses in
 daemon-owned PTYs instead of the current terminal, and the
 **[cflow commands](#cflow-declarative-agent-workflows)** (`claunch cflow ...`)
@@ -522,9 +522,19 @@ claunch new-session -s work --profile work     # daemon auto-starts, claude spaw
 claunch send-keys work "fix the failing test" Enter
 claunch wait-for work --idle --timeout 600     # block until claude stops producing output
 claunch capture-pane work                      # print the rendered screen
+claunch attach work                            # take over interactively (Ctrl+] detaches)
 claunch sessions                               # list sessions + status
 claunch kill-session work
 ```
+
+`attach` is the tmux moment: your terminal goes raw and mirrors the session
+1:1 — keystrokes go to the PTY, output paints locally, and the session resizes
+to (and follows) your terminal. `Ctrl+]` detaches; the session keeps running
+in the daemon, and you can reattach later from any terminal (or watch the same
+session in the browser at the same time — viewers are just subscribers).
+`new-session --attach` (`-a`) creates a session and drops you straight into
+it, so `claunch new -a --profile work` feels like plain `claude` — except the
+session survives closing the terminal.
 
 That `send-keys → wait-for → capture-pane` triple closes the automation loop:
 external scripts (or another agent) can drive interactive claude sessions
@@ -534,8 +544,9 @@ without a human at the keyboard.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, trailing args pass to the harness). |
+| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `-a/--attach` to attach immediately, trailing args pass to the harness). |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. |
+| `attach [S]` (`attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `send-keys [-l] S KEYS...` | tmux semantics: `Enter`, `Escape`, `Tab`, `C-c`, `M-x`, `Up`... are keys; everything else is literal text. `-l` sends all args literally. `-t S` also accepted. |
 | `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |

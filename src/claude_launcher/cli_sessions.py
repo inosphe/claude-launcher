@@ -55,7 +55,14 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         + (f", profile: {info['profile']}" if info.get("profile") else "")
         + f", pid: {info.get('pid')})"
     )
-    print(f"attach in the browser: {client.base_url}/  |  capture: claunch capture-pane {info['name']}")
+    if args.attach:
+        from . import attach as attach_mod
+
+        return attach_mod.attach(client, info["name"])
+    print(
+        f"attach: claunch attach {info['name']}  |  browser: {client.base_url}/  "
+        f"|  capture: claunch capture-pane {info['name']}"
+    )
     return 0
 
 
@@ -79,6 +86,27 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
             f"{s['cols']}x{s['rows']}  {s.get('cwd', '')}"
         )
     return 0
+
+
+def _cmd_attach(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    name = args.session
+    if not name:
+        sessions = client.get("/api/sessions").get("sessions", [])
+        live = [s["name"] for s in sessions if s["status"] != "exited"]
+        if not live:
+            print("error: no running sessions to attach to", file=sys.stderr)
+            return 1
+        if len(live) > 1:
+            print(
+                "error: several sessions are running — pick one: " + ", ".join(live),
+                file=sys.stderr,
+            )
+            return 1
+        name = live[0]
+    from . import attach as attach_mod
+
+    return attach_mod.attach(client, name)
 
 
 def _cmd_send_keys(args: argparse.Namespace) -> int:
@@ -287,6 +315,10 @@ def register(sub) -> None:
         help="do not relaunch on daemon restart",
     )
     p_new.add_argument(
+        "-a", "--attach", action="store_true",
+        help="attach this terminal to the new session right away (detach: Ctrl+])",
+    )
+    p_new.add_argument(
         "args", nargs=argparse.REMAINDER,
         help="extra arguments passed to the harness (prefix with -- if they start with -)",
     )
@@ -294,6 +326,18 @@ def register(sub) -> None:
 
     p_ls = sub.add_parser("sessions", aliases=["lss"], help="list daemon-managed sessions")
     p_ls.set_defaults(func=_cmd_sessions)
+
+    p_attach = sub.add_parser(
+        "attach",
+        aliases=["attach-session"],
+        help="attach this terminal to a session, tmux-style (detach: Ctrl+])",
+    )
+    p_attach.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
+    p_attach.add_argument(
+        "session", nargs="?",
+        help="session name (may be omitted when exactly one session is running)",
+    )
+    p_attach.set_defaults(func=_cmd_attach_dispatch)
 
     p_send = sub.add_parser(
         "send-keys",
@@ -375,6 +419,14 @@ def _resolve_target(args: argparse.Namespace) -> bool:
         print("error: no session given", file=sys.stderr)
         return False
     return True
+
+
+def _cmd_attach_dispatch(args: argparse.Namespace) -> int:
+    # ``-t`` tmux muscle memory; unlike the others, no session at all is fine
+    # (attach auto-picks when exactly one session is running).
+    if getattr(args, "session_t", None):
+        args.session = args.session_t
+    return _cmd_attach(args)
 
 
 def _cmd_send_keys_dispatch(args: argparse.Namespace) -> int:
