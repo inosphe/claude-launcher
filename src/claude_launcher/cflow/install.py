@@ -79,7 +79,10 @@ candidates (`claunch cflow ls`) and ask which one to run.
   are watched live by humans — write them as status updates for a reviewer,
   not as praise for yourself.
 - Approvals and user selections happen OUTSIDE your tools (CLI / `!`
-  commands); nothing you can call grants them.
+  commands / the web dashboard); nothing you can call grants them.
+- A human may force the run's position while you are stopped
+  (`claunch cflow goto <step>`). Whatever `status` serves after a nudge IS
+  the current truth — even if it revisits a step you already finished.
 - If a tool returns an error about no active run, `start` one; if it says a
   run is already active, resume it instead of forcing a restart unless the
   user explicitly wants a fresh run.

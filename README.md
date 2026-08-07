@@ -740,6 +740,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/cflow/approve`           | `{cwd}` — approve the gate / extend the loop limit |
 | POST   | `/api/cflow/select`            | `{cwd, option, reason?}` — confirm a user-chooser branch |
 | POST   | `/api/cflow/nudge`             | `{cwd}` — re-type the resume line into the run's sessions |
+| POST   | `/api/cflow/goto`              | `{cwd, step, reason?}` — force the current step (`end` finishes) + nudge |
 
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`); runtime
@@ -909,6 +910,7 @@ outside — a supervising script or another agent can watch
 | `cflow status [--json]`  | Active run: current step, state, how to unblock. |
 | `cflow approve`          | Approve the current human gate (human-only: CLI or web dashboard). |
 | `cflow select <opt> [--reason]` | Confirm (or override) a user-chooser branch. |
+| `cflow goto <step> [--reason]` | Force the current step (`end` finishes; journaled, re-gates, auto-nudges). On the dashboard: click a diagram node. |
 | `cflow journal [-n N]`   | Print the run journal (JSONL). |
 | `cflow abort` / `reset`  | Abort the run / clear run state (journal kept). |
 | `cflow install --profile P \| --project [DIR]` | Register the MCP server + `/cflow` skill. |

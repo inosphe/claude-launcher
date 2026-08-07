@@ -292,7 +292,31 @@ def test_api_cflow_actions(home, tmp_path):
             assert (await resp.json())["nudged_sessions"] == ["n1"]
             await _wait_screen(worker, "echo:cflow: continue")
 
-            # approving with nothing waiting is a clean 400, not a 500
+            # forced state set (goto) from the dashboard: re-gates + nudges
+            resp = await client.post(
+                "/api/cflow/goto",
+                json={"cwd": str(gated), "step": "nope"},
+                headers=bearer,
+            )
+            assert resp.status == 400
+            resp = await client.post(
+                "/api/cflow/goto",
+                json={"cwd": str(gated), "step": "ship", "reason": "redo"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["status"] == "state_set"
+            assert doc["visit"] == 2
+            assert doc["nudged_sessions"] == ["n1"]
+            await _wait_screen(worker, "echo:cflow: current step forced")
+
+            # the forced revisit re-closed the gate: approve opens it again...
+            resp = await client.post(
+                "/api/cflow/approve", json={"cwd": str(gated)}, headers=bearer
+            )
+            assert resp.status == 200
+            # ...and with nothing left waiting, approve is a clean 400, not a 500
             resp = await client.post(
                 "/api/cflow/approve", json={"cwd": str(gated)}, headers=bearer
             )

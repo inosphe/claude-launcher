@@ -143,6 +143,8 @@ body {
 .wf-cols { display: flex; gap: 26px; align-items: flex-start; flex-wrap: wrap; }
 .wf-diagram { flex: 0 0 480px; max-width: 100%; }
 .wfd { width: 100%; height: auto; }
+.wfd-node { cursor: pointer; }
+.wfd-node:hover rect { stroke: #8fa1b3; }
 .wfd-node rect { fill: #1b1e24; stroke: #30363d; stroke-width: 1.5; }
 .wfd-node.visited rect { stroke: #2f6f43; }
 .wfd-node.current rect { fill: #14233a; stroke: #58a6ff; stroke-width: 2; }

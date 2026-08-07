@@ -460,7 +460,23 @@ function renderWf(data) {
   const cols = el("div", "wf-cols");
   const dia = el("div", "wf-diagram");
   dia.innerHTML = wfDiagramSvg(wf, run);
+  const finished = run.status === "done" || run.status === "aborted";
+  dia.querySelectorAll("g.wfd-node[data-step]").forEach((g) => {
+    g.addEventListener("click", () => {
+      const step = g.dataset.step;
+      const q = step === "end"
+        ? "Force-FINISH this workflow run?"
+        : `Force the run's current step to '${step}'?` +
+          (finished ? " (this reopens the finished run)" : "") +
+          " The session will be nudged to continue from there.";
+      if (confirm(q)) cflowAction("/api/cflow/goto", { cwd: data.cwd, step });
+    });
+  });
   cols.appendChild(dia);
+  dia.appendChild(el(
+    "p", "wf-note",
+    "click a step to force the run there (override; journaled + auto-nudge)"
+  ));
   cols.appendChild(wfReports(data));
   view.appendChild(cols);
 
@@ -674,7 +690,7 @@ function wfDiagramSvg(wf, run) {
     if (s.verify) flags.push("verify");
     if (s.select) flags.push(`select:${s.select.chooser}`);
     const title = s.title && s.title !== s.id ? `${s.id} — ${s.title}` : s.id;
-    parts.push(`<g class="${cls.join(" ")}">`);
+    parts.push(`<g class="${cls.join(" ")}" data-step="${escXml(s.id)}">`);
     parts.push(`<rect x="${NX}" y="${y}" width="${NW}" height="${NH}" rx="8"/>`);
     parts.push(
       `<text class="wfd-title" x="${NX + 12}" y="${y + (flags.length ? 19 : 27)}">` +
@@ -697,7 +713,7 @@ function wfDiagramSvg(wf, run) {
   if (hasEnd) {
     const y = yTop("end");
     parts.push(
-      `<g class="wfd-node end"><rect x="${(W - 90) / 2}" y="${y}" width="90" height="30" rx="15"/>` +
+      `<g class="wfd-node end" data-step="end"><rect x="${(W - 90) / 2}" y="${y}" width="90" height="30" rx="15"/>` +
       `<text class="wfd-title" x="${W / 2}" y="${y + 20}" text-anchor="middle">end</text></g>`
     );
   }

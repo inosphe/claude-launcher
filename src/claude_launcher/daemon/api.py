@@ -106,6 +106,7 @@ def build_app(manager: SessionManager, token: str, *, started_at: float) -> web.
     r.add_post("/api/cflow/approve", h_cflow_approve)
     r.add_post("/api/cflow/select", h_cflow_select)
     r.add_post("/api/cflow/nudge", h_cflow_nudge)
+    r.add_post("/api/cflow/goto", h_cflow_goto)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_get("/api/sessions/{name}", h_session_get)
@@ -366,6 +367,24 @@ async def h_cflow_nudge(request: web.Request) -> web.Response:
         request.app["manager"], cwd, cflow_engine.NUDGE_CONTINUE
     )
     return web.json_response({"ok": True, "nudged_sessions": nudged})
+
+
+async def h_cflow_goto(request: web.Request) -> web.Response:
+    """Force the run's current step (human override), then nudge the
+    directory's sessions so the agent continues from the new position."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, body = resolved
+    step = str(body.get("step") or "")
+    if not step:
+        return json_error(400, "'step' required in the JSON body")
+    reason = str(body.get("reason") or "") or None
+    payload = cflow_engine.goto(step, by="web", reason=reason, cwd=cwd)
+    payload["nudged_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, cflow_engine.nudge_for_state(step)
+    )
+    return web.json_response(payload)
 
 
 async def h_sessions_list(request: web.Request) -> web.Response:

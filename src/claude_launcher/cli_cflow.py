@@ -159,6 +159,18 @@ def _cmd_select(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_goto(args: argparse.Namespace) -> int:
+    payload = engine.goto(args.step, by="user", reason=args.reason)
+    if payload.get("status") in ("done", "aborted"):
+        print(f"workflow forced to {payload['status']}")
+        return 0
+    _report_unblock(
+        f"current step forced to {args.step!r} (visit {payload.get('visit')})",
+        engine.nudge_for_state(args.step),
+    )
+    return 0
+
+
 def _cmd_abort(_args: argparse.Namespace) -> int:
     payload = engine.abort(by="user")
     print(f"aborted run {payload.get('run')}")
@@ -242,6 +254,15 @@ def register(sub) -> None:
     q.add_argument("option")
     q.add_argument("--reason", help="recorded in the journal")
     q.set_defaults(func=_cmd_select)
+
+    q = csub.add_parser(
+        "goto",
+        help="force the run's current step (human override; 'end' finishes); "
+        "auto-nudges the directory's sessions",
+    )
+    q.add_argument("step")
+    q.add_argument("--reason", help="recorded in the journal")
+    q.set_defaults(func=_cmd_goto)
 
     q = csub.add_parser("abort", help="abort the active run")
     q.set_defaults(func=_cmd_abort)

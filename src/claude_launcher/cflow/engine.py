@@ -46,6 +46,13 @@ NUDGE_SELECTED = "cflow: selection confirmed - continue per the /cflow protocol"
 NUDGE_CONTINUE = "cflow: continue per the /cflow protocol"
 
 
+def nudge_for_state(step_id: str) -> str:
+    return (
+        f"cflow: current step forced to '{step_id}' - "
+        "continue per the /cflow protocol"
+    )
+
+
 class CflowError(Exception):
     """Raised for protocol misuse (wrong tool for the current position)."""
 
@@ -530,6 +537,52 @@ def select(
         "step_id": step.id,
         "option": option,
         "note": "selection confirmed; nudge the agent to continue",
+    }
+
+
+def goto(
+    step_id: str,
+    *,
+    by: str = "user",
+    reason: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> dict:
+    """Force the run's position to an arbitrary step — a human override for
+    when the graph and reality disagree (a step never got delivered, work
+    must be redone, or a finished run needs reopening). ``end`` force-
+    finishes. The move is journaled; the step itself is NOT delivered here —
+    the agent fetches it via 'next'/'status' (so per-visit gates re-apply),
+    which is why callers pair this with a session nudge.
+    """
+    workflow, state = _load(cwd)
+    target = None if step_id == model.END else step_id
+    if target is not None:
+        workflow.step(target)  # unknown id -> WorkflowError
+    state_mod.journal(
+        "state_forced",
+        {
+            "run": state["run_id"],
+            "from": state.get("current"),
+            "to": step_id,
+            "by": by,
+            "reason": (reason or "").strip(),
+        },
+        cwd,
+    )
+    if state["status"] in ("done", "aborted"):
+        state["status"] = "running"  # a forced goto can reopen a finished run
+    _move_to(workflow, state, target, cwd)
+    if state["status"] == "done":
+        return _done_payload(state, cwd)
+    return {
+        **_base(state),
+        "status": "state_set",
+        "step_id": target,
+        "visit": _visits(state, target),
+        "note": (
+            "position forced; the agent picks the step up via 'next'/'status' "
+            "- nudge it to continue"
+        ),
     }
 
 

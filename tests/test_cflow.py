@@ -481,6 +481,55 @@ def test_verify_blocks_then_passes(flow_dir):
 
 
 # --------------------------------------------------------------------------- #
+# engine: forced state (goto)
+# --------------------------------------------------------------------------- #
+def test_goto_forces_position_without_delivering(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    payload = engine.goto("two", by="user", reason="one already done elsewhere")
+    assert (payload["status"], payload["step_id"]) == ("state_set", "two")
+
+    # not delivered by goto itself: the agent fetches it on its own call
+    payload = engine.next_step()
+    assert (payload["status"], payload["step_id"]) == ("step", "two")
+    forced = [e for e in state_mod.read_journal() if e["event"] == "state_forced"]
+    assert forced[0]["from"] == "one"
+    assert forced[0]["to"] == "two"
+
+
+def test_goto_unknown_step_rejected(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    with pytest.raises(WorkflowError, match="unknown step"):
+        engine.goto("nope")
+
+
+def test_goto_regates_and_counts_visits(flow_dir):
+    _write(flow_dir, "gated", GATED)
+    engine.start("gated")
+    _advance("worked")
+    engine.approve(by="user")
+    engine.next_step()  # ship delivered (visit 1, gate opened)
+
+    payload = engine.goto("ship")
+    assert payload["visit"] == 2
+    # per-visit semantics survive the override: the gate closes again
+    assert engine.next_step()["status"] == "waiting_approval"
+
+
+def test_goto_end_finishes_and_goto_reopens(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    payload = engine.goto("end")
+    assert payload["status"] == "done"
+    assert engine.status()["status"] == "done"
+
+    payload = engine.goto("two")  # reopen the finished run
+    assert payload["status"] == "state_set"
+    assert engine.status()["status"] == "step"
+
+
+# --------------------------------------------------------------------------- #
 # run registry (dashboard discovery)
 # --------------------------------------------------------------------------- #
 def test_start_registers_run_dir_and_prunes(flow_dir):
