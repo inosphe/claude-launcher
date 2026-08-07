@@ -708,7 +708,7 @@ function wfReports(data) {
   }
   box.appendChild(head);
 
-  const reports = (data.reports || []).slice().reverse();
+  const reports = (data.reports || []).slice(); // journal order: oldest first
   if (!reports.length) box.appendChild(el("p", "wf-note", "no reports yet"));
   if (wfSelectedStep && reports.length &&
       !reports.some((r) => r.step === wfSelectedStep)) {
