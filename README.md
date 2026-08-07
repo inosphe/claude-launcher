@@ -835,13 +835,6 @@ claunch mesh history dev
 - **Join briefing**: newly enrolled members get an idle-gated briefing block
   typed into their terminal (mesh, their handle/role, member list, how to
   send) — so a session enrolled from the web knows it joined something.
-- **Nudge policies** (per mesh, all **off** by default — every nudge costs
-  the agent a turn): *heartbeat* reminds a member sitting on unanswered
-  messages; *task-poll* pokes idle, caught-up members of selected roles
-  (default: workers); *stall warnings* message the mesh's leaders about a
-  member stuck in one state. Edit in the web mesh view ("Nudge policy"),
-  via `claunch mesh policy <mesh> --set heartbeat.enabled=true ...`, or
-  `PUT /api/mesh/{mesh}/policy`.
 - **MCP tools** (optional): `claunch mesh mcp` runs a stdio MCP server with
   `send` / `members` / `history` for agents that prefer tools over shell —
   register it e.g. with `claude mcp add mesh -- claunch mesh mcp`. There is
@@ -854,6 +847,43 @@ claunch mesh history dev
   `work-pc/s0`-style addresses. If the relay drops, local messaging keeps
   working and cross-machine messages queue durably until reconnect
   (senders see `queued for remote` immediately).
+
+### Nudge policies (heartbeat · task-poll · stall warnings)
+
+Per-mesh policies the daemon evaluates roughly **once a second** (inside each
+mesh's delivery worker), for **local members only**. The observable state per
+member is: whether its session is *idle* (the screen-quiet tracker), when the
+daemon last **delivered** into its terminal (`last_delivered`), when the
+member last **sent** a mesh message (`last_sent`), and how many messages are
+still *pending* injection. Two derived states drive everything:
+
+- **unanswered** — something was delivered and the member has sent nothing
+  since (`last_sent < last_delivered`);
+- **caught up** — not unanswered *and* nothing pending.
+
+| policy | fires when | first fire | action |
+| ------ | ---------- | ---------- | ------ |
+| **heartbeat** | member is *unanswered* **and** its session is idle (a busy member is presumed working) | `last_delivered` + `interval` (default 180s) | injects a `kind: heartbeat` block into that member's terminal — **not** logged, **not** federated |
+| **task-poll** | member is idle **and** *caught up* **and** its role is in `roles` (default `worker` — leaders/reviewers have no queue to pull from) | last activity + `interval` (default 600s) | injects a `kind: task-poll` block with the per-role body (`bodies[role]`, fallback interpolates `{role}`) |
+| **stall warning** | a **non-leader** member has held one state for `warn_secs` (default 600s): either *idle-stalled* (idle + caught up that long) or *behind* (pending messages whose injection never lands because the session never goes idle) | after `warn_secs` | sends a **real mesh message** from the external `policy` sender to every leader-role member — it enters the log, is delivered by injection, and **crosses machines over federation**; needs at least one leader to exist |
+
+Each policy repeats with a per-member **doubling backoff** (`interval` → 2× →
+4× … capped at `max_interval`; stall warnings double from `warn_secs`), and
+resets the moment the trigger clears — a heartbeat stops as soon as the member
+sends anything, a task-poll stops when work arrives, a stall warning stops
+when the member becomes active. Example with heartbeat on (`interval` 180):
+delivery at 10:00, member stays silent → nudges at 10:03, 10:09, 10:21, …
+converging to one per `max_interval`; the first `claunch mesh send` from the
+member ends the series.
+
+All three are **off by default**: unlike interconnect's socket appends, every
+nudge is a terminal injection that consumes the recipient agent's turn, so
+enabling is a deliberate choice. Timers are in-memory (they restart with the
+daemon); only the config persists, in `mesh.json`. There is no escalation
+tier by design — delivery already *is* the escalation. Edit in the web mesh
+view ("Nudge policy"), via
+`claunch mesh policy <mesh> --set heartbeat.enabled=true ...`, or
+`PUT /api/mesh/{mesh}/policy`.
 
 ## Web UI & HTTP API
 
