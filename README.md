@@ -44,7 +44,31 @@ Install editable so the tool imports straight from this repo instead of a copy:
 uv tool install --force --editable .
 ```
 
-Now source edits take effect on the **next** `claunch` invocation — no reinstall.
+Or skip uv's tool venv entirely and put a shim on PATH that runs the launcher
+from this checkout (Windows):
+
+```powershell
+pwsh -File stubs\install-shim.ps1
+```
+
+That renders [`stubs/claunch.bat`](stubs/claunch.bat) into `~\.local\bin\claunch.bat`
+with this repo's path baked in, so every `claunch ...` becomes
+`uv run --project <repo> claunch ...`. Nothing is copied and there is no second
+environment to keep in sync — handy when an editable tool install has drifted or
+broken. Useful flags:
+
+| Flag | Effect |
+| --- | --- |
+| `-BinDir <dir>`     | Install somewhere other than `~\.local\bin` (or set `CLAUNCH_BIN_DIR`). |
+| `-NoSync`           | Bake `--no-sync` in for a faster start; run `uv sync` yourself when deps change. |
+| `-AddToPath`        | Append the bin directory to the persisted user PATH. |
+| `-Force`            | Overwrite a foreign `claunch.bat`, and delete a `claunch.exe` that would shadow it. |
+| `-Uninstall`        | Remove the shim. |
+
+Set `CLAUNCH_PROJECT` in your environment to point the installed shim at a
+different checkout without reinstalling.
+
+Either way, source edits take effect on the **next** `claunch` invocation — no reinstall.
 Because nothing is copied into uv's tool venv, the source files are never locked,
 so you can patch the launcher **while a `claunch run` session is active**. The
 running session keeps the code it started with (Python loads modules into memory
