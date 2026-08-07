@@ -575,6 +575,7 @@ async def h_mesh_send(request: web.Request) -> web.Response:
         to,
         text,
         external=bool(body.get("external")),
+        type=str(body.get("type") or "say"),
     )
     return web.json_response({**result, "relay": request.app["relay_state"]()})
 

@@ -108,6 +108,35 @@ def test_infer_role():
     assert infer_role("alice") == "member"
 
 
+def test_message_intents():
+    assert mesh_mod.expects_reply(None) is True          # default 'say'
+    assert mesh_mod.expects_reply("say") is True
+    assert mesh_mod.expects_reply("ask") is True
+    assert mesh_mod.expects_reply("worker") is True      # unknown -> reply-expected
+    for t in ("fyi", "ack", "ping", "Ack", " FYI "):     # normalised on read
+        assert mesh_mod.expects_reply(t) is False
+    assert mesh_mod.type_notice("ask") is None
+    assert mesh_mod.type_notice(None) is None
+    # a role leaked into 'type' draws the reply-all advisory
+    assert "not a known intent" in mesh_mod.type_notice("worker")
+
+
+def test_format_delivery_no_reply_batch():
+    fyi_only = [
+        {"from": "policy", "to": "leader", "type": "fyi", "body": "stall: w1"},
+        {"from": "w2", "to": "leader", "type": "ack", "body": "done"},
+    ]
+    block = format_delivery("m1", "leader", fyi_only)
+    assert "needs_reply: false" in block
+    assert "no reply expected" in block
+    assert "type: fyi" in block and "type: ack" in block
+    # one reply-expecting message flips the whole batch back
+    mixed = fyi_only + [{"from": "w2", "to": "leader", "body": "question?"}]
+    block = format_delivery("m1", "leader", mixed)
+    assert "needs_reply: true" in block
+    assert "reply with" in block
+
+
 def test_format_delivery_block():
     msgs = [
         {"from": "leader", "to": "*", "body": "line one\nline two"},
@@ -494,11 +523,13 @@ def test_federation_link_and_remote_delivery(home, tmp_path):
         assert mm_a.mesh_info(mesh_a)["peers"][0]["machine"] == "pcB"
 
         # a remote-addressed message crosses on flush…
-        sent = mm_b.send("m1", "bob", "alice", "hello across")
+        sent = mm_b.send("m1", "bob", "alice", "hello across", type="ack")
         assert sent["remote"] == ["alice"]
+        assert sent["expects_reply"] is False and sent["notice"] is None
         assert sent["queued_remote"] == []  # relay is up
         await mm_b._flush_peer(mesh_b, "pcA")
         assert [m["body"] for m in mesh_a.pending("alice")] == ["hello across"]
+        assert mesh_a.messages[-1]["type"] == "ack"  # intent survives the hop
         assert mesh_b.peer_status["pcA"]["ok"] is True
 
         # …exactly once: the cursor advanced, and replays dedupe by id
@@ -669,6 +700,13 @@ def test_policy_heartbeat_nudges_unanswered_member(home, tmp_path):
         mm.set_policy("hb", {"heartbeat": {"enabled": True, "interval": 1}})
         mm.start()
 
+        # an fyi delivery does NOT arm the heartbeat: draining it leaves the
+        # member owing nothing
+        mm.send("hb", "leader", "worker_b", "status update", type="fyi")
+        await _wait_screen(b, "status update")
+        await asyncio.sleep(3)
+        assert "kind: heartbeat" not in _screen_text(b)
+
         mm.send("hb", "leader", "worker_b", "please reply")
         await _wait_screen(b, "please reply")
         # worker_b never sends anything back -> the heartbeat block lands
@@ -716,6 +754,7 @@ def test_policy_task_poll_and_stall_warning(home, tmp_path):
         await _wait_screen(a, "stall: worker_b")
         assert any(
             m["from"] == "policy" and "stall: worker_b" in m["body"]
+            and m.get("type") == "fyi"  # informs the leader, never asks
             for m in mm.get("tp").messages
         )
 
@@ -762,7 +801,9 @@ def test_mesh_mcp_tools(home, monkeypatch):
 
         def post(self, path, body, **kw):
             assert path == "/api/mesh/dev/messages"
-            assert body == {"from": "s0", "to": ["a", "b"], "body": "hi"}
+            assert body == {
+                "from": "s0", "to": ["a", "b"], "body": "hi", "type": "fyi",
+            }
             return {"id": "msg-1", "recipients": ["a", "b"], "relay": None}
 
     monkeypatch.setattr(mesh_mcp.daemon_client, "connect", lambda: FakeClient())
@@ -793,7 +834,8 @@ def test_mesh_mcp_tools(home, monkeypatch):
         {
             "jsonrpc": "2.0", "id": 4, "method": "tools/call",
             "params": {"name": "send",
-                       "arguments": {"mesh": "dev", "to": "a, b", "body": "hi"}},
+                       "arguments": {"mesh": "dev", "to": "a, b", "body": "hi",
+                                     "type": "fyi"}},
         }
     )
     assert resp["result"]["isError"] is False

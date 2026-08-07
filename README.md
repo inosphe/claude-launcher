@@ -832,6 +832,14 @@ claunch mesh history dev
 - Every session/mesh command prints a **relay status** line
   (`relay: connected as 'work-pc'` / `relay: DISCONNECTED ...`), because a
   mesh can only span machines while the relay uplink is registered.
+- **Message intents** (ported from interconnect): `--type say` (default) or
+  `ask` invite a reply; `fyi` / `ack` do not — the delivery block then says
+  `needs_reply: false` / "no reply expected", which is what stops every agent
+  from politely answering every utterance. fyi/ack deliveries also never arm
+  the heartbeat nudge, and stall warnings go out as `fyi`. Unknown types are
+  accepted but draw an advisory (a role name in `type` silently invites
+  reply-all). Available on the CLI (`--type`), MCP `send`, the web send box,
+  and the API (`type` field).
 - **Join briefing**: newly enrolled members get an idle-gated briefing block
   typed into their terminal (mesh, their handle/role, member list, how to
   send) — so a session enrolled from the web knows it joined something.

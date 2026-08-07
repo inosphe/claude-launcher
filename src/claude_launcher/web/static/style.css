@@ -330,6 +330,9 @@ body {
 .mesh-msg-meta {
   display: flex; gap: 10px; font-size: 11px; color: #7d8590; margin-bottom: 4px;
 }
+.mesh-msg-type {
+  padding: 0 6px; border-radius: 8px; background: #172947; color: #58a6ff;
+}
 .mesh-msg-from { color: #58a6ff; font-weight: 600; }
 .mesh-msg-at { margin-left: auto; }
 .mesh-msg-body { font-size: 13px; color: #c6cdd5; white-space: pre-wrap; }

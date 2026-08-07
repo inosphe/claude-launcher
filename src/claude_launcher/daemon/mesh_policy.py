@@ -201,14 +201,17 @@ async def tick(mm, mesh) -> None:
         idle = session.status() == STATUS_IDLE
         last_sent = st.get("last_sent", 0.0)
         last_delivered = st.get("last_delivered", 0.0)
-        unanswered = last_delivered > 0 and last_sent < last_delivered
+        # last_asked marks the newest *reply-expecting* delivery (fyi/ack
+        # traffic never arms the heartbeat — expects_reply in mesh.py).
+        last_asked = st.get("last_asked", 0.0)
+        unanswered = last_asked > 0 and last_sent < last_asked
         pending = len(mesh.pending(handle))
         caught_up = not unanswered and pending == 0
         active_at = max(last_sent, last_delivered, st["anchor"])
 
-        # -- heartbeat: delivered, no reply since --------------------------- #
+        # -- heartbeat: asked something, no reply since --------------------- #
         if hb["enabled"] and unanswered and idle:
-            due = st.get("hb_next", last_delivered + hb["interval"])
+            due = st.get("hb_next", last_asked + hb["interval"])
             if now >= due:
                 await _inject(mm, session, mesh, "heartbeat", handle, hb["body"])
                 backoff = min(
@@ -268,8 +271,11 @@ async def tick(mm, mesh) -> None:
                         behind=pending if stalled_behind else 0,
                     )
                     try:
+                        # fyi: leaders are informed, not asked — the warning
+                        # must not arm their own heartbeat or invite replies.
                         mm.send(
-                            mesh.name, POLICY_SENDER, leaders, body, external=True
+                            mesh.name, POLICY_SENDER, leaders, body,
+                            external=True, type="fyi",
                         )
                     except Exception as exc:  # noqa: BLE001
                         log.debug("mesh %r: stall warn failed: %s", mesh.name, exc)

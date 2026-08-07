@@ -1436,6 +1436,16 @@ function renderMesh(info, history) {
     opt.textContent = `to: ${m.handle}`;
     to.appendChild(opt);
   }
+  const intent = document.createElement("select");
+  for (const [v, label] of [
+    ["say", "type: say"], ["ask", "type: ask (expects reply)"],
+    ["fyi", "type: fyi (no reply)"], ["ack", "type: ack (no reply)"],
+  ]) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = label;
+    intent.appendChild(opt);
+  }
   const text = document.createElement("textarea");
   text.placeholder = "message — delivered by typing into the recipient's terminal";
   text.rows = 3;
@@ -1452,6 +1462,7 @@ function renderMesh(info, history) {
         to: to.value === "*" ? "*" : to.value,
         body,
         external,
+        type: intent.value,
       }),
     });
     const doc = await resp.json().catch(() => ({}));
@@ -1464,7 +1475,7 @@ function renderMesh(info, history) {
     refreshMeshView();
   });
   const row = el("div", "mesh-send-row");
-  row.append(from, to);
+  row.append(from, to, intent);
   send.append(row, text, sendBtn);
   view.appendChild(send);
 
@@ -1478,6 +1489,9 @@ function renderMesh(info, history) {
     const toS = m.to === "*" ? "everyone" : (Array.isArray(m.to) ? m.to.join(", ") : m.to);
     meta.appendChild(el("span", "mesh-msg-from", m.from));
     meta.appendChild(el("span", null, `→ ${toS}`));
+    if (m.type && m.type !== "say") {
+      meta.appendChild(el("span", "mesh-msg-type", m.type));
+    }
     meta.appendChild(el("span", "mesh-msg-at", (m.ts || "").replace("T", " ")));
     line.appendChild(meta);
     line.appendChild(el("div", "mesh-msg-body", m.body || ""));
