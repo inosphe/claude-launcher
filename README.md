@@ -570,7 +570,7 @@ without a human at the keyboard.
 
 The web UI normally binds loopback. To reach it from your phone or another
 network without opening an inbound port, the daemon can dial an outbound
-WebSocket to a [psmux-relay](https://github.com/inosphe/mux-relay) and register
+WebSocket to a [mux-relay](https://github.com/inosphe/mux-relay) and register
 itself as a named backend. A browser then logs into the relay and opens
 `https://relay.example.com/t/<name>/` to get this daemon's full web UI. Because
 the daemon only ever dials **loopback**, the tunnel can't widen its network
