@@ -1306,6 +1306,7 @@ function renderMesh(info, history) {
   linkRow.append(codeIn, linkBtn);
   fed.appendChild(linkRow);
   view.appendChild(fed);
+  view.appendChild(renderMeshPolicy(info));
 
   // send box: as the human operator, or on behalf of a member
   const send = el("div", "mesh-send");
@@ -1384,6 +1385,105 @@ function renderMesh(info, history) {
     logBox.appendChild(line);
   }
   view.appendChild(logBox);
+}
+
+/* Nudge-policy editor: heartbeat / task-poll / stall warnings, per mesh.
+   All nudges are terminal injections (they consume the agent's turn), so
+   every section ships disabled until deliberately switched on here. */
+function renderMeshPolicy(info) {
+  const pol = info.policy || {};
+  const box = el("div", "mesh-policy");
+  box.appendChild(el("h3", null, "Nudge policy"));
+  box.appendChild(el(
+    "p", "wf-note",
+    "nudges are typed into the member's terminal, so each one costs the " +
+    "agent a turn — enable deliberately"
+  ));
+  const fields = {};
+  const num = (val) => {
+    const inp = document.createElement("input");
+    inp.type = "number"; inp.min = "1"; inp.value = val;
+    inp.className = "pol-num";
+    return inp;
+  };
+  const section = (key, title, rows) => {
+    const sec = el("div", "pol-section");
+    const head = el("label", "pol-head");
+    const on = document.createElement("input");
+    on.type = "checkbox"; on.checked = !!(pol[key] || {}).enabled;
+    head.append(on, el("span", null, title));
+    sec.appendChild(head);
+    fields[key] = { enabled: on };
+    for (const [name, label, input] of rows) {
+      const row = el("div", "pol-row");
+      row.append(el("span", "pol-label", label), input);
+      sec.appendChild(row);
+      fields[key][name] = input;
+    }
+    box.appendChild(sec);
+  };
+
+  const hb = pol.heartbeat || {};
+  const hbBody = document.createElement("input");
+  hbBody.value = hb.body || "";
+  section("heartbeat", "heartbeat — remind a member sitting on unanswered messages", [
+    ["interval", "first nudge after (s)", num(hb.interval ?? 180)],
+    ["max_interval", "backoff ceiling (s)", num(hb.max_interval ?? 1800)],
+    ["body", "message", hbBody],
+  ]);
+
+  const tp = pol.task_poll || {};
+  const tpRoles = document.createElement("input");
+  tpRoles.value = (tp.roles || ["worker"]).join(", ");
+  const tpBody = document.createElement("input");
+  const firstRole = (tp.roles || ["worker"])[0] || "worker";
+  tpBody.value = (tp.bodies || {})[firstRole] || "";
+  section("task_poll", "task-poll — poke idle, caught-up members of these roles", [
+    ["interval", "poke after idle (s)", num(tp.interval ?? 600)],
+    ["max_interval", "backoff ceiling (s)", num(tp.max_interval ?? 3600)],
+    ["roles", "roles (comma-sep)", tpRoles],
+    ["body", `message (role: ${firstRole})`, tpBody],
+  ]);
+
+  const sw = pol.stall_warn || {};
+  section("stall_warn", "stall warning — message the leaders about a stuck member", [
+    ["warn_secs", "warn after (s)", num(sw.warn_secs ?? 600)],
+  ]);
+
+  const save = el("button", "wf-btn approve", "Save policy");
+  save.addEventListener("click", async () => {
+    const roles = tpRoles.value.split(",").map((r) => r.trim()).filter(Boolean);
+    const patch = {
+      heartbeat: {
+        enabled: fields.heartbeat.enabled.checked,
+        interval: +fields.heartbeat.interval.value,
+        max_interval: +fields.heartbeat.max_interval.value,
+        body: hbBody.value,
+      },
+      task_poll: {
+        enabled: fields.task_poll.enabled.checked,
+        interval: +fields.task_poll.interval.value,
+        max_interval: +fields.task_poll.max_interval.value,
+        roles,
+        bodies: tpBody.value ? { [roles[0] || "worker"]: tpBody.value } : {},
+      },
+      stall_warn: {
+        enabled: fields.stall_warn.enabled.checked,
+        warn_secs: +fields.stall_warn.warn_secs.value,
+      },
+    };
+    const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/policy`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
+    document.activeElement?.blur?.();
+    refreshMeshView();
+  });
+  box.appendChild(save);
+  return box;
 }
 
 function meshDotClass(reachability) {

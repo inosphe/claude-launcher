@@ -205,6 +205,53 @@ def _cmd_members(args: argparse.Namespace) -> int:
     return 0
 
 
+def _parse_policy_value(key: str, raw: str):
+    if raw.lower() in ("true", "false"):
+        return raw.lower() == "true"
+    if key == "roles":
+        return [r.strip() for r in raw.split(",") if r.strip()]
+    try:
+        return float(raw)
+    except ValueError:
+        return raw
+
+
+def _cmd_policy(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    if args.set:
+        patch: dict = {}
+        for item in args.set:
+            path, sep, raw = item.partition("=")
+            if not sep:
+                print(f"error: --set needs section.key=value, got {item!r}",
+                      file=sys.stderr)
+                return 1
+            parts = path.split(".")
+            if len(parts) == 2:
+                section, key = parts
+                patch.setdefault(section, {})[key] = _parse_policy_value(key, raw)
+            elif len(parts) == 3 and parts[1] == "bodies":
+                section, _, role = parts
+                patch.setdefault(section, {}).setdefault("bodies", {})[role] = raw
+            else:
+                print(f"error: bad policy path {path!r} (use section.key or "
+                      "task_poll.bodies.<role>)", file=sys.stderr)
+                return 1
+        payload = client.put(f"/api/mesh/{args.mesh}/policy", patch)
+    else:
+        payload = client.get(f"/api/mesh/{args.mesh}/policy")
+    import json as _json
+
+    print(_json.dumps(payload.get("policy", {}), indent=2, ensure_ascii=False))
+    return 0
+
+
+def _cmd_mcp(_args: argparse.Namespace) -> int:
+    from . import mesh_mcp
+
+    return mesh_mcp.serve()
+
+
 def _cmd_history(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     payload = client.get(f"/api/mesh/{args.mesh}/messages?limit={args.n}")
@@ -281,7 +328,24 @@ def register(sub) -> None:
     p.add_argument("mesh")
     p.set_defaults(func=_cmd_members)
 
+    p = msub.add_parser(
+        "policy",
+        help="show or edit the mesh's nudge policy (heartbeat/task-poll/stall-warn)",
+    )
+    p.add_argument("mesh")
+    p.add_argument(
+        "--set", action="append", metavar="SECTION.KEY=VALUE",
+        help="e.g. --set heartbeat.enabled=true --set task_poll.roles=worker "
+             "--set task_poll.bodies.worker='pull a task'",
+    )
+    p.set_defaults(func=_cmd_policy)
+
     p = msub.add_parser("history", help="print recent mesh messages")
     p.add_argument("mesh")
     p.add_argument("-n", type=int, default=50, help="how many (default 50)")
     p.set_defaults(func=_cmd_history)
+
+    p = msub.add_parser(
+        "mcp", help="run the stdio MCP server (send/members/history tools)"
+    )
+    p.set_defaults(func=_cmd_mcp)

@@ -135,6 +135,8 @@ def build_app(
     r.add_get("/api/mesh/{mesh}/messages", h_mesh_history)
     r.add_post("/api/mesh/{mesh}/invite", h_mesh_invite)
     r.add_post("/api/mesh/link", h_mesh_link)
+    r.add_get("/api/mesh/{mesh}/policy", h_mesh_policy_get)
+    r.add_put("/api/mesh/{mesh}/policy", h_mesh_policy_set)
     # Peer federation endpoints. Deliberately outside /api/: the auth
     # middleware only guards /api/*, and these are called by *other daemons*
     # (via the relay's backend bridge) that hold mesh-scoped link tokens,
@@ -579,6 +581,18 @@ async def h_mesh_history(request: web.Request) -> web.Response:
         return json_error(400, "limit must be an integer")
     messages = _mesh_mgr(request).history(request.match_info["mesh"], limit)
     return web.json_response({"messages": messages})
+
+
+async def h_mesh_policy_get(request: web.Request) -> web.Response:
+    mm = _mesh_mgr(request)
+    mesh = mm.get(request.match_info["mesh"])
+    return web.json_response({"policy": mesh.policy})
+
+
+async def h_mesh_policy_set(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    policy = _mesh_mgr(request).set_policy(request.match_info["mesh"], body)
+    return web.json_response({"policy": policy})
 
 
 async def h_mesh_invite(request: web.Request) -> web.Response:

@@ -1,0 +1,293 @@
+"""Per-mesh nudge policies: heartbeat, task-poll and stall warnings.
+
+Ports interconnect's proxy-TUI policy set into the daemon, adapted to the
+injection transport (see ``docs/mesh-design.md``). The originals watched
+socket/recv state; here the observable member state is (a) the session's
+idle tracker and (b) mesh activity — when the daemon last *delivered* into a
+member's terminal and when that member last *sent*:
+
+* **heartbeat** — a member had messages delivered but has sent nothing since:
+  after ``interval`` (doubling per repeat up to ``max_interval``) inject a
+  reminder. The port of interconnect's recv-idle liveness ping.
+* **task-poll** — a member that is caught up (nothing pending, nothing
+  unanswered) and idle: a role-targeted poke to pull work or leave. Only
+  ``roles`` (default: workers) are polled; bodies are per-role.
+* **stall warning** — a non-leader member has held one state too long
+  (idle+caught-up, or undeliverable-behind): a real mesh message to every
+  leader-role member, so it also crosses machines over federation.
+
+interconnect's fourth tier — tmux send-keys escalation — has no port: every
+delivery here *is* an injection, so there is nothing to escalate to.
+
+Policies default **off** per mesh: unlike a socket append, a nudge consumes
+the recipient agent's turn, so enabling is a deliberate (web-editable) choice.
+
+All timing state is in-memory (timers restart with the daemon); the *config*
+persists in ``mesh.json`` under ``policy``.
+"""
+
+from __future__ import annotations
+
+import copy
+import logging
+import time
+
+from .session import STATUS_IDLE
+
+log = logging.getLogger("claunch.daemon.mesh")
+
+DEFAULT_HEARTBEAT_BODY = (
+    "heartbeat: you have unanswered mesh messages. Act on them or reply NOW; "
+    "if you already handled them, send a brief ack so the mesh knows. "
+    "Do NOT reply to this notice itself."
+)
+TASK_POLL_BODIES = {
+    "worker": (
+        "you are idle and caught up (no unread mesh mail). If you have no "
+        "task in flight, ask the leader to assign one -- or leave the mesh "
+        "if your work here is done. Do NOT reply to this notice."
+    ),
+}
+TASK_POLL_FALLBACK_BODY = (
+    "you are idle and caught up -- engage if there is work for a {role} "
+    "here, otherwise stay parked. Do NOT reply to this notice."
+)
+
+#: The handle stall warnings are sent as (external sender, delivered like any
+#: other mesh message — including to remote leaders over federation).
+POLICY_SENDER = "policy"
+
+_MIN_SECS, _MAX_SECS = 1.0, 86400.0
+
+
+def default_policy() -> dict:
+    return {
+        "heartbeat": {
+            "enabled": False,
+            "interval": 180.0,
+            "max_interval": 1800.0,
+            "body": DEFAULT_HEARTBEAT_BODY,
+        },
+        "task_poll": {
+            "enabled": False,
+            "interval": 600.0,
+            "max_interval": 3600.0,
+            "roles": ["worker"],
+            "bodies": dict(TASK_POLL_BODIES),
+        },
+        "stall_warn": {
+            "enabled": False,
+            "warn_secs": 600.0,
+        },
+    }
+
+
+class PolicyError(Exception):
+    pass
+
+
+def _num(value, lo=_MIN_SECS, hi=_MAX_SECS) -> float:
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise PolicyError(f"not a number: {value!r}") from None
+    if not (lo <= f <= hi):
+        raise PolicyError(f"{f} out of range [{lo}, {hi}]")
+    return f
+
+
+def merge_policy(base: dict, patch: dict) -> dict:
+    """Validated deep-merge of a (partial) policy patch over ``base``.
+
+    Unknown sections/keys are rejected rather than ignored — a typo in a
+    config edit must fail loudly, not silently change nothing.
+    """
+    if not isinstance(patch, dict):
+        raise PolicyError("policy patch must be an object")
+    out = copy.deepcopy(base)
+    for section, fields in patch.items():
+        if section not in out:
+            raise PolicyError(f"unknown policy section {section!r}")
+        if not isinstance(fields, dict):
+            raise PolicyError(f"policy section {section!r} must be an object")
+        for key, value in fields.items():
+            if key not in out[section]:
+                raise PolicyError(f"unknown key {section}.{key}")
+            if key == "enabled":
+                out[section][key] = bool(value)
+            elif key in ("interval", "max_interval"):
+                out[section][key] = _num(value)
+            elif key == "warn_secs":
+                out[section][key] = _num(value, lo=0.0)  # 0 disables
+            elif key == "roles":
+                if not isinstance(value, list) or not all(
+                    isinstance(r, str) and r for r in value
+                ):
+                    raise PolicyError("task_poll.roles must be a list of role names")
+                out[section][key] = [r.strip().lower() for r in value]
+            elif key == "body":
+                out[section][key] = " ".join(str(value).split())[:500]
+            elif key == "bodies":
+                if not isinstance(value, dict):
+                    raise PolicyError("task_poll.bodies must be {role: text}")
+                out[section][key] = {
+                    str(r).strip().lower(): " ".join(str(t).split())[:500]
+                    for r, t in value.items()
+                }
+    return out
+
+
+def load_policy(doc) -> dict:
+    """Policy as persisted (possibly partial/old) -> full validated policy."""
+    if not isinstance(doc, dict):
+        return default_policy()
+    try:
+        return merge_policy(default_policy(), doc)
+    except PolicyError as exc:
+        log.warning("ignoring bad persisted mesh policy: %s", exc)
+        return default_policy()
+
+
+def format_nudge(mesh_name: str, kind: str, handle: str, body: str) -> str:
+    """The injected block for an in-band nudge (heartbeat / task-poll)."""
+    return (
+        "---\n"
+        "# claunch mesh policy: automated nudge -- machine-generated, not typed by the user\n"
+        f"mesh: {mesh_name}\n"
+        f"kind: {kind}\n"
+        f"to: {handle}\n"
+        f"note: {body}\n"
+        "---"
+    )
+
+
+def stall_body(handle: str, role: str, *, secs: float, behind: int) -> str:
+    what = (
+        f"behind -- {behind} message(s) delivered-pending, its session never went idle"
+        if behind
+        else "idle and caught up with nothing to do"
+    )
+    minutes = int(secs // 60)
+    return (
+        f"stall: {handle} ({role}) has been {what} for {minutes} min. "
+        f"If this is unexpected, check on {handle}."
+    )
+
+
+async def tick(mm, mesh) -> None:
+    """One policy evaluation pass over ``mesh``'s local members.
+
+    Called from the mesh's delivery worker loop (so it shares the worker's
+    cadence); every injection re-checks idleness at fire time.
+    """
+    pol = mesh.policy
+    hb, tp, sw = pol["heartbeat"], pol["task_poll"], pol["stall_warn"]
+    if not (hb["enabled"] or tp["enabled"] or sw["enabled"]):
+        return
+    now = time.monotonic()
+    leaders = sorted(
+        h for h, m in mesh.members.items() if m.role == "leader"
+    )
+    for handle, member in list(mesh.members.items()):
+        if not member.local:
+            continue
+        st = mesh.activity.setdefault(handle, {"anchor": now})
+        try:
+            session = mm.manager.get(member.session)
+        except Exception:  # ManagerError — session removed
+            continue
+        if session.exited:
+            continue
+        idle = session.status() == STATUS_IDLE
+        last_sent = st.get("last_sent", 0.0)
+        last_delivered = st.get("last_delivered", 0.0)
+        unanswered = last_delivered > 0 and last_sent < last_delivered
+        pending = len(mesh.pending(handle))
+        caught_up = not unanswered and pending == 0
+        active_at = max(last_sent, last_delivered, st["anchor"])
+
+        # -- heartbeat: delivered, no reply since --------------------------- #
+        if hb["enabled"] and unanswered and idle:
+            due = st.get("hb_next", last_delivered + hb["interval"])
+            if now >= due:
+                await _inject(mm, session, mesh, "heartbeat", handle, hb["body"])
+                backoff = min(
+                    st.get("hb_backoff", hb["interval"]) * 2, hb["max_interval"]
+                )
+                st["hb_backoff"] = backoff
+                st["hb_next"] = now + backoff
+        elif not unanswered:
+            st.pop("hb_next", None)
+            st.pop("hb_backoff", None)
+
+        # -- task-poll: caught up, idle, polled role ------------------------ #
+        if (
+            tp["enabled"]
+            and idle
+            and caught_up
+            and member.role in tp["roles"]
+        ):
+            due = st.get("tp_next", active_at + tp["interval"])
+            if now >= due:
+                body = tp["bodies"].get(member.role) or (
+                    TASK_POLL_FALLBACK_BODY.format(role=member.role)
+                )
+                await _inject(mm, session, mesh, "task-poll", handle, body)
+                backoff = min(
+                    st.get("tp_backoff", tp["interval"]) * 2, tp["max_interval"]
+                )
+                st["tp_backoff"] = backoff
+                st["tp_next"] = now + backoff
+        elif not caught_up:
+            st.pop("tp_next", None)
+            st.pop("tp_backoff", None)
+
+        # -- stall warning: one state held too long -> tell the leaders ---- #
+        if (
+            sw["enabled"]
+            and sw["warn_secs"] > 0
+            and leaders
+            and handle not in leaders
+        ):
+            stalled_idle = idle and caught_up and now - active_at >= sw["warn_secs"]
+            # "behind": messages await this member but its session never goes
+            # idle enough (or delivery keeps failing) — the injection analogue
+            # of interconnect's undrained socket.
+            first_pending = mesh._first_pending.get(handle)
+            stalled_behind = (
+                pending > 0
+                and first_pending is not None
+                and now - first_pending >= sw["warn_secs"]
+            )
+            if stalled_idle or stalled_behind:
+                due = st.get("warn_next", 0.0)
+                if now >= due:
+                    secs = now - (first_pending if stalled_behind else active_at)
+                    body = stall_body(
+                        handle, member.role, secs=secs,
+                        behind=pending if stalled_behind else 0,
+                    )
+                    try:
+                        mm.send(
+                            mesh.name, POLICY_SENDER, leaders, body, external=True
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("mesh %r: stall warn failed: %s", mesh.name, exc)
+                    backoff = min(
+                        st.get("warn_backoff", sw["warn_secs"]) * 2, _MAX_SECS
+                    )
+                    st["warn_backoff"] = backoff
+                    st["warn_next"] = now + backoff
+            else:
+                st.pop("warn_next", None)
+                st.pop("warn_backoff", None)
+
+
+async def _inject(mm, session, mesh, kind: str, handle: str, body: str) -> None:
+    block = format_nudge(mesh.name, kind, handle, body)
+    try:
+        await session.paste(block, enter=True)
+    except Exception as exc:  # noqa: BLE001 — SessionGone etc.; next tick retries
+        log.debug("mesh %r: %s nudge to %r failed: %s", mesh.name, kind, handle, exc)
+        return
+    log.info("mesh %r: %s nudge -> %r", mesh.name, kind, handle)

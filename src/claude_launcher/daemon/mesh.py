@@ -34,7 +34,7 @@ from typing import Callable, Dict, List, Optional, Union
 
 import yaml
 
-from . import paths
+from . import mesh_policy, paths
 from .manager import ManagerError, SessionManager
 from .session import STATUS_IDLE, SessionGone
 
@@ -154,6 +154,12 @@ class Mesh:
         #: Runtime peer flush status: machine -> {ok, error, retry_at, backoff}.
         self.peer_status: Dict[str, dict] = {}
         self.seen_ids: set = set()  # message-id dedupe for peer deliveries
+        #: Nudge policy config (heartbeat / task-poll / stall warnings),
+        #: persisted in mesh.json and edited via the API/web.
+        self.policy: dict = mesh_policy.default_policy()
+        #: In-memory per-member activity/timers the policy tick reads:
+        #: handle -> {anchor, last_sent, last_delivered, hb_/tp_/warn_ timers}.
+        self.activity: Dict[str, dict] = {}
         self.wake = asyncio.Event()
         self.last_append = 0.0  # monotonic time of the last log append
         self._first_pending: Dict[str, float] = {}  # handle -> monotonic
@@ -316,7 +322,57 @@ class MeshManager:
         self._persist_def(mesh)
         self._persist_cursors(mesh)
         self._push_members_soon(mesh)
+        self._brief_soon(mesh, member)
         return member
+
+    def _brief_soon(self, mesh: Mesh, member: Member) -> None:
+        """Schedule a join briefing injection into the new member's terminal."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        asyncio.ensure_future(self._brief(mesh, member))
+
+    async def _brief(self, mesh: Mesh, member: Member, *, hold: float = 30.0) -> None:
+        """Idle-gated briefing paste: who you are here and how to speak.
+
+        A self-join (agent ran ``claunch mesh join`` in its own terminal) sees
+        the CLI output too; the briefing matters for members enrolled from the
+        web, whose agent would otherwise never learn it joined anything.
+        """
+        deadline = time.monotonic() + hold
+        while time.monotonic() < deadline:
+            try:
+                session = self.manager.get(member.session)
+            except ManagerError:
+                return
+            if member.handle not in mesh.members:
+                return  # left before the briefing landed
+            if session.exited:
+                return
+            if session.status() == STATUS_IDLE:
+                break
+            await asyncio.sleep(0.5)
+        else:
+            return  # never went idle; skip rather than interleave
+        others = ", ".join(
+            f"{h} ({m.role})" for h, m in sorted(mesh.members.items())
+            if h != member.handle
+        ) or "(nobody else yet)"
+        block = (
+            "---\n"
+            "# claunch mesh: join briefing -- machine-generated, not typed by the user\n"
+            f"mesh: {mesh.name}\n"
+            f"you: {member.handle} (role: {member.role})\n"
+            f"members: {others}\n"
+            f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
+            f"note: incoming mesh messages will be typed into this terminal\n"
+            "---"
+        )
+        try:
+            await session.paste(block, enter=True)
+        except Exception:  # noqa: BLE001 — best-effort (SessionGone etc.)
+            return
 
     def leave(self, name: str, handle: str) -> Member:
         mesh = self.get(name)
@@ -387,6 +443,10 @@ class MeshManager:
         mesh.last_append = time.monotonic()
         self._append_log(mesh, msg)
         now = time.monotonic()
+        if member is not None and member.local:
+            mesh.activity.setdefault(member.handle, {"anchor": now})[
+                "last_sent"
+            ] = now
         for handle in recipients:
             mesh._first_pending.setdefault(handle, now)
         mesh.wake.set()
@@ -416,6 +476,19 @@ class MeshManager:
     def history(self, name: str, limit: int = 50) -> List[dict]:
         mesh = self.get(name)
         return mesh.messages[-limit:] if limit > 0 else list(mesh.messages)
+
+    # ------------------------------------------------------------------ #
+    # policy config
+    # ------------------------------------------------------------------ #
+    def set_policy(self, name: str, patch: dict) -> dict:
+        """Apply a partial policy edit (validated deep-merge) and persist."""
+        mesh = self.get(name)
+        try:
+            mesh.policy = mesh_policy.merge_policy(mesh.policy, patch)
+        except mesh_policy.PolicyError as exc:
+            raise MeshError(f"bad policy: {exc}") from None
+        self._persist_def(mesh)
+        return mesh.policy
 
     # ------------------------------------------------------------------ #
     # federation (relay-optional: every daemon owns its local side; links
@@ -738,6 +811,7 @@ class MeshManager:
             "members": members,
             "messages": len(mesh.messages),
             "peers": peers,
+            "policy": mesh.policy,
         }
 
     def _reachability(self, member: Member) -> str:
@@ -788,6 +862,10 @@ class MeshManager:
                                 "mesh %r: peer flush to %r failed",
                                 mesh.name, machine,
                             )
+                try:
+                    await mesh_policy.tick(self, mesh)
+                except Exception:  # noqa: BLE001 — a policy bug must not stall delivery
+                    log.exception("mesh %r: policy tick failed", mesh.name)
         except asyncio.CancelledError:
             pass
 
@@ -815,6 +893,9 @@ class MeshManager:
             return
         mesh.cursors[member.handle] = len(mesh.messages)
         mesh._first_pending.pop(member.handle, None)
+        mesh.activity.setdefault(member.handle, {"anchor": time.monotonic()})[
+            "last_delivered"
+        ] = time.monotonic()
         self._persist_cursors(mesh)
         log.info(
             "mesh %r: delivered %d message(s) to %r (session %r)",
@@ -837,6 +918,7 @@ class MeshManager:
         mesh.invites = {
             str(k): str(v) for k, v in (doc.get("invites") or {}).items()
         }
+        mesh.policy = mesh_policy.load_policy(doc.get("policy"))
         log_path = d / "log.jsonl"
         if log_path.is_file():
             for line in log_path.read_text(encoding="utf-8").splitlines():
@@ -884,6 +966,7 @@ class MeshManager:
                 "members": {h: m.to_dict() for h, m in sorted(mesh.members.items())},
                 "links": mesh.links,
                 "invites": mesh.invites,
+                "policy": mesh.policy,
             }
             (d / "mesh.json").write_text(
                 json.dumps(doc, indent=2), encoding="utf-8"

@@ -809,6 +809,20 @@ claunch mesh history dev
 - Every session/mesh command prints a **relay status** line
   (`relay: connected as 'work-pc'` / `relay: DISCONNECTED ...`), because a
   mesh can only span machines while the relay uplink is registered.
+- **Join briefing**: newly enrolled members get an idle-gated briefing block
+  typed into their terminal (mesh, their handle/role, member list, how to
+  send) — so a session enrolled from the web knows it joined something.
+- **Nudge policies** (per mesh, all **off** by default — every nudge costs
+  the agent a turn): *heartbeat* reminds a member sitting on unanswered
+  messages; *task-poll* pokes idle, caught-up members of selected roles
+  (default: workers); *stall warnings* message the mesh's leaders about a
+  member stuck in one state. Edit in the web mesh view ("Nudge policy"),
+  via `claunch mesh policy <mesh> --set heartbeat.enabled=true ...`, or
+  `PUT /api/mesh/{mesh}/policy`.
+- **MCP tools** (optional): `claunch mesh mcp` runs a stdio MCP server with
+  `send` / `members` / `history` for agents that prefer tools over shell —
+  register it e.g. with `claude mcp add mesh -- claunch mesh mcp`. There is
+  deliberately no receive tool: incoming messages arrive by injection.
 - **Cross-machine meshes**: with both daemons registered on the same relay
   (and `allow_backend_peering` enabled on it), run `claunch mesh invite dev`
   on one machine and `claunch mesh link <code>` on the other. The daemons
@@ -867,6 +881,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/mesh/{mesh}/members`     | `{session, handle?, role?}` — enrol a session |
 | DELETE | `/api/mesh/{mesh}/members/{handle}` | remove a member |
 | GET/POST | `/api/mesh/{mesh}/messages`  | history (`?limit=`) / send `{from, to, body, external?}` |
+| GET/PUT | `/api/mesh/{mesh}/policy`     | read / edit the mesh's nudge policy (heartbeat, task-poll, stall warnings) |
 | POST   | `/api/mesh/{mesh}/invite`      | mint a single-use cross-machine invite code |
 | POST   | `/api/mesh/link`               | `{code}` — redeem an invite: link this daemon into the mesh |
 | POST   | `/peer/mesh/*`                 | daemon↔daemon federation (link/messages/members) — authenticated by per-link mesh tokens, not the API token |

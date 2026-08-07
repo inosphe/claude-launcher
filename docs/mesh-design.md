@@ -1,6 +1,8 @@
 # Mesh: session-to-session messaging
 
-Status: phase 1 (local mesh) and phase 2 (federation over the relay) implemented.
+Status: all four phases implemented — local mesh, federation over the relay,
+the nudge-policy layer, and the agent conveniences (MCP wrapper, join
+briefing).
 
 Mesh lets claunch sessions — the agents running inside them — exchange
 messages. Sessions are grouped into a *mesh* (on the web dashboard or via the
@@ -218,6 +220,44 @@ can run them bare inside its own session. Mesh and session commands print a
 relay status trailer (`relay: connected as work-pc` / `relay: not configured`
 / `relay: disconnected`).
 
+## Nudge policies (phase 3)
+
+interconnect's proxy-TUI policy set, daemon-resident and per-mesh, edited on
+the web (mesh view → "Nudge policy"), via
+`GET/PUT /api/mesh/{mesh}/policy`, or `claunch mesh policy <mesh>
+[--set section.key=value]`. The observable member state here is the session
+idle tracker plus mesh activity (last delivery into the member vs. the
+member's last send) — the injection-transport analogue of interconnect's
+socket/recv state:
+
+- **heartbeat** — a member had messages delivered but has sent nothing since:
+  after `interval` (per-member doubling backoff to `max_interval`) inject a
+  reminder block (`kind: heartbeat`). Fires only while the session is idle —
+  a busy member is presumed to be working.
+- **task-poll** — a member that is idle *and* caught up (nothing pending,
+  nothing unanswered), whose role is in `roles` (default `worker`): inject a
+  role-targeted poke (`bodies` per role, fallback interpolates `{role}`).
+- **stall warning** — a non-leader member has held one state for `warn_secs`
+  (idle+caught-up, or *behind*: deliveries pending but its session never goes
+  idle): send a real mesh message from the external `policy` sender to every
+  leader-role member — so it is injected locally *and* crosses machines over
+  federation.
+
+interconnect's fourth tier — tmux send-keys escalation — has no port: every
+delivery already is an injection, so there is nothing to escalate to. All
+three policies default **off**: unlike a socket append, a nudge consumes the
+recipient agent's turn, so enabling is a deliberate choice. Config persists
+in `mesh.json` (`policy`); timers are in-memory and restart with the daemon.
+
+## Agent conveniences (phase 4)
+
+- **Join briefing**: on join the daemon injects an idle-gated briefing block
+  (mesh, handle/role, member list, how to send) into the new member's
+  terminal — so a session enrolled from the web learns it joined something.
+- **MCP wrapper**: `claunch mesh mcp` is a stdio MCP server exposing
+  `send` / `members` / `history` (the caller is `$CLAUNCH_SESSION`, like the
+  CLI). Deliberately no `recv`: receiving needs no tool by design.
+
 ## Phases
 
 1. **Local mesh MVP** (done): paste mode, mesh module + API + CLI +
@@ -226,9 +266,9 @@ relay status trailer (`relay: connected as work-pc` / `relay: not configured`
    bridge (mesh-scoped tokens), remote member entries (machine/session),
    forwarding sends to peer daemons, durable queue with redelivery on relay
    reconnect, per-member reachability. See "Federation (phase 2)" above.
-3. **Policy layer**: heartbeat ("you were asked and have not replied"),
-   task-poll for idle workers, stall warnings to leaders — daemon-resident,
-   per-mesh config editable on the web (ports interconnect's `NudgeTimer` /
-   `select_policy` timers and resolution order).
-4. **Agent polish**: MCP wrapper for send/members/history, join briefing
-   injection, skill.
+3. **Policy layer** (done): heartbeat, task-poll, stall warnings —
+   daemon-resident, per-mesh config editable on the web. See "Nudge
+   policies" above.
+4. **Agent polish** (done): MCP wrapper for send/members/history and the
+   join briefing injection. (A packaged skill remains an option if agents
+   turn out to need more guidance than the briefing block provides.)

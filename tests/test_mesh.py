@@ -591,6 +591,228 @@ def test_federation_queue_and_reconnect(home, tmp_path):
     asyncio.run(run())
 
 
+# --------------------------------------------------------------------------- #
+# nudge policy (heartbeat / task-poll / stall warnings)
+# --------------------------------------------------------------------------- #
+def test_policy_merge_validation():
+    from claude_launcher.daemon import mesh_policy
+
+    base = mesh_policy.default_policy()
+    for section in ("heartbeat", "task_poll", "stall_warn"):
+        assert base[section]["enabled"] is False  # nudges cost turns: off by default
+
+    merged = mesh_policy.merge_policy(
+        base,
+        {
+            "heartbeat": {"enabled": True, "interval": 30},
+            "task_poll": {"roles": ["Worker", "reviewer"]},
+            "stall_warn": {"warn_secs": 0},  # 0 = disabled threshold, allowed
+        },
+    )
+    assert merged["heartbeat"]["enabled"] is True
+    assert merged["heartbeat"]["interval"] == 30.0
+    assert merged["task_poll"]["roles"] == ["worker", "reviewer"]
+    assert merged["heartbeat"]["body"] == base["heartbeat"]["body"]  # untouched
+    assert base["heartbeat"]["enabled"] is False  # merge does not mutate base
+
+    with pytest.raises(mesh_policy.PolicyError):
+        mesh_policy.merge_policy(base, {"nosuch": {}})
+    with pytest.raises(mesh_policy.PolicyError):
+        mesh_policy.merge_policy(base, {"heartbeat": {"nosuch": 1}})
+    with pytest.raises(mesh_policy.PolicyError):
+        mesh_policy.merge_policy(base, {"heartbeat": {"interval": "soon"}})
+    with pytest.raises(mesh_policy.PolicyError):
+        mesh_policy.merge_policy(base, {"heartbeat": {"interval": 0}})  # < 1s
+    with pytest.raises(mesh_policy.PolicyError):
+        mesh_policy.merge_policy(base, {"task_poll": {"roles": "worker"}})
+
+    # bad persisted policy degrades to defaults instead of failing the load
+    assert mesh_policy.load_policy({"heartbeat": {"interval": -5}}) == (
+        mesh_policy.default_policy()
+    )
+
+
+def test_policy_set_and_persist(home, tmp_path):
+    async def run():
+        mgr = _manager()
+        root = tmp_path / "meshp"
+        mm = MeshManager(mgr, root=root)
+        mm.create("p1")
+        policy = mm.set_policy("p1", {"heartbeat": {"enabled": True, "interval": 45}})
+        assert policy["heartbeat"]["interval"] == 45.0
+        with pytest.raises(MeshError):
+            mm.set_policy("p1", {"heartbeat": {"interval": "NaNsense"}})
+
+        mm2 = MeshManager(mgr, root=root)
+        mm2.load_all()
+        assert mm2.get("p1").policy["heartbeat"]["enabled"] is True
+        assert mm2.get("p1").policy["heartbeat"]["interval"] == 45.0
+
+    asyncio.run(run())
+
+
+def test_policy_heartbeat_nudges_unanswered_member(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05)
+        mm.create("hb")
+        mgr.create(SessionDef(name="a1", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="b1", harness="py", cwd=str(tmp_path)))
+        a = mgr.get("a1")
+        b = mgr.get("b1")
+        await _wait_screen(a, "READY")
+        await _wait_screen(b, "READY")
+        mm.join("hb", "a1", handle="leader")
+        mm.join("hb", "b1", handle="worker_b")
+        mm.set_policy("hb", {"heartbeat": {"enabled": True, "interval": 1}})
+        mm.start()
+
+        mm.send("hb", "leader", "worker_b", "please reply")
+        await _wait_screen(b, "please reply")
+        # worker_b never sends anything back -> the heartbeat block lands
+        await _wait_screen(b, "kind: heartbeat")
+        assert "kind: heartbeat" not in _screen_text(a)  # leader answered nothing,
+        # but nothing was ever delivered to it either — no heartbeat for it
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_policy_task_poll_and_stall_warning(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05)
+        mm.create("tp")
+        mgr.create(SessionDef(name="a1", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="b1", harness="py", cwd=str(tmp_path)))
+        a = mgr.get("a1")
+        b = mgr.get("b1")
+        await _wait_screen(a, "READY")
+        await _wait_screen(b, "READY")
+        mm.join("tp", "a1", handle="leader")
+        mm.join("tp", "b1", handle="worker_b")
+        mm.set_policy(
+            "tp",
+            {
+                "task_poll": {"enabled": True, "interval": 1},
+                "stall_warn": {"enabled": True, "warn_secs": 1},
+            },
+        )
+        mm.start()
+
+        # worker_b is idle and caught up: it gets a task-poll; the leader is
+        # not a polled role, so its screen stays clean of poll blocks
+        await _wait_screen(b, "kind: task-poll")
+        assert "kind: task-poll" not in _screen_text(a)
+
+        # the stall warning about worker_b reaches the leader as a real mesh
+        # message (from the external 'policy' sender)
+        await _wait_screen(a, "stall: worker_b")
+        assert any(
+            m["from"] == "policy" and "stall: worker_b" in m["body"]
+            for m in mm.get("tp").messages
+        )
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# join briefing + MCP wrapper
+# --------------------------------------------------------------------------- #
+def test_join_briefing_lands_in_terminal(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05)
+        mm.create("brief")
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+        s = mgr.get("s1")
+        await _wait_screen(s, "READY")
+        mm.join("brief", "s1", handle="worker_1")
+        await _wait_screen(s, "join briefing")
+        text = _screen_text(s)
+        assert "you: worker_1 (role: worker)" in text
+        assert "claunch mesh send brief" in text
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_mesh_mcp_tools(home, monkeypatch):
+    from claude_launcher import mesh_mcp
+
+    class FakeClient:
+        def get(self, path, **kw):
+            assert path == "/api/mesh/dev"
+            return {
+                "members": [{"handle": "w1"}],
+                "peers": [],
+                "relay": {"configured": False},
+            }
+
+        def post(self, path, body, **kw):
+            assert path == "/api/mesh/dev/messages"
+            assert body == {"from": "s0", "to": ["a", "b"], "body": "hi"}
+            return {"id": "msg-1", "recipients": ["a", "b"], "relay": None}
+
+    monkeypatch.setattr(mesh_mcp.daemon_client, "connect", lambda: FakeClient())
+
+    init = mesh_mcp._handle(
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
+    )
+    assert init["result"]["serverInfo"]["name"] == "claunch-mesh"
+    tools = mesh_mcp._handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
+    assert [t["name"] for t in tools["result"]["tools"]] == [
+        "send", "members", "history",
+    ]
+
+    # send requires a session identity
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    resp = mesh_mcp._handle(
+        {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "send",
+                       "arguments": {"mesh": "dev", "to": "*", "body": "x"}},
+        }
+    )
+    assert resp["result"]["isError"] is True
+    assert "$CLAUNCH_SESSION" in resp["result"]["content"][0]["text"]
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s0")
+    resp = mesh_mcp._handle(
+        {
+            "jsonrpc": "2.0", "id": 4, "method": "tools/call",
+            "params": {"name": "send",
+                       "arguments": {"mesh": "dev", "to": "a, b", "body": "hi"}},
+        }
+    )
+    assert resp["result"]["isError"] is False
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    assert payload["recipients"] == ["a", "b"]
+    assert payload["relay"].startswith("relay: not configured")
+
+    resp = mesh_mcp._handle(
+        {
+            "jsonrpc": "2.0", "id": 5, "method": "tools/call",
+            "params": {"name": "members", "arguments": {"mesh": "dev"}},
+        }
+    )
+    assert resp["result"]["isError"] is False
+    assert json.loads(resp["result"]["content"][0]["text"])["members"] == [
+        {"handle": "w1"}
+    ]
+
+
 def test_cursors_phase1_format_migrates(home, tmp_path):
     _register_py_harness()
 
