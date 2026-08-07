@@ -15,10 +15,20 @@ import time
 import webbrowser
 from typing import List
 
-from . import daemon_client, store
+from . import cli_mesh, daemon_client, store
 from .daemon import paths as daemon_paths
 from .daemon import runtime_state
 from .daemon_client import DaemonClientError
+
+
+def _print_relay_status(client) -> None:
+    """Session commands surface relay connectivity constantly (to stderr, so
+    scripted stdout parsing stays safe)."""
+    try:
+        relay = client.get("/api/daemon").get("relay")
+    except DaemonClientError:
+        return
+    print(cli_mesh.relay_line(relay), file=sys.stderr)
 
 
 # --------------------------------------------------------------------------- #
@@ -63,6 +73,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         f"attach: claunch attach {info['name']}  |  browser: {client.base_url}/  "
         f"|  capture: claunch capture-pane {info['name']}"
     )
+    _print_relay_status(client)
     return 0
 
 
@@ -92,6 +103,7 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
             f"'claunch respawn {dead[0]}' revives one, "
             f"'claunch clear-sessions' drops them all"
         )
+    _print_relay_status(client)
     return 0
 
 
@@ -148,6 +160,19 @@ def _cmd_send_keys(args: argparse.Namespace) -> int:
     keys: List[str] = list(args.keys)
     if keys and keys[0] == "--":
         keys = keys[1:]
+    if args.paste:
+        # One paste, not per-argument keys: '-' reads stdin (the natural way
+        # to hand over genuinely multiline text), else args joined by spaces.
+        text = sys.stdin.read() if keys == ["-"] else " ".join(keys)
+        if not text:
+            print("error: no text to paste", file=sys.stderr)
+            return 1
+        client = daemon_client.ensure_running()
+        client.post(
+            f"/api/sessions/{args.session}/keys",
+            {"paste": text, "enter": bool(args.enter)},
+        )
+        return 0
     if not keys:
         print("error: no keys given", file=sys.stderr)
         return 1
@@ -256,6 +281,7 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             + (f" ({running} running, rest exited)" if running is not None else "")
         )
         print(f"log:      {daemon_paths.log_file()}")
+        print(cli_mesh.relay_line(info.get("relay")))
         return 0
     raise AssertionError(f"unknown daemon action {action!r}")
 
@@ -440,6 +466,13 @@ def register(sub) -> None:
         help="send keys to a session (tmux semantics: Enter, Escape, C-c, ... or literal text)",
     )
     p_send.add_argument("-l", "--literal", action="store_true", help="send arguments as literal text")
+    p_send.add_argument(
+        "-p", "--paste", action="store_true",
+        help="inject as one (bracketed) paste — newlines don't submit; '-' reads stdin",
+    )
+    p_send.add_argument(
+        "--enter", action="store_true", help="with --paste: press Enter after the paste"
+    )
     p_send.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)  # tmux muscle memory
     p_send.add_argument("session", nargs="?")
     p_send.add_argument("keys", nargs=argparse.REMAINDER)

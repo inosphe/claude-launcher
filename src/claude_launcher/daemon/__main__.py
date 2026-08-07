@@ -19,6 +19,7 @@ from .. import daemon_client, store
 from . import paths, runtime_state
 from .api import build_app
 from .manager import SessionManager
+from .mesh import MeshError, MeshManager
 
 log = logging.getLogger("claunch.daemon")
 
@@ -57,8 +58,30 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
             ", ".join(retired),
         )
 
+    mesh_manager = MeshManager(manager)
+    mesh_manager.load_all()
+
     token = runtime_state.load_or_create_token()
-    app = build_app(manager, token, started_at=time.monotonic())
+    relay_state = {"uplink": None}
+
+    def _relay_state() -> dict:
+        uplink = relay_state["uplink"]
+        if uplink is None:
+            return {"configured": False, "connected": False, "name": None}
+        return {
+            "configured": True,
+            "connected": uplink.connected,
+            "name": uplink.name,
+            "url": uplink.url,
+        }
+
+    app = build_app(
+        manager,
+        token,
+        started_at=time.monotonic(),
+        mesh=mesh_manager,
+        relay_state=_relay_state,
+    )
 
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
@@ -81,6 +104,10 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     log.info("listening on http://%s:%s", host, actual_port)
 
     uplink, uplink_task = _start_uplink(actual_port)
+    relay_state["uplink"] = uplink
+    if uplink is not None:
+        _wire_federation(mesh_manager, uplink)
+    mesh_manager.start()
 
     try:
         await app["shutdown_event"].wait()
@@ -96,6 +123,7 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
                 await uplink_task
             except (asyncio.CancelledError, Exception):
                 pass
+        await mesh_manager.shutdown()
         runtime_state.remove_daemon_json()
         await manager.shutdown_all()
         await runner.cleanup()
@@ -138,6 +166,36 @@ def _start_uplink(actual_port: int):
         return None, None
     log.info("starting relay uplink → %s (backend %r)", uplink.url, uplink.name)
     return uplink, asyncio.ensure_future(uplink.run())
+
+
+def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
+    """Give the mesh manager a peer transport riding the relay uplink.
+
+    The transport is one JSON POST per call, bridged to the peer daemon's
+    ``/peer/*`` endpoint through the relay (PEER_OPEN). Any transport or
+    HTTP-level failure surfaces as MeshError so mesh callers see one
+    exception family.
+    """
+    from . import peer_client, relay_uplink
+
+    async def peer_call(machine: str, path: str, body: dict) -> dict:
+        raw = peer_client.build_request(path, body, host=machine)
+        try:
+            resp = await uplink.peer_http(machine, raw)
+        except relay_uplink.PeerError as exc:
+            raise MeshError(str(exc)) from None
+        try:
+            status, payload = peer_client.parse_response(resp)
+        except peer_client.PeerHttpError as exc:
+            raise MeshError(f"peer {machine!r}: {exc}") from None
+        if status >= 400:
+            detail = payload.get("error") or f"HTTP {status}"
+            raise MeshError(f"peer {machine!r} rejected {path}: {detail}")
+        return payload
+
+    mesh_manager.machine = uplink.name
+    mesh_manager.peer_transport = peer_call
+    mesh_manager.relay_connected = lambda: uplink.connected
 
 
 def main(argv=None) -> int:

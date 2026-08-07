@@ -217,6 +217,17 @@ class Session:
         await self.write_bytes(data)
         return data
 
+    async def paste(self, text: str, *, enter: bool = False) -> bytes:
+        """Inject multiline text as one paste (bracketed when the program
+        opted in via DECSET 2004), so newlines don't submit once per line."""
+        if self.exited:
+            raise SessionGone(f"session {self.sdef.name!r} has exited")
+        data = keys_mod.encode_paste(
+            text, bracketed=self.screen.bracketed_paste, enter=enter
+        )
+        await self.write_bytes(data)
+        return data
+
     async def write_bytes(self, data: bytes) -> None:
         if self.exited:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
