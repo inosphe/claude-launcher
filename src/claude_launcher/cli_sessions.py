@@ -96,9 +96,6 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
             f"{s['name']:<16} [{state:<10}] {s['harness']:<8} {prof:<12} "
             f"{s['cols']}x{s['rows']}  {s.get('cwd', '')}"
         )
-<<<<<<< HEAD
-    _print_relay_status(client)
-=======
     dead = [s["name"] for s in sessions if s["status"] == "exited"]
     if dead:
         print(
@@ -106,7 +103,7 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
             f"'claunch respawn {dead[0]}' revives one, "
             f"'claunch clear-sessions' drops them all"
         )
->>>>>>> master
+    _print_relay_status(client)
     return 0
 
 
