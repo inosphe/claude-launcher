@@ -272,6 +272,25 @@ def _cmd_mcp(_args: argparse.Namespace) -> int:
     return mesh_mcp.serve()
 
 
+def _cmd_install(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from . import mesh_install, profile as profile_mod
+
+    if args.profile and args.project is not None:
+        print("error: choose --profile or --project, not both", file=sys.stderr)
+        return 1
+    if args.profile:
+        p = profile_mod.require(args.profile)
+        done = mesh_install.install_into_profile(p)
+    else:
+        done = mesh_install.install_into_project(Path(args.project or ".").resolve())
+    for line in done:
+        print(f"installed: {line}")
+    print("note: restart claude for the MCP server to be picked up")
+    return 0
+
+
 def _cmd_history(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     payload = client.get(f"/api/mesh/{args.mesh}/messages?limit={args.n}")
@@ -383,3 +402,14 @@ def register(sub) -> None:
         "mcp", help="run the stdio MCP server (send/members/history tools)"
     )
     p.set_defaults(func=_cmd_mcp)
+
+    p = msub.add_parser(
+        "install",
+        help="register the mesh MCP server + /mesh skill (project or profile)",
+    )
+    p.add_argument("--profile", help="install into this profile's config dir")
+    p.add_argument("--project", nargs="?", const=".", default=None,
+                   metavar="DIR",
+                   help="install into a project (.mcp.json + .claude/skills; "
+                        "default: current directory)")
+    p.set_defaults(func=_cmd_install)

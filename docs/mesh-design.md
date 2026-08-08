@@ -269,6 +269,14 @@ in `mesh.json` (`policy`); timers are in-memory and restart with the daemon.
 - **MCP wrapper**: `claunch mesh mcp` is a stdio MCP server exposing
   `send` / `members` / `history` (the caller is `$CLAUNCH_SESSION`, like the
   CLI). Deliberately no `recv`: receiving needs no tool by design.
+- **/mesh skill + installer**: `claunch mesh install` registers the MCP
+  server and writes `skills/mesh/SKILL.md` (profile or project), the agent
+  protocol adapted from interconnect's — everything about *receiving*
+  (recv loops, watches, parking, doorbell recovery) is gone by design, so
+  the skill teaches only self-identification, idempotent join, delivery
+  block reading, sending discipline (intents/sections/threading), role
+  stances, and compaction recovery. The join briefing prompts the agent to
+  activate the skill (`/mesh <name>`).
 
 ## Phases
 
@@ -281,6 +289,5 @@ in `mesh.json` (`policy`); timers are in-memory and restart with the daemon.
 3. **Policy layer** (done): heartbeat, task-poll, stall warnings —
    daemon-resident, per-mesh config editable on the web. See "Nudge
    policies" above.
-4. **Agent polish** (done): MCP wrapper for send/members/history and the
-   join briefing injection. (A packaged skill remains an option if agents
-   turn out to need more guidance than the briefing block provides.)
+4. **Agent polish** (done): MCP wrapper for send/members/history, the join
+   briefing injection, and the `/mesh` skill + `claunch mesh install`.

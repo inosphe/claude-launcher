@@ -486,6 +486,9 @@ class MeshManager:
             f"you: {member.handle} (role: {member.role})\n"
             f"members: {others}\n"
             f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
+            f"protocol: activate your 'mesh' skill NOW (/mesh {mesh.name}) to "
+            "load the member protocol; if you have no such skill, run "
+            "'claunch mesh install' first and retry\n"
             f"note: incoming mesh messages will be typed into this terminal\n"
             "---"
         )
