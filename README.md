@@ -585,7 +585,12 @@ nothing changes unless you opt in.
 claunch -L test new-session -s scratch   # auto-starts the 'test' instance daemon
 claunch -L test sessions                 # separate world from the default daemon
 claunch -L test daemon stop
+claunch daemon restart --all             # restart every RUNNING instance
 ```
+
+`daemon restart --all` restarts the default instance and every named one that
+is currently serving (stopped instances are skipped, not started) — the "pick
+up new code everywhere" verb after an upgrade.
 
 Instances make multi-endpoint setups testable on one machine: two named
 instances are two full daemons that can join the same mesh through a relay,

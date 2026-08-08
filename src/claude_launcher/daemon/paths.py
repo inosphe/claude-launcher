@@ -48,6 +48,25 @@ def instance() -> str:
     return validate_instance(name) if name else ""
 
 
+def known_instances() -> list:
+    """Every instance with runtime state on disk: ``''`` (the default) first
+    when its directory exists, then named instances sorted.
+
+    "Known" means a state directory exists — not that a server is running;
+    callers who care probe each instance's ``daemon.json``/health themselves.
+    """
+    names = []
+    if (config.launcher_home() / "daemon").is_dir():
+        names.append("")
+    root = config.launcher_home() / "daemons"
+    if root.is_dir():
+        names.extend(sorted(
+            p.name for p in root.iterdir()
+            if p.is_dir() and _INSTANCE_RE.match(p.name)
+        ))
+    return names
+
+
 def daemon_dir() -> Path:
     """Root for this instance's runtime state (``~/.claude-launcher/daemon``,
     or ``~/.claude-launcher/daemons/<name>`` for a named instance)."""

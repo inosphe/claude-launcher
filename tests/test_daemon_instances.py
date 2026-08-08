@@ -66,6 +66,28 @@ def test_instance_locks_are_independent(home, monkeypatch):
         default_lock.release()
 
 
+def test_known_instances_enumeration(home):
+    assert paths.known_instances() == []
+    (home / "daemon").mkdir()
+    (home / "daemons" / "beta").mkdir(parents=True)
+    (home / "daemons" / "alpha").mkdir()
+    (home / "daemons" / ".not-an-instance").mkdir()  # invalid name: ignored
+    assert paths.known_instances() == ["", "alpha", "beta"]
+
+
+def test_restart_all_skips_stopped_instances(home, capsys):
+    # state dirs exist but no server answers -> everything skipped, exit 0
+    (home / "daemon").mkdir()
+    (home / "daemons" / "alpha").mkdir(parents=True)
+    from claude_launcher import cli
+
+    assert cli.main(["daemon", "restart", "--all"]) == 0
+    out = capsys.readouterr().out
+    assert "default: not running -- skipped" in out
+    assert "alpha: not running -- skipped" in out
+    assert "0 daemon(s) restarted" in out
+
+
 def test_cli_rejects_bad_instance_flag(home, monkeypatch, capsys):
     monkeypatch.setenv(paths.INSTANCE_ENV, "placeholder")  # so teardown restores
     assert cli.main(["-L", "bad/name", "daemon", "status"]) == 2
