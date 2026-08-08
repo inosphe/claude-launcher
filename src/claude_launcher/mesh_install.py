@@ -143,6 +143,7 @@ def install_into_profile(profile: Profile) -> List[str]:
 def install_into_project(project_dir: Path) -> List[str]:
     """Register the MCP server (.mcp.json) + skill (.claude/skills) in a project."""
     done = []
+    project_dir.mkdir(parents=True, exist_ok=True)
     mcp_path = project_dir / ".mcp.json"
     try:
         doc = json.loads(mcp_path.read_text(encoding="utf-8")) if mcp_path.is_file() else {}
