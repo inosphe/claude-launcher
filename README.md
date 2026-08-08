@@ -893,23 +893,37 @@ claunch mesh install --project .  # register MCP tools + /mesh skill
   role stances, and membership recovery after a context compaction. The
   join briefing the daemon types into a new member's terminal tells the
   agent to activate this skill.
-- **Cross-machine meshes**: with both daemons registered on the same relay
-  (and `allow_backend_peering` enabled on it), run `claunch mesh invite dev`
-  on one machine and `claunch mesh link <code>` on the other. The daemons
-  exchange mesh-scoped tokens (never their API tokens) and forward messages
-  to each other over the relay's backend bridge; members show as
-  `work-pc/s0`-style addresses. If the relay drops, local messaging keeps
-  working and cross-machine messages queue durably until reconnect
-  (senders see `queued for remote` immediately).
+- **Cross-machine meshes (primary/mirror)**: every mesh has ONE owner — the
+  daemon that created it is its **primary**, holding the authoritative
+  roster, the single message log, the policy engine and invite minting.
+  With both daemons registered on the same relay (and
+  `allow_backend_peering` enabled on it), run `claunch mesh invite dev` on
+  the primary and `claunch mesh link <code>` on the other machine: that
+  daemon becomes a **guest** holding a *mirror* — a synced copy of roster +
+  history for its UI and agents. Guest members are secondary: their joins,
+  leaves and sends (even a DM between two members of the same guest daemon)
+  are forwarded to the primary, which decides, sequences and fans out — so
+  every daemon's history is identical and guest-to-guest messages route
+  through the hub with no pairwise links. Credentials are mesh-scoped
+  tokens (never daemon API tokens); members show as `work-pc/s0`-style
+  addresses. If the primary is unreachable, the mirror stays readable,
+  sends queue durably in its outbox (senders see `queued` immediately) and
+  drain in order on reconnect; joins fail fast — membership is an
+  authoritative decision.
 
 ### Nudge policies (heartbeat · task-poll · stall warnings)
 
-Per-mesh policies the daemon evaluates roughly **once a second** (inside each
-mesh's delivery worker), for **local members only**. The observable state per
-member is: whether its session is *idle* (the screen-quiet tracker), when the
-daemon last **delivered** into its terminal (`last_delivered`), when the
-member last **sent** a mesh message (`last_sent`), and how many messages are
-still *pending* injection. Two derived states drive everything:
+Per-mesh policies evaluated roughly **once a second** — on the mesh's
+**primary daemon only** (a mirror's engine is a guarded no-op; its policy
+copy is read-only). Local members are observed through their sessions
+directly; remote (guest) members through the activity reports their daemons
+piggyback on sync acks, and their nudges are shipped as fanout instructions
+the guest daemon injects (re-checking idleness at fire time). The observable
+state per member is: whether its session is *idle* (the screen-quiet
+tracker), when the daemon last **delivered** into its terminal
+(`last_delivered`), when the member last **sent** a mesh message
+(`last_sent`), and how many messages are still *pending* injection. Two
+derived states drive everything:
 
 - **unanswered** — something was delivered and the member has sent nothing
   since (`last_sent < last_delivered`);
@@ -917,7 +931,7 @@ still *pending* injection. Two derived states drive everything:
 
 | policy | fires when | first fire | action |
 | ------ | ---------- | ---------- | ------ |
-| **heartbeat** | member is *unanswered* **and** its session is idle (a busy member is presumed working) | `last_delivered` + `interval` (default 180s) | injects a `kind: heartbeat` block into that member's terminal — **not** logged, **not** federated |
+| **heartbeat** | member is *unanswered* **and** its session is idle (a busy member is presumed working) | `last_delivered` + `interval` (default 180s) | injects a `kind: heartbeat` block into that member's terminal — never logged; for a guest member it ships as a fanout instruction that member's daemon injects |
 | **task-poll** | member is idle **and** *caught up* **and** its role is in `roles` (default `worker` — leaders/reviewers have no queue to pull from) | last activity + `interval` (default 600s) | injects a `kind: task-poll` block with the per-role body (`bodies[role]`, fallback interpolates `{role}`) |
 | **stall warning** | a **non-leader** member has held one state for `warn_secs` (default 600s): either *idle-stalled* (idle + caught up that long) or *behind* (pending messages whose injection never lands because the session never goes idle) | after `warn_secs` | sends a **real mesh message** from the external `policy` sender to every leader-role member — it enters the log, is delivered by injection, and **crosses machines over federation**; needs at least one leader to exist |
 
@@ -1001,7 +1015,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET/PUT | `/api/mesh/{mesh}/policy`     | read / edit the mesh's nudge policy (heartbeat, task-poll, stall warnings) |
 | POST   | `/api/mesh/{mesh}/invite`      | mint a single-use cross-machine invite code |
 | POST   | `/api/mesh/link`               | `{code}` — redeem an invite: link this daemon into the mesh |
-| POST   | `/peer/mesh/*`                 | daemon↔daemon federation (link/messages/members) — authenticated by per-link mesh tokens, not the API token |
+| POST   | `/peer/mesh/*`                 | daemon↔daemon federation (link/join/leave/send/sync) — authenticated by per-link mesh tokens, not the API token |
 | GET    | `/api/cflow`                   | all registered cflow runs, keyed (cwd, scope), with status + step reports; `?cwd=[&scope=]` inspects explicitly |
 | GET    | `/api/cflow/run`               | `?cwd=&scope=` — run detail: status, workflow graph, reports, journal |
 | POST   | `/api/cflow/approve`           | `{cwd, scope}` — approve the gate / extend the loop limit |

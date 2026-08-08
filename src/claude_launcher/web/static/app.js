@@ -1249,8 +1249,18 @@ function renderMesh(info, history) {
   if (formInUse(view)) return; // don't wipe in-progress input
   view.innerHTML = "";
 
+  // Federation v2: '' machine = the primary daemon's own member. On a
+  // mirror, OUR members carry our relay name; selfMachine tells them apart.
+  const selfMachine = (info.relay && info.relay.name) || "";
+  const isMirror = !!info.primary;
+  const isLocalMember = (m) =>
+    isMirror ? m.machine === selfMachine : (!m.machine || m.machine === selfMachine);
+
   const head = el("div", "wf-head");
   head.appendChild(el("h2", null, `mesh: ${info.name}`));
+  if (isMirror) {
+    head.appendChild(el("span", "mesh-mirror-badge", `mirror of ${info.primary}`));
+  }
   const rm = el("button", "wf-btn archive", "Remove mesh");
   rm.addEventListener("click", async () => {
     if (!confirm(`Remove mesh '${info.name}'? Its history is retired on disk.`)) return;
@@ -1278,11 +1288,12 @@ function renderMesh(info, history) {
     const dot = el("span", `dot ${meshDotClass(m.reachability)}`);
     const name = el("span", "mesh-handle", m.handle);
     const role = el("span", "mesh-role", m.role);
+    const machineLabel = m.machine || (isMirror ? info.primary : "");
     const where = el(
       "span", "mesh-session mono",
-      (m.machine ? m.machine + "/" : "") + m.session
+      (machineLabel ? machineLabel + "/" : "") + m.session
     );
-    if (!m.machine) {
+    if (isLocalMember(m)) {
       where.classList.add("linkish");
       where.title = "attach this session's terminal";
       where.addEventListener("click", () => attach(m.session));
@@ -1305,7 +1316,9 @@ function renderMesh(info, history) {
   }
 
   // enrol form: any live session not already a member
-  const taken = new Set(members.filter((m) => !m.machine).map((m) => m.session));
+  const taken = new Set(
+    members.filter((m) => isLocalMember(m)).map((m) => m.session)
+  );
   const candidates = sessionsCache.filter(
     (s) => s.status !== "exited" && !taken.has(s.name)
   );
@@ -1341,9 +1354,9 @@ function renderMesh(info, history) {
   box.appendChild(addRow);
   view.appendChild(box);
 
-  // federation: linked peer daemons + invite/link controls
+  // federation: primary/guest daemons + invite/link controls
   const fed = el("div", "mesh-fed");
-  fed.appendChild(el("h3", null, "Peer daemons"));
+  fed.appendChild(el("h3", null, isMirror ? "Primary daemon" : "Guest daemons"));
   const peers = info.peers || [];
   if (!peers.length) {
     fed.appendChild(el(
@@ -1359,30 +1372,34 @@ function renderMesh(info, history) {
       (ok ? "ok" : "linked, no traffic yet");
     row.appendChild(el("span", `dot ${ok ? "idle" : (p.ok === false ? "exited" : "starting")}`));
     row.appendChild(el("span", "mesh-handle mono", p.machine));
+    row.appendChild(el("span", "mesh-role", p.role || ""));
     row.appendChild(el("span", "meta", state + (p.queued ? ` · ${p.queued} queued` : "")));
     fed.appendChild(row);
   }
-  const fedRow = el("div", "mesh-add");
-  const inviteBtn = el("button", "wf-btn option", "Invite peer…");
-  const codeOut = document.createElement("input");
-  codeOut.readOnly = true;
-  codeOut.placeholder = "invite code appears here — copy to the peer machine";
-  // The view is rebuilt by the 2s poll, which can detach this input while
-  // the invite request is in flight — so the code lives in meshInviteCodes
-  // (module state) and every rebuild re-renders it from there.
-  codeOut.value = meshInviteCodes[info.name] || "";
-  codeOut.addEventListener("focus", () => codeOut.select());
-  inviteBtn.addEventListener("click", async () => {
-    const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/invite`, {
-      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+  if (!isMirror) {
+    // only the primary mints invites (v2: the owner controls the roster)
+    const fedRow = el("div", "mesh-add");
+    const inviteBtn = el("button", "wf-btn option", "Invite peer…");
+    const codeOut = document.createElement("input");
+    codeOut.readOnly = true;
+    codeOut.placeholder = "invite code appears here — copy to the peer machine";
+    // The view is rebuilt by the 2s poll, which can detach this input while
+    // the invite request is in flight — so the code lives in meshInviteCodes
+    // (module state) and every rebuild re-renders it from there.
+    codeOut.value = meshInviteCodes[info.name] || "";
+    codeOut.addEventListener("focus", () => codeOut.select());
+    inviteBtn.addEventListener("click", async () => {
+      const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/invite`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+      });
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
+      meshInviteCodes[info.name] = doc.code || "";
+      refreshMeshView();
     });
-    const doc = await resp.json().catch(() => ({}));
-    if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
-    meshInviteCodes[info.name] = doc.code || "";
-    refreshMeshView();
-  });
-  fedRow.append(inviteBtn, codeOut);
-  fed.appendChild(fedRow);
+    fedRow.append(inviteBtn, codeOut);
+    fed.appendChild(fedRow);
+  }
   const linkRow = el("div", "mesh-add");
   const codeIn = document.createElement("input");
   codeIn.placeholder = "paste an invite code from another machine";
@@ -1405,7 +1422,16 @@ function renderMesh(info, history) {
   linkRow.append(codeIn, linkBtn);
   fed.appendChild(linkRow);
   view.appendChild(fed);
-  view.appendChild(renderMeshPolicy(info));
+  const polBox = renderMeshPolicy(info);
+  if (isMirror) {
+    // the policy engine runs on the primary; the mirror's copy is read-only
+    polBox.querySelectorAll("input,select,button").forEach((n) => { n.disabled = true; });
+    polBox.appendChild(el(
+      "p", "wf-note",
+      `policy is owned by the primary daemon (${info.primary}) — edit it there`
+    ));
+  }
+  view.appendChild(polBox);
 
   // send box: as the human operator, or on behalf of a member
   const send = el("div", "mesh-send");

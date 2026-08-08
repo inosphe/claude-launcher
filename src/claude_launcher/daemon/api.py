@@ -143,8 +143,10 @@ def build_app(
     # not this daemon's Bearer token. Each handler authenticates the caller
     # itself (invite consumption or the per-link token_in).
     r.add_post("/peer/mesh/link", h_peer_link)
-    r.add_post("/peer/mesh/messages", h_peer_messages)
-    r.add_post("/peer/mesh/members", h_peer_members)
+    r.add_post("/peer/mesh/join", h_peer_join)
+    r.add_post("/peer/mesh/leave", h_peer_leave)
+    r.add_post("/peer/mesh/send", h_peer_send)
+    r.add_post("/peer/mesh/sync", h_peer_sync)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
@@ -542,7 +544,7 @@ async def h_mesh_join(request: web.Request) -> web.Response:
     session = str(body.get("session") or "")
     if not session:
         return json_error(400, "'session' required in the JSON body")
-    member = _mesh_mgr(request).join(
+    member = await _mesh_mgr(request).join(
         request.match_info["mesh"],
         session,
         handle=str(body.get("handle") or ""),
@@ -552,7 +554,7 @@ async def h_mesh_join(request: web.Request) -> web.Response:
 
 
 async def h_mesh_leave(request: web.Request) -> web.Response:
-    member = _mesh_mgr(request).leave(
+    member = await _mesh_mgr(request).leave(
         request.match_info["mesh"], request.match_info["handle"]
     )
     return web.json_response({"ok": True, "handle": member.handle})
@@ -570,7 +572,7 @@ async def h_mesh_send(request: web.Request) -> web.Response:
     if not isinstance(text, str):
         return json_error(400, "'body' must be a string")
     sections = body.get("sections")
-    result = _mesh_mgr(request).send(
+    result = await _mesh_mgr(request).send(
         request.match_info["mesh"],
         sender,
         to,
@@ -620,37 +622,69 @@ async def h_mesh_link(request: web.Request) -> web.Response:
 
 async def h_peer_link(request: web.Request) -> web.Response:
     body = await _json_body(request)
-    members = body.get("members")
     result = _mesh_mgr(request).peer_link_accept(
         str(body.get("mesh") or ""),
         str(body.get("machine") or ""),
         str(body.get("token") or ""),
         str(body.get("reply_token") or ""),
-        members if isinstance(members, list) else [],
     )
     return web.json_response(result)
 
 
-async def h_peer_messages(request: web.Request) -> web.Response:
+async def h_peer_join(request: web.Request) -> web.Response:
     body = await _json_body(request)
+    result = _mesh_mgr(request).peer_join_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        str(body.get("session") or ""),
+        str(body.get("handle") or ""),
+        str(body.get("role") or ""),
+    )
+    return web.json_response(result)
+
+
+async def h_peer_leave(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = _mesh_mgr(request).peer_leave_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        str(body.get("handle") or ""),
+    )
+    return web.json_response(result)
+
+
+async def h_peer_send(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    message = body.get("message")
+    result = _mesh_mgr(request).peer_send_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        message if isinstance(message, dict) else {},
+    )
+    return web.json_response(result)
+
+
+async def h_peer_sync(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    try:
+        base = int(body.get("base") or 0)
+    except (TypeError, ValueError):
+        return json_error(400, "'base' must be an integer")
     messages = body.get("messages")
-    result = _mesh_mgr(request).peer_messages_accept(
-        str(body.get("mesh") or ""),
-        str(body.get("machine") or ""),
-        str(body.get("token") or ""),
-        messages if isinstance(messages, list) else [],
-    )
-    return web.json_response(result)
-
-
-async def h_peer_members(request: web.Request) -> web.Response:
-    body = await _json_body(request)
     members = body.get("members")
-    result = _mesh_mgr(request).peer_members_accept(
+    nudges = body.get("nudges")
+    result = _mesh_mgr(request).peer_sync_accept(
         str(body.get("mesh") or ""),
         str(body.get("machine") or ""),
         str(body.get("token") or ""),
+        base,
+        messages if isinstance(messages, list) else [],
         members if isinstance(members, list) else [],
+        body.get("policy"),
+        nudges if isinstance(nudges, list) else [],
     )
     return web.json_response(result)
 

@@ -124,10 +124,11 @@ peers to retransmit.
 ## Cross-machine notes
 
 Members may live on other machines (`members` shows `machine/session` and
-reachability). Address them by handle exactly like local peers. When the
-relay is disconnected they show `remote-disconnected` and messages to them
-queue durably — mention the delay if coordination depends on it, but do not
-retry-spam.
+reachability). Address them by handle exactly like local peers. Every mesh
+has one primary daemon; if yours is a mirror and the primary is unreachable,
+`send` reports `queued` (delivered on reconnect, in order) and `join` fails
+until it returns. When remote members show `remote-disconnected`, mention
+the delay if coordination depends on it, but do not retry-spam.
 """
 
 

@@ -57,9 +57,11 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
     if not meshes:
         print("no meshes; create one with 'claunch mesh create <name>'")
     for m in meshes:
+        tag = f"  (mirror of {m['primary']})" if m.get("primary") else ""
         print(
             f"{m['name']:<16} {len(m['members'])} member(s), "
             f"{m['messages']} message(s)"
+            + tag
         )
     _print_relay(payload.get("relay"))
     return 0
@@ -158,6 +160,12 @@ def _cmd_send(args: argparse.Namespace) -> int:
     if sections:
         payload["sections"] = sections
     result = client.post(f"/api/mesh/{args.mesh}/messages", payload)
+    if result.get("queued"):
+        # mirror with its primary unreachable: durably queued, not yet sent
+        print(f"queued {result.get('id')} -- primary daemon unreachable; "
+              "will forward on reconnect")
+        _print_relay(result.get("relay"))
+        return 0
     recipients = result.get("recipients", [])
     queued = result.get("queued_remote", [])
     line = f"sent {result.get('id')} to {', '.join(recipients) or '(nobody)'}"
@@ -201,11 +209,15 @@ def _cmd_link(args: argparse.Namespace) -> int:
 def _cmd_members(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     info = client.get(f"/api/mesh/{args.mesh}")
+    primary = info.get("primary")
+    if primary:
+        print(f"(mirror of primary daemon {primary!r})")
     members = info.get("members", [])
     if not members:
         print(f"mesh {args.mesh!r} has no members yet")
     for m in members:
-        where = m.get("machine") or "local"
+        # the roster is absolute: '' = the primary daemon's own member
+        where = m.get("machine") or (primary if primary else "local")
         pending = m.get("pending")
         pending_s = f" pending:{pending}" if pending else ""
         print(
@@ -220,7 +232,8 @@ def _cmd_members(args: argparse.Namespace) -> int:
         else:
             state = "linked (no traffic yet)"
         queued = f" -- {p['queued']} message(s) queued" if p.get("queued") else ""
-        print(f"peer daemon {p['machine']:<12} [{state}]{queued}")
+        label = "primary daemon" if p.get("role") == "primary" else "guest daemon"
+        print(f"{label} {p['machine']:<12} [{state}]{queued}")
     _print_relay(info.get("relay"))
     return 0
 

@@ -45,6 +45,12 @@ Consequences:
 The relay is **not** a required component of claunch sessions, so it cannot be
 a required component of mesh either. The model is a federation:
 
+> **Note (v2)**: the equal-replica reading of this section is superseded —
+> a mesh now has one authoritative *primary* daemon and guest daemons hold
+> mirrors (see "Federation v2"). What stays true: the relay remains optional
+> for purely-local meshes, every daemon still owns delivery into its own
+> PTYs, and disconnection still degrades to durable queues, never data loss.
+
 - Every daemon fully owns its local side: its sessions, their mesh
   memberships, delivery into their PTYs, its copy of the message log, and
   policy execution (heartbeats etc.) for its own members.
@@ -145,7 +151,17 @@ Plus a prerequisite: `POST /api/sessions/{name}/keys` accepts
 `{"paste": "multi\nline text", "enter": true}` — bracketed-paste injection, so
 multiline content does not submit once per newline.
 
-## Federation (phase 2)
+## Federation (phase 2) — retired, replaced by v2 below
+
+> **Status: retired.** This symmetric-replica model shipped and worked,
+> but field use showed its structural flaw: no daemon is authoritative, so
+> handles can race across daemons (merge resolves by skip-and-warn), member
+> knowledge is non-transitive (A-B + B-C links leave A blind to C), any
+> linked daemon can mint invites, same-named meshes merge by accident, and
+> each daemon holds only a partial history and its own policy engine. See
+> "Federation v2" for the model that replaced it; this section is kept only
+> to document what was retired and why. v1 on-disk federation state (links /
+> peer cursors) is dropped on load, not migrated.
 
 Linking two daemons' copies of a mesh is invite-based:
 
@@ -182,6 +198,72 @@ Forwarding rules:
 - Remote members surface as `remote-connected` / `remote-disconnected`
   reachability depending on the live uplink state; linked peers (with queue
   depth and last error) appear in mesh views, the CLI and the web panel.
+
+## Federation v2: primary/mirror (phase 5 — implemented)
+
+The goal was always "sessions on different networks woven into ONE mesh";
+v2 keeps that goal but gives the mesh a single source of truth.
+
+**Roles.**
+
+- **Primary daemon** — the mesh's creator and owner (unchanged from local
+  meshes today). Holds the authoritative state: the member registry, THE
+  message log (one id + sequence per message), the policy config and its
+  only running engine, invite minting, and a delivery cursor per guest.
+- **Guest daemon** — linked by redeeming an invite. Holds a **mirror**: a
+  synced copy of the roster + log (for its UI and agents to read), the
+  terminal-injection delivery for its own local member sessions, and one
+  durable upstream queue toward the primary.
+- **Secondary guest member** — a session on a guest daemon. Its join, leave
+  and send are *requests* forwarded to the primary; the primary decides,
+  sequences, and fans out.
+
+**Topology: hub-and-spoke.** Guests talk only to the primary; guest-to-guest
+traffic routes through it (transitivity solved — no pairwise links). Only
+the primary mints invites. Loop prevention (origin gate) becomes
+unnecessary; message ids remain for idempotent redelivery.
+
+**Aligned decisions.**
+
+1. *Name collision on link*: if the guest already has a local mesh with the
+   invite's name, `link` fails with an error — never merge. The user renames
+   or removes the local mesh first.
+2. *Local DMs on a guest still go through the primary*: every message —
+   including one between two members of the same guest daemon — is
+   sequenced by the primary, so every daemon's history is identical (modulo
+   tail lag). Primary unreachable means those conversations queue too.
+3. *Policy engine runs on the primary only.* Guests piggyback member
+   activity/idle state onto their cursor acks; nudges arrive as ordinary
+   deliveries and the guest applies the usual idle-gate at injection time.
+4. *Joins fail fast when the primary is unreachable* — membership is an
+   authoritative decision (central handle uniqueness), so no queued joins.
+
+**Flows.**
+
+- *Link*: guest redeems the invite over the relay bridge, receives a
+  roster + log snapshot and a guest credential; the primary records the
+  guest machine and its cursor. The mirror records `primary: <machine>`.
+- *Join (guest member)*: guest daemon forwards the join to the primary,
+  which enforces handle uniqueness, records the member, fans the roster out
+  to all guests; the guest injects the join briefing locally.
+- *Send (any member)*: guest forwards to primary; primary assigns id/seq,
+  appends to the log, delivers to its local recipients, and fans out to
+  each guest daemon by cursor; guests append to the mirror and inject into
+  their local recipients' terminals. Batch sections slice at the delivering
+  daemon, exactly as today.
+- *Failure*: guest→primary down — sends queue durably at the guest (sender
+  told `queued`), the mirror stays readable, joins fail fast. Primary→guest
+  down — fanout queues at the primary per guest cursor. Primary process
+  down — the mesh freezes for guests (read + queue only): the accepted
+  trade-off of a clear owner.
+- *Admin*: kick and policy edits are primary-only; a guest daemon may
+  request leave for its own members.
+
+**Retired from v1**: symmetric per-link token pairs (replaced by a
+primary-issued guest credential), guest-side `peer_cursors`, the origin
+gate, guest-minted invites, accidental same-name merge, per-replica policy
+engines. Existing v1 federation state is dropped, not migrated (the feature
+was experimental).
 
 ## Delivery pipeline
 
@@ -291,3 +373,6 @@ in `mesh.json` (`policy`); timers are in-memory and restart with the daemon.
    policies" above.
 4. **Agent polish** (done): MCP wrapper for send/members/history, the join
    briefing injection, and the `/mesh` skill + `claunch mesh install`.
+5. **Federation v2** (done): primary/mirror redesign — see "Federation v2"
+   above. Retires the symmetric model of phase 2; scenario-derived tests in
+   `tests/test_mesh_v2.py` (TDD) plus the multi-daemon e2e.

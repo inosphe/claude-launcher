@@ -173,39 +173,43 @@ def test_mesh_federation_over_real_relay(home, tmp_path):
             if not a.uplink.peering:
                 pytest.skip("relay binary lacks CAP_PEERING — rebuild mux-relay")
 
-            # daemon A hosts the mesh and a recipient session
+            # daemon A is the mesh's PRIMARY and hosts a recipient session
             a.manager.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path)))
             a.mesh.create("fedmesh")
-            a.mesh.join("fedmesh", "sa", handle="alice")
+            await a.mesh.join("fedmesh", "sa", handle="alice")
             code = a.mesh.invite("fedmesh")["code"]
 
-            # daemon B redeems the invite: the handshake crosses the relay
+            # daemon B redeems the invite: it becomes a MIRROR over the relay
             b.manager.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
             result = await b.mesh.link(code)
             assert result["peer"] == "pca"
-            assert b.mesh.get("fedmesh").members["alice"].machine == "pca"
+            mesh_b = b.mesh.get("fedmesh")
+            assert mesh_b.primary == "pca"
+            # absolute roster: '' = the primary's own member
+            assert mesh_b.members["alice"].machine == ""
 
-            # B's join fans out over the bridge too
-            b.mesh.join("fedmesh", "sb", handle="bob")
-            await _wait(
-                lambda: "bob" in a.mesh.get("fedmesh").members,
-                "member push to reach daemon A",
-            )
+            # B's join is decided by the primary (authoritative roster)
+            await b.mesh.join("fedmesh", "sb", handle="bob")
             assert a.mesh.get("fedmesh").members["bob"].machine == "pcb"
 
-            # a message from bob is forwarded by B's worker and typed into
-            # alice's terminal by A's worker
-            sent = b.mesh.send("fedmesh", "bob", "alice", "hello over relay")
-            assert sent["queued_remote"] == []  # relay is connected
+            # a message from bob is sequenced by the primary over the bridge
+            # and typed into alice's terminal by A's worker
+            sent = await b.mesh.send("fedmesh", "bob", "alice", "hello over relay")
+            assert sent["queued"] is False  # the primary answered live
+            assert sent["recipients"] == ["alice"]
             session_a = a.manager.get("sa")
             await _wait(
                 lambda: "hello over relay" in "\n".join(session_a.capture()),
                 "cross-machine delivery into the recipient terminal",
                 timeout=25.0,
             )
-            mesh_b = b.mesh.get("fedmesh")
-            assert b.mesh.pending_for_machine(mesh_b, "pca") == []
-            assert mesh_b.peer_status["pca"]["ok"] is True
+            # the fanout converges the mirror's log with the primary's
+            await _wait(
+                lambda: [m["id"] for m in b.mesh.get("fedmesh").messages]
+                == [m["id"] for m in a.mesh.get("fedmesh").messages],
+                "mirror log to converge",
+            )
+            assert mesh_b.outbox == []
         finally:
             await b.stop()
             await a.stop()
