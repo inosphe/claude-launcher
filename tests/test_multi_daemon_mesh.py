@@ -240,6 +240,23 @@ def test_mesh_between_two_daemon_processes(home, tmp_path):
             timeout=40.0,
         )
 
+        # the wizard surface: A sees B in the relay directory, browses its
+        # sessions, and pushes an invitation — no code changes hands
+        peers = ca.get("/api/relay/peers")["peers"]
+        assert "pcb" in peers and "pca" not in peers
+        cb.post("/api/sessions", {"name": "sb2", "harness": "py", "cwd": str(tmp_path)})
+        remote = ca.get("/api/relay/peers/pcb/sessions")
+        assert "sb2" in [s["name"] for s in remote["sessions"]]
+        pushed = ca.post(
+            "/api/mesh/fedmesh/invitations",
+            {"machine": "pcb", "session": "sb2", "handle": "betty"},
+        )
+        assert pushed["member"]["handle"] == "betty"
+        assert _member(ca, "betty")["machine"] == "pcb"
+        assert _wait(
+            lambda: _member(cb, "betty"), "betty's membership to reach daemon B"
+        )["machine"] == "pcb"
+
         # clean shutdown via the API, like `claunch -L a daemon stop`
         ca.post("/api/daemon/shutdown")
         cb.post("/api/daemon/shutdown")

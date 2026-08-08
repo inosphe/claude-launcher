@@ -28,6 +28,15 @@ G. Guest lifecycle
 
 S. Authority hardening
    S1 the primary cannot send AS a guest member without `external`
+
+W. Owner-initiated invitations (the wizard path)
+   W1 `invite_member` pushes an invitation over the relay: ONE owner-side
+      call creates the guest link, mirror, member and briefing; the
+      embedded ticket is consumed
+   W2 inviting from an already-linked machine mints no ticket at all
+   W3 an unreachable target daemon leaves no stray outstanding ticket
+   W4 the target validates the session; a dead/unknown session is an
+      error on the inviter's side and nothing is created
 """
 
 from __future__ import annotations
@@ -114,6 +123,12 @@ def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
         return mm.peer_unlink_accept(
             body["mesh"], body["machine"], body.get("token") or ""
         )
+    if path == "/peer/mesh/invite":
+        return mm.peer_invite_accept(  # coroutine — awaited by _wire's call
+            body["mesh"], body["machine"],
+            body.get("session") or "", body.get("handle") or "",
+            body.get("role") or "", body.get("code") or "",
+        )
     if path == "/peer/mesh/join":
         return mm.peer_join_accept(
             body["mesh"], body["machine"], body["token"],
@@ -140,7 +155,10 @@ def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
 
 def _wire(machines: dict) -> None:
     async def call(machine, path, body):
-        return _dispatch_peer(machines[machine], path, body)
+        result = _dispatch_peer(machines[machine], path, body)
+        if asyncio.iscoroutine(result):
+            result = await result
+        return result
 
     for name, mm in machines.items():
         mm.machine = name
@@ -500,6 +518,75 @@ def test_primary_cannot_send_as_guest_member(home, tmp_path):
         assert ok["from"] == "operator"
         ok2 = await mm_b.send("m", "bob", "alice", "genuinely bob")
         assert ok2["from"] == "bob" and ok2["queued"] is False
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# W1/W2: owner-initiated invitations (the wizard path)
+# --------------------------------------------------------------------------- #
+def test_invite_member_pushes_establishment(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
+        await mm_a.send("m", "operator", "alice", "before bob", external=True)
+
+        member = await mm_a.invite_member("m", "pcB", "sb", handle="bob")
+        assert member["handle"] == "bob" and member["machine"] == "pcB"
+
+        # W1: one owner-side call did the whole establishment on B
+        mesh_a, mesh_b = mm_a.get("m"), mm_b.get("m")
+        assert mesh_b.primary == "pcA"
+        assert mesh_b.members["bob"].machine == "pcB"
+        assert mesh_a.members["bob"].machine == "pcB"
+        assert "pcB" in mesh_a.guests
+        # the embedded ticket was consumed, not left outstanding
+        assert mm_a.invite_list("m") == []
+        await _wait_screen(mgr.get("sb"), "join briefing")
+
+        # W2: a second invitation to the linked machine mints no ticket
+        mgr.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path)))
+        bee = await mm_a.invite_member("m", "pcB", "sb2", handle="bee")
+        assert bee["handle"] == "bee"
+        assert mm_a.invite_list("m") == []
+        assert mm_a.get("m").members["bee"].machine == "pcB"
+
+        # sanity: inviting THIS machine is redirected to plain join
+        with pytest.raises(MeshError):
+            await mm_a.invite_member("m", "pcA", "sa")
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# W3/W4: failure hygiene — no stray tickets, remote validation counts
+# --------------------------------------------------------------------------- #
+def test_invite_member_failures_leave_no_debris(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
+
+        # W3: target unreachable — the minted ticket is burned again
+        _break_transport(mm_a)
+        with pytest.raises(PeerUnreachable):
+            await mm_a.invite_member("m", "pcB", "sb", handle="bob")
+        assert mm_a.invite_list("m") == []
+        _wire({"pcA": mm_a, "pcB": mm_b})  # transport restored
+
+        # W4: the target daemon rejects an unknown session; nothing appears
+        with pytest.raises(MeshError):
+            await mm_a.invite_member("m", "pcB", "no-such-session")
+        assert mm_a.invite_list("m") == []
+        assert [x.name for x in mm_b.list()] == []
+        assert set(mm_a.get("m").members) == {"alice"}
 
         await mgr.shutdown_all()
 

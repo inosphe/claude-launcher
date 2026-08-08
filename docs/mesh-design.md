@@ -338,6 +338,25 @@ show no establishment controls at all.
   relay, so a spoofed request cannot receive credentials; the primary
   refuses to send *as* a member that is not its own without `external`.
 
+**Owner-initiated invitations (the wizard path).** The flows above are all
+guest-initiated; the complement is the owner pulling a remote session in
+with nothing carried by hand. `claunch mesh add <mesh>` lists the other
+backends on the relay (a `PEER_LIST` tunnel message, capability bit
+`CAP_PEER_LIST` — relays that predate it simply fail the listing), browses
+the chosen daemon's live sessions (`/peer/sessions`), and POSTs
+`/api/mesh/{mesh}/invitations {machine, session, handle?, role?}`. The
+primary then pushes `/peer/mesh/invite` to the target daemon with an
+embedded one-shot ticket (skipped entirely when the machine is already a
+trusted guest); the target validates the session locally and performs the
+ordinary join-by-address back at the inviter, so every existing validation
+and the whole grant path are reused. Failure hygiene: an unreachable target
+or a rejected invitation burns the unredeemed ticket. Trust model: one
+relay = one operator (single backend token), so the target daemon accepts
+without a local confirmation gate — both `/peer/sessions` (names only) and
+`/peer/mesh/invite` lean on that assumption deliberately. On the web the
+sidebar's mesh field recognises a pasted invite code (base64url JSON),
+decodes the address out of it and submits the join directly.
+
 ## Delivery pipeline
 
 One asyncio worker per mesh. For each local member with undelivered log
@@ -386,6 +405,8 @@ Cross-machine verbs (phase 6, "Membership-first joining" above):
 claunch mesh join <mesh>@<machine> [--code TICKET]
 claunch mesh requests [<mesh>] [--cancel ID]
 claunch mesh approve|deny <mesh> <request-id>
+claunch mesh add <mesh> [<machine> [<session>]] [--as HANDLE]   # owner wizard
+claunch mesh peers
 claunch mesh invite <mesh> [--ls | --revoke PREFIX]
 claunch mesh revoke <mesh> <machine>
 ```

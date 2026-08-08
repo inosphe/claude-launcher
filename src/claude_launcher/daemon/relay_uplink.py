@@ -90,6 +90,8 @@ class RelayUplink:
         #: True when the relay advertised CAP_PEERING in REGISTER_OK — checked
         #: before every PEER_OPEN (an old relay drops unknown types silently).
         self.peering = False
+        #: True when the relay also answers PEER_LIST (CAP_PEER_LIST).
+        self.listing = False
         self._peer_streams: Dict[int, _PeerStream] = {}
         self._peer_waiters: Dict[int, asyncio.Future] = {}
         self._next_req = 1
@@ -150,6 +152,7 @@ class RelayUplink:
                 finally:
                     self.connected = False
                     self.peering = False
+                    self.listing = False
                     ping.cancel()
                     watchdog.cancel()
                     await self._close_all_streams()
@@ -169,6 +172,7 @@ class RelayUplink:
             if decoded and decoded.kind == w.REGISTER_OK:
                 self._last_recv = time.monotonic()
                 self.peering = bool(decoded.caps & w.CAP_PEERING)
+                self.listing = bool(decoded.caps & w.CAP_PEER_LIST)
                 # Any frames after REGISTER_OK in the same message are handled
                 # by the recv loop; stash the decoder so we don't lose them.
                 self._decoder = decoder
@@ -192,11 +196,13 @@ class RelayUplink:
         m = w.decode_payload(payload)
         if m is None:
             return
-        if m.kind in (w.PEER_OPEN_OK, w.PEER_OPEN_ERR):
+        if m.kind in (w.PEER_OPEN_OK, w.PEER_OPEN_ERR, w.PEER_LIST_OK):
             waiter = self._peer_waiters.pop(m.req, None)
             if waiter is not None and not waiter.done():
                 if m.kind == w.PEER_OPEN_OK:
                     waiter.set_result(m.sid)
+                elif m.kind == w.PEER_LIST_OK:
+                    waiter.set_result(list(m.names))
                 else:
                     waiter.set_exception(PeerError(_peer_err_text(m.code)))
             return
@@ -326,6 +332,30 @@ class RelayUplink:
         finally:
             self._peer_streams.pop(sid, None)
             await self._raw_send(w.stream_close(self._room, sid))
+
+    async def peer_list(self, *, timeout: float = 10.0) -> list:
+        """Names of the other backends registered on this relay.
+
+        Raises :class:`PeerError` when the uplink is down or the relay is
+        too old to answer (no CAP_PEER_LIST).
+        """
+        if self._ws is None or not self.connected:
+            raise PeerError("relay uplink is not connected")
+        if not self.listing:
+            raise PeerError(
+                "relay does not support peer listing — upgrade the relay "
+                "(and enable allow_backend_peering)"
+            )
+        req_id = self._next_req
+        self._next_req = ((self._next_req + 1) & 0xFFFFFFFF) or 1
+        fut: asyncio.Future = asyncio.get_running_loop().create_future()
+        self._peer_waiters[req_id] = fut
+        await self._raw_send(w.peer_list(self._room, req_id))
+        try:
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            self._peer_waiters.pop(req_id, None)
+            raise PeerError("PEER_LIST timed out") from None
 
     def _fail_peer_state(self) -> None:
         """Uplink died: fail pending PEER_OPENs, complete in-flight bridges."""

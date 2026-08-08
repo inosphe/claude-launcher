@@ -227,6 +227,89 @@ def _cmd_invite(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pick(prompt: str, items: list) -> Optional[str]:
+    """Numbered picker on stdin. Returns None on EOF/blank/invalid."""
+    for i, item in enumerate(items, 1):
+        print(f"  {i}. {item}")
+    try:
+        raw = input(f"{prompt} [1-{len(items)}]: ").strip()
+    except EOFError:
+        return None
+    if raw.isdigit() and 1 <= int(raw) <= len(items):
+        return items[int(raw) - 1]
+    if raw in items:  # typing the name itself also works
+        return raw
+    return None
+
+
+def _cmd_add(args: argparse.Namespace) -> int:
+    """Owner-side wizard: enrol a session from another relay daemon."""
+    client = daemon_client.ensure_running()
+    machine = args.machine
+    if not machine:
+        if not sys.stdin.isatty():
+            print("error: give MACHINE and SESSION, or run interactively",
+                  file=sys.stderr)
+            return 2
+        peers = client.get("/api/relay/peers").get("peers", [])
+        if not peers:
+            print("no other daemons are registered on the relay")
+            _print_relay(client.get("/api/daemon").get("relay"))
+            return 1
+        machine = _pick("machine", peers)
+        if not machine:
+            print("cancelled")
+            return 1
+    session = args.session
+    if not session:
+        if not sys.stdin.isatty():
+            print("error: give SESSION as well (no prompt without a tty)",
+                  file=sys.stderr)
+            return 2
+        listed = client.get(
+            f"/api/relay/peers/{machine}/sessions"
+        ).get("sessions", [])
+        if not listed:
+            print(f"daemon {machine!r} has no live sessions to enrol")
+            return 1
+        session = _pick(
+            "session", [s["name"] for s in listed]
+        )
+        if not session:
+            print("cancelled")
+            return 1
+    handle = args.handle
+    if handle is None and sys.stdin.isatty() and not args.machine:
+        # only prompt inside the full wizard flow; flags stay scriptable
+        try:
+            handle = input(f"handle [{session}]: ").strip() or ""
+        except EOFError:
+            handle = ""
+    body = {"machine": machine, "session": session,
+            "handle": handle or "", "role": args.role or ""}
+    result = client.post(f"/api/mesh/{args.mesh}/invitations", body)
+    member = result.get("member", {})
+    print(
+        f"added {member.get('handle')!r} (role: {member.get('role')}, "
+        f"{machine}/{session}) to mesh {args.mesh!r}"
+    )
+    print("its daemon now mirrors the mesh; the member was briefed in its terminal")
+    _print_relay(client.get("/api/daemon").get("relay"))
+    return 0
+
+
+def _cmd_peers(_args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    payload = client.get("/api/relay/peers")
+    peers = payload.get("peers", [])
+    if not peers:
+        print("no other daemons are registered on the relay")
+    for name in peers:
+        print(name)
+    _print_relay(payload.get("relay"))
+    return 0
+
+
 def _cmd_requests(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     if args.cancel:
@@ -489,6 +572,26 @@ def register(sub) -> None:
     p.add_argument("--revoke", metavar="PREFIX",
                    help="revoke outstanding tickets by the prefix shown in --ls")
     p.set_defaults(func=_cmd_invite)
+
+    p = msub.add_parser(
+        "add",
+        help="wizard: enrol a session from another relay daemon into this "
+             "mesh (owner side; no codes to carry)",
+    )
+    p.add_argument("mesh")
+    p.add_argument("machine", nargs="?",
+                   help="target daemon's relay name (omit to pick from a list)")
+    p.add_argument("session", nargs="?",
+                   help="session on that daemon (omit to pick from a list)")
+    p.add_argument("--as", dest="handle", metavar="HANDLE", default=None,
+                   help="handle inside the mesh (default: the session name)")
+    p.add_argument("--role", help="member role (default: inferred from the handle)")
+    p.set_defaults(func=_cmd_add)
+
+    p = msub.add_parser(
+        "peers", help="list the other daemons registered on the relay"
+    )
+    p.set_defaults(func=_cmd_peers)
 
     p = msub.add_parser(
         "requests",

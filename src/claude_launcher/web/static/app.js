@@ -1215,11 +1215,34 @@ function renderOutgoingJoins(outgoing) {
   }
 }
 
-/* One field, two verbs: a bare name creates a mesh here, 'mesh@machine'
-   asks that machine's daemon to admit one of our sessions. */
+/* An invite code is base64url JSON {v:2, mesh, machine, token} — decodable
+   client-side, so pasting one straight into the mesh field can become a
+   fully-formed join with no address typing. */
+function decodeInviteCode(raw) {
+  const s = (raw || "").trim();
+  if (s.length < 24 || /[@\s]/.test(s) || !/^[A-Za-z0-9_-]+=*$/.test(s)) return null;
+  try {
+    const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+    const doc = JSON.parse(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)));
+    if (doc && doc.v === 2 && doc.mesh && doc.machine && doc.token) {
+      return { mesh: String(doc.mesh), machine: String(doc.machine) };
+    }
+  } catch { /* not a code — fall through */ }
+  return null;
+}
+
+/* One field, three verbs: a bare name creates a mesh here, 'mesh@machine'
+   asks that machine's daemon to admit one of our sessions, and a pasted
+   invite code is redeemed directly (the address comes from the code). */
 $("new-mesh").querySelector("input[name=name]").addEventListener("input", (e) => {
-  const joining = e.target.value.includes("@");
+  const code = decodeInviteCode(e.target.value);
+  const joining = code !== null || e.target.value.includes("@");
   $("mesh-join-extra").classList.toggle("hidden", !joining);
+  // the pasted code IS the ticket — the separate code field would be noise
+  $("mesh-join-code").classList.toggle("hidden", code !== null);
+  const hint = $("mesh-join-hint");
+  hint.classList.toggle("hidden", code === null);
+  if (code) hint.textContent = `invite ticket for mesh '${code.mesh}' on '${code.machine}'`;
   $("new-mesh").querySelector("button").textContent = joining ? "Join" : "Create";
   if (!joining) return;
   const sel = $("mesh-join-session");
@@ -1245,20 +1268,22 @@ $("new-mesh").addEventListener("submit", async (e) => {
     err.textContent = doc.error || `HTTP ${resp.status}`;
     err.classList.remove("hidden");
   };
-  if (name.includes("@")) {
+  const pasted = decodeInviteCode(name);
+  if (pasted || name.includes("@")) {
+    const addr = pasted ? `${pasted.mesh}@${pasted.machine}` : name;
     const session = $("mesh-join-session").value;
     if (!session) {
       err.textContent = "no live session to enrol";
       err.classList.remove("hidden");
       return;
     }
-    const resp = await api(`/api/mesh/${encodeURIComponent(name)}/members`, {
+    const resp = await api(`/api/mesh/${encodeURIComponent(addr)}/members`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         session,
         handle: $("mesh-join-handle").value.trim(),
-        code: $("mesh-join-code").value.trim(),
+        code: pasted ? name : $("mesh-join-code").value.trim(),
       }),
     });
     if (!resp.ok) return fail(resp);
@@ -1267,10 +1292,12 @@ $("new-mesh").addEventListener("submit", async (e) => {
     f.name.value = "";
     $("mesh-join-handle").value = "";
     $("mesh-join-code").value = "";
+    $("mesh-join-code").classList.remove("hidden");
+    $("mesh-join-hint").classList.add("hidden");
     $("mesh-join-extra").classList.add("hidden");
     f.querySelector("button").textContent = "Create";
     await refreshMeshList();
-    if (!doc.pending) location.hash = "#/mesh/" + encodeURIComponent(name.split("@")[0]);
+    if (!doc.pending) location.hash = "#/mesh/" + encodeURIComponent(addr.split("@")[0]);
     return;
   }
   const resp = await api("/api/mesh", {

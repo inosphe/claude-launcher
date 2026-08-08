@@ -372,6 +372,9 @@ class MeshManager:
         #: transport failure, MeshError on an application-level rejection.
         self.peer_transport: Optional[Callable] = None
         self.relay_connected: Callable[[], bool] = lambda: False
+        #: async () -> [machine names] — the other backends on our relay
+        #: (RelayUplink.peer_list); None when no uplink or an old relay.
+        self.peer_lister: Optional[Callable] = None
         #: How often (seconds) a policy-enabled primary syncs each guest even
         #: with nothing to send, so activity reports stay fresh.
         self.report_interval: float = 10.0
@@ -1280,6 +1283,73 @@ class MeshManager:
         self._persist_def(mesh)
         return len(matched)
 
+    async def invite_member(
+        self,
+        name: str,
+        machine: str,
+        session: str,
+        *,
+        handle: str = "",
+        role: str = "",
+    ) -> dict:
+        """Owner-initiated enrolment: pull ``machine``'s ``session`` into the
+        mesh (the CLI wizard / web "add remote member" path).
+
+        Instead of carrying a ticket to the other machine by hand, the primary
+        pushes an invitation to that daemon over the relay; the remote daemon
+        validates the session and joins back through the ordinary
+        join-by-address path, pre-approved by an embedded one-shot ticket.
+        Trust model: backends on one relay belong to one operator (the relay's
+        single backend token), so the remote daemon accepts without a local
+        confirmation step.
+        """
+        mesh = self.get(name)
+        self._require_primary(mesh, "membership")
+        me = self._require_machine()
+        if not machine or machine == me:
+            raise MeshError(
+                "pick another machine on the relay — local sessions join "
+                f"with 'claunch mesh join {name}'"
+            )
+        if self.peer_transport is None:
+            raise MeshError("relay uplink is not running — cannot reach peers")
+        body = {
+            "mesh": mesh.name,
+            "machine": me,
+            "session": session,
+            "handle": handle,
+            "role": role,
+        }
+        ticket = None
+        if machine not in mesh.guests:  # first contact needs the pre-approval
+            ticket = self.invite(name)
+            body["code"] = ticket["code"]
+        try:
+            resp = await self.peer_transport(machine, "/peer/mesh/invite", body)
+        except (MeshError, PeerUnreachable):
+            if ticket is not None:  # burn the unredeemed ticket
+                try:
+                    self.invite_revoke(name, self._ticket_token(ticket["code"])[:8])
+                except MeshError:
+                    pass  # already consumed or expired meanwhile
+            raise
+        member = resp.get("member") if isinstance(resp, dict) else None
+        if not isinstance(member, dict):
+            raise MeshError(f"unexpected invite response from {machine!r}")
+        log.info(
+            "mesh %r: invited %r (%s/%s) via push",
+            mesh.name, member.get("handle"), machine, session,
+        )
+        return member
+
+    @staticmethod
+    def _ticket_token(code: str) -> str:
+        try:
+            return str(json.loads(
+                base64.urlsafe_b64decode(code.encode("ascii")))["token"])
+        except Exception:  # noqa: BLE001 — our own code should always parse
+            return ""
+
     @staticmethod
     def _invite_age(created: str) -> float:
         try:
@@ -1669,6 +1739,37 @@ class MeshManager:
             grant if isinstance(grant, dict) else {},
         )
         return {"ok": True, "handle": member.handle}
+
+    async def peer_invite_accept(
+        self,
+        name: str,
+        machine: str,
+        session: str,
+        handle: str,
+        role: str,
+        code: str,
+    ) -> dict:
+        """A mesh owner on ``machine`` pushes an invitation for our ``session``.
+
+        We simply run the ordinary join-by-address back at the claimed owner:
+        the embedded ticket (or an existing trusted link) makes it synchronous,
+        and every join-side validation — session exists and is alive, handle
+        shape, name collision, code/address cross-check — applies unchanged.
+        Trust model: same relay = same operator (one backend token), so no
+        local confirmation gate.
+        """
+        if not machine:
+            raise MeshError("invitation carries no origin machine")
+        result = await self.join(
+            f"{name}@{machine}", session, handle=handle, role=role,
+            code=code or None,
+        )
+        if isinstance(result, dict):  # pended — the inviter failed to pre-approve
+            self.cancel_request(str(result.get("request_id") or ""))
+            raise MeshError(
+                "invitation was not pre-approved by the inviting daemon"
+            )
+        return {"member": result.to_dict()}
 
     def peer_unlink_accept(self, name: str, machine: str, token: str) -> dict:
         """The primary revoked us (or deleted the mesh): drop the mirror."""

@@ -206,6 +206,7 @@ def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
     mesh_manager.machine = uplink.name
     mesh_manager.peer_transport = peer_call
     mesh_manager.relay_connected = lambda: uplink.connected
+    mesh_manager.peer_lister = uplink.peer_list
 
 
 def main(argv=None) -> int:

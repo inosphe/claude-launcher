@@ -277,6 +277,8 @@ body {
 }
 #mesh-join-extra { flex: 1 1 100%; display: flex; gap: 6px; flex-wrap: wrap; }
 #mesh-join-extra.hidden { display: none; }
+#mesh-join-hint { flex: 1 1 100%; font-size: 11px; color: #d29922; margin: 0; }
+#mesh-join-hint.hidden { display: none; }
 #new-mesh button {
   padding: 5px 12px; font-size: 12px; cursor: pointer;
   background: #238636; color: #fff; border: none; border-radius: 4px;

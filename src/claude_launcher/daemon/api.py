@@ -142,6 +142,9 @@ def build_app(
     r.add_delete("/api/mesh/{mesh}/guests/{machine}", h_mesh_guest_revoke)
     r.add_get("/api/mesh/{mesh}/policy", h_mesh_policy_get)
     r.add_put("/api/mesh/{mesh}/policy", h_mesh_policy_set)
+    r.add_post("/api/mesh/{mesh}/invitations", h_mesh_invitation)
+    r.add_get("/api/relay/peers", h_relay_peers)
+    r.add_get("/api/relay/peers/{machine}/sessions", h_relay_peer_sessions)
     # Peer federation endpoints. Deliberately outside /api/: the auth
     # middleware only guards /api/*, and these are called by *other daemons*
     # (via the relay's backend bridge) that hold mesh-scoped link tokens,
@@ -149,7 +152,12 @@ def build_app(
     # itself (invite consumption or the per-link token_in).
     r.add_post("/peer/mesh/join_request", h_peer_join_request)
     r.add_post("/peer/mesh/grant", h_peer_grant)
+    r.add_post("/peer/mesh/invite", h_peer_mesh_invite)
     r.add_post("/peer/mesh/unlink", h_peer_unlink)
+    # Same-relay convenience surface (one relay = one operator's machines):
+    # lets a mesh owner's wizard enumerate a peer daemon's sessions before
+    # pushing an invitation. Session names only — no capture, no control.
+    r.add_post("/peer/sessions", h_peer_sessions)
     r.add_post("/peer/mesh/join", h_peer_join)
     r.add_post("/peer/mesh/leave", h_peer_leave)
     r.add_post("/peer/mesh/send", h_peer_send)
@@ -649,6 +657,48 @@ async def h_mesh_request_deny(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def h_mesh_invitation(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    machine = str(body.get("machine") or "")
+    session = str(body.get("session") or "")
+    if not machine or not session:
+        return json_error(400, "'machine' and 'session' required")
+    member = await _mesh_mgr(request).invite_member(
+        request.match_info["mesh"],
+        machine,
+        session,
+        handle=str(body.get("handle") or ""),
+        role=str(body.get("role") or ""),
+    )
+    return web.json_response({"member": member}, status=201)
+
+
+async def h_relay_peers(request: web.Request) -> web.Response:
+    mm = _mesh_mgr(request)
+    if mm.peer_lister is None:
+        return json_error(
+            400, "relay uplink is not running — no peers to list"
+        )
+    try:
+        names = await mm.peer_lister()
+    except Exception as exc:  # noqa: BLE001 — surface PeerError as 400
+        return json_error(400, str(exc))
+    return web.json_response(
+        {"peers": sorted(names), "relay": request.app["relay_state"]()}
+    )
+
+
+async def h_relay_peer_sessions(request: web.Request) -> web.Response:
+    mm = _mesh_mgr(request)
+    if mm.peer_transport is None:
+        return json_error(400, "relay uplink is not running")
+    machine = request.match_info["machine"]
+    payload = await mm.peer_transport(machine, "/peer/sessions", {})
+    return web.json_response(
+        {"machine": machine, "sessions": payload.get("sessions", [])}
+    )
+
+
 async def h_mesh_outgoing_cancel(request: web.Request) -> web.Response:
     result = _mesh_mgr(request).cancel_request(request.match_info["rid"])
     return web.json_response(result)
@@ -687,6 +737,32 @@ async def h_peer_grant(request: web.Request) -> web.Response:
         grant if isinstance(grant, dict) else None,
     )
     return web.json_response(result)
+
+
+async def h_peer_mesh_invite(request: web.Request) -> web.Response:
+    body = await _json_body(request)
+    result = await _mesh_mgr(request).peer_invite_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("session") or ""),
+        str(body.get("handle") or ""),
+        str(body.get("role") or ""),
+        str(body.get("code") or ""),
+    )
+    return web.json_response(result)
+
+
+async def h_peer_sessions(request: web.Request) -> web.Response:
+    manager: SessionManager = request.app["manager"]
+    return web.json_response(
+        {
+            "sessions": [
+                {"name": s.sdef.name, "status": s.status()}
+                for s in manager.list()
+                if not s.exited
+            ]
+        }
+    )
 
 
 async def h_peer_unlink(request: web.Request) -> web.Response:
