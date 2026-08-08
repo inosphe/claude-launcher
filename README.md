@@ -854,10 +854,15 @@ claunch mesh history dev
 - **Join briefing**: newly enrolled members get an idle-gated briefing block
   typed into their terminal (mesh, their handle/role, member list, how to
   send) — so a session enrolled from the web knows it joined something.
-- **MCP tools** (optional): `claunch mesh mcp` runs a stdio MCP server with
-  `send` / `members` / `history` for agents that prefer tools over shell —
-  register it e.g. with `claude mcp add mesh -- claunch mesh mcp`. There is
-  deliberately no receive tool: incoming messages arrive by injection.
+- **MCP tools + /mesh skill**: `claunch mesh install` (`--project [DIR]` or
+  `--profile NAME`) registers a stdio MCP server (`send`/`members`/`history`
+  — deliberately no receive tool: incoming messages arrive by injection) and
+  writes the `/mesh` skill, the member protocol: idempotent join, how to
+  read delivery blocks (`needs_reply`, intents, ids), sending discipline
+  (direct over broadcast, batch sections for fan-outs, reply threading),
+  role stances, and membership recovery after a context compaction. The
+  join briefing the daemon types into a new member's terminal tells the
+  agent to activate this skill.
 - **Cross-machine meshes**: with both daemons registered on the same relay
   (and `allow_backend_peering` enabled on it), run `claunch mesh invite dev`
   on one machine and `claunch mesh link <code>` on the other. The daemons
