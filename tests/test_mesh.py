@@ -169,22 +169,22 @@ def test_mesh_registry_and_persistence(home, tmp_path):
         with pytest.raises(MeshError):
             mm.create("bad name")
         with pytest.raises(MeshError):
-            mm.join("dev", "nosuch")  # unknown session
+            await mm.join("dev", "nosuch")  # unknown session
 
         mgr.create(SessionDef(name="a1", harness="py", cwd=str(tmp_path)))
         mgr.create(SessionDef(name="b1", harness="py", cwd=str(tmp_path)))
-        m = mm.join("dev", "a1", handle="leader")
+        m = await mm.join("dev", "a1", handle="leader")
         assert m.role == "leader"
-        mm.join("dev", "b1")  # handle defaults to the session name
+        await mm.join("dev", "b1")  # handle defaults to the session name
         assert "b1" in mesh.members
 
         with pytest.raises(MeshConflict):
-            mm.join("dev", "a1", handle="other")  # session already enrolled
+            await mm.join("dev", "a1", handle="other")  # session already enrolled
         with pytest.raises(MeshConflict):
             mgr.create(SessionDef(name="c1", harness="py", cwd=str(tmp_path)))
-            mm.join("dev", "c1", handle="leader")  # handle taken
+            await mm.join("dev", "c1", handle="leader")  # handle taken
 
-        result = mm.send("dev", "a1", "*", "hello mesh")
+        result = await mm.send("dev", "a1", "*", "hello mesh")
         assert result["from"] == "leader"  # session name resolved to handle
         assert result["recipients"] == ["b1"]
 
@@ -197,10 +197,10 @@ def test_mesh_registry_and_persistence(home, tmp_path):
         assert loaded.pending("b1")  # not delivered yet (no worker ran)
         assert not loaded.pending("leader")  # sender doesn't get its own send
 
-        mm.leave("dev", "b1")
+        await mm.leave("dev", "b1")
         assert "b1" not in mesh.members
         with pytest.raises(MeshError):
-            mm.leave("dev", "b1")
+            await mm.leave("dev", "b1")
 
         mm.delete("dev")
         with pytest.raises(MeshError):
@@ -219,19 +219,19 @@ def test_send_validation(home, tmp_path):
         mm = MeshManager(mgr)
         mm.create("m")
         mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
-        mm.join("m", "s1", handle="alice")
+        await mm.join("m", "s1", handle="alice")
 
         with pytest.raises(MeshError):
-            mm.send("m", "stranger", "alice", "hi")  # unknown non-external sender
+            await mm.send("m", "stranger", "alice", "hi")  # unknown non-external sender
         with pytest.raises(MeshError):
-            mm.send("m", "alice", "nosuch", "hi")  # unknown recipient
+            await mm.send("m", "alice", "nosuch", "hi")  # unknown recipient
         with pytest.raises(MeshError):
-            mm.send("m", "alice", "*", "hi")  # nobody else to deliver to
+            await mm.send("m", "alice", "*", "hi")  # nobody else to deliver to
         with pytest.raises(MeshError):
-            mm.send("m", "alice", "alice", "\x07\x08")  # empty after sanitizing
+            await mm.send("m", "alice", "alice", "\x07\x08")  # empty after sanitizing
 
         # external (human) sender is allowed explicitly
-        result = mm.send("m", "operator", "*", "status?", external=True)
+        result = await mm.send("m", "operator", "*", "status?", external=True)
         assert result["from"] == "operator"
         assert result["recipients"] == ["alice"]
 
@@ -255,10 +255,10 @@ def test_delivery_injects_into_recipient_terminal(home, tmp_path):
         b = mgr.create(SessionDef(name="beta", harness="py", cwd=str(tmp_path)))
         await _wait_screen(a, "READY")
         await _wait_screen(b, "READY")
-        mm.join("m1", "alpha", handle="leader")
-        mm.join("m1", "beta", handle="worker_1")
+        await mm.join("m1", "alpha", handle="leader")
+        await mm.join("m1", "beta", handle="worker_1")
 
-        mm.send("m1", "leader", "worker_1", "please build the thing")
+        await mm.send("m1", "leader", "worker_1", "please build the thing")
 
         # the block is typed into beta's PTY; the echo child proves arrival
         await _wait_screen(b, "please build the thing")
@@ -292,13 +292,13 @@ def test_delivery_waits_for_respawn(home, tmp_path):
         b = mgr.create(SessionDef(name="dst", harness="py", cwd=str(tmp_path)))
         await _wait_screen(a, "READY")
         await _wait_screen(b, "READY")
-        mm.join("m2", "src", handle="alice")
-        mm.join("m2", "dst", handle="bob")
+        await mm.join("m2", "src", handle="alice")
+        await mm.join("m2", "dst", handle="bob")
 
         await b.send_keys(["quit", "Enter"])
         await b.wait_for("exited", timeout=10.0, threshold=0.5)
 
-        mm.send("m2", "alice", "bob", "are you there")
+        await mm.send("m2", "alice", "bob", "are you there")
         await asyncio.sleep(1.5)  # worker runs but must hold the cursor
         assert mm.get("m2").pending("bob")
 
@@ -430,8 +430,8 @@ def test_mesh_api(home, tmp_path):
             # peer endpoints sit outside /api: no daemon auth needed, the
             # per-link mesh token is the (only) gate — a bad one is a 400
             resp = await client.post(
-                "/peer/mesh/messages",
-                json={"mesh": "fed", "machine": "pcX", "token": "bad", "messages": []},
+                "/peer/mesh/sync",
+                json={"mesh": "fed", "machine": "pcX", "token": "bad", "base": 0},
             )
             assert resp.status == 400
         finally:
@@ -453,9 +453,9 @@ def test_batch_sections_and_reply_to(home, tmp_path):
         mm.create("b")
         for n, h in (("s1", "leader"), ("s2", "w1"), ("s3", "w2")):
             mgr.create(SessionDef(name=n, harness="py", cwd=str(tmp_path)))
-            mm.join("b", n, handle=h)
+            await mm.join("b", n, handle=h)
 
-        sent = mm.send(
+        sent = await mm.send(
             "b", "leader", ["w1", "w2"], "sprint goal: finish auth.",
             sections={
                 "w1": "you take the login API.",
@@ -482,7 +482,7 @@ def test_batch_sections_and_reply_to(home, tmp_path):
         assert "needs_reply: false" in block_w2  # w2's slice is fyi
 
         # reply_to threads and is shown in the delivery block
-        reply = mm.send("b", "w1", "leader", "on it", type="ack",
+        reply = await mm.send("b", "w1", "leader", "on it", type="ack",
                         reply_to=msg["id"])
         assert reply["reply_to"] == msg["id"]
         assert f"reply_to: {msg['id']}" in format_delivery(
@@ -491,17 +491,17 @@ def test_batch_sections_and_reply_to(home, tmp_path):
 
         # validation: section for a non-recipient / the sender / empty slice
         with pytest.raises(MeshError):
-            mm.send("b", "leader", ["w1"], "x", sections={"w2": "not in to"})
+            await mm.send("b", "leader", ["w1"], "x", sections={"w2": "not in to"})
         with pytest.raises(MeshError):
-            mm.send("b", "leader", "*", "x", sections={"leader": "self"})
+            await mm.send("b", "leader", "*", "x", sections={"leader": "self"})
         with pytest.raises(MeshError):
-            mm.send("b", "leader", ["w1", "w2"], "", sections={"w1": "only w1"})
+            await mm.send("b", "leader", ["w1", "w2"], "", sections={"w1": "only w1"})
         # sections-only send (empty shared body) is fine when all are covered
-        ok = mm.send("b", "leader", ["w1"], "", sections={"w1": "solo"})
+        ok = await mm.send("b", "leader", ["w1"], "", sections={"w1": "solo"})
         assert ok["batched"] is True
 
         # the separable advisory: @-addressing several recipients un-batched
-        sep = mm.send("b", "leader", ["w1", "w2"], "@w1 do X. @w2 do Y.")
+        sep = await mm.send("b", "leader", ["w1", "w2"], "@w1 do X. @w2 do Y.")
         assert "BATCH" in (sep["notice"] or "")
 
         await mm.shutdown()
@@ -511,39 +511,9 @@ def test_batch_sections_and_reply_to(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# federation: two mesh managers wired with an in-process peer transport
+# federation v2 (primary/mirror) lives in tests/test_mesh_v2.py; only the
+# relay-identity precondition stays here
 # --------------------------------------------------------------------------- #
-def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
-    """What the /peer/* HTTP handlers do, minus the HTTP."""
-    if path == "/peer/mesh/link":
-        return mm.peer_link_accept(
-            body["mesh"], body["machine"], body["token"],
-            body["reply_token"], body.get("members") or [],
-        )
-    if path == "/peer/mesh/messages":
-        return mm.peer_messages_accept(
-            body["mesh"], body["machine"], body["token"],
-            body.get("messages") or [],
-        )
-    if path == "/peer/mesh/members":
-        return mm.peer_members_accept(
-            body["mesh"], body["machine"], body["token"],
-            body.get("members") or [],
-        )
-    raise AssertionError(f"unexpected peer path {path!r}")
-
-
-def _federate(machines: dict) -> None:
-    """Give each manager an identity and a direct transport to the others."""
-    async def call(machine, path, body):
-        return _dispatch_peer(machines[machine], path, body)
-
-    for name, mm in machines.items():
-        mm.machine = name
-        mm.peer_transport = call
-        mm.relay_connected = lambda: True
-
-
 def test_invite_and_link_require_relay_identity(home):
     mgr = _manager()
     mm = MeshManager(mgr)
@@ -554,152 +524,6 @@ def test_invite_and_link_require_relay_identity(home):
     async def run():
         with pytest.raises(MeshError):
             await mm.link("whatever")
-
-    asyncio.run(run())
-
-
-def test_federation_link_and_remote_delivery(home, tmp_path):
-    _register_py_harness()
-
-    async def run():
-        mgr = _manager()
-        mm_a = MeshManager(mgr, root=tmp_path / "meshA")
-        mm_b = MeshManager(mgr, root=tmp_path / "meshB")
-        _federate({"pcA": mm_a, "pcB": mm_b})
-
-        mgr.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path)))
-        mgr.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
-
-        mm_a.create("m1")
-        mm_a.join("m1", "sa", handle="alice")
-        code = mm_a.invite("m1")["code"]
-
-        result = await mm_b.link(code)
-        assert result["peer"] == "pcA"
-        mesh_a, mesh_b = mm_a.get("m1"), mm_b.get("m1")
-        # tokens were exchanged, and each side adopted the other's members
-        assert "pcB" in mesh_a.links and "pcA" in mesh_b.links
-        assert mesh_a.links["pcB"]["token_in"] == mesh_b.links["pcA"]["token_out"]
-        assert mesh_a.links["pcB"]["token_out"] == mesh_b.links["pcA"]["token_in"]
-        assert mesh_b.members["alice"].machine == "pcA"
-        with pytest.raises(MeshError):
-            await mm_b.link(code)  # invites are single-use
-
-        # B enrols its own session; the member push makes it visible on A
-        mm_b.join("m1", "sb", handle="bob")
-        await mm_b._push_members(mesh_b)
-        assert mesh_a.members["bob"].machine == "pcB"
-        assert mm_a.mesh_info(mesh_a)["peers"][0]["machine"] == "pcB"
-
-        # a remote-addressed message crosses on flush…
-        sent = mm_b.send("m1", "bob", "alice", "hello across", type="ack")
-        assert sent["remote"] == ["alice"]
-        assert sent["expects_reply"] is False and sent["notice"] is None
-        assert sent["queued_remote"] == []  # relay is up
-        await mm_b._flush_peer(mesh_b, "pcA")
-        assert [m["body"] for m in mesh_a.pending("alice")] == ["hello across"]
-        assert mesh_a.messages[-1]["type"] == "ack"  # intent survives the hop
-        assert mesh_b.peer_status["pcA"]["ok"] is True
-
-        # …exactly once: the cursor advanced, and replays dedupe by id
-        await mm_b._flush_peer(mesh_b, "pcA")
-        assert len([m for m in mesh_a.messages if m["body"] == "hello across"]) == 1
-        replay = mm_a.peer_messages_accept(
-            "m1", "pcB", mesh_a.links["pcB"]["token_in"],
-            [{k: sent[k] for k in ("id", "ts", "from", "to", "body")}],
-        )
-        assert replay["accepted"] == 0
-
-        # the reverse direction: A's broadcast reaches bob, and A does NOT
-        # echo B's own message back (origin gate)
-        mm_a.send("m1", "alice", "*", "ack from A")
-        assert [m["body"] for m in mm_a.pending_for_machine(mesh_a, "pcB")] == [
-            "ack from A"  # only A's own message — never B's, per the origin gate
-        ]
-        await mm_a._flush_peer(mesh_a, "pcB")
-        bodies_b = [m["body"] for m in mesh_b.messages]
-        assert "ack from A" in bodies_b
-        assert bodies_b.count("hello across") == 1  # no echo
-
-        # batch fields and reply_to survive the hop, so the remote daemon
-        # can slice deliveries for its own members
-        mm_b.send(
-            "m1", "bob", "alice", "shared bit",
-            sections={"alice": {"text": "your slice", "type": "ask"}},
-            reply_to="msg-000000000000",
-        )
-        await mm_b._flush_peer(mesh_b, "pcA")
-        got = mesh_a.messages[-1]
-        assert got["sections"]["alice"]["text"] == "your slice"
-        assert got["shared"] == "shared bit"
-        assert got["reply_to"] == "msg-000000000000"
-
-        # a wrong peer token is rejected
-        with pytest.raises(MeshError):
-            mm_a.peer_messages_accept("m1", "pcB", "forged", [])
-
-        # links, peer cursors and remote members survive a reload
-        mm_b2 = MeshManager(mgr, root=tmp_path / "meshB")
-        mm_b2.load_all()
-        loaded = mm_b2.get("m1")
-        assert "pcA" in loaded.links
-        assert loaded.members["alice"].machine == "pcA"
-        assert loaded.peer_cursors["pcA"] == mesh_b.peer_cursors["pcA"]
-
-        await mgr.shutdown_all()
-
-    asyncio.run(run())
-
-
-def test_federation_queue_and_reconnect(home, tmp_path):
-    _register_py_harness()
-
-    async def run():
-        mgr = _manager()
-        mm_a = MeshManager(mgr, root=tmp_path / "meshA")
-        mm_b = MeshManager(mgr, root=tmp_path / "meshB")
-        _federate({"pcA": mm_a, "pcB": mm_b})
-
-        mgr.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path)))
-        mgr.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
-        mm_a.create("m1")
-        mm_a.join("m1", "sa", handle="alice")
-        await mm_b.link(mm_a.invite("m1")["code"])
-        mm_b.join("m1", "sb", handle="bob")
-        mesh_b = mm_b.get("m1")
-
-        # relay drops: sends are accepted but queue for the peer
-        calls = []
-
-        async def broken(machine, path, body):
-            calls.append(path)
-            raise MeshError("relay down")
-
-        mm_b.peer_transport = broken
-        mm_b.relay_connected = lambda: False
-
-        sent = mm_b.send("m1", "bob", "alice", "while offline")
-        assert sent["queued_remote"] == ["alice"]
-        await mm_b._flush_peer(mesh_b, "pcA")
-        status = mesh_b.peer_status["pcA"]
-        assert status["ok"] is False and status["backoff"] > 0
-        assert mm_b.pending_for_machine(mesh_b, "pcA") != []
-        # the flusher backs off — an immediate retry doesn't even dial
-        n = len(calls)
-        await mm_b._flush_peer(mesh_b, "pcA")
-        assert len(calls) == n
-
-        # reconnect: the queue drains and the peer marks healthy again
-        _federate({"pcA": mm_a, "pcB": mm_b})
-        mesh_b.peer_status["pcA"]["retry_at"] = 0.0
-        await mm_b._flush_peer(mesh_b, "pcA")
-        assert [m["body"] for m in mm_a.get("m1").pending("alice")] == [
-            "while offline"
-        ]
-        assert mesh_b.peer_status["pcA"]["ok"] is True
-        assert mm_b.pending_for_machine(mesh_b, "pcA") == []
-
-        await mgr.shutdown_all()
 
     asyncio.run(run())
 
@@ -777,19 +601,19 @@ def test_policy_heartbeat_nudges_unanswered_member(home, tmp_path):
         b = mgr.get("b1")
         await _wait_screen(a, "READY")
         await _wait_screen(b, "READY")
-        mm.join("hb", "a1", handle="leader")
-        mm.join("hb", "b1", handle="worker_b")
+        await mm.join("hb", "a1", handle="leader")
+        await mm.join("hb", "b1", handle="worker_b")
         mm.set_policy("hb", {"heartbeat": {"enabled": True, "interval": 1}})
         mm.start()
 
         # an fyi delivery does NOT arm the heartbeat: draining it leaves the
         # member owing nothing
-        mm.send("hb", "leader", "worker_b", "status update", type="fyi")
+        await mm.send("hb", "leader", "worker_b", "status update", type="fyi")
         await _wait_screen(b, "status update")
         await asyncio.sleep(3)
         assert "kind: heartbeat" not in _screen_text(b)
 
-        mm.send("hb", "leader", "worker_b", "please reply")
+        await mm.send("hb", "leader", "worker_b", "please reply")
         await _wait_screen(b, "please reply")
         # worker_b never sends anything back -> the heartbeat block lands
         await _wait_screen(b, "kind: heartbeat")
@@ -815,8 +639,8 @@ def test_policy_task_poll_and_stall_warning(home, tmp_path):
         b = mgr.get("b1")
         await _wait_screen(a, "READY")
         await _wait_screen(b, "READY")
-        mm.join("tp", "a1", handle="leader")
-        mm.join("tp", "b1", handle="worker_b")
+        await mm.join("tp", "a1", handle="leader")
+        await mm.join("tp", "b1", handle="worker_b")
         mm.set_policy(
             "tp",
             {
@@ -859,8 +683,8 @@ def test_join_briefing_lands_in_terminal(home, tmp_path):
         mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
         s = mgr.get("s1")
         await _wait_screen(s, "READY")
-        mm.join("brief", "s1", handle="worker_1")
-        await _wait_screen(s, "join briefing")
+        await mm.join("brief", "s1", handle="worker_1")
+        await _wait_screen(s, "join briefing", timeout=30.0)
         text = _screen_text(s)
         assert "you: worker_1 (role: worker)" in text
         assert "claunch mesh send brief" in text
@@ -975,7 +799,7 @@ def test_cursors_phase1_format_migrates(home, tmp_path):
         mm = MeshManager(mgr, root=root)
         mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
         mm.create("old")
-        mm.join("old", "s1", handle="w1")
+        await mm.join("old", "s1", handle="w1")
         # rewrite cursors in the phase-1 flat format
         (root / "old" / "cursors.json").write_text(
             json.dumps({"w1": 3}), encoding="utf-8"
@@ -984,7 +808,7 @@ def test_cursors_phase1_format_migrates(home, tmp_path):
         mm2.load_all()
         loaded = mm2.get("old")
         assert loaded.cursors == {"w1": 3}
-        assert loaded.peer_cursors == {}
+        assert loaded.guest_cursors == {}
         await mgr.shutdown_all()
 
     asyncio.run(run())

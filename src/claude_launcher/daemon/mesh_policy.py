@@ -175,11 +175,17 @@ def stall_body(handle: str, role: str, *, secs: float, behind: int) -> str:
 
 
 async def tick(mm, mesh) -> None:
-    """One policy evaluation pass over ``mesh``'s local members.
+    """One policy evaluation pass over ``mesh``'s members. Primary-only.
 
-    Called from the mesh's delivery worker loop (so it shares the worker's
-    cadence); every injection re-checks idleness at fire time.
+    Runs on the mesh's owner daemon exclusively (a mirror's tick is a
+    guarded no-op — federation v2). Local members are observed through
+    their sessions directly; remote (guest) members through the activity
+    reports their daemons piggyback on sync acks. Nudges for remote
+    members become fanout instructions, injected by the guest daemon
+    (which re-checks idleness at fire time, as we do locally).
     """
+    if getattr(mesh, "primary", ""):
+        return  # the engine lives on the primary daemon only
     pol = mesh.policy
     hb, tp, sw = pol["heartbeat"], pol["task_poll"], pol["stall_warn"]
     if not (hb["enabled"] or tp["enabled"] or sw["enabled"]):
@@ -189,31 +195,54 @@ async def tick(mm, mesh) -> None:
         h for h, m in mesh.members.items() if m.role == "leader"
     )
     for handle, member in list(mesh.members.items()):
-        if not member.local:
-            continue
-        st = mesh.activity.setdefault(handle, {"anchor": now})
-        try:
-            session = mm.manager.get(member.session)
-        except Exception:  # ManagerError — session removed
-            continue
-        if session.exited:
-            continue
-        idle = session.status() == STATUS_IDLE
-        last_sent = st.get("last_sent", 0.0)
-        last_delivered = st.get("last_delivered", 0.0)
-        # last_asked marks the newest *reply-expecting* delivery (fyi/ack
-        # traffic never arms the heartbeat — expects_reply in mesh.py).
-        last_asked = st.get("last_asked", 0.0)
-        unanswered = last_asked > 0 and last_sent < last_asked
-        pending = len(mesh.pending(handle))
-        caught_up = not unanswered and pending == 0
-        active_at = max(last_sent, last_delivered, st["anchor"])
+        local = mm._is_local(mesh, member)
+        session = None
+        if local:
+            st = mesh.activity.setdefault(handle, {"anchor": now})
+            try:
+                session = mm.manager.get(member.session)
+            except Exception:  # ManagerError — session removed
+                continue
+            if session.exited:
+                continue
+            idle = session.status() == STATUS_IDLE
+            last_sent = st.get("last_sent", 0.0)
+            last_delivered = st.get("last_delivered", 0.0)
+            # last_asked marks the newest *reply-expecting* delivery (fyi/ack
+            # traffic never arms the heartbeat — expects_reply in mesh.py).
+            last_asked = st.get("last_asked", 0.0)
+            unanswered = last_asked > 0 and last_sent < last_asked
+            pending = len(mesh.pending(handle))
+            caught_up = not unanswered and pending == 0
+            active_at = max(last_sent, last_delivered, st["anchor"])
+            first_pending = mesh._first_pending.get(handle)
+            hb_base = last_asked
+        else:
+            rep = mesh.remote_activity.get(handle)
+            if not isinstance(rep, dict):
+                continue  # the guest has not reported yet
+            reported_at = float(rep.get("at") or 0.0)
+            if now - reported_at > max(15.0, 3 * mm.report_interval):
+                continue  # stale report; wait for a fresh sync ack
+            st = mesh.activity.setdefault(handle, {"anchor": now})
+            idle = bool(rep.get("idle"))
+            unanswered = bool(rep.get("unanswered"))
+            caught_up = bool(rep.get("caught_up"))
+            pending = int(rep.get("pending") or 0)
+            active_at = reported_at - float(rep.get("active_ago") or 0.0)
+            fpa = rep.get("first_pending_ago")
+            first_pending = (
+                reported_at - float(fpa) if fpa is not None else None
+            )
+            hb_base = reported_at
 
         # -- heartbeat: asked something, no reply since --------------------- #
         if hb["enabled"] and unanswered and idle:
-            due = st.get("hb_next", last_asked + hb["interval"])
+            due = st.get("hb_next", hb_base + hb["interval"])
             if now >= due:
-                await _inject(mm, session, mesh, "heartbeat", handle, hb["body"])
+                await _dispatch(
+                    mm, mesh, member, session, "heartbeat", handle, hb["body"]
+                )
                 backoff = min(
                     st.get("hb_backoff", hb["interval"]) * 2, hb["max_interval"]
                 )
@@ -235,7 +264,9 @@ async def tick(mm, mesh) -> None:
                 body = tp["bodies"].get(member.role) or (
                     TASK_POLL_FALLBACK_BODY.format(role=member.role)
                 )
-                await _inject(mm, session, mesh, "task-poll", handle, body)
+                await _dispatch(
+                    mm, mesh, member, session, "task-poll", handle, body
+                )
                 backoff = min(
                     st.get("tp_backoff", tp["interval"]) * 2, tp["max_interval"]
                 )
@@ -256,7 +287,6 @@ async def tick(mm, mesh) -> None:
             # "behind": messages await this member but its session never goes
             # idle enough (or delivery keeps failing) — the injection analogue
             # of interconnect's undrained socket.
-            first_pending = mesh._first_pending.get(handle)
             stalled_behind = (
                 pending > 0
                 and first_pending is not None
@@ -273,10 +303,13 @@ async def tick(mm, mesh) -> None:
                     try:
                         # fyi: leaders are informed, not asked — the warning
                         # must not arm their own heartbeat or invite replies.
-                        mm.send(
-                            mesh.name, POLICY_SENDER, leaders, body,
+                        # An ordinary mesh message, so it federates to remote
+                        # leaders through the normal fanout.
+                        mm._send_core(
+                            mesh, POLICY_SENDER, leaders, body,
                             external=True, type="fyi",
                         )
+                        mm._flush_guests_soon(mesh)
                     except Exception as exc:  # noqa: BLE001
                         log.debug("mesh %r: stall warn failed: %s", mesh.name, exc)
                     backoff = min(
@@ -287,6 +320,20 @@ async def tick(mm, mesh) -> None:
             else:
                 st.pop("warn_next", None)
                 st.pop("warn_backoff", None)
+
+
+async def _dispatch(mm, mesh, member, session, kind, handle, body) -> None:
+    """Deliver a nudge decision: inject locally, or queue for the member's
+    guest daemon to inject on its next sync."""
+    if session is not None:
+        await _inject(mm, session, mesh, kind, handle, body)
+        return
+    mesh.pending_nudges.setdefault(member.machine, []).append(
+        {"handle": handle, "kind": kind, "body": body}
+    )
+    mm._flush_guests_soon(mesh)
+    log.info("mesh %r: %s nudge queued for %r (guest %r)",
+             mesh.name, kind, handle, member.machine)
 
 
 async def _inject(mm, session, mesh, kind: str, handle: str, body: str) -> None:

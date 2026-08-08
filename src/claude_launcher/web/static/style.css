@@ -301,6 +301,10 @@ body {
   font-size: 11px; padding: 1px 7px; border-radius: 9px;
   background: #172947; color: #58a6ff;
 }
+.mesh-mirror-badge {
+  font-size: 11px; padding: 2px 9px; border-radius: 9px; margin-left: 10px;
+  background: #2d2308; color: #d29922; border: 1px solid #4d3c10;
+}
 .mesh-session { color: #8b949e; }
 .mesh-session.linkish { cursor: pointer; }
 .mesh-session.linkish:hover { color: #58a6ff; }

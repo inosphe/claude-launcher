@@ -181,22 +181,23 @@ def _wire_federation(mesh_manager: MeshManager, uplink) -> None:
     """Give the mesh manager a peer transport riding the relay uplink.
 
     The transport is one JSON POST per call, bridged to the peer daemon's
-    ``/peer/*`` endpoint through the relay (PEER_OPEN). Any transport or
-    HTTP-level failure surfaces as MeshError so mesh callers see one
-    exception family.
+    ``/peer/*`` endpoint through the relay (PEER_OPEN). Transport-level
+    failures surface as PeerUnreachable (the mirror may then queue durably);
+    an HTTP-level rejection surfaces as plain MeshError (never queued).
     """
     from . import peer_client, relay_uplink
+    from .mesh import PeerUnreachable
 
     async def peer_call(machine: str, path: str, body: dict) -> dict:
         raw = peer_client.build_request(path, body, host=machine)
         try:
             resp = await uplink.peer_http(machine, raw)
         except relay_uplink.PeerError as exc:
-            raise MeshError(str(exc)) from None
+            raise PeerUnreachable(str(exc)) from None
         try:
             status, payload = peer_client.parse_response(resp)
         except peer_client.PeerHttpError as exc:
-            raise MeshError(f"peer {machine!r}: {exc}") from None
+            raise PeerUnreachable(f"peer {machine!r}: {exc}") from None
         if status >= 400:
             detail = payload.get("error") or f"HTTP {status}"
             raise MeshError(f"peer {machine!r} rejected {path}: {detail}")
