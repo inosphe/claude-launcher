@@ -190,11 +190,14 @@ def test_mesh_between_two_daemon_processes(home, tmp_path):
         ca.post("/api/mesh/fedmesh/members", {"session": "sa", "handle": "alice"})
         code = ca.post("/api/mesh/fedmesh/invite")["code"]
 
-        # daemon B redeems the invite over the relay bridge and joins bob
+        # bob joins fedmesh@pca from daemon B: one call over the relay bridge,
+        # redeeming the ticket, creates B's mirror and admits him
         cb.post("/api/sessions", {"name": "sb", "harness": "py", "cwd": str(tmp_path)})
-        linked = cb.post("/api/mesh/link", {"code": code})
-        assert linked["peer"] == "pca"
-        cb.post("/api/mesh/fedmesh/members", {"session": "sb", "handle": "bob"})
+        joined = cb.post(
+            "/api/mesh/fedmesh@pca/members",
+            {"session": "sb", "handle": "bob", "code": code},
+        )
+        assert joined["handle"] == "bob"
 
         def _member(client, handle):
             info = client.get("/api/mesh/fedmesh")
@@ -236,6 +239,23 @@ def test_mesh_between_two_daemon_processes(home, tmp_path):
             "cross-daemon delivery into bob's terminal",
             timeout=40.0,
         )
+
+        # the wizard surface: A sees B in the relay directory, browses its
+        # sessions, and pushes an invitation — no code changes hands
+        peers = ca.get("/api/relay/peers")["peers"]
+        assert "pcb" in peers and "pca" not in peers
+        cb.post("/api/sessions", {"name": "sb2", "harness": "py", "cwd": str(tmp_path)})
+        remote = ca.get("/api/relay/peers/pcb/sessions")
+        assert "sb2" in [s["name"] for s in remote["sessions"]]
+        pushed = ca.post(
+            "/api/mesh/fedmesh/invitations",
+            {"machine": "pcb", "session": "sb2", "handle": "betty"},
+        )
+        assert pushed["member"]["handle"] == "betty"
+        assert _member(ca, "betty")["machine"] == "pcb"
+        assert _wait(
+            lambda: _member(cb, "betty"), "betty's membership to reach daemon B"
+        )["machine"] == "pcb"
 
         # clean shutdown via the API, like `claunch -L a daemon stop`
         ca.post("/api/daemon/shutdown")

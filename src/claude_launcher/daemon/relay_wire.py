@@ -32,11 +32,15 @@ STREAM_CLOSE = 0x15
 PEER_OPEN = 0x16
 PEER_OPEN_OK = 0x17
 PEER_OPEN_ERR = 0x18
+PEER_LIST = 0x19
+PEER_LIST_OK = 0x1A
 
 #: REGISTER_OK capability bits. Old relays send an empty body (caps 0); the
 #: bit MUST be checked before sending PEER_OPEN — an old relay silently drops
 #: unknown message types, so an unchecked request hangs without any error.
 CAP_PEERING = 0x01
+#: PEER_LIST support (a relay that only knows CAP_PEERING drops PEER_LIST).
+CAP_PEER_LIST = 0x02
 
 #: PEER_OPEN_ERR codes.
 PEER_ERR_UNKNOWN_BACKEND = 1
@@ -91,6 +95,13 @@ def peer_open(room_id: bytes, req_id: int, name: str) -> bytes:
     return _frame(room_id, _CH_TUNNEL, payload)
 
 
+def peer_list(room_id: bytes, req_id: int) -> bytes:
+    """Ask the relay for the names of the other registered backends."""
+    return _frame(
+        room_id, _CH_TUNNEL, bytes([PEER_LIST]) + struct.pack(">I", req_id)
+    )
+
+
 def pong(room_id: bytes, token: int) -> bytes:
     return _frame(room_id, _CH_CONTROL, bytes([PONG]) + struct.pack(">Q", token))
 
@@ -118,8 +129,9 @@ class Msg:
     data: bytes = b""
     token: int = 0
     caps: int = 0  # REGISTER_OK capability bits
-    req: int = 0  # PEER_OPEN_OK/ERR request correlation id
+    req: int = 0  # PEER_OPEN_OK/ERR + PEER_LIST_OK request correlation id
     code: int = 0  # PEER_OPEN_ERR code
+    names: tuple = ()  # PEER_LIST_OK backend names
 
 
 def decode_payload(payload: bytes) -> Optional[Msg]:
@@ -149,6 +161,24 @@ def decode_payload(payload: bytes) -> Optional[Msg]:
         if len(body) < 5:
             return None
         return Msg(PEER_OPEN_ERR, req=struct.unpack(">I", body[:4])[0], code=body[4])
+    if ty == PEER_LIST:
+        # Backend→relay only; decoded here for symmetry and tests.
+        if len(body) < 4:
+            return None
+        return Msg(PEER_LIST, req=struct.unpack(">I", body[:4])[0])
+    if ty == PEER_LIST_OK:
+        # [req_id u32][count u8]([len u8][name])*
+        if len(body) < 5:
+            return None
+        req = struct.unpack(">I", body[:4])[0]
+        count, rest = body[4], body[5:]
+        names = []
+        for _ in range(count):
+            if not rest or len(rest) < 1 + rest[0]:
+                return None  # truncated — drop the whole message
+            names.append(rest[1 : 1 + rest[0]].decode("utf-8", "replace"))
+            rest = rest[1 + rest[0]:]
+        return Msg(PEER_LIST_OK, req=req, names=tuple(names))
     if ty in (PING, PONG):
         if len(body) < 8:
             return None

@@ -260,6 +260,8 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             print("daemon is not running")
         return 0
     if action == "restart":
+        if getattr(args, "all", False):
+            return _restart_all_instances()
         daemon_client.stop()
         time.sleep(0.3)
         client = daemon_client.ensure_running()
@@ -286,6 +288,45 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         print(cli_mesh.relay_line(info.get("relay")))
         return 0
     raise AssertionError(f"unknown daemon action {action!r}")
+
+
+def _restart_all_instances() -> int:
+    """Restart every daemon instance that is currently serving.
+
+    The client stack resolves all its paths through ``CLAUNCH_DAEMON``, and a
+    spawned daemon inherits the environment — so iterating means swapping the
+    variable per instance. Instances that merely have state on disk but no
+    live server are left alone (restart should not *start* servers you shut
+    down on purpose).
+    """
+    instances = daemon_paths.known_instances()
+    if not instances:
+        print("no daemon instances found")
+        return 0
+    saved = os.environ.get(daemon_paths.INSTANCE_ENV)
+    restarted = 0
+    try:
+        for name in instances:
+            if name:
+                os.environ[daemon_paths.INSTANCE_ENV] = name
+            else:
+                os.environ.pop(daemon_paths.INSTANCE_ENV, None)
+            label = name or "default"
+            if daemon_client.connect() is None:
+                print(f"{label}: not running -- skipped")
+                continue
+            daemon_client.stop()
+            time.sleep(0.3)
+            client = daemon_client.ensure_running()
+            restarted += 1
+            print(f"{label}: restarted at {client.base_url}")
+    finally:
+        if saved is None:
+            os.environ.pop(daemon_paths.INSTANCE_ENV, None)
+        else:
+            os.environ[daemon_paths.INSTANCE_ENV] = saved
+    print(f"{restarted} daemon(s) restarted")
+    return 0
 
 
 def _cmd_daemon_token(args: argparse.Namespace) -> int:
@@ -535,6 +576,12 @@ def register(sub) -> None:
     dsub = p_daemon.add_subparsers(dest="daemon_command", required=True)
     for action in ("start", "stop", "status", "restart"):
         p = dsub.add_parser(action, help=f"{action} the daemon")
+        if action == "restart":
+            p.add_argument(
+                "--all", action="store_true",
+                help="restart every running daemon instance (the default one "
+                     "and all named -L instances)",
+            )
         p.set_defaults(func=_cmd_daemon, action=action)
     p_token = dsub.add_parser("token", help="print the API/web login token")
     p_token.add_argument("--rotate", action="store_true", help="generate a new token")

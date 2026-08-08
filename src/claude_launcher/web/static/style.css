@@ -259,11 +259,26 @@ body {
 #mesh-list li.active { background: #2b313b; }
 #mesh-list .meta { margin-left: auto; color: #7d8590; font-size: 11px; }
 #mesh-list .mesh-empty { color: #6e7681; font-size: 12px; cursor: default; }
-#new-mesh { display: flex; gap: 6px; padding: 8px 16px 12px; }
-#new-mesh input {
+#mesh-list .mesh-tag {
+  font-size: 10px; padding: 1px 6px; border-radius: 8px; margin-left: auto;
+  background: #2d2308; color: #d29922; border: 1px solid #4d3c10;
+}
+#mesh-list .mesh-tag + .meta { margin-left: 6px; }
+#mesh-outgoing { list-style: none; }
+#mesh-outgoing li {
+  padding: 6px 16px; font-size: 12px; color: #7d8590;
+  display: flex; align-items: center; gap: 8px;
+}
+#mesh-outgoing .mesh-kick { margin-left: auto; }
+#new-mesh { display: flex; gap: 6px; padding: 8px 16px 12px; flex-wrap: wrap; }
+#new-mesh input, #new-mesh select {
   flex: 1; min-width: 0; padding: 5px 8px; font-size: 13px;
   background: #14161a; color: #d8dbe0; border: 1px solid #30363d; border-radius: 4px;
 }
+#mesh-join-extra { flex: 1 1 100%; display: flex; gap: 6px; flex-wrap: wrap; }
+#mesh-join-extra.hidden { display: none; }
+#mesh-join-hint { flex: 1 1 100%; font-size: 11px; color: #d29922; margin: 0; }
+#mesh-join-hint.hidden { display: none; }
 #new-mesh button {
   padding: 5px 12px; font-size: 12px; cursor: pointer;
   background: #238636; color: #fff; border: none; border-radius: 4px;

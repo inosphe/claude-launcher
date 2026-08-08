@@ -1184,35 +1184,146 @@ async function refreshMeshList() {
     li.className = "clickable";
     if (m.name === meshName) li.classList.add("active");
     const label = el("span", null, m.name);
-    const meta = el(
+    li.appendChild(label);
+    // a mirror is somebody else's mesh: say so before the counts, since what
+    // you can do here (no invites, no policy edits) depends on it
+    if (m.primary) li.appendChild(el("span", "mesh-tag", `mirror · ${m.primary}`));
+    const inbound = (m.requests || []).length;
+    if (inbound) {
+      const req = el("span", "mesh-tag", `${inbound} join req`);
+      req.style.background = "#0d2818";
+      req.style.color = "#3fb950";
+      req.style.borderColor = "#1b4522";
+      li.appendChild(req);
+    }
+    li.appendChild(el(
       "span", "meta",
       `${m.members.length} member${m.members.length === 1 ? "" : "s"} · ${m.messages} msg`
-    );
-    li.append(label, meta);
+    ));
     li.addEventListener("click", () => {
       location.hash = "#/mesh/" + encodeURIComponent(m.name);
     });
     list.appendChild(li);
   }
+  renderOutgoingJoins(data.outgoing || []);
 }
+
+/* Our own join requests still waiting on another machine's operator. They
+   live outside any mesh (nothing is mounted locally until the grant lands),
+   so the sidebar is the only place they can be seen. */
+function renderOutgoingJoins(outgoing) {
+  const box = $("mesh-outgoing");
+  box.innerHTML = "";
+  box.classList.toggle("hidden", !outgoing.length);
+  for (const r of outgoing) {
+    const li = document.createElement("li");
+    li.append(
+      el("span", null, `${r.mesh}@${r.primary}`),
+      el("span", "meta", `awaiting approval as '${r.handle}'`)
+    );
+    const cancel = el("button", "mesh-kick", "×");
+    cancel.title = "forget this request locally (the owner still sees it)";
+    cancel.addEventListener("click", async () => {
+      await api(`/api/mesh/outgoing/${encodeURIComponent(r.request_id)}`,
+                { method: "DELETE" });
+      refreshMeshList();
+    });
+    li.appendChild(cancel);
+    box.appendChild(li);
+  }
+}
+
+/* An invite code is base64url JSON {v:2, mesh, machine, token} — decodable
+   client-side, so pasting one straight into the mesh field can become a
+   fully-formed join with no address typing. */
+function decodeInviteCode(raw) {
+  const s = (raw || "").trim();
+  if (s.length < 24 || /[@\s]/.test(s) || !/^[A-Za-z0-9_-]+=*$/.test(s)) return null;
+  try {
+    const b64 = s.replace(/-/g, "+").replace(/_/g, "/");
+    const doc = JSON.parse(atob(b64 + "=".repeat((4 - (b64.length % 4)) % 4)));
+    if (doc && doc.v === 2 && doc.mesh && doc.machine && doc.token) {
+      return { mesh: String(doc.mesh), machine: String(doc.machine) };
+    }
+  } catch { /* not a code — fall through */ }
+  return null;
+}
+
+/* One field, three verbs: a bare name creates a mesh here, 'mesh@machine'
+   asks that machine's daemon to admit one of our sessions, and a pasted
+   invite code is redeemed directly (the address comes from the code). */
+$("new-mesh").querySelector("input[name=name]").addEventListener("input", (e) => {
+  const code = decodeInviteCode(e.target.value);
+  const joining = code !== null || e.target.value.includes("@");
+  $("mesh-join-extra").classList.toggle("hidden", !joining);
+  // the pasted code IS the ticket — the separate code field would be noise
+  $("mesh-join-code").classList.toggle("hidden", code !== null);
+  const hint = $("mesh-join-hint");
+  hint.classList.toggle("hidden", code === null);
+  if (code) hint.textContent = `invite ticket for mesh '${code.mesh}' on '${code.machine}'`;
+  $("new-mesh").querySelector("button").textContent = joining ? "Join" : "Create";
+  if (!joining) return;
+  const sel = $("mesh-join-session");
+  const keep = sel.value;
+  sel.innerHTML = "";
+  for (const s of sessionsCache.filter((s) => s.status !== "exited")) {
+    const opt = document.createElement("option");
+    opt.value = s.name;
+    opt.textContent = s.name;
+    sel.appendChild(opt);
+  }
+  if (keep) sel.value = keep;
+});
 
 $("new-mesh").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target;
   const name = f.name.value.trim();
   if (!name) return;
+  const err = $("mesh-error");
+  const fail = async (resp) => {
+    const doc = await resp.json().catch(() => ({}));
+    err.textContent = doc.error || `HTTP ${resp.status}`;
+    err.classList.remove("hidden");
+  };
+  const pasted = decodeInviteCode(name);
+  if (pasted || name.includes("@")) {
+    const addr = pasted ? `${pasted.mesh}@${pasted.machine}` : name;
+    const session = $("mesh-join-session").value;
+    if (!session) {
+      err.textContent = "no live session to enrol";
+      err.classList.remove("hidden");
+      return;
+    }
+    const resp = await api(`/api/mesh/${encodeURIComponent(addr)}/members`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        session,
+        handle: $("mesh-join-handle").value.trim(),
+        code: pasted ? name : $("mesh-join-code").value.trim(),
+      }),
+    });
+    if (!resp.ok) return fail(resp);
+    const doc = await resp.json().catch(() => ({}));
+    err.classList.add("hidden");
+    f.name.value = "";
+    $("mesh-join-handle").value = "";
+    $("mesh-join-code").value = "";
+    $("mesh-join-code").classList.remove("hidden");
+    $("mesh-join-hint").classList.add("hidden");
+    $("mesh-join-extra").classList.add("hidden");
+    f.querySelector("button").textContent = "Create";
+    await refreshMeshList();
+    if (!doc.pending) location.hash = "#/mesh/" + encodeURIComponent(addr.split("@")[0]);
+    return;
+  }
   const resp = await api("/api/mesh", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ name }),
   });
-  const err = $("mesh-error");
-  if (!resp.ok) {
-    const doc = await resp.json().catch(() => ({}));
-    err.textContent = doc.error || `HTTP ${resp.status}`;
-    err.classList.remove("hidden");
-    return;
-  }
+  if (!resp.ok) return fail(resp);
   err.classList.add("hidden");
   f.name.value = "";
   await refreshMeshList();
@@ -1318,18 +1429,28 @@ function renderMesh(info, history) {
     }
     const state = el("span", "meta", m.reachability +
       (m.pending ? ` · ${m.pending} pending` : ""));
-    const kick = el("button", "mesh-kick", "×");
-    kick.title = `remove '${m.handle}' from the mesh`;
-    kick.addEventListener("click", async () => {
-      if (!confirm(`Remove member '${m.handle}'?`)) return;
-      await api(
-        `/api/mesh/${encodeURIComponent(info.name)}/members/${encodeURIComponent(m.handle)}`,
-        { method: "DELETE" }
-      );
-      refreshMeshView();
-      refreshMeshList();
-    });
-    row.append(dot, name, role, where, state, kick);
+    row.append(dot, name, role, where, state);
+    // A mirror may only remove its own members; the primary's roster is the
+    // primary's to edit (and whole guest machines go via 'revoke' below).
+    if (!isMirror || isLocalMember(m)) {
+      const kick = el("button", "mesh-kick", "×");
+      kick.title = `remove '${m.handle}' from the mesh`;
+      kick.addEventListener("click", async () => {
+        if (!confirm(`Remove member '${m.handle}'?`)) return;
+        const resp = await api(
+          `/api/mesh/${encodeURIComponent(info.name)}/members/${encodeURIComponent(m.handle)}`,
+          { method: "DELETE" }
+        );
+        if (!resp.ok) {
+          const doc = await resp.json().catch(() => ({}));
+          alert(doc.error || `HTTP ${resp.status}`);
+          return;
+        }
+        refreshMeshView();
+        refreshMeshList();
+      });
+      row.appendChild(kick);
+    }
     box.appendChild(row);
   }
 
@@ -1372,15 +1493,16 @@ function renderMesh(info, history) {
   box.appendChild(addRow);
   view.appendChild(box);
 
-  // federation: primary/guest daemons + invite/link controls
+  // membership from other machines: who joined us (guests) or who owns us
   const fed = el("div", "mesh-fed");
   fed.appendChild(el("h3", null, isMirror ? "Primary daemon" : "Guest daemons"));
   const peers = info.peers || [];
   if (!peers.length) {
     fed.appendChild(el(
       "p", "wf-note",
-      "not linked to any other machine — mint an invite here and redeem it " +
-      "on the peer with 'claunch mesh link <code>' (both daemons need a relay uplink)"
+      "no other machine has joined — sessions elsewhere join with " +
+      `'claunch mesh join ${info.name}@${selfMachine || "<this-machine>"}' ` +
+      "and appear below once approved (both daemons need a relay uplink)"
     ));
   }
   for (const p of peers) {
@@ -1392,15 +1514,69 @@ function renderMesh(info, history) {
     row.appendChild(el("span", "mesh-handle mono", p.machine));
     row.appendChild(el("span", "mesh-role", p.role || ""));
     row.appendChild(el("span", "meta", state + (p.queued ? ` · ${p.queued} queued` : "")));
+    if (!isMirror) {
+      const revoke = el("button", "mesh-kick", "×");
+      revoke.title = `unlink ${p.machine}: drop its members and its mirror`;
+      revoke.addEventListener("click", async () => {
+        if (!confirm(
+          `Unlink guest '${p.machine}'? Its members leave the mesh and its ` +
+          "mirror is dropped."
+        )) return;
+        const resp = await api(
+          `/api/mesh/${encodeURIComponent(info.name)}/guests/${encodeURIComponent(p.machine)}`,
+          { method: "DELETE" }
+        );
+        if (!resp.ok) {
+          const doc = await resp.json().catch(() => ({}));
+          alert(doc.error || `HTTP ${resp.status}`);
+          return;
+        }
+        refreshMeshView();
+        refreshMeshList();
+      });
+      row.appendChild(revoke);
+    }
     fed.appendChild(row);
   }
   if (!isMirror) {
-    // only the primary mints invites (v2: the owner controls the roster)
+    // Joins are requests: the owner admits them. A ticket is only a way to
+    // pre-approve one, for automation that cannot wait for a human.
+    for (const r of info.requests || []) {
+      const row = el("div", "mesh-member");
+      row.appendChild(el("span", "dot starting"));
+      row.appendChild(el("span", "mesh-handle", r.handle));
+      row.appendChild(el("span", "mesh-role", r.role || ""));
+      row.appendChild(el("span", "mesh-session mono", `${r.machine}/${r.session}`));
+      row.appendChild(el("span", "meta", "wants to join"));
+      for (const [label, verb, cls] of [
+        ["Approve", "approve", "approve"], ["Deny", "deny", "archive"],
+      ]) {
+        const btn = el("button", `wf-btn ${cls}`, label);
+        btn.addEventListener("click", async () => {
+          const resp = await api(
+            `/api/mesh/${encodeURIComponent(info.name)}/requests/` +
+            `${encodeURIComponent(r.id)}/${verb}`,
+            { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+          );
+          const doc = await resp.json().catch(() => ({}));
+          if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
+          if (verb === "approve" && doc.delivered === false) {
+            alert(`admitted '${doc.handle}' — ${doc.machine} is unreachable, ` +
+                  "the grant is queued and retried");
+          }
+          refreshMeshView();
+          refreshMeshList();
+        });
+        row.appendChild(btn);
+      }
+      fed.appendChild(row);
+    }
     const fedRow = el("div", "mesh-add");
-    const inviteBtn = el("button", "wf-btn option", "Invite peer…");
+    const inviteBtn = el("button", "wf-btn option", "Mint invite ticket…");
     const codeOut = document.createElement("input");
     codeOut.readOnly = true;
-    codeOut.placeholder = "invite code appears here — copy to the peer machine";
+    codeOut.placeholder =
+      "single-use ticket appears here — it pre-approves one join";
     // The view is rebuilt by the 2s poll, which can detach this input while
     // the invite request is in flight — so the code lives in meshInviteCodes
     // (module state) and every rebuild re-renders it from there.
@@ -1417,28 +1593,11 @@ function renderMesh(info, history) {
     });
     fedRow.append(inviteBtn, codeOut);
     fed.appendChild(fedRow);
+    fed.appendChild(el(
+      "p", "wf-note",
+      `redeemed there with: claunch mesh join ${info.name}@${selfMachine || "<this-machine>"} --code <ticket>`
+    ));
   }
-  const linkRow = el("div", "mesh-add");
-  const codeIn = document.createElement("input");
-  codeIn.placeholder = "paste an invite code from another machine";
-  const linkBtn = el("button", "wf-btn option", "Link");
-  linkBtn.addEventListener("click", async () => {
-    const code = codeIn.value.trim();
-    if (!code) return;
-    const resp = await api("/api/mesh/link", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ code }),
-    });
-    const doc = await resp.json().catch(() => ({}));
-    if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
-    codeIn.value = "";
-    codeIn.blur();
-    refreshMeshView();
-    refreshMeshList();
-  });
-  linkRow.append(codeIn, linkBtn);
-  fed.appendChild(linkRow);
   view.appendChild(fed);
   const polBox = renderMeshPolicy(info);
   if (isMirror) {
@@ -1461,7 +1620,9 @@ function renderMesh(info, history) {
     opt.textContent = "from: operator (you)";
     from.appendChild(opt);
   }
-  for (const m of members) {
+  // Only sessions this daemon actually hosts: speaking as a member on another
+  // machine is impersonation, and the primary rejects it.
+  for (const m of members.filter((m) => isLocalMember(m))) {
     const opt = document.createElement("option");
     opt.value = m.handle;
     opt.textContent = `from: ${m.handle}`;
@@ -1516,6 +1677,13 @@ function renderMesh(info, history) {
     }
     text.value = "";
     text.blur();
+    if (doc.queued) {
+      // mirror with its primary unreachable: durably queued, not yet in the log
+      alert(`queued ${doc.id} — the primary daemon (${info.primary}) is ` +
+            "unreachable; it will be forwarded, in order, on reconnect");
+    } else if ((doc.queued_remote || []).length) {
+      alert(`sent — queued for unreachable machines: ${doc.queued_remote.join(", ")}`);
+    }
     refreshMeshView();
   });
   const row = el("div", "mesh-send-row");

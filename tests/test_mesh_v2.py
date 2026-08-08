@@ -4,9 +4,9 @@ Scenario matrix, derived from docs/mesh-design.md "Federation v2":
 
 A. Link & roles
    A1 only the primary mints invites (a mirror refuses)
-   A2 link creates a mirror with a roster+log+policy snapshot and an
-      asymmetric credential pair; invites are single-use
-   A3 link is refused when a local mesh with the invite's name exists
+   A2 the first join from a machine creates a mirror with a roster+log+
+      policy snapshot and an asymmetric credential pair
+   A3 a join address is refused when a local mesh of that name exists
    A4 a mirror refuses policy edits; its name is occupied (create conflicts)
    A5 primary and mirror state survive a reload (guests/cursors; primary/
       link/roster/log/outbox)
@@ -115,9 +115,22 @@ async def _wait_for(cond, what: str, timeout: float = 15.0) -> None:
 # in-process wiring: the /peer/* HTTP layer, minus the HTTP
 # --------------------------------------------------------------------------- #
 def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
-    if path == "/peer/mesh/link":
-        return mm.peer_link_accept(
-            body["mesh"], body["machine"], body["token"], body["reply_token"]
+    if path == "/peer/mesh/join_request":
+        return mm.peer_join_request_accept(
+            body["mesh"], body["machine"],
+            body.get("session") or "", body.get("handle") or "",
+            body.get("role") or "", body.get("reply_token") or "",
+            body.get("code") or "",
+        )
+    if path == "/peer/mesh/grant":
+        return mm.peer_grant_accept(
+            body["mesh"], body["machine"],
+            body.get("request_id") or "", body.get("token") or "",
+            bool(body.get("denied")), body.get("grant"),
+        )
+    if path == "/peer/mesh/unlink":
+        return mm.peer_unlink_accept(
+            body["mesh"], body["machine"], body.get("token") or ""
         )
     if path == "/peer/mesh/join":
         return mm.peer_join_accept(
@@ -176,8 +189,10 @@ async def _linked_pair(mgr, tmp_path, *, sessions=("sa", "sb")):
         mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
     mm_a.create("m")
     await mm_a.join("m", sessions[0], handle="alice")
-    await mm_b.link(mm_a.invite("m")["code"])
-    await mm_b.join("m", sessions[1], handle="bob")
+    # phase 6: the mirror is a side effect of the first member's join
+    await mm_b.join(
+        "m@pcA", sessions[1], handle="bob", code=mm_a.invite("m")["code"]
+    )
     return mm_a, mm_b
 
 
@@ -192,16 +207,16 @@ def test_link_creates_mirror_with_snapshot(home, tmp_path):
         mm_a = MeshManager(mgr, settle=0.05, root=tmp_path / "meshA")
         mm_b = MeshManager(mgr, settle=0.05, root=tmp_path / "meshB")
         _wire({"pcA": mm_a, "pcB": mm_b})
-        mgr.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path)))
-        mgr.create(SessionDef(name="sa2", harness="py", cwd=str(tmp_path)))
+        for s in ("sa", "sa2", "sb"):
+            mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
         mm_a.create("m")
         await mm_a.join("m", "sa", handle="alice")
         await mm_a.join("m", "sa2", handle="amy")
         await mm_a.send("m", "alice", "amy", "pre-link history")
 
         code = mm_a.invite("m")["code"]
-        result = await mm_b.link(code)
-        assert result["peer"] == "pcA"
+        member = await mm_b.join("m@pcA", "sb", handle="bob", code=code)
+        assert member.handle == "bob"
 
         mesh_a, mesh_b = mm_a.get("m"), mm_b.get("m")
         # roles: A owns, B mirrors
@@ -212,6 +227,7 @@ def test_link_creates_mirror_with_snapshot(home, tmp_path):
         # asymmetric credential pair
         assert mesh_a.guests["pcB"]["token_in"] == mesh_b.link["token_out"]
         assert mesh_a.guests["pcB"]["token_out"] == mesh_b.link["token_in"]
+        # the guest's cursor starts past the snapshot it was handed
         assert mesh_a.guest_cursors["pcB"] == 1
         # A1: the mirror cannot mint invites, the primary can
         with pytest.raises(MeshError):
@@ -219,16 +235,13 @@ def test_link_creates_mirror_with_snapshot(home, tmp_path):
         # A4: the mirror refuses policy edits
         with pytest.raises(MeshError):
             mm_b.set_policy("m", {"heartbeat": {"enabled": True}})
-        # A2: invites are single-use
-        with pytest.raises(MeshError):
-            await mm_b.link(code)
 
         await mgr.shutdown_all()
 
     asyncio.run(run())
 
 
-def test_link_refused_on_name_collision(home, tmp_path):
+def test_join_address_refused_on_name_collision(home, tmp_path):
     _register_py_harness()
 
     async def run():
@@ -240,7 +253,7 @@ def test_link_refused_on_name_collision(home, tmp_path):
         code = mm_a.invite("m")["code"]
         mm_b.create("m")  # a pre-existing local mesh of the same name
         with pytest.raises(MeshConflict):
-            await mm_b.link(code)
+            await mm_b.join("m@pcA", "sb", handle="bob", code=code)
         # A3: never merged — B's mesh is still its own, unlinked
         assert mm_b.get("m").primary == ""
         await mgr.shutdown_all()
@@ -443,10 +456,10 @@ def test_guest_to_guest_via_hub_three_daemons(home, tmp_path):
             mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
         mm_a.create("m")
         await mm_a.join("m", "sa", handle="alice")
-        await mm_b.link(mm_a.invite("m")["code"])
-        await mm_c.link(mm_a.invite("m")["code"])
-        await mm_b.join("m", "sb", handle="bob")
-        await mm_c.join("m", "sc", handle="carol")
+        await mm_b.join("m@pcA", "sb", handle="bob",
+                        code=mm_a.invite("m")["code"])
+        await mm_c.join("m@pcA", "sc", handle="carol",
+                        code=mm_a.invite("m")["code"])
 
         # every daemon sees the full roster (via the hub, no B-C link)
         for mm in (mm_a, mm_b, mm_c):
@@ -730,8 +743,8 @@ def test_stall_warning_reaches_remote_leader(home, tmp_path):
             mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
         mm_a.create("m")
         await mm_a.join("m", "sw", handle="worker_1")
-        await mm_b.link(mm_a.invite("m")["code"])
-        await mm_b.join("m", "sl", handle="leader")
+        await mm_b.join("m@pcA", "sl", handle="leader",
+                        code=mm_a.invite("m")["code"])
         mesh_a, mesh_b = mm_a.get("m"), mm_b.get("m")
         mm_a.set_policy("m", {"stall_warn": {"enabled": True, "warn_secs": 1.0}})
 

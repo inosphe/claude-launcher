@@ -32,9 +32,19 @@
     <div id="mesh-panel">
       <h3>Mesh</h3>
       <ul id="mesh-list"></ul>
+      <ul id="mesh-outgoing" class="hidden"></ul>
       <form id="new-mesh">
-        <input name="name" placeholder="new mesh name" autocomplete="off">
+        <input name="name" placeholder="new mesh, or mesh@machine to join"
+               autocomplete="off">
         <button type="submit">Create</button>
+        <div id="mesh-join-extra" class="hidden">
+          <select id="mesh-join-session"></select>
+          <input id="mesh-join-handle" placeholder="handle (optional)"
+                 autocomplete="off">
+          <input id="mesh-join-code" placeholder="invite code (optional)"
+                 autocomplete="off">
+        </div>
+        <p id="mesh-join-hint" class="hidden"></p>
         <p id="mesh-error" class="error hidden"></p>
       </form>
     </div>

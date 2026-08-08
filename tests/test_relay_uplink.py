@@ -76,6 +76,57 @@ def test_decode_ignores_unknown_type():
     assert w.decode_payload(b"") is None
 
 
+def test_peer_list_roundtrip():
+    room = bytes(16)
+    frame = w.peer_list(room, 42)
+    _r, payload = w.FrameDecoder().feed(frame)[0]
+    assert payload == bytes([w.PEER_LIST]) + struct.pack(">I", 42)
+
+    # relay-side reply: [req u32][count u8]([len u8][name])*
+    body = struct.pack(">I", 42) + bytes([2, 3]) + b"pca" + bytes([7]) + b"work-pc"
+    m = w.decode_payload(bytes([w.PEER_LIST_OK]) + body)
+    assert m.kind == w.PEER_LIST_OK and m.req == 42
+    assert m.names == ("pca", "work-pc")
+    # empty list (peering disabled on the relay)
+    m0 = w.decode_payload(bytes([w.PEER_LIST_OK]) + struct.pack(">I", 7) + b"\x00")
+    assert m0.names == ()
+    # truncated name table → the whole message is dropped, not misparsed
+    trunc = struct.pack(">I", 9) + bytes([2, 3]) + b"pc"
+    assert w.decode_payload(bytes([w.PEER_LIST_OK]) + trunc) is None
+
+
+def test_uplink_peer_list_requires_cap():
+    async def run():
+        up = RelayUplink(url="ws://x", token="t", name="pc",
+                         local_host="127.0.0.1", local_port=1)
+        up._ws = _FakeWS()
+        up.connected = True
+        up.peering = True
+        up.listing = False  # old relay: CAP_PEERING only
+        try:
+            await up.peer_list()
+        except Exception as exc:
+            assert "peer listing" in str(exc)
+        else:
+            raise AssertionError("peer_list should refuse without CAP_PEER_LIST")
+
+        # with the cap: request goes out, the reply resolves the future
+        up.listing = True
+        task = asyncio.ensure_future(up.peer_list())
+        room, sent = await up._ws.next_sent()
+        assert sent.kind == w.PEER_LIST
+        reply = (
+            bytes([w.PEER_LIST_OK])
+            + struct.pack(">I", sent.req)
+            + bytes([1, 3])
+            + b"pcb"
+        )
+        await up._handle(reply)
+        assert await asyncio.wait_for(task, 2.0) == ["pcb"]
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # fake WebSocket + helpers
 # --------------------------------------------------------------------------- #
