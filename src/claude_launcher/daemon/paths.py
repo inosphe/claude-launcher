@@ -4,17 +4,56 @@ Everything machine-local the daemon needs (its address file, auth token, lock,
 session definitions, per-session logs) lives under ``<launcher home>/daemon/``.
 None of this belongs in ``~/.claunch.yaml`` — that file is synced between
 machines and holds *settings*, while these are per-machine *runtime state*.
+
+Named instances (tmux ``-L`` style): setting ``CLAUNCH_DAEMON=<name>`` (or
+``claunch -L <name>``) selects a separate daemon *instance* whose entire
+runtime state lives under ``<launcher home>/daemons/<name>/`` — its own
+address file, token, singleton lock, sessions and meshes. Instances are fully
+independent servers; the default (unnamed) instance keeps the classic
+``daemon/`` directory, so existing setups are untouched.
 """
 
 from __future__ import annotations
 
+import os
+import re
 from pathlib import Path
 
 from .. import config
 
+#: Selects the daemon instance, tmux's ``-L socket-name`` analog. Empty/unset
+#: means the default instance.
+INSTANCE_ENV = "CLAUNCH_DAEMON"
+
+_INSTANCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
+
+
+def validate_instance(name: str) -> str:
+    """Return ``name`` if it is a safe instance name, else raise ValueError.
+
+    The name becomes a directory component, so anything that could traverse
+    (separators, leading dots) or confuse tooling is rejected outright.
+    """
+    if not _INSTANCE_RE.match(name):
+        raise ValueError(
+            f"bad daemon instance name {name!r} (use letters, digits, '-', '_', "
+            "'.'; must start with a letter or digit, max 64 chars)"
+        )
+    return name
+
+
+def instance() -> str:
+    """The active daemon instance name ('' = the default instance)."""
+    name = os.environ.get(INSTANCE_ENV, "").strip()
+    return validate_instance(name) if name else ""
+
 
 def daemon_dir() -> Path:
-    """Root for all daemon runtime state (``~/.claude-launcher/daemon``)."""
+    """Root for this instance's runtime state (``~/.claude-launcher/daemon``,
+    or ``~/.claude-launcher/daemons/<name>`` for a named instance)."""
+    name = instance()
+    if name:
+        return config.launcher_home() / "daemons" / name
     return config.launcher_home() / "daemon"
 
 

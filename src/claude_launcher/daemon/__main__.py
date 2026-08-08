@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 import time
 
@@ -159,8 +160,16 @@ def _start_uplink(actual_port: int):
     """
     from . import relay_uplink
 
+    cfg = store.relay_config()
+    # A named instance sharing the config file with its siblings must not also
+    # share their relay identity — suffix the default backend name so every
+    # instance registers under its own directory entry.
+    if paths.instance() and not (os.environ.get("CLAUNCH_RELAY_NAME") or cfg.get("name")):
+        import socket
+
+        cfg["name"] = f"{socket.gethostname()}-{paths.instance()}"
     uplink = relay_uplink.config_from_env_and_dict(
-        store.relay_config(), local_host="127.0.0.1", local_port=actual_port
+        cfg, local_host="127.0.0.1", local_port=actual_port
     )
     if uplink is None:
         return None, None
@@ -205,7 +214,17 @@ def main(argv=None) -> int:
         action="store_true",
         help="log to stderr too (for debugging; the CLI starts the daemon detached)",
     )
+    parser.add_argument(
+        "--name",
+        metavar="NAME",
+        help="run as the named daemon instance (tmux -L style; also settable "
+        "via the CLAUNCH_DAEMON env var)",
+    )
     args = parser.parse_args(argv)
+    if args.name:
+        # Into the environment (not a variable) so every paths.instance()
+        # call — and any child process — sees the same instance.
+        os.environ[paths.INSTANCE_ENV] = paths.validate_instance(args.name)
     _setup_logging(args.foreground)
 
     lock = runtime_state.SingletonLock()
@@ -219,6 +238,12 @@ def main(argv=None) -> int:
     cfg = store.daemon_config()
     host = str(cfg["host"])
     port = int(cfg["port"])
+    if paths.instance():
+        # Named instances share the config file with the default daemon, so
+        # its fixed port would collide. They bind an ephemeral port instead
+        # (their daemon.json is the discovery channel) unless one is pinned.
+        port = int(os.environ.get("CLAUNCH_DAEMON_PORT") or 0)
+        log.info("daemon instance %r (state: %s)", paths.instance(), paths.daemon_dir())
     try:
         return asyncio.run(_serve(host, port, cfg))
     except KeyboardInterrupt:

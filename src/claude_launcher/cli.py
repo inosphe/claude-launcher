@@ -7,6 +7,7 @@ This module only parses arguments and formats output; all behaviour lives in the
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -37,6 +38,7 @@ from . import (
 from .cflow.engine import CflowError
 from .cflow.model import WorkflowError
 from .cflow.state import StateError as CflowStateError
+from .daemon import paths as daemon_paths
 from .daemon_client import DaemonClientError
 from .credentials import CredentialsError
 from .lineage import LineageError
@@ -534,6 +536,14 @@ def build_parser() -> argparse.ArgumentParser:
         description="Run Claude Code under isolated, per-profile login tokens and config.",
     )
     parser.add_argument("--version", action="version", version=f"claude-launcher {__version__}")
+    parser.add_argument(
+        "-L",
+        "--instance",
+        metavar="NAME",
+        help="target the named daemon instance (tmux -L style; every daemon/"
+        "session/mesh command then talks to that instance's server — equivalent "
+        "to setting CLAUNCH_DAEMON=NAME)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_create = sub.add_parser("create", help="create a new profile (seeds global config)")
@@ -756,6 +766,16 @@ def main(argv: Optional[List[str]] = None) -> int:
     _harden_console()
     parser = build_parser()
     args = parser.parse_args(argv)
+    if getattr(args, "instance", None):
+        try:
+            # Into the environment so daemon paths, auto-started daemons and
+            # any spawned children all target the same instance.
+            os.environ[daemon_paths.INSTANCE_ENV] = daemon_paths.validate_instance(
+                args.instance
+            )
+        except ValueError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     try:
         # Read the source of truth and reconcile local state (migrate any legacy
         # config, materialize declared-but-missing profile dirs) before running.

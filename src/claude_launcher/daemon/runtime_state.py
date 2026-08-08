@@ -26,6 +26,7 @@ def write_daemon_json(host: str, port: int) -> None:
         "pid": os.getpid(),
         "host": host,
         "port": port,
+        "instance": paths.instance() or None,
         "version": __version__,
         "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
