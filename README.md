@@ -111,7 +111,9 @@ claunch usage work      # show this profile's subscription usage
 Plus the **[managed-session commands](#managed-sessions-tmux-style-daemon)** —
 `new-session`, `attach`, `sessions`, `send-keys`, `capture-pane`, `wait-for`,
 `kill-session`, `resize`, `daemon ...`, `web` — which run harnesses in
-daemon-owned PTYs instead of the current terminal, and the
+daemon-owned PTYs instead of the current terminal, the
+**[mesh commands](#mesh-session-to-session-messaging)** (`claunch mesh ...`)
+for session-to-session (and cross-machine) agent messaging, and the
 **[cflow commands](#cflow-declarative-agent-workflows)** (`claunch cflow ...`)
 for declarative agent workflows with human gates.
 
@@ -814,8 +816,14 @@ claunch mesh join dev --session alpha --as leader     # or from inside a
 claunch mesh join dev --as worker_1                   # session: $CLAUNCH_SESSION
 claunch mesh send dev '*' "kickoff: read the plan in docs/"   # broadcast
 claunch mesh send dev worker_1 "build the thing"              # direct
-claunch mesh members dev
-claunch mesh history dev
+claunch mesh send dev leader "done" --type ack --reply-to msg-a1b2c3d4e5f6
+claunch mesh send dev worker_1,worker_2 "sprint goal"     --section worker_1="you take the login API"     --section worker_2="you take token refresh"  # batch: each gets own slice
+claunch mesh members dev          # members + peers + reachability
+claunch mesh history dev          # ids, [type] tags, [re <id>] threading
+claunch mesh policy dev --set heartbeat.enabled=true   # nudge policies
+claunch mesh invite dev           # cross-machine: mint an invite code
+claunch mesh link <code>          # ...redeem it on the other machine
+claunch mesh install --project .  # register MCP tools + /mesh skill
 ```
 
 - Inside a session, `join`/`send`/`leave` need no identity flags —
