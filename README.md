@@ -868,9 +868,15 @@ claunch mesh install --project .  # register MCP tools + /mesh skill
   `machine-generated, not typed by the user`) listing sender, body and how to
   reply. Undelivered messages persist (per-member cursors survive daemon
   restarts) and land after `respawn` if the member's session was down.
-- The web UI has a **Mesh** panel: create meshes, enrol sessions with
-  handle/role, watch per-member reachability and pending counts, read the
-  message log, and send as the human operator.
+- The web UI has a **Mesh** panel. Sidebar: create a mesh, or type
+  `mesh@machine` (or paste an invite code — it is decoded in place) to join
+  a remote one with a session/handle picker; meshes carry a `mirror` badge
+  and a pending join-request count, and your own outbound requests are
+  listed with a cancel. Mesh page: enrol sessions with handle/role, watch
+  per-member reachability and pending counts, read the log, send as the
+  human operator — and, on a mesh you own, approve/deny join requests,
+  mint invite tickets, and revoke guest machines; a mirror shows its
+  primary and keeps roster/policy controls read-only.
 - Every session/mesh command prints a **relay status** line
   (`relay: connected as 'work-pc'` / `relay: DISCONNECTED ...`), because a
   mesh can only span machines while the relay uplink is registered.
