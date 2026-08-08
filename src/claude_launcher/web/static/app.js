@@ -27,9 +27,27 @@ function url(path) {
    invalidates it. The pasted token itself stays valid until rotated —
    remember it in localStorage and re-login transparently on 401, so the
    paste-the-token prompt only ever shows for a fresh browser or after
-   `claunch daemon token --rotate`. */
-const TOKEN_KEY = "claunch_token";
+   `claunch daemon token --rotate`.
+
+   The key is scoped by BASE because several daemons reach the browser through
+   one relay origin ("/t/<name>/" each) and therefore share one localStorage:
+   under a single global key each tunnel overwrites its siblings' token, and
+   the next daemon restart makes them re-prompt with a token that isn't
+   theirs. (Their session cookies don't collide — the relay rewrites Path to
+   the tunnel prefix.) */
+const TOKEN_KEY = `claunch_token:${BASE}`;
 let reloginPromise = null;
+
+/* One-shot migration off the old unscoped key: whichever tunnel loads first
+   inherits it, the rest paste their token once more. */
+(function migrateLegacyToken() {
+  const legacy = localStorage.getItem("claunch_token");
+  if (legacy === null) return;
+  localStorage.removeItem("claunch_token");
+  if (localStorage.getItem(TOKEN_KEY) === null) {
+    localStorage.setItem(TOKEN_KEY, legacy);
+  }
+})();
 
 async function tryStoredLogin() {
   const token = localStorage.getItem(TOKEN_KEY);
