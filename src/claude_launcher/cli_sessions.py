@@ -271,6 +271,8 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             print("daemon is not running")
             return 1
         print(f"pid:      {info.get('pid')}")
+        if info.get("instance"):
+            print(f"instance: {info.get('instance')}")
         print(f"address:  http://{info.get('host')}:{info.get('port')}")
         print(f"version:  {info.get('version')}")
         print(f"started:  {info.get('started_at')}")

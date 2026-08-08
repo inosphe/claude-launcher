@@ -570,6 +570,28 @@ without a human at the keyboard.
 | `daemon relay [KEY [VALUE]]` | Show or set the relay uplink (reach this daemon from outside the LAN — see below). |
 | `web [--open]`        | Print (and open) the web UI URL. |
 
+### Named daemon instances (tmux `-L`)
+
+Like tmux's `-L socket-name`, `claunch -L NAME ...` (or `CLAUNCH_DAEMON=NAME`)
+targets a separate **daemon instance**: an independent server with its own
+state directory (`~/.claude-launcher/daemons/NAME/` — sessions, meshes, auth
+token, lock), its own ephemeral port (discovered via its `daemon.json`;
+pin one with `CLAUNCH_DAEMON_PORT`), and its own relay identity (defaults to
+`<hostname>-NAME`; override with `CLAUNCH_RELAY_NAME`). The default instance
+keeps the classic `~/.claude-launcher/daemon/` directory and fixed port, so
+nothing changes unless you opt in.
+
+```bash
+claunch -L test new-session -s scratch   # auto-starts the 'test' instance daemon
+claunch -L test sessions                 # separate world from the default daemon
+claunch -L test daemon stop
+```
+
+Instances make multi-endpoint setups testable on one machine: two named
+instances are two full daemons that can join the same mesh through a relay,
+exactly like two hosts would (`tests/test_multi_daemon_mesh.py` drives that
+end-to-end).
+
 ### Reaching the daemon from outside the LAN (relay uplink)
 
 The web UI normally binds loopback. To reach it from your phone or another

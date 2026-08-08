@@ -377,12 +377,14 @@ def config_from_env_and_dict(cfg: dict, *, local_host: str, local_port: int
                              ) -> Optional[RelayUplink]:
     """Build an uplink from a ``relay`` config block, or None if not enabled.
 
-    Secrets prefer the environment so they need not live in the config file:
-    ``CLAUNCH_RELAY_TOKEN`` overrides ``token``.
+    The environment overrides the config file: ``CLAUNCH_RELAY_TOKEN`` (a
+    secret that need not live on disk), plus ``CLAUNCH_RELAY_URL`` and
+    ``CLAUNCH_RELAY_NAME`` so a named daemon instance can be pointed at a
+    relay per-process while sharing the config file with its siblings.
     """
     if not isinstance(cfg, dict):
         return None
-    url = str(cfg.get("url") or "").strip()
+    url = (os.environ.get("CLAUNCH_RELAY_URL") or str(cfg.get("url") or "")).strip()
     if not url:
         return None
     token = os.environ.get("CLAUNCH_RELAY_TOKEN") or str(cfg.get("token") or "")
@@ -390,7 +392,7 @@ def config_from_env_and_dict(cfg: dict, *, local_host: str, local_port: int
         log.warning("relay uplink configured but no token (set CLAUNCH_RELAY_TOKEN "
                     "or daemon.relay.token) — uplink disabled")
         return None
-    name = str(cfg.get("name") or "").strip()
+    name = (os.environ.get("CLAUNCH_RELAY_NAME") or str(cfg.get("name") or "")).strip()
     if not name:
         import socket
 
