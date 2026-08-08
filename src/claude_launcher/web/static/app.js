@@ -1593,10 +1593,33 @@ function renderMesh(info, history) {
     });
     fedRow.append(inviteBtn, codeOut);
     fed.appendChild(fedRow);
-    fed.appendChild(el(
-      "p", "wf-note",
-      `redeemed there with: claunch mesh join ${info.name}@${selfMachine || "<this-machine>"} --code <ticket>`
-    ));
+    const cmdBase =
+      `claunch mesh join ${info.name}@${selfMachine || "<this-machine>"} --code`;
+    if (meshInviteCodes[info.name]) {
+      // the whole redeem command, ticket included — one click to carry over
+      const cmdRow = el("div", "mesh-add");
+      const cmd = document.createElement("input");
+      cmd.readOnly = true;
+      cmd.className = "mono";
+      cmd.value = `${cmdBase} ${meshInviteCodes[info.name]}`;
+      cmd.addEventListener("focus", () => cmd.select());
+      const copyBtn = el("button", "wf-btn option", "Copy command");
+      copyBtn.addEventListener("click", async () => {
+        try {
+          await navigator.clipboard.writeText(cmd.value);
+        } catch {
+          cmd.select();
+          document.execCommand("copy");
+        }
+        copyBtn.textContent = "Copied";
+      });
+      cmdRow.append(cmd, copyBtn);
+      fed.appendChild(cmdRow);
+    } else {
+      fed.appendChild(el(
+        "p", "wf-note", `redeemed there with: ${cmdBase} <ticket>`
+      ));
+    }
   }
   view.appendChild(fed);
   const polBox = renderMeshPolicy(info);
