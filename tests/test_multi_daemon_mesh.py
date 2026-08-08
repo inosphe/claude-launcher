@@ -190,11 +190,14 @@ def test_mesh_between_two_daemon_processes(home, tmp_path):
         ca.post("/api/mesh/fedmesh/members", {"session": "sa", "handle": "alice"})
         code = ca.post("/api/mesh/fedmesh/invite")["code"]
 
-        # daemon B redeems the invite over the relay bridge and joins bob
+        # bob joins fedmesh@pca from daemon B: one call over the relay bridge,
+        # redeeming the ticket, creates B's mirror and admits him
         cb.post("/api/sessions", {"name": "sb", "harness": "py", "cwd": str(tmp_path)})
-        linked = cb.post("/api/mesh/link", {"code": code})
-        assert linked["peer"] == "pca"
-        cb.post("/api/mesh/fedmesh/members", {"session": "sb", "handle": "bob"})
+        joined = cb.post(
+            "/api/mesh/fedmesh@pca/members",
+            {"session": "sb", "handle": "bob", "code": code},
+        )
+        assert joined["handle"] == "bob"
 
         def _member(client, handle):
             info = client.get("/api/mesh/fedmesh")

@@ -424,7 +424,21 @@ def test_mesh_api(home, tmp_path):
             resp = await client.post("/api/mesh/fed/invite", headers=bearer)
             assert resp.status == 400
             assert "relay" in (await resp.json())["error"]
-            resp = await client.post("/api/mesh/link", json={}, headers=bearer)
+            # joining a remote address needs the relay too (no link verb any
+            # more: membership is the only way in)
+            resp = await client.post(
+                "/api/mesh/elsewhere@pcX/members",
+                json={"session": "w1", "handle": "w1"},
+                headers=bearer,
+            )
+            assert resp.status == 400
+            # the approval surface exists and is scoped to the owner
+            resp = await client.get("/api/mesh/fed/invites", headers=bearer)
+            assert resp.status == 200
+            assert (await resp.json())["invites"] == []
+            resp = await client.post(
+                "/api/mesh/fed/requests/nope/approve", headers=bearer
+            )
             assert resp.status == 400
 
             # peer endpoints sit outside /api: no daemon auth needed, the
@@ -514,7 +528,7 @@ def test_batch_sections_and_reply_to(home, tmp_path):
 # federation v2 (primary/mirror) lives in tests/test_mesh_v2.py; only the
 # relay-identity precondition stays here
 # --------------------------------------------------------------------------- #
-def test_invite_and_link_require_relay_identity(home):
+def test_invite_and_remote_join_require_relay_identity(home):
     mgr = _manager()
     mm = MeshManager(mgr)
     mm.create("m")
@@ -522,8 +536,10 @@ def test_invite_and_link_require_relay_identity(home):
         mm.invite("m")  # no relay identity
 
     async def run():
+        # without a relay name this daemon has no address of its own, so a
+        # remote join has nowhere to send the grant back to
         with pytest.raises(MeshError):
-            await mm.link("whatever")
+            await mm.join("other@pcX", "s1", handle="w1")
 
     asyncio.run(run())
 

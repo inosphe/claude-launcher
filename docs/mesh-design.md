@@ -210,7 +210,8 @@ v2 keeps that goal but gives the mesh a single source of truth.
   meshes today). Holds the authoritative state: the member registry, THE
   message log (one id + sequence per message), the policy config and its
   only running engine, invite minting, and a delivery cursor per guest.
-- **Guest daemon** — linked by redeeming an invite. Holds a **mirror**: a
+- **Guest daemon** — linked by its first approved join (phase 6; the
+  original invite/link ceremony is retired). Holds a **mirror**: a
   synced copy of the roster + log (for its UI and agents to read), the
   terminal-injection delivery for its own local member sessions, and one
   durable upstream queue toward the primary.
@@ -240,9 +241,10 @@ unnecessary; message ids remain for idempotent redelivery.
 
 **Flows.**
 
-- *Link*: guest redeems the invite over the relay bridge, receives a
-  roster + log snapshot and a guest credential; the primary records the
-  guest machine and its cursor. The mirror records `primary: <machine>`.
+- *Link*: established by the first approved join from that machine (phase
+  6) — the guest receives a roster + log snapshot and a guest credential;
+  the primary records the guest machine and its cursor. The mirror records
+  `primary: <machine>`.
 - *Join (guest member)*: guest daemon forwards the join to the primary,
   which enforces handle uniqueness, records the member, fans the roster out
   to all guests; the guest injects the join briefing locally.
@@ -264,6 +266,77 @@ primary-issued guest credential), guest-side `peer_cursors`, the origin
 gate, guest-minted invites, accidental same-name merge, per-replica policy
 engines. Existing v1 federation state is dropped, not migrated (the feature
 was experimental).
+
+## Membership-first joining (phase 6 — implemented)
+
+Field use of v2 showed the remaining conceptual bug is the *establishment*
+layer: the invite targets a **daemon**, but what the user means to connect
+is a **session**. The `invite → link → join` three-step exposes plumbing
+(daemon pairing, empty mirrors) as a first-class ceremony, requires humans
+to carry opaque codes between machines that already share an authenticated
+relay namespace, and shipped with no lifecycle at all (no unlink/revoke, no
+invite expiry, orphan mirrors after a primary-side delete). Phase 6 replaces
+the ceremony; everything underneath (hub sequencing, mirror sync, outbox,
+policy engine) is untouched.
+
+**Aligned decisions.**
+
+1. *Join is the only first-class verb.* A mesh has one global address,
+   `name@machine` (the primary's relay name): `claunch mesh join dev@pca
+   --as worker_b` from any relay-connected daemon. Daemon pairing and
+   mirror creation happen underneath, on the first join from that machine.
+2. *Codeless joins are pended for manual approval.* The primary's operator
+   sees join requests (web box + `mesh requests`/`approve`/`deny` CLI) and
+   decides; the subject of approval is the requesting **machine** (its
+   relay identity) plus the proposed member. A machine allowlist can come
+   later as a convenience; it is not the default.
+3. *Invite codes survive only as pre-approval tickets.* `mesh invite`
+   mints a ticket that lets `mesh join dev@pca --code X` skip the pending
+   queue (unattended/automation path). Tickets get expiry plus list/revoke.
+4. *Links are persistent with explicit revocation.* Once a machine's first
+   member is approved, the link lives until revoked: `mesh guests` lists
+   linked machines, `mesh revoke <mesh> <machine>` removes the guest and
+   its members and notifies it (best-effort; a guest that can no longer
+   authenticate marks its mirror orphaned). Deleting a mesh on the primary
+   notifies guests so mirrors are dropped, not orphaned. Additional members
+   from an already-linked machine join without re-approval (the machine is
+   trusted; only handle uniqueness applies).
+
+**Flow (codeless).** Guest daemon has no mirror for `dev@pca` → sends a
+join *request* (mesh, machine, session, handle, role, guest reply-token) →
+primary queues it pending → operator approves → primary registers the guest
+link, mints the credential pair, and calls back over the relay with the
+grant: tokens + roster/log/policy snapshot + the member record. The guest
+builds the mirror, records the member and injects the join briefing. If the
+guest is unreachable at approval time the grant retries with backoff; the
+requester sees "requested — waiting for approval by pca" meanwhile. With a
+`--code` ticket the same request is granted synchronously — no pending.
+
+**UI.** The mesh page's "Invite peer…" box became a **Join requests**
+approval box on the primary (approve/deny per request), with ticket minting
+demoted to a secondary control and a per-guest revoke. The sidebar's mesh
+field takes either a new name (create) or `mesh@machine` (join, with an
+optional ticket), and lists our own outstanding outbound requests. Mirrors
+show no establishment controls at all.
+
+**Shipped surface.**
+
+- CLI: `mesh join MESH[@MACHINE] [--code X]`, `mesh requests [MESH]
+  [--cancel ID]`, `mesh approve|deny MESH ID`, `mesh revoke MESH MACHINE`,
+  `mesh invite MESH [--ls|--revoke PREFIX]`. `mesh link` is gone.
+- API: `POST /api/mesh/{mesh|mesh@machine}/members` (201 admitted / 202
+  pending), `GET|DELETE /api/mesh/{mesh}/invites[/{prefix}]`,
+  `POST /api/mesh/{mesh}/requests/{id}/approve|deny`,
+  `DELETE /api/mesh/{mesh}/guests/{machine}`,
+  `DELETE /api/mesh/outgoing/{id}`. `POST /api/mesh/link` is gone.
+- Peer: `/peer/mesh/join_request`, `/peer/mesh/grant`, `/peer/mesh/unlink`
+  replace `/peer/mesh/link`.
+- Durability: the guest persists outstanding outbound requests in
+  `outgoing_joins.json`; the primary persists pending requests and
+  undelivered grants in `mesh.json` and retries grants from the worker.
+- Hardening: the grant is addressed to the *claimed* machine name over the
+  relay, so a spoofed request cannot receive credentials; the primary
+  refuses to send *as* a member that is not its own without `external`.
 
 ## Delivery pipeline
 
@@ -305,8 +378,16 @@ claunch mesh leave <mesh> [--session NAME | --as HANDLE]
 claunch mesh send <mesh> <to|*> <text...>       # sender = $CLAUNCH_SESSION
 claunch mesh members <mesh>
 claunch mesh history <mesh> [-n N]
-claunch mesh invite <mesh>                      # mint a code for a peer daemon
-claunch mesh link <code>                        # redeem it on the other machine
+```
+
+Cross-machine verbs (phase 6, "Membership-first joining" above):
+
+```
+claunch mesh join <mesh>@<machine> [--code TICKET]
+claunch mesh requests [<mesh>] [--cancel ID]
+claunch mesh approve|deny <mesh> <request-id>
+claunch mesh invite <mesh> [--ls | --revoke PREFIX]
+claunch mesh revoke <mesh> <machine>
 ```
 
 `join`/`send`/`leave` default the session to `$CLAUNCH_SESSION` so an agent
@@ -376,3 +457,8 @@ in `mesh.json` (`policy`); timers are in-memory and restart with the daemon.
 5. **Federation v2** (done): primary/mirror redesign — see "Federation v2"
    above. Retires the symmetric model of phase 2; scenario-derived tests in
    `tests/test_mesh_v2.py` (TDD) plus the multi-daemon e2e.
+6. **Membership-first joining** (done): `mesh join name@machine` as the
+   only establishment verb — codeless requests pend for approval, invite
+   codes demoted to pre-approval tickets, persistent links with explicit
+   revoke and guest management. Scenario-derived tests in
+   `tests/test_mesh_join.py` (TDD). See "Membership-first joining" above.

@@ -85,14 +85,29 @@ def _cmd_join(args: argparse.Namespace) -> int:
         return 1
     client = daemon_client.ensure_running()
     body = {"session": session, "handle": args.handle or "", "role": args.role or ""}
+    if args.code:
+        body["code"] = args.code
     member = client.post(f"/api/mesh/{args.mesh}/members", body)
+    if member.get("pending"):
+        # codeless remote join: the primary's operator has to approve it
+        print(
+            f"requested to join mesh {member['mesh']!r} on {member['primary']!r} "
+            f"-- waiting for approval (request {member['request_id']})"
+        )
+        print(
+            "the operator there approves with: claunch mesh approve "
+            f"{member['mesh']} <id>   |   track: claunch mesh requests"
+        )
+        _print_relay(client.get("/api/daemon").get("relay"))
+        return 0
+    local = args.mesh.split("@")[0]  # 'dev@pca' is mounted locally as 'dev'
     print(
-        f"joined mesh {args.mesh!r} as {member['handle']!r} "
+        f"joined mesh {local!r} as {member['handle']!r} "
         f"(role: {member['role']}, session: {member['session']})"
     )
     print(
-        f"send: claunch mesh send {args.mesh} '*' \"...\"  |  "
-        f"members: claunch mesh members {args.mesh}"
+        f"send: claunch mesh send {local} '*' \"...\"  |  "
+        f"members: claunch mesh members {local}"
     )
     _print_relay(client.get("/api/daemon").get("relay"))
     return 0
@@ -182,27 +197,106 @@ def _cmd_send(args: argparse.Namespace) -> int:
 
 def _cmd_invite(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
+    if args.revoke:
+        result = client.delete(f"/api/mesh/{args.mesh}/invites/{args.revoke}")
+        print(f"revoked {result.get('revoked')} ticket(s) matching {args.revoke!r}")
+        return 0
+    if args.ls:
+        tickets = client.get(f"/api/mesh/{args.mesh}/invites").get("invites", [])
+        if not tickets:
+            print(f"mesh {args.mesh!r} has no outstanding invite tickets")
+        for t in tickets:
+            print(
+                f"{t['prefix']:<10} minted {t['created_at']}  "
+                f"expires in {int(t['expires_in'] // 60)}m"
+            )
+        return 0
     result = client.post(f"/api/mesh/{args.mesh}/invite", {})
     print(
-        f"invite code for mesh {args.mesh!r} (machine {result.get('machine')!r}):"
+        f"invite ticket for mesh {args.mesh!r} (machine {result.get('machine')!r}), "
+        f"single-use, valid {int(float(result.get('expires_in') or 0) // 3600)}h:"
     )
     print(result.get("code"))
     print(
-        "redeem on the peer machine with: claunch mesh link <code>",
+        "a ticket only pre-approves the join -- redeem it on the other machine "
+        f"with: claunch mesh join {args.mesh}@{result.get('machine')} "
+        "--code <code>",
         file=sys.stderr,
     )
     _print_relay(result.get("relay"))
     return 0
 
 
-def _cmd_link(args: argparse.Namespace) -> int:
+def _cmd_requests(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
-    result = client.post("/api/mesh/link", {"code": args.code})
+    if args.cancel:
+        result = client.delete(f"/api/mesh/outgoing/{args.cancel}")
+        print(f"cancelled outgoing join request {result.get('request_id')}")
+        print(
+            "note: the primary's operator still sees the request -- ask them "
+            "to deny it",
+            file=sys.stderr,
+        )
+        return 0
+    payload = client.get("/api/mesh")
+    shown = 0
+    for m in payload.get("meshes", []):
+        if args.mesh and m["name"] != args.mesh:
+            continue
+        for r in m.get("requests") or []:
+            shown += 1
+            print(
+                f"in   {m['name']:<12} {r['id']:<10} {r['handle']!r} "
+                f"({r['role']}) from {r['machine']}/{r['session']}  "
+                f"{r['requested_at']}"
+            )
+    for r in payload.get("outgoing", []):
+        if args.mesh and r["mesh"] != args.mesh:
+            continue
+        shown += 1
+        print(
+            f"out  {r['mesh']:<12} {r['request_id']:<10} as {r['handle']!r} "
+            f"-> {r['primary']}  {r['requested_at']}"
+        )
+    if not shown:
+        print("no pending join requests")
+    else:
+        print(
+            "approve/deny an inbound request: claunch mesh approve|deny MESH ID",
+            file=sys.stderr,
+        )
+    _print_relay(payload.get("relay"))
+    return 0
+
+
+def _cmd_approve(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    result = client.post(f"/api/mesh/{args.mesh}/requests/{args.request_id}/approve")
+    state = "granted" if result.get("delivered") else "granted (grant queued -- " \
+                                                       "retried until the guest is reachable)"
     print(
-        f"linked mesh {result.get('mesh')!r} with peer {result.get('peer')!r} "
-        f"({result.get('members')} member(s) total)"
+        f"approved {result['id']}: {result['handle']!r} on "
+        f"{result['machine']} is now a member -- {state}"
     )
-    _print_relay(result.get("relay"))
+    return 0
+
+
+def _cmd_deny(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    result = client.post(f"/api/mesh/{args.mesh}/requests/{args.request_id}/deny")
+    print(f"denied join request {result['id']}")
+    return 0
+
+
+def _cmd_revoke(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    result = client.delete(f"/api/mesh/{args.mesh}/guests/{args.machine}")
+    removed = result.get("removed_members") or []
+    print(
+        f"revoked guest {result['machine']!r} from mesh {args.mesh!r} "
+        f"({len(removed)} member(s) removed: {', '.join(removed) or '-'})"
+    )
+    print("its mirror is dropped as soon as that daemon is reachable")
     return 0
 
 
@@ -337,13 +431,20 @@ def register(sub) -> None:
     p.set_defaults(func=_cmd_rm)
 
     p = msub.add_parser(
-        "join", help="join a mesh (defaults to the current $CLAUNCH_SESSION)"
+        "join",
+        help="join a mesh -- MESH here, or MESH@MACHINE on another daemon "
+             "(defaults to the current $CLAUNCH_SESSION)",
     )
-    p.add_argument("mesh")
+    p.add_argument("mesh", metavar="MESH[@MACHINE]",
+                   help="a local mesh, or 'mesh@machine' to join the mesh "
+                        "owned by that machine's daemon (relay name)")
     p.add_argument("--as", dest="handle", metavar="HANDLE",
                    help="handle inside the mesh (default: the session name)")
     p.add_argument("--role", help="member role (default: inferred from the handle)")
     p.add_argument("--session", help="session to enrol (default: $CLAUNCH_SESSION)")
+    p.add_argument("--code", help="invite ticket from 'claunch mesh invite' -- "
+                                  "pre-approves the join; without one the "
+                                  "request waits for the owner's approval")
     p.set_defaults(func=_cmd_join)
 
     p = msub.add_parser("leave", help="leave a mesh")
@@ -379,16 +480,44 @@ def register(sub) -> None:
 
     p = msub.add_parser(
         "invite",
-        help="mint a code another machine's daemon can redeem to link this mesh",
+        help="mint a single-use ticket that pre-approves one "
+             "'mesh join MESH@THIS-MACHINE --code ...'",
     )
     p.add_argument("mesh")
+    p.add_argument("--ls", action="store_true",
+                   help="list outstanding tickets instead of minting one")
+    p.add_argument("--revoke", metavar="PREFIX",
+                   help="revoke outstanding tickets by the prefix shown in --ls")
     p.set_defaults(func=_cmd_invite)
 
     p = msub.add_parser(
-        "link", help="redeem an invite code -- link this daemon into a peer's mesh"
+        "requests",
+        help="pending join requests: inbound (awaiting your approval) and "
+             "outbound (awaiting theirs)",
     )
-    p.add_argument("code")
-    p.set_defaults(func=_cmd_link)
+    p.add_argument("mesh", nargs="?", help="only this mesh (default: all)")
+    p.add_argument("--cancel", metavar="ID",
+                   help="forget one of our outbound requests")
+    p.set_defaults(func=_cmd_requests)
+
+    p = msub.add_parser("approve", help="admit a pending join request")
+    p.add_argument("mesh")
+    p.add_argument("request_id", metavar="ID")
+    p.set_defaults(func=_cmd_approve)
+
+    p = msub.add_parser("deny", help="reject a pending join request")
+    p.add_argument("mesh")
+    p.add_argument("request_id", metavar="ID")
+    p.set_defaults(func=_cmd_deny)
+
+    p = msub.add_parser(
+        "revoke",
+        help="unlink a guest daemon: drop its members and its mirror "
+             "(machines are listed by 'mesh members')",
+    )
+    p.add_argument("mesh")
+    p.add_argument("machine")
+    p.set_defaults(func=_cmd_revoke)
 
     p = msub.add_parser("members", help="list a mesh's members and reachability")
     p.add_argument("mesh")

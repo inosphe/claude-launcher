@@ -70,6 +70,11 @@ Run `claunch mesh members MESH`.
 - Otherwise join: `claunch mesh join MESH [--as HANDLE]`. HANDLE defaults to
   your session name; its leading word sets your role (`worker_1` -> worker,
   `moderator`/`leader` -> leader, `reviewer...` -> reviewer).
+- If MESH is not on this daemon it lives on another machine: join it by
+  address, `claunch mesh join MESH@MACHINE` (add `--code TICKET` if the user
+  gave you one). Without a ticket the mesh's owner must approve you — the
+  command says "waiting for approval" and you are NOT a member yet. Do not
+  retry it; check `claunch mesh requests`, and tell the user you are waiting.
 
 Then catch up: `claunch mesh history MESH -n 20`.
 
@@ -125,10 +130,12 @@ peers to retransmit.
 
 Members may live on other machines (`members` shows `machine/session` and
 reachability). Address them by handle exactly like local peers. Every mesh
-has one primary daemon; if yours is a mirror and the primary is unreachable,
-`send` reports `queued` (delivered on reconnect, in order) and `join` fails
-until it returns. When remote members show `remote-disconnected`, mention
-the delay if coordination depends on it, but do not retry-spam.
+has one primary daemon that owns membership: joining from elsewhere is
+`claunch mesh join MESH@MACHINE` and may wait for that owner's approval.
+If your daemon is a mirror and the primary is unreachable, `send` reports
+`queued` (delivered on reconnect, in order) and `join` fails until it
+returns. When remote members show `remote-disconnected`, mention the delay
+if coordination depends on it, but do not retry-spam.
 """
 
 

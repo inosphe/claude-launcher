@@ -179,17 +179,18 @@ def test_mesh_federation_over_real_relay(home, tmp_path):
             await a.mesh.join("fedmesh", "sa", handle="alice")
             code = a.mesh.invite("fedmesh")["code"]
 
-            # daemon B redeems the invite: it becomes a MIRROR over the relay
+            # a session on daemon B joins by address, redeeming the ticket:
+            # one call over the relay creates the MIRROR and the member
             b.manager.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
-            result = await b.mesh.link(code)
-            assert result["peer"] == "pca"
+            member = await b.mesh.join(
+                "fedmesh@pca", "sb", handle="bob", code=code
+            )
+            assert member.handle == "bob"
             mesh_b = b.mesh.get("fedmesh")
             assert mesh_b.primary == "pca"
             # absolute roster: '' = the primary's own member
             assert mesh_b.members["alice"].machine == ""
-
-            # B's join is decided by the primary (authoritative roster)
-            await b.mesh.join("fedmesh", "sb", handle="bob")
+            # the join was decided by the primary (authoritative roster)
             assert a.mesh.get("fedmesh").members["bob"].machine == "pcb"
 
             # a message from bob is sequenced by the primary over the bridge

@@ -843,8 +843,12 @@ claunch mesh send dev worker_1,worker_2 "sprint goal"     --section worker_1="yo
 claunch mesh members dev          # members + peers + reachability
 claunch mesh history dev          # ids, [type] tags, [re <id>] threading
 claunch mesh policy dev --set heartbeat.enabled=true   # nudge policies
-claunch mesh invite dev           # cross-machine: mint an invite code
-claunch mesh link <code>          # ...redeem it on the other machine
+claunch mesh join dev@work-pc     # cross-machine: join the mesh owned there
+claunch mesh requests             # ...pending joins: inbound and outbound
+claunch mesh approve dev req-3f2a # ...the owner admits (or 'deny')
+claunch mesh invite dev           # optional ticket that pre-approves one join
+claunch mesh join dev@work-pc --code <ticket>   # ...admitted without waiting
+claunch mesh revoke dev other-pc  # unlink a guest machine (persistent until then)
 claunch mesh install --project .  # register MCP tools + /mesh skill
 ```
 
@@ -897,10 +901,10 @@ claunch mesh install --project .  # register MCP tools + /mesh skill
   daemon that created it is its **primary**, holding the authoritative
   roster, the single message log, the policy engine and invite minting.
   With both daemons registered on the same relay (and
-  `allow_backend_peering` enabled on it), run `claunch mesh invite dev` on
-  the primary and `claunch mesh link <code>` on the other machine: that
-  daemon becomes a **guest** holding a *mirror* — a synced copy of roster +
-  history for its UI and agents. Guest members are secondary: their joins,
+  `allow_backend_peering` enabled on it), a session elsewhere joins by
+  **address**: `claunch mesh join dev@work-pc`. Its daemon becomes a
+  **guest** holding a *mirror* — a synced copy of roster + history for its
+  UI and agents. Guest members are secondary: their joins,
   leaves and sends (even a DM between two members of the same guest daemon)
   are forwarded to the primary, which decides, sequences and fans out — so
   every daemon's history is identical and guest-to-guest messages route
@@ -910,6 +914,17 @@ claunch mesh install --project .  # register MCP tools + /mesh skill
   sends queue durably in its outbox (senders see `queued` immediately) and
   drain in order on reconnect; joins fail fast — membership is an
   authoritative decision.
+- **Joining is asking to be admitted**: the first join from a machine is a
+  *request* the mesh's owner sees in `claunch mesh requests` (and in the web
+  UI) and answers with `approve`/`deny`; the grant is delivered back over
+  the relay to the **claimed machine name**, so only the daemon actually
+  registered under it can complete the join. `claunch mesh invite dev` mints
+  an optional single-use ticket (24h) that pre-approves exactly one join —
+  the unattended path, for automation that cannot wait for a human. Once a
+  machine is admitted its link is **persistent**: further sessions there
+  join with no ceremony, a lost mirror is re-granted automatically, and the
+  owner ends it with `claunch mesh revoke dev <machine>`, which drops that
+  machine's members and its mirror.
 
 ### Nudge policies (heartbeat · task-poll · stall warnings)
 
@@ -1009,13 +1024,16 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/profiles`                | profile names (for the UI's create form) |
 | GET/POST | `/api/mesh`                  | list meshes (+ relay status) / create `{name}` |
 | GET/DELETE | `/api/mesh/{mesh}`         | members + reachability / remove |
-| POST   | `/api/mesh/{mesh}/members`     | `{session, handle?, role?}` — enrol a session |
+| POST   | `/api/mesh/{mesh}/members`     | `{session, handle?, role?, code?}` — enrol a session; `{mesh}` may be `mesh@machine` (201 admitted, 202 pending approval) |
 | DELETE | `/api/mesh/{mesh}/members/{handle}` | remove a member |
 | GET/POST | `/api/mesh/{mesh}/messages`  | history (`?limit=`) / send `{from, to, body, external?}` |
 | GET/PUT | `/api/mesh/{mesh}/policy`     | read / edit the mesh's nudge policy (heartbeat, task-poll, stall warnings) |
-| POST   | `/api/mesh/{mesh}/invite`      | mint a single-use cross-machine invite code |
-| POST   | `/api/mesh/link`               | `{code}` — redeem an invite: link this daemon into the mesh |
-| POST   | `/peer/mesh/*`                 | daemon↔daemon federation (link/join/leave/send/sync) — authenticated by per-link mesh tokens, not the API token |
+| POST   | `/api/mesh/{mesh}/invite`      | mint a single-use ticket pre-approving one join |
+| GET/DELETE | `/api/mesh/{mesh}/invites[/{prefix}]` | list / revoke outstanding tickets |
+| POST   | `/api/mesh/{mesh}/requests/{id}/approve\|deny` | decide a pending join request |
+| DELETE | `/api/mesh/{mesh}/guests/{machine}` | unlink a guest machine (drops its members + mirror) |
+| DELETE | `/api/mesh/outgoing/{id}`      | forget one of our own pending join requests |
+| POST   | `/peer/mesh/*`                 | daemon↔daemon federation (join_request/grant/unlink/join/leave/send/sync) — authenticated by per-link mesh tokens, not the API token |
 | GET    | `/api/cflow`                   | all registered cflow runs, keyed (cwd, scope), with status + step reports; `?cwd=[&scope=]` inspects explicitly |
 | GET    | `/api/cflow/run`               | `?cwd=&scope=` — run detail: status, workflow graph, reports, journal |
 | POST   | `/api/cflow/approve`           | `{cwd, scope}` — approve the gate / extend the loop limit |
