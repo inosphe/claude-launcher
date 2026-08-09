@@ -1344,7 +1344,10 @@ async function openMesh(name) {
   meshPollTimer = setInterval(refreshMeshView, 2000);
 }
 
-async function refreshMeshView() {
+/* `force` redraws even while a field has focus: picking from the wizard's
+   selects leaves the focus right there, and the poll's don't-wipe-input guard
+   would otherwise hold back the very list the pick just asked for. */
+async function refreshMeshView(force = false) {
   if (!meshName) return;
   let info, history;
   try {
@@ -1363,7 +1366,194 @@ async function refreshMeshView() {
     return;
   }
   renderRelayBadge(info.relay);
-  renderMesh(info, history);
+  renderMesh(info, history, force);
+}
+
+/* ---- owner-side invitation wizard -------------------------------------- */
+/* The complement of joining: instead of minting a ticket and carrying it to
+   the other machine by hand, the owner browses the daemons on the relay, picks
+   one of their live sessions and pulls it in (POST .../invitations — the
+   primary pushes the invitation over the relay and the target joins back).
+   Panel state lives here because the 2s poll rebuilds the whole mesh view:
+   which machine is chosen, the fetched lists and the typed handle would all
+   evaporate otherwise. */
+let meshInvitePanels = {};
+
+function invitePanel(mesh) {
+  if (!meshInvitePanels[mesh]) {
+    meshInvitePanels[mesh] = {
+      open: false,
+      peers: null,     // null = not fetched yet, [] = fetched and empty
+      machine: "",
+      sessions: null,
+      session: "",
+      handle: "",
+      role: "",
+      note: "",
+      bad: false,      // note is an error, not progress
+      busy: false,
+    };
+  }
+  return meshInvitePanels[mesh];
+}
+
+function inviteFail(st, resp, doc) {
+  st.note = doc.error || `HTTP ${resp.status}`;
+  st.bad = true;
+}
+
+async function loadInvitePeers(mesh) {
+  const st = invitePanel(mesh);
+  st.note = "listing daemons on the relay…";
+  st.bad = false;
+  refreshMeshView(true);
+  const resp = await api("/api/relay/peers");
+  const doc = await resp.json().catch(() => ({}));
+  st.peers = doc.peers || [];
+  if (!resp.ok) inviteFail(st, resp, doc);
+  else {
+    st.bad = false;
+    st.note = st.peers.length ? "" : "no other daemon is registered on the relay";
+  }
+  refreshMeshView(true);
+}
+
+async function loadInviteSessions(mesh, machine) {
+  const st = invitePanel(mesh);
+  st.machine = machine;
+  st.session = "";
+  st.sessions = null;
+  st.bad = false;
+  st.note = machine ? `asking ${machine} for its live sessions…` : "";
+  refreshMeshView(true);
+  if (!machine) return;
+  const resp = await api(`/api/relay/peers/${encodeURIComponent(machine)}/sessions`);
+  const doc = await resp.json().catch(() => ({}));
+  if (st.machine !== machine) return; // a newer pick already won
+  st.sessions = doc.sessions || [];
+  if (!resp.ok) inviteFail(st, resp, doc);
+  else {
+    st.bad = false;
+    st.note = st.sessions.length ? "" : `${machine} has no live session to enrol`;
+  }
+  refreshMeshView(true);
+}
+
+/* Renders into the "Guest daemons" box; primary-only (a mirror owns nothing
+   to invite anyone into). `members` filters out sessions already enrolled. */
+function renderInviteWizard(info, fed, members) {
+  const st = invitePanel(info.name);
+  const row = el("div", "mesh-add");
+  const toggle = el("button", "wf-btn option",
+                    st.open ? "Close" : "Invite a remote session…");
+  toggle.addEventListener("click", async () => {
+    st.open = !st.open;
+    st.note = "";
+    st.bad = false;
+    if (!st.open) return refreshMeshView(true);
+    // Always re-list on open: daemons come and go on the relay, and a stale
+    // roster here means picking a machine that is no longer there.
+    await loadInvitePeers(info.name);
+    if (st.machine && !st.bad) loadInviteSessions(info.name, st.machine);
+  });
+  row.appendChild(toggle);
+
+  if (st.open) {
+    const machineSel = document.createElement("select");
+    machineSel.appendChild(el(
+      "option", null, st.peers === null ? "loading…" : "machine…"
+    ));
+    for (const p of st.peers || []) {
+      const opt = el("option", null, p);
+      opt.value = p;
+      machineSel.appendChild(opt);
+    }
+    machineSel.value = st.machine;
+    machineSel.addEventListener("change", () => {
+      loadInviteSessions(info.name, machineSel.value);
+    });
+
+    // Its daemon may host sessions that already sit in this mesh — offering
+    // them again would only earn a 400 from the primary.
+    const taken = new Set(
+      members.filter((m) => m.machine === st.machine).map((m) => m.session)
+    );
+    const free = (st.sessions || []).filter((s) => !taken.has(s.name));
+    const sessionSel = document.createElement("select");
+    sessionSel.appendChild(el("option", null,
+      !st.machine ? "pick a machine first"
+        : (st.sessions === null ? "loading…" : "session…")));
+    for (const s of free) {
+      const opt = el("option", null, `${s.name} · ${s.status}`);
+      opt.value = s.name;
+      sessionSel.appendChild(opt);
+    }
+    sessionSel.disabled = !free.length;
+    sessionSel.value = st.session;
+    sessionSel.addEventListener("change", () => {
+      st.session = sessionSel.value;
+      refreshMeshView(true); // the pick is what un-greys Invite
+    });
+
+    const handle = document.createElement("input");
+    handle.className = "mesh-plain";
+    handle.placeholder = "handle (default: session name)";
+    handle.value = st.handle;
+    handle.addEventListener("input", () => { st.handle = handle.value; });
+    const role = document.createElement("input");
+    role.className = "mesh-plain";
+    role.placeholder = "role (optional)";
+    role.value = st.role;
+    role.addEventListener("input", () => { st.role = role.value; });
+
+    const go = el("button", "wf-btn approve", "Invite");
+    go.disabled = st.busy || !st.machine || !st.session;
+    go.addEventListener("click", async () => {
+      const { machine, session } = st;
+      st.busy = true;
+      st.bad = false;
+      st.note = `inviting ${machine}/${session}…`;
+      refreshMeshView(true);
+      const resp = await api(
+        `/api/mesh/${encodeURIComponent(info.name)}/invitations`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            machine, session, handle: st.handle.trim(), role: st.role.trim(),
+          }),
+        }
+      );
+      const doc = await resp.json().catch(() => ({}));
+      st.busy = false;
+      if (!resp.ok) {
+        inviteFail(st, resp, doc);
+        refreshMeshView(true);
+        return;
+      }
+      const member = doc.member || {};
+      // Keep the machine (inviting its siblings next is the common case), drop
+      // everything that was about this one session.
+      st.open = false;
+      st.session = "";
+      st.handle = "";
+      st.role = "";
+      st.sessions = null;
+      st.bad = false;
+      st.note = `added '${member.handle || session}' (${machine}/${session}) — ` +
+        "its daemon now mirrors this mesh and the member was briefed";
+      refreshMeshView(true);
+      refreshMeshList();
+    });
+    row.append(machineSel, sessionSel, handle, role, go);
+  } else {
+    row.appendChild(el(
+      "span", "wf-note",
+      "enrol a session from another daemon on the relay — nothing to carry over"
+    ));
+  }
+  fed.appendChild(row);
+  if (st.note) fed.appendChild(el("p", st.bad ? "wf-warning" : "wf-note", st.note));
 }
 
 /* The send/add forms must survive the 2s poll: rebuild everything except a
@@ -1373,9 +1563,9 @@ function formInUse(root) {
     ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
 }
 
-function renderMesh(info, history) {
+function renderMesh(info, history, force) {
   const view = $("mesh-view");
-  if (formInUse(view)) return; // don't wipe in-progress input
+  if (!force && formInUse(view)) return; // don't wipe in-progress input
   view.innerHTML = "";
 
   // Federation v2: '' machine = the primary daemon's own member. On a
@@ -1500,9 +1690,9 @@ function renderMesh(info, history) {
   if (!peers.length) {
     fed.appendChild(el(
       "p", "wf-note",
-      "no other machine has joined — sessions elsewhere join with " +
+      "no other machine has joined yet — invite one below, or let it ask with " +
       `'claunch mesh join ${info.name}@${selfMachine || "<this-machine>"}' ` +
-      "and appear below once approved (both daemons need a relay uplink)"
+      "and approve it here (both daemons need a relay uplink)"
     ));
   }
   for (const p of peers) {
@@ -1571,12 +1761,13 @@ function renderMesh(info, history) {
       }
       fed.appendChild(row);
     }
+    renderInviteWizard(info, fed, members);
     const fedRow = el("div", "mesh-add");
     const inviteBtn = el("button", "wf-btn option", "Mint invite ticket…");
     const codeOut = document.createElement("input");
     codeOut.readOnly = true;
     codeOut.placeholder =
-      "single-use ticket appears here — it pre-approves one join";
+      "single-use ticket appears here — pre-approves one unattended join";
     // The view is rebuilt by the 2s poll, which can detach this input while
     // the invite request is in flight — so the code lives in meshInviteCodes
     // (module state) and every rebuild re-renders it from there.

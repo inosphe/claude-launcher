@@ -293,7 +293,10 @@ body {
 .mesh-members h3, .mesh-send h3, .mesh-log h3, .mesh-fed h3, .mesh-policy h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
 }
+/* the box is mostly tokens and commands — but the invite wizard's fields are
+   ordinary words, so they opt back out of the monospace treatment */
 .mesh-fed input { font-family: SFMono-Regular, Consolas, monospace; font-size: 11px; }
+.mesh-fed input.mesh-plain { font-family: inherit; font-size: 13px; }
 .pol-section { margin: 12px 0; padding-top: 8px; border-top: 1px solid #22262d; }
 .pol-head {
   display: flex; gap: 8px; align-items: center; font-size: 13px;
