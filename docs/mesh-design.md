@@ -355,7 +355,11 @@ relay = one operator (single backend token), so the target daemon accepts
 without a local confirmation gate — both `/peer/sessions` (names only) and
 `/peer/mesh/invite` lean on that assumption deliberately. On the web the
 sidebar's mesh field recognises a pasted invite code (base64url JSON),
-decodes the address out of it and submits the join directly.
+decodes the address out of it and submits the join directly, and the mesh
+page carries the wizard itself: "Invite a remote session…" lists the relay's
+daemons, then that daemon's live sessions (minus the ones already enrolled),
+and POSTs the invitation — so the owner-side path needs no code, no CLI and
+no second machine. Ticket minting stays beside it for unattended joins.
 
 ## Delivery pipeline
 

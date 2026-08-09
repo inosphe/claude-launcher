@@ -874,9 +874,12 @@ claunch mesh install --project .  # register MCP tools + /mesh skill
   and a pending join-request count, and your own outbound requests are
   listed with a cancel. Mesh page: enrol sessions with handle/role, watch
   per-member reachability and pending counts, read the log, send as the
-  human operator — and, on a mesh you own, approve/deny join requests,
-  mint invite tickets, and revoke guest machines; a mirror shows its
-  primary and keeps roster/policy controls read-only.
+  human operator — and, on a mesh you own, **invite a remote session**
+  (pick a daemon on the relay, pick one of its live sessions — the web
+  equivalent of `claunch mesh add`, with nothing to copy by hand),
+  approve/deny join requests, mint invite tickets for unattended joins, and
+  revoke guest machines; a mirror shows its primary and keeps roster/policy
+  controls read-only.
 - Every session/mesh command prints a **relay status** line
   (`relay: connected as 'work-pc'` / `relay: DISCONNECTED ...`), because a
   mesh can only span machines while the relay uplink is registered.
