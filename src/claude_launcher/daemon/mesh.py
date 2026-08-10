@@ -40,7 +40,7 @@ from typing import Callable, Dict, List, Optional, Union
 
 import yaml
 
-from . import mesh_policy, paths
+from . import mesh_policy, mesh_roles, paths
 from .manager import ManagerError, SessionManager
 from .session import STATUS_IDLE, SessionGone
 
@@ -53,16 +53,11 @@ _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 #: `.` is legal in a mesh name, so the suffix has to be matched exactly.
 _RETIRED_RE = re.compile(r"\.deleted-\d{8}T\d{6}Z$")
 
-#: Handle leading word -> role, interconnect's convention (`worker_1` is a
-#: worker, `moderator` leads). Anything else is a plain member.
-_ROLE_WORDS = {
-    "leader": "leader",
-    "moderator": "leader",
-    "operator": "operator",
-    "worker": "worker",
-    "reviewer": "reviewer",
-    "specialist": "specialist",
-}
+#: Handle leading word -> role. The vocabulary itself lives in
+#: :mod:`mesh_roles` and is per-mesh overridable; this module only ever asks
+#: a *mesh* to resolve a handle (see ``Mesh.roleset``). The module-level
+#: helper below is the last-resort fallback for a member record with no role
+#: stored and no mesh in hand.
 
 #: Delivered bodies are clipped at this many characters (the log keeps the
 #: full text; ``history`` is the overflow path).
@@ -213,8 +208,14 @@ def utcnow() -> str:
 
 
 def infer_role(handle: str) -> str:
-    head = re.split(r"[._\-0-9]", handle.lower(), maxsplit=1)[0]
-    return _ROLE_WORDS.get(head, "member")
+    """The role a handle self-selects under the PACKAGED vocabulary.
+
+    Only for a member record that reaches us with no role at all (very old
+    state, a hand-edited ``mesh.json``). Everything on the join path resolves
+    through the mesh's own set instead — see ``MeshManager._resolve_role`` —
+    because that is the one a mesh may have overridden.
+    """
+    return mesh_roles.resolve().infer(handle)
 
 
 class MeshError(Exception):
@@ -355,6 +356,19 @@ class Mesh:
         #: Nudge policy config (heartbeat / task-poll / stall warnings),
         #: persisted in mesh.json and edited via the API/web.
         self.policy: dict = mesh_policy.default_policy()
+        #: This mesh's role-set OVERRIDE (None = the packaged vocabulary), as
+        #: uploaded to the authority. Persisted in mesh.json and federated,
+        #: so every daemon in the mesh resolves handles the same way.
+        self.roles_doc: Optional[dict] = None
+        #: Bumped whenever ``roles_doc`` changes. A guest's ``roles_seen``
+        #: decides whether a sync must carry the (comparatively fat) role set,
+        #: so stance text does not ride every message flush.
+        self.roles_version: int = 0
+        #: Cache of ``roles_doc`` resolved against the packaged default, with
+        #: the version it was built from — resolving parses YAML, and the
+        #: join path must not pay that per member.
+        self._roleset: Optional[mesh_roles.RoleSet] = None
+        self._roleset_version: int = -1
         #: In-memory per-member activity/timers the policy tick reads:
         #: handle -> {anchor, last_sent, last_delivered, hb_/tp_/warn_ timers}.
         self.activity: Dict[str, dict] = {}
@@ -365,6 +379,48 @@ class Mesh:
         #: name is known so it can be folded into ``peers`` (see
         #: MeshManager._migrate_v2). None once migrated or not applicable.
         self._v2: Optional[dict] = None
+
+    # ------------------------------------------------------------------ #
+    # roles
+    # ------------------------------------------------------------------ #
+    @property
+    def roleset(self) -> mesh_roles.RoleSet:
+        """The vocabulary in force here: the packaged set plus our override.
+
+        An override that no longer resolves (written by a newer daemon, say)
+        falls back to the packaged set rather than breaking every join — the
+        mesh keeps working with a vocabulary everyone understands.
+        """
+        if self._roleset is None or self._roleset_version != self.roles_version:
+            try:
+                self._roleset = mesh_roles.resolve(self.roles_doc)
+            except mesh_roles.RoleError as exc:
+                log.warning(
+                    "mesh %r: unusable role set (%s) — falling back to the "
+                    "packaged vocabulary", self.name, exc,
+                )
+                self._roleset = mesh_roles.resolve()
+            self._roleset_version = self.roles_version
+        return self._roleset
+
+    def set_roles_doc(self, doc: Optional[dict], *, version=None) -> bool:
+        """Adopt a role-set override. Returns whether anything changed.
+
+        The authority bumps the version itself; a mirror adopts the number the
+        authority reports, so ``roles_version`` means the same thing mesh-wide
+        and a guest can tell whether it is holding the current vocabulary.
+        """
+        if doc == self.roles_doc and version in (None, self.roles_version):
+            return False
+        self.roles_doc = doc
+        if version is None:
+            self.roles_version += 1
+        else:
+            try:
+                self.roles_version = int(version)
+            except (TypeError, ValueError):
+                self.roles_version += 1
+        return True
 
     # ------------------------------------------------------------------ #
     # rank
@@ -847,6 +903,15 @@ class MeshManager:
             mesh.seen_ids.add(str(m["id"]))
             self._append_log(mesh, m)
         mesh.policy = mesh_policy.load_policy(grant.get("policy"))
+        # The vocabulary comes with the grant so a newcomer reads the roster's
+        # role names correctly from its very first render, rather than after
+        # whatever sync happens to carry the role set next.
+        grant_roles = grant.get("roles")
+        if isinstance(grant_roles, dict):
+            mesh.set_roles_doc(
+                mesh_roles.load_override(grant_roles.get("doc")),
+                version=grant_roles.get("version"),
+            )
         member_doc = grant.get("member") or {}
         member = mesh.members.get(str(member_doc.get("handle") or ""))
         if member is None:
@@ -918,7 +983,7 @@ class MeshManager:
             self._persist_cursors(mesh)
             self._brief_soon(mesh, member)
             return member
-        member = Member(handle, session, role=role)
+        member = Member(handle, session, role=self._resolve_role(mesh, handle, role))
         mesh.members[handle] = member
         # New members start caught up: joining must not replay the backlog.
         mesh.cursors[handle] = len(mesh.messages)
@@ -934,6 +999,25 @@ class MeshManager:
         except RuntimeError:
             return
         asyncio.ensure_future(self._brief(mesh, member))
+
+    def _stance_lines(self, mesh: Mesh, member: Member) -> str:
+        """The briefing's stance section for this member — possibly empty.
+
+        A POINTER, not the prose. Pasting the stance inline was tried and is
+        wrong twice over: it doubles the length of a block that is typed into
+        a live terminal, and — the part that actually matters — it freezes the
+        stance into the agent's context at join time, so every later upload
+        would leave the member acting on a vocabulary the mesh no longer has.
+        ``mesh stance`` always prints the current text, and doubles as the
+        recovery path after a compaction drops this block.
+        """
+        role = mesh.roleset.get(member.role)
+        if not (role and role.stance.strip()):
+            return ""
+        return (
+            f"stance: run 'claunch mesh stance {mesh.name}' now — it prints "
+            f"what a {member.role} is on this mesh, and it is binding\n"
+        )
 
     async def _brief(self, mesh: Mesh, member: Member, *, hold: float = 30.0) -> None:
         """Idle-gated briefing paste: who you are here and how to speak.
@@ -968,6 +1052,7 @@ class MeshManager:
             f"you: {member.handle} (role: {member.role})\n"
             f"members: {others}\n"
             f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
+            + self._stance_lines(mesh, member) +
             f"protocol: activate your 'mesh' skill NOW (/mesh {mesh.name}) to "
             "load the member protocol; if you have no such skill, run "
             "'claunch mesh install' first and retry\n"
@@ -1350,6 +1435,113 @@ class MeshManager:
         self._persist_def(mesh)
         self._flush_guests_soon(mesh)
         return mesh.policy
+
+    # ------------------------------------------------------------------ #
+    # roles: the vocabulary this mesh's handles resolve into
+    # ------------------------------------------------------------------ #
+    def _resolve_role(self, mesh: Mesh, handle: str, role: str) -> str:
+        """Settle the role to STORE for a joining member.
+
+        Resolved once, here, and kept as a plain string: a later role-set
+        upload never rewrites it (uploads are not retroactive). A member whose
+        role the vocabulary later drops simply matches no rule.
+        """
+        try:
+            return mesh.roleset.resolve(handle, role)
+        except mesh_roles.RoleError as exc:
+            raise MeshError(str(exc)) from None
+
+    def roles_view(self, name: str) -> dict:
+        """This mesh's vocabulary, for the API/CLI/web."""
+        mesh = self.get(name)
+        rs = mesh.roleset
+        return {
+            "version": mesh.roles_version,
+            "custom": mesh.roles_doc is not None,
+            # Whether WE are the authority. Not "may you edit this" — a mirror
+            # may, its upload is just forwarded — only whether the change is
+            # applied here or a hop away.
+            "is_authority": not mesh.primary,
+            "authority": mesh.authority,
+            "default": rs.default,
+            "yaml": mesh_roles.to_yaml(mesh.roles_doc or rs.to_doc()),
+            "roles": [
+                {
+                    "name": r.name,
+                    "aliases": list(r.aliases),
+                    "stall_watch": r.stall_watch,
+                    "task_poll": r.task_poll,
+                    "stance": r.stance,
+                    # How many members currently hold it — the roster is the
+                    # only place the vocabulary meets reality, and a role
+                    # nobody holds is worth seeing as such.
+                    "members": sorted(
+                        h for h, m in mesh.members.items() if m.role == r.name
+                    ),
+                }
+                for r in (rs.roles[n] for n in sorted(rs.roles))
+            ],
+            # Roles held by a member but no longer in the vocabulary — the
+            # visible face of "uploads are not retroactive".
+            "orphans": sorted(
+                {m.role for m in mesh.members.values() if not rs.get(m.role)}
+            ),
+        }
+
+    async def set_roles(self, name: str, doc) -> dict:
+        """Upload (or clear, with ``doc=None``) this mesh's role-set override.
+
+        The authority owns the vocabulary — one mesh, one set of role names,
+        or two daemons would read the same handle differently. A mirror's
+        upload is therefore *forwarded* rather than refused: the dashboard a
+        user happens to have open should not have to be the authority's.
+        """
+        mesh = self.get(name)
+        parsed = None
+        if doc is not None:
+            try:
+                parsed = mesh_roles.parse(doc)
+                mesh_roles.resolve(parsed)  # must resolve before we adopt it
+            except mesh_roles.RoleError as exc:
+                raise MeshError(f"bad role set: {exc}") from None
+        if mesh.primary:
+            payload = await self._peer_call_primary(
+                mesh, "/peer/mesh/roles", {"roles": parsed}
+            )
+            mesh.set_roles_doc(parsed, version=payload.get("version"))
+            self._persist_def(mesh)
+            return self.roles_view(name)
+        self._adopt_roles(mesh, parsed)
+        return self.roles_view(name)
+
+    def _adopt_roles(self, mesh: Mesh, parsed: Optional[dict]) -> None:
+        """Authority side: take the new vocabulary and push it to the guests."""
+        if not mesh.set_roles_doc(parsed):
+            return
+        self._persist_def(mesh)
+        self._flush_guests_soon(mesh)
+        log.info(
+            "mesh %r: role set %s (version %d): %s",
+            mesh.name, "replaced" if parsed else "reset to the default",
+            mesh.roles_version, ", ".join(sorted(mesh.roleset.roles)),
+        )
+
+    def peer_roles_accept(
+        self, name: str, machine: str, token: str, doc
+    ) -> dict:
+        """A peer asks us, the authority, to change the mesh's role set."""
+        mesh = self.get(name)
+        self._require_authority(mesh, "the role set")
+        self._check_link_token(mesh, machine, token)
+        parsed = None
+        if doc is not None:
+            try:
+                parsed = mesh_roles.parse(doc)
+                mesh_roles.resolve(parsed)
+            except mesh_roles.RoleError as exc:
+                raise MeshError(f"bad role set: {exc}") from None
+        self._adopt_roles(mesh, parsed)
+        return {"version": mesh.roles_version}
 
     # ------------------------------------------------------------------ #
     # federation v2: primary/mirror. The primary owns roster, log, policy
@@ -1776,7 +1968,10 @@ class MeshManager:
             raise MeshConflict(
                 f"handle {handle!r} is already taken in mesh {mesh.name!r}"
             )
-        member = Member(handle, session, machine=machine, role=role)
+        member = Member(
+            handle, session, machine=machine,
+            role=self._resolve_role(mesh, handle, role),
+        )
         mesh.members[handle] = member
         return member, True
 
@@ -1971,11 +2166,13 @@ class MeshManager:
         status = mesh.peer_status.get(machine)
         if status is not None:
             status["roster_seen"] = mesh.roster_version
+            status["roles_seen"] = mesh.roles_version
         return {
             "token": mesh.links[machine]["token_in"],
             "members": [m.to_dict() for m in mesh.members.values()],
             "messages": list(mesh.messages),
             "policy": mesh.policy,
+            "roles": {"doc": mesh.roles_doc, "version": mesh.roles_version},
             "member": member.to_dict(),
             "cursor": len(mesh.messages),
             "peers": list(mesh.peers),
@@ -2374,7 +2571,10 @@ class MeshManager:
                     f"session {session!r} on {machine!r} is already in mesh "
                     f"{name!r} as {m.handle!r}"
                 )
-        member = Member(handle, session, machine=machine, role=role)
+        member = Member(
+            handle, session, machine=machine,
+            role=self._resolve_role(mesh, handle, role),
+        )
         mesh.members[handle] = member
         self._roster_changed(mesh)
         log.info("mesh %r: %r joined from guest %r", mesh.name, handle, machine)
@@ -2559,9 +2759,11 @@ class MeshManager:
         epoch: Optional[int] = None,
         links: Optional[List[dict]] = None,
         edges: Optional[dict] = None,
+        roles: Optional[dict] = None,
     ) -> dict:
         """The authority pushes state at us: log tail, roster, rank order,
-        brokered edges, policy, nudges.
+        brokered edges, policy, nudges, and — only when we are behind on it —
+        the role set.
 
         ``base`` must equal our log length — a mismatch means the authority's
         cursor for us is stale, so we answer with ``resync`` and our true
@@ -2616,6 +2818,14 @@ class MeshManager:
             self._apply_link_grants(mesh, links, sender=machine)
         if isinstance(edges, dict):
             mesh.edges = {str(k): bool(v) for k, v in edges.items()}
+        if isinstance(roles, dict):
+            # Present only when the authority thinks we are behind. `doc` may
+            # legitimately be None — that is the mesh returning to the
+            # packaged vocabulary, which is a change like any other.
+            mesh.set_roles_doc(
+                mesh_roles.load_override(roles.get("doc")),
+                version=roles.get("version"),
+            )
         if members:
             # The roster is authoritative: adopt it wholesale, keeping local
             # delivery cursors for members that still exist.
@@ -2864,7 +3074,12 @@ class MeshManager:
             now - status.get("last_sync", 0.0) >= self.report_interval
         )
         roster_due = status.get("roster_seen", 0) < mesh.roster_version
-        if not msgs and not nudges and not roster_due and not report_due:
+        # The role set is comparatively fat (stance prose for every role) and
+        # changes about never, so unlike the roster it is sent ONLY when this
+        # peer is behind on it — never on the back of a message flush.
+        roles_due = status.get("roles_seen", -1) != mesh.roles_version
+        if (not msgs and not nudges and not roster_due and not report_due
+                and not roles_due):
             return True  # already in step
         try:
             resp = await self.peer_transport(
@@ -2887,6 +3102,12 @@ class MeshManager:
                     # State of every edge, including ones this peer is not an
                     # endpoint of, so its diagram shows the same graph as ours.
                     "edges": dict(mesh.edges),
+                    # Only when this peer is behind (see roles_due). Sent as
+                    # {doc, version} so a null doc — the mesh going back to the
+                    # packaged vocabulary — is distinguishable from "omitted".
+                    **({"roles": {"doc": mesh.roles_doc,
+                                  "version": mesh.roles_version}}
+                       if roles_due else {}),
                 },
             )
         except Exception as exc:  # noqa: BLE001 — queue and retry with backoff
@@ -2918,6 +3139,10 @@ class MeshManager:
         status.update({"ok": True, "error": None, "retry_at": 0.0,
                        "backoff": 0.0, "last_sync": now,
                        "roster_seen": mesh.roster_version})
+        if roles_due:
+            # Only after the peer actually took it — a failed sync leaves
+            # roles_due true so the next one carries the vocabulary again.
+            status["roles_seen"] = mesh.roles_version
         activity = resp.get("activity")
         if isinstance(activity, dict):
             for handle, rep in activity.items():
@@ -3060,6 +3285,15 @@ class MeshManager:
             "links": self.edge_table(mesh),
             "requests": requests,
             "policy": mesh.policy,
+            # A summary only — the stance prose is fetched on demand from
+            # /api/mesh/<name>/roles, so the 2s dashboard poll stays cheap.
+            "roles": {
+                "version": mesh.roles_version,
+                "custom": mesh.roles_doc is not None,
+                "default": mesh.roleset.default,
+                "names": sorted(mesh.roleset.roles),
+                "is_authority": not mesh.primary,
+            },
         }
 
     def _reachability(self, mesh: Mesh, member: Member) -> str:
@@ -3294,6 +3528,11 @@ class MeshManager:
             if isinstance(v, dict)
         }
         mesh.policy = mesh_policy.load_policy(doc.get("policy"))
+        mesh.roles_doc = mesh_roles.load_override(doc.get("roles"))
+        try:
+            mesh.roles_version = int(doc.get("roles_version") or 0)
+        except (TypeError, ValueError):
+            mesh.roles_version = 0
         log_path = d / "log.jsonl"
         if log_path.is_file():
             for line in log_path.read_text(encoding="utf-8").splitlines():
@@ -3370,6 +3609,12 @@ class MeshManager:
                 "requests": mesh.pending_requests,
                 "grants": mesh.pending_grants,
                 "policy": mesh.policy,
+                # Absent (not null) when the mesh runs the packaged
+                # vocabulary, so mesh.json stays as small as it ever was for
+                # the meshes that never touch this.
+                **({"roles": mesh.roles_doc} if mesh.roles_doc else {}),
+                **({"roles_version": mesh.roles_version}
+                   if mesh.roles_version else {}),
             }
             (d / "mesh.json").write_text(
                 json.dumps(doc, indent=2), encoding="utf-8"

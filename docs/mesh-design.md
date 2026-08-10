@@ -79,9 +79,9 @@ a required component of mesh either. The model is a federation:
 - Agents self-identify via `$CLAUNCH_SESSION` (injected into every session's
   children). No pane ids, no pids, no cwd-keyed markers — those were
   interconnect's machine-local identifiers and do not survive a network hop.
-- Roles are inferred from the handle's leading word (`worker_1` -> worker,
-  `moderator` -> leader) unless given explicitly — same convention as
-  interconnect.
+- Roles are inferred from the handle's leading word (`worker_1`/`coder2` ->
+  worker, `moderator`/`mod` -> leader) unless given explicitly — same
+  convention as interconnect, aliases included. See **Roles** below.
 
 ## What is kept from interconnect, what is dropped
 
@@ -496,10 +496,17 @@ warning rather than shadowing it.
   property of the edge, `editable` of *this daemon's* view of it, so the
   "who may cut" rule is answered once on the server rather than re-derived
   in every client.
-- Peer: `/peer/mesh/deliver` (fast path) and `/peer/mesh/link` (a peer asks
-  the authority to cut or restore an edge it terminates). `/peer/mesh/sync`
-  additionally carries `peers`, `authority_epoch`, the brokered `links` for
-  that peer and the whole `edges` table, so every daemon draws the same graph.
+- Peer: `/peer/mesh/deliver` (fast path), `/peer/mesh/link` (a peer asks
+  the authority to cut or restore an edge it terminates) and
+  `/peer/mesh/roles` (a peer asks it to change the role set).
+  `/peer/mesh/sync` additionally carries `peers`, `authority_epoch`, the
+  brokered `links` for that peer and the whole `edges` table, so every daemon
+  draws the same graph — plus `roles` when, and only when, that peer's
+  `roles_seen` is behind the mesh's `roles_version`.
+- Roles: `GET/PUT /api/mesh/{mesh}/roles` (see **Roles**). The mesh view
+  carries only a summary (`version`, `custom`, `default`, role `names`,
+  `is_authority`); the stance prose lives on the dedicated endpoint so the
+  dashboard's 2s poll never carries it.
 
 **Handover, concretely.** The outgoing authority is the only daemon that
 knows the new order and the only one still holding every peer's credentials,
@@ -587,6 +594,8 @@ claunch mesh leave <mesh> [--session NAME | --as HANDLE]
 claunch mesh send <mesh> <to|*> <text...>       # sender = $CLAUNCH_SESSION
 claunch mesh members <mesh>
 claunch mesh history <mesh> [-n N]
+claunch mesh roles <mesh> [--yaml | --file ROLES.YAML | --reset]
+claunch mesh stance <mesh> [--as HANDLE]
 ```
 
 Cross-machine verbs (phase 6, "Membership-first joining" above):
@@ -622,11 +631,15 @@ socket/recv state:
   a busy member is presumed to be working.
 - **task-poll** — a member that is idle *and* caught up (nothing pending,
   nothing unanswered), whose role is in `roles` (default `worker`): inject a
-  role-targeted poke (`bodies` per role, fallback interpolates `{role}`).
-- **stall warning** — a non-leader member has held one state for `warn_secs`
+  role-targeted poke. The text is the first of `bodies[role]` (this mesh's
+  own override), the **role set's** `task_poll`, then a `{role}`-interpolated
+  fallback — so a mesh that defines its own roles gets matching wording
+  without a second edit here.
+- **stall warning** — a member has held one state for `warn_secs`
   (idle+caught-up, or *behind*: deliveries pending but its session never goes
   idle): send a real mesh message from the external `policy` sender to every
-  leader-role member — so it is injected locally *and* crosses machines over
+  member whose role is marked `stall_watch` in the role set (the leader, by
+  default) — so it is injected locally *and* crosses machines over
   federation.
 
 interconnect's fourth tier — tmux send-keys escalation — has no port: every
@@ -634,6 +647,86 @@ delivery already is an injection, so there is nothing to escalate to. All
 three policies default **off**: unlike a socket append, a nudge consumes the
 recipient agent's turn, so enabling is a deliberate choice. Config persists
 in `mesh.json` (`policy`); timers are in-memory and restart with the daemon.
+
+## Roles
+
+A role is what a member **is** on the mesh: its stance, and the handful of
+behaviours the daemon keys off it. The vocabulary is a **document**, not a
+table in the source.
+
+**The packaged set.** `leader` / `operator` / `worker` / `reviewer` /
+`specialist`, with interconnect's aliases (`coder`, `dev`, `engineer`, … ->
+worker; `mod`, `lead`, `chair` -> leader; `qa`, `critic`, `peer` -> reviewer)
+and `reviewer` as the default, so an unlabelled member audits rather than
+rubber-stamps. It ships as YAML in `mesh_roles.DEFAULT_YAML` — parsed by the
+same code every upload goes through, so the default is proven by the parser
+it depends on. Aliases matter more than they look: before this, a fleet named
+with interconnect's usual handles (`coder1`…`coder5`) resolved every member
+to `member`, a label no policy targeted.
+
+**Per-mesh override.** A mesh may upload its own YAML
+(`PUT /api/mesh/<m>/roles`, `claunch mesh roles <m> --file r.yaml`, or the
+web panel). Scope is the mesh, not the machine: a mesh is the unit a team
+actually is, one machine hosts members of several meshes at once, and keying
+it to the mesh means every daemon resolves handles through the *same*
+vocabulary by construction. That is also why a role's stance is **inline
+text** rather than a file path — the document federates, and a path means
+nothing on the machine it lands on. Caps (8 KB of stance per role, 64 KB per
+document) keep it small enough to cross a link without thought.
+
+```yaml
+version: 1
+default: reviewer
+roles:
+  leader:
+    aliases: [lead, moderator, mod, chair]
+    stall_watch: true          # hears about stalled members
+    stance: |                  # handed to the member on join
+      You hold this mesh's direction and own its decisions. ...
+  worker:
+    aliases: [coder, dev, engineer]
+    task_poll: >-              # this role's task-poll wording
+      you are idle and caught up ...
+    stance: |
+      You are a producer: ...
+```
+
+**Overriding is per role, not per field.** A role named in the upload
+replaces that role's whole definition; roles left unmentioned keep the
+packaged one; `<name>: null` deletes one; `replace: true` makes the upload
+the entire vocabulary. Merging *within* a role was rejected deliberately — a
+half-overridden role (new aliases, old prose) reads as a bug, and there is no
+sane way to merge two pieces of prose. A name or alias may only ever resolve
+to one role; an upload that breaks that is refused whole.
+
+**The authority owns it**, as it owns `policy` — one mesh, one set of role
+names, or two daemons would read the same handle differently. A mirror's
+upload is *forwarded* (`/peer/mesh/roles`) rather than refused, so the
+dashboard a user happens to have open need not be the authority's. It rides
+the ordinary sync but is **version-gated**: `roles_version` vs a per-peer
+`roles_seen`, so the stance prose travels on a real change and never on the
+back of a message flush. A joining guest gets it with its grant.
+
+**Uploads are not retroactive.** A member's role is resolved once, at join,
+and stored as a plain string; changing the vocabulary never rewrites it.
+A member holding a role the new set dropped keeps it and simply matches no
+rule — no migration code, and the CLI/web surface it as an *orphan* so the
+state is visible rather than mysterious.
+
+**Stance is delivered by pointer.** The join briefing names the role and tells
+the agent to run `claunch mesh stance <mesh>`; it never pastes the prose.
+Inlining was tried and is wrong twice over — it doubles a block that is typed
+into a live terminal, and it freezes the stance into the agent's context at
+join time, so every later upload would leave that member acting on a
+vocabulary the mesh no longer has. The same command is the recovery path
+after a compaction drops the briefing.
+
+**What a role actually drives** today: the stance pointer in the join
+briefing, `stall_watch` (who hears about a stuck member), and `task_poll`
+wording. Role-based **routing bans** (worker↔worker, the operator pipe) are
+still not implemented — the schema leaves room, but turning them on would make
+a `send` that works today start failing on an upload alone, so that stays a
+separate, explicit decision.
 
 ## Agent conveniences (phase 4)
 

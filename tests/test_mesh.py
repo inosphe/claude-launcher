@@ -140,7 +140,17 @@ def test_infer_role():
     assert infer_role("worker_1") == "worker"
     assert infer_role("moderator") == "leader"
     assert infer_role("reviewer.claude") == "reviewer"
-    assert infer_role("alice") == "member"
+    # Aliases, which the old six-entry table had none of: a fleet named with
+    # interconnect's usual handles (coder1, coder2, ...) used to land every
+    # one of them on the meaningless "member" and so fall out of every
+    # role-targeted policy.
+    assert infer_role("coder1") == "worker"
+    assert infer_role("dev-2") == "worker"
+    assert infer_role("qa") == "reviewer"
+    assert infer_role("mod") == "leader"
+    # An unlabelled member audits rather than rubber-stamps (interconnect's
+    # rule); "member" — a role nothing acted on — is gone.
+    assert infer_role("alice") == "reviewer"
 
 
 def test_message_intents():

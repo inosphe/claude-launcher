@@ -11,10 +11,12 @@ member's terminal and when that member last *sent*:
   reminder. The port of interconnect's recv-idle liveness ping.
 * **task-poll** — a member that is caught up (nothing pending, nothing
   unanswered) and idle: a role-targeted poke to pull work or leave. Only
-  ``roles`` (default: workers) are polled; bodies are per-role.
-* **stall warning** — a non-leader member has held one state too long
+  ``roles`` (default: workers) are polled; the text comes from the mesh's
+  role set unless overridden here (see :func:`task_poll_body`).
+* **stall warning** — a member has held one state too long
   (idle+caught-up, or undeliverable-behind): a real mesh message to every
-  leader-role member, so it also crosses machines over federation.
+  member whose role is a ``stall_watch`` role in the mesh's vocabulary
+  (the leader by default), so it also crosses machines over federation.
 
 interconnect's fourth tier — tmux send-keys escalation — has no port: every
 delivery here *is* an injection, so there is nothing to escalate to.
@@ -41,13 +43,10 @@ DEFAULT_HEARTBEAT_BODY = (
     "if you already handled them, send a brief ack so the mesh knows. "
     "Do NOT reply to this notice itself."
 )
-TASK_POLL_BODIES = {
-    "worker": (
-        "you are idle and caught up (no unread mesh mail). If you have no "
-        "task in flight, ask the leader to assign one -- or leave the mesh "
-        "if your work here is done. Do NOT reply to this notice."
-    ),
-}
+#: Per-role task-poll text now belongs to the ROLE, in the mesh's role set
+#: (``mesh_roles``), so a mesh that defines its own roles gets bodies to match
+#: without a second edit here. ``task_poll.bodies`` stays as the per-mesh
+#: OVERRIDE and therefore starts empty — see :func:`task_poll_body`.
 TASK_POLL_FALLBACK_BODY = (
     "you are idle and caught up -- engage if there is work for a {role} "
     "here, otherwise stay parked. Do NOT reply to this notice."
@@ -73,7 +72,7 @@ def default_policy() -> dict:
             "interval": 600.0,
             "max_interval": 3600.0,
             "roles": ["worker"],
-            "bodies": dict(TASK_POLL_BODIES),
+            "bodies": {},
         },
         "stall_warn": {
             "enabled": False,
@@ -161,6 +160,27 @@ def format_nudge(mesh_name: str, kind: str, handle: str, body: str) -> str:
     )
 
 
+def task_poll_body(mesh, task_poll: dict, role: str) -> str:
+    """The task-poll text for ``role``, most specific source first.
+
+    The mesh's own ``task_poll.bodies`` wins — it is the per-mesh edit made
+    right here in the policy editor. Below it sits the role set's ``task_poll``
+    (a property of what the role *is*, and the only one that travels with a
+    custom role), and below that the generic interpolated line.
+
+    Only the fallback is ``format``-ed: an authored body is used verbatim, so
+    a stray brace in one is text rather than a KeyError that would take the
+    whole nudge down.
+    """
+    authored = (task_poll.get("bodies") or {}).get(role)
+    if authored:
+        return authored
+    role_def = mesh.roleset.get(role)
+    if role_def is not None and role_def.task_poll:
+        return role_def.task_poll
+    return TASK_POLL_FALLBACK_BODY.format(role=role)
+
+
 def stall_body(handle: str, role: str, *, secs: float, behind: int) -> str:
     what = (
         f"behind -- {behind} message(s) delivered-pending, its session never went idle"
@@ -191,8 +211,12 @@ async def tick(mm, mesh) -> None:
     if not (hb["enabled"] or tp["enabled"] or sw["enabled"]):
         return
     now = time.monotonic()
-    leaders = sorted(
-        h for h, m in mesh.members.items() if m.role == "leader"
+    # Who hears about a stalled member is the ROLE SET's call, not a constant
+    # here: a mesh that renamed its lead role (or wants two roles watching)
+    # says so in its vocabulary. Defaults to leader alone.
+    watching = set(mesh.roleset.stall_watchers())
+    watchers = sorted(
+        h for h, m in mesh.members.items() if m.role in watching
     )
     for handle, member in list(mesh.members.items()):
         local = mm._is_local(mesh, member)
@@ -261,9 +285,7 @@ async def tick(mm, mesh) -> None:
         ):
             due = st.get("tp_next", active_at + tp["interval"])
             if now >= due:
-                body = tp["bodies"].get(member.role) or (
-                    TASK_POLL_FALLBACK_BODY.format(role=member.role)
-                )
+                body = task_poll_body(mesh, tp, member.role)
                 await _dispatch(
                     mm, mesh, member, session, "task-poll", handle, body
                 )
@@ -276,12 +298,12 @@ async def tick(mm, mesh) -> None:
             st.pop("tp_next", None)
             st.pop("tp_backoff", None)
 
-        # -- stall warning: one state held too long -> tell the leaders ---- #
+        # -- stall warning: one state held too long -> tell the watchers --- #
         if (
             sw["enabled"]
             and sw["warn_secs"] > 0
-            and leaders
-            and handle not in leaders
+            and watchers
+            and handle not in watchers
         ):
             stalled_idle = idle and caught_up and now - active_at >= sw["warn_secs"]
             # "behind": messages await this member but its session never goes
@@ -301,12 +323,12 @@ async def tick(mm, mesh) -> None:
                         behind=pending if stalled_behind else 0,
                     )
                     try:
-                        # fyi: leaders are informed, not asked — the warning
+                        # fyi: watchers are informed, not asked — the warning
                         # must not arm their own heartbeat or invite replies.
                         # An ordinary mesh message, so it federates to remote
-                        # leaders through the normal fanout.
+                        # watchers through the normal fanout.
                         mm._send_core(
-                            mesh, POLICY_SENDER, leaders, body,
+                            mesh, POLICY_SENDER, watchers, body,
                             external=True, type="fyi",
                         )
                         mm._flush_guests_soon(mesh)

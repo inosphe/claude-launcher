@@ -1339,6 +1339,7 @@ async function openMesh(name) {
   if (meshPollTimer) clearInterval(meshPollTimer);
   meshName = name;
   missingMeshShown = "";   // a different route deserves a fresh verdict
+  rolesEditor = "";        // never carry one mesh's open editor into another
   showView("mesh");
   $("mesh-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshMeshView();
@@ -1350,6 +1351,10 @@ async function openMesh(name) {
    would otherwise hold back the very list the pick just asked for. */
 async function refreshMeshView(force = false) {
   if (!meshName) return;
+  // An open role-set editor holds unsaved YAML in a textarea the rebuild
+  // below would discard. A poll-driven refresh stands down until it closes;
+  // an explicit one (a save, a cancel) still goes through.
+  if (rolesEditor && !force) return;
   let info, history;
   try {
     const [r1, r2] = await Promise.all([
@@ -2196,6 +2201,7 @@ function renderMesh(info, history, force) {
     ));
   }
   view.appendChild(polBox);
+  view.appendChild(renderMeshRoles(info));
 
   // send box: as the human operator, or on behalf of a member
   const send = el("div", "mesh-send");
@@ -2364,6 +2370,9 @@ function renderMeshPolicy(info) {
   const tpBody = document.createElement("input");
   const firstRole = (tp.roles || ["worker"])[0] || "worker";
   tpBody.value = (tp.bodies || {})[firstRole] || "";
+  // Empty is not "no message": it means the ROLE's own task_poll text, which
+  // is where a custom vocabulary carries its wording.
+  tpBody.placeholder = `(blank — use the ${firstRole} role's own text)`;
   section("task_poll", "task-poll — poke idle, caught-up members of these roles", [
     ["interval", "poke after idle (s)", num(tp.interval ?? 600)],
     ["max_interval", "backoff ceiling (s)", num(tp.max_interval ?? 3600)],
@@ -2409,6 +2418,106 @@ function renderMeshPolicy(info) {
     refreshMeshView();
   });
   box.appendChild(save);
+  return box;
+}
+
+/* The mesh's role set: which roles its handles resolve into, and the YAML
+   that says so. The vocabulary is the authority's — a mirror's edit is
+   forwarded there — so this panel is live on every daemon in the mesh.
+
+   The editor is opened on demand rather than rendered with the page: the
+   YAML is a separate fetch (the 2s poll only carries role NAMES, so stance
+   prose never rides it), and a textarea that rebuilt itself every two
+   seconds would throw away whatever was being typed. `rolesEditor` holds the
+   open editor's mesh so the poll leaves it alone. */
+let rolesEditor = "";
+
+function renderMeshRoles(info) {
+  const roles = info.roles || {};
+  const box = el("div", "mesh-roles");
+  box.appendChild(el("h3", null, "Roles"));
+  box.appendChild(el(
+    "p", "wf-note",
+    (roles.custom ? "this mesh's own vocabulary" : "the packaged vocabulary") +
+    ` · default role: ${roles.default || "?"} · a handle's leading word ` +
+    "picks its role, and changing this is never retroactive"
+  ));
+  const chips = el("div", "mesh-role-chips");
+  const held = {};
+  for (const m of info.members || []) held[m.role] = (held[m.role] || 0) + 1;
+  for (const name of roles.names || []) {
+    const chip = el("span", "mesh-role-chip", `${name} · ${held[name] || 0}`);
+    if (held[name]) chip.classList.add("held");
+    chips.appendChild(chip);
+  }
+  // A role a member still holds but the vocabulary no longer defines. Not an
+  // error — it is what "not retroactive" looks like from the outside.
+  for (const name of Object.keys(held).sort()) {
+    if ((roles.names || []).includes(name)) continue;
+    const chip = el("span", "mesh-role-chip orphan", `${name} · ${held[name]}`);
+    chip.title = "held by a member but no longer defined — it matches no rule";
+    chips.appendChild(chip);
+  }
+  box.appendChild(chips);
+
+  if (rolesEditor !== info.name) {
+    const edit = el("button", "wf-btn", "Edit role set");
+    edit.addEventListener("click", () => { rolesEditor = info.name; refreshMeshView(true); });
+    box.appendChild(edit);
+    return box;
+  }
+
+  const area = document.createElement("textarea");
+  area.className = "mesh-roles-yaml";
+  area.value = "loading…";
+  area.disabled = true;
+  box.appendChild(area);
+  api(`/api/mesh/${encodeURIComponent(info.name)}/roles`)
+    .then((r) => r.json())
+    .then((doc) => {
+      area.value = doc.yaml || "";
+      area.disabled = false;
+    })
+    .catch(() => { area.value = "(could not load the role set)"; });
+
+  const actions = el("div", "mesh-roles-actions");
+  const url = `/api/mesh/${encodeURIComponent(info.name)}/roles`;
+  // Deliberately NOT meshEdit: that refreshes unconditionally in its finally,
+  // which would rebuild this textarea and throw away the author's text on the
+  // very path where they need it most — a rejected upload, whose error names
+  // the line to fix. So the editor closes only after a save that took.
+  const put = async (body) => {
+    const resp = await api(url, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) { alert(doc.error || `HTTP ${resp.status}`); return; }
+    rolesEditor = "";
+    await refreshMeshView(true);
+  };
+  const save = el("button", "wf-btn approve", "Save role set");
+  save.addEventListener("click", () => put({ yaml: area.value }));
+  const reset = el("button", "wf-btn", "Reset to default");
+  reset.addEventListener("click", () => {
+    if (!confirm(
+      "Drop this mesh's role set and go back to the packaged one?\n\n" +
+      "Members keep the role they joined with — this is not retroactive."
+    )) return;
+    return put({ yaml: null });
+  });
+  const cancel = el("button", "wf-btn", "Cancel");
+  cancel.addEventListener("click", () => { rolesEditor = ""; refreshMeshView(true); });
+  actions.append(save, reset, cancel);
+  box.appendChild(actions);
+  if (!roles.is_authority) {
+    box.appendChild(el(
+      "p", "wf-note",
+      `${info.authority} owns the vocabulary — your edit is forwarded there ` +
+      "and comes back to every daemon in the mesh"
+    ));
+  }
   return box;
 }
 
