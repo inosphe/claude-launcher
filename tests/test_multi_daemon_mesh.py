@@ -207,10 +207,11 @@ def test_mesh_between_two_daemon_processes(home, tmp_path):
             lambda: _member(ca, "bob"), "bob's membership to reach daemon A"
         )
         assert bob_on_a["machine"] == "pcb"
-        # v2: B's copy is a mirror of pca; alice is the primary's own member
+        # B's copy is a mirror of pca; the roster is absolute, so alice
+        # carries the authority's machine rather than a blank
         info_b = cb.get("/api/mesh/fedmesh")
         assert info_b["primary"] == "pca"
-        assert _member(cb, "alice")["machine"] == ""
+        assert _member(cb, "alice")["machine"] == "pca"
 
         def _capture(client, name: str) -> str:
             return client.get(f"/api/sessions/{name}/capture", raw=True).decode(

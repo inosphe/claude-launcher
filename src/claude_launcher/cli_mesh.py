@@ -298,16 +298,94 @@ def _cmd_add(args: argparse.Namespace) -> int:
     return 0
 
 
-def _cmd_peers(_args: argparse.Namespace) -> int:
+def _cmd_peers(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
-    payload = client.get("/api/relay/peers")
-    peers = payload.get("peers", [])
+    if not getattr(args, "mesh", None):
+        payload = client.get("/api/relay/peers")
+        peers = payload.get("peers", [])
+        if not peers:
+            print("no other daemons are registered on the relay")
+        for name in peers:
+            print(name)
+        _print_relay(payload.get("relay"))
+        return 0
+    info = client.get(f"/api/mesh/{args.mesh}")
+    peers = info.get("peers", [])
     if not peers:
-        print("no other daemons are registered on the relay")
-    for name in peers:
-        print(name)
-    _print_relay(payload.get("relay"))
+        print(f"mesh {args.mesh!r} is local to this daemon -- no peers")
+        _print_relay(info.get("relay"))
+        return 0
+    print(f"rank  machine       role       members")
+    for p in peers:
+        marks = []
+        if p.get("self"):
+            marks.append("this daemon")
+        if p.get("ok") is False:
+            marks.append(f"unreachable ({p.get('error')})")
+        if p.get("queued"):
+            marks.append(f"{p['queued']} queued")
+        if p.get("linked") and not p.get("enabled"):
+            marks.append("cut")
+        print(
+            f"{p['rank']:<5} {p['machine']:<13} {p['role']:<10} "
+            f"{', '.join(p.get('members') or []) or '-'}"
+            + (f"   [{'; '.join(marks)}]" if marks else "")
+        )
+    print(
+        f"\nauthority: {info.get('authority')} (rank 0, epoch "
+        f"{info.get('epoch', 0)}) -- move it with 'claunch mesh rank "
+        f"{args.mesh} <machine> 0'"
+    )
+    _print_relay(info.get("relay"))
     return 0
+
+
+def _cmd_rank(args: argparse.Namespace) -> int:
+    """Move one peer to a position; everyone else keeps their relative order."""
+    client = daemon_client.ensure_running()
+    info = client.get(f"/api/mesh/{args.mesh}")
+    order = [p["machine"] for p in info.get("peers", [])]
+    if args.machine not in order:
+        print(
+            f"{args.machine!r} is not a peer of mesh {args.mesh!r} "
+            f"(peers: {', '.join(order) or 'none'})",
+            file=sys.stderr,
+        )
+        return 1
+    position = max(0, min(args.position, len(order) - 1))
+    order.remove(args.machine)
+    order.insert(position, args.machine)
+    result = client.put(
+        f"/api/mesh/{args.mesh}/peers",
+        {"order": order, "force": bool(args.force)},
+    )
+    print("rank order: " + " > ".join(result.get("peers") or order))
+    if result.get("handover"):
+        print(
+            f"authority moved to {result.get('authority')} "
+            f"(epoch {result.get('epoch')})"
+        )
+    return 0
+
+
+def _cmd_cut(args: argparse.Namespace) -> int:
+    client = daemon_client.ensure_running()
+    enabled = args.func is _cmd_uncut
+    result = client.patch(
+        f"/api/mesh/{args.mesh}/links/{args.a}/{args.b}", {"enabled": enabled}
+    )
+    verb = "restored" if result.get("enabled") else "cut"
+    print(f"{verb} the direct link {result['a']} <-> {result['b']}")
+    if not result.get("enabled"):
+        print(
+            "their traffic now always goes through the authority -- there is "
+            "no direct hop while the link is cut"
+        )
+    return 0
+
+
+def _cmd_uncut(args: argparse.Namespace) -> int:
+    return _cmd_cut(args)
 
 
 def _cmd_requests(args: argparse.Namespace) -> int:
@@ -589,9 +667,42 @@ def register(sub) -> None:
     p.set_defaults(func=_cmd_add)
 
     p = msub.add_parser(
-        "peers", help="list the other daemons registered on the relay"
+        "peers",
+        help="with a mesh: its daemons in rank order (rank 0 = the "
+             "authority); without: the daemons registered on the relay",
     )
+    p.add_argument("mesh", nargs="?", help="show this mesh's ranked graph")
     p.set_defaults(func=_cmd_peers)
+
+    p = msub.add_parser(
+        "rank",
+        help="move a peer to a rank; position 0 hands it the authority",
+    )
+    p.add_argument("mesh")
+    p.add_argument("machine")
+    p.add_argument("position", type=int,
+                   help="0 = authority, 1 = next, ... (clamped to the list)")
+    p.add_argument("--force", action="store_true",
+                   help="take the authority over from a daemon that is gone "
+                        "for good (bumps the epoch; run this on the daemon "
+                        "that should hold rank 0)")
+    p.set_defaults(func=_cmd_rank)
+
+    p = msub.add_parser(
+        "cut",
+        help="cut the direct link between two peers: their traffic falls "
+             "back to the authority's fanout",
+    )
+    p.add_argument("mesh")
+    p.add_argument("a", metavar="MACHINE-A")
+    p.add_argument("b", metavar="MACHINE-B")
+    p.set_defaults(func=_cmd_cut)
+
+    p = msub.add_parser("uncut", help="restore a cut link between two peers")
+    p.add_argument("mesh")
+    p.add_argument("a", metavar="MACHINE-A")
+    p.add_argument("b", metavar="MACHINE-B")
+    p.set_defaults(func=_cmd_uncut)
 
     p = msub.add_parser(
         "requests",

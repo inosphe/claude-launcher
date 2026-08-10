@@ -854,6 +854,9 @@ claunch mesh approve dev req-3f2a # ...the owner admits (or 'deny')
 claunch mesh add dev              # owner-side wizard: pick a relay daemon ->
                                   #   pick its session -> enrolled, no codes
 claunch mesh peers                # the other daemons registered on the relay
+claunch mesh peers dev            # ...or this mesh's daemons in RANK order
+claunch mesh rank dev laptop 0    # move a peer; position 0 hands it authority
+claunch mesh cut dev laptop pc-b  # drop one direct link (falls back to rank 0)
 claunch mesh invite dev           # optional ticket that pre-approves one join
 claunch mesh join dev@work-pc --code <ticket>   # ...admitted without waiting
 claunch mesh revoke dev other-pc  # unlink a guest machine (persistent until then)
@@ -924,13 +927,29 @@ claunch mesh install --project .  # register MCP tools + /mesh skill
   UI and agents. Guest members are secondary: their joins,
   leaves and sends (even a DM between two members of the same guest daemon)
   are forwarded to the primary, which decides, sequences and fans out — so
-  every daemon's history is identical and guest-to-guest messages route
-  through the hub with no pairwise links. Credentials are mesh-scoped
+  every daemon's history is identical. Credentials are mesh-scoped
   tokens (never daemon API tokens); members show as `work-pc/s0`-style
   addresses. If the primary is unreachable, the mirror stays readable,
   sends queue durably in its outbox (senders see `queued` immediately) and
   drain in order on reconnect; joins fail fast — membership is an
   authoritative decision.
+- **The daemons form a graph, not a star**: `claunch mesh peers dev` lists
+  them in **rank** order, and the order *is* the authority — `peers[0]`
+  sequences the log, owns the roster and runs the policy engine, with no
+  per-link role to declare anywhere. Every pair is linked directly (the
+  authority brokers each edge's credentials, so no two daemons ever have to
+  trust an unauthenticated first contact), and every link is duplex. When
+  the authority is unreachable a send still goes **straight** to the daemons
+  hosting its recipients — it reaches their terminals immediately and is
+  folded into the log at its authoritative position once sequencing catches
+  up — so an outage stops the record, not the conversation. Move the
+  authority with `claunch mesh rank dev <machine> 0`; cut a single edge with
+  `claunch mesh cut` (its traffic falls back to the authority's fanout).
+  An edge belongs to both its ends, so **either end may cut or restore it** —
+  from its own CLI or its own dashboard — while an edge between two other
+  daemons stays the authority's call. The mesh page leads with an editable
+  diagram of all of this, backed by a Links list that does the same edits
+  without having to hit a hairline.
 - **Joining is asking to be admitted**: the first join from a machine is a
   *request* the mesh's owner sees in `claunch mesh requests` (and in the web
   UI) and answers with `approve`/`deny`; the grant is delivered back over

@@ -77,6 +77,9 @@ class DaemonClient:
     def put(self, path: str, body: Optional[dict] = None, **kw):
         return self.request("PUT", path, body if body is not None else {}, **kw)
 
+    def patch(self, path: str, body: Optional[dict] = None, **kw):
+        return self.request("PATCH", path, body if body is not None else {}, **kw)
+
     def delete(self, path: str, **kw):
         return self.request("DELETE", path, **kw)
 

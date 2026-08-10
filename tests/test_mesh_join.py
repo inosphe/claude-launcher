@@ -149,6 +149,13 @@ def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
             int(body.get("base") or 0), body.get("messages") or [],
             body.get("members") or [], body.get("policy"),
             body.get("nudges") or [],
+            peers=body.get("peers"), epoch=body.get("epoch"),
+            links=body.get("links"), edges=body.get("edges"),
+        )
+    if path == "/peer/mesh/deliver":
+        return mm.peer_deliver_accept(
+            body["mesh"], body["machine"], body["token"],
+            body.get("message") or {},
         )
     raise AssertionError(f"unexpected peer path {path!r}")
 
@@ -213,8 +220,8 @@ def test_coded_join_creates_mirror_member_and_briefing(home, tmp_path):
         assert set(mesh_b.members) == {"alice", "amy", "bob"}
         assert [m["body"] for m in mesh_b.messages] == ["pre-join history"]
         assert mesh_a.members["bob"].machine == "pcB"
-        assert mesh_a.guests["pcB"]["token_in"] == mesh_b.link["token_out"]
-        assert mesh_a.guests["pcB"]["token_out"] == mesh_b.link["token_in"]
+        assert mesh_a.links["pcB"]["token_in"] == mesh_b.links["pcA"]["token_out"]
+        assert mesh_a.links["pcB"]["token_out"] == mesh_b.links["pcA"]["token_in"]
         assert mm_a.request_list("m") == []  # nothing pended
         # the joining member is briefed in its own terminal
         await _wait_screen(mgr.get("sb"), "join briefing")
@@ -363,7 +370,7 @@ def test_relink_auto_grant_reclaims_member(home, tmp_path):
         mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
         code = mm_a.invite("m")["code"]
         await mm_b.join("m@pcA", "sb", handle="bob", code=code)
-        old_token = mm_a.get("m").guests["pcB"]["token_in"]
+        old_token = mm_a.get("m").links["pcB"]["token_in"]
 
         # the guest loses its mirror (local mishap)
         mm_b.delete("m")
@@ -375,7 +382,7 @@ def test_relink_auto_grant_reclaims_member(home, tmp_path):
         assert isinstance(member, Member) and member.handle == "bob"
         assert mm_b.get("m").primary == "pcA"
         assert mm_a.request_list("m") == []
-        assert mm_a.get("m").guests["pcB"]["token_in"] != old_token
+        assert mm_a.get("m").links["pcB"]["token_in"] != old_token
         # no duplicate member appeared
         assert sum(
             1 for x in mm_a.get("m").members.values() if x.machine == "pcB"
@@ -462,7 +469,7 @@ def test_revoke_guest_removes_members_and_mirror(home, tmp_path):
 
         await mm_a.revoke_guest("m", "pcB")
         mesh_a = mm_a.get("m")
-        assert mesh_a.guests == {}
+        assert mesh_a.links == {}
         assert "bob" not in mesh_a.members
         # G1: the guest was told; its mirror is gone
         assert [x.name for x in mm_b.list()] == []
@@ -543,7 +550,7 @@ def test_invite_member_pushes_establishment(home, tmp_path):
         assert mesh_b.primary == "pcA"
         assert mesh_b.members["bob"].machine == "pcB"
         assert mesh_a.members["bob"].machine == "pcB"
-        assert "pcB" in mesh_a.guests
+        assert "pcB" in mesh_a.links
         # the embedded ticket was consumed, not left outstanding
         assert mm_a.invite_list("m") == []
         await _wait_screen(mgr.get("sb"), "join briefing")

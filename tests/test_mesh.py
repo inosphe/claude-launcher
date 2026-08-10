@@ -860,7 +860,7 @@ def test_cursors_phase1_format_migrates(home, tmp_path):
         mm2.load_all()
         loaded = mm2.get("old")
         assert loaded.cursors == {"w1": 3}
-        assert loaded.guest_cursors == {}
+        assert loaded.link_cursors == {}
         await mgr.shutdown_all()
 
     asyncio.run(run())

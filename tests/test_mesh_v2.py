@@ -152,6 +152,13 @@ def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
             int(body.get("base") or 0), body.get("messages") or [],
             body.get("members") or [], body.get("policy"),
             body.get("nudges") or [],
+            peers=body.get("peers"), epoch=body.get("epoch"),
+            links=body.get("links"), edges=body.get("edges"),
+        )
+    if path == "/peer/mesh/deliver":
+        return mm.peer_deliver_accept(
+            body["mesh"], body["machine"], body["token"],
+            body.get("message") or {},
         )
     raise AssertionError(f"unexpected peer path {path!r}")
 
@@ -222,13 +229,15 @@ def test_link_creates_mirror_with_snapshot(home, tmp_path):
         # roles: A owns, B mirrors
         assert mesh_a.primary == "" and mesh_b.primary == "pcA"
         # A2: snapshot — roster and full log arrived with the link
-        assert mesh_b.members["alice"].machine == ""  # absolute: primary-local
+        # phase 7: the roster is fully absolute — even the authority's own
+        # members carry its machine, so a handover cannot reassign them
+        assert mesh_b.members["alice"].machine == "pcA"
         assert [m["body"] for m in mesh_b.messages] == ["pre-link history"]
         # asymmetric credential pair
-        assert mesh_a.guests["pcB"]["token_in"] == mesh_b.link["token_out"]
-        assert mesh_a.guests["pcB"]["token_out"] == mesh_b.link["token_in"]
+        assert mesh_a.links["pcB"]["token_in"] == mesh_b.links["pcA"]["token_out"]
+        assert mesh_a.links["pcB"]["token_out"] == mesh_b.links["pcA"]["token_in"]
         # the guest's cursor starts past the snapshot it was handed
-        assert mesh_a.guest_cursors["pcB"] == 1
+        assert mesh_a.link_cursors["pcB"] == 1
         # A1: the mirror cannot mint invites, the primary can
         with pytest.raises(MeshError):
             mm_b.invite("m")
@@ -281,15 +290,15 @@ def test_state_survives_reload_and_v1_state_is_dropped(home, tmp_path):
         mm_a2.load_all()
         mesh_a2 = mm_a2.get("m")
         assert mesh_a2.primary == ""
-        assert "pcB" in mesh_a2.guests
-        assert mesh_a2.guest_cursors["pcB"] >= 1
+        assert "pcB" in mesh_a2.links
+        assert mesh_a2.link_cursors["pcB"] >= 1
         assert mesh_a2.members["bob"].machine == "pcB"
 
         mm_b2 = MeshManager(mgr, settle=0.05, root=tmp_path / "meshB")
         mm_b2.load_all()
         mesh_b2 = mm_b2.get("m")
         assert mesh_b2.primary == "pcA"
-        assert mesh_b2.link["token_out"] == mm_b.get("m").link["token_out"]
+        assert mesh_b2.links["pcA"]["token_out"] == mm_b.get("m").links["pcA"]["token_out"]
         assert [m["body"] for m in mesh_b2.messages] == ["over the hub"]
         assert [e["body"] for e in mesh_b2.outbox] == ["while offline"]
 
@@ -321,7 +330,7 @@ def test_v1_federation_state_ignored_on_load(home, tmp_path):
     mm.load_all()
     mesh = mm.get("old")
     # A6: the v1 symmetric link and its peer cursor are gone; nothing crashes
-    assert mesh.primary == "" and mesh.guests == {} and mesh.link is None
+    assert mesh.primary == "" and mesh.links == {} and mesh.peers == []
     assert mesh.cursors == {"w": 1}
 
 
@@ -571,7 +580,7 @@ def test_dedupe_and_resync(home, tmp_path):
         n = len(mesh_a.messages)
         # C6: an upstream retry with the same id is acknowledged, not re-run
         dup = mm_a.peer_send_accept(
-            "m", "pcB", mesh_a.guests["pcB"]["token_in"],
+            "m", "pcB", mesh_a.links["pcB"]["token_in"],
             {"id": sent["id"], "from": "bob", "to": "alice", "body": "once only"},
         )
         assert dup.get("duplicate") is True
@@ -581,9 +590,9 @@ def test_dedupe_and_resync(home, tmp_path):
         await mm_a._flush_guest(mesh_a, "pcB")
         assert mesh_b.messages[-1]["id"] == sent["id"]
         before = [m["id"] for m in mesh_b.messages]
-        mesh_a.guest_cursors["pcB"] = 0  # simulate a lost cursor
+        mesh_a.link_cursors["pcB"] = 0  # simulate a lost cursor
         await mm_a._flush_guest(mesh_a, "pcB")
-        assert mesh_a.guest_cursors["pcB"] == len(mesh_a.messages)
+        assert mesh_a.link_cursors["pcB"] == len(mesh_a.messages)
         assert [m["id"] for m in mesh_b.messages] == before  # no duplicates
 
         await mgr.shutdown_all()
@@ -805,15 +814,22 @@ def test_mesh_info_reports_roles_and_queues(home, tmp_path):
         mm_a, mm_b = await _linked_pair(mgr, tmp_path)
         mesh_a, mesh_b = mm_a.get("m"), mm_b.get("m")
 
+        # phase 7: "peers" is the whole rank list, ourselves included, with
+        # rank 0 holding the authority
         info_a = mm_a.mesh_info(mesh_a)
         assert info_a["primary"] is None  # owned
-        assert info_a["peers"][0]["machine"] == "pcB"
+        assert [p["machine"] for p in info_a["peers"]] == ["pcA", "pcB"]
+        assert info_a["peers"][0]["role"] == "authority"
+        assert info_a["peers"][0]["self"] is True
+        assert info_a["peers"][1]["role"] == "peer"
 
         info_b = mm_b.mesh_info(mesh_b)
         assert info_b["primary"] == "pcA"
-        assert info_b["peers"][0]["machine"] == "pcA"
+        assert [p["machine"] for p in info_b["peers"]] == ["pcA", "pcB"]
+        assert info_b["peers"][0]["role"] == "authority"
+        assert info_b["peers"][1]["self"] is True
 
-        # outbox depth surfaces as the mirror's queue
+        # outbox depth surfaces as the queue toward the authority
         _break_transport(mm_b)
         await mm_b.send("m", "bob", "alice", "stuck")
         info_b = mm_b.mesh_info(mm_b.get("m"))

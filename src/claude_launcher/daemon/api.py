@@ -166,6 +166,8 @@ def build_app(
     r.add_post("/api/mesh/{mesh}/requests/{rid}/approve", h_mesh_request_approve)
     r.add_post("/api/mesh/{mesh}/requests/{rid}/deny", h_mesh_request_deny)
     r.add_delete("/api/mesh/{mesh}/guests/{machine}", h_mesh_guest_revoke)
+    r.add_put("/api/mesh/{mesh}/peers", h_mesh_peers_reorder)
+    r.add_patch("/api/mesh/{mesh}/links/{a}/{b}", h_mesh_link_set)
     r.add_get("/api/mesh/{mesh}/policy", h_mesh_policy_get)
     r.add_put("/api/mesh/{mesh}/policy", h_mesh_policy_set)
     r.add_post("/api/mesh/{mesh}/invitations", h_mesh_invitation)
@@ -186,8 +188,10 @@ def build_app(
     r.add_post("/peer/sessions", h_peer_sessions)
     r.add_post("/peer/mesh/join", h_peer_join)
     r.add_post("/peer/mesh/leave", h_peer_leave)
+    r.add_post("/peer/mesh/link", h_peer_link)
     r.add_post("/peer/mesh/send", h_peer_send)
     r.add_post("/peer/mesh/sync", h_peer_sync)
+    r.add_post("/peer/mesh/deliver", h_peer_deliver)
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
@@ -737,6 +741,34 @@ async def h_mesh_guest_revoke(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def h_mesh_peers_reorder(request: web.Request) -> web.Response:
+    """Rewrite the rank list — rank 0 is the mesh's authority."""
+    body = await _json_body(request)
+    order = body.get("order")
+    if not isinstance(order, list):
+        return json_error(400, "'order' must be a list of machine names")
+    result = await _mesh_mgr(request).reorder_peers(
+        request.match_info["mesh"],
+        [str(m) for m in order],
+        force=bool(body.get("force")),
+    )
+    return web.json_response(result)
+
+
+async def h_mesh_link_set(request: web.Request) -> web.Response:
+    """Cut or restore the direct edge between two peers."""
+    body = await _json_body(request)
+    if "enabled" not in body:
+        return json_error(400, "'enabled' must be true or false")
+    result = await _mesh_mgr(request).set_link(
+        request.match_info["mesh"],
+        request.match_info["a"],
+        request.match_info["b"],
+        enabled=bool(body.get("enabled")),
+    )
+    return web.json_response(result)
+
+
 async def h_peer_join_request(request: web.Request) -> web.Response:
     body = await _json_body(request)
     result = _mesh_mgr(request).peer_join_request_accept(
@@ -825,6 +857,22 @@ async def h_peer_leave(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def h_peer_link(request: web.Request) -> web.Response:
+    """A peer asks us to cut or restore an edge it terminates."""
+    body = await _json_body(request)
+    if "enabled" not in body:
+        return json_error(400, "'enabled' must be true or false")
+    result = _mesh_mgr(request).peer_link_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        str(body.get("a") or ""),
+        str(body.get("b") or ""),
+        bool(body.get("enabled")),
+    )
+    return web.json_response(result)
+
+
 async def h_peer_send(request: web.Request) -> web.Response:
     body = await _json_body(request)
     message = body.get("message")
@@ -846,6 +894,8 @@ async def h_peer_sync(request: web.Request) -> web.Response:
     messages = body.get("messages")
     members = body.get("members")
     nudges = body.get("nudges")
+    peers = body.get("peers")
+    links = body.get("links")
     result = _mesh_mgr(request).peer_sync_accept(
         str(body.get("mesh") or ""),
         str(body.get("machine") or ""),
@@ -855,6 +905,23 @@ async def h_peer_sync(request: web.Request) -> web.Response:
         members if isinstance(members, list) else [],
         body.get("policy"),
         nudges if isinstance(nudges, list) else [],
+        peers=peers if isinstance(peers, list) else None,
+        epoch=body.get("epoch"),
+        links=links if isinstance(links, list) else None,
+        edges=body.get("edges") if isinstance(body.get("edges"), dict) else None,
+    )
+    return web.json_response(result)
+
+
+async def h_peer_deliver(request: web.Request) -> web.Response:
+    """Fast path: a peer delivers a send its authority has not sequenced."""
+    body = await _json_body(request)
+    message = body.get("message")
+    result = _mesh_mgr(request).peer_deliver_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        message if isinstance(message, dict) else {},
     )
     return web.json_response(result)
 

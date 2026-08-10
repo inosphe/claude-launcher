@@ -48,6 +48,11 @@ log = logging.getLogger("claunch.daemon.mesh")
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
+#: Directory suffix `_drop_mesh` renames a deleted mesh to. History is kept
+#: on disk deliberately, but such a directory must never be mounted again —
+#: `.` is legal in a mesh name, so the suffix has to be matched exactly.
+_RETIRED_RE = re.compile(r"\.deleted-\d{8}T\d{6}Z$")
+
 #: Handle leading word -> role, interconnect's convention (`worker_1` is a
 #: worker, `moderator` leads). Anything else is a plain member.
 _ROLE_WORDS = {
@@ -272,23 +277,53 @@ class Member:
 class Mesh:
     """One mesh: membership, its message log, and per-member delivery state."""
 
-    def __init__(self, name: str, *, created_at: str = "") -> None:
+    def __init__(self, name: str, *, created_at: str = "", me: str = "") -> None:
         self.name = name
         self.created_at = created_at or utcnow()
         self.members: Dict[str, Member] = {}
         self.messages: List[dict] = []  # in-memory mirror of log.jsonl
         self.cursors: Dict[str, int] = {}  # handle -> delivered log index
-        #: Role: "" = this daemon is the mesh's PRIMARY (owner); a machine
-        #: name = this mesh is a MIRROR of that primary daemon.
-        self.primary: str = ""
-        #: Mirror side: the credential pair for talking to the primary
-        #: ({token_in, token_out, created_at}); None on the primary.
-        self.link: Optional[dict] = None
-        #: Primary side: guest machine -> {token_in, token_out, created_at}.
-        #: token_in authenticates that guest's calls to us; token_out is what
-        #: we present when syncing to it (exchanged by the link handshake).
-        self.guests: Dict[str, dict] = {}
-        #: Outstanding invite tickets (primary only; pre-approval for a
+        #: This daemon's relay name, mirrored from MeshManager.machine so the
+        #: mesh can work out its own rank. "" = no relay identity yet.
+        self.me: str = me
+        #: Phase 7: the mesh's daemons in RANK order — ``peers[0]`` is the
+        #: authority (sequencer, roster owner, policy engine) and every
+        #: further entry is an ordinary peer. Empty = a purely local mesh
+        #: that has never federated.
+        self.peers: List[str] = []
+        #: One entry per linked peer machine:
+        #: ``{token_in, token_out, created_at, enabled}``. ``token_in``
+        #: authenticates that peer's calls to us, ``token_out`` is what we
+        #: present to it — the pair is exchanged by the link handshake, so
+        #: every edge is duplex. ``enabled`` False = the operator cut it.
+        self.links: Dict[str, dict] = {}
+        #: Authority side: brokered credentials for the peer-to-peer edges
+        #: it is not part of, ``"m1|m2"`` (sorted) -> {token_12, token_21,
+        #: created_at, enabled}. The authority already holds an
+        #: authenticated channel to both ends, so it mints both halves and
+        #: ships each side its own view — no separate handshake, and no
+        #: daemon has to trust an unauthenticated first contact.
+        self.pair_links: Dict[str, dict] = {}
+        #: Whether each peer-to-peer edge is live, ``"m1|m2"`` (sorted) ->
+        #: enabled. The authority owns it (an operator cuts an edge there)
+        #: and ships it to everyone, so every daemon can draw the same
+        #: graph — including edges it is not itself an endpoint of.
+        self.edges: Dict[str, bool] = {}
+        #: Bumped on every authority handover; messages carry it alongside
+        #: ``seq`` so a forced takeover cannot silently interleave with the
+        #: old authority's late traffic.
+        self.authority_epoch: int = 0
+        #: Authority side: next sequence number to hand out.
+        self.next_seq: int = 0
+        #: Fast-path arrivals that have been injected into local terminals
+        #: but not yet sequenced by the authority. Folded into ``messages``
+        #: when the sequenced copy syncs in.
+        self.provisional: List[dict] = []
+        #: handle -> message ids already injected (via the fast path) that
+        #: still sit at or beyond the member's cursor, so folding a
+        #: provisional message into the log never re-injects it.
+        self.delivered_ids: Dict[str, set] = {}
+        #: Outstanding invite tickets (authority only; pre-approval for a
         #: join request): token -> minted-at ISO timestamp. TTL-checked at
         #: redemption (MeshManager.invite_ttl).
         self.invites: Dict[str, str] = {}
@@ -299,8 +334,8 @@ class Mesh:
         #: Primary side: approved joins whose grant callback has not reached
         #: the guest yet, id -> {machine, handle, reply_token}.
         self.pending_grants: Dict[str, dict] = {}
-        #: Primary side: per-guest fanout cursor into ``messages``.
-        self.guest_cursors: Dict[str, int] = {}
+        #: Authority side: per-peer fanout cursor into ``messages``.
+        self.link_cursors: Dict[str, int] = {}
         #: Runtime peer call status: machine -> {ok, error, retry_at, backoff,
         #: last_sync, roster_seen}. On a mirror the single key is the primary.
         self.peer_status: Dict[str, dict] = {}
@@ -326,6 +361,55 @@ class Mesh:
         self.wake = asyncio.Event()
         self.last_append = 0.0  # monotonic time of the last log append
         self._first_pending: Dict[str, float] = {}  # handle -> monotonic
+        #: Retired primary/mirror state read off disk, held until the relay
+        #: name is known so it can be folded into ``peers`` (see
+        #: MeshManager._migrate_v2). None once migrated or not applicable.
+        self._v2: Optional[dict] = None
+
+    # ------------------------------------------------------------------ #
+    # rank
+    # ------------------------------------------------------------------ #
+    @property
+    def authority(self) -> str:
+        """The machine that sequences this mesh — ``peers[0]``.
+
+        A mesh that never federated has no peer list; we are its authority
+        by construction.
+        """
+        return self.peers[0] if self.peers else self.me
+
+    @property
+    def primary(self) -> str:
+        """Legacy view of :attr:`authority`: ``""`` when *we* hold it.
+
+        Phase 7 turned ownership into a position, but "am I the authority?"
+        is asked all over this module and reads best as ``if mesh.primary``.
+        """
+        auth = self.authority
+        return "" if not auth or auth == self.me else auth
+
+    def rank(self, machine: str) -> int:
+        """Rank of ``machine`` (0 = authority); -1 when it is not a peer."""
+        try:
+            return self.peers.index(machine)
+        except ValueError:
+            return -1
+
+    def owns_link(self, machine: str) -> bool:
+        """Whether WE drive the handshake on the edge to ``machine``.
+
+        The lower-ranked side owns the edge. An unranked side (no relay
+        identity yet, or a peer we only just heard of) never owns it.
+        """
+        mine, theirs = self.rank(self.me), self.rank(machine)
+        if mine < 0:
+            return False
+        return theirs < 0 or mine < theirs
+
+    def linked(self, machine: str) -> bool:
+        """A live (uncut) credential pair exists toward ``machine``."""
+        link = self.links.get(machine)
+        return bool(link) and link.get("enabled", True)
 
     # ------------------------------------------------------------------ #
     # views
@@ -339,8 +423,19 @@ class Mesh:
         return to == handle
 
     def pending(self, handle: str) -> List[dict]:
+        """Undelivered messages for ``handle`` — sequenced tail first, then
+        anything the fast path parked in ``provisional``."""
         start = self.cursors.get(handle, 0)
-        return [m for m in self.messages[start:] if self.addressed_to(m, handle)]
+        done = self.delivered_ids.get(handle) or frozenset()
+        out = [
+            m for m in self.messages[start:]
+            if self.addressed_to(m, handle) and m.get("id") not in done
+        ]
+        out.extend(
+            m for m in self.provisional
+            if self.addressed_to(m, handle) and m.get("id") not in done
+        )
+        return out
 
 
 class MeshManager:
@@ -366,8 +461,9 @@ class MeshManager:
         #: Federation wiring, set by the daemon entrypoint once the uplink
         #: exists. ``machine`` is this daemon's relay name — the machine-level
         #: qualifier in global addresses like ``work-pc/s0``; empty means no
-        #: relay configured, so the mesh is local-only.
-        self.machine: str = ""
+        #: relay configured, so the mesh is local-only. Assigning it refreshes
+        #: every mesh's view of its own rank (see the property below).
+        self._machine: str = ""
         #: async (machine, path, body) -> dict; raises PeerUnreachable on
         #: transport failure, MeshError on an application-level rejection.
         self.peer_transport: Optional[Callable] = None
@@ -386,6 +482,23 @@ class MeshManager:
         #: handle, role, requested_at}. Durable (outgoing_joins.json) so a
         #: grant that arrives after a restart still finds its request.
         self._outgoing: Dict[str, dict] = {}
+
+    @property
+    def machine(self) -> str:
+        return self._machine
+
+    @machine.setter
+    def machine(self, value: str) -> None:
+        """Our relay name. The uplink resolves it *after* ``load_all``, so
+        every mesh's ``me`` (and with it its rank) is refreshed here."""
+        self._machine = str(value or "")
+        for mesh in self._meshes.values():
+            # An empty relay name never *erases* a remembered identity: a
+            # federated mesh keeps the rank it was written with until the
+            # uplink offers a real name (possibly a renamed one).
+            if self._machine:
+                mesh.me = self._machine
+            self._migrate_v2(mesh)
 
     def _is_local(self, mesh: Mesh, member: Member) -> bool:
         """Whether ``member``'s session lives on THIS daemon.
@@ -414,10 +527,24 @@ class MeshManager:
         for entry in sorted(root.iterdir()):
             if not (entry / "mesh.json").is_file():
                 continue
+            if _RETIRED_RE.search(entry.name):
+                continue  # a deleted mesh's history, kept but not mounted
             try:
-                self._meshes[entry.name] = self._load(entry)
+                mesh = self._load(entry)
             except (OSError, ValueError, KeyError) as exc:
                 log.warning("skipping unreadable mesh %r: %s", entry.name, exc)
+                continue
+            # Key by the mesh's OWN name, never the directory's. They agree
+            # for a live mesh, and when they do not the mesh is reachable in
+            # the listing but not by name — every lookup answers "no mesh
+            # named ...", including the delete that would clear it.
+            if mesh.name in self._meshes:
+                log.warning(
+                    "mesh %r: %r also claims that name — ignoring the second",
+                    mesh.name, str(entry),
+                )
+                continue
+            self._meshes[mesh.name] = mesh
         outgoing_path = root / "outgoing_joins.json"
         if outgoing_path.is_file():
             try:
@@ -455,7 +582,7 @@ class MeshManager:
             )
         if name in self._meshes:
             raise MeshConflict(f"mesh {name!r} already exists")
-        mesh = Mesh(name)
+        mesh = Mesh(name, me=self.machine)
         self._meshes[name] = mesh
         self._persist_def(mesh)
         self._ensure_worker(name)
@@ -475,10 +602,10 @@ class MeshManager:
         # A primary tells its guests so their mirrors are dropped, not
         # orphaned (best-effort — an unreachable guest keeps a dead mirror
         # it can remove locally).
-        if not mesh.primary and mesh.guests:
+        if not mesh.primary and mesh.links:
             self._notify_unlink_soon(
                 mesh.name,
-                {m: str(g.get("token_out") or "") for m, g in mesh.guests.items()},
+                {m: str(g.get("token_out") or "") for m, g in mesh.links.items()},
             )
         self._drop_mesh(name)
 
@@ -687,13 +814,28 @@ class MeshManager:
                 f"a mesh named {mesh_name!r} appeared locally while the join "
                 "was pending — remove it and re-join"
             )
-        mesh = Mesh(mesh_name)
-        mesh.primary = primary
-        mesh.link = {
+        mesh = Mesh(mesh_name, me=self.machine)
+        # The authority's rank list is authoritative; fall back to a plain
+        # two-node order when talking to a daemon that predates phase 7.
+        peers = [str(p) for p in (grant.get("peers") or []) if p]
+        mesh.peers = peers or [primary]
+        if primary not in mesh.peers:  # defensive: rank 0 must be the granter
+            mesh.peers.insert(0, primary)
+        if mesh.me and mesh.me not in mesh.peers:
+            mesh.peers.append(mesh.me)  # never at rank 0 — we are the joiner
+        try:
+            mesh.authority_epoch = int(grant.get("epoch") or 0)
+        except (TypeError, ValueError):
+            mesh.authority_epoch = 0
+        mesh.links[primary] = {
             "token_out": str(grant.get("token") or ""),
             "token_in": reply_token,
             "created_at": utcnow(),
+            "enabled": True,
         }
+        # Edges to the other peers, brokered by the authority: with them the
+        # newcomer is part of the complete graph from its very first message.
+        self._apply_link_grants(mesh, grant.get("links") or [], sender=primary)
         for entry in grant.get("members") or []:
             if isinstance(entry, dict) and entry.get("handle"):
                 member = Member.from_dict(entry)
@@ -866,8 +1008,9 @@ class MeshManager:
         return member
 
     def _roster_changed(self, mesh: Mesh) -> None:
-        """Primary-side roster bump: persist and fan out to guests soon."""
+        """Authority-side roster bump: persist and fan out to peers soon."""
         mesh.roster_version += 1
+        self._ensure_pair_links(mesh)
         self._persist_def(mesh)
         self._flush_guests_soon(mesh)
 
@@ -1000,6 +1143,11 @@ class MeshManager:
             "from": from_handle,
             "to": to if isinstance(to, str) else list(to),
             "type": intent,
+            # (epoch, seq) is the authoritative order. Epoch only moves on an
+            # authority handover, so a forced takeover cannot interleave with
+            # the old authority's late traffic.
+            "epoch": mesh.authority_epoch,
+            "seq": mesh.next_seq,
             # The log keeps the full composite; delivery slices per recipient
             # from ``shared`` + ``sections`` (see format_delivery).
             "body": (
@@ -1013,6 +1161,8 @@ class MeshManager:
         if norm_sections is not None:
             msg["shared"] = body
             msg["sections"] = norm_sections
+        mesh.next_seq += 1
+        self._fold_provisional(mesh, msg["id"])
         mesh.messages.append(msg)
         mesh.seen_ids.add(msg["id"])
         mesh.last_append = time.monotonic()
@@ -1134,6 +1284,15 @@ class MeshManager:
         mesh.outbox.append(entry)
         self._persist_outbox(mesh)
         self._flush_upstream_soon(mesh)
+        # The authority is down but our peers need not be: push straight to
+        # the daemons hosting the recipients so the conversation continues.
+        # The outbox still holds the message for sequencing on reconnect.
+        if self._fast_targets(mesh, recipients):
+            try:
+                await self._fast_deliver(mesh, entry)
+            except Exception:  # noqa: BLE001 — the send is already queued
+                log.exception("mesh %r: fast-path delivery failed", mesh.name)
+        direct = list(entry.get("fast_sent") or [])
         return {
             **entry,
             "queued": True,
@@ -1143,8 +1302,12 @@ class MeshManager:
             "batched": norm_sections is not None,
             "expects_reply": expects_reply(intent),
             "notice": (
-                f"queued: primary daemon {mesh.primary!r} is unreachable — "
-                "the message will forward on reconnect"
+                f"queued: authority daemon {mesh.primary!r} is unreachable — "
+                "the message will be sequenced on reconnect"
+                + (
+                    f"; delivered directly to {', '.join(sorted(direct))}"
+                    if direct else ""
+                )
             ),
         }
 
@@ -1192,6 +1355,187 @@ class MeshManager:
     # federation v2: primary/mirror. The primary owns roster, log, policy
     # and invites; guests hold a synced mirror and forward member requests.
     # ------------------------------------------------------------------ #
+    # ------------------------------------------------------------------ #
+    # topology: rank order and per-link state
+    # ------------------------------------------------------------------ #
+    async def reorder_peers(
+        self, name: str, order: List[str], *, force: bool = False
+    ) -> dict:
+        """Rewrite the rank list — the one way authority moves.
+
+        Only the current authority may reorder, so two daemons can never
+        promote themselves at once; ``force`` is the escape hatch for an
+        authority that is gone for good, and it bumps ``authority_epoch`` so
+        the old one's late traffic is re-sequenced rather than interleaved.
+        """
+        mesh = self.get(name)
+        order = [str(m).strip() for m in order if str(m).strip()]
+        if sorted(order) != sorted(mesh.peers):
+            missing = sorted(set(mesh.peers) - set(order))
+            extra = sorted(set(order) - set(mesh.peers))
+            raise MeshError(
+                "the new order must list exactly the mesh's peers"
+                + (f" (missing: {', '.join(missing)})" if missing else "")
+                + (f" (unknown: {', '.join(extra)})" if extra else "")
+            )
+        if not order:
+            raise MeshError(f"mesh {name!r} has no peers to order")
+        if mesh.primary and not force:
+            raise MeshError(
+                f"rank order is the authority's to set ({mesh.primary}) — "
+                "reorder there, or force a takeover if it is gone for good"
+            )
+        was, now = mesh.peers[0], order[0]
+        if force and mesh.primary and now != mesh.me:
+            raise MeshError(
+                "a forced takeover has to put this daemon at rank 0 — it is "
+                "the only order the other peers can be told about from here"
+            )
+        # Absolute roster before anything moves: see _stamp_own_members.
+        self._stamp_own_members(mesh)
+        before = (list(mesh.peers), mesh.authority_epoch, mesh.next_seq)
+        mesh.peers = order
+        if now != was:
+            mesh.authority_epoch += 1
+            self._raise_seq_floor(mesh)
+        self._ensure_pair_links(mesh)
+        self._roster_changed(mesh)
+        if now == was:
+            self._flush_guests_soon(mesh)
+            return {
+                "peers": list(mesh.peers),
+                "authority": mesh.authority,
+                "epoch": mesh.authority_epoch,
+                "handover": False,
+            }
+        # We have just demoted ourselves, so the ordinary authority fanout is
+        # closed to us: hand the new order over explicitly, while we still
+        # hold every peer's credentials. The successor MUST get it — if it
+        # does not, nobody would be sequencing, so roll the whole thing back.
+        if now != mesh.me and not await self._flush_guest(
+            mesh, now, force=True, urgent=True
+        ):
+            mesh.peers, mesh.authority_epoch, mesh.next_seq = before
+            self._ensure_pair_links(mesh)
+            self._roster_changed(mesh)
+            raise MeshError(
+                f"{now!r} could not be told it is the new authority — it is "
+                "unreachable, so the rank order was left unchanged"
+            )
+        log.info(
+            "mesh %r: authority moved %r -> %r (epoch %d)",
+            mesh.name, was, now, mesh.authority_epoch,
+        )
+        await self._handover_flush(mesh, skip=now)
+        return {
+            "peers": list(mesh.peers),
+            "authority": mesh.authority,
+            "epoch": mesh.authority_epoch,
+            "handover": now != was,
+        }
+
+    async def _handover_flush(self, mesh: Mesh, *, skip: str = "") -> None:
+        """One last push from the outgoing authority, carrying the new order.
+
+        Only the successor's copy is load-bearing (the caller sends that one
+        and refuses the handover if it fails). For the rest an unreachable
+        peer is not fatal: it still believes we are rank 0, and the new
+        authority's own syncs correct it — the credential pair it presents
+        was brokered by the same authority either way.
+        """
+        if self.peer_transport is None:
+            return
+        for machine in list(mesh.links):
+            if machine == skip:
+                continue
+            try:
+                await self._flush_guest(mesh, machine, force=True, urgent=True)
+            except Exception as exc:  # noqa: BLE001 — best-effort
+                log.warning(
+                    "mesh %r: could not hand the new order to %r: %s",
+                    mesh.name, machine, exc,
+                )
+
+    async def set_link(
+        self, name: str, a: str, b: str, *, enabled: bool
+    ) -> dict:
+        """Cut or restore the direct edge between two peers.
+
+        Who may do this: the authority may edit any edge, and a peer may edit
+        the edges it *terminates*. An edge is duplex and both ends have equal
+        standing on it, so either one may sever their own connection — but
+        an edge between two other daemons is not yours to touch, and that
+        request goes nowhere. A peer's edit is forwarded to the authority,
+        which owns the table and fans the result back out.
+
+        A cut edge only loses its *fast path* — the authority's fanout still
+        reaches both ends — so cutting an edge that touches the authority
+        would orphan a daemon instead of degrading it, and is refused.
+        """
+        mesh = self.get(name)
+        self._validate_edge(mesh, a, b)
+        if mesh.primary:
+            if mesh.me not in (a, b):
+                raise MeshError(
+                    f"{a!r} <-> {b!r} is an edge between two other daemons — "
+                    f"only the authority ({mesh.primary}) can edit it"
+                )
+            await self._peer_call_primary(
+                mesh, "/peer/mesh/link", {"a": a, "b": b, "enabled": enabled}
+            )
+            # Optimistic: the authority accepted, so show it now rather than
+            # at the next sync — which re-sends the whole table anyway.
+            self._mark_edge(mesh, a, b, enabled)
+            return {"a": a, "b": b, "enabled": bool(enabled)}
+        self._mark_edge(mesh, a, b, enabled)
+        self._roster_changed(mesh)  # ships the new state on the next sync
+        self._flush_guests_soon(mesh)
+        return {"a": a, "b": b, "enabled": bool(enabled)}
+
+    def _validate_edge(self, mesh: Mesh, a: str, b: str) -> None:
+        """Shape checks every caller shares — local, peer-forwarded or HTTP."""
+        for machine in (a, b):
+            if machine not in mesh.peers:
+                raise MeshError(f"{machine!r} is not a peer of mesh {mesh.name!r}")
+        if a == b:
+            raise MeshError("an edge needs two different peers")
+        if mesh.authority in (a, b):
+            raise MeshError(
+                f"the edge to the authority ({mesh.authority}) carries the "
+                "sequenced log — revoke the peer instead of cutting it"
+            )
+
+    def _mark_edge(self, mesh: Mesh, a: str, b: str, enabled: bool) -> None:
+        """Record an edge's cut state, and mirror it onto our own credential
+        when we are one of its ends — ``linked()`` reads that, not the table."""
+        key = self._pair_key(a, b)
+        mesh.edges[key] = bool(enabled)
+        other = b if a == mesh.me else (a if b == mesh.me else "")
+        if other and other in mesh.links:
+            mesh.links[other]["enabled"] = bool(enabled)
+
+    def peer_link_accept(
+        self, name: str, machine: str, token: str, a: str, b: str, enabled: bool
+    ) -> dict:
+        """A peer asks us, the authority, to cut or restore its own edge."""
+        mesh = self.get(name)
+        self._require_authority(mesh, "link state")
+        self._check_link_token(mesh, machine, token)
+        if machine not in (a, b):
+            raise MeshError(
+                f"{machine!r} is not an end of {a!r} <-> {b!r} — a peer may "
+                "only edit the edges it terminates"
+            )
+        self._validate_edge(mesh, a, b)
+        self._mark_edge(mesh, a, b, enabled)
+        self._roster_changed(mesh)
+        self._flush_guests_soon(mesh)
+        log.info(
+            "mesh %r: %s %s the edge %s <-> %s",
+            mesh.name, machine, "restored" if enabled else "cut", a, b,
+        )
+        return {"a": a, "b": b, "enabled": bool(enabled)}
+
     def _require_machine(self) -> str:
         if not self.machine:
             raise MeshError(
@@ -1200,22 +1544,27 @@ class MeshManager:
             )
         return self.machine
 
-    def _require_primary(self, mesh: Mesh, what: str) -> None:
+    def _require_authority(self, mesh: Mesh, what: str) -> None:
         if mesh.primary:
             raise MeshError(
                 f"mesh {mesh.name!r} is a mirror — {what} is owned by the "
-                f"primary daemon ({mesh.primary})"
+                f"authority daemon ({mesh.primary}, rank 0)"
             )
 
-    async def _peer_call_primary(self, mesh: Mesh, path: str, body: dict) -> dict:
-        """One authenticated request from this mirror to its primary."""
+    async def _peer_call(self, mesh: Mesh, machine: str, path: str, body: dict):
+        """One authenticated request across the link to ``machine``.
+
+        Every edge is duplex and symmetric in shape, so the same call serves
+        a peer talking *up* to the authority and one talking *sideways* to
+        another peer.
+        """
         if self.peer_transport is None:
             raise PeerUnreachable(
-                "relay uplink is not running — cannot reach the primary"
+                f"relay uplink is not running — cannot reach {machine!r}"
             )
-        link = mesh.link or {}
+        link = mesh.links.get(machine) or {}
         return await self.peer_transport(
-            mesh.primary,
+            machine,
             path,
             {
                 "mesh": mesh.name,
@@ -1225,6 +1574,10 @@ class MeshManager:
             },
         )
 
+    async def _peer_call_primary(self, mesh: Mesh, path: str, body: dict) -> dict:
+        """One authenticated request from this peer up to the authority."""
+        return await self._peer_call(mesh, mesh.authority, path, body)
+
     def invite(self, name: str) -> dict:
         """Mint a pre-approval invite ticket (primary-only).
 
@@ -1233,7 +1586,7 @@ class MeshManager:
         expire after ``invite_ttl`` seconds.
         """
         mesh = self.get(name)
-        self._require_primary(mesh, "invite minting")
+        self._require_authority(mesh, "invite minting")
         machine = self._require_machine()
         token = secrets.token_urlsafe(18)
         mesh.invites[token] = utcnow()
@@ -1253,7 +1606,7 @@ class MeshManager:
     def invite_list(self, name: str) -> List[dict]:
         """Outstanding (unredeemed, unexpired) tickets, oldest first."""
         mesh = self.get(name)
-        self._require_primary(mesh, "invite minting")
+        self._require_authority(mesh, "invite minting")
         self._expire_invites(mesh)
         return [
             {
@@ -1271,7 +1624,7 @@ class MeshManager:
     def invite_revoke(self, name: str, prefix: str) -> int:
         """Revoke every outstanding ticket whose token starts with ``prefix``."""
         mesh = self.get(name)
-        self._require_primary(mesh, "invite minting")
+        self._require_authority(mesh, "invite minting")
         prefix = (prefix or "").strip()
         if not prefix:
             raise MeshError("give the ticket prefix shown by the invite list")
@@ -1304,7 +1657,7 @@ class MeshManager:
         confirmation step.
         """
         mesh = self.get(name)
-        self._require_primary(mesh, "membership")
+        self._require_authority(mesh, "membership")
         me = self._require_machine()
         if not machine or machine == me:
             raise MeshError(
@@ -1321,7 +1674,7 @@ class MeshManager:
             "role": role,
         }
         ticket = None
-        if machine not in mesh.guests:  # first contact needs the pre-approval
+        if machine not in mesh.links:  # first contact needs the pre-approval
             ticket = self.invite(name)
             body["code"] = ticket["code"]
         try:
@@ -1382,24 +1735,24 @@ class MeshManager:
         if self._invite_age(created) > self.invite_ttl:
             raise MeshError("invite code has expired — mint a new one")
 
-    def _check_guest_token(self, mesh: Mesh, machine: str, token: str) -> None:
-        guest = mesh.guests.get(machine)
-        expected = guest.get("token_in") if guest else None
+    def _check_link_token(self, mesh: Mesh, machine: str, token: str) -> None:
+        """Authenticate an inbound peer call over the link to ``machine``.
+
+        One check for both directions: since phase 7 an edge holds the same
+        ``{token_in, token_out}`` pair whichever side ranks higher.
+        """
+        link = mesh.links.get(machine)
+        expected = link.get("token_in") if link else None
         if expected is None or not secrets.compare_digest(
             str(token).encode("utf-8"), str(expected).encode("utf-8")
         ):
             raise MeshError("bad mesh peer token")
 
     def _check_primary_token(self, mesh: Mesh, machine: str, token: str) -> None:
-        expected = (mesh.link or {}).get("token_in") if mesh.primary else None
-        if (
-            expected is None
-            or machine != mesh.primary
-            or not secrets.compare_digest(
-                str(token).encode("utf-8"), str(expected).encode("utf-8")
-            )
-        ):
+        """As above, but the caller must also *be* our authority."""
+        if not mesh.primary or machine != mesh.primary:
             raise MeshError("bad mesh peer token")
+        self._check_link_token(mesh, machine, token)
 
     # -- primary-side: join requests, grants, guest lifecycle ------------ #
     def _admit_member(
@@ -1427,32 +1780,207 @@ class MeshManager:
         mesh.members[handle] = member
         return member, True
 
-    def _register_guest(self, mesh: Mesh, machine: str, reply_token: str) -> None:
-        """Mint (or re-mint) the credential pair for a guest machine."""
-        mesh.guests[machine] = {
-            "token_in": secrets.token_urlsafe(18),  # guest -> us
-            "token_out": str(reply_token),  # us -> guest (their choice)
-            "created_at": utcnow(),
+    def _ensure_ranked(self, mesh: Mesh, machine: str) -> None:
+        """Append ``machine`` to the rank list if it is not there yet.
+
+        Our own name goes in first, so the daemon that federates a mesh
+        keeps the authority it already had as its sole owner.
+        """
+        if mesh.me and mesh.me not in mesh.peers:
+            mesh.peers.insert(0, mesh.me)
+            self._stamp_own_members(mesh)
+        if machine and machine not in mesh.peers:
+            mesh.peers.append(machine)
+
+    @staticmethod
+    def _stamp_own_members(mesh: Mesh) -> None:
+        """Give our own members an explicit machine.
+
+        Before phase 7 a blank ``machine`` meant "the authority's own", which
+        was unambiguous only because authority never moved. It moves now, so
+        the roster has to be absolute: a member left blank would be claimed
+        by whoever holds rank 0 next, and delivery would follow it to a
+        daemon that does not have the session.
+        """
+        if not mesh.me:
+            return
+        for member in mesh.members.values():
+            if not member.machine:
+                member.machine = mesh.me
+
+    @staticmethod
+    def _raise_seq_floor(mesh: Mesh) -> None:
+        """Continue numbering above everything already written.
+
+        Called whenever this daemon starts sequencing — at a handover, from
+        either side — so ``(epoch, seq)`` stays strictly increasing even
+        though the pen changed hands.
+        """
+        mesh.next_seq = max(
+            [mesh.next_seq]
+            + [int(m["seq"]) + 1 for m in mesh.messages if "seq" in m]
+        )
+
+    @staticmethod
+    def _pair_key(a: str, b: str) -> str:
+        return "|".join(sorted((a, b)))
+
+    def _ensure_pair_links(self, mesh: Mesh) -> None:
+        """Authority side: mint the missing peer-to-peer edge credentials.
+
+        Phase 7's default topology is the complete graph, so every pair of
+        non-authority peers gets a credential pair here and receives it on
+        its next sync. Pairs whose machines have left are dropped.
+        """
+        if mesh.primary:
+            return
+        others = [m for m in mesh.peers if m != mesh.authority]
+        wanted = {
+            self._pair_key(a, b)
+            for i, a in enumerate(others) for b in others[i + 1:]
         }
-        mesh.guest_cursors[machine] = len(mesh.messages)
+        for key in list(mesh.pair_links):
+            if key not in wanted:
+                del mesh.pair_links[key]
+                mesh.edges.pop(key, None)
+        for key in wanted:
+            if key not in mesh.pair_links:
+                a, b = key.split("|")
+                mesh.pair_links[key] = {
+                    f"token_{a}": secrets.token_urlsafe(18),  # a presents it
+                    f"token_{b}": secrets.token_urlsafe(18),  # b presents it
+                    "created_at": utcnow(),
+                }
+            mesh.edges.setdefault(key, True)
+
+    def edge_table(self, mesh: Mesh) -> List[dict]:
+        """Every edge of the graph with its state — what a diagram needs.
+
+        Edges incident on the authority always read ``enabled``: they carry
+        the sequenced log and are revoked rather than cut.
+
+        ``cuttable`` is a property of the edge; ``editable`` is a property of
+        *this* daemon's view of it — the authority may edit every edge, a
+        peer only the ones it terminates. Shipping the answer keeps the rule
+        in one place instead of re-deriving it in each client.
+        """
+        out = []
+        for i, a in enumerate(mesh.peers):
+            for b in mesh.peers[i + 1:]:
+                key = self._pair_key(a, b)
+                touches_authority = mesh.authority in (a, b)
+                mine = mesh.me in (a, b)
+                out.append(
+                    {
+                        "a": a,
+                        "b": b,
+                        "enabled": (
+                            True if touches_authority
+                            else bool(mesh.edges.get(key, True))
+                        ),
+                        "cuttable": not touches_authority,
+                        "editable": not touches_authority
+                        and (not mesh.primary or mine),
+                    }
+                )
+        return out
+
+    def _link_grants_for(self, mesh: Mesh, machine: str) -> List[dict]:
+        """The edge credentials ``machine`` must hold, from its point of view.
+
+        ``token_out`` is what it presents to the far end; ``token_in`` is
+        what it should expect back. Both halves come from one authority, so
+        the two peers cannot disagree about the edge.
+        """
+        grants = []
+        for key, pair in sorted(mesh.pair_links.items()):
+            a, b = key.split("|")
+            if machine not in (a, b):
+                continue
+            other = b if machine == a else a
+            grants.append(
+                {
+                    "machine": other,
+                    "token_out": str(pair.get(f"token_{machine}") or ""),
+                    "token_in": str(pair.get(f"token_{other}") or ""),
+                    "created_at": str(pair.get("created_at") or ""),
+                    "enabled": bool(mesh.edges.get(key, True)),
+                }
+            )
+        return grants
+
+    def _apply_link_grants(
+        self, mesh: Mesh, grants: List[dict], sender: str = ""
+    ) -> None:
+        """Peer side: adopt the edges the authority brokered for us.
+
+        ``sender`` is the daemon whose sync carried the grants; its own edge
+        is never in the list (it brokered the others) and must survive the
+        prune. Anchoring on the sender rather than on ``mesh.authority``
+        matters at a handover, where the sync that promotes us comes from
+        the *outgoing* authority and we are the new rank 0 ourselves.
+        """
+        if not isinstance(grants, list):
+            return
+        keep = {sender or mesh.authority}
+        for g in grants:
+            if not isinstance(g, dict):
+                continue
+            other = str(g.get("machine") or "")
+            if not other or other == mesh.me:
+                continue
+            keep.add(other)
+            mesh.links[other] = {
+                "token_in": str(g.get("token_in") or ""),
+                "token_out": str(g.get("token_out") or ""),
+                "created_at": str(g.get("created_at") or "") or utcnow(),
+                "enabled": bool(g.get("enabled", True)),
+            }
+        # An edge the authority no longer brokers is gone (peer revoked, or
+        # the pair was dropped); keep only the authority link and live ones.
+        for machine in [m for m in mesh.links if m not in keep]:
+            del mesh.links[machine]
+            mesh.link_cursors.pop(machine, None)
+
+    def _register_guest(self, mesh: Mesh, machine: str, reply_token: str) -> None:
+        """Mint (or re-mint) the credential pair for a peer machine and give
+        it a rank (last — an existing peer keeps the rank it has)."""
+        self._ensure_ranked(mesh, machine)
+        previous = mesh.links.get(machine) or {}
+        mesh.links[machine] = {
+            "token_in": secrets.token_urlsafe(18),  # them -> us
+            "token_out": str(reply_token),  # us -> them (their choice)
+            "created_at": utcnow(),
+            "enabled": bool(previous.get("enabled", True)),
+        }
+        mesh.link_cursors[machine] = len(mesh.messages)
         mesh.peer_status[machine] = {
             "ok": True, "error": None, "retry_at": 0.0, "backoff": 0.0,
             "last_sync": time.monotonic(), "roster_seen": mesh.roster_version,
         }
+        self._ensure_pair_links(mesh)
 
     def _grant_payload(self, mesh: Mesh, machine: str, member: Member) -> dict:
-        """Everything a guest needs to build its mirror + member."""
-        mesh.guest_cursors[machine] = len(mesh.messages)
+        """Everything a peer needs to build its mirror + member.
+
+        ``peers`` carries the whole rank list, so the newcomer knows which
+        other daemons to open direct links with (phase 7's complete graph)
+        and where it sits in the order.
+        """
+        mesh.link_cursors[machine] = len(mesh.messages)
         status = mesh.peer_status.get(machine)
         if status is not None:
             status["roster_seen"] = mesh.roster_version
         return {
-            "token": mesh.guests[machine]["token_in"],
+            "token": mesh.links[machine]["token_in"],
             "members": [m.to_dict() for m in mesh.members.values()],
             "messages": list(mesh.messages),
             "policy": mesh.policy,
             "member": member.to_dict(),
             "cursor": len(mesh.messages),
+            "peers": list(mesh.peers),
+            "epoch": mesh.authority_epoch,
+            "links": self._link_grants_for(mesh, machine),
         }
 
     def peer_join_request_accept(
@@ -1474,14 +2002,14 @@ class MeshManager:
         name, so only the daemon really registered under it can finish.
         """
         mesh = self.get(name)
-        self._require_primary(mesh, "membership")
+        self._require_authority(mesh, "membership")
         if not _NAME_RE.match(machine or ""):
             raise MeshError("invalid peer machine name")
         if not str(reply_token or ""):
             raise MeshError("missing reply token")
         if machine == self._require_machine():
             raise MeshError("a daemon cannot join itself as a guest")
-        if machine in mesh.guests or code:
+        if machine in mesh.links or code:
             if code:
                 self._redeem_invite(mesh, code)
             member, created = self._admit_member(
@@ -1531,7 +2059,7 @@ class MeshManager:
     def request_list(self, name: str) -> List[dict]:
         """Pending inbound join requests, oldest first (primary only)."""
         mesh = self.get(name)
-        self._require_primary(mesh, "membership")
+        self._require_authority(mesh, "membership")
         return [
             {
                 k: r.get(k)
@@ -1547,7 +2075,7 @@ class MeshManager:
     async def approve_request(self, name: str, rid: str) -> dict:
         """Admit a pended join and deliver the grant (retried if needed)."""
         mesh = self.get(name)
-        self._require_primary(mesh, "membership")
+        self._require_authority(mesh, "membership")
         req = mesh.pending_requests.pop(rid, None)
         if req is None:
             raise MeshError(f"no pending join request {rid!r} in mesh {name!r}")
@@ -1575,7 +2103,7 @@ class MeshManager:
     async def deny_request(self, name: str, rid: str) -> dict:
         """Drop a pended join and tell the requester (best-effort)."""
         mesh = self.get(name)
-        self._require_primary(mesh, "membership")
+        self._require_authority(mesh, "membership")
         req = mesh.pending_requests.pop(rid, None)
         if req is None:
             raise MeshError(f"no pending join request {rid!r} in mesh {name!r}")
@@ -1604,7 +2132,7 @@ class MeshManager:
         for rid, g in list(mesh.pending_grants.items()):
             machine = g["machine"]
             member = mesh.members.get(g["handle"])
-            if member is None or machine not in mesh.guests:
+            if member is None or machine not in mesh.links:
                 mesh.pending_grants.pop(rid, None)  # revoked meanwhile
                 self._persist_def(mesh)
                 continue
@@ -1649,14 +2177,24 @@ class MeshManager:
                 mesh.name, machine, g["handle"],
             )
 
+    def _unrank(self, mesh: Mesh, machine: str) -> None:
+        """Drop every trace of a departed peer: rank, edges, brokered pairs."""
+        mesh.links.pop(machine, None)
+        mesh.link_cursors.pop(machine, None)
+        mesh.peer_status.pop(machine, None)
+        mesh.pending_nudges.pop(machine, None)
+        if machine in mesh.peers:
+            mesh.peers.remove(machine)
+        # A single remaining peer (ourselves) is not a graph any more.
+        if mesh.peers == [mesh.me]:
+            mesh.peers = []
+        self._ensure_pair_links(mesh)
+
     def _rollback_admission(self, mesh: Mesh, machine: str, handle: str) -> None:
         mesh.members.pop(handle, None)
         mesh.remote_activity.pop(handle, None)
         if not any(m.machine == machine for m in mesh.members.values()):
-            mesh.guests.pop(machine, None)
-            mesh.guest_cursors.pop(machine, None)
-            mesh.peer_status.pop(machine, None)
-            mesh.pending_nudges.pop(machine, None)
+            self._unrank(mesh, machine)
         mesh.roster_version += 1
         self._persist_def(mesh)
         self._persist_cursors(mesh)
@@ -1665,13 +2203,11 @@ class MeshManager:
     async def revoke_guest(self, name: str, machine: str) -> dict:
         """Unlink a guest machine: drop its members, credentials and mirror."""
         mesh = self.get(name)
-        self._require_primary(mesh, "guest management")
-        guest = mesh.guests.pop(machine, None)
+        self._require_authority(mesh, "guest management")
+        guest = mesh.links.get(machine)
         if guest is None:
             raise MeshError(f"no guest {machine!r} linked to mesh {name!r}")
-        mesh.guest_cursors.pop(machine, None)
-        mesh.peer_status.pop(machine, None)
-        mesh.pending_nudges.pop(machine, None)
+        self._unrank(mesh, machine)
         for rid in [
             r for r, g in mesh.pending_grants.items() if g["machine"] == machine
         ]:
@@ -1821,8 +2357,8 @@ class MeshManager:
     ) -> dict:
         """A guest daemon asks to enrol one of its sessions as a member."""
         mesh = self.get(name)
-        self._require_primary(mesh, "membership")
-        self._check_guest_token(mesh, machine, token)
+        self._require_authority(mesh, "membership")
+        self._check_link_token(mesh, machine, token)
         handle = (handle or session).strip()
         if not _NAME_RE.match(handle):
             raise MeshError(
@@ -1849,8 +2385,8 @@ class MeshManager:
     ) -> dict:
         """A guest daemon withdraws one of its OWN members."""
         mesh = self.get(name)
-        self._require_primary(mesh, "membership")
-        self._check_guest_token(mesh, machine, token)
+        self._require_authority(mesh, "membership")
+        self._check_link_token(mesh, machine, token)
         member = mesh.members.get(handle)
         if member is None:
             raise MeshError(f"no member {handle!r} in mesh {name!r}")
@@ -1868,8 +2404,8 @@ class MeshManager:
     ) -> dict:
         """A guest daemon forwards a member's send for sequencing."""
         mesh = self.get(name)
-        self._require_primary(mesh, "sequencing")
-        self._check_guest_token(mesh, machine, token)
+        self._require_authority(mesh, "sequencing")
+        self._check_link_token(mesh, machine, token)
         if not isinstance(message, dict):
             raise MeshError("bad message payload")
         mid = str(message.get("id") or "")
@@ -1902,7 +2438,113 @@ class MeshManager:
         self._flush_guests_soon(mesh)
         return result
 
-    # -- guest-side peer handler ---------------------------------------- #
+    # -- peer-side handlers --------------------------------------------- #
+    def _ingest_message(self, m: dict, origin: str) -> Optional[dict]:
+        """Normalise a message that arrived over the wire, or None if unusable.
+
+        Shared by the sequenced sync and the fast path so both produce
+        byte-identical log entries for the same message.
+        """
+        if not isinstance(m, dict) or not isinstance(m.get("body"), str):
+            return None
+        mid = str(m.get("id") or "")
+        if not mid:
+            return None
+        msg = {
+            "id": mid,
+            "ts": str(m.get("ts") or utcnow()),
+            "from": str(m.get("from") or origin),
+            "to": m.get("to") if isinstance(m.get("to"), (str, list)) else "*",
+            "type": str(m.get("type") or "say").strip().lower() or "say",
+            "body": _CTRL_RE.sub("", m["body"]),
+        }
+        for key in ("seq", "epoch"):
+            if m.get(key) is not None:
+                try:
+                    msg[key] = int(m[key])
+                except (TypeError, ValueError):
+                    pass
+        if m.get("reply_to"):
+            msg["reply_to"] = str(m["reply_to"])
+        # Batch fields ride along so this daemon can slice deliveries for
+        # its own local members.
+        if isinstance(m.get("sections"), dict):
+            sections = {
+                str(h): {
+                    "text": _CTRL_RE.sub("", str(sec.get("text") or "")),
+                    **(
+                        {"type": str(sec["type"]).strip().lower()}
+                        if sec.get("type") else {}
+                    ),
+                }
+                for h, sec in m["sections"].items()
+                if isinstance(sec, dict) and sec.get("text")
+            }
+            if sections:
+                msg["sections"] = sections
+                msg["shared"] = _CTRL_RE.sub("", str(m.get("shared") or ""))
+        return msg
+
+    def _fold_provisional(self, mesh: Mesh, mid: str) -> None:
+        """Retire the fast-path copy of ``mid`` now that the log has it.
+
+        Members that already had it injected keep the id in ``delivered_ids``
+        so the sequenced copy does not reach their terminal a second time.
+        """
+        index = next(
+            (i for i, m in enumerate(mesh.provisional) if m.get("id") == mid),
+            None,
+        )
+        if index is None:
+            return
+        mesh.provisional.pop(index)
+
+    def peer_deliver_accept(
+        self, name: str, machine: str, token: str, message: dict
+    ) -> dict:
+        """Fast path: a peer hands us a send its authority has not sequenced.
+
+        Only reachability is claimed here, never order — the message goes
+        into ``provisional`` and reaches local terminals right away, and the
+        authoritative copy folds over it whenever the authority comes back.
+        """
+        mesh = self.get(name)
+        self._check_link_token(mesh, machine, token)
+        if not mesh.linked(machine):
+            raise MeshError(f"link to {machine!r} is cut")
+        msg = self._ingest_message(message, machine)
+        if msg is None:
+            raise MeshError("bad message payload")
+        mid = msg["id"]
+        if mid in mesh.seen_ids or any(
+            m.get("id") == mid for m in mesh.provisional
+        ):
+            return {"id": mid, "duplicate": True}
+        sender = mesh.members.get(str(msg.get("from") or ""))
+        if sender is not None and sender.machine != machine:
+            raise MeshError(
+                f"sender {msg.get('from')!r} is not a member of {machine!r}"
+            )
+        recipients = [
+            h for h, m in mesh.members.items()
+            if self._is_local(mesh, m) and mesh.addressed_to(msg, h)
+        ]
+        if not recipients:
+            # Nothing for us to inject; the sequenced copy will still arrive
+            # through the authority, so this is not an error.
+            return {"id": mid, "delivered": []}
+        mesh.provisional.append(msg)
+        now = time.monotonic()
+        for handle in recipients:
+            mesh._first_pending.setdefault(handle, now)
+        mesh.last_append = now
+        mesh.wake.set()
+        log.info(
+            "mesh %r: fast-path message %s from %r for %s",
+            mesh.name, mid, machine, ", ".join(recipients),
+        )
+        return {"id": mid, "delivered": recipients}
+
     def peer_sync_accept(
         self,
         name: str,
@@ -1913,10 +2555,15 @@ class MeshManager:
         members: List[dict],
         policy,
         nudges: List[dict],
+        peers: Optional[List[str]] = None,
+        epoch: Optional[int] = None,
+        links: Optional[List[dict]] = None,
+        edges: Optional[dict] = None,
     ) -> dict:
-        """The primary pushes state at us: log tail, roster, policy, nudges.
+        """The authority pushes state at us: log tail, roster, rank order,
+        brokered edges, policy, nudges.
 
-        ``base`` must equal our log length — a mismatch means the primary's
+        ``base`` must equal our log length — a mismatch means the authority's
         cursor for us is stale, so we answer with ``resync`` and our true
         position instead of applying anything out of order.
         """
@@ -1927,43 +2574,48 @@ class MeshManager:
         now = time.monotonic()
         appended = 0
         for m in messages:
-            mid = str(m.get("id") or "")
-            if not mid or mid in mesh.seen_ids or not isinstance(m.get("body"), str):
+            msg = self._ingest_message(m, machine)
+            if msg is None or msg["id"] in mesh.seen_ids:
                 continue
-            msg = {
-                "id": mid,
-                "ts": str(m.get("ts") or utcnow()),
-                "from": str(m.get("from") or machine),
-                "to": m.get("to") if isinstance(m.get("to"), (str, list)) else "*",
-                "type": str(m.get("type") or "say").strip().lower() or "say",
-                "body": _CTRL_RE.sub("", m["body"]),
-            }
-            if m.get("reply_to"):
-                msg["reply_to"] = str(m["reply_to"])
-            # Batch fields ride along so this daemon can slice deliveries
-            # for its own local members.
-            if isinstance(m.get("sections"), dict):
-                sections = {
-                    str(h): {
-                        "text": _CTRL_RE.sub("", str(sec.get("text") or "")),
-                        **(
-                            {"type": str(sec["type"]).strip().lower()}
-                            if sec.get("type") else {}
-                        ),
-                    }
-                    for h, sec in m["sections"].items()
-                    if isinstance(sec, dict) and sec.get("text")
-                }
-                if sections:
-                    msg["sections"] = sections
-                    msg["shared"] = _CTRL_RE.sub("", str(m.get("shared") or ""))
+            # Fold a fast-path arrival into its authoritative position rather
+            # than appending a second copy; whoever already read it keeps a
+            # note in delivered_ids so it is not injected twice.
+            self._fold_provisional(mesh, msg["id"])
             mesh.messages.append(msg)
-            mesh.seen_ids.add(mid)
+            mesh.seen_ids.add(msg["id"])
             self._append_log(mesh, msg)
             appended += 1
             for handle, member in mesh.members.items():
                 if self._is_local(mesh, member) and mesh.addressed_to(msg, handle):
                     mesh._first_pending.setdefault(handle, now)
+        if peers:
+            # Rank order is the authority's to decide; adopting it is what
+            # keeps every daemon's view of the graph identical.
+            mesh.peers = [str(p) for p in peers if p]
+            if mesh.me and mesh.me not in mesh.peers:
+                mesh.peers.append(mesh.me)
+            if not mesh.primary:
+                # This sync promoted us (a handover): take over the duties
+                # that only the authority performs. Fanout cursors start at
+                # zero and the resync handshake pulls them to the truth.
+                self._ensure_pair_links(mesh)
+                self._raise_seq_floor(mesh)
+                for other in mesh.peers:
+                    if other != mesh.me:
+                        mesh.link_cursors.setdefault(other, 0)
+                log.info(
+                    "mesh %r: took over the authority from %r (epoch %s)",
+                    mesh.name, machine, epoch,
+                )
+        if epoch is not None:
+            try:
+                mesh.authority_epoch = int(epoch)
+            except (TypeError, ValueError):
+                pass
+        if links is not None:
+            self._apply_link_grants(mesh, links, sender=machine)
+        if isinstance(edges, dict):
+            mesh.edges = {str(k): bool(v) for k, v in edges.items()}
         if members:
             # The roster is authoritative: adopt it wholesale, keeping local
             # delivery cursors for members that still exist.
@@ -2071,7 +2723,7 @@ class MeshManager:
     # -- flushers -------------------------------------------------------- #
     def _flush_guests_soon(self, mesh: Mesh) -> None:
         """Best-effort immediate fanout to every guest (worker also retries)."""
-        if mesh.primary or not mesh.guests or self.peer_transport is None:
+        if mesh.primary or not mesh.links or self.peer_transport is None:
             return
         try:
             asyncio.get_running_loop()
@@ -2079,7 +2731,7 @@ class MeshManager:
             return
 
         async def _flush_all() -> None:
-            for machine in list(mesh.guests):
+            for machine in list(mesh.links):
                 try:
                     await self._flush_guest(mesh, machine)
                 except Exception:  # noqa: BLE001
@@ -2088,6 +2740,69 @@ class MeshManager:
                     )
 
         asyncio.ensure_future(_flush_all())
+
+    def _fast_targets(self, mesh: Mesh, recipients: List[str]) -> List[str]:
+        """Peer machines we can hand ``recipients``' mail to directly.
+
+        The authority is excluded — a message that took this path is already
+        queued for it — as are ourselves and any cut edge.
+        """
+        out = set()
+        for handle in recipients:
+            member = mesh.members.get(handle)
+            if member is None or self._is_local(mesh, member):
+                continue
+            machine = member.machine or mesh.authority
+            if machine in ("", mesh.me, mesh.authority):
+                continue
+            if mesh.linked(machine):
+                out.add(machine)
+        return sorted(out)
+
+    async def _fast_deliver(self, mesh: Mesh, entry: dict) -> None:
+        """Push one queued send straight at the peers hosting its recipients.
+
+        Best-effort and idempotent: ``fast_sent`` records who has taken it so
+        the worker's retries do not re-push, and the receiving daemon dedupes
+        by message id anyway.
+        """
+        recipients = self._resolve_recipients(
+            mesh, str(entry.get("from") or ""), entry.get("to") or "*"
+        )
+        done = set(entry.get("fast_sent") or [])
+        for machine in self._fast_targets(mesh, recipients):
+            if machine in done:
+                continue
+            try:
+                await self._peer_call(
+                    mesh, machine, "/peer/mesh/deliver", {"message": entry}
+                )
+            except PeerUnreachable as exc:
+                self._mark_peer_down(mesh, machine, exc)
+                continue
+            except MeshError as exc:
+                # A rejection is final for this edge (cut, stale token): the
+                # sequenced copy remains the guaranteed path.
+                log.info(
+                    "mesh %r: peer %r refused the fast path: %s",
+                    mesh.name, machine, exc,
+                )
+                done.add(machine)
+                continue
+            done.add(machine)
+        if done:
+            entry["fast_sent"] = sorted(done)
+            self._persist_outbox(mesh)
+
+    async def _flush_fast(self, mesh: Mesh) -> None:
+        """Worker duty: retry the fast path for everything still queued."""
+        if not mesh.primary or not mesh.outbox or self.peer_transport is None:
+            return
+        for entry in list(mesh.outbox):
+            try:
+                await self._fast_deliver(mesh, entry)
+            except MeshError:
+                continue  # roster moved under us; the outbox drain will tell
 
     def _flush_upstream_soon(self, mesh: Mesh) -> None:
         if not mesh.primary or self.peer_transport is None:
@@ -2112,26 +2827,33 @@ class MeshManager:
              "backoff": backoff}
         )
 
-    async def _flush_guest(self, mesh: Mesh, machine: str) -> None:
-        """Primary → guest sync: log tail + roster + policy + nudges.
+    async def _flush_guest(
+        self, mesh: Mesh, machine: str, *, force: bool = False,
+        urgent: bool = False,
+    ) -> bool:
+        """Authority → peer sync: log tail + roster + rank + policy + nudges.
 
         Also fires with an empty payload on a slow cadence while any policy
-        is enabled, so the guest's activity report (piggybacked on the ack)
-        stays fresh for the policy engine.
+        is enabled, so the peer's activity report (piggybacked on the ack)
+        stays fresh for the policy engine. ``force`` is for the outgoing
+        authority's handover push, the one moment a non-authority may send
+        this; ``urgent`` additionally ignores the retry backoff, because a
+        handover cannot wait for one. Returns whether the peer is in step
+        with us — the handover refuses to commit without that.
         """
-        if mesh.primary:
-            return
-        guest = mesh.guests.get(machine)
+        if mesh.primary and not force:
+            return False
+        guest = mesh.links.get(machine)
         if guest is None or self.peer_transport is None:
-            return
+            return False
         status = mesh.peer_status.setdefault(
             machine, {"ok": None, "error": None, "retry_at": 0.0, "backoff": 0.0,
                       "last_sync": 0.0, "roster_seen": 0}
         )
         now = time.monotonic()
-        if now < status.get("retry_at", 0.0):
-            return
-        cursor = mesh.guest_cursors.get(machine, 0)
+        if now < status.get("retry_at", 0.0) and not urgent:
+            return False
+        cursor = mesh.link_cursors.get(machine, 0)
         msgs = mesh.messages[cursor:]
         nudges = mesh.pending_nudges.pop(machine, [])
         policy_on = any(
@@ -2143,7 +2865,7 @@ class MeshManager:
         )
         roster_due = status.get("roster_seen", 0) < mesh.roster_version
         if not msgs and not nudges and not roster_due and not report_due:
-            return
+            return True  # already in step
         try:
             resp = await self.peer_transport(
                 machine,
@@ -2157,6 +2879,14 @@ class MeshManager:
                     "members": [m.to_dict() for m in mesh.members.values()],
                     "policy": mesh.policy,
                     "nudges": nudges,
+                    # phase 7: rank order + the peer-to-peer edges we broker
+                    # for this machine, so the graph converges everywhere.
+                    "peers": list(mesh.peers),
+                    "epoch": mesh.authority_epoch,
+                    "links": self._link_grants_for(mesh, machine),
+                    # State of every edge, including ones this peer is not an
+                    # endpoint of, so its diagram shows the same graph as ours.
+                    "edges": dict(mesh.edges),
                 },
             )
         except Exception as exc:  # noqa: BLE001 — queue and retry with backoff
@@ -2170,21 +2900,21 @@ class MeshManager:
                 mesh.name, len(msgs), machine, exc,
                 mesh.peer_status[machine]["backoff"],
             )
-            return
+            return False
         if not isinstance(resp, dict):
             resp = {}
         if "resync" in resp:
             # Our cursor was stale (state loss on either side): adopt the
             # guest's true position; the next flush sends the real tail.
             try:
-                mesh.guest_cursors[machine] = max(0, int(resp["resync"]))
+                mesh.link_cursors[machine] = max(0, int(resp["resync"]))
             except (TypeError, ValueError):
                 pass
             status.update({"ok": True, "error": None, "retry_at": 0.0,
                            "backoff": 0.0, "last_sync": now})
             self._persist_cursors(mesh)
-            return
-        mesh.guest_cursors[machine] = cursor + len(msgs)
+            return True
+        mesh.link_cursors[machine] = cursor + len(msgs)
         status.update({"ok": True, "error": None, "retry_at": 0.0,
                        "backoff": 0.0, "last_sync": now,
                        "roster_seen": mesh.roster_version})
@@ -2204,6 +2934,7 @@ class MeshManager:
                 "mesh %r: synced %d message(s) to guest %r",
                 mesh.name, len(msgs), machine,
             )
+        return True
 
     async def _flush_upstream(self, mesh: Mesh) -> None:
         """Mirror → primary: drain the durable outbox strictly in order."""
@@ -2265,35 +2996,43 @@ class MeshManager:
                     "reachability": self._reachability(mesh, m),
                 }
             )
+        # The whole rank list, ourselves included — the diagram draws nodes
+        # from this and edges from `links`, so both must be absolute.
         peers = []
-        if mesh.primary:
-            status = mesh.peer_status.get(mesh.primary) or {}
+        for rank, machine in enumerate(mesh.peers):
+            status = mesh.peer_status.get(machine) or {}
+            link = mesh.links.get(machine)
+            mine = bool(mesh.me) and machine == mesh.me
             peers.append(
                 {
-                    "machine": mesh.primary,
-                    "role": "primary",
-                    "linked_at": (mesh.link or {}).get("created_at", ""),
-                    "ok": status.get("ok"),
-                    "error": status.get("error"),
-                    "queued": len(mesh.outbox),
+                    "machine": machine,
+                    "rank": rank,
+                    "role": "authority" if rank == 0 else "peer",
+                    "self": mine,
+                    "linked": link is not None,
+                    "enabled": bool((link or {}).get("enabled", True)),
+                    "owns_link": mesh.owns_link(machine),
+                    "linked_at": (link or {}).get("created_at", ""),
+                    "ok": None if mine else status.get("ok"),
+                    "error": None if mine else status.get("error"),
+                    # Toward the authority we queue unsequenced sends; toward
+                    # anyone else the log tail itself is the queue.
+                    "queued": (
+                        0 if mine
+                        else len(mesh.outbox) if machine == mesh.authority
+                        else max(
+                            0,
+                            len(mesh.messages) - mesh.link_cursors.get(machine, 0),
+                        )
+                    ),
+                    "members": sorted(
+                        h for h, m in mesh.members.items()
+                        # A blank machine only survives on a mesh that never
+                        # federated, where it can only mean us.
+                        if (m.machine or mesh.me) == machine
+                    ),
                 }
             )
-        else:
-            for machine in sorted(mesh.guests):
-                status = mesh.peer_status.get(machine) or {}
-                peers.append(
-                    {
-                        "machine": machine,
-                        "role": "guest",
-                        "linked_at": mesh.guests[machine].get("created_at", ""),
-                        "ok": status.get("ok"),
-                        "error": status.get("error"),
-                        "queued": (
-                            len(mesh.messages)
-                            - mesh.guest_cursors.get(machine, 0)
-                        ),
-                    }
-                )
         requests = []
         if not mesh.primary:
             for r in sorted(
@@ -2311,9 +3050,14 @@ class MeshManager:
             "name": mesh.name,
             "created_at": mesh.created_at,
             "primary": mesh.primary or None,
+            "authority": mesh.authority or None,
+            "self": mesh.me or None,
+            "epoch": mesh.authority_epoch,
             "members": members,
             "messages": len(mesh.messages),
+            "provisional": len(mesh.provisional),
             "peers": peers,
+            "links": self.edge_table(mesh),
             "requests": requests,
             "policy": mesh.policy,
         }
@@ -2358,9 +3102,10 @@ class MeshManager:
                             "mesh %r: delivery to %r failed", mesh.name, handle
                         )
                 if mesh.primary:
-                    # Mirror duties: drain the upstream outbox. The policy
-                    # engine deliberately does NOT run here — it lives on
-                    # the primary.
+                    # Peer duties: drain the outbox toward the authority and,
+                    # while that is stuck, keep retrying the direct pushes.
+                    # The policy engine deliberately does NOT run here — it
+                    # lives on the authority.
                     if self.peer_transport is not None:
                         try:
                             await self._flush_upstream(mesh)
@@ -2368,9 +3113,15 @@ class MeshManager:
                             log.exception(
                                 "mesh %r: upstream flush failed", mesh.name
                             )
+                        try:
+                            await self._flush_fast(mesh)
+                        except Exception:  # noqa: BLE001
+                            log.exception(
+                                "mesh %r: fast-path flush failed", mesh.name
+                            )
                     continue
                 if self.peer_transport is not None:
-                    for machine in list(mesh.guests):
+                    for machine in list(mesh.links):
                         try:
                             await self._flush_guest(mesh, machine)
                         except Exception:  # noqa: BLE001
@@ -2414,6 +3165,14 @@ class MeshManager:
         except SessionGone:
             return
         mesh.cursors[member.handle] = len(mesh.messages)
+        # Fast-path arrivals are not in the log yet, so the cursor cannot
+        # cover them: remember their ids until the sequenced copy has been
+        # folded in behind the cursor.
+        delivered = set(mesh.delivered_ids.get(member.handle) or ())
+        delivered.update(m["id"] for m in pending if m.get("id"))
+        ahead = {m.get("id") for m in mesh.messages[mesh.cursors[member.handle]:]}
+        ahead.update(m.get("id") for m in mesh.provisional)
+        mesh.delivered_ids[member.handle] = delivered & ahead
         mesh._first_pending.pop(member.handle, None)
         now = time.monotonic()
         st = mesh.activity.setdefault(member.handle, {"anchor": now})
@@ -2432,26 +3191,97 @@ class MeshManager:
     # ------------------------------------------------------------------ #
     # persistence
     # ------------------------------------------------------------------ #
+    def _migrate_v2(self, mesh: Mesh, doc: Optional[dict] = None) -> None:
+        """Fold retired primary/mirror state into the rank list (phase 7).
+
+        An owner becomes rank 0 with its guests following in link order; a
+        mirror keeps its primary at rank 0 and appends itself. ``load_all``
+        runs before the uplink resolves our relay name, so this is called
+        again from the ``machine`` setter — until then the v2 fragment just
+        waits on the mesh.
+        """
+        if doc is not None:
+            guests = doc.get("guests")
+            link = doc.get("link")
+            mesh._v2 = {
+                "primary": str(doc.get("primary") or ""),
+                "link": dict(link) if isinstance(link, dict) else None,
+                "guests": {
+                    str(k): dict(v) for k, v in (guests or {}).items()
+                    if isinstance(v, dict)
+                },
+            }
+        v2 = mesh._v2
+        if not v2 or mesh.peers:
+            return
+        primary, link, guests = v2["primary"], v2["link"], v2["guests"]
+        if primary:
+            if link is None:
+                log.warning(
+                    "mesh %r: mirror of %r has no link credentials — unlinked",
+                    mesh.name, primary,
+                )
+                mesh._v2 = None
+                return
+            if not mesh.me:
+                return  # retry once the relay name lands
+            peers = [primary, mesh.me]
+            links = {primary: {**link, "enabled": True}}
+        elif guests:
+            if not mesh.me:
+                return
+            ordered = sorted(
+                guests, key=lambda m: str(guests[m].get("created_at") or "")
+            )
+            peers = [mesh.me, *ordered]
+            links = {m: {**guests[m], "enabled": True} for m in ordered}
+        else:
+            mesh._v2 = None  # purely local mesh: nothing to migrate
+            return
+        mesh.peers = peers
+        for machine, link_doc in links.items():
+            mesh.links.setdefault(machine, link_doc)
+        self._stamp_own_members(mesh)
+        mesh._v2 = None
+        log.info(
+            "mesh %r: migrated federation state to rank order %s",
+            mesh.name, mesh.peers,
+        )
+        self._persist_def(mesh)
+
     def _load(self, d: Path) -> Mesh:
         doc = json.loads((d / "mesh.json").read_text(encoding="utf-8"))
-        mesh = Mesh(str(doc["name"]), created_at=str(doc.get("created_at") or ""))
+        mesh = Mesh(
+            str(doc["name"]),
+            created_at=str(doc.get("created_at") or ""),
+            # The uplink resolves our relay name after load_all, so fall back
+            # to the identity this directory was last written with — that is
+            # what makes rank (and therefore `primary`) correct on reload.
+            me=self.machine or str(doc.get("self") or ""),
+        )
         for entry in (doc.get("members") or {}).values():
             member = Member.from_dict(entry)
             mesh.members[member.handle] = member
-        # v1 symmetric-federation state ("links", cursors "peers") is
-        # deliberately dropped, not migrated — the model was retired.
-        mesh.primary = str(doc.get("primary") or "")
-        link = doc.get("link")
-        mesh.link = dict(link) if isinstance(link, dict) else None
-        if mesh.primary and mesh.link is None:
-            log.warning(
-                "mesh %r: mirror of %r has no link credentials — unlinked",
-                mesh.name, mesh.primary,
-            )
-        mesh.guests = {
-            str(k): dict(v) for k, v in (doc.get("guests") or {}).items()
-            if isinstance(v, dict)
-        }
+        # Phase 7 always writes "peers" beside "links". A doc carrying
+        # "links" *without* "peers" is retired v1 symmetric-federation
+        # state, which is dropped rather than migrated (as it has been
+        # since v2) — the two formats happen to share the key name.
+        mesh.peers = [str(p) for p in (doc.get("peers") or []) if p]
+        if mesh.peers:
+            mesh.links = {
+                str(k): dict(v) for k, v in (doc.get("links") or {}).items()
+                if isinstance(v, dict)
+            }
+            mesh.pair_links = {
+                str(k): dict(v)
+                for k, v in (doc.get("pair_links") or {}).items()
+                if isinstance(v, dict)
+            }
+        try:
+            mesh.authority_epoch = int(doc.get("authority_epoch") or 0)
+        except (TypeError, ValueError):
+            mesh.authority_epoch = 0
+        self._migrate_v2(mesh, doc)
         mesh.invites = {
             str(k): str(v) for k, v in (doc.get("invites") or {}).items()
         }
@@ -2477,22 +3307,30 @@ class MeshManager:
                 mesh.messages.append(msg)
                 if msg.get("id"):
                     mesh.seen_ids.add(str(msg["id"]))
+                try:
+                    mesh.next_seq = max(mesh.next_seq, int(msg.get("seq", -1)) + 1)
+                except (TypeError, ValueError):
+                    pass
         cursors_path = d / "cursors.json"
         if cursors_path.is_file():
             try:
                 raw = json.loads(cursors_path.read_text(encoding="utf-8"))
-                if "members" in raw or "peers" in raw or "guests" in raw:
+                if {"members", "peers", "guests", "links"} & set(raw):
                     mesh.cursors = {
                         str(k): int(v) for k, v in (raw.get("members") or {}).items()
                     }
-                    mesh.guest_cursors = {
-                        str(k): int(v) for k, v in (raw.get("guests") or {}).items()
+                    # "guests" is the phase-5 name for the same per-peer map.
+                    mesh.link_cursors = {
+                        str(k): int(v)
+                        for k, v in (
+                            raw.get("links") or raw.get("guests") or {}
+                        ).items()
                     }
                 else:  # phase-1 format: a flat {handle: index} map
                     mesh.cursors = {str(k): int(v) for k, v in raw.items()}
             except (ValueError, TypeError):
                 mesh.cursors = {}
-                mesh.guest_cursors = {}
+                mesh.link_cursors = {}
         outbox_path = d / "outbox.jsonl"
         if mesh.primary and outbox_path.is_file():
             for line in outbox_path.read_text(encoding="utf-8").splitlines():
@@ -2522,9 +3360,11 @@ class MeshManager:
             doc = {
                 "name": mesh.name,
                 "created_at": mesh.created_at,
-                "primary": mesh.primary,
-                "link": mesh.link,
-                "guests": mesh.guests,
+                "self": mesh.me,
+                "peers": mesh.peers,
+                "links": mesh.links,
+                "pair_links": mesh.pair_links,
+                "authority_epoch": mesh.authority_epoch,
                 "members": {h: m.to_dict() for h, m in sorted(mesh.members.items())},
                 "invites": mesh.invites,
                 "requests": mesh.pending_requests,
@@ -2541,7 +3381,7 @@ class MeshManager:
         try:
             (self._mesh_dir(mesh.name) / "cursors.json").write_text(
                 json.dumps(
-                    {"members": mesh.cursors, "guests": mesh.guest_cursors},
+                    {"members": mesh.cursors, "links": mesh.link_cursors},
                     indent=2,
                 ),
                 encoding="utf-8",

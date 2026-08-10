@@ -188,8 +188,8 @@ def test_mesh_federation_over_real_relay(home, tmp_path):
             assert member.handle == "bob"
             mesh_b = b.mesh.get("fedmesh")
             assert mesh_b.primary == "pca"
-            # absolute roster: '' = the primary's own member
-            assert mesh_b.members["alice"].machine == ""
+            # absolute roster: every member names its own daemon
+            assert mesh_b.members["alice"].machine == "pca"
             # the join was decided by the primary (authoritative roster)
             assert a.mesh.get("fedmesh").members["bob"].machine == "pcb"
 

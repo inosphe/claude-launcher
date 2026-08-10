@@ -1,8 +1,9 @@
 # Mesh: session-to-session messaging
 
-Status: all four phases implemented — local mesh, federation over the relay,
-the nudge-policy layer, and the agent conveniences (MCP wrapper, join
-briefing).
+Status: all seven phases implemented — local mesh, federation over the relay,
+the nudge-policy layer, the agent conveniences (MCP wrapper, join briefing),
+the primary/mirror redesign, membership-first joining, and the ranked peer
+graph that replaced the star.
 
 Mesh lets claunch sessions — the agents running inside them — exchange
 messages. Sessions are grouped into a *mesh* (on the web dashboard or via the
@@ -201,6 +202,13 @@ Forwarding rules:
 
 ## Federation v2: primary/mirror (phase 5 — implemented)
 
+> **Note (phase 7)**: the *topology* of this section is superseded — the
+> hub-and-spoke below is now the special case of a ranked peer graph where
+> only the authority has links (see "Ranked peer graph"). What stays true:
+> the mesh still has exactly one authority at a time, it still sequences THE
+> log, and guests still hold mirrors with durable outboxes. "Primary" now
+> means `peers[0]`, a position rather than an identity.
+
 The goal was always "sessions on different networks woven into ONE mesh";
 v2 keeps that goal but gives the mesh a single source of truth.
 
@@ -361,6 +369,184 @@ daemons, then that daemon's live sessions (minus the ones already enrolled),
 and POSTs the invitation — so the owner-side path needs no code, no CLI and
 no second machine. Ticket minting stays beside it for unattended joins.
 
+## Ranked peer graph (phase 7 — implemented)
+
+Phases 5–6 gave the mesh a clear owner, but they also hard-wired a **star**:
+`Mesh.primary` was a two-valued fact (own it, or mirror somebody else's), so
+the only relationship a daemon could have was *toward the hub*. Two guests on
+the same relay, whose members talk to each other all day, had no connection at
+all — every message hairpinned through the primary, and a primary outage froze
+conversations that never needed it.
+
+Phase 7 keeps the single source of truth and removes the star. The mesh is a
+**graph of individually configured, duplex peer links**, and authority is a
+*position in an ordered list* rather than an identity.
+
+**Aligned decisions.**
+
+1. *Rank replaces ownership.* A mesh holds `peers: [machine, …]` — ordered,
+   and the order **is** the rank. `peers[0]` is the mesh's authority; nothing
+   has to be declared per link. The list is editable afterwards, so authority
+   can be moved without recreating the mesh.
+2. *Rank decides both layers.* Globally, `peers[0]` sequences messages, owns
+   the roster and handle uniqueness, mints invites, approves joins and runs
+   the policy engine. Per edge, the lower-ranked side is the **link owner**:
+   it drives the handshake, issues the credential and re-establishes a broken
+   link. Traffic itself is always **duplex** — every link carries both
+   directions with its own queue and cursor.
+3. *Complete graph by default.* A peer joining links with every existing peer,
+   not just the authority. An operator may **cut** an individual edge
+   (`links[m].enabled = false`); there is no multi-hop routing, so a cut edge
+   simply loses its fast path and falls back to the authority's fanout.
+4. *Authority moves only when a human says so.* No automatic failover, hence
+   no split-brain and no merge rules. Reordering is performed by the current
+   `peers[0]`; a `force` reorder exists for a permanently dead authority and
+   bumps `authority_epoch` so late traffic from the old one is re-sequenced
+   rather than silently interleaved.
+
+**Two streams.** Decision 3 is only worth anything if an outage of `peers[0]`
+does not stop conversations, so *delivery* and *log placement* are separated:
+
+- **Sequencing stream** — a non-authority daemon forwards its members' sends
+  to `peers[0]`, which stamps `(epoch, seq)`, appends to THE log and fans the
+  tail out to every peer by cursor. Unchanged from v2.
+- **Fast path** — when that forward fails at the transport level, the send
+  queues in the outbox *and* is pushed straight to the daemons hosting its
+  recipients (`/peer/mesh/deliver`). They inject it into the terminals
+  immediately and park it in a **provisional** list; when the sequenced copy
+  eventually arrives it is folded into the log at its authoritative position
+  instead of being re-injected (per-member `delivered_ids` guards that).
+
+The cost is explicit: with the fast path in play, "the order I saw" can differ
+from "the order the log records". The log stays the record; a provisional
+entry is shown with `seq: null` until it is sequenced. The fast path only
+arms when the authority is actually unreachable, so the healthy case still
+carries each message exactly once.
+
+**Who holds the edge credentials.** A pair of peers that have never spoken
+cannot authenticate a first contact between themselves, so the **authority
+brokers every edge**: it already has an authenticated channel to both ends,
+so it mints both halves of each peer-to-peer pair and ships each side its own
+view (`token_out` to present, `token_in` to expect) on the ordinary sync.
+There is no separate handshake to secure, and the two ends cannot disagree
+about an edge because one daemon wrote both halves.
+
+**Who may cut an edge.** The authority owns the edge table, but it is not the
+only daemon with standing on an edge: an edge is duplex and its two ends are
+equals, so **either end may cut or restore it**, and a peer's edit is
+forwarded to the authority (`/peer/mesh/link`) which records it and fans the
+result back out. An edge between two *other* daemons is not yours — that is
+the authority's call, and the rule is enforced twice, once in the client's
+own daemon and again at the authority, so calling the peer endpoint directly
+buys nothing. Edges incident on the authority are never cuttable by anyone:
+they carry the sequenced log, so removing one is a revoke, not a cut.
+
+**The roster is absolute.** Before phase 7 the authority's own members
+carried a blank `machine`, which was unambiguous only because authority never
+moved. It moves now, so every member names its own daemon: left blank, a
+member would be claimed by whoever holds rank 0 next, and delivery would
+follow it to a daemon that does not host the session. Migration stamps
+existing members on load.
+
+**State.** `primary` / `link` / `guests` collapse into:
+
+```
+mesh.json   self: machine                    # who we were when this was written
+            peers: [machine, …]              # order = rank; peers[0] = authority
+            links: {machine: {token_in, token_out, created_at, enabled}}
+            pair_links: {"m1|m2": {token_m1, token_m2, created_at}}
+            edges: {"m1|m2": enabled}        # authority-owned cut state
+            authority_epoch: N
+cursors.json  links: {machine: index}        # was "guests"
+```
+
+`token_in` is what that peer presents to us, `token_out` what we present to
+it — the same shape the v2 guest/primary credentials already had, which is
+why the two token checks merge into one `_check_link_token`. v2 state
+migrates automatically: the old primary becomes `peers[0]`, guests follow in
+link order, and the token pairs move into `links` unchanged. Guests that were
+never linked to each other are given brokered credentials on the next sync.
+`self` is recorded because the relay resolves our name *after* `load_all`,
+and rank — and therefore "am I the authority?" — cannot be read without it.
+
+**A mesh is keyed by its own name, and deletion is durable.** Deleting a mesh
+retires its directory to `<name>.deleted-<stamp>` rather than erasing the
+history. `load_all` therefore has to skip those directories — it once mounted
+every directory containing a `mesh.json`, **keyed by the directory name**
+while the loaded object kept its own. A deleted mesh then came back on the
+next daemon restart as a zombie: listed in the sidebar under its real name,
+but absent from the lookup table, so opening it — or deleting it again —
+answered `no mesh named 'mesh0'`. The invariant is that the key *is*
+`mesh.name`, which makes "listed" and "openable" the same set by
+construction; a second directory claiming a live name is ignored with a
+warning rather than shadowing it.
+
+**Shipped surface.**
+
+- CLI: `mesh peers [<mesh>]` — with a mesh, its daemons in rank order with
+  link state; without, the relay listing it always did. `mesh rank <mesh>
+  <machine> <position> [--force]` moves one peer (position 0 = handover);
+  `mesh cut|uncut <mesh> <a> <b>` toggles one edge.
+- API: `PUT /api/mesh/{mesh}/peers {order, force}`,
+  `PATCH /api/mesh/{mesh}/links/{a}/{b} {enabled}`. `mesh_info` gains
+  `authority`, `self`, `epoch`, a `peers` list carrying each daemon's rank,
+  role, reachability, queue depth and hosted members, and a `links` **edge
+  table** (`{a, b, enabled, cuttable, editable}`) — per-edge state cannot be
+  inferred from per-node state, and the diagram needs it. `cuttable` is a
+  property of the edge, `editable` of *this daemon's* view of it, so the
+  "who may cut" rule is answered once on the server rather than re-derived
+  in every client.
+- Peer: `/peer/mesh/deliver` (fast path) and `/peer/mesh/link` (a peer asks
+  the authority to cut or restore an edge it terminates). `/peer/mesh/sync`
+  additionally carries `peers`, `authority_epoch`, the brokered `links` for
+  that peer and the whole `edges` table, so every daemon draws the same graph.
+
+**Handover, concretely.** The outgoing authority is the only daemon that
+knows the new order and the only one still holding every peer's credentials,
+but the moment it rewrites `peers` it is no longer allowed to use the
+authority push path. So it broadcasts once *as* the outgoing authority
+(`_flush_guest(..., force=True)`) carrying the new order; each peer adopts
+it, and the one that finds itself at rank 0 takes over the authority's
+duties — brokering edges, raising the sequence floor above everything
+already written, and opening a fanout cursor per peer (the existing resync
+handshake pulls those to the truth). A peer that was unreachable during the
+broadcast still believes the old order; the new authority's own syncs
+correct it, because the credential pair it presents was brokered by the
+same authority either way.
+- Web: the mesh page leads with an SVG **topology diagram** — see below.
+
+## Topology diagram (web)
+
+The mesh page gains a diagram above the existing boxes (which stay: they own
+the text-level detail and the enrolment forms). It is hand-rolled inline SVG
+in `app.js`, consistent with the rest of the dashboard — no build step, no
+vendored library, no external fetch.
+
+- **Layout**: a rank ring. `peers[0]` sits at 12 o'clock wearing the authority
+  mark, the rest follow clockwise by rank, so position reads as precedence
+  and every edge of the complete graph stays visible. It is drawn 1:1 at a
+  radius derived from the peer count — the smallest that still separates
+  neighbouring *labels* — so the panel stays small and does not stretch.
+- **Nodes** are peer daemons: rank badge and member count inside the disc,
+  machine name below it (names are longer than any disc worth drawing).
+- **Edges** are links, styled by state: solid = ok, dashed = queued, red =
+  unreachable, grey = cut. A transparent fat line under each hairline does
+  the hit-testing, or they would be unclickable.
+- **Editing**: drag a node onto another rank slot to reorder (authority
+  handover is confirmed explicitly), click an edge to cut or restore it.
+  Peers are revoked from the *Peer daemons* box below, since removing a
+  daemon is not an edge operation.
+- **Links list**: the same edges as text under the diagram, each with its
+  state and a Cut/Restore button. Aiming at a hairline is a poor way to run
+  a network — and an edge passing behind a node is barely clickable at all —
+  so the list, not the diagram, is the surface that is always usable. Rows
+  the viewing daemon may not edit say *which* rule blocked them and where
+  the edit can be made instead.
+
+Both editing surfaces are driven by the edge table's `editable` flag, so a
+peer's dashboard can cut its own links without the operator having to go find
+the authority's browser.
+
 ## Delivery pipeline
 
 One asyncio worker per mesh. For each local member with undelivered log
@@ -487,3 +673,9 @@ in `mesh.json` (`policy`); timers are in-memory and restart with the daemon.
    codes demoted to pre-approval tickets, persistent links with explicit
    revoke and guest management. Scenario-derived tests in
    `tests/test_mesh_join.py` (TDD). See "Membership-first joining" above.
+7. **Ranked peer graph** (done): the star becomes a graph of individually
+   configured duplex links; authority is `peers[0]` of an editable ordered
+   list; a fast path keeps peers talking while the authority is down; the
+   web page leads with an editable SVG topology diagram. Scenario-derived
+   tests in `tests/test_mesh_graph.py` (TDD). See "Ranked peer graph" and
+   "Topology diagram" above.
