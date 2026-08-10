@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import os
 import threading
 import time
 from datetime import datetime, timezone
@@ -33,6 +34,11 @@ SAMPLE_INTERVAL = 0.4
 
 #: Rotate the raw output log beyond this size (a single .1 backup is kept).
 LOG_MAX_BYTES = 10 * 1024 * 1024
+
+#: Gap between a paste and its submitting Enter (seconds), so the CR arrives in
+#: its own PTY read — see :meth:`Session.paste`. Measured against Claude Code:
+#: 0 never submits, 20ms already does; 150ms leaves room for a busy renderer.
+PASTE_ENTER_DELAY = float(os.environ.get("CLAUNCH_PASTE_ENTER_DELAY") or 0.15)
 
 STATUS_STARTING = "starting"
 STATUS_BUSY = "busy"
@@ -219,14 +225,24 @@ class Session:
 
     async def paste(self, text: str, *, enter: bool = False) -> bytes:
         """Inject multiline text as one paste (bracketed when the program
-        opted in via DECSET 2004), so newlines don't submit once per line."""
+        opted in via DECSET 2004), so newlines don't submit once per line.
+
+        The submitting Enter is a *separate*, delayed write. A bracketed-paste
+        TUI (Claude Code and Ink-based prompts generally) treats one read as
+        one paste: a CR sitting in the same chunk right after the ``ESC[201~``
+        end marker is folded into the pasted text, so the block lands in the
+        composer and is never submitted. Landing the CR in its own read is
+        what makes it a keypress again.
+        """
         if self.exited:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
-        data = keys_mod.encode_paste(
-            text, bracketed=self.screen.bracketed_paste, enter=enter
-        )
+        data = keys_mod.encode_paste(text, bracketed=self.screen.bracketed_paste)
         await self.write_bytes(data)
-        return data
+        if not enter:
+            return data
+        await asyncio.sleep(PASTE_ENTER_DELAY)
+        await self.write_bytes(b"\r")
+        return data + b"\r"
 
     async def write_bytes(self, data: bytes) -> None:
         if self.exited:

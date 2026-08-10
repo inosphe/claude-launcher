@@ -19,6 +19,7 @@ from claude_launcher import store
 from claude_launcher.daemon import keys as keys_mod
 from claude_launcher.daemon import mesh as mesh_mod
 from claude_launcher.daemon import paths
+from claude_launcher.daemon import session as session_mod
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -70,6 +71,17 @@ async def _wait_screen(session, needle: str, timeout: float = 20.0) -> None:
     )
 
 
+async def _wait_drained(mesh, handle: str, timeout: float = 10.0) -> None:
+    """Wait for ``handle``'s cursor to catch up (delivery ends a beat after
+    the block hits the screen — the submitting Enter is a delayed write)."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if mesh.pending(handle) == []:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{handle!r} still has pending: {mesh.pending(handle)}")
+
+
 # --------------------------------------------------------------------------- #
 # paste encoding
 # --------------------------------------------------------------------------- #
@@ -78,8 +90,31 @@ def test_encode_paste_newlines_become_cr():
     assert data == b"a\rb\rc"
 
 
-def test_encode_paste_bracketed_wrap_and_enter():
-    data = keys_mod.encode_paste("x\ny", bracketed=True, enter=True)
+def test_encode_paste_bracketed_wrap():
+    data = keys_mod.encode_paste("x\ny", bracketed=True)
+    assert data == b"\x1b[200~x\ry\x1b[201~"
+
+
+def test_paste_enter_is_a_separate_write(monkeypatch):
+    """The submitting CR must land in its own PTY write — bundled into the
+    paste chunk, a bracketed-paste TUI folds it into the pasted text and the
+    block just sits in the composer."""
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    writes: list = []
+
+    class FakeSession:
+        exited = False
+        sdef = SessionDef(name="s")
+        screen = ScreenState(20, 5)
+        paste = session_mod.Session.paste
+
+        async def write_bytes(self, data: bytes) -> None:
+            writes.append(data)
+
+    s = FakeSession()
+    s.screen.feed(b"\x1b[?2004h")  # program opted into bracketed paste
+    data = asyncio.run(s.paste("x\ny", enter=True))
+    assert writes == [b"\x1b[200~x\ry\x1b[201~", b"\r"]
     assert data == b"\x1b[200~x\ry\x1b[201~\r"
 
 
@@ -265,9 +300,10 @@ def test_delivery_injects_into_recipient_terminal(home, tmp_path):
         await _wait_screen(b, "mesh: m1")
         assert "please build the thing" not in _screen_text(a)  # not the sender
 
-        # cursor advanced and persisted
+        # cursor advanced and persisted — the submitting Enter trails the
+        # pasted block by PASTE_ENTER_DELAY, and the cursor moves after it
         mesh = mm.get("m1")
-        assert mesh.pending("worker_1") == []
+        await _wait_drained(mesh, "worker_1")
         cursors = json.loads(
             (paths.mesh_dir("m1") / "cursors.json").read_text(encoding="utf-8")
         )

@@ -127,7 +127,7 @@ _PASTE_START = b"\x1b[200~"
 _PASTE_END = b"\x1b[201~"
 
 
-def encode_paste(text: str, *, bracketed: bool, enter: bool = False) -> bytes:
+def encode_paste(text: str, *, bracketed: bool) -> bytes:
     """Encode ``text`` as one paste, so embedded newlines don't submit per line.
 
     Newlines become CR — what a real terminal sends for pasted line breaks;
@@ -135,16 +135,17 @@ def encode_paste(text: str, *, bracketed: bool, enter: bool = False) -> bytes:
     running program has opted into bracketed paste (DECSET 2004, tracked by
     :class:`~claude_launcher.daemon.screen.ScreenState`), the payload is
     wrapped in the paste markers so the program treats those CRs as text
-    rather than submissions. ``enter`` appends a submitting CR *after* the
-    paste.
+    rather than submissions.
+
+    The paste never carries a submitting Enter: a TUI that reads the paste and
+    the trailing CR out of one chunk folds the CR into the pasted text and
+    nothing is submitted. :meth:`Session.paste` sends Enter as its own write.
     """
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     normalized = _PASTE_CTRL_RE.sub("", normalized)
     payload = normalized.replace("\n", "\r").encode("utf-8")
     if bracketed:
         payload = _PASTE_START + payload + _PASTE_END
-    if enter:
-        payload += b"\r"
     return payload
 
 
