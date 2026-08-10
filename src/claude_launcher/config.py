@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from typing import Optional
 
 #: Environment variable Claude Code reads to locate its config/credentials.
 CLAUDE_CONFIG_DIR_ENV = "CLAUDE_CONFIG_DIR"
@@ -27,6 +28,15 @@ LAUNCHER_SEED_ENV = "CLAUDE_LAUNCHER_SEED"
 #: Override the YAML file used by ``claunch export`` / ``import`` (also holds
 #: provider definitions and selection).
 LAUNCHER_SYNC_ENV = "CLAUDE_LAUNCHER_SYNC_FILE"
+
+#: Server side: directory holding the sync server's documents and user list.
+SYNC_SERVER_DIR_ENV = "CLAUNCH_SYNC_SERVER_DIR"
+
+#: Client side: overrides for the ``sync:`` block in the config file. The token
+#: especially is a secret, so an env var is the preferred place for it.
+SYNC_URL_ENV = "CLAUNCH_SYNC_URL"
+SYNC_TOKEN_ENV = "CLAUNCH_SYNC_TOKEN"
+SYNC_NAMESPACE_ENV = "CLAUNCH_SYNC_NAMESPACE"
 
 _DEFAULT_HOME = Path.home() / ".claude-launcher"
 
@@ -76,4 +86,34 @@ def sync_file() -> Path:
     """YAML file that ``export``/``import`` read and write (default ``~/.claunch.yaml``)."""
     override = os.environ.get(LAUNCHER_SYNC_ENV)
     return Path(override).expanduser() if override else Path.home() / ".claunch.yaml"
+
+
+def sync_base_file() -> Path:
+    """Snapshot of the last state this machine agreed on with the sync server.
+
+    Kept out of the config file itself: it is per-machine bookkeeping (the base
+    of the three-way merge), not configuration.
+    """
+    return launcher_home() / "sync-base.yaml"
+
+
+def sync_server_dir() -> Path:
+    """Where ``claunch sync-server`` keeps its documents and user list."""
+    override = os.environ.get(SYNC_SERVER_DIR_ENV)
+    return Path(override).expanduser() if override else launcher_home() / "sync-server"
+
+
+def sync_url() -> Optional[str]:
+    """Env override for the sync server URL (``None`` if unset)."""
+    return os.environ.get(SYNC_URL_ENV) or None
+
+
+def sync_token() -> Optional[str]:
+    """Env override for the sync auth token (``None`` if unset)."""
+    return os.environ.get(SYNC_TOKEN_ENV) or None
+
+
+def sync_namespace() -> Optional[str]:
+    """Env override for the synced document's namespace (``None`` if unset)."""
+    return os.environ.get(SYNC_NAMESPACE_ENV) or None
 

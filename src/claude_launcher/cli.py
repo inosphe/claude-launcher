@@ -20,6 +20,7 @@ from . import (
     cli_cflow,
     cli_mesh,
     cli_sessions,
+    cli_sync,
     config,
     credentials,
     lineage,
@@ -45,6 +46,8 @@ from .lineage import LineageError
 from .migrate import MigrateError
 from .prompt_input import PromptInputError
 from .providers import ProviderError
+from .sync import SyncError
+from .syncserver.docs import SyncServerError
 
 
 # --------------------------------------------------------------------------- #
@@ -747,6 +750,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_sessions.register(sub)
     cli_mesh.register(sub)
     cli_cflow.register(sub)
+    cli_sync.register(sub)
 
     return parser
 
@@ -791,6 +795,8 @@ def main(argv: Optional[List[str]] = None) -> int:
         PromptInputError,
         ProviderError,
         store.StoreError,
+        SyncError,
+        SyncServerError,
         DaemonClientError,
         CflowError,
         WorkflowError,

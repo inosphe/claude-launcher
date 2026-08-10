@@ -98,6 +98,7 @@ claunch usage work      # show this profile's subscription usage
 | `template [--init]`    | Show or write the default env template. |
 | `migrate <name> [src]` | Copy skills/MCP servers from a global or local path. |
 | `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claunch.yaml`. |
+| `sync [--mode ...]`    | Reconcile `~/.claunch.yaml` with the sync server (`merge`/`up`/`down`). |
 | `validate [name]`      | Health-check logins via `claude -p heartbeat` (all if no name). |
 | `usage <name>`         | Query subscription usage (`--json` for the raw response). |
 | `set-provider [p] <provider>` | Pin a provider globally or per profile (`--clear` to inherit). |
@@ -497,6 +498,9 @@ claunch list
 claunch login work                            # tokens are per-machine (below)
 ```
 
+Past two or three machines, copying stops being fun — point them all at a
+[profile sync server](#profile-sync-server) and run `claunch sync` instead.
+
 **Login tokens are never stored here** — they are secrets, kept per-profile and
 per-machine, so run `claunch login` on each machine. Provider auth tokens *are*
 in this file (see the [secrets note](#api-providers-third-party-backends)).
@@ -510,6 +514,130 @@ run it explicitly:
 claunch prune --dry-run        # show orphan dirs (not declared in ~/.claunch.yaml)
 claunch prune                  # delete them
 ```
+
+## Profile sync server
+
+Copying `~/.claunch.yaml` by hand works for two machines and stops scaling at
+three. `claunch sync` reconciles that file with a **sync server** — a small
+service that holds one shared document per namespace — so every machine ends up
+with the same profiles, providers and template.
+
+What travels is **configuration only**. Login tokens never leave the machine
+(they are per-profile secrets — run `claunch login` on each host), and the
+`daemon` block stays local too: its port, bind host and relay token describe
+*that* machine, not the profile set.
+
+### Client setup
+
+Describe the server in `~/.claunch.yaml`:
+
+```yaml
+sync:
+  url: https://sync.example.com
+  namespace: alice              # which document on the server
+  token: "..."                  # better: CLAUNCH_SYNC_TOKEN in the environment
+  # sections: [template, provider, providers, profiles, harnesses]   # the default
+  # verify_tls: true
+  # allow_insecure: false       # required to sync over plain http off-loopback
+```
+
+Then:
+
+```bash
+claunch sync                    # --mode merge (the default)
+claunch sync --mode up          # local wins: push this machine's config
+claunch sync --mode down        # server wins: overwrite local config
+claunch sync --dry-run          # show both sides' changes, write nothing
+claunch sync --status           # local config + pending changes, no network
+```
+
+| Mode | Direction | What it does |
+| ---- | --------- | ------------ |
+| `merge` | both | Three-way merge, then push the result. The default. |
+| `up`    | local → server | Replaces the server document with this machine's sections. |
+| `down`  | server → local | Replaces the local sections with the server's. Local-only edits are discarded. |
+
+### How `merge` decides
+
+It is a real three-way merge, not a union. Each machine caches the last state it
+agreed on with the server (`<launcher home>/sync-base.yaml`) and uses it as the
+merge base, which is what makes **deletions propagate**: a profile you removed
+here is *gone*, not resurrected by the next machine that still has it.
+
+- Changed on one side only → that change is taken.
+- Changed on both sides, identically → nothing to decide.
+- Changed on both sides, differently → a **conflict**: reported by path, and
+  resolved by `--prefer local` (default) or `--prefer remote`.
+
+Pushes are guarded by a revision. If another machine wrote while you were
+merging, the server rejects the push and `claunch sync` merges again on top of
+the winner and retries — so a race costs a round trip, never a lost edit.
+
+```console
+$ claunch sync
+synced 'alice' with https://sync.example.com  (mode: merge)
+  conflicts (1, kept local):
+    ! profiles.work.env.REGION   local='apac'  remote='us'
+  local changes (~/.claunch.yaml):
+    + profiles.lab
+  pushed to server:
+    ~ profiles.work.env.REGION
+  revision: 5
+```
+
+A pulled profile is **materialized immediately** — its `CLAUDE_CONFIG_DIR` is
+created and seeded, so it is usable right after the sync (it still needs
+`claunch login`). A pulled *deletion* only removes the declaration: as everywhere
+else in the launcher, deleting a directory is explicit, so run `claunch prune`
+to finish the job.
+
+### Running the server
+
+```bash
+claunch sync-server user add alice       # prints the token once; only its hash is stored
+claunch sync-server serve --port 8378    # foreground; put it behind TLS in production
+```
+
+| Command | Description |
+| ------- | ----------- |
+| `sync-server serve` | Run the server (`--host`, `--port`). |
+| `sync-server user add <name>` | Create an account, print its token once (`--namespace NS`, repeatable, `*` for all). |
+| `sync-server user ls` | List accounts and the namespaces they may sync. |
+| `sync-server user token <name>` | Issue a new token, invalidating the old one. |
+| `sync-server user namespaces <name> <ns>...` | Replace an account's namespace list. |
+| `sync-server user rm <name>` | Remove an account (documents are kept). |
+| `sync-server docs` | List stored documents, revisions and last writer. |
+
+Accounts are stored in `<data dir>/users.yaml` (default
+`<launcher home>/sync-server`, override with `CLAUNCH_SYNC_SERVER_DIR` or
+`--data-dir`); documents live beside them under `docs/`. **Tokens are stored
+SHA-256 hashed**, so a leaked `users.yaml` does not hand over anyone's config;
+the plaintext is shown once at `user add` / `user token` time. An account may
+only touch its own namespaces — anything else is a 403, whether or not the
+namespace exists.
+
+The server also runs standalone, without the rest of the CLI:
+
+```bash
+python -m claude_launcher.syncserver --host 0.0.0.0 --port 8378
+```
+
+It speaks plain JSON over HTTP and stores documents opaquely, so a launcher
+upgrade that adds config keys needs no server change:
+
+| Route | Purpose |
+| ----- | ------- |
+| `GET /api/sync/health` | Liveness (the only unauthenticated route). |
+| `GET /api/sync/whoami` | The calling account and its namespaces. |
+| `GET /api/sync/doc/{ns}` | `{"revision": N, "doc": {...}, "updated_at": ..., "updated_by": ...}`; revision `0` when the namespace has no document. |
+| `PUT /api/sync/doc/{ns}` | Body `{"revision": <what you read>, "doc": {...}}`; `409` with the winning document if the revision is stale. |
+| `DELETE /api/sync/doc/{ns}` | Drop a namespace's document. |
+
+**Secrets note.** Provider auth tokens live in `~/.claunch.yaml` (see the
+[providers section](#api-providers-third-party-backends)), so they are part of
+what syncs. `claunch sync` therefore refuses plain `http` to anything but
+loopback unless you set `sync.allow_insecure: true`; put the server behind TLS,
+or keep provider tokens out of the synced sections.
 
 ## Managed sessions (tmux-style daemon)
 
@@ -1307,6 +1435,10 @@ A profile directory typically holds:
 | `CLAUDE_LAUNCHER_USAGE_MODEL` | Model for the setup-token usage fallback call (default Haiku). |
 | `CLAUDE_LAUNCHER_SEED`      | Config dir new profiles seed from (default `CLAUDE_CONFIG_DIR` or `~/.claude`). |
 | `CLAUDE_LAUNCHER_SYNC_FILE` | The config source of truth (default `~/.claunch.yaml`). |
+| `CLAUNCH_SYNC_URL`          | [Sync server](#profile-sync-server) URL, overriding `sync.url`. |
+| `CLAUNCH_SYNC_TOKEN`        | Sync auth token, overriding `sync.token` (the preferred place for it). |
+| `CLAUNCH_SYNC_NAMESPACE`    | Synced document's namespace, overriding `sync.namespace`. |
+| `CLAUNCH_SYNC_SERVER_DIR`   | Server side: documents + accounts (default `<launcher home>/sync-server`). |
 
 ## License
 
