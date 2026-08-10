@@ -1338,6 +1338,7 @@ function stopMeshPoll() {
 async function openMesh(name) {
   if (meshPollTimer) clearInterval(meshPollTimer);
   meshName = name;
+  missingMeshShown = "";   // a different route deserves a fresh verdict
   showView("mesh");
   $("mesh-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshMeshView();
@@ -1357,16 +1358,81 @@ async function refreshMeshView(force = false) {
     ]);
     info = await r1.json();
     if (!r1.ok) {
-      $("mesh-view").innerHTML = "";
-      $("mesh-view").appendChild(el("p", "wf-warning", info.error || "cannot load mesh"));
+      renderMissingMesh(meshName, info.error || "cannot load mesh");
       return;
     }
     history = r2.ok ? (await r2.json()).messages || [] : [];
+    missingMeshShown = "";  // it loaded, so arm the panel again
   } catch {
     return;
   }
   renderRelayBadge(info.relay);
   renderMesh(info, history, force);
+}
+
+/* A mesh route can outlive its mesh: a bookmark or a shared link naming a
+   mesh this daemon never had, or a mirror that was dropped when the owner
+   unlinked us (removing the invited session does that). The route then
+   pointed at an error with no way out but editing the URL — every 2s poll
+   just repainted it. So the dead end becomes a junction: leave, go to one
+   of the meshes that IS here, or make one under that name.
+
+   Rebuilt only when the message changes, or the poll would yank the buttons
+   out from under the pointer twice a minute. */
+let missingMeshShown = "";
+
+function renderMissingMesh(name, error) {
+  const key = `${name} ${error}`;
+  if (missingMeshShown === key) return;
+  missingMeshShown = key;
+  const view = $("mesh-view");
+  view.innerHTML = "";
+  view.appendChild(el("p", "wf-warning", error));
+  const others = (meshCache || []).filter((m) => m.name !== name);
+  view.appendChild(el(
+    "p", "wf-note",
+    "this link names a mesh that is not on this daemon — either it never " +
+    "was, or its mirror was dropped (removing the invited session, or being " +
+    "unlinked by the owner, does that). " +
+    (others.length
+      ? "the meshes that are here:"
+      : "there are no meshes on this daemon at all.")
+  ));
+  const row = el("div", "mesh-missing-actions");
+  const back = el("button", "wf-btn option", "Back");
+  back.addEventListener("click", () => { location.hash = "#"; });
+  row.appendChild(back);
+  for (const m of others) {
+    const link = el("button", "wf-btn option", m.name);
+    link.addEventListener("click", () => {
+      location.hash = "#/mesh/" + encodeURIComponent(m.name);
+    });
+    row.appendChild(link);
+  }
+  const make = el("button", "wf-btn nudge", `Create '${name}' here`);
+  make.addEventListener("click", async () => {
+    if (!confirm(
+      `Create a NEW local mesh called '${name}' on this daemon?\n\n` +
+      "This does not rejoin the remote mesh of the same name — to get back " +
+      "into that one, the machine that owns it has to invite this daemon " +
+      "again (or give you a join ticket)."
+    )) return;
+    const resp = await api("/api/mesh", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name }),
+    });
+    if (!resp.ok) {
+      const doc = await resp.json().catch(() => ({}));
+      alert(doc.error || `HTTP ${resp.status}`);
+      return;
+    }
+    missingMeshShown = "";
+    await refreshMeshList();
+    await refreshMeshView(true);
+  });
+  row.appendChild(make);
+  view.appendChild(row);
 }
 
 /* ---- owner-side invitation wizard -------------------------------------- */
@@ -1556,6 +1622,304 @@ function renderInviteWizard(info, fed, members) {
   if (st.note) fed.appendChild(el("p", st.bad ? "wf-warning" : "wf-note", st.note));
 }
 
+/* ---- topology diagram --------------------------------------------------- */
+/* Phase 7 turned the mesh into a ranked peer graph, and a graph is the one
+   thing a list cannot show: who is linked to whom, and what each edge is
+   doing. Hand-rolled inline SVG — same as everything else here, no build
+   step and no vendored library.
+
+   Layout is a RANK RING: rank 0 at 12 o'clock, the rest clockwise, so a
+   node's position *is* its precedence and every edge of the complete graph
+   stays visible. Dragging a node onto another's slot rewrites the order. */
+
+/* The ring is drawn at 1:1 — one SVG unit is one CSS pixel — so the diagram
+   stays the same modest size whatever the peer count, instead of a fixed
+   canvas width stretching a two-node sliver into a wall. The radius is the
+   smallest one that still separates neighbours by a whole cell, so two peers
+   make a small dumbbell rather than a huge circle with everything else empty.
+   The cell is sized for the NAME LABEL, not the disc — the label is the wide
+   part, and clearing only the discs lets names collide. */
+const RING = {
+  node: 26, cell: 126, cellY: 88, pad: { x: 56, top: 36, bottom: 50 },
+};
+let meshDrag = null;   // {from: machine} while a node is being dragged
+let meshBusy = false;  // an edit is in flight; suppress the poll's redraw
+
+/* A drag released anywhere but on a node is a cancel. Registered once, at
+   the window, because the node handlers only see drops that land on them —
+   without this a stray release would leave meshDrag set and freeze the
+   poll's redraw. The node's own pointerup runs first (bubbling), so the
+   deferred check only sees genuinely stray releases. */
+window.addEventListener("pointerup", () => {
+  if (!meshDrag) return;
+  setTimeout(() => {
+    if (!meshDrag) return;
+    meshDrag = null;
+    refreshMeshView(true);
+  }, 0);
+});
+
+/* Chord between neighbours is 2r·sin(pi/n); asking that to span one cell
+   gives the radius directly. One peer sits at the centre. */
+function ringRadius(count) {
+  if (count < 2) return 0;
+  // Two peers sit on a vertical diameter, where the wide label is never
+  // beside anything — only disc-plus-label height has to clear.
+  const cell = count === 2 ? RING.cellY : RING.cell;
+  return cell / (2 * Math.sin(Math.PI / count));
+}
+
+function ringPoint(index, count, radius) {
+  // -90deg puts rank 0 at the top; clockwise from there. Centre is (0,0);
+  // the viewBox is fitted around the result afterwards.
+  const angle = (2 * Math.PI * index) / Math.max(1, count) - Math.PI / 2;
+  return { x: radius * Math.cos(angle), y: radius * Math.sin(angle) };
+}
+
+function svg(tag, attrs, text) {
+  const node = document.createElementNS("http://www.w3.org/2000/svg", tag);
+  for (const [k, v] of Object.entries(attrs || {})) node.setAttribute(k, v);
+  if (text !== undefined) node.textContent = text;
+  return node;
+}
+
+/* Cut state is per EDGE (the daemon ships the whole table, including edges
+   we are not an endpoint of); reachability is per NODE and only observable
+   for edges we terminate — nobody can report on a link between two other
+   machines, so those draw plain. */
+function edgeClass(edge, byName) {
+  if (!edge.enabled) return "cut";
+  const pa = byName[edge.a] || {}, pb = byName[edge.b] || {};
+  if (!pa.self && !pb.self) return "ok";
+  const far = pa.self ? pb : pa;
+  if (far.ok === false) return "down";
+  if (far.queued) return "queued";
+  return "ok";
+}
+
+async function meshEdit(path, options, what) {
+  meshBusy = true;
+  try {
+    const resp = await api(path, {
+      headers: { "Content-Type": "application/json" }, ...options,
+    });
+    if (!resp.ok) {
+      const doc = await resp.json().catch(() => ({}));
+      alert(doc.error || `HTTP ${resp.status}`);
+      return false;
+    }
+    return true;
+  } finally {
+    meshBusy = false;
+    await refreshMeshView(true);
+    refreshMeshList();
+  }
+}
+
+/* One place decides what cutting an edge means, so the diagram and the list
+   below it cannot drift apart. */
+function toggleEdge(info, edge) {
+  const { a, b } = edge;
+  const enable = !edge.enabled;
+  if (!confirm(
+    enable
+      ? `Restore the direct link ${a} <-> ${b}?`
+      : `Cut the direct link ${a} <-> ${b}? Their traffic will go through ` +
+        `${info.authority} instead — slower, but nothing is lost.`
+  )) return;
+  return meshEdit(
+    `/api/mesh/${encodeURIComponent(info.name)}/links/` +
+    `${encodeURIComponent(a)}/${encodeURIComponent(b)}`,
+    { method: "PATCH", body: JSON.stringify({ enabled: enable }) }
+  );
+}
+
+/* Aiming at a hairline is a poor way to run a network, and edges that pass
+   behind a node are barely clickable at all. So the same edits are also a
+   plain list: every pair, its state, and the button that changes it. */
+function renderLinkEditor(info) {
+  const edges = info.links || [];
+  const box = el("div", "mesh-links");
+  box.appendChild(el("h3", null, "Links"));
+  if (!edges.length) return box;
+  const self = (info.peers || []).find((p) => p.self);
+  const me = self ? self.machine : "";
+  for (const edge of edges) {
+    const row = el("div", "mesh-member");
+    const cls = edgeClass(edge, Object.fromEntries(
+      (info.peers || []).map((p) => [p.machine, p])
+    ));
+    row.appendChild(el("span", `mesh-link-swatch ${cls}`));
+    row.appendChild(el(
+      "span", "mesh-handle mono",
+      `${edge.a} ↔ ${edge.b}`
+    ));
+    row.appendChild(el("span", "meta", {
+      ok: "linked", queued: "linked · traffic queued",
+      down: "linked · peer unreachable", cut: "cut — routed via the authority",
+    }[cls]));
+    if (edge.editable) {
+      const btn = el("button", "wf-btn option", edge.enabled ? "Cut" : "Restore");
+      btn.addEventListener("click", () => toggleEdge(info, edge));
+      row.appendChild(btn);
+    } else {
+      // Say which of the two rules blocked it, and where the operator can
+      // act instead — "disabled" alone is a dead end for whoever is trying
+      // to change something.
+      const far = edge.a === info.authority ? edge.b : edge.a;
+      row.appendChild(el(
+        "span", "wf-note",
+        !edge.cuttable
+          ? (far === me
+            ? "carries the log — leave with Remove mesh, or be unlinked "
+              + `from ${info.authority}`
+            : info.primary === null
+              ? `carries the log — unlink ${far} to remove it`
+              : `carries the log — ${info.authority} unlinks ${far}`)
+          : `not this daemon's edge — edit it on ${info.authority}, `
+            + `${edge.a} or ${edge.b}`
+      ));
+    }
+    box.appendChild(row);
+  }
+  return box;
+}
+
+function renderTopology(info) {
+  const peers = info.peers || [];
+  const box = el("div", "mesh-topo");
+  const head = el("div", "mesh-topo-head");
+  head.appendChild(el("h3", null, "Topology"));
+  // Only the authority can edit the graph, so only it is told how.
+  head.appendChild(el(
+    "span", "wf-note",
+    !peers.length
+      ? "local mesh — no other daemon has joined yet"
+      : info.primary === null
+        ? "rank 0 holds the authority · drag a node onto another to reorder · " +
+          "click an edge to cut or restore it"
+        : `rank 0 holds the authority — edit the graph on ${info.authority}`
+  ));
+  box.appendChild(head);
+  if (!peers.length) return box;
+
+  const at = {};
+  const radius = ringRadius(peers.length);
+  peers.forEach((p, i) => { at[p.machine] = ringPoint(i, peers.length, radius); });
+  // Fit the box to the nodes plus room for the name labels, which hang below
+  // each disc and are wider than it. Asymmetric on y: only the bottom side
+  // carries a label past the disc.
+  const xs = Object.values(at).map((p) => p.x);
+  const ys = Object.values(at).map((p) => p.y);
+  const vb = {
+    x: Math.min(...xs) - RING.pad.x, y: Math.min(...ys) - RING.pad.top,
+    w: Math.max(...xs) - Math.min(...xs) + 2 * RING.pad.x,
+    h: Math.max(...ys) - Math.min(...ys) + RING.pad.top + RING.pad.bottom,
+  };
+  // width/height in units == viewBox units: drawn 1:1, never upscaled.
+  const canvas = svg("svg", {
+    viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`,
+    width: Math.round(vb.w), height: Math.round(vb.h),
+    class: "mesh-ring",
+  });
+
+  // edges first so nodes paint over them
+  const byName = {};
+  for (const p of peers) byName[p.machine] = p;
+  for (const edge of info.links || []) {
+    const { a, b } = edge;
+    if (!at[a] || !at[b]) continue;
+    const cls = edgeClass(edge, byName);
+    const ends = { x1: at[a].x, y1: at[a].y, x2: at[b].x, y2: at[b].y };
+    const group = svg("g", { class: `mesh-edge-group ${cls}` });
+    // A 1.6px stroke is far too thin to aim at (and a horizontal one has a
+    // zero-height box), so a transparent fat line underneath does the
+    // hit-testing while the visible one stays hairline.
+    group.appendChild(svg("line", { ...ends, class: "mesh-edge-hit" }));
+    group.appendChild(svg("line", { ...ends, class: `mesh-edge ${cls}` }));
+    group.appendChild(svg("title", {}, `${a} <-> ${b} — ${cls}`));
+    // `editable` is the daemon's own answer for THIS daemon: the authority
+    // may edit any edge, a peer only the ones it terminates, and nobody cuts
+    // an authority edge (those carry the sequenced log — revoke instead).
+    if (edge.editable) {
+      group.classList.add("editable");
+      group.addEventListener("click", () => toggleEdge(info, edge));
+    }
+    canvas.appendChild(group);
+  }
+
+  peers.forEach((p, i) => {
+    const pos = at[p.machine];
+    const g = svg("g", {
+      class: "mesh-node"
+        + (p.self ? " self" : "")
+        + (p.rank === 0 ? " authority" : "")
+        + (p.ok === false ? " down" : "")
+        + (meshDrag && meshDrag.from === p.machine ? " dragging" : ""),
+      transform: `translate(${pos.x} ${pos.y})`,
+    });
+    g.appendChild(svg("circle", { r: RING.node, class: "mesh-node-disc" }));
+    // Only what always fits goes inside the disc: the rank, and the member
+    // count under it. Machine names are long enough to spill out of any disc
+    // small enough to be worth drawing, so they hang below it instead.
+    const chips = (p.members || []).length;
+    g.appendChild(svg("text", { class: "mesh-node-rank", y: -2 },
+                      p.rank === 0 ? "★ 0" : String(p.rank)));
+    g.appendChild(svg("text", { class: "mesh-node-members", y: 11 },
+                      chips ? `${chips} member${chips === 1 ? "" : "s"}` : "—"));
+    g.appendChild(svg(
+      "text", { class: "mesh-node-name", y: RING.node + 14 },
+      p.machine.length > 17 ? `${p.machine.slice(0, 16)}…` : p.machine
+    ));
+    const marks = [`rank ${p.rank}`, p.rank === 0 ? "authority" : "peer"];
+    if (p.self) marks.push("this daemon");
+    if (p.ok === false) marks.push(`unreachable: ${p.error}`);
+    if (p.queued) marks.push(`${p.queued} queued`);
+    if ((p.members || []).length) marks.push((p.members || []).join(", "));
+    g.appendChild(svg("title", {}, `${p.machine} — ${marks.join(" · ")}`));
+
+    // Reordering is the authority's call, so only it offers the gesture.
+    if (info.primary === null && peers.length > 1) {
+      g.classList.add("draggable");
+      // No setPointerCapture here: capturing would route the pointerup back
+      // to the node the drag started on, so a drop could never land on the
+      // target. Releasing outside any node is handled by the window
+      // listener registered below.
+      g.addEventListener("pointerdown", () => { meshDrag = { from: p.machine }; });
+      g.addEventListener("pointerup", () => {
+        const from = meshDrag && meshDrag.from;
+        meshDrag = null;
+        if (!from || from === p.machine) return refreshMeshView(true);
+        const order = peers.map((q) => q.machine).filter((m) => m !== from);
+        order.splice(i, 0, from);
+        if (order[0] !== info.authority && !confirm(
+          `Hand the mesh's authority to '${order[0]}'? It takes over ` +
+          "sequencing, the roster and the policy engine."
+        )) return refreshMeshView(true);
+        meshEdit(
+          `/api/mesh/${encodeURIComponent(info.name)}/peers`,
+          { method: "PUT", body: JSON.stringify({ order }) }
+        );
+      });
+    }
+    canvas.appendChild(g);
+  });
+  box.appendChild(canvas);
+
+  const legend = el("div", "mesh-legend");
+  for (const [cls, label] of [
+    ["ok", "linked"], ["queued", "queued"],
+    ["down", "unreachable"], ["cut", "cut"],
+  ]) {
+    const item = el("span", "mesh-legend-item");
+    item.appendChild(el("i", `mesh-legend-swatch ${cls}`));
+    item.appendChild(el("span", null, label));
+    legend.appendChild(item);
+  }
+  box.appendChild(legend);
+  return box;
+}
+
 /* The send/add forms must survive the 2s poll: rebuild everything except a
    form the user is currently typing in. */
 function formInUse(root) {
@@ -1566,6 +1930,8 @@ function formInUse(root) {
 function renderMesh(info, history, force) {
   const view = $("mesh-view");
   if (!force && formInUse(view)) return; // don't wipe in-progress input
+  // ...nor yank the node out from under a drag, or race an in-flight edit
+  if (!force && (meshDrag || meshBusy)) return;
   view.innerHTML = "";
 
   // Federation v2: '' machine = the primary daemon's own member. On a
@@ -1594,6 +1960,10 @@ function renderMesh(info, history, force) {
     "messages are typed into recipients' terminals by the daemon — " +
     "agents reply with: claunch mesh send " + info.name + " <to|*> \"...\""
   ));
+
+  // the graph leads; the boxes below own the text-level detail and the forms
+  view.appendChild(renderTopology(info));
+  if ((info.links || []).length) view.appendChild(renderLinkEditor(info));
 
   // members table
   const members = info.members || [];
@@ -1685,8 +2055,8 @@ function renderMesh(info, history, force) {
 
   // membership from other machines: who joined us (guests) or who owns us
   const fed = el("div", "mesh-fed");
-  fed.appendChild(el("h3", null, isMirror ? "Primary daemon" : "Guest daemons"));
-  const peers = info.peers || [];
+  fed.appendChild(el("h3", null, "Peer daemons"));
+  const peers = (info.peers || []).filter((p) => !p.self);
   if (!peers.length) {
     fed.appendChild(el(
       "p", "wf-note",
@@ -1696,13 +2066,16 @@ function renderMesh(info, history, force) {
     ));
   }
   for (const p of peers) {
+    // Since phase 7 the peer list is the whole rank list, ourselves
+    // included — the diagram wants that, this box does not.
+    if (p.self) continue;
     const row = el("div", "mesh-member");
     const ok = p.ok === true;
     const state = p.ok === false ? `unreachable — ${p.error || "?"}` :
       (ok ? "ok" : "linked, no traffic yet");
     row.appendChild(el("span", `dot ${ok ? "idle" : (p.ok === false ? "exited" : "starting")}`));
     row.appendChild(el("span", "mesh-handle mono", p.machine));
-    row.appendChild(el("span", "mesh-role", p.role || ""));
+    row.appendChild(el("span", "mesh-role", `rank ${p.rank} · ${p.role || ""}`));
     row.appendChild(el("span", "meta", state + (p.queued ? ` · ${p.queued} queued` : "")));
     if (!isMirror) {
       const revoke = el("button", "mesh-kick", "×");
@@ -1866,10 +2239,11 @@ function renderMesh(info, history, force) {
     intent.appendChild(opt);
   }
   const text = document.createElement("textarea");
-  text.placeholder = "message — delivered by typing into the recipient's terminal";
+  text.placeholder =
+    "message (Ctrl+Enter to send) — delivered by typing into the recipient's terminal";
   text.rows = 3;
   const sendBtn = el("button", "wf-btn approve", "Send");
-  sendBtn.addEventListener("click", async () => {
+  const submitMsg = async () => {
     const body = text.value.trim();
     if (!body) return;
     const external = !from.value;
@@ -1899,6 +2273,13 @@ function renderMesh(info, history, force) {
       alert(`sent — queued for unreachable machines: ${doc.queued_remote.join(", ")}`);
     }
     refreshMeshView();
+  };
+  sendBtn.addEventListener("click", submitMsg);
+  text.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      submitMsg();
+    }
   });
   const row = el("div", "mesh-send-row");
   row.append(from, to, intent);
