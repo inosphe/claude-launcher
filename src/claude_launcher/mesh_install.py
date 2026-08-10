@@ -68,8 +68,8 @@ Run `claunch mesh members MESH`.
 - If a listed member's session is SESSION, you are already a member — note
   your HANDLE and role from that row and go to Step 3.
 - Otherwise join: `claunch mesh join MESH [--as HANDLE]`. HANDLE defaults to
-  your session name; its leading word sets your role (`worker_1` -> worker,
-  `moderator`/`leader` -> leader, `reviewer...` -> reviewer).
+  your session name and its leading word picks your role (see *Your role*
+  below); `--role NAME` sets it outright.
 - If MESH is not on this daemon it lives on another machine: join it by
   address, `claunch mesh join MESH@MACHINE` (add `--code TICKET` if the user
   gave you one). Without a ticket the mesh's owner must approve you — the
@@ -107,11 +107,20 @@ from your session automatically):
 - Acknowledge an assignment with a brief `--type ack`, then report the real
   outcome with a normal message when done.
 
-Roles set stance, not permissions: a leader assigns and coordinates (prefer
-batch sends for fan-outs); a worker executes, reports to the leader, asks
-when blocked; reviewers/specialists engage within their specialty. A
-`stall:` message from the `policy` sender tells leaders a member looks stuck
-— check on that member; do not reply to the notice itself.
+## Your role
+
+Your handle's leading word picks your role (`worker_1`/`coder2` -> worker,
+`moderator`/`lead` -> leader, `qa` -> reviewer; anything unrecognised ->
+reviewer, so an unlabelled member audits rather than rubber-stamps). The join
+briefing names your role and points you at your **stance** — run
+`claunch mesh stance MESH`, and treat what it prints as binding.
+
+A mesh may define its own vocabulary, so do not assume the names above:
+`claunch mesh roles MESH` lists the roles this mesh actually has, and
+`claunch mesh stance MESH` re-prints yours. Roles set stance, not
+permissions. A `stall:` message from the `policy` sender tells the watching
+roles that a member looks stuck — check on that member; never reply to the
+notice itself.
 
 ## Recovery (after compaction or restart)
 
@@ -121,7 +130,9 @@ Membership lives in the daemon and survives; your context may not. Recover:
 2. `claunch mesh ls` — the meshes on this daemon.
 3. `claunch mesh members <mesh>` — the row whose session is SESSION is you
    (handle + role).
-4. `claunch mesh history <mesh> -n 30` — re-read the recent conversation.
+4. `claunch mesh stance <mesh>` — re-read your role's stance, which the
+   compaction dropped along with the join briefing.
+5. `claunch mesh history <mesh> -n 30` — re-read the recent conversation.
 
 Undelivered messages are redelivered by the daemon automatically — never ask
 peers to retransmit.

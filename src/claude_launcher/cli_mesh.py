@@ -534,6 +534,95 @@ def _cmd_policy(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_roles(args: argparse.Namespace) -> int:
+    """Show, upload or reset a mesh's role set."""
+    client = daemon_client.ensure_running()
+    if args.reset:
+        payload = client.put(f"/api/mesh/{args.mesh}/roles", {"yaml": None})
+        print(f"mesh {args.mesh!r} is back on the packaged role set")
+    elif args.file:
+        from pathlib import Path
+
+        try:
+            text = Path(args.file).read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"error: cannot read {args.file}: {exc}", file=sys.stderr)
+            return 1
+        payload = client.put(f"/api/mesh/{args.mesh}/roles", {"yaml": text})
+        print(f"mesh {args.mesh!r} role set updated (version "
+              f"{payload.get('version')})")
+    else:
+        payload = client.get(f"/api/mesh/{args.mesh}/roles")
+    if args.yaml:
+        # Exactly what --file would accept back: `roles <m> --yaml > r.yaml`,
+        # edit, `roles <m> --file r.yaml`.
+        print(payload.get("yaml", "").rstrip())
+        return 0
+    source = "custom" if payload.get("custom") else "packaged default"
+    print(f"role set: {source} (version {payload.get('version')}), "
+          f"default role: {payload.get('default')}")
+    if not payload.get("is_authority"):
+        print(f"  owned by {payload.get('authority')} — an edit here is "
+              f"forwarded there, then comes back to every daemon")
+    print()
+    print(f"{'role':<12} {'aliases':<44} members")
+    for role in payload.get("roles", []):
+        aliases = ", ".join(role.get("aliases") or []) or "-"
+        held = ", ".join(role.get("members") or []) or "-"
+        flag = " *" if role.get("stall_watch") else ""
+        print(f"{role['name'] + flag:<12} {aliases[:43]:<44} {held}")
+    if payload.get("orphans"):
+        print()
+        print("roles held by a member but no longer defined (uploads are not "
+              "retroactive):")
+        print("  " + ", ".join(payload["orphans"]))
+    return 0
+
+
+def _cmd_stance(args: argparse.Namespace) -> int:
+    """Print the stance for a handle's role — the post-compaction recovery."""
+    client = daemon_client.ensure_running()
+    info = client.get(f"/api/mesh/{args.mesh}")
+    handle = args.handle
+    if not handle:
+        session = _own_session(args)
+        if not session:
+            print("error: no session — pass --as HANDLE, or run inside a "
+                  "claunch session (where $CLAUNCH_SESSION is set)",
+                  file=sys.stderr)
+            return 1
+        for m in info.get("members", []):
+            if m.get("session") == session and not m.get("machine"):
+                handle = m.get("handle")
+                break
+        if not handle:
+            print(f"error: session {session!r} is not a member of "
+                  f"{args.mesh!r}", file=sys.stderr)
+            return 1
+    member = next(
+        (m for m in info.get("members", []) if m.get("handle") == handle), None
+    )
+    if member is None:
+        print(f"error: no member {handle!r} in mesh {args.mesh!r}",
+              file=sys.stderr)
+        return 1
+    payload = client.get(f"/api/mesh/{args.mesh}/roles")
+    role = next(
+        (r for r in payload.get("roles", [])
+         if r.get("name") == member.get("role")), None
+    )
+    print(f"# {handle} — role {member.get('role')} on mesh {args.mesh}")
+    if role is None:
+        print(f"\nThis mesh's role set no longer defines "
+              f"{member.get('role')!r}, so there is no stance for it. You "
+              f"keep the role you joined with (uploads are not retroactive); "
+              f"ask the mesh's owner to reassign you.")
+        return 0
+    print()
+    print((role.get("stance") or "(this role declares no stance)").rstrip())
+    return 0
+
+
 def _cmd_mcp(_args: argparse.Namespace) -> int:
     from . import mesh_mcp
 
@@ -748,6 +837,32 @@ def register(sub) -> None:
              "--set task_poll.bodies.worker='pull a task'",
     )
     p.set_defaults(func=_cmd_policy)
+
+    p = msub.add_parser(
+        "roles",
+        help="show, upload or reset the mesh's role set (the vocabulary its "
+             "handles resolve into)",
+    )
+    p.add_argument("mesh")
+    p.add_argument("--file", metavar="ROLES.YAML",
+                   help="upload this YAML as the mesh's role set")
+    p.add_argument("--reset", action="store_true",
+                   help="drop the override and go back to the packaged roles")
+    p.add_argument("--yaml", action="store_true",
+                   help="print the set as YAML (round-trips into --file)")
+    p.set_defaults(func=_cmd_roles)
+
+    p = msub.add_parser(
+        "stance",
+        help="print your role's stance on a mesh (re-read it after a "
+             "compaction or restart)",
+    )
+    p.add_argument("mesh")
+    p.add_argument("--as", dest="handle",
+                   help="whose stance (default: resolved from $CLAUNCH_SESSION)")
+    p.add_argument("--session", help="session to resolve (default: "
+                                     "$CLAUNCH_SESSION)")
+    p.set_defaults(func=_cmd_stance)
 
     p = msub.add_parser("history", help="print recent mesh messages")
     p.add_argument("mesh")

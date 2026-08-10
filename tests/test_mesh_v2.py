@@ -732,7 +732,12 @@ def test_remote_heartbeat_decided_by_primary_injected_by_guest(home, tmp_path):
 
         # …and the guest daemon injects it into bob's terminal
         await mm_a._flush_guest(mesh_a, "pcB")
-        await _wait_screen(mgr.get("sb"), "kind: heartbeat")
+        # Wait on the nudge's LAST line, not its `kind:` header. The join
+        # briefing is idle-gated and lands around now too, and the echo child
+        # doubles every line, so the pair overflows a 30-row screen and the
+        # header scrolls off; `note: heartbeat:` identifies the same block
+        # just as precisely and survives.
+        await _wait_screen(mgr.get("sb"), "note: heartbeat:")
         assert mesh_a.pending_nudges.get("pcB", []) == []
 
         await mgr.shutdown_all()

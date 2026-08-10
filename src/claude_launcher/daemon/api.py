@@ -170,6 +170,8 @@ def build_app(
     r.add_patch("/api/mesh/{mesh}/links/{a}/{b}", h_mesh_link_set)
     r.add_get("/api/mesh/{mesh}/policy", h_mesh_policy_get)
     r.add_put("/api/mesh/{mesh}/policy", h_mesh_policy_set)
+    r.add_get("/api/mesh/{mesh}/roles", h_mesh_roles_get)
+    r.add_put("/api/mesh/{mesh}/roles", h_mesh_roles_set)
     r.add_post("/api/mesh/{mesh}/invitations", h_mesh_invitation)
     r.add_get("/api/relay/peers", h_relay_peers)
     r.add_get("/api/relay/peers/{machine}/sessions", h_relay_peer_sessions)
@@ -189,6 +191,7 @@ def build_app(
     r.add_post("/peer/mesh/join", h_peer_join)
     r.add_post("/peer/mesh/leave", h_peer_leave)
     r.add_post("/peer/mesh/link", h_peer_link)
+    r.add_post("/peer/mesh/roles", h_peer_roles)
     r.add_post("/peer/mesh/send", h_peer_send)
     r.add_post("/peer/mesh/sync", h_peer_sync)
     r.add_post("/peer/mesh/deliver", h_peer_deliver)
@@ -655,6 +658,34 @@ async def h_mesh_policy_set(request: web.Request) -> web.Response:
     return web.json_response({"policy": policy})
 
 
+async def h_mesh_roles_get(request: web.Request) -> web.Response:
+    return web.json_response(
+        _mesh_mgr(request).roles_view(request.match_info["mesh"])
+    )
+
+
+async def h_mesh_roles_set(request: web.Request) -> web.Response:
+    """Upload this mesh's role set, or reset it to the packaged vocabulary.
+
+    The body is ``{"yaml": "..."}`` (what a user edits) or ``{"roles": {...}}``
+    (an already-parsed document); either may be null to reset. Uploads are not
+    retroactive — members already on the roster keep the role they joined with.
+    """
+    body = await _json_body(request)
+    if "yaml" in body:
+        doc = body.get("yaml")
+        if doc is not None and not isinstance(doc, str):
+            return json_error(400, "'yaml' must be a string or null")
+        if isinstance(doc, str) and not doc.strip():
+            doc = None  # an emptied editor means "reset", not "empty set"
+    elif "roles" in body:
+        doc = body.get("roles")
+    else:
+        return json_error(400, "send {'yaml': ...} or {'roles': ...}")
+    result = await _mesh_mgr(request).set_roles(request.match_info["mesh"], doc)
+    return web.json_response(result)
+
+
 async def h_mesh_invite(request: web.Request) -> web.Response:
     result = _mesh_mgr(request).invite(request.match_info["mesh"])
     return web.json_response({**result, "relay": request.app["relay_state"]()})
@@ -873,6 +904,18 @@ async def h_peer_link(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def h_peer_roles(request: web.Request) -> web.Response:
+    """A peer asks us, the authority, to change the mesh's role set."""
+    body = await _json_body(request)
+    result = _mesh_mgr(request).peer_roles_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        body.get("roles"),
+    )
+    return web.json_response(result)
+
+
 async def h_peer_send(request: web.Request) -> web.Response:
     body = await _json_body(request)
     message = body.get("message")
@@ -909,6 +952,7 @@ async def h_peer_sync(request: web.Request) -> web.Response:
         epoch=body.get("epoch"),
         links=links if isinstance(links, list) else None,
         edges=body.get("edges") if isinstance(body.get("edges"), dict) else None,
+        roles=body.get("roles") if isinstance(body.get("roles"), dict) else None,
     )
     return web.json_response(result)
 

@@ -976,6 +976,9 @@ claunch mesh send dev worker_1,worker_2 "sprint goal"     --section worker_1="yo
 claunch mesh members dev          # members + peers + reachability
 claunch mesh history dev          # ids, [type] tags, [re <id>] threading
 claunch mesh policy dev --set heartbeat.enabled=true   # nudge policies
+claunch mesh roles dev            # the vocabulary its handles resolve into
+claunch mesh roles dev --yaml > roles.yaml   # edit, then --file roles.yaml
+claunch mesh stance dev           # what your role is on this mesh
 claunch mesh join dev@work-pc     # cross-machine: join the mesh owned there
 claunch mesh requests             # ...pending joins: inbound and outbound
 claunch mesh approve dev req-3f2a # ...the owner admits (or 'deny')
@@ -1035,7 +1038,21 @@ claunch mesh install --project .  # register MCP tools + /mesh skill
   MSGID` / the `reply_to` field threads an answer to it.
 - **Join briefing**: newly enrolled members get an idle-gated briefing block
   typed into their terminal (mesh, their handle/role, member list, how to
-  send) — so a session enrolled from the web knows it joined something.
+  send) — so a session enrolled from the web knows it joined something. It
+  points at `claunch mesh stance <mesh>` rather than pasting the stance, so
+  the member always reads the *current* one.
+- **Roles**: a role is what a member **is** — its stance, who hears about a
+  stall (`stall_watch`), its task-poll wording. The packaged vocabulary is
+  interconnect's (`leader`/`operator`/`worker`/`reviewer`/`specialist`, with
+  aliases, so `coder1` is a worker and `mod` leads; anything unrecognised
+  defaults to `reviewer`, which audits rather than rubber-stamps). Each mesh
+  may upload its own YAML — `claunch mesh roles <mesh> --file roles.yaml`,
+  `PUT /api/mesh/{mesh}/roles`, or the web panel. A role in the upload
+  replaces that role whole, `<name>: null` deletes one, `replace: true`
+  swaps the lot; the **authority owns it** (a mirror's edit is forwarded) so
+  every daemon reads the same handle the same way. **Uploads are not
+  retroactive**: members keep the role they joined with, and one holding a
+  role the new set dropped is surfaced as an *orphan* rather than migrated.
 - **MCP tools + /mesh skill**: `claunch mesh install` (`--project [DIR]` or
   `--profile NAME`) registers a stdio MCP server (`send`/`members`/`history`
   — deliberately no receive tool: incoming messages arrive by injection) and
@@ -1121,8 +1138,8 @@ derived states drive everything:
 | policy | fires when | first fire | action |
 | ------ | ---------- | ---------- | ------ |
 | **heartbeat** | member is *unanswered* **and** its session is idle (a busy member is presumed working) | `last_delivered` + `interval` (default 180s) | injects a `kind: heartbeat` block into that member's terminal — never logged; for a guest member it ships as a fanout instruction that member's daemon injects |
-| **task-poll** | member is idle **and** *caught up* **and** its role is in `roles` (default `worker` — leaders/reviewers have no queue to pull from) | last activity + `interval` (default 600s) | injects a `kind: task-poll` block with the per-role body (`bodies[role]`, fallback interpolates `{role}`) |
-| **stall warning** | a **non-leader** member has held one state for `warn_secs` (default 600s): either *idle-stalled* (idle + caught up that long) or *behind* (pending messages whose injection never lands because the session never goes idle) | after `warn_secs` | sends a **real mesh message** from the external `policy` sender to every leader-role member — it enters the log, is delivered by injection, and **crosses machines over federation**; needs at least one leader to exist |
+| **task-poll** | member is idle **and** *caught up* **and** its role is in `roles` (default `worker` — leaders/reviewers have no queue to pull from) | last activity + `interval` (default 600s) | injects a `kind: task-poll` block whose text is `bodies[role]` (this mesh's override) → the **role set's** `task_poll` → a `{role}`-interpolated fallback |
+| **stall warning** | a member the vocabulary does not mark `stall_watch` has held one state for `warn_secs` (default 600s): either *idle-stalled* (idle + caught up that long) or *behind* (pending messages whose injection never lands because the session never goes idle) | after `warn_secs` | sends a **real mesh message** from the external `policy` sender to every member whose role **is** `stall_watch` (the leader by default) — it enters the log, is delivered by injection, and **crosses machines over federation**; needs at least one such member to exist |
 
 Each policy repeats with a per-member **doubling backoff** (`interval` → 2× →
 4× … capped at `max_interval`; stall warnings double from `warn_secs`), and
@@ -1202,6 +1219,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | DELETE | `/api/mesh/{mesh}/members/{handle}` | remove a member |
 | GET/POST | `/api/mesh/{mesh}/messages`  | history (`?limit=`) / send `{from, to, body, external?}` |
 | GET/PUT | `/api/mesh/{mesh}/policy`     | read / edit the mesh's nudge policy (heartbeat, task-poll, stall warnings) |
+| GET/PUT | `/api/mesh/{mesh}/roles`      | read / upload the mesh's role set (`{yaml}` or `{roles}`; either null resets to the packaged vocabulary) |
 | POST   | `/api/mesh/{mesh}/invite`      | mint a single-use ticket pre-approving one join |
 | GET/DELETE | `/api/mesh/{mesh}/invites[/{prefix}]` | list / revoke outstanding tickets |
 | POST   | `/api/mesh/{mesh}/requests/{id}/approve\|deny` | decide a pending join request |
