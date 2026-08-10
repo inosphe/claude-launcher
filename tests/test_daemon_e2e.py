@@ -770,3 +770,38 @@ def test_api_end_to_end(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_web_assets_must_revalidate(home, tmp_path):
+    """index.html names 'static/app.js' with no version, so if the daemon
+    sends no Cache-Control the browser picks a heuristic freshness lifetime
+    and stops asking. An upgraded daemon then keeps serving a UI its own
+    users cannot get rid of — the failure looks like "the fix did not ship".
+    """
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            for path in ("/", "/static/app.js", "/static/style.css"):
+                resp = await client.get(path)
+                assert resp.status == 200, path
+                assert "no-cache" in resp.headers.get("Cache-Control", ""), path
+                # no-cache is only affordable because the revalidation is
+                # cheap: the static handler must still offer a validator
+                if path != "/":
+                    assert resp.headers.get("ETag") or resp.headers.get(
+                        "Last-Modified"
+                    ), path
+
+            # API responses are not in the business of caching either way
+            resp = await client.get("/api/health")
+            assert resp.status == 200
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())

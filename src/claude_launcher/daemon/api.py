@@ -46,6 +46,28 @@ def _token_eq(supplied: str, expected: str) -> bool:
 
 
 @web.middleware
+async def revalidate_middleware(request: web.Request, handler):
+    """Make the dashboard's own assets always revalidate.
+
+    ``index.html`` names ``static/app.js`` with no version, and aiohttp's
+    static handler sends no ``Cache-Control`` — so browsers fall back to
+    *heuristic* freshness (a fraction of the file's age) and serve a stale
+    bundle without ever asking us. A daemon that has already been upgraded
+    then keeps rendering the old UI, which reads as "the fix did not ship".
+
+    ``no-cache`` does not mean "do not store": the ETag and Last-Modified
+    the static handler already sends turn each load into a conditional GET
+    that answers 304 in a couple of hundred bytes. Correctness for the cost
+    of one round-trip per asset.
+    """
+    response = await handler(request)
+    path = request.path
+    if path == "/" or path.startswith("/static/"):
+        response.headers.setdefault("Cache-Control", "no-cache")
+    return response
+
+
+@web.middleware
 async def error_middleware(request: web.Request, handler):
     try:
         return await handler(request)
@@ -96,7 +118,11 @@ def build_app(
 ) -> web.Application:
     cookie_sessions: set = set()
     app = web.Application(
-        middlewares=[error_middleware, build_auth_middleware(token, cookie_sessions)]
+        middlewares=[
+            revalidate_middleware,
+            error_middleware,
+            build_auth_middleware(token, cookie_sessions),
+        ]
     )
     app["manager"] = manager
     app["mesh"] = mesh if mesh is not None else MeshManager(manager)
