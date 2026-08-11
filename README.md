@@ -1554,7 +1554,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
-| POST   | `/api/sessions/{name}/keys`    | `{keys: [...], literal}` — send-keys; or `{paste, enter}` — one bracketed paste (multiline-safe) |
+| POST   | `/api/sessions/{name}/keys`    | raw keyboard: `{keys: [...], literal}` — send-keys; or `{paste, enter}` — one bracketed paste (multiline-safe) |
+| POST   | `/api/sessions/{name}/deliver` | `{text}` — hand the agent a message (paste + separately-written Enter). What every automated sender uses; `/keys` is for a human at a keyboard |
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |
 | GET    | `/api/sessions/{name}/wait`    | long-poll `?state=idle\|exited&timeout=&threshold=` |
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
@@ -1782,8 +1783,8 @@ how to unblock; inside a chat session you can approve without leaving:
 
 When the agent runs as a [managed session](#managed-sessions-tmux-style-daemon)
 in the run's directory, approving/selecting (CLI or dashboard) also
-**auto-nudges** it — a resume line is typed into the session via send-keys, so
-the stopped agent picks the run back up on its own. The run page also has a
+**auto-nudges** it — a resume line is delivered into the session as a user
+message, so the stopped agent picks the run back up on its own. The run page also has a
 **Nudge session** button to re-send that line manually whenever the agent
 stalls. Elsewhere (e.g. `!` inside the chat itself) nudge the agent with any
 message. The same CLI works from

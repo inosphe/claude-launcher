@@ -42,7 +42,7 @@ import yaml
 
 from . import mesh_policy, mesh_roles, paths
 from .manager import ManagerError, SessionManager
-from .session import STATUS_IDLE, SessionGone
+from .session import STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.mesh")
 
@@ -1263,10 +1263,7 @@ class MeshManager:
             f"note: incoming mesh messages will be typed into this terminal\n"
             "---"
         )
-        try:
-            await session.paste(block, enter=True)
-        except Exception:  # noqa: BLE001 — best-effort (SessionGone etc.)
-            return
+        await session.deliver(block)  # best-effort: a dead session just misses it
 
     async def leave(self, name: str, handle: str) -> Member:
         """Remove a member. Guests may only remove their OWN members (the
@@ -3312,9 +3309,7 @@ class MeshManager:
             handle,
             str(nudge.get("body") or ""),
         )
-        try:
-            await session.paste(block, enter=True)
-        except Exception:  # noqa: BLE001 — SessionGone etc.
+        if not await session.deliver(block):
             return
         log.info("mesh %r: applied %s nudge -> %r",
                  mesh.name, nudge.get("kind"), handle)
@@ -3933,10 +3928,8 @@ class MeshManager:
             if held < self.busy_hold:
                 return  # idle-gate: don't interleave with a running turn
         block = format_delivery(mesh.name, member.handle, pending)
-        try:
-            await session.paste(block, enter=True)
-        except SessionGone:
-            return
+        if not await session.deliver(block):
+            return  # undelivered: hold the cursor, the next tick retries
         mesh.cursors[member.handle] = len(mesh.messages)
         # Fast-path arrivals are not in the log yet, so the cursor cannot
         # cover them: remember their ids until the sequenced copy has been

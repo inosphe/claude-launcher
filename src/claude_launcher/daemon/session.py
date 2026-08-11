@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 import os
 import threading
 import time
@@ -39,6 +40,8 @@ LOG_MAX_BYTES = 10 * 1024 * 1024
 #: its own PTY read — see :meth:`Session.paste`. Measured against Claude Code:
 #: 0 never submits, 20ms already does; 150ms leaves room for a busy renderer.
 PASTE_ENTER_DELAY = float(os.environ.get("CLAUNCH_PASTE_ENTER_DELAY") or 0.15)
+
+log = logging.getLogger(__name__)
 
 STATUS_STARTING = "starting"
 STATUS_BUSY = "busy"
@@ -214,12 +217,51 @@ class Session:
             return None
         return idle_for
 
+    async def deliver(self, text: str) -> bool:
+        """Put ``text`` in front of the agent running here, as a user message.
+
+        **The** way anything automated hands an agent something to act on —
+        cflow nudges, mesh deliveries and policy nudges, a spawned child's
+        opening task. Call this rather than assembling the write yourself:
+        submitting a message correctly means a paste plus a *separately
+        written* Enter (see :meth:`paste`), and every hand-rolled variant of
+        that has eventually gotten the chunking wrong and left the message
+        typed into the composer but never sent.
+
+        Best-effort by design — every caller is a background sender with
+        nothing to tell a user. Returns whether it landed, so a caller that
+        must not lose the message (mesh delivery advancing its cursor) can
+        hold its position and retry on the next tick.
+        """
+        try:
+            await self.paste(text, enter=True)
+        except Exception as exc:  # noqa: BLE001 — SessionGone, PTY write, ...
+            log.debug("deliver to %r failed: %s", self.sdef.name, exc)
+            return False
+        return True
+
     async def send_keys(self, args: List[str], *, literal: bool = False) -> bytes:
+        """Raw keystrokes — the passthrough for a human at a keyboard (the
+        web terminal, ``claunch send-keys``). To hand an agent a *message*,
+        use :meth:`deliver` instead.
+        """
         if self.exited:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         data = keys_mod.encode_keys(
             args, literal=literal, app_cursor=self.screen.app_cursor_keys
         )
+        head, submit = keys_mod.split_submit(data)
+        if submit and self.screen.bracketed_paste:
+            # Text and its submitting CR in one write is the same trap
+            # :meth:`paste` documents: a bracketed-paste TUI reads the chunk
+            # as one paste and folds the CR into the text, so the line is
+            # typed but never sent. Split it here too — this path is reached
+            # by hand ('claunch send-keys ... Enter') where the caller has no
+            # way to know the difference.
+            await self.write_bytes(head)
+            await asyncio.sleep(PASTE_ENTER_DELAY)
+            await self.write_bytes(submit)
+            return data
         await self.write_bytes(data)
         return data
 
@@ -420,6 +462,12 @@ class DeadSession:
 
     async def send_keys(self, args: List[str], *, literal: bool = False) -> bytes:
         raise self._gone()
+
+    async def paste(self, text: str, *, enter: bool = False) -> bytes:
+        raise self._gone()
+
+    async def deliver(self, text: str) -> bool:
+        return False  # nothing is running to read it
 
     async def write_bytes(self, data: bytes) -> None:
         raise self._gone()

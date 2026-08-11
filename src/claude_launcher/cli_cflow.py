@@ -174,7 +174,11 @@ def _cmd_request(args: argparse.Namespace) -> int:
 def _nudge_via_daemon(message: str, scope) -> list:
     """Best-effort: type a resume nudge into the run's own session (scope ==
     session name, 1:1). Needs the daemon; silently a no-op without it, and
-    default-scope runs belong to no session."""
+    default-scope runs belong to no session.
+
+    Goes through the daemon's ``/deliver`` — the same door in-process senders
+    use — rather than typing keys, so how a message gets submitted stays a
+    single decision made in one place."""
     target = scope or state_mod.current_scope()
     if target == state_mod.DEFAULT_SCOPE:
         return []
@@ -197,7 +201,7 @@ def _nudge_via_daemon(message: str, scope) -> list:
         if s.get("name") != target or not same or s.get("status") == "exited":
             continue
         try:
-            client.post(f"/api/sessions/{s['name']}/keys", {"keys": [message, "Enter"]})
+            client.post(f"/api/sessions/{s['name']}/deliver", {"text": message})
         except daemon_client.DaemonClientError:
             return []
         return [target]

@@ -149,6 +149,20 @@ def encode_paste(text: str, *, bracketed: bool) -> bytes:
     return payload
 
 
+def split_submit(data: bytes) -> Tuple[bytes, bytes]:
+    """Split a trailing submitting CR/LF off an encoded key stream.
+
+    Returns ``(head, submit)``; ``submit`` is empty when there is nothing to
+    split — no trailing newline, or the stream *is* just the newline (a bare
+    Enter keypress, which is already its own write). Callers writing to a
+    bracketed-paste program send the two halves separately; see
+    :meth:`~claude_launcher.daemon.session.Session.send_keys`.
+    """
+    if len(data) > 1 and data[-1:] in (b"\r", b"\n"):
+        return data[:-1], data[-1:]
+    return data, b""
+
+
 def encode_keys(args: Iterable[str], *, literal: bool = False, app_cursor: bool = False) -> bytes:
     """Translate ``send-keys`` arguments into the byte stream to write to a PTY.
 

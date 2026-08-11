@@ -31,6 +31,15 @@ paste + Enter). Arrival **is** the wake-up. No Monitor tool, no doorbell, no
 proxy process, no hooks, no `recv`, and no nudge feature — all removed by
 design, not omitted.
 
+The injection itself is **not** open-coded per sender. Getting it right means a
+bracketed paste followed by an Enter written *separately* — bundled into one
+PTY write, a paste-aware TUI folds the CR into the pasted text and the message
+is typed but never submitted. That rule lives in `Session.deliver(text)` (and,
+across a process boundary, `POST /api/sessions/{name}/deliver`); mesh delivery,
+mesh/policy nudges, cflow nudges and spawned-child tasks are all callers of it.
+`tests/test_delivery_contract.py` fails the build if a new sender reaches for
+the raw writers instead.
+
 Consequences:
 
 - Receivers need zero cooperation and zero setup. Any harness works.

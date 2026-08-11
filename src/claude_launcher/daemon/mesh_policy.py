@@ -360,9 +360,6 @@ async def _dispatch(mm, mesh, member, session, kind, handle, body) -> None:
 
 async def _inject(mm, session, mesh, kind: str, handle: str, body: str) -> None:
     block = format_nudge(mesh.name, kind, handle, body)
-    try:
-        await session.paste(block, enter=True)
-    except Exception as exc:  # noqa: BLE001 — SessionGone etc.; next tick retries
-        log.debug("mesh %r: %s nudge to %r failed: %s", mesh.name, kind, handle, exc)
-        return
+    if not await session.deliver(block):
+        return  # logged by deliver(); the next tick re-fires the nudge
     log.info("mesh %r: %s nudge -> %r", mesh.name, kind, handle)

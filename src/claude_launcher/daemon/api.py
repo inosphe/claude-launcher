@@ -217,6 +217,7 @@ def build_app(
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
+    r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
     r.add_get("/api/sessions/{name}/capture", h_session_capture)
     r.add_get("/api/sessions/{name}/wait", h_session_wait)
     r.add_post("/api/sessions/{name}/resize", h_session_resize)
@@ -523,10 +524,11 @@ async def _nudge_sessions(
     nudged = []
     for name in _scope_sessions(manager, cwd, scope):
         try:
-            await manager.get(name).send_keys([message, "Enter"])
-        except Exception:
+            session = manager.get(name)
+        except Exception:  # noqa: BLE001 — raced with a removal
             continue
-        nudged.append(name)
+        if await session.deliver(message):
+            nudged.append(name)
     return nudged
 
 
@@ -1354,10 +1356,7 @@ async def _deliver_task(session, task: str, *, hold: float = 60.0) -> None:
         await asyncio.sleep(0.2)
     else:
         return  # never settled; better nothing than a half-typed prompt
-    try:
-        await session.paste(task, enter=True)
-    except Exception:  # noqa: BLE001 — best-effort, as with the join briefing
-        return
+    await session.deliver(task)
 
 
 async def h_sessions_clear(request: web.Request) -> web.Response:
@@ -1462,6 +1461,19 @@ async def h_session_keys(request: web.Request) -> web.Response:
         return json_error(400, "'keys' must be a list of strings")
     data = await session.send_keys(keys, literal=bool(body.get("literal")))
     return web.json_response({"ok": True, "bytes": len(data)})
+
+
+async def h_session_deliver(request: web.Request) -> web.Response:
+    """Hand a message to the agent in this session — the out-of-process door
+    to :meth:`Session.deliver`, for senders that live outside the daemon (the
+    CLI's cflow nudges). ``/keys`` stays the raw keyboard passthrough."""
+    session = _session(request)
+    body = await _json_body(request)
+    text = body.get("text")
+    if not isinstance(text, str) or not text:
+        return json_error(400, "'text' must be a non-empty string")
+    delivered = await session.deliver(text)
+    return web.json_response({"ok": True, "delivered": delivered})
 
 
 async def h_session_capture(request: web.Request) -> web.Response:

@@ -339,6 +339,52 @@ def test_api_cflow_monitoring(home, tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_cflow_nudge_goes_through_deliver(home, tmp_path, monkeypatch):
+    """A cflow nudge reaches the session as a paste plus its own CR.
+
+    The echo harness the other tests use is a plain line reader, so it submits
+    whatever chunking it gets — only a real bracketed-paste TUI (Claude Code)
+    folds a CR that shares the paste's chunk into the composer, leaving the
+    nudge typed but never sent. So assert the write shape, not the echo. The
+    rule itself lives in ``Session.deliver``; see test_delivery_contract.py.
+    """
+    from pathlib import Path
+
+    from claude_launcher.daemon import api as api_mod, session as session_mod
+    from claude_launcher.daemon.screen import ScreenState
+
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    cwd = str(Path(tmp_path).resolve())
+    writes: list = []
+
+    class FakeSession:
+        exited = False
+        sdef = SessionDef(name="n1", cwd=cwd)
+        screen = ScreenState(80, 24)
+        paste = session_mod.Session.paste
+        deliver = session_mod.Session.deliver
+
+        async def write_bytes(self, data: bytes) -> None:
+            writes.append(data)
+
+    session = FakeSession()
+    session.screen.feed(b"\x1b[?2004h")  # a TUI that opted into bracketed paste
+
+    class FakeManager:
+        def list(self):
+            return [session]
+
+        def get(self, name):
+            assert name == "n1"
+            return session
+
+    nudged = asyncio.run(
+        api_mod._nudge_sessions(FakeManager(), cwd, "n1", "cflow: go")
+    )
+    assert nudged == ["n1"]
+    assert writes == [b"\x1b[200~cflow: go\x1b[201~", b"\r"]
+
+
 def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):
     """A session's own page: its definition, its mesh memberships, and the
     cflow slot it owns — plus the two ways to create a run in that slot."""
@@ -890,6 +936,27 @@ def test_api_end_to_end(home, tmp_path):
                 headers=bearer,
             )
             assert resp.status == 200
+
+            # /deliver: the door for automated senders outside the daemon
+            resp = await client.post(
+                "/api/sessions/api1/deliver", json={"text": ""}, headers=bearer
+            )
+            assert resp.status == 400  # a message must have content
+            resp = await client.post(
+                "/api/sessions/api1/deliver",
+                json={"text": "a message"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["delivered"] is True
+            deadline = time.monotonic() + 15
+            while time.monotonic() < deadline:
+                resp = await client.get("/api/sessions/api1/capture", headers=bearer)
+                if "echo:a message" in await resp.text():
+                    break
+                await asyncio.sleep(0.2)
+            else:
+                raise AssertionError("the delivered message was never submitted")
 
             resp = await client.post(
                 "/api/sessions/api1/keys",
