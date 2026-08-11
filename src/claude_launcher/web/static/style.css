@@ -19,9 +19,21 @@ body {
 #sidebar header {
   padding: 14px 16px; border-bottom: 1px solid #2a2e36;
   display: flex; align-items: baseline; justify-content: space-between;
+  gap: 8px;
 }
 #sidebar h1 { font-size: 16px; letter-spacing: 0.5px; }
 #daemon-info { font-size: 11px; color: #7d8590; }
+
+/* The list polls itself, so this is only ever "don't wait for the next tick"
+   — a spawn that happened elsewhere lands here the moment you ask. */
+#refresh-all {
+  margin-left: auto; flex: none; align-self: center; cursor: pointer;
+  background: none; border: none; color: #7d8590;
+  font-size: 14px; line-height: 1; padding: 2px 5px;
+}
+#refresh-all:hover { color: #58a6ff; }
+#refresh-all.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
 #session-list { list-style: none; overflow-y: auto; flex: 1; }
 #session-list li {
@@ -745,6 +757,8 @@ body {
     border-right: none; overflow-y: auto; overscroll-behavior: contain;
   }
   #sidebar header { padding: 10px 14px; }
+  /* thumb-sized, like every other tap target on the rail */
+  #refresh-all { font-size: 17px; padding: 6px 10px; }
   /* The rail is the whole screen here, so the list takes what it needs and
      the nav sits at the thumb end rather than floating mid-screen. */
   #session-list { flex: 1 0 auto; max-height: none; overflow: visible; }

@@ -628,6 +628,36 @@ $("clear-exited").addEventListener("click", async () => {
   refreshSessions();
 });
 
+/* The rail polls, but a poll is a tick behind at best: a session spawned from
+   somewhere else — another agent's `spawn`, a `claunch new` in a terminal, a
+   relay that dropped a beat — shows up only when the timer next comes round.
+   This is that timer, on demand, for the whole rail at once. */
+$("refresh-all").addEventListener("click", async () => {
+  const btn = $("refresh-all");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.classList.add("spinning");
+  try {
+    await Promise.all([
+      refreshSessions(),
+      refreshMeshList(),
+      refreshCflow(),
+      refreshWorkspaces(),
+      // The spawn form's pickers come from the same daemon and go stale the
+      // same way — a workspace or harness added since load belongs here too.
+      refreshHarnesses(),
+      refreshRoles(),
+      refreshProfiles(),
+      // A local daemon answers before the eye registers the spin; without a
+      // floor the button just flickers and reads as "nothing happened".
+      new Promise((done) => setTimeout(done, 400)),
+    ]);
+  } finally {
+    btn.disabled = false;
+    btn.classList.remove("spinning");
+  }
+});
+
 /* Resume: relaunch an exited session under its own name and definition. The
    claude harness comes back with `--resume` of the conversation pinned at
    creation, so quitting it by accident (double Ctrl+C) is recoverable from the
