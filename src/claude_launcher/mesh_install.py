@@ -22,11 +22,13 @@ SKILL_MD = """\
 name: mesh
 description: >-
   Join a claunch mesh and message other agent sessions; incoming messages are
-  typed into your terminal by the daemon. Also how to SPAWN further agent
-  sessions, enrol them in the mesh and set who may talk to whom. Usage:
-  /mesh MESH [HANDLE] — join (or resume membership in) MESH as HANDLE (its
-  leading word picks your role; omit to use your session name). Also use when
-  a mesh delivery or briefing block tells you to activate the mesh skill,
+  typed into your terminal by the daemon. ALSO the only correct way to CREATE
+  a session from inside one — read it before running any 'claunch
+  new-session', which is the user's command and is refused here — including
+  how to spawn a child, enrol it in the mesh and set who may talk to whom.
+  Usage: /mesh MESH [HANDLE] — join (or resume membership in) MESH as HANDLE
+  (its leading word picks your role; omit to use your session name). Also use
+  when a mesh delivery or briefing block tells you to activate the mesh skill,
   after a compaction/restart to recover your membership, or when you need
   another agent to help with the work.
 ---
@@ -99,30 +101,47 @@ from your session automatically):
 - **Thread answers**: `--reply-to <msgid>` (ids appear in delivery blocks
   and history).
 
-## Step 4 — growing the team (only if the work needs it)
+## Step 4 — creating sessions
 
-You can create further agent sessions on this daemon and put them in the mesh
-with you. Do this when the work genuinely splits — parallel tracks, or a
-second pair of eyes you will actually talk to — not to look busy. Every child
-is a real terminal burning real tokens, and one you never message is pure
-cost.
+**`spawn` is how a session creates a session.** Not `claunch new-session` —
+that is the user's command, and it is refused from in here because a session
+made with it would have no parent, no mesh, and no way to report back to you.
+This holds whenever you are asked to create one, including when the user asks
+directly ("make a coder session in the other repo"): the request is still
+yours to carry out, with `spawn`.
 
 - `children` (MCP) or `claunch spawn --help` — what you may spawn *before*
-  you try: how many are left, how deep you are, which fields you may choose.
-- **Spawn**: MCP `spawn` with `mesh`, `handle`, `role` and a `task`, or
-  `claunch spawn --mesh MESH --as HANDLE --role ROLE --task "..."`. The child
-  inherits your harness, profile and working directory — you choose WHO it
-  is, not what it runs. Give it a `role` from this mesh's vocabulary
-  (`claunch mesh roles MESH`) and a `task` that says what it is for; a child
-  that has to ask what it exists for has already cost you a turn.
+  you try: how many are left, how deep you are, which fields you may choose,
+  and the **workspaces** you may send a child to.
+- **Spawn**: MCP `spawn` with `handle`, `role` and a `task`, or
+  `claunch spawn --as HANDLE --role ROLE --task "..."`. The child inherits
+  your harness, profile and working directory — you choose WHO it is, not
+  what it runs. Give it a `role` from this mesh's vocabulary (`claunch mesh
+  roles MESH`) and a `task` that says what it is for; a child that has to ask
+  what it exists for has already cost you a turn.
+- **A different directory is a `workspace`, not a path**: `workspace: NAME`
+  (`-w NAME`), one of the names `children` lists. A bare path is refused by
+  policy, and reaching for `new-session -c DIR` because of that is exactly the
+  mistake this step prevents. If the directory you need is not registered, say
+  so — `claunch workspace add DIR` is the user's call, not yours.
+- **Leave `mesh` out.** The child joins the mesh you are in, connected to you
+  and to nobody else; if you are in none, one is opened for the two of you.
+  Name a `mesh` only to put a child somewhere other than your own. (`'-'`
+  starts it in no mesh, unable to answer you — you will rarely want that.)
 - `workflow: NAME` starts a cflow run scoped to the child's own session, so
   the run is its work and not yours.
 - A refusal that mentions `spawn.<something>` is policy, not a bug: the limit
   is in the user's `~/.claunch.yaml`. Do not retry it — tell the user which
   key would allow it, and carry on without the child.
 
+Spawn when the work genuinely splits — parallel tracks, or a second pair of
+eyes you will actually talk to. Every child is a real terminal burning real
+tokens, and one you never message is pure cost.
+
 **Your children start connected to YOU and to nobody else.** That is the
-point: you decide who they may talk to.
+point: you decide who they may talk to. Each is told that you are its parent
+and given the exact `mesh send` that reaches you, so expect reports — and
+when one goes quiet, ask it rather than assuming it is still working.
 
 - `members` shows `reachable` — who *you* can message — and `member_links`,
   the whole graph. `claunch mesh members MESH` lists disconnected pairs.

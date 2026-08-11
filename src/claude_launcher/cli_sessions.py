@@ -4,6 +4,18 @@ Kept out of ``cli.py`` for size; :func:`register` wires the subparsers in.
 Every handler is a thin client of the daemon's HTTP API via
 :mod:`daemon_client` — session commands auto-start the daemon like tmux, while
 ``claunch daemon ...`` manages it explicitly.
+
+**Two doors make a session, and they are not interchangeable.**
+``new-session`` is the human's: every field is spelled out, nothing is
+inherited, no lineage is recorded and no policy applies — the caller is the
+person who owns the machine. ``spawn`` is a session's: the child inherits what
+its parent runs, is recorded as its parent's, joins its mesh, and counts
+against the ``spawn`` policy.
+
+``$CLAUNCH_SESSION`` is what tells them apart, and the daemon cannot see it —
+an HTTP request carries no caller environment, and the same endpoint serves
+the web UI. So the split is enforced here, in the CLI, which is the only place
+that knows whose shell it is running in (see :func:`_use_spawn_instead`).
 """
 
 from __future__ import annotations
@@ -35,6 +47,10 @@ def _print_relay_status(client) -> None:
 # session commands
 # --------------------------------------------------------------------------- #
 def _cmd_new_session(args: argparse.Namespace) -> int:
+    inside = os.environ.get("CLAUNCH_SESSION") or ""
+    if inside and not args.detached:
+        print(_use_spawn_instead(args, inside), file=sys.stderr)
+        return 2
     env = {}
     for item in args.env or []:
         if "=" not in item:
@@ -101,6 +117,85 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     )
     _print_relay_status(client)
     return 0
+
+
+def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
+    """The refusal ``new-session`` gives when an agent runs it.
+
+    ``new-session`` and ``spawn`` build the same thing by different rights.
+    ``new-session`` is the human's: every field spelled out, no lineage, no
+    limits — the caller is the person who owns the machine. ``spawn`` is a
+    session's: the child inherits what its parent runs, is recorded as its
+    parent's, joins its mesh, and counts against the spawn policy.
+
+    An agent that reaches for the human door gets a session that answers to
+    nobody: absent from its parent's subtree, in no mesh, with no way to
+    report what it was made to do. That has happened, and it fails silently —
+    the session comes up, works, and has nowhere to put the result. So the
+    door is closed from inside a session, and closed with the other command
+    already written out: an agent that is told only "use spawn" still has to
+    translate its own flags, and translating ``-c DIR`` is exactly the step
+    that sent it here.
+    """
+    from . import workspaces
+
+    out = ["claunch spawn"]
+    if args.name:
+        out.append(f"-s {args.name}")
+    notes = []
+    if args.cwd:
+        found = workspaces.find(args.cwd)
+        if found is not None:
+            out.append(f"--workspace {found.name}")
+        else:
+            notes.append(
+                f"{args.cwd!r} is not a registered workspace, and a child "
+                "cannot be sent to a bare path (spawn.allow_cwd) — the user "
+                f"registers one with 'claunch workspace add {args.cwd}'"
+            )
+    for flag, value in (
+        ("--mesh", args.mesh), ("--as", args.handle), ("--role", args.role),
+        ("--workflow", args.workflow), ("--context", args.context),
+        ("--task", args.task),
+        # only when it is a real choice: 'claude' is this parser's default,
+        # and a child inherits its parent's harness anyway
+        ("--harness", args.harness if args.harness != "claude" else ""),
+    ):
+        if value:
+            out.append(f"{flag} {value!r}" if " " in str(value) else f"{flag} {value}")
+    for handle in args.connect or []:
+        out.append(f"--connect {handle}")
+    if args.profile:
+        notes.append(
+            f"--profile {args.profile} is dropped: a child runs under its "
+            "parent's profile"
+        )
+    if not args.mesh:
+        notes.append(
+            "no --mesh needed: the child joins yours, and starts connected "
+            "to you"
+        )
+    # ASCII only, like the session listing: this prints to a Windows console
+    # as often as not, where an em dash arrives as a question mark.
+    lines = [
+        f"refused: you are inside the managed session {parent!r}, and "
+        "'new-session' is the human's command -- it records no parent, joins "
+        "no mesh, and would leave a session that cannot report back to you.",
+        "",
+        "spawn a child instead:",
+        f"  {' '.join(out)}",
+    ]
+    if notes:
+        lines.append("")
+        lines.extend(f"  note: {n}" for n in notes)
+    lines.extend([
+        "",
+        "'claunch spawn --help' lists the rest; the 'children' MCP tool says "
+        "how many you may still spawn and which workspaces you may send one "
+        "to. If you genuinely want a session that is not yours -- unrelated "
+        "work, nothing to report -- pass --detached.",
+    ])
+    return "\n".join(lines)
 
 
 def _cmd_spawn(args: argparse.Namespace) -> int:
@@ -589,7 +684,8 @@ def register(sub) -> None:
     p_new = sub.add_parser(
         "new-session",
         aliases=["new"],
-        help="spawn a harness (claude, ...) in a daemon-managed PTY session",
+        help="spawn a harness (claude, ...) in a daemon-managed PTY session "
+             "-- the human's command; from inside a session use 'claunch spawn'",
     )
     p_new.add_argument("-s", "--name", help="session name (auto-generated if omitted)")
     p_new.add_argument("--profile", help="claunch profile (required for the claude harness)")
@@ -646,6 +742,13 @@ def register(sub) -> None:
         help="attach this terminal to the new session right away (detach: Ctrl+])",
     )
     p_new.add_argument(
+        "--detached", action="store_true",
+        help="create it even from inside a managed session, as nobody's child "
+             "-- no parent recorded, no mesh inherited. Refused without this, "
+             "because a session created by a session is a child and 'claunch "
+             "spawn' is what makes one",
+    )
+    p_new.add_argument(
         "args", nargs=argparse.REMAINDER,
         help="extra arguments passed to the harness (prefix with -- if they start with -)",
     )
@@ -661,7 +764,11 @@ def register(sub) -> None:
         "--parent", help="parent session (default: $CLAUNCH_SESSION)"
     )
     p_spawn.add_argument("-s", "--name", help="child session name")
-    p_spawn.add_argument("--mesh", help="mesh to enrol the child in")
+    p_spawn.add_argument(
+        "--mesh",
+        help="mesh to enrol the child in (default: the parent's own, opening "
+             "one for the pair if it is in none; '-' for no mesh at all)",
+    )
     p_spawn.add_argument("--as", dest="handle", help="the child's mesh handle")
     p_spawn.add_argument("--role", help="the child's mesh role")
     p_spawn.add_argument(

@@ -842,8 +842,8 @@ without a human at the keyboard.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). |
-| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`). See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
+| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
+| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`). `--mesh` defaults to the parent's own. See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
@@ -1496,6 +1496,17 @@ An agent inside a session can create **more** sessions, enrol them in its
 mesh and decide who they may talk to — via the `spawn`, `children`,
 `connect` and `disconnect` MCP tools, or `claunch spawn` by hand.
 
+- **`spawn` is the door from inside a session; `new-session` is yours.**
+  They build the same thing by different rights: `new-session` spells every
+  field out, inherits nothing, records no lineage and obeys no policy —
+  because the caller is the person who owns the machine. `spawn` gives the
+  child its parent's program, its parent's mesh, a place in the tree, and a
+  budget. Run from inside a managed session (`$CLAUNCH_SESSION` set),
+  `new-session` is **refused** and prints the `spawn` command it would have
+  been, flags translated — including `-c DIR` into the `--workspace` name
+  that stands for it. The daemon cannot enforce this (an HTTP request carries
+  no caller environment, and the web UI uses the same endpoint), so the CLI
+  does. `--detached` creates one anyway, as nobody's child.
 - **A child inherits what it runs** — harness, profile, working directory,
   args, env — from the session that spawned it. The agent chooses *who* it
   is: name, mesh handle, role, an opening `task`, optionally a `workflow`
@@ -1539,11 +1550,23 @@ mesh and decide who they may talk to — via the `spawn`, `children`,
   This is a **surface, not a sandbox**: an agent holds the daemon's API
   token, so the limits are blast-radius protection against runaway recursion
   and fan-out loops, not a boundary against a hostile session.
-- **Sessions form a tree.** `claunch sessions` indents children under the
-  session that spawned them. Authority runs *down* the tree only: a session
-  may act on its descendants, never its parent and never its siblings.
-  Children are not restored on daemon restart — the arrangement is the
-  parent's to rebuild.
+- **Sessions form a tree.** `claunch sessions` and the web sidebar both
+  indent children under the session that spawned them. Authority runs *down*
+  the tree only: a session may act on its descendants, never its parent and
+  never its siblings. Children are not restored on daemon restart — the
+  arrangement is the parent's to rebuild.
+- **A child lands in its parent's mesh without being asked to.** Naming no
+  `mesh` on a spawn means *the parent's own*; a parent that is in none gets
+  one opened for the pair, named after it, so the whole subtree ends up in
+  one room. A parent in several has to say which — guessing there does not
+  fail, it broadcasts, and the child would report its work to strangers.
+  `--mesh -` starts a child in no mesh at all.
+
+  The child is then told **whose it is**, on both channels: its system prompt
+  carries the parent's name and handle (so it survives a compaction), and its
+  opening block leads with the same fact plus the exact `claunch mesh send`
+  that answers it. A child that does not know who is waiting reports to
+  nobody, which is indistinguishable from having done nothing.
 - **A spawned child starts connected to its parent and nobody else**, and
   the parent wires it up from there. This member graph is a different thing
   from the peer-daemon links `cut`/`uncut` edit: members are never routed,

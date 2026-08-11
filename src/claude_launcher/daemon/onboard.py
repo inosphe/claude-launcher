@@ -32,6 +32,14 @@ between going quiet and being able to accept a submit (the failure
 :meth:`Session._await_readable` describes and only partly mitigates).
 Harnesses that take no such argument are typed into instead.
 
+**A child is never alone.** A spawn that named no mesh used to produce exactly
+that: a worker with no way to report back and a parent with no way to ask.
+Saying nothing now means *the parent's mesh* (:func:`inherit_mesh`), and a
+parent that is in none gets one opened for the pair — so "these two can talk"
+is a property of being parent and child, not of having remembered a flag. The
+child is then told whose it is, on both channels, because a session that does
+not know who is waiting on it reports to nobody.
+
 The split between the two channels follows what is *true for how long*:
 
 * **System prompt** (:attr:`SessionDef.identity`, claude harness only) takes
@@ -48,7 +56,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple
 
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
@@ -57,6 +65,12 @@ from .harness import CLAUDE_HARNESS
 from .mesh import MeshError
 
 log = logging.getLogger(__name__)
+
+#: The spelling that declines the inherited mesh — a child deliberately off
+#: the air. A token rather than an omitted field, because omission is what now
+#: means *inherit*: there has to be a way to say "no mesh" that is louder than
+#: saying nothing.
+NO_MESH = "-"
 
 
 class OnboardError(Exception):
@@ -78,6 +92,15 @@ class Plan:
     workflow: str = ""
     context: str = ""
     task: str = ""
+    #: The session that asked for this one, by name — "" for a session a human
+    #: created. Carried on the plan rather than passed alongside it because
+    #: every leg wants it: the join keeps the child connected to it, the
+    #: opening block names it, and the system prompt says who is waiting.
+    parent: str = ""
+    #: How the parent answers in :attr:`mesh` — usually its session name, but
+    #: it may have joined under another handle, and a child told the wrong one
+    #: addresses a member that is not there.
+    parent_handle: str = ""
     #: The system-prompt block, or "" when there is nothing certain to say
     #: (no mesh and no workflow, a harness with no prompt to append to, or a
     #: remote join whose handle is not settled until the grant arrives).
@@ -85,7 +108,86 @@ class Plan:
 
     @property
     def wanted(self) -> bool:
-        return bool(self.mesh or self.workflow or self.task)
+        return bool(self.mesh or self.workflow or self.task or self.parent)
+
+
+async def inherit_mesh(body: dict, *, parent: str, mesh_mgr) -> None:
+    """Settle which mesh a child joins when its parent named none.
+
+    Rewrites ``body['mesh']`` in place, so everything downstream — preflight,
+    the join, the briefing — sees an ordinary request that happens to name a
+    mesh. Run before :func:`preflight`, which is where a mesh stops being
+    negotiable: the identity block is built there and the system prompt is
+    fixed the moment the harness starts.
+
+    Silence means **the parent's mesh**. A spawn is one session asking for
+    another, and the pair is the point; a child that could not be spoken to
+    was the common outcome of forgetting one field, and it failed silently —
+    the session came up, did its work, and had nowhere to put it.
+
+    * **One mesh** — the answer, and the case nearly every fleet is in.
+    * **None** — one is opened for the pair and the parent joined into it
+      (:func:`_open_mesh_for`). A parent nobody put in a mesh is not a parent
+      that wants an unreachable child; it is one that never needed a mesh
+      until now. The mesh is named after the parent, so its whole subtree
+      lands in the same one: the next spawn finds it in exactly one mesh and
+      takes this branch no further.
+    * **Several** — refused, naming them. Guessing here is the one mistake
+      that cannot be walked back, because the wrong guess does not fail, it
+      broadcasts: the child arrives in a room of strangers and reports its
+      work to them.
+
+    :data:`NO_MESH` opts out for a child that genuinely should be off the air.
+    """
+    named = str(body.get("mesh") or "").strip()
+    if named == NO_MESH:
+        body.pop("mesh", None)
+        return
+    if named:
+        return
+    mine = [m["mesh"] for m in mesh_mgr.meshes_for_session(parent)]
+    if len(mine) > 1:
+        raise OnboardError(
+            f"session {parent!r} is in {len(mine)} meshes "
+            f"({', '.join(sorted(mine))}) — name the one this child belongs "
+            f"in, or pass mesh: {NO_MESH!r} to start it outside every mesh. "
+            "A child is put in its parent's mesh by default, and with several "
+            "there is no default to take"
+        )
+    body["mesh"] = mine[0] if mine else await _open_mesh_for(parent, mesh_mgr)
+
+
+async def _open_mesh_for(parent: str, mesh_mgr) -> str:
+    """Create a mesh for a parent that is in none, and put the parent in it.
+
+    Named after the parent because the name has to mean something to a human
+    reading ``claunch mesh ls`` later, and "the mesh s7 works in" is the only
+    thing true about it at this point. A collision takes a suffix rather than
+    joining whatever already holds that name — a mesh the parent is not in is
+    somebody else's room.
+
+    Deliberately *not* undone by :func:`unwind` when the spawn that triggered
+    it goes on to fail. The child's leg is undone because its name returns to
+    circulation and would be inherited; this one leaves a mesh holding the
+    parent alone, which is not a leak but the state the next spawn wants —
+    it finds the parent in exactly one mesh and joins it, instead of opening
+    a second.
+    """
+    taken = {m.name for m in mesh_mgr.list()}
+    candidates = (parent, *(f"{parent}-{i}" for i in range(2, 100)))
+    name = next((c for c in candidates if c not in taken), "")
+    if not name:
+        raise OnboardError(
+            f"could not open a mesh for {parent!r}: every name from {parent!r} "
+            f"to {parent}-99 is taken — name a mesh for this child explicitly"
+        )
+    mesh_mgr.create(name)
+    # The parent is briefed as usual: it is being put in a mesh it did not ask
+    # for, and a session that discovers its own membership from a child's
+    # first message has been told by the wrong party.
+    await mesh_mgr.join(name, parent, handle=parent)
+    log.info("opened mesh %r for %r and its children", name, parent)
+    return name
 
 
 def preflight(
@@ -95,6 +197,7 @@ def preflight(
     session_name: str,
     cwd: str,
     harness: str,
+    parent: str = "",
 ) -> Plan:
     """Check what can be checked without a session, and build its identity.
 
@@ -102,6 +205,11 @@ def preflight(
     mesh or workflow costs nothing. ``session_name`` may be "" when the daemon
     will generate one — the handle then defaults at join time and the identity
     block simply omits it.
+
+    ``parent`` names the session that asked for this one. Run
+    :func:`inherit_mesh` first when there is one: by the time the identity is
+    built the mesh has to be settled, because that is what decides whether the
+    child can be told how to answer its parent at all.
     """
     mesh = str(body.get("mesh") or "").strip()
     handle = str(body.get("handle") or "").strip()
@@ -145,6 +253,15 @@ def preflight(
     elif body.get("context"):
         raise OnboardError("'context' describes a 'workflow' run — name one")
 
+    # Resolved here, once, from the roster: the parent may have joined under a
+    # handle that is not its session name, and every channel that tells the
+    # child how to answer has to name the same one.
+    parent_handle = ""
+    if parent and local_mesh is not None:
+        member = mesh_mgr.resolve_sender(mesh, parent)
+        if member is not None:
+            parent_handle = member.handle
+
     return Plan(
         mesh=mesh,
         handle=handle,
@@ -153,18 +270,29 @@ def preflight(
         workflow=workflow,
         context=str(body.get("context") or ""),
         task=str(body.get("task") or ""),
+        parent=parent,
+        parent_handle=parent_handle,
         identity=_identity_block(
             mesh=mesh if local_mesh is not None else "",
             handle=(handle or session_name) if local_mesh is not None else "",
             workflow=workflow,
             scope=session_name,
             harness=harness,
+            parent=parent,
+            parent_handle=parent_handle,
         ),
     )
 
 
 def _identity_block(
-    *, mesh: str, handle: str, workflow: str, scope: str, harness: str
+    *,
+    mesh: str,
+    handle: str,
+    workflow: str,
+    scope: str,
+    harness: str,
+    parent: str = "",
+    parent_handle: str = "",
 ) -> str:
     """The unchanging half, phrased for a system prompt.
 
@@ -184,6 +312,22 @@ def _identity_block(
             "join briefing in your terminal for the current roster rather "
             "than assuming this one."
         )
+    if parent:
+        # Permanent because the relationship is: the graph is rewired all the
+        # time, but who asked for this session never changes, and a compaction
+        # that dropped it would leave an agent finishing work for nobody.
+        lines.append(
+            f"The claunch session {parent!r} created this one — it is your "
+            "parent, and it is waiting on what you produce. Report to it: "
+            "progress when the shape of the work changes, and the result when "
+            "you are done. Finishing quietly is the one failure it cannot see."
+            + (
+                f" It answers in mesh {mesh!r} as {parent_handle!r}."
+                if mesh and parent_handle
+                else " You share no mesh with it, so you have no channel back "
+                "— say so in your first turn rather than working on regardless."
+            )
+        )
     if workflow:
         lines.append(
             f"This session drives the cflow run of workflow {workflow!r}"
@@ -194,9 +338,7 @@ def _identity_block(
     return "\n\n".join(lines)
 
 
-async def arrange(
-    plan: Plan, *, name: str, cwd: str, mesh_mgr, parent: Optional[str] = None
-) -> Tuple[dict, str]:
+async def arrange(plan: Plan, *, name: str, cwd: str, mesh_mgr) -> Tuple[dict, str]:
     """Do every leg of a validated plan, for a session that does not exist yet.
 
     Returns ``(report, block)``: one report entry per leg attempted, so a
@@ -212,8 +354,14 @@ async def arrange(
     result: dict = {}
     sections: list = []
 
+    # First, because it is the frame the rest is read in: a child that learns
+    # its assignment before it learns who assigned it has already started
+    # working out what to do with the result on its own.
+    if plan.parent:
+        sections.append(_parent_block(plan))
+
     if plan.mesh:
-        joined = await _join(plan, name, mesh_mgr=mesh_mgr, parent=parent)
+        joined = await _join(plan, name, mesh_mgr=mesh_mgr)
         result["mesh"] = joined
         if joined.get("briefing"):
             sections.append(joined.pop("briefing"))
@@ -251,6 +399,38 @@ async def arrange(
     return result, "\n\n".join(sections)
 
 
+def _parent_block(plan: Plan) -> str:
+    """Who is waiting, and the exact command that answers them.
+
+    The system prompt carries the same fact and outlives this block, so the
+    duplication is deliberate: the prompt is what survives a compaction, and
+    this is what is on screen during the first turn — the turn where a child
+    decides whether reporting back is part of the job.
+
+    The reply line is a whole command rather than a description of one. An
+    agent that has to assemble ``claunch mesh send`` from the briefing and the
+    handle will sometimes assemble it wrong, and a misaddressed report reads
+    to its parent exactly like no report at all.
+    """
+    reply = (
+        f"claunch mesh send {plan.mesh} {plan.parent_handle} \"...\""
+        if plan.mesh and plan.parent_handle
+        else "(no shared mesh -- you have no channel back; say so in your reply)"
+    )
+    return (
+        "---\n"
+        "# claunch: the session that created you -- machine-generated\n"
+        f"parent: {plan.parent}\n"
+        + (f"parent_handle: {plan.parent_handle}\n" if plan.parent_handle else "")
+        + f"reply: {reply}\n"
+        "protocol: this session exists because that one asked for it. Send it "
+        "progress when the shape of the work changes, and the result when you "
+        "are done -- it cannot see your terminal, so silence reads as nothing "
+        "happening.\n"
+        "---"
+    )
+
+
 async def unwind(report: dict, *, name: str, cwd: str, mesh_mgr) -> None:
     """Undo an :func:`arrange` whose session then failed to start.
 
@@ -273,7 +453,7 @@ async def unwind(report: dict, *, name: str, cwd: str, mesh_mgr) -> None:
             log.warning("could not undo cflow run for %r: %s", name, exc)
 
 
-async def _join(plan: Plan, name: str, *, mesh_mgr, parent: Optional[str]) -> dict:
+async def _join(plan: Plan, name: str, *, mesh_mgr) -> dict:
     """Enrol the session, cut it down to the peers it should see, and return
     the briefing text for the opening block.
 
@@ -305,8 +485,8 @@ async def _join(plan: Plan, name: str, *, mesh_mgr, parent: Optional[str]) -> di
         "role": member.role,
     }
     keep = set(plan.connect)
-    if parent is not None:
-        parent_member = mesh_mgr.resolve_sender(plan.mesh, parent)
+    if plan.parent:
+        parent_member = mesh_mgr.resolve_sender(plan.mesh, plan.parent)
         if parent_member is not None:
             keep.add(parent_member.handle)
         try:
