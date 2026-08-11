@@ -10,6 +10,7 @@ browser history.
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import time
 from pathlib import Path
@@ -18,13 +19,14 @@ from aiohttp import web
 
 from .. import __version__, harnesses as harness_registry
 from .. import profile as profile_mod, spawn as spawn_mod, workspaces
+from . import onboard
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
 from . import mesh_roles
-from .harness import HarnessError, SessionDef
+from .harness import CLAUDE_HARNESS, HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
 from .mesh import MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, SessionGone
@@ -584,10 +586,11 @@ def _startable_workflows(cwd: str) -> list:
 async def h_cflow_workflows(request: web.Request) -> web.Response:
     """Workflows startable in a directory (project + global) — feeds the
     dashboard's start picker."""
+    # An absent cwd means the daemon's own directory, which is exactly what a
+    # session created with no directory runs in — so the create form's
+    # "(daemon cwd)" asks about the workflows it would really see.
     raw = request.query.get("cwd")
-    if not raw:
-        return json_error(400, "'cwd' query parameter required")
-    cwd = str(Path(raw).resolve())
+    cwd = str(Path(raw).resolve()) if raw else os.getcwd()
     return web.json_response({"workflows": _startable_workflows(cwd)})
 
 
@@ -1203,10 +1206,33 @@ async def h_sessions_list(request: web.Request) -> web.Response:
 
 
 async def h_sessions_create(request: web.Request) -> web.Response:
+    """Create a session — and, if asked, everything it needs to start work.
+
+    ``mesh``/``handle``/``connect``, ``workflow``/``context`` and ``task`` are
+    optional and composed here, the same way and in the same order the spawn
+    endpoint has always composed them for an agent's children (see
+    :mod:`claude_launcher.daemon.onboard`). They are checked *before* anything
+    is built, so a mistyped mesh is a 400 with no session left behind.
+
+    The response keeps the session's own fields at the top level, as it always
+    has, and reports each onboarding leg beside them.
+    """
     manager: SessionManager = request.app["manager"]
     body = await _json_body(request)
     body.setdefault("restore", manager.restore_default)
     body.setdefault("name", "")
+    try:
+        plan = onboard.preflight(
+            body,
+            mesh_mgr=_mesh_mgr(request),
+            session_name=str(body.get("name") or ""),
+            cwd=str(body.get("cwd") or ""),
+            harness=str(body.get("harness") or "") or CLAUDE_HARNESS,
+        )
+    except onboard.OnboardError as exc:
+        return json_error(400, str(exc))
+    if plan.identity:
+        body["identity"] = plan.identity
     try:
         sdef = SessionDef.from_dict(body)
     except (KeyError, ValueError, TypeError) as exc:
@@ -1217,7 +1243,12 @@ async def h_sessions_create(request: web.Request) -> web.Response:
         if "already exists" in str(exc):
             return json_error(409, str(exc))
         raise
-    return web.json_response(session.info(), status=201)
+    result = dict(session.info())
+    if plan.wanted:
+        result.update(
+            await onboard.run(plan, session, mesh_mgr=_mesh_mgr(request))
+        )
+    return web.json_response(result, status=201)
 
 
 async def h_session_children(request: web.Request) -> web.Response:
@@ -1261,7 +1292,20 @@ async def h_session_spawn(request: web.Request) -> web.Response:
     parent = request.match_info["name"]
     body = await _json_body(request)
     try:
-        session = manager.spawn(parent, body)
+        plan = onboard.preflight(
+            body,
+            mesh_mgr=_mesh_mgr(request),
+            session_name=str(body.get("name") or ""),
+            cwd=manager.get(parent).sdef.cwd,
+            harness=str(body.get("harness") or "")
+            or manager.get(parent).sdef.harness,
+        )
+    except ManagerError as exc:
+        return json_error(404, str(exc))
+    except onboard.OnboardError as exc:
+        return json_error(400, str(exc))
+    try:
+        session = manager.spawn(parent, body, identity=plan.identity)
     except spawn_mod.SpawnDenied as exc:
         return json_error(403, str(exc))
     except (HarnessError, ValueError, TypeError) as exc:
@@ -1270,128 +1314,10 @@ async def h_session_spawn(request: web.Request) -> web.Response:
         return json_error(409 if "already exists" in str(exc) else 400, str(exc))
 
     result = {"session": session.info(), "parent": parent}
-    mesh_name = str(body.get("mesh") or "").strip()
-    if mesh_name:
-        result["mesh"] = await _spawn_join_mesh(request, parent, session, body)
-    workflow = str(body.get("workflow") or "").strip()
-    if workflow:
-        result["workflow"] = _spawn_start_workflow(session, workflow, body)
-    task = str(body.get("task") or "").strip()
-    if task:
-        result["task"] = await _spawn_open_task(session, task)
+    result.update(
+        await onboard.run(plan, session, mesh_mgr=_mesh_mgr(request), parent=parent)
+    )
     return web.json_response(result, status=201)
-
-
-async def _spawn_join_mesh(
-    request: web.Request, parent: str, session, body: dict
-) -> dict:
-    """Enrol the new child, then cut it down to the peers it should see.
-
-    The child starts connected to its parent only. That is the conservative
-    direction: a child that cannot yet reach a peer says so and asks, while a
-    child wired to everyone by default has already broadcast to them by the
-    time anyone notices the arrangement was wrong.
-    """
-    mm = _mesh_mgr(request)
-    mesh_name = str(body.get("mesh") or "").strip()
-    manager: SessionManager = request.app["manager"]
-    try:
-        member = await mm.join(
-            mesh_name,
-            session.sdef.name,
-            handle=str(body.get("handle") or ""),
-            role=str(body.get("role") or ""),
-        )
-    except MeshError as exc:
-        return {"ok": False, "error": str(exc)}
-    if isinstance(member, dict):  # a remote join pended for approval
-        return {"ok": False, "pending": member}
-
-    # The parent's own handle in this mesh, if it has one — the single peer
-    # the child keeps. A parent that is not itself a member leaves the child
-    # connected to whatever `connect` names, or to nobody.
-    parent_member = mm.resolve_sender(mesh_name, parent)
-    keep = {str(h) for h in (body.get("connect") or []) if str(h).strip()}
-    if parent_member is not None:
-        keep.add(parent_member.handle)
-    try:
-        cut = await mm.isolate_member(mesh_name, member.handle, keep=keep)
-    except MeshError as exc:
-        return {"ok": True, "handle": member.handle, "isolate_error": str(exc)}
-    del manager  # only needed for the lookup above
-    return {
-        "ok": True,
-        "mesh": mesh_name,
-        "handle": member.handle,
-        "role": member.role,
-        "connected_to": sorted(keep),
-        "disconnected_from": cut,
-    }
-
-
-def _spawn_start_workflow(session, workflow: str, body: dict) -> dict:
-    """Start a cflow run scoped to the child.
-
-    Runs are keyed by ``(cwd, scope)`` and a session-scoped run uses the
-    session name as its scope, so the child's own agent picks this up as
-    *its* run — not the parent's, even though both sit in the same directory.
-    """
-    try:
-        payload = cflow_engine.start(
-            workflow,
-            context=str(body.get("context") or "") or None,
-            cwd=session.sdef.cwd,
-            scope=session.sdef.name,
-        )
-    except Exception as exc:  # noqa: BLE001 — engine raises several types
-        return {"ok": False, "error": str(exc)}
-    return {
-        "ok": True,
-        "workflow": workflow,
-        "scope": session.sdef.name,
-        "step": payload.get("step") or payload.get("id"),
-    }
-
-
-async def _spawn_open_task(session, task: str) -> dict:
-    """Type the child's opening instruction once it has finished booting.
-
-    Fire-and-forget for the same reason the mesh briefing is: the harness
-    takes seconds to come up, and a spawn call that waited for it would tie
-    the parent's tool call to another program's startup time. The injection
-    is idle-gated, so it lands in a prompt rather than halfway through one.
-    """
-    asyncio.ensure_future(_deliver_task(session, task))
-    return {"ok": True, "queued": True}
-
-
-#: How long the child must stay idle before its opening task is typed in.
-#: A single idle *sample* is not enough: the mesh join briefing is pasted at
-#: almost the same moment, and its submitting Enter is a deliberately delayed
-#: write (``PASTE_ENTER_DELAY``), so there is a real window where the session
-#: reads idle mid-briefing. Typing into that window glues the task onto the
-#: briefing's closing fence. Comfortably longer than that delay, and longer
-#: than the gap between a harness printing its banner and taking input.
-TASK_SETTLE = 1.5
-
-
-async def _deliver_task(session, task: str, *, hold: float = 60.0) -> None:
-    deadline = time.monotonic() + hold
-    idle_since = None
-    while time.monotonic() < deadline:
-        if session.exited:
-            return
-        if session.status() == STATUS_IDLE:
-            if idle_since is None:
-                idle_since = time.monotonic()
-            elif time.monotonic() - idle_since >= TASK_SETTLE:
-                break
-        else:
-            idle_since = None  # something is still arriving; start over
-        await asyncio.sleep(0.2)
-    else:
-        return  # never settled; better nothing than a half-typed prompt
-    await session.deliver(task)
 
 
 async def h_sessions_clear(request: web.Request) -> web.Response:

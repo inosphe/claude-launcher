@@ -59,6 +59,18 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["restore"] = args.restore
     if args.role:
         body["role"] = args.role
+    # Decided at creation because they are what the session is FOR: a mesh it
+    # is not in and a run it does not drive have to be arranged afterwards,
+    # with the agent already sitting at a prompt not knowing either.
+    for key, value in (
+        ("mesh", args.mesh), ("handle", args.handle),
+        ("workflow", args.workflow), ("context", args.context),
+        ("task", args.task),
+    ):
+        if value:
+            body[key] = value
+    if args.connect:
+        body["connect"] = args.connect
     # `--resume` with no value is the picker, which argparse hands back as the
     # empty string — the same spelling the API uses, so it passes through.
     if args.resume is not None:
@@ -78,6 +90,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         + (f", role: {info['role']}" if info.get("role") else "")
         + f", pid: {info.get('pid')})"
     )
+    _print_onboarding(info)
     if args.attach:
         from . import attach as attach_mod
 
@@ -114,6 +127,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("role", args.role),
             ("connect", args.connect),
             ("workflow", args.workflow),
+            ("context", args.context),
             ("task", args.task),
             ("harness", args.harness),
             ("workspace", args.workspace),
@@ -131,15 +145,27 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         # The one field that was asked for by name and answered by path:
         # printing it is how the caller sees the registry resolved.
         print(f"  in {child['cwd']}")
+    _print_onboarding(result)
+    return 0
+
+
+def _print_onboarding(result: dict) -> None:
+    """Report the legs a create/spawn asked for, one line each.
+
+    Each is reported separately because each can fail on its own: the session
+    exists even when the mesh join is what went wrong, and a caller told only
+    "created" would go looking for a member that is not there.
+    """
     mesh = result.get("mesh") or {}
-    if mesh.get("ok"):
-        reach = ", ".join(mesh.get("connected_to") or []) or "(nobody)"
-        print(f"  mesh {mesh.get('mesh')}: joined as {mesh.get('handle')}, "
-              f"can reach {reach}")
-        if mesh.get("disconnected_from"):
-            print(f"  cut off from: {', '.join(mesh['disconnected_from'])}")
-    elif mesh:
-        print(f"  mesh join failed: {mesh.get('error') or mesh.get('pending')}")
+    if mesh:
+        if mesh.get("ok"):
+            reach = ", ".join(mesh.get("connected_to") or []) or "the whole mesh"
+            print(f"  mesh {mesh.get('mesh')}: joined as {mesh.get('handle')}, "
+                  f"can reach {reach}")
+            if mesh.get("disconnected_from"):
+                print(f"  cut off from: {', '.join(mesh['disconnected_from'])}")
+        else:
+            print(f"  mesh join failed: {mesh.get('error') or mesh.get('pending')}")
     flow = result.get("workflow") or {}
     if flow:
         print(
@@ -148,7 +174,6 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         )
     if result.get("task"):
         print("  opening task will be typed in once it settles")
-    return 0
 
 
 def _by_lineage(sessions):
@@ -602,6 +627,20 @@ def register(sub) -> None:
         "--no-restore", dest="restore", action="store_false",
         help="do not relaunch on daemon restart",
     )
+    p_new.add_argument("--mesh", help="mesh to join at creation")
+    p_new.add_argument(
+        "--as", dest="handle", help="its handle in that mesh (default: session name)"
+    )
+    p_new.add_argument(
+        "--connect", action="append", metavar="HANDLE",
+        help="a member it may message (repeatable); without any it can reach "
+             "the whole mesh",
+    )
+    p_new.add_argument("--workflow", help="cflow workflow to start for it")
+    p_new.add_argument("--context", help="context string for that workflow run")
+    p_new.add_argument(
+        "--task", help="opening instruction typed in once it has booted"
+    )
     p_new.add_argument(
         "-a", "--attach", action="store_true",
         help="attach this terminal to the new session right away (detach: Ctrl+])",
@@ -631,6 +670,7 @@ def register(sub) -> None:
              "always reach its parent",
     )
     p_spawn.add_argument("--workflow", help="cflow workflow to start for the child")
+    p_spawn.add_argument("--context", help="context string for that workflow run")
     p_spawn.add_argument("--task", help="opening instruction typed into the child")
     p_spawn.add_argument(
         "--harness", help="a different harness (needs spawn.allow_harness)"

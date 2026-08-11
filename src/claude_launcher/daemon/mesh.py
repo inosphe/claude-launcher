@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import json
 import logging
 import re
@@ -684,6 +685,9 @@ class MeshManager:
         self._root = root
         self._meshes: Dict[str, Mesh] = {}
         self._workers: Dict[str, asyncio.Task] = {}
+        #: Sessions whose join briefing the onboarding path is folding into a
+        #: single opening block. Held only for the length of one join call.
+        self._brief_deferred: set = set()
         self._started = False
         #: Federation wiring, set by the daemon entrypoint once the uplink
         #: exists. ``machine`` is this daemon's relay name — the machine-level
@@ -1187,8 +1191,27 @@ class MeshManager:
         self._brief_soon(mesh, member)
         return member
 
+    @contextlib.contextmanager
+    def defer_briefing(self, session: str):
+        """Hold back this session's automatic join briefing for one join.
+
+        Onboarding composes the briefing into one opening block together with
+        the workflow assignment and the opening task, so the paste this would
+        schedule would be a second one racing it. Scoped to a context manager
+        rather than a flag on ``join`` because three different join paths
+        (local, mirror, remote grant) all end in a briefing, and every one of
+        them should be held back by the same statement.
+        """
+        self._brief_deferred.add(session)
+        try:
+            yield
+        finally:
+            self._brief_deferred.discard(session)
+
     def _brief_soon(self, mesh: Mesh, member: Member) -> None:
         """Schedule a join briefing injection into the new member's terminal."""
+        if member.session in self._brief_deferred:
+            return
         try:
             asyncio.get_running_loop()
         except RuntimeError:
@@ -1214,6 +1237,45 @@ class MeshManager:
             f"what a {member.role} is on this mesh, and it is binding\n"
         )
 
+    def briefing_block(self, mesh: Mesh, member: Member) -> str:
+        """The briefing's *text*: what this member is here, and how to speak.
+
+        Split from :meth:`_brief` — which waits for idle and pastes it — so a
+        session being onboarded can fold it into one opening block instead of
+        having it arrive as a second paste racing the first.
+
+        Built at call time and never stored, because it names only the peers
+        this member can reach *now*. A briefing that listed the whole roster
+        would have a spawned child addressing peers it is not connected to,
+        and reading the refusal as a bug rather than as the arrangement it was
+        started under. (This is also why it is the briefing that carries the
+        roster and never the system prompt: the graph is rewired mid-session,
+        an appended prompt is not.)
+        """
+        reachable = mesh.neighbours(member.handle)
+        others = ", ".join(
+            f"{h} ({mesh.members[h].role})" for h in reachable
+        ) or "(nobody else yet)"
+        hidden = len(mesh.members) - 1 - len(reachable)
+        return (
+            "---\n"
+            "# claunch mesh: join briefing -- machine-generated, not typed by the user\n"
+            f"mesh: {mesh.name}\n"
+            f"you: {member.handle} (role: {member.role})\n"
+            f"members: {others}\n"
+            + (
+                f"note: {hidden} other member(s) exist that you are not "
+                "connected to and cannot message\n" if hidden > 0 else ""
+            ) +
+            f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
+            + self._stance_lines(mesh, member) +
+            f"protocol: activate your 'mesh' skill NOW (/mesh {mesh.name}) to "
+            "load the member protocol; if you have no such skill, run "
+            "'claunch install' first and retry\n"
+            f"note: incoming mesh messages will be typed into this terminal\n"
+            "---"
+        )
+
     async def _brief(self, mesh: Mesh, member: Member, *, hold: float = 30.0) -> None:
         """Idle-gated briefing paste: who you are here and how to speak.
 
@@ -1236,34 +1298,8 @@ class MeshManager:
             await asyncio.sleep(0.5)
         else:
             return  # never went idle; skip rather than interleave
-        # Only who this member can actually reach. A briefing that listed the
-        # whole roster would have a spawned child addressing peers it is not
-        # connected to, and reading the refusal as a bug rather than as the
-        # arrangement it was started under.
-        reachable = mesh.neighbours(member.handle)
-        others = ", ".join(
-            f"{h} ({mesh.members[h].role})" for h in reachable
-        ) or "(nobody else yet)"
-        hidden = len(mesh.members) - 1 - len(reachable)
-        block = (
-            "---\n"
-            "# claunch mesh: join briefing -- machine-generated, not typed by the user\n"
-            f"mesh: {mesh.name}\n"
-            f"you: {member.handle} (role: {member.role})\n"
-            f"members: {others}\n"
-            + (
-                f"note: {hidden} other member(s) exist that you are not "
-                "connected to and cannot message\n" if hidden > 0 else ""
-            ) +
-            f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
-            + self._stance_lines(mesh, member) +
-            f"protocol: activate your 'mesh' skill NOW (/mesh {mesh.name}) to "
-            "load the member protocol; if you have no such skill, run "
-            "'claunch install' first and retry\n"
-            f"note: incoming mesh messages will be typed into this terminal\n"
-            "---"
-        )
-        await session.deliver(block)  # best-effort: a dead session just misses it
+        # best-effort: a dead session just misses it
+        await session.deliver(self.briefing_block(mesh, member))
 
     async def leave(self, name: str, handle: str) -> Member:
         """Remove a member. Guests may only remove their OWN members (the

@@ -84,6 +84,16 @@ class SessionDef:
     #: the only reference that survives that. Consumers must treat a parent
     #: that no longer resolves as a root.
     parent: Optional[str] = None
+    #: Who this session *is*, decided at creation and true for its whole life:
+    #: its mesh handle, the run it drives. Appended to the system prompt next
+    #: to the role stance — claude harness only, same as the role.
+    #:
+    #: Only the unchanging half lives here. Which peers it can reach right now
+    #: is deliberately absent: the member graph is rewired mid-session by
+    #: connect/disconnect, and a frozen roster would have the agent addressing
+    #: peers it cannot reach and reading the refusal as a bug. That half stays
+    #: in the mesh briefing, which is re-derived every time it is sent.
+    identity: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -101,6 +111,7 @@ class SessionDef:
             "resume": self.resume,
             "fork_session": self.fork_session,
             "parent": self.parent,
+            "identity": self.identity,
         }
 
     @classmethod
@@ -120,6 +131,7 @@ class SessionDef:
             resume=_resume_field(data.get("resume")),
             fork_session=bool(data.get("fork_session")),
             parent=str(data.get("parent") or "").strip() or None,
+            identity=str(data.get("identity") or "").strip() or None,
         )
 
 
@@ -302,11 +314,18 @@ def build_command(
                 argv.extend(["--session-id", sdef.conversation_id])
         # Re-injected on every spawn, restores included: an appended system
         # prompt lives in the process, not the transcript, so a resumed
-        # session would otherwise come back without its role.
+        # session would otherwise come back without its role or its identity.
+        # One flag, not one per block: claude's own prompt is what is being
+        # appended to, and two appends would be two edits to it.
+        blocks = []
         if sdef.role:
             role = mesh_roles.resolve().get(sdef.role)
             if role is not None:
-                argv.extend(["--append-system-prompt", mesh_roles.system_prompt(role)])
+                blocks.append(mesh_roles.system_prompt(role))
+        if sdef.identity:
+            blocks.append(sdef.identity)
+        if blocks:
+            argv.extend(["--append-system-prompt", "\n\n".join(blocks)])
         argv.extend(sdef.args)
     else:
         entry = harness_registry.get(sdef.harness)

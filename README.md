@@ -842,7 +842,7 @@ without a human at the keyboard.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `-a/--attach` to attach immediately, trailing args pass to the harness). |
+| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). |
 | `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`). See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
@@ -1148,6 +1148,51 @@ Resuming *without* a fork means the two sessions share one conversation, which
 is the point when you are picking up an exited session's work elsewhere — and
 a footgun if the source is still running. The web picker shows each session's
 status next to its name for exactly that reason.
+
+### Created with a job (mesh · workflow · opening task)
+
+A session is rarely wanted on its own. It is wanted **in** a mesh, driving a
+particular run, with an opening instruction — and until all three have landed
+it is a terminal nobody is listening to, or an agent that does not know why it
+exists. So they are options on the create call, not three steps after it:
+
+```bash
+claunch new-session -s w1 --role worker \
+    --mesh dev --as worker_1 \
+    --workflow feature-dev --context "the export path" \
+    --task "take the API half; report when the design note is up"
+```
+
+The same keys on `POST /api/sessions`, the same fields in the web form's
+**Start it working** box (mesh and workflow are pickers, not text boxes), and
+the same set an agent's [`spawn`](#agents-that-build-their-own-team-spawn--hierarchy--member-graph)
+tool has always had — that path composed these from the start, and this is
+that composition shared rather than a second one.
+
+Two properties are worth knowing:
+
+- **Nothing is built until the request is known to be honourable.** A mesh
+  that is not here, a handle already taken, a workflow not declared in that
+  directory: each is a `400` with no session left behind, instead of a live
+  session whose join failed after the fact. (It has to work this way — the
+  system prompt is fixed when the PTY starts, so anything going into it must
+  be known before the session exists.)
+- **One opening block, not three.** The mesh briefing, the workflow assignment
+  and the task arrive as a single delivery. They used to be three independently
+  idle-gated pastes racing into the same terminal, which needed a settle
+  constant tuned against the paste-Enter delay to keep the task from being
+  glued onto the briefing's closing fence.
+
+What goes in the **system prompt** versus the opening block follows what is
+true for how long. The handle this session answers to and the run it drives
+hold for its whole life, so they are appended to claude's system prompt beside
+the role stance and survive compaction and restore. Who it can reach right now
+does *not*: `connect`/`disconnect` rewire the member graph mid-session, and a
+frozen roster would have the agent addressing peers it cannot reach and
+reading the refusal as a bug. That half stays in the briefing, which is
+re-derived every time it is sent. Only claude has `--append-system-prompt`, so
+the briefing is the channel that must be sufficient on its own; the system
+prompt is the reinforcement where there is one.
 
 ### Restore on daemon restart
 
@@ -1564,6 +1609,13 @@ itself is never touched, and sessions already in it keep running. The list
 refreshes in place, so a `claunch workspace add` in a terminal shows up here
 too, and `(daemon cwd)` is always available in the picker.
 
+A **Start it working** box carries what the session is *for*: a mesh picker
+(with a handle field once one is chosen), a workflow picker over the runs
+declared in the chosen directory, and an opening task — all applied in the
+same call that creates it, so the agent's first turn already knows its mesh
+identity and its run. See
+[Created with a job](#created-with-a-job-mesh--workflow--opening-task).
+
 The form otherwise spawns sessions the same way the CLI does, including the
 two choices that can only be made at spawn (see
 [Spawning with a role…](#spawning-with-a-role-or-from-another-sessions-conversation)):
@@ -1626,7 +1678,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/auth/session`            | token → HttpOnly cookie (browser login) |
 | GET    | `/api/daemon`                  | version/uptime/session count |
 | POST   | `/api/daemon/shutdown`         | graceful stop |
-| GET/POST | `/api/sessions`              | list / create (`{name?, harness?, profile?, cwd?, args?, env?, role?, resume?, fork_session?}`; `resume` = session name, conversation uuid, or `""`/`true` for claude's picker) |
+| GET/POST | `/api/sessions`              | list / create (`{name?, harness?, profile?, cwd?, args?, env?, role?, resume?, fork_session?}`; `resume` = session name, conversation uuid, or `""`/`true` for claude's picker). Onboarding is optional and composed in the same call: `{mesh?, handle?, connect?, workflow?, context?, task?}` — checked before anything is built, and reported per leg beside the session's own fields |
 | DELETE | `/api/sessions`                | clear all exited records (`?logs=1` deletes their logs) |
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it |

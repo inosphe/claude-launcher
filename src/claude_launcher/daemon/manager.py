@@ -102,7 +102,7 @@ class SessionManager:
             )
         return replace(sdef, resume=cid)
 
-    def spawn(self, parent: str, request: dict) -> Session:
+    def spawn(self, parent: str, request: dict, *, identity: str = "") -> Session:
         """Create a child of ``parent`` under the spawn policy.
 
         The agent-facing counterpart of :meth:`create`: the child is built
@@ -143,6 +143,10 @@ class SessionManager:
                     ),
                     "parent": parent,
                     "restore": False,
+                    # Who the child IS, resolved by the caller before this
+                    # point because the system prompt is fixed when the PTY
+                    # starts and the mesh join happens after it.
+                    "identity": identity,
                 }
             )
         )

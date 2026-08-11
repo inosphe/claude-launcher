@@ -539,6 +539,18 @@ $("new-session").addEventListener("submit", async (e) => {
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
   if (f.role.value) body.role = f.role.value;
+  // Onboarding: only sent when chosen. The daemon checks each before it
+  // builds anything, so a stale mesh or workflow is refused with nothing
+  // left behind.
+  if (f.mesh.value) {
+    body.mesh = f.mesh.value;
+    if (f.handle.value.trim()) body.handle = f.handle.value.trim();
+  }
+  if (f.workflow.value) {
+    body.workflow = f.workflow.value;
+    if (f.context.value.trim()) body.context = f.context.value.trim();
+  }
+  if (f.task.value.trim()) body.task = f.task.value.trim();
   if (f.resume.value) {
     // "" (no resume) is left off entirely: the API reads a missing key as
     // "a new conversation" and an empty string as "open the picker".
@@ -563,6 +575,11 @@ $("new-session").addEventListener("submit", async (e) => {
   // Create at the same conversation and quietly open it twice. The role is
   // left alone — spawning a second worker is a normal thing to want.
   f.resume.value = "";
+  // The opening task named this session's job, so it is spent too — the
+  // mesh and workflow pickers are not, since a second worker on the same
+  // team is the normal next thing to want.
+  f.task.value = "";
+  f.context.value = "";
   syncForkAvailability();
   const info = await resp.json();
   await refreshSessions();
@@ -1066,13 +1083,62 @@ function route() {
     case "wf": openWorkflow(r.cwd, r.scope); break;
     case "mesh": openMesh(r.name); break;
     case "meshes": showView("meshes"); refreshMeshList(); break;
-    case "new": showView("new"); break;
+    case "new": showView("new"); refreshWorkflowChoices(); break;
     case "flows": showView("flows"); refreshCflow(); break;
     case "ws": openWorkspaces(); break;
     default: openHome();
   }
 }
 window.addEventListener("hashchange", route);
+
+/* The create form's mesh and workflow pickers. Both are lists the daemon
+   already publishes, so neither is a text box: a mesh that does not exist or
+   a workflow that is not declared here would be refused at create time, and
+   the refusal is cheaper never to provoke. */
+function syncOnboardPickers() {
+  const form = $("new-session");
+  const mesh = form.mesh;
+  const keptMesh = mesh.value;
+  mesh.innerHTML = "";
+  mesh.appendChild(new Option("(none)", ""));
+  for (const m of meshCache) mesh.appendChild(new Option(m.name, m.name));
+  mesh.value = [...mesh.options].some((o) => o.value === keptMesh) ? keptMesh : "";
+  $("new-handle-row").classList.toggle("hidden", !mesh.value);
+
+  const wf = form.workflow;
+  const keptWf = wf.value;
+  wf.innerHTML = "";
+  wf.appendChild(new Option("(none)", ""));
+  for (const name of workflowsCache) wf.appendChild(new Option(name, name));
+  wf.value = [...wf.options].some((o) => o.value === keptWf) ? keptWf : "";
+  $("new-context-row").classList.toggle("hidden", !wf.value);
+}
+
+/* Workflows are declared per directory, so the list follows the Directory
+   picker rather than being fetched once. */
+let workflowsCache = [];
+let workflowsFor = null;
+async function refreshWorkflowChoices() {
+  const cwd = document.querySelector("#new-session select[name=cwd]").value;
+  if (cwd === workflowsFor) return;
+  workflowsFor = cwd;
+  try {
+    const resp = await api(`/api/cflow/workflows?cwd=${encodeURIComponent(cwd)}`);
+    workflowsCache = resp.ok
+      ? ((await resp.json()).workflows || []).map((w) => w.name || w)
+      : [];
+  } catch {
+    workflowsCache = [];
+  }
+  syncOnboardPickers();
+}
+
+$("new-session").mesh.addEventListener("change", syncOnboardPickers);
+$("new-session").workflow.addEventListener("change", syncOnboardPickers);
+document
+  .querySelector("#new-session select[name=cwd]")
+  .addEventListener("change", refreshWorkflowChoices);
+
 
 function el(tag, cls, text) {
   const node = document.createElement(tag);
@@ -2259,6 +2325,7 @@ async function refreshMeshList() {
     list.appendChild(li);
   }
   renderOutgoingJoins(data.outgoing || []);
+  syncOnboardPickers();
   if (currentPage === "home") renderHome();
 }
 

@@ -85,6 +85,26 @@
           <span><code>--fork-session</code> (leave the original untouched)</span>
         </label>
         <label>Args <input name="args" placeholder="extra harness flags"></label>
+
+        <!-- What the session is FOR. Decided here because arranging them
+             afterwards leaves an agent sitting at a prompt not knowing
+             which mesh it is in or which run it drives. -->
+        <fieldset id="new-onboard">
+          <legend>Start it working</legend>
+          <label>Mesh <select name="mesh"></select></label>
+          <label id="new-handle-row" class="hidden">
+            Handle <input name="handle" placeholder="(session name)">
+          </label>
+          <label>Workflow <select name="workflow"></select></label>
+          <label id="new-context-row" class="hidden">
+            Context <input name="context" placeholder="context for the run (optional)">
+          </label>
+          <label>Opening task
+            <textarea name="task" rows="3"
+              placeholder="typed in once it has booted — what it is for"></textarea>
+          </label>
+        </fieldset>
+
         <button type="submit">Create</button>
         <p id="create-error" class="error hidden"></p>
       </form>

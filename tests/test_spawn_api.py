@@ -49,6 +49,22 @@ async def _serve(mgr, mm):
     return client
 
 
+
+def _declare_review_workflow(cwd) -> None:
+    """A one-step workflow declared in ``cwd``, so preflight can find it."""
+    d = cwd / ".claunch" / "workflows"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "review.yaml").write_text(
+        "name: review\n"
+        "start: look\n"
+        "steps:\n"
+        "  look:\n"
+        "    title: Look\n"
+        "    instructions: look at it\n",
+        encoding="utf-8",
+    )
+
+
 def test_spawn_creates_a_child_that_inherits_and_joins(home, tmp_path):
     _register_py_harness()
 
@@ -389,3 +405,164 @@ def test_a_spawn_role_becomes_the_members_role_in_the_mesh(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# onboarding: a session created with a job, not just a program
+#
+# The composition (create -> join -> start run -> brief) has always existed on
+# the spawn endpoint. These cover it on the human path, and cover the two
+# properties that made it worth lifting out: nothing is built until the
+# request is known to be honourable, and the briefing arrives as ONE block.
+# --------------------------------------------------------------------------- #
+def test_create_joins_a_mesh_and_starts_a_run_in_one_call(home, tmp_path):
+    _register_py_harness()
+    _declare_review_workflow(tmp_path)
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            resp = await client.post(
+                "/api/sessions",
+                json={
+                    "name": "w1", "harness": "py", "cwd": str(tmp_path),
+                    "mesh": "team", "handle": "worker_1",
+                    "workflow": "review", "task": "take the API",
+                },
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            body = await resp.json()
+
+            # the session's own fields stay at the top level, as they always
+            # have, with each onboarding leg reported beside them
+            assert body["name"] == "w1"
+            assert body["mesh"]["ok"] is True
+            assert body["mesh"]["handle"] == "worker_1"
+            assert body["workflow"]["ok"] is True, body["workflow"]
+            assert body["workflow"]["scope"] == "w1"
+            assert body["task"]["ok"] is True
+            assert mm.get("team").members["worker_1"].session == "w1"
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_an_unknown_mesh_is_refused_before_anything_is_built(home, tmp_path):
+    """The reason preflight exists: the system prompt is fixed when the PTY
+    starts, so the mesh has to be known first — which also turns 'the session
+    came up, then the join failed' into a 400 with nothing left behind."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "w1", "harness": "py", "cwd": str(tmp_path),
+                      "mesh": "nope"},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            assert "no mesh named" in (await resp.json())["error"]
+            assert [s.sdef.name for s in mgr.list()] == []
+
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "w1", "harness": "py", "cwd": str(tmp_path),
+                      "workflow": "ghost"},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            assert "no workflow named" in (await resp.json())["error"]
+            assert [s.sdef.name for s in mgr.list()] == []
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_taken_handle_is_refused_before_the_session_exists(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            await mm.join("team", "lead", handle="lead")
+
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "w1", "harness": "py", "cwd": str(tmp_path),
+                      "mesh": "team", "handle": "lead"},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            assert "already taken" in (await resp.json())["error"]
+            assert "w1" not in [s.sdef.name for s in mgr.list()]
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_identity_goes_to_the_system_prompt_but_the_roster_never_does(home, tmp_path):
+    """The split the two channels are for: a handle holds for the session's
+    life and belongs in the prompt; who it can reach is rewired mid-session
+    and must stay in the briefing, which is re-derived every time."""
+    from claude_launcher.daemon import onboard
+
+    _declare_review_workflow(tmp_path)
+    plan = onboard.preflight(
+        {"mesh": "team", "handle": "worker_1", "workflow": "review"},
+        mesh_mgr=_FakeMeshMgr(),
+        session_name="w1",
+        cwd=str(tmp_path),
+        harness="claude",
+    )
+    assert "worker_1" in plan.identity
+    assert "review" in plan.identity
+    # never the roster: it goes stale the moment connect/disconnect runs
+    assert "members:" not in plan.identity
+    assert "reach" in plan.identity  # ...it points at the briefing instead
+
+    # and nothing at all for a harness with no system prompt to append to
+    bare = onboard.preflight(
+        {"mesh": "team", "handle": "worker_1"},
+        mesh_mgr=_FakeMeshMgr(), session_name="w1",
+        cwd=str(tmp_path), harness="py",
+    )
+    assert bare.identity == ""
+
+
+class _FakeMeshMgr:
+    """Just the two lookups preflight makes — no daemon, no event loop."""
+
+    class _Mesh:
+        name = "team"
+        members: dict = {}
+
+    def get(self, name):
+        if name != "team":
+            from claude_launcher.daemon.mesh import MeshError
+
+            raise MeshError(f"no mesh named {name!r}")
+        return self._Mesh()
+
+    def list(self):
+        return [self._Mesh()]
