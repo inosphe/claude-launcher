@@ -288,6 +288,8 @@ body {
   padding: 6px 16px; margin-right: 8px; font-size: 13px; cursor: pointer;
   border: none; border-radius: 5px; color: #fff;
 }
+/* the same chip when it is a link rather than a button (page-to-page moves) */
+a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-btn.approve { background: #238636; }
 .wf-btn.approve:hover { background: #2ea043; }
 .wf-btn.option { background: #1f6feb; }
@@ -432,7 +434,7 @@ body {
 }
 
 /* mesh detail view */
-#mesh-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
+#mesh-view, #flow-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
 .mesh-members, .mesh-send, .mesh-fed, .mesh-policy, .mesh-links, .mesh-roles,
 .mesh-owed {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
@@ -640,6 +642,97 @@ body {
 .mesh-legend-swatch.spawn { border-top-color: #454c56; }
 .mesh-legend-swatch.mcut { border-top-style: dashed; border-top-color: #ff7b72; }
 
+/* ---- flow topology (phase 11): the same mesh, with the runs inside it --- */
+/* The palette is deliberately the run page's, not the mesh page's: a green
+   ring for visited, a blue one for where the agent is now, amber for a step
+   that wants a human. Somebody who has read one run page can read a wall of
+   these without a legend. */
+.flow-ring {
+  display: block; min-width: 240px; max-width: 100%; margin-top: 10px;
+  background: #1b1e24; border: 1px solid #2a2e36; border-radius: 8px;
+}
+.flow-card { cursor: pointer; }
+.flow-card text { pointer-events: none; }
+.flow-card-box { fill: #22262d; stroke: #363c46; stroke-width: 1.5; }
+.flow-card:hover .flow-card-box { stroke: #8fa1b3; }
+.flow-card.picked .flow-card-box { stroke: #58a6ff; stroke-width: 2.4; }
+/* An agent waiting on a person is the one thing here nobody may scroll past. */
+.flow-card.blocked .flow-card-box { stroke: #d29922; stroke-width: 2.2; }
+.flow-card.error .flow-card-box { stroke: #ff7b72; stroke-width: 2; }
+.flow-card.done .flow-card-box { stroke: #2f6f43; }
+.flow-card.none .flow-card-box, .flow-card.unknown .flow-card-box {
+  fill: #1e2126; stroke: #2f343d; stroke-dasharray: 4 3;
+}
+.flow-handle { fill: #d8dbe0; font-size: 12.5px; font-weight: 600; }
+.flow-wf { fill: #7d8590; font-size: 10.5px; }
+.flow-foot { fill: #8fa1b3; font-size: 10.5px; }
+.flow-foot.none { fill: #6e7681; }
+.flow-state { font-size: 10px; fill: #6e7681; }
+.flow-state.blocked { fill: #d29922; }
+.flow-state.running { fill: #3fb950; }
+.flow-state.deciding { fill: #58a6ff; }
+.flow-state.error { fill: #ff7b72; }
+.flow-dot { fill: #6e7681; }
+.flow-dot.idle { fill: #3fb950; }
+.flow-dot.busy { fill: #d29922; }
+.flow-dot.starting { fill: #58a6ff; }
+
+/* the track: the workflow itself, one line per agent */
+.flow-rail { stroke: #3a4049; stroke-width: 1.6; }
+.flow-arc { fill: none; stroke: #454c56; stroke-width: 1.2; }
+.flow-arc.back { stroke: #8a6d3b; stroke-dasharray: 3 2; }
+.flow-pip-mark { fill: #1b1e24; stroke: #4d5566; stroke-width: 1.5; }
+.flow-pip.visited .flow-pip-mark { fill: #23402c; stroke: #3fb950; }
+.flow-pip.current .flow-pip-mark { fill: #14233a; stroke: #58a6ff; stroke-width: 2.2; }
+.flow-halo { fill: none; stroke: #58a6ff; stroke-width: 1; opacity: 0.4; }
+.flow-card.blocked .flow-pip.current .flow-pip-mark { stroke: #d29922; }
+.flow-card.blocked .flow-halo { stroke: #d29922; opacity: 0.55; }
+.flow-pip-core { fill: #4d5566; }
+.flow-pip.current .flow-pip-core { fill: #58a6ff; }
+/* gate on the left of the pip (must be let IN), verify on the right (must
+   pass to get OUT) — the side is the whole of the distinction */
+.flow-bar { stroke-width: 2; }
+.flow-bar.gate { stroke: #d29922; }
+.flow-bar.verify { stroke: #58a6ff; }
+.flow-visits { fill: #d29922; font-size: 9px; }
+
+.flow-legend { display: flex; gap: 14px; margin-top: 8px; flex-wrap: wrap; }
+.flow-legend .mesh-legend-item { color: #7d8590; font-size: 11px; }
+.flow-legend-swatch {
+  width: 9px; height: 9px; border-radius: 50%; border: 1.5px solid #4d5566;
+  display: inline-block;
+}
+.flow-legend-swatch.visited { background: #23402c; border-color: #3fb950; }
+.flow-legend-swatch.current { background: #14233a; border-color: #58a6ff; }
+.flow-legend-swatch.select { border-radius: 2px; transform: rotate(45deg); }
+.flow-legend-swatch.gate { border-radius: 0; width: 3px; border-color: #d29922;
+  background: #d29922; }
+.flow-legend-swatch.verify { border-radius: 0; width: 3px; border-color: #58a6ff;
+  background: #58a6ff; }
+.flow-legend-swatch.back { border-radius: 0; height: 0; width: 14px;
+  border: none; border-top: 1.5px dashed #8a6d3b; }
+.flow-legend-swatch.end { box-shadow: inset 0 0 0 2px #1b1e24; background: #4d5566; }
+
+/* the blocked runs, repeated in text with the buttons that clear them */
+.flow-waiting, .flow-detail {
+  margin: 14px 0; padding: 12px 16px; background: #1b1e24;
+  border: 1px solid #2a2e36; border-radius: 8px; max-width: 900px;
+}
+.flow-waiting h3, .flow-detail h3 {
+  margin: 0 0 8px; font-size: 12px; text-transform: uppercase;
+  color: #7d8590; letter-spacing: 0.5px;
+}
+.flow-waiting-row {
+  display: flex; align-items: center; gap: 10px; padding: 6px 0;
+  border-top: 1px solid #24282f; flex-wrap: wrap;
+}
+.flow-waiting-what { color: #d29922; font-size: 12px; flex: 1 1 240px; }
+.flow-waiting-acts { display: flex; gap: 6px; margin-left: auto; }
+.flow-waiting-acts .wf-btn { margin: 0; }
+.flow-detail-head { display: flex; align-items: baseline; gap: 12px; }
+.flow-detail-head .wf-btn { margin-left: auto; }
+.flow-detail .wf-diagram { margin-top: 10px; }
+
 /* the dead-route panel: leave, jump to a mesh that exists, or create one */
 .mesh-missing-actions {
   display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; max-width: 760px;
@@ -798,9 +891,10 @@ body {
   .auth-box { width: auto; max-width: 360px; margin: 0 16px; padding: 22px; }
 
   /* ---- the pages that live in #main ---- */
-  #wf-view, #mesh-view, #sess-view, #ws-view {
+  #wf-view, #mesh-view, #flow-view, #sess-view, #ws-view {
     padding: 14px 12px; overscroll-behavior: contain;
   }
+  .flow-waiting, .flow-detail,
   .mesh-members, .mesh-send, .mesh-fed, .mesh-policy, .mesh-links,
   .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo,
   .sess-meta, .sess-meshes, .sess-wf, .wf-pending,

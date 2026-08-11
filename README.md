@@ -1698,6 +1698,29 @@ through the same authenticated human channel as the CLI; the agent still
 has no way to approve. A slot with a pending start request is listed there
 too, so the wait between asking and the agent picking it up is visible.
 
+A mesh's page (`#/mesh/<name>`) leads with the **topology diagram** — a
+cluster per daemon on the rank ring, each holding its spawn forest, with cuts
+overlaid and reachability on demand. Its **flow view** link opens the same
+mesh read a second way (`#/mesh/<name>/flows`), where every agent is a card
+carrying its whole [cflow](#cflow-declarative-agent-workflows) run as a
+track: one pip per step in the run page's own order, visited behind it, a
+haloed pip where it is now, hollow ahead; a diamond for a branch, bars either
+side of a pip for the gate you must be let through and the verify you must
+pass to leave, and an arc under the rail wherever the workflow loops back.
+The two pictures place the same mesh identically — the layout is literally
+the same code — so they read as two zoom levels of one thing rather than two
+diagrams.
+
+What it is *for* decides its styling: an agent waiting on a **human** is the
+loudest thing on the page, and those cards are repeated in a **Waiting on
+you** strip above the canvas with the Approve and option buttons that clear
+them, so the answer is in the same place as the question. An agent-chooser
+select is deliberately not in that strip — that branch is the agent's own
+call. Clicking a card opens the full state machine underneath it, unchanged
+from the run page, alongside who spawned it, who it may message and a link to
+the run. Members with no run say so rather than showing an empty track, and
+members on another daemon say that their state lives over there.
+
 - **Auth is mandatory** (even on loopback): the CLI reads the token from
   `~/.claude-launcher/daemon/token` automatically; the browser asks once for
   `claunch daemon token` and stores an HttpOnly cookie. API clients send
@@ -1737,6 +1760,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/mesh/{mesh}/members`     | `{session, handle?, role?, code?}` — enrol a session; `{mesh}` may be `mesh@machine` (201 admitted, 202 pending approval) |
 | DELETE | `/api/mesh/{mesh}/members/{handle}` | remove a member |
 | GET/POST | `/api/mesh/{mesh}/messages`  | history (`?limit=`) / send `{from, to, body, external?}` |
+| GET    | `/api/mesh/{mesh}/flows`       | every member's cflow run, plus the workflow graphs behind them (deduplicated per `workflow@cwd`) — the roster/run join the flow view is drawn from |
 | GET/PUT | `/api/mesh/{mesh}/policy`     | read / edit the mesh's nudge policy (heartbeat, task-poll, stall warnings) |
 | GET/PUT | `/api/mesh/{mesh}/roles`      | read / upload the mesh's role set (`{yaml}` or `{roles}`; either null resets to the packaged vocabulary) |
 | POST   | `/api/mesh/{mesh}/invite`      | mint a single-use ticket pre-approving one join |

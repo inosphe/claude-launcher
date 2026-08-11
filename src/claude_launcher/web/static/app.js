@@ -936,6 +936,7 @@ function mobileTitle() {
     case "flows": return "workflows";
     case "ws": return "workspaces";
     case "mesh": return `mesh · ${meshName}`;
+    case "flow": return `flows · ${flowMesh}`;
     case "wf": return `workflow · ${shortenPath(wfCwd || "")}`;
     case "session": return `session · ${sessName}`;
     default: return currentName || "no session";
@@ -1031,6 +1032,7 @@ const VIEWS = {
   session: "sess-view",
   wf: "wf-view",
   mesh: "mesh-view",
+  flow: "flow-view",
   ws: "ws-view",
 };
 
@@ -1106,6 +1108,7 @@ function selectWfStep(step) {
  *   #/new               the create form
  *   #/mesh              the mesh list, and create/join
  *   #/mesh/<name>       one mesh
+ *   #/mesh/<name>/flows ...and where each of its agents is in its workflow
  *   #/flows             cflow runs
  *   #/wf/<scope|cwd>    one run
  *   #/workspaces        the workspace registry
@@ -1129,7 +1132,12 @@ function parseHash(h) {
       : { page: "wf", cwd: token, scope: "default" };  // pre-scope links
   }
   if (parts[0] === "mesh") {
-    return parts[1] ? { page: "mesh", name: parts[1] } : { page: "meshes" };
+    if (!parts[1]) return { page: "meshes" };
+    // Same shape as #/s/<name>/info: one more segment is a second reading of
+    // the same thing, not a different thing.
+    return parts[2] === "flows"
+      ? { page: "flow", name: parts[1] }
+      : { page: "mesh", name: parts[1] };
   }
   if (parts[0] === "new") return { page: "new" };
   if (parts[0] === "flows") return { page: "flows" };
@@ -1143,6 +1151,7 @@ function route() {
   // open function never has to know which other pages exist.
   if (r.page !== "wf") stopWfPoll();
   if (r.page !== "mesh") stopMeshPoll();
+  if (r.page !== "flow") stopFlowPoll();
   if (r.page !== "ws") closeWorkspaces();
 
   switch (r.page) {
@@ -1156,6 +1165,7 @@ function route() {
     case "session": openSession(r.name); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
     case "mesh": openMesh(r.name); break;
+    case "flow": openFlowTopology(r.name); break;
     case "meshes": showView("meshes"); refreshMeshList(); break;
     case "new": showView("new"); refreshWorkflowChoices(); break;
     case "flows": showView("flows"); refreshCflow(); break;
@@ -3072,8 +3082,13 @@ function meshForest(members) {
 /* Tidy layered layout: depth picks the row, a leaf takes the next free column
    and a parent centres over its children. Deterministic on purpose — the
    panel is rebuilt every 2s, and a force simulation would redraw a slightly
-   different picture each time for a graph whose shape we already know. */
-function layoutForest(forest) {
+   different picture each time for a graph whose shape we already know.
+
+   `m` is the metric block — RING for the dot-per-agent picture, a wider one
+   for the flow view, whose agents are cards. Same engine either way: the two
+   views must place the same mesh the same way, or they stop being two zoom
+   levels of one thing. */
+function layoutForest(forest, m = RING) {
   const pos = new Map();
   let col = 0;
   const place = (handle, depth) => {
@@ -3083,7 +3098,7 @@ function layoutForest(forest) {
       .map((c) => place(c, depth + 1))
       .filter((x) => x !== null);
     const x = xs.length ? (xs[0] + xs[xs.length - 1]) / 2 : col++;
-    pos.set(handle, { x: x * RING.colW, y: depth * RING.rowH });
+    pos.set(handle, { x: x * m.colW, y: depth * m.rowH });
     return x;
   };
   for (const root of forest.roots) {
@@ -3094,20 +3109,20 @@ function layoutForest(forest) {
 }
 
 /* Lay a cluster out in its own coordinates and measure the box it needs. */
-function measureCluster(cluster) {
-  const pos = layoutForest(meshForest(cluster.members));
+function measureCluster(cluster, m = RING) {
+  const pos = layoutForest(meshForest(cluster.members), m);
   const nodes = [...pos].map(([handle, p]) => ({ handle, ...p }));
   const xs = nodes.map((n) => n.x);
   const minX = nodes.length ? Math.min(...xs) : 0;
   const maxX = nodes.length ? Math.max(...xs) : 0;
   const maxY = nodes.length ? Math.max(...nodes.map((n) => n.y)) : 0;
-  const offX = RING.pad.x + RING.colW / 2 - minX;
-  for (const n of nodes) { n.x += offX; n.y += RING.pad.top; }
+  const offX = m.pad.x + m.colW / 2 - minX;
+  for (const n of nodes) { n.x += offX; n.y += m.pad.top; }
   return {
     nodes,
     at: new Map(nodes.map((n) => [n.handle, n])),
-    w: maxX - minX + RING.colW + 2 * RING.pad.x,
-    h: maxY + RING.leaf + RING.pad.top + RING.pad.bottom,
+    w: maxX - minX + m.colW + 2 * m.pad.x,
+    h: maxY + m.leaf + m.pad.top + m.pad.bottom,
   };
 }
 
@@ -3403,6 +3418,13 @@ function renderMesh(info, history, force, owed) {
   if (isMirror) {
     head.appendChild(el("span", "mesh-mirror-badge", `mirror of ${info.primary}`));
   }
+  // The same mesh with the runs drawn in. A link rather than a section: the
+  // roster answers "who is here", and adding "how far along is each of them"
+  // to the same page would make the answer to neither easy to find.
+  const flowLink = el("a", "wf-btn option", "flow view");
+  flowLink.href = "#/mesh/" + encodeURIComponent(info.name) + "/flows";
+  flowLink.title = "the same topology, with every agent's workflow inside it";
+  head.appendChild(flowLink);
   const rm = el("button", "wf-btn archive", "Remove mesh");
   rm.addEventListener("click", async () => {
     if (!confirm(`Remove mesh '${info.name}'? Its history is retired on disk.`)) return;
@@ -4099,6 +4121,625 @@ function meshDotClass(reachability) {
   if (reachability === "busy" || reachability === "starting") return "busy";
   if (reachability === "remote-connected") return "starting";
   return "exited"; // exited / missing / remote-disconnected / unknown
+}
+
+/* ------------------------------------------------------------------ */
+/* flow topology (#/mesh/<name>/flows) — the mesh, and how far along   */
+/* every agent in it is                                                */
+/* ------------------------------------------------------------------ */
+/* The mesh page answers "who is here, and who may speak to whom". The flows
+   page answers "which runs exist, and where do they stand". Neither answers
+   the question a person actually arrives with, which is the join of the two:
+   *which of my agents is stuck, and who do I ask about it*. Reading it today
+   means holding a roster in your head while scrolling a list of runs.
+
+   So this view puts the run inside the node. Same mesh, same clusters, same
+   spawn forest, same cuts — the layout engine is literally the one the other
+   diagram uses, called with wider metrics — but every agent is a card, and
+   the card carries its whole state machine as a track:
+
+       ●───●───◆───◉───○───▷        visited · select · HERE · ahead · end
+           │       └ gate/verify bars flank the pip they belong to
+           └────────────────┘        a back arc: this workflow loops
+
+   The track is the workflow breadth-first from `start` — the same order the
+   run page stacks its rows in, so the strip is that diagram turned on its
+   side, and the two are readable as one picture at two zoom levels. Steps
+   that terminate grow an `end` pip at the tail. Edges that a straight rail
+   already implies (i -> i+1) are not drawn; only the ones that say something
+   are: a skip forward arcs over the rail, a loop back arcs under it.
+
+   What the picture is FOR, in one rule: the loudest thing on it is an agent
+   waiting on a human. Those cards get a halo, and they are repeated above
+   the canvas with the actual Approve / option buttons, because a monitor you
+   cannot act from just sends you somewhere else to act. Everything else —
+   the full state machine, the reports, the journal — is one click away, on
+   the card, rather than in the picture. A dense diagram that answers the
+   wrong question is worse than a sparse one that answers the right one. */
+const FLOW = {
+  pip: 6,          // pip radius; the gate/verify bars flank it
+  gap: 22,         // pip centre to pip centre along the rail
+  trackPad: 18,    // rail inset from the card's edge
+  cardH: 78,
+  minCard: 158, maxCard: 320,
+};
+let flowMesh = null;      // mesh whose flow view is open
+let flowPollTimer = null;
+let flowPick = null;      // handle whose full state machine is expanded
+let flowLast = null;      // last {info, data}, for instant re-render on a pick
+
+/* Card size, and how tight the pips have to sit to fit the longest track in
+   this mesh. One geometry for every card: a workflow's progress is only
+   comparable across agents if the tracks line up. */
+function flowMetrics(maxPips) {
+  const span = FLOW.gap * Math.max(0, maxPips - 1);
+  const wanted = span + 2 * FLOW.trackPad;
+  const cardW = Math.min(FLOW.maxCard, Math.max(FLOW.minCard, wanted));
+  const gap = wanted > FLOW.maxCard && maxPips > 1
+    ? (FLOW.maxCard - 2 * FLOW.trackPad) / (maxPips - 1)
+    : FLOW.gap;
+  return {
+    cardW, cardH: FLOW.cardH, gap,
+    // The RING contract, in card units — see layoutForest/measureCluster.
+    // pad.top must clear the machine-name header AND the half-card that
+    // hangs above the first row's centre line.
+    node: FLOW.cardH / 2, colW: cardW + 26, rowH: FLOW.cardH + 36,
+    leaf: FLOW.cardH / 2 + 12, gapRing: 46,
+    pad: { x: 26, top: 34 + FLOW.cardH / 2, bottom: 16 },
+  };
+}
+
+/* The steps of a workflow in the order the run page lays them out: breadth
+   first from `start`, then whatever the walk could not reach (an orphaned
+   step is a mistake worth seeing, not worth hiding). Deliberately the same
+   walk as wfDiagramSvg's — not shared with it, because that one builds a
+   string and this one builds data, but a test pins the two orders together.
+   If they ever drift, the strip stops being the run page's diagram. */
+function flowOrder(wf) {
+  const steps = wf.steps || [];
+  const byId = {};
+  for (const s of steps) byId[s.id] = s;
+  const outs = (s) => (s.select ? s.select.options.map((o) => o.next) : [s.next]);
+  const order = [];
+  const seen = new Set();
+  const queue = [wf.start];
+  while (queue.length) {
+    const id = queue.shift();
+    if (!id || seen.has(id) || !byId[id]) continue;
+    seen.add(id);
+    order.push(id);
+    for (const t of outs(byId[id])) if (t && !seen.has(t)) queue.push(t);
+  }
+  for (const s of steps) if (!seen.has(s.id)) order.push(s.id);
+  return order;
+}
+
+/* One agent's whole state machine, squeezed onto a line. Pure: everything
+   the drawing needs, and nothing about pixels. */
+function flowTrack(wf, run) {
+  const order = flowOrder(wf);
+  const byId = {};
+  for (const s of wf.steps || []) byId[s.id] = s;
+  const outs = (s) => (s.select ? s.select.options.map((o) => o.next) : [s.next]);
+  const index = new Map(order.map((id, i) => [id, i]));
+  const visits = (run && run.visits) || {};
+  const status = (run && run.status) || "";
+  // A finished run is nowhere: leaving step_id lit would claim it is still
+  // working on the step it stopped at.
+  const here = status === "done" || status === "aborted"
+    ? "" : (run && run.step_id) || "";
+
+  const pips = order.map((id) => {
+    const s = byId[id];
+    return {
+      id,
+      kind: s.select ? "select" : "step",
+      gate: !!s.gate,
+      verify: !!s.verify,
+      visits: visits[id] || 0,
+      state: id === here ? "current" : (visits[id] ? "visited" : "ahead"),
+    };
+  });
+  if (order.some((id) => outs(byId[id]).some((t) => !t))) {
+    pips.push({
+      id: "end", kind: "end", gate: false, verify: false, visits: 0,
+      state: status === "done" ? "current" : "ahead",
+    });
+    index.set("end", pips.length - 1);
+  }
+
+  const arcs = [];
+  const drawn = new Set();
+  for (const id of order) {
+    for (const t of outs(byId[id])) {
+      const to = t ? t : "end";
+      if (!index.has(to)) continue;   // a `next` naming nothing: no edge to draw
+      const i = index.get(id), j = index.get(to);
+      const key = `${i}>${j}`;
+      if (j === i + 1 || drawn.has(key)) continue;  // the rail already says it
+      drawn.add(key);
+      arcs.push({ from: i, to: j, back: j <= i });
+    }
+  }
+  return {
+    pips, arcs,
+    current: here && index.has(here) ? index.get(here) : -1,
+    // The graphs are shared per workflow@cwd, so a re-run over an edited YAML
+    // can put the run on a step this snapshot has never heard of. Say so
+    // rather than drawing a track with nothing lit on it.
+    offGraph: !!here && !index.has(here),
+  };
+}
+
+/* Blocked on a HUMAN — the one state in this picture a person can clear. An
+   agent-chooser select is the agent's own call and must not read as a queue
+   for the operator. */
+function flowNeedsHuman(f) {
+  if (!f || f.remote) return false;
+  if (f.status === "waiting_approval" || f.status === "waiting_selection") return true;
+  return f.status === "select" && f.chooser === "user";
+}
+
+/* One word for the whole card, and the class that colours it. */
+function flowState(f) {
+  if (!f || f.remote) return "unknown";
+  if (flowNeedsHuman(f)) return "blocked";
+  switch (f.status) {
+    case "error": return "error";
+    case "done": return "done";
+    case "aborted": return "aborted";
+    case "select": return "deciding";
+    case "idle": case "no_session": case undefined: case "": return "none";
+    default: return "running";
+  }
+}
+
+const FLOW_WORDS = {
+  blocked: "waiting on you", running: "running", deciding: "agent deciding",
+  done: "done", aborted: "aborted", error: "error",
+  none: "no run", unknown: "run lives on its own daemon",
+};
+
+/* ---- drawing ---------------------------------------------------------- */
+function flowPipShape(pip, x, y) {
+  const r = FLOW.pip;
+  if (pip.kind === "select") {
+    return svg("path", {
+      class: "flow-pip-mark",
+      d: `M ${x} ${y - r - 1} L ${x + r + 1} ${y} L ${x} ${y + r + 1} ` +
+         `L ${x - r - 1} ${y} Z`,
+    });
+  }
+  return svg("circle", { class: "flow-pip-mark", cx: x, cy: y, r });
+}
+
+/* The track, in card coordinates (0,0 = the card's centre). */
+function flowTrackSvg(track, m) {
+  const g = svg("g", { class: "flow-track" });
+  const y = 4;
+  // Centred, not left-aligned: the pip spacing is one number for the whole
+  // mesh, so two agents on the same workflow still line up pip for pip, and
+  // a short workflow beside a long one does not sit in a lopsided card.
+  const x0 = -(m.gap * (track.pips.length - 1)) / 2;
+  const xOf = (i) => x0 + i * m.gap;
+  const last = track.pips.length - 1;
+  if (last > 0) {
+    g.appendChild(svg("line", {
+      class: "flow-rail", x1: xOf(0), y1: y, x2: xOf(last), y2: y,
+    }));
+  }
+  for (const a of track.arcs) {
+    const xa = xOf(a.from), xb = xOf(a.to);
+    // Kept shallow deliberately: the card's two text lines sit ~17px either
+    // side of the rail, and an arc that reached them would read as a strike
+    // through the words rather than as an edge.
+    const lift = a.back ? 11 : -11;
+    g.appendChild(svg("path", {
+      class: `flow-arc ${a.back ? "back" : "skip"}`,
+      d: `M ${xa} ${y + (a.back ? FLOW.pip : -FLOW.pip)} ` +
+         `Q ${(xa + xb) / 2} ${y + lift * 2} ` +
+         `${xb} ${y + (a.back ? FLOW.pip : -FLOW.pip)}`,
+    }));
+  }
+  track.pips.forEach((pip, i) => {
+    const x = xOf(i);
+    const node = svg("g", { class: `flow-pip ${pip.state} ${pip.kind}` });
+    if (pip.state === "current") {
+      node.appendChild(svg("circle", {
+        class: "flow-halo", cx: x, cy: y, r: FLOW.pip + 5,
+      }));
+    }
+    // A gate is a door you must be let through to ENTER; a verify is one you
+    // must pass to LEAVE. Same mark, the side says which.
+    if (pip.gate) {
+      g.appendChild(svg("line", {
+        class: "flow-bar gate", x1: x - FLOW.pip - 4, y1: y - 6,
+        x2: x - FLOW.pip - 4, y2: y + 6,
+      }));
+    }
+    if (pip.verify) {
+      g.appendChild(svg("line", {
+        class: "flow-bar verify", x1: x + FLOW.pip + 4, y1: y - 6,
+        x2: x + FLOW.pip + 4, y2: y + 6,
+      }));
+    }
+    node.appendChild(flowPipShape(pip, x, y));
+    if (pip.kind === "end") {
+      node.appendChild(svg("circle", { class: "flow-pip-core", cx: x, cy: y, r: 2.5 }));
+    }
+    if (pip.visits > 1) {
+      node.appendChild(svg(
+        "text", { class: "flow-visits", x, y: y - FLOW.pip - 6, "text-anchor": "middle" },
+        `×${pip.visits}`
+      ));
+    }
+    node.appendChild(svg("title", {}, [
+      pip.id,
+      pip.kind === "select" ? "branch" : null,
+      pip.gate ? "gate to enter" : null,
+      pip.verify ? "verify to leave" : null,
+      pip.state === "current" ? "here now"
+        : pip.visits ? `visited ${pip.visits}×` : "not reached",
+    ].filter(Boolean).join(" · ")));
+    g.appendChild(node);
+  });
+  return g;
+}
+
+function flowCardSvg(member, f, wf, m) {
+  const state = flowState(f);
+  const g = svg("g", {
+    class: `flow-card ${state}` + (flowPick === member.handle ? " picked" : ""),
+  });
+  g.appendChild(svg("rect", {
+    class: "flow-card-box", x: -m.cardW / 2, y: -m.cardH / 2,
+    width: m.cardW, height: m.cardH, rx: 9,
+  }));
+  const left = -m.cardW / 2 + 12, right = m.cardW / 2 - 12, top = -m.cardH / 2;
+  g.appendChild(svg("circle", {
+    class: `flow-dot ${meshDotClass(member.reachability)}`,
+    cx: left + 4, cy: top + 16, r: 4,
+  }));
+  g.appendChild(svg(
+    "text", { class: "flow-handle", x: left + 14, y: top + 20 },
+    member.handle.length > 16 ? `${member.handle.slice(0, 15)}…` : member.handle
+  ));
+  const wfName = (f && f.workflow) || "";
+  g.appendChild(svg(
+    "text", { class: "flow-wf", x: right, y: top + 20, "text-anchor": "end" },
+    wfName.length > 18 ? `${wfName.slice(0, 17)}…` : (wfName || "—")
+  ));
+
+  if (wf && f) {
+    const track = flowTrack(wf, f);
+    g.appendChild(flowTrackSvg(track, m));
+    g.appendChild(svg(
+      "text", { class: "flow-foot", x: left, y: m.cardH / 2 - 10 },
+      track.offGraph
+        ? `${f.step_id} — not in this workflow snapshot`
+        : (f.step_id || FLOW_WORDS[state])
+    ));
+    g.appendChild(svg(
+      "text", { class: `flow-state ${state}`, x: right, y: m.cardH / 2 - 10,
+                "text-anchor": "end" },
+      FLOW_WORDS[state]
+    ));
+  } else {
+    // Nothing to track. The card says why in the space the track would have
+    // taken rather than in the corner, because on this page a card with no
+    // line through it is the thing a reader stops at.
+    g.appendChild(svg(
+      "text", { class: `flow-foot none ${state}`, x: left, y: 10 },
+      f && f.graph_error ? "workflow snapshot unreadable" : FLOW_WORDS[state]
+    ));
+  }
+  g.appendChild(svg("title", {}, [
+    `${member.handle} (${member.role})`,
+    member.session,
+    wfName ? `workflow ${wfName}` : "no workflow run",
+    FLOW_WORDS[state],
+    member.parent ? `spawned by ${member.parent}` : null,
+  ].filter(Boolean).join(" · ")));
+  g.addEventListener("click", () => {
+    flowPick = flowPick === member.handle ? null : member.handle;
+    if (flowLast) renderFlowTopo(flowLast.info, flowLast.data);
+  });
+  return g;
+}
+
+/* ---- the page --------------------------------------------------------- */
+function renderFlowTopo(info, data) {
+  const view = $("flow-view");
+  view.innerHTML = "";
+  const flows = data.flows || {};
+  const graphs = data.workflows || {};
+  const members = info.members || [];
+  const wfFor = (handle) => {
+    const f = flows[handle];
+    return f && f.key ? graphs[f.key] || null : null;
+  };
+
+  const head = el("div", "wf-head");
+  head.appendChild(el("h2", null, `flows: ${info.name}`));
+  const back = el("a", "wf-btn option", "mesh view");
+  back.href = "#/mesh/" + encodeURIComponent(info.name);
+  back.title = "the same mesh without the workflows: links, roster, history";
+  head.appendChild(back);
+  view.appendChild(head);
+  view.appendChild(el(
+    "p", "wf-desc",
+    "every agent in the mesh, with its workflow run drawn into it — " +
+    "click a card for the full state machine"
+  ));
+
+  if (!members.length) {
+    view.appendChild(el("p", "wf-note", "no members yet — nothing to draw"));
+    return;
+  }
+
+  // Blocked runs first, in text, with the buttons that clear them: the
+  // picture is where you notice, this is where you act.
+  const waiting = members.filter((m) => flowNeedsHuman(flows[m.handle]));
+  const strip = el("div", "flow-waiting");
+  strip.appendChild(el("h3", null, waiting.length
+    ? `Waiting on you (${waiting.length})`
+    : "Waiting on you"));
+  if (!waiting.length) {
+    strip.appendChild(el("p", "wf-note", "nothing in this mesh is blocked on a human"));
+  }
+  for (const m of waiting) strip.appendChild(flowWaitingRow(m, flows[m.handle]));
+  view.appendChild(strip);
+
+  const maxPips = Math.max(1, ...members.map((m) => {
+    const wf = wfFor(m.handle);
+    return wf ? flowTrack(wf, flows[m.handle]).pips.length : 1;
+  }));
+  const m = flowMetrics(maxPips);
+  const clusters = meshClusters(info).map((c) => ({ ...c, ...measureCluster(c, m) }));
+  const cell = m.gapRing + Math.max(...clusters.map(
+    (c) => (clusters.length === 2 ? c.h : Math.max(c.w, c.h))
+  ));
+  const radius = ringRadius(clusters.length, cell);
+  clusters.forEach((c, i) => {
+    const p = ringPoint(i, clusters.length, radius);
+    c.cx = p.x; c.cy = p.y;
+    c.left = p.x - c.w / 2; c.top = p.y - c.h / 2;
+  });
+  const at = new Map();
+  for (const c of clusters) {
+    for (const n of c.nodes) {
+      at.set(n.handle, { x: c.left + n.x, y: c.top + n.y, cluster: c });
+    }
+  }
+
+  const vb = {
+    x: Math.min(...clusters.map((c) => c.left)) - 4,
+    y: Math.min(...clusters.map((c) => c.top)) - 4,
+  };
+  vb.w = Math.max(...clusters.map((c) => c.left + c.w)) - vb.x + 4;
+  vb.h = Math.max(...clusters.map((c) => c.top + c.h)) - vb.y + 4;
+  const canvas = svg("svg", {
+    viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`,
+    width: Math.round(vb.w), height: Math.round(vb.h), class: "flow-ring",
+  });
+
+  /* 1. the clusters, behind what they hold */
+  for (const c of clusters) {
+    const rank = c.peer ? c.peer.rank : 0;
+    const g = svg("g", {
+      class: "mesh-cluster"
+        + (c.peer && c.peer.self ? " self" : "")
+        + (rank === 0 && c.peer ? " authority" : "")
+        + (c.peer && c.peer.ok === false ? " down" : ""),
+    });
+    g.appendChild(svg("rect", {
+      x: c.left, y: c.top, width: c.w, height: c.h, rx: 10,
+      class: "mesh-cluster-box",
+    }));
+    const label = c.machine || "this daemon";
+    g.appendChild(svg(
+      "text", { x: c.left + 12, y: c.top + 19, class: "mesh-cluster-name" },
+      (c.peer ? (rank === 0 ? "★ " : `${rank} · `) : "")
+        + (label.length > 20 ? `${label.slice(0, 19)}…` : label)
+    ));
+    canvas.appendChild(g);
+  }
+
+  /* 2. peer edges at the cluster boundary — unchanged from the mesh view,
+        because the transport is a property of the daemons either side */
+  const byMachine = {};
+  for (const p of info.peers || []) byMachine[p.machine] = p;
+  const byName = Object.fromEntries(clusters.map((c) => [c.machine, c]));
+  for (const edge of info.links || []) {
+    const a = byName[edge.a], b = byName[edge.b];
+    if (!a || !b) continue;
+    const cls = edgeClass(edge, byMachine);
+    const ea = boxExit(a, b.cx, b.cy), eb = boxExit(b, a.cx, a.cy);
+    const g = svg("g", { class: `mesh-edge-group ${cls}` });
+    g.appendChild(svg("line", {
+      x1: ea.x, y1: ea.y, x2: eb.x, y2: eb.y, class: `mesh-edge ${cls}`,
+    }));
+    g.appendChild(svg("title", {}, `${edge.a} <-> ${edge.b} — ${cls}`));
+    canvas.appendChild(g);
+  }
+
+  /* 3. spawn edges, card edge to card edge rather than centre to centre */
+  for (const mem of members) {
+    const child = at.get(mem.handle), parent = mem.parent && at.get(mem.parent);
+    if (!child || !parent || parent.cluster !== child.cluster) continue;
+    const mid = (parent.y + m.cardH / 2 + child.y - m.cardH / 2) / 2;
+    canvas.appendChild(svg("path", {
+      class: "mesh-spawn",
+      d: `M ${parent.x} ${parent.y + m.cardH / 2} V ${mid} ` +
+         `H ${child.x} V ${child.y - m.cardH / 2}`,
+    }));
+  }
+
+  /* 4. cuts: connected is the default and says nothing, a cut is a decision */
+  for (const e of info.member_links || []) {
+    if (e.enabled) continue;
+    const a = at.get(e.a), b = at.get(e.b);
+    if (!a || !b) continue;
+    const g = svg("g", { class: "mesh-mcut" });
+    g.appendChild(svg("line", { x1: a.x, y1: a.y, x2: b.x, y2: b.y }));
+    g.appendChild(svg("title", {}, `${e.a} ✕ ${e.b} — cannot message each other`));
+    canvas.appendChild(g);
+  }
+
+  /* 5. the agents, each carrying its own run */
+  for (const mem of members) {
+    const p = at.get(mem.handle);
+    if (!p) continue;
+    const card = flowCardSvg(mem, flows[mem.handle], wfFor(mem.handle), m);
+    card.setAttribute("transform", `translate(${p.x} ${p.y})`);
+    canvas.appendChild(card);
+  }
+  view.appendChild(canvas);
+
+  const legend = el("div", "flow-legend");
+  for (const [cls, label] of [
+    ["visited", "visited"], ["current", "here now"], ["ahead", "not reached"],
+    ["select", "branch"], ["gate", "gate in"], ["verify", "verify out"],
+    ["back", "loops back"], ["end", "terminates"],
+  ]) {
+    const item = el("span", "mesh-legend-item");
+    item.appendChild(el("i", `flow-legend-swatch ${cls}`));
+    item.appendChild(el("span", null, label));
+    legend.appendChild(item);
+  }
+  view.appendChild(legend);
+
+  if (flowPick) {
+    const mem = members.find((x) => x.handle === flowPick);
+    if (!mem) flowPick = null;      // it left while its card was open
+    else view.appendChild(flowDetail(info, mem, flows[flowPick], wfFor(flowPick)));
+  }
+}
+
+/* One blocked run, and the button that unblocks it. */
+function flowWaitingRow(member, f) {
+  const row = el("div", "flow-waiting-row");
+  const who = el("span", "mesh-handle linkish", member.handle);
+  who.title = "attach this session's terminal";
+  who.addEventListener("click", () => {
+    location.hash = "#/s/" + encodeURIComponent(f.session || member.session);
+  });
+  row.append(who, el("span", "mesh-role", member.role));
+  row.appendChild(el("span", "flow-waiting-what",
+    f.gate || f.prompt || `step ${f.step_id || "?"}`));
+  const act = el("span", "flow-waiting-acts");
+  if (f.status === "waiting_approval") {
+    const btn = el("button", "wf-btn approve",
+      f.reason === "loop_limit" ? "Extend loop limit" : "Approve gate");
+    btn.addEventListener("click", async () => {
+      if (!confirm(`Approve '${f.step_id}' for ${member.handle}?`)) return;
+      await cflowAction("/api/cflow/approve", { cwd: f.cwd, scope: f.scope });
+      refreshFlowView();
+    });
+    act.appendChild(btn);
+  } else {
+    for (const o of f.options || []) {
+      const btn = el("button", "wf-btn option", o.name);
+      btn.title = o.description || "";
+      btn.addEventListener("click", async () => {
+        if (!confirm(`Select '${o.name}' for ${member.handle}?`)) return;
+        await cflowAction("/api/cflow/select",
+          { cwd: f.cwd, scope: f.scope, option: o.name });
+        refreshFlowView();
+      });
+      act.appendChild(btn);
+    }
+  }
+  row.appendChild(act);
+  return row;
+}
+
+/* The card's own truth, expanded: the run page's full diagram, unchanged, so
+   the compact track is an index into something and not a replacement for it. */
+function flowDetail(info, member, f, wf) {
+  const box = el("div", "flow-detail");
+  const head = el("div", "flow-detail-head");
+  head.appendChild(el("h3", null, `${member.handle} · ${member.role}`));
+  const close = el("button", "wf-btn clear", "Close");
+  close.addEventListener("click", () => {
+    flowPick = null;
+    if (flowLast) renderFlowTopo(flowLast.info, flowLast.data);
+  });
+  head.appendChild(close);
+  box.appendChild(head);
+
+  const meta = el("div", "wf-meta");
+  const attach = el("a", "wf-session", `attach: ${member.session}`);
+  attach.href = "#/s/" + encodeURIComponent(member.session);
+  meta.appendChild(attach);
+  if (member.parent) meta.appendChild(el("span", null, `spawned by ${member.parent}`));
+  const reach = [...meshReachable(info, member.handle)];
+  meta.appendChild(el("span", null,
+    reach.length ? `can message ${reach.join(", ")}` : "can message nobody"));
+  if (f && f.cwd) {
+    const run = el("a", "wf-session", "open the run page");
+    run.href = "#/wf/" + encodeURIComponent(`${f.scope}|${f.cwd}`);
+    meta.appendChild(run);
+  }
+  box.appendChild(meta);
+
+  if (!f || f.remote) {
+    box.appendChild(el("p", "wf-note",
+      "this member runs on another daemon — open the flow view there"));
+    return box;
+  }
+  if (f.graph_error) box.appendChild(el("p", "wf-warning", f.graph_error));
+  if (!wf) {
+    box.appendChild(el("p", "wf-note",
+      f.status === "no_session"
+        ? "its session is not running here"
+        : "no cflow run in this session's directory"));
+    return box;
+  }
+  const dia = el("div", "wf-diagram");
+  dia.innerHTML = wfDiagramSvg(wf, f, null);
+  box.appendChild(dia);
+  return box;
+}
+
+function stopFlowPoll() {
+  if (flowPollTimer) { clearInterval(flowPollTimer); flowPollTimer = null; }
+  flowMesh = null;
+  flowLast = null;
+}
+
+async function openFlowTopology(name) {
+  if (flowPollTimer) clearInterval(flowPollTimer);
+  flowMesh = name;
+  flowPick = null;
+  showView("flow");
+  $("flow-view").innerHTML = "<p class='wf-note'>loading…</p>";
+  await refreshFlowView();
+  flowPollTimer = setInterval(refreshFlowView, 2000);
+}
+
+async function refreshFlowView() {
+  if (!flowMesh) return;
+  let info, data;
+  try {
+    const [r1, r2] = await Promise.all([
+      api(`/api/mesh/${encodeURIComponent(flowMesh)}`),
+      api(`/api/mesh/${encodeURIComponent(flowMesh)}/flows`),
+    ]);
+    info = await r1.json();
+    if (!r1.ok) {
+      $("flow-view").innerHTML = "";
+      $("flow-view").appendChild(el("p", "wf-warning", info.error || "cannot load mesh"));
+      return;
+    }
+    // A daemon too old to know the route still draws the topology, with
+    // every card reading "no run" — degraded, not broken.
+    data = r2.ok ? await r2.json() : { flows: {}, workflows: {} };
+  } catch {
+    return;
+  }
+  flowLast = { info, data };
+  renderFlowTopo(info, data);
 }
 
 /* ------------------------------------------------------------------ */
