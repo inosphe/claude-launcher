@@ -352,6 +352,9 @@ let rolesByName = {};
    so the options are only rebuilt when the list actually differs. */
 let workspacesRendered = null;
 
+/* Last workspace list the poll saw, for the manage page (#/workspaces). */
+let workspacesCache = [];
+
 /* The declared harnesses. Fetched once: the set is declared in YAML and
    changes when someone edits config or installs a program, neither of which
    happens mid-session — a reload is the honest way to pick those up. */
@@ -409,6 +412,10 @@ async function refreshWorkspaces() {
   const signature = JSON.stringify(list);
   if (signature === workspacesRendered) return;
   workspacesRendered = signature;
+  // The manage page reads the same poll: the registry is also edited from a
+  // shell, so a 'claunch workspace add' in another window lands here too.
+  workspacesCache = list;
+  if (wsOpen) renderWorkspaces();
 
   const previous = select.value;
   select.innerHTML = "";
@@ -810,6 +817,7 @@ function setMobileTab(tab) {
 /* What the top bar calls the thing on screen. The mesh and workflow pages
    live in the same slot as the terminal, so the bar names them too. */
 function mobileTitle() {
+  if (wsOpen) return "workspaces";
   if (meshName) return `mesh · ${meshName}`;
   if (wfCwd) return `workflow · ${shortenPath(wfCwd)}`;
   if (sessName) return `session · ${sessName}`;
@@ -908,8 +916,10 @@ function showView(name) {
   $("sess-view").classList.toggle("hidden", name !== "session");
   $("wf-view").classList.toggle("hidden", name !== "wf");
   $("mesh-view").classList.toggle("hidden", name !== "mesh");
+  $("ws-view").classList.toggle("hidden", name !== "ws");
   $("placeholder").classList.toggle(
-    "hidden", showTerm || name === "wf" || name === "mesh" || name === "session"
+    "hidden",
+    showTerm || ["wf", "mesh", "session", "ws"].includes(name)
   );
   // An empty session slot is nothing to look at on a phone — a killed or
   // never-picked session drops you back into the menu rather than at a ☰ to
@@ -965,6 +975,9 @@ function selectWfStep(step) {
 
 function route() {
   const h = location.hash || "";
+  // Every branch but the workspaces one leaves that page, so the flag that
+  // names it in the mobile bar is cleared here rather than in four places.
+  if (h !== "#/workspaces") closeWorkspaces();
   if (h.startsWith("#/wf/")) {
     stopMeshPoll();
     const token = decodeURIComponent(h.slice(5));
@@ -978,6 +991,10 @@ function route() {
   } else if (h.startsWith("#/mesh/")) {
     stopWfPoll();
     openMesh(decodeURIComponent(h.slice(7)));
+  } else if (h === "#/workspaces") {
+    stopWfPoll();
+    stopMeshPoll();
+    openWorkspaces();
   } else {
     stopWfPoll();
     stopMeshPoll();
@@ -991,6 +1008,215 @@ function el(tag, cls, text) {
   if (cls) node.className = cls;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+/* ------------------------------------------------------------------ */
+/* workspaces page (#/workspaces) — the registry, managed              */
+/*                                                                    */
+/* The create form's Directory field is a picker precisely so a path   */
+/* is never typed twice; this page is where it is typed the ONE time,  */
+/* and the daemon checks it against the filesystem before storing it.  */
+/* Registering is the vouching step, so it has to be spellable         */
+/* somewhere — what the registry buys is that nowhere else is.         */
+/* ------------------------------------------------------------------ */
+let wsOpen = false;
+let wsError = "";                    // last add/remove failure
+let wsDraft = { path: "", name: "" }; // survives a poll-driven rebuild
+
+function openWorkspaces() {
+  wsOpen = true;
+  setMenuOpen(false);   // the page it opens lives where the terminal was
+  showView("ws");
+  renderWorkspaces();
+  refreshWorkspaces();  // don't make the user wait out the 2s poll
+}
+
+function closeWorkspaces() {
+  if (!wsOpen) return;
+  wsOpen = false;
+  wsError = "";
+}
+
+/* Sessions currently running in a directory. normcase-style comparison,
+   matching the daemon's own (`workspaces._same_path`): on Windows 'F:\Works'
+   and 'f:\works' are one directory, and a count that said otherwise would
+   under-warn on the unregister confirm. */
+function wsSessionsIn(path) {
+  const norm = (p) => (p || "").replace(/[\\/]+$/, "").toLowerCase();
+  const want = norm(path);
+  return want ? sessionsCache.filter((s) => norm(s.cwd) === want) : [];
+}
+
+function renderWorkspaces() {
+  const view = $("ws-view");
+  const focused = document.activeElement && document.activeElement.id;
+  view.innerHTML = "";
+
+  const head = el("div", "wf-head");
+  head.appendChild(el("h2", null, "Workspaces"));
+  const back = el("button", "wf-btn clear", "Back");
+  back.addEventListener("click", () => { location.hash = "#"; });
+  head.appendChild(back);
+  view.appendChild(head);
+  view.appendChild(el(
+    "p", "wf-note",
+    "The directories a session may be spawned in. The create form's " +
+    "Directory field is exactly this list — and so is where an agent may " +
+    "send a session it spawns, unless spawn.allow_workspace is turned off."
+  ));
+
+  view.appendChild(wsAddCard());
+
+  const list = el("div", "ws-list");
+  list.appendChild(el("h3", null, `Registered (${workspacesCache.length})`));
+  if (!workspacesCache.length) {
+    list.appendChild(el(
+      "p", "wf-note",
+      "Nothing registered yet. Until there is, the create form offers only " +
+      "the daemon's own directory and an agent has nowhere to send a child."
+    ));
+  }
+  for (const w of workspacesCache) list.appendChild(wsRow(w));
+  view.appendChild(list);
+
+  if (focused) {
+    const again = $(focused);
+    if (again) {
+      again.focus();
+      if (again.setSelectionRange) {
+        const end = again.value.length;
+        again.setSelectionRange(end, end);
+      }
+    }
+  }
+}
+
+function wsAddCard() {
+  const card = el("form", "ws-add");
+  card.appendChild(el("h3", null, "Register a directory"));
+  card.appendChild(el(
+    "p", "wf-note",
+    "Resolved on the daemon's machine, not this browser's, and it must " +
+    "already exist — a path that is not there is the mistake the registry " +
+    "is here to catch."
+  ));
+
+  const path = el("input", "mono");
+  path.id = "ws-path";
+  path.placeholder = "directory, e.g. D:\\works\\hq";
+  path.autocomplete = "off";
+  path.spellcheck = false;
+  path.value = wsDraft.path;
+  path.addEventListener("input", () => { wsDraft.path = path.value; });
+
+  const name = el("input");
+  name.id = "ws-name";
+  name.placeholder = "name in the picker (optional)";
+  name.autocomplete = "off";
+  name.value = wsDraft.name;
+  name.addEventListener("input", () => { wsDraft.name = name.value; });
+
+  const row = el("div", "ws-add-row");
+  row.appendChild(path);
+  row.appendChild(name);
+  const submit = el("button", "wf-btn approve", "Register");
+  submit.type = "submit";
+  row.appendChild(submit);
+  card.appendChild(row);
+
+  if (wsError) card.appendChild(el("p", "error", wsError));
+
+  card.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    await wsAdd(path.value, name.value);
+  });
+  return card;
+}
+
+function wsRow(w) {
+  const row = el("div", "ws-row");
+  const text = el("div", "ws-text");
+  text.appendChild(el("span", "ws-name", w.name));
+  text.appendChild(el("span", "ws-path mono", w.path));
+  row.appendChild(text);
+
+  // A workspace on a removable drive is legitimately absent half the time,
+  // so the entry stays (it is still the user's) and says which it is.
+  if (!w.exists) row.appendChild(el("span", "badge exited", "missing"));
+  const here = wsSessionsIn(w.path);
+  if (here.length) {
+    row.appendChild(el(
+      "span", "badge idle",
+      here.length === 1 ? "1 session" : `${here.length} sessions`
+    ));
+  }
+
+  const rm = el("button", "wf-btn clear", "Unregister");
+  rm.addEventListener("click", () => wsRemove(w, here));
+  row.appendChild(rm);
+  return row;
+}
+
+async function wsAdd(rawPath, rawName) {
+  wsError = "";
+  const path = (rawPath || "").trim();
+  if (!path) {
+    wsError = "a workspace needs a directory path";
+    renderWorkspaces();
+    return;
+  }
+  const body = { path };
+  if ((rawName || "").trim()) body.name = rawName.trim();
+  try {
+    const resp = await api("/api/workspaces", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      // The daemon's refusals already say what to do about them (no such
+      // directory, name taken by another path) — passing one through beats
+      // inventing a vaguer sentence here.
+      wsError = doc.error || `HTTP ${resp.status}`;
+      renderWorkspaces();
+      return;
+    }
+    wsDraft = { path: "", name: "" };
+  } catch (err) {
+    wsError = String(err);
+    renderWorkspaces();
+    return;
+  }
+  await refreshWorkspaces();
+  renderWorkspaces();
+}
+
+async function wsRemove(w, here) {
+  const running = (here || []).filter((s) => s.status !== "exited");
+  const warning = running.length
+    ? `\n\n${running.length} session(s) are running there (` +
+      `${running.map((s) => s.name).join(", ")}). They keep running: this ` +
+      "decides what may be spawned next, not what is already up."
+    : "";
+  if (!confirm(
+    `Unregister workspace '${w.name}'?\n\nThe directory ${w.path} is not ` +
+    `touched — only the registry entry goes.${warning}`
+  )) return;
+  wsError = "";
+  try {
+    const resp = await api(`/api/workspaces/${encodeURIComponent(w.name)}`, {
+      method: "DELETE",
+    });
+    if (!resp.ok) {
+      const doc = await resp.json().catch(() => ({}));
+      wsError = doc.error || `HTTP ${resp.status}`;
+    }
+  } catch (err) {
+    wsError = String(err);
+  }
+  await refreshWorkspaces();
+  renderWorkspaces();
 }
 
 async function cflowAction(path, body) {

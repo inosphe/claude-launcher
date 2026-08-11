@@ -74,7 +74,10 @@
       <label>Name <input name="name" placeholder="(auto)"></label>
       <label>Harness <select name="harness"></select></label>
       <label>Profile <select name="profile"></select></label>
-      <label>Directory <select name="cwd"></select></label>
+      <label class="with-link">
+        <span>Directory <a id="ws-manage" href="#/workspaces">manage</a></span>
+        <select name="cwd"></select>
+      </label>
       <p id="cwd-hint" class="hidden"></p>
       <label>Role <select name="role"></select></label>
       <p id="role-stance" class="hidden"></p>
@@ -100,6 +103,7 @@
     <div id="sess-view" class="hidden"></div>
     <div id="wf-view" class="hidden"></div>
     <div id="mesh-view" class="hidden"></div>
+    <div id="ws-view" class="hidden"></div>
     <div id="placeholder">Select or create a session.</div>
   </main>
   <!-- Mobile only: while the menu is up, what going "back" returns to. -->

@@ -1062,8 +1062,7 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
 
 def test_api_workspaces_feed_the_directory_picker(home, tmp_path):
     """The web form picks a directory from this list instead of taking one
-    typed free-hand — so the endpoint has to carry enough to render it, and
-    to stay read-only."""
+    typed free-hand — so the endpoint has to carry enough to render it."""
     from aiohttp.test_utils import TestClient, TestServer
     from claude_launcher import workspaces
 
@@ -1088,9 +1087,68 @@ def test_api_workspaces_feed_the_directory_picker(home, tmp_path):
             assert entry["exists"] is True
             assert entry["path"] == str((tmp_path / "proj").resolve())
 
-            # the browser picks from the registry; it does not write to it
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_api_workspaces_can_be_registered_and_dropped(home, tmp_path):
+    """The registry is editable from the browser as well as the shell.
+
+    The picker stays a picker: a path is typed once, *here*, and checked
+    against the daemon's filesystem before it is stored — which is what makes
+    it never worth typing again at spawn time.
+    """
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            (tmp_path / "hq").mkdir()
+
+            resp = await client.post(
+                "/api/workspaces",
+                json={"path": str(tmp_path / "hq"), "name": "hq"},
+                headers=bearer,
+            )
+            assert resp.status == 201
+            assert (await resp.json())["workspace"] == {
+                "name": "hq",
+                "path": str((tmp_path / "hq").resolve()),
+                "exists": True,
+            }
+            resp = await client.get("/api/workspaces", headers=bearer)
+            assert [w["name"] for w in (await resp.json())["workspaces"]] == ["hq"]
+
+            # a directory that is not there is refused with the reason, which
+            # is the whole point of registering rather than typing at spawn
+            resp = await client.post(
+                "/api/workspaces",
+                json={"path": str(tmp_path / "ghost")},
+                headers=bearer,
+            )
+            assert resp.status == 400
+            assert "no such directory" in (await resp.json())["error"]
+
+            # ...and an empty body is a bad request, not a 500
             resp = await client.post("/api/workspaces", json={}, headers=bearer)
-            assert resp.status == 405
+            assert resp.status == 400
+
+            resp = await client.delete("/api/workspaces/hq", headers=bearer)
+            assert resp.status == 200
+            resp = await client.get("/api/workspaces", headers=bearer)
+            assert (await resp.json())["workspaces"] == []
+            # the directory itself is never touched — only the entry goes
+            assert (tmp_path / "hq").is_dir()
+
+            resp = await client.delete("/api/workspaces/hq", headers=bearer)
+            assert resp.status == 404
         finally:
             await mgr.shutdown_all()
             await client.close()

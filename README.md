@@ -1091,6 +1091,13 @@ registry is what the *browser* offers, which has neither. The daemon's own
 directory is always available in the picker as `(daemon cwd)`, so the form
 works before you register anything.
 
+The browser can edit the registry too, on the
+[`#/workspaces` page](#web-ui--http-api) — and that is not a contradiction of
+the picker. A path is typed **once**, at registration, where the daemon checks
+it against the filesystem and answers immediately; what the registry removes
+is the same path being retyped at every spawn, where a typo surfaces late.
+Vouching has to be spellable somewhere. The point is that nowhere else is.
+
 An **agent** spawning a child is in the browser's position, not the shell's,
 so it gets the picker too, and registering a directory is what puts it within
 reach of one — see
@@ -1548,8 +1555,14 @@ installed on this machine (`pi`, out of the box) is shown greyed out as
 The create form's **Directory** is a picker over your
 [workspaces](#workspaces-where-a-session-may-be-spawned) — free-text paths are
 deliberately not accepted here, since a mistyped one is both easy and
-expensive. Register directories once with `claunch workspace add <dir>`; the
-list refreshes in place, and `(daemon cwd)` is always available.
+expensive. The **manage** link beside the field opens `#/workspaces`, the page
+that edits that registry: register a directory (checked against the *daemon's*
+filesystem before it is stored, so a bad path is refused with the reason
+instead of failing later at spawn), see which entries are missing right now
+and how many sessions are running in each, and unregister one — the directory
+itself is never touched, and sessions already in it keep running. The list
+refreshes in place, so a `claunch workspace add` in a terminal shows up here
+too, and `(daemon cwd)` is always available in the picker.
 
 The form otherwise spawns sessions the same way the CLI does, including the
 two choices that can only be made at spawn (see
@@ -1626,7 +1639,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | profile names (for the UI's create form) |
 | GET    | `/api/roles`                   | the roles a session can be spawned with, each with its aliases, stance and the exact system-prompt injection |
-| GET    | `/api/workspaces`              | registered directories for the create form's picker (read-only — the registry is edited with `claunch workspace`) |
+| GET    | `/api/workspaces`              | registered directories, for the create form's picker and the manage page |
+| POST   | `/api/workspaces`              | register one — `{"path": "...", "name": "..."}`; `400` (with the reason) if the directory is not there |
+| DELETE | `/api/workspaces/{name}`       | unregister one; the directory itself is untouched |
 | GET    | `/api/harnesses`               | declared harnesses, each with `available` (is it installed on this machine) and `builtin` |
 | GET/POST | `/api/mesh`                  | list meshes (+ relay status) / create `{name}` |
 | GET/DELETE | `/api/mesh/{mesh}`         | members + reachability / remove |

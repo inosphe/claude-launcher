@@ -148,6 +148,8 @@ def build_app(
     r.add_get("/api/profiles", h_profiles)
     r.add_get("/api/roles", h_roles)
     r.add_get("/api/workspaces", h_workspaces)
+    r.add_post("/api/workspaces", h_workspace_add)
+    r.add_delete("/api/workspaces/{name}", h_workspace_remove)
     r.add_get("/api/harnesses", h_harnesses)
     r.add_get("/api/cflow", h_cflow_runs)
     r.add_get("/api/cflow/run", h_cflow_run_detail)
@@ -303,16 +305,49 @@ async def h_harnesses(request: web.Request) -> web.Response:
 
 
 async def h_workspaces(request: web.Request) -> web.Response:
-    """The directories a session may be spawned in, for the create form.
-
-    Read-only on purpose: the point of the registry is that a directory is
-    vouched for once, from a shell that can complete paths and see what is
-    actually there. A browser can pick from it, not add to it — a POST here
-    would put the free-text directory field back, one level down.
-    """
+    """The directories a session may be spawned in, for the pickers."""
     return web.json_response(
         {"workspaces": [w.to_dict() for w in workspaces.list_all()]}
     )
+
+
+async def h_workspace_add(request: web.Request) -> web.Response:
+    """Register a directory — the browser's ``claunch workspace add``.
+
+    Writable, where the create form's directory field deliberately is not, and
+    the difference is not a contradiction but the whole shape of the feature:
+    a free-text path is typed **once**, here, where it is checked against the
+    filesystem before it is stored and the answer comes back immediately. What
+    the registry removes is that same path being retyped at every spawn, where
+    a typo surfaces late and blames the harness. Registering is the vouching
+    step; it cannot happen without someone spelling a directory out.
+
+    The path is resolved on the **daemon**, which is what a workspace means —
+    a browser on another machine is describing the daemon's filesystem, not
+    its own.
+    """
+    body = await _json_body(request)
+    try:
+        workspace = workspaces.add(
+            str(body.get("path") or ""), str(body.get("name") or "") or None
+        )
+    except workspaces.WorkspaceError as exc:
+        return json_error(400, str(exc))
+    return web.json_response({"workspace": workspace.to_dict()}, status=201)
+
+
+async def h_workspace_remove(request: web.Request) -> web.Response:
+    """Unregister one workspace. The directory itself is never touched.
+
+    Sessions already running in it are left alone too: their cwd was resolved
+    when they spawned, so unregistering decides what may be spawned *next*,
+    not what is running now.
+    """
+    try:
+        removed = workspaces.remove(request.match_info["name"])
+    except workspaces.WorkspaceError as exc:
+        return json_error(404, str(exc))
+    return web.json_response({"workspace": removed.to_dict()})
 
 
 async def h_roles(request: web.Request) -> web.Response:
