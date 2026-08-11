@@ -226,13 +226,24 @@ body {
 #terminal .xterm-viewport {
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
-/* session detail page */
+/* session detail. One node, two homes: the page slot on a phone (these
+   rules) and the right-hand rail on a wide screen (.docked, further down),
+   where there is room for a second column beside the terminal. The JS moves
+   it between them; both rulesets dress the same markup. */
 #sess-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
 #session-list .sess-info {
   flex: none; background: none; border: none; color: #6e7681;
   font-size: 13px; line-height: 1; padding: 2px 4px; cursor: pointer;
 }
 #session-list .sess-info:hover { color: #58a6ff; }
+/* lit while this row is the one open in the right rail */
+#session-list .sess-info.on { color: #58a6ff; }
+.sess-head { flex-wrap: wrap; }
+.sess-close {
+  margin-left: auto; flex: none; cursor: pointer; background: none;
+  border: none; color: #7d8590; font-size: 17px; line-height: 1; padding: 0 4px;
+}
+.sess-close:hover { color: #ff7b72; }
 .sess-meta {
   display: grid; grid-template-columns: max-content minmax(0, 1fr);
   gap: 4px 16px; margin: 14px 0; max-width: 760px; font-size: 13px;
@@ -257,6 +268,36 @@ body {
 .sess-wf-run .meta { color: #7d8590; font-size: 11px; }
 .sess-wf .wf-btn { margin-top: 10px; }
 .sess-wf .wf-start, .sess-wf .wf-pending { margin-left: 0; background: #14161a; }
+
+/* ---- the same node, docked as the right rail ----
+   .docked is set by the layout rather than inferred from where the node
+   happens to sit, so the rendering is named instead of being a side effect
+   of the DOM move. It is a rail, not a page: it takes a column's worth of
+   width and gives the rest back to the terminal, so nothing inside may size
+   itself from its content — one long path would push #main narrower than
+   the session it is showing can be read in. */
+#sess-view.docked {
+  flex: 0 0 clamp(260px, 26vw, 340px); min-height: 0;
+  padding: 14px 16px; overflow-y: auto; overscroll-behavior: contain;
+  background: #1b1e24; border-left: 1px solid #2a2e36;
+}
+.docked .wf-head { flex-wrap: wrap; gap: 6px 8px; }
+.docked .wf-head h2 { font-size: 15px; overflow-wrap: anywhere; }
+.docked .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; }
+/* label over value: two columns in this width leaves neither readable */
+.docked .sess-meta {
+  grid-template-columns: minmax(0, 1fr); gap: 0; margin: 10px 0;
+  max-width: none; font-size: 12px;
+}
+.docked .sess-meta dt { margin-top: 7px; font-size: 11px; }
+.docked .sess-meshes, .docked .sess-wf {
+  margin: 10px 0; padding: 10px 12px; max-width: none; background: #16181d;
+}
+.docked .wf-start, .docked .wf-pending { padding: 10px 12px; max-width: none; }
+.docked .wf-start-select, .docked .wf-start-context {
+  flex: 1 1 100%; max-width: 100%; min-width: 0;
+}
+.docked select, .docked input { max-width: 100%; }
 
 /* workflow detail page */
 #wf-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }

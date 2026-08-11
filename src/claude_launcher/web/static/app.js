@@ -185,16 +185,19 @@ async function refreshSessions() {
     if (s.status === "exited") {
       li.title = [li.title, "exited — open it to resume"].filter(Boolean).join(" · ");
     }
-    // A second destination per row: the terminal is what the session is
-    // doing, this is what it *is* (definition, meshes, its cflow run).
+    // The row attaches — that is what the session is doing. This opens what
+    // it *is* (definition, meshes, its cflow run) beside it, so the two are
+    // not two places you have to travel between.
     const info = document.createElement("button");
     info.className = "sess-info";
     info.type = "button";
+    info.dataset.name = s.name;
+    if (s.name === sessName) info.classList.add("on");
     info.textContent = "ⓘ";
     info.title = "session details: harness, directory, meshes, workflow";
     info.addEventListener("click", (e) => {
       e.stopPropagation();   // the row itself attaches; this button does not
-      location.hash = "#/s/" + encodeURIComponent(s.name) + "/info";
+      openDetail(s.name);
     });
     li.append(dot, label, meta, info);
     li.addEventListener("click", () => {
@@ -630,11 +633,7 @@ $("new-session").addEventListener("submit", async (e) => {
   location.hash = "#/s/" + encodeURIComponent(info.name);
 });
 
-$("term-details").addEventListener("click", () => {
-  if (currentName) {
-    location.hash = "#/s/" + encodeURIComponent(currentName) + "/info";
-  }
-});
+$("term-details").addEventListener("click", () => openDetail(currentName));
 
 $("term-kill").addEventListener("click", async () => {
   if (!currentName) return;
@@ -920,10 +919,56 @@ function syncLayout() {
   const wasOpen = railOpen;
   railOpen = MOBILE_MQ.matches && page === "home";
   document.body.classList.toggle("rail-open", railOpen);
+  syncDetailPanel();
   syncMobileBars();
   // Coming back from the rail the terminal was display:none, so its grid is
   // whatever it was before the viewport last changed. Re-fit it.
   if (wasOpen && !railOpen) refitSoon(60);
+}
+
+/* Where the session detail lives, and whether it is up.
+
+   Wide: a rail of its own down the right-hand side, opposite the one that
+   lists the sessions — the left rail is what exists, this is what the one
+   you picked *is*, and the terminal keeps the middle. Not folded into the
+   left rail: the session list is a monitor you watch while working, and a
+   panel growing under it would push the thing being watched off screen.
+   Narrow: two rails do not fit next to anything, so it takes the page slot
+   instead — which is why "session" is a page on a phone and nothing at all
+   on a desktop.
+
+   The same node is *moved*, never duplicated: one render path, and the poll,
+   the half-typed context line and the scroll position all survive a rotation
+   across the breakpoint. */
+let detailWasUp = false;
+
+function syncDetailPanel() {
+  const view = $("sess-view");
+  const narrow = MOBILE_MQ.matches;
+  const host = narrow ? $("main") : $("layout");
+  if (view.parentNode !== host) {
+    // Last in #layout is the mobile bottom bar (display:none up here), so the
+    // rail goes before it: #main keeps the middle, this takes the right edge.
+    if (narrow) host.appendChild(view);
+    else host.insertBefore(view, $("mobile-bottom"));
+  }
+  view.classList.toggle("docked", !narrow);
+  const up = !!sessName && (!narrow || currentPage === "session");
+  view.classList.toggle("hidden", !up);
+  // Docking and undocking take width off #main and give it back, and no
+  // resize event announces that — a sibling changing width is not a viewport
+  // change. Without this the terminal keeps the columns it had and the
+  // session wraps its output against a width that is no longer there.
+  if (!narrow && up !== detailWasUp) refitSoon(60);
+  detailWasUp = up;
+}
+
+/* Which row's ⓘ is lit. Rebuilt rows get this from refreshSessions; this is
+   for the rows already on screen when the panel opens or closes. */
+function markDetailRow() {
+  document.querySelectorAll("#session-list .sess-info").forEach((b) =>
+    b.classList.toggle("on", b.dataset.name === sessName)
+  );
 }
 
 /* What the top bar calls the thing on screen. Pages live in the same slot as
@@ -1008,6 +1053,17 @@ MOBILE_MQ.addEventListener("change", () => {
   // Rotating a tablet, or dragging a window across the breakpoint. The route
   // does not change — only whether the rail and the page can share the
   // screen — so re-deriving the chrome from the same page is the whole job.
+  // Except the detail, which is the one thing that is a page on one side of
+  // the breakpoint and not on the other. Narrowing: the right rail has
+  // nowhere to go on a phone that isn't the page the user is already on, so
+  // it closes (ⓘ brings it back). Widening: it stops being a page and
+  // becomes a rail, so the slot it was borrowing has to be handed back —
+  // otherwise #main is left showing nothing at all.
+  if (MOBILE_MQ.matches) {
+    if (sessName && currentPage !== "session") dropDetail();
+  } else if (currentPage === "session") {
+    go(currentName ? "#/s/" + encodeURIComponent(currentName) : "#/");
+  }
   syncLayout();
   refitSoon();
 });
@@ -1021,14 +1077,15 @@ let wfPollTimer = null;
 let wfSelectedStep = null; // node picked in the diagram (null = show all)
 let wfLastData = null;     // last payload, for instant re-render on selection
 
-/* Every page's container, by page name. The terminal is deliberately not in
-   here: it is not swapped in and out, it is *covered* — see showView. */
+/* Every page's container, by page name. Two are deliberately not in here:
+   the terminal, which is not swapped in and out but *covered* (see
+   showView), and the session detail, which is not a page on a wide screen
+   at all — it is the right-hand rail, and syncDetailPanel owns it. */
 const VIEWS = {
   home: "home-view",
   new: "new-view",
   meshes: "meshes-view",
   flows: "flows-view",
-  session: "sess-view",
   wf: "wf-view",
   mesh: "mesh-view",
   ws: "ws-view",
@@ -1050,7 +1107,9 @@ function showView(name) {
   for (const [page, id] of Object.entries(VIEWS)) {
     $(id).classList.toggle("hidden", name !== page);
   }
-  if (name !== "session") stopSessionPoll();
+  // On a phone the detail occupies the page slot, so leaving that page is
+  // closing it. As a rail it is not a page and survives every navigation.
+  if (name !== "session" && MOBILE_MQ.matches) dropDetail();
   syncLayout();          // rail mode, nav highlight, and the bars' titles
   if (showTerm) refitSoon(60);
 }
@@ -1102,7 +1161,6 @@ function selectWfStep(step) {
 /* ------------------------------------------------------------------ */
 /*   #/                  home — the dashboard, and the rail itself on a phone
  *   #/s/<name>          that session's terminal (attached)
- *   #/s/<name>/info     ...and what it *is*: definition, meshes, its run
  *   #/new               the create form
  *   #/mesh              the mesh list, and create/join
  *   #/mesh/<name>       one mesh
@@ -1114,11 +1172,10 @@ function parseHash(h) {
   const raw = (h || "").replace(/^#\/?/, "");
   if (!raw) return { page: "home" };
   const parts = raw.split("/").map(decodeURIComponent);
-  if (parts[0] === "s" && parts[1]) {
-    return parts[2] === "info"
-      ? { page: "session", name: parts[1] }
-      : { page: "terminal", name: parts[1] };
-  }
+  // A session has one destination: its terminal. What it *is* is a panel
+  // beside that (see openDetail), not a place you can be — so an old
+  // /info link lands on the session rather than on nothing.
+  if (parts[0] === "s" && parts[1]) return { page: "terminal", name: parts[1] };
   if (parts[0] === "wf" && parts[1]) {
     // The scope is glued to the cwd with '|' because a Windows path is full
     // of the separators a path segment would otherwise be split on.
@@ -1153,7 +1210,6 @@ function route() {
       if (currentName === r.name && term) showView("terminal");
       else attach(r.name);
       break;
-    case "session": openSession(r.name); break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
     case "mesh": openMesh(r.name); break;
     case "meshes": showView("meshes"); refreshMeshList(); break;
@@ -1164,6 +1220,15 @@ function route() {
   }
 }
 window.addEventListener("hashchange", route);
+
+/* Navigate, even when the URL already says where we are. The detail panel
+   can be up over the very route the URL names (a phone shows it in the page
+   slot), so "go to the terminal" has to mean re-entering the route rather
+   than assigning a hash the browser will discard as a no-op. */
+function go(hash) {
+  if ((location.hash || "#/") === hash) route();
+  else location.hash = hash;
+}
 
 /* The create form's mesh and workflow pickers. Both are lists the daemon
    already publishes, so neither is a text box: a mesh that does not exist or
@@ -2128,32 +2193,61 @@ function wfDiagramSvg(wf, run, selected) {
 }
 
 /* ------------------------------------------------------------------ */
-/* session detail page (#/s/<name>/info) — what a session IS          */
+/* session detail — what a session IS, beside what it is doing        */
 /* ------------------------------------------------------------------ */
 /* The session list answers "which sessions exist"; the terminal answers
    "what is it doing right now". Neither answers "what is this session" —
    which harness and profile, whose directory, which role, which meshes, and
    above all which cflow run it drives. Four registries hold those answers and
    they only ever met in the operator's head; /api/sessions/<name>/meta
-   gathers them, keyed by the one thing they share: the session name. */
-let sessName = null;
+   gathers them, keyed by the one thing they share: the session name.
+
+   It used to be a route, #/s/<name>/info, and that was the wrong shape: you
+   read a session's definition *while* watching it work, and a route made
+   that a trip away from the terminal and back. It is a rail now — open down
+   the right-hand side, beside the thing it describes, closed by the same
+   button that opened it, and not in the URL at all. Where it goes is the
+   layout's business (syncDetailPanel), the one place that knows how wide the
+   screen is. */
+let sessName = null;      // the session whose detail is open (null = closed)
 let sessPollTimer = null;
 let sessStartBox = null;  // reused across polls: it holds the user's typing
 
-function stopSessionPoll() {
+/* Forget the open detail. State only — the caller syncs the layout, which is
+   what actually takes the panel off the screen. */
+function dropDetail() {
   if (sessPollTimer) { clearInterval(sessPollTimer); sessPollTimer = null; }
   sessName = null;
   sessStartBox = null;
+  $("sess-view").innerHTML = "";
+  markDetailRow();
 }
 
-async function openSession(name) {
+/* ⓘ, and the terminal header's `details`. Same button both ways: pressing it
+   on the session already showing closes the panel. */
+function openDetail(name) {
+  if (!name) return;
+  if (name === sessName) { closeDetail(); return; }
   if (sessPollTimer) clearInterval(sessPollTimer);
-  sessStartBox = null;
-  showView("session");
   sessName = name;
+  sessStartBox = null;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
-  await refreshSession();
+  // On a phone the detail is the page; on a desktop the page does not change
+  // at all — the right rail opens beside it.
+  if (MOBILE_MQ.matches) showView("session");
+  else syncLayout();
+  markDetailRow();
+  refreshSession();
   sessPollTimer = setInterval(refreshSession, 2000);
+}
+
+function closeDetail() {
+  const wasPage = currentPage === "session";
+  dropDetail();
+  // On a phone the detail *was* the page, so closing it has to leave
+  // something behind: the terminal it describes, or home if none is open.
+  if (wasPage) go(currentName ? "#/s/" + encodeURIComponent(currentName) : "#/");
+  else syncLayout();
 }
 
 async function refreshSession() {
@@ -2197,15 +2291,19 @@ function renderSession(data) {
   const s = data.session || {};
   view.innerHTML = "";
 
-  const head = el("div", "wf-head");
+  const head = el("div", "wf-head sess-head");
   head.appendChild(el("h2", null, s.name || "session"));
   head.appendChild(el("span", `badge ${s.status || ""}`, s.status || "?"));
+  // Through the router, so the terminal it opens is the one the URL names —
+  // and via go(), because on a phone this panel is laid over the very route
+  // that terminal lives at, where assigning the same hash would do nothing.
   const open = el("button", "wf-btn", "Open terminal");
-  // Through the router, so the terminal it opens is the one the URL names.
-  open.addEventListener("click", () => {
-    location.hash = "#/s/" + encodeURIComponent(s.name);
-  });
+  open.addEventListener("click", () => go("#/s/" + encodeURIComponent(s.name)));
   head.appendChild(open);
+  const close = el("button", "sess-close", "×");
+  close.title = "close details";
+  close.addEventListener("click", closeDetail);
+  head.appendChild(close);
   view.appendChild(head);
 
   const dl = el("dl", "sess-meta");

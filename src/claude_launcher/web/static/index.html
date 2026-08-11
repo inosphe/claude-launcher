@@ -137,11 +137,20 @@
       <ul id="cflow-list"></ul>
     </div>
 
+    <!-- The session detail. Not a page on a wide screen but the rail down
+         the right-hand side: the JS moves this very node out of #main and
+         into #layout, opposite the session list (see syncDetailPanel). It is
+         declared here because a phone keeps it here, and because the page
+         slot is the safe place for it to start. -->
     <div id="sess-view" class="hidden"></div>
     <div id="wf-view" class="hidden"></div>
     <div id="mesh-view" class="hidden"></div>
     <div id="ws-view" class="hidden"></div>
   </main>
+
+  <!-- #sess-view is moved in here, to the right of #main, on a wide screen:
+       the left rail lists what exists, this one says what the session you
+       picked *is*, and the terminal keeps the middle. -->
 
   <!-- Mobile only: while the rail is up, what going "back" returns to. -->
   <div id="mobile-bottom">
