@@ -746,7 +746,10 @@ def test_join_briefing_lands_in_terminal(home, tmp_path):
         s = mgr.get("s1")
         await _wait_screen(s, "READY")
         await mm.join("brief", "s1", handle="worker_1")
-        await _wait_screen(s, "join briefing", timeout=30.0)
+        # Wait for the block's LAST line, not its first: the child echoes the
+        # paste line by line, so waiting on the header and reading the screen
+        # races the rest of the block onto it.
+        await _wait_screen(s, "typed into this terminal", timeout=30.0)
         text = _screen_text(s)
         assert "you: worker_1 (role: worker)" in text
         assert "claunch mesh send brief" in text
@@ -811,7 +814,10 @@ def test_mesh_mcp_tools(home, monkeypatch):
     assert init["result"]["serverInfo"]["name"] == "claunch-mesh"
     tools = mesh_mcp._handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert [t["name"] for t in tools["result"]["tools"]] == [
+        # talking ...
         "send", "members", "history",
+        # ... and building the team that does it
+        "spawn", "children", "connect", "disconnect",
     ]
 
     # send requires a session identity

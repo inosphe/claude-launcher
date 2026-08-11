@@ -143,6 +143,12 @@ def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
             body.get("a") or "", body.get("b") or "",
             bool(body.get("enabled")),
         )
+    if path == "/peer/mesh/member-link":
+        return mm.peer_member_link_accept(
+            body["mesh"], body["machine"], body["token"],
+            body.get("a") or "", body.get("b") or "",
+            bool(body.get("enabled")),
+        )
     if path == "/peer/mesh/roles":
         return mm.peer_roles_accept(
             body["mesh"], body["machine"], body["token"], body.get("roles"),
@@ -155,6 +161,7 @@ def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
             body.get("nudges") or [],
             peers=body.get("peers"), epoch=body.get("epoch"),
             links=body.get("links"), edges=body.get("edges"),
+            member_edges=body.get("member_edges"),
             roles=body.get("roles"),
         )
     raise AssertionError(f"unexpected peer path {path!r}")

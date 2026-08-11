@@ -388,6 +388,33 @@ def _cmd_uncut(args: argparse.Namespace) -> int:
     return _cmd_cut(args)
 
 
+def _cmd_connect(args: argparse.Namespace) -> int:
+    """Rewire the *member* graph — who may message whom inside the mesh.
+
+    One layer up from cut/uncut, which move daemons' traffic around without
+    changing who can reach whom. A disconnected member pair has no fallback:
+    members are not routed, so the send is simply refused.
+    """
+    client = daemon_client.ensure_running()
+    enabled = args.func is _cmd_connect
+    result = client.patch(
+        f"/api/mesh/{args.mesh}/members/{args.a}/links/{args.b}",
+        {"enabled": enabled},
+    )
+    verb = "connected" if result.get("enabled") else "disconnected"
+    print(f"{verb} {result['a']} <-> {result['b']}")
+    if not result.get("enabled"):
+        print(
+            "they can no longer message each other -- sends between them are "
+            "refused, and '*' from either one skips the other"
+        )
+    return 0
+
+
+def _cmd_disconnect(args: argparse.Namespace) -> int:
+    return _cmd_connect(args)
+
+
 def _cmd_requests(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     if args.cancel:
@@ -479,6 +506,13 @@ def _cmd_members(args: argparse.Namespace) -> int:
             f"{m['handle']:<16} {m['role']:<10} {where + '/' + m['session']:<28} "
             f"[{m['reachability']}]{pending_s}"
         )
+    # Only the cuts are printed. The complete graph is the norm, so listing
+    # every connected pair would bury the handful of edges someone chose.
+    cuts = [e for e in info.get("member_links") or [] if not e.get("enabled")]
+    if cuts:
+        print(f"\ndisconnected pairs ({len(cuts)}):")
+        for edge in cuts:
+            print(f"  {edge['a']} -x- {edge['b']}")
     for p in info.get("peers", []):
         if p.get("ok") is False:
             state = f"unreachable ({p.get('error')})"
@@ -792,6 +826,26 @@ def register(sub) -> None:
     p.add_argument("a", metavar="MACHINE-A")
     p.add_argument("b", metavar="MACHINE-B")
     p.set_defaults(func=_cmd_uncut)
+
+    p = msub.add_parser(
+        "connect",
+        help="let two MEMBERS message each other (the member graph, not the "
+             "peer-daemon links cut/uncut edit)",
+    )
+    p.add_argument("mesh")
+    p.add_argument("a", metavar="HANDLE-A")
+    p.add_argument("b", metavar="HANDLE-B")
+    p.set_defaults(func=_cmd_connect)
+
+    p = msub.add_parser(
+        "disconnect",
+        help="stop two members messaging each other; sends between them are "
+             "refused (members are never routed around a cut)",
+    )
+    p.add_argument("mesh")
+    p.add_argument("a", metavar="HANDLE-A")
+    p.add_argument("b", metavar="HANDLE-B")
+    p.set_defaults(func=_cmd_disconnect)
 
     p = msub.add_parser(
         "requests",

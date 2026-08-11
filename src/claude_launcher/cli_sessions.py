@@ -77,6 +77,99 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_spawn(args: argparse.Namespace) -> int:
+    """Spawn a child of a session, exactly as that session's agent would.
+
+    The same endpoint and the same policy — this is here so the arrangement
+    can be built and inspected by hand, and so a refusal can be reproduced
+    without an agent in the loop.
+    """
+    client = daemon_client.ensure_running()
+    parent = args.parent or os.environ.get("CLAUNCH_SESSION")
+    if not parent:
+        print(
+            "no parent session: pass one, or run this inside a managed "
+            "session (which sets $CLAUNCH_SESSION)"
+        )
+        return 2
+    payload = {
+        k: v
+        for k, v in (
+            ("name", args.name),
+            ("mesh", args.mesh),
+            ("handle", args.handle),
+            ("role", args.role),
+            ("connect", args.connect),
+            ("workflow", args.workflow),
+            ("task", args.task),
+            ("harness", args.harness),
+        )
+        if v
+    }
+    try:
+        result = client.post(f"/api/sessions/{parent}/children", payload)
+    except daemon_client.DaemonClientError as exc:
+        print(exc)
+        return 1
+    child = result.get("session") or {}
+    print(f"spawned {child.get('name')} (child of {parent})")
+    mesh = result.get("mesh") or {}
+    if mesh.get("ok"):
+        reach = ", ".join(mesh.get("connected_to") or []) or "(nobody)"
+        print(f"  mesh {mesh.get('mesh')}: joined as {mesh.get('handle')}, "
+              f"can reach {reach}")
+        if mesh.get("disconnected_from"):
+            print(f"  cut off from: {', '.join(mesh['disconnected_from'])}")
+    elif mesh:
+        print(f"  mesh join failed: {mesh.get('error') or mesh.get('pending')}")
+    flow = result.get("workflow") or {}
+    if flow:
+        print(
+            f"  workflow {flow.get('workflow')}: "
+            + ("started" if flow.get("ok") else f"failed -- {flow.get('error')}")
+        )
+    if result.get("task"):
+        print("  opening task will be typed in once it settles")
+    return 0
+
+
+def _by_lineage(sessions):
+    """Order sessions parent-before-child, yielding ``(session, depth)``.
+
+    Spawned sessions are indented under the one that created them, so a fleet
+    reads as the tree it is. A session whose parent is not in the list (an
+    exited record cleared away, a hand-edited definition) is shown as a root
+    rather than dropped — the listing's job is to account for every session,
+    and a cycle or a dangling name must not make one invisible.
+    """
+    by_name = {s["name"]: s for s in sessions}
+    children = {}
+    roots = []
+    for s in sessions:
+        parent = s.get("parent")
+        if parent and parent in by_name and parent != s["name"]:
+            children.setdefault(parent, []).append(s)
+        else:
+            roots.append(s)
+    out = []
+    seen = set()
+
+    def walk(node, depth):
+        if node["name"] in seen:
+            return
+        seen.add(node["name"])
+        out.append((node, depth))
+        for child in children.get(node["name"], []):
+            walk(child, depth + 1)
+
+    for root in roots:
+        walk(root, 0)
+    for s in sessions:  # anything a cycle kept out of the walk
+        if s["name"] not in seen:
+            out.append((s, 0))
+    return out
+
+
 def _cmd_sessions(_args: argparse.Namespace) -> int:
     client = daemon_client.connect()
     if client is None:
@@ -86,14 +179,17 @@ def _cmd_sessions(_args: argparse.Namespace) -> int:
     if not sessions:
         print("no sessions; create one with 'claunch new-session --profile <name>'")
         return 0
-    for s in sessions:
+    for s, depth in _by_lineage(sessions):
         state = s["status"]
         if state == "exited":
             code = s.get("exit_code")
             state = f"exited({code})" if code is not None else "exited"
         prof = s.get("profile") or "-"
+        # ASCII only: this prints to a Windows console as often as not, and
+        # the box-drawing characters arrive there as mojibake.
+        label = ("  " * (depth - 1) + "`- " + s["name"] if depth else s["name"])[:16]
         print(
-            f"{s['name']:<16} [{state:<10}] {s['harness']:<8} {prof:<12} "
+            f"{label:<16} [{state:<10}] {s['harness']:<8} {prof:<12} "
             f"{s['cols']}x{s['rows']}  {s.get('cwd', '')}"
         )
     dead = [s["name"] for s in sessions if s["status"] == "exited"]
@@ -477,6 +573,31 @@ def register(sub) -> None:
         help="extra arguments passed to the harness (prefix with -- if they start with -)",
     )
     p_new.set_defaults(func=_cmd_new_session)
+
+    p_spawn = sub.add_parser(
+        "spawn",
+        help="spawn a CHILD of a session (inherits its harness/profile/cwd), "
+             "optionally enrolling it in a mesh -- what an agent's 'spawn' "
+             "tool does",
+    )
+    p_spawn.add_argument(
+        "--parent", help="parent session (default: $CLAUNCH_SESSION)"
+    )
+    p_spawn.add_argument("-s", "--name", help="child session name")
+    p_spawn.add_argument("--mesh", help="mesh to enrol the child in")
+    p_spawn.add_argument("--as", dest="handle", help="the child's mesh handle")
+    p_spawn.add_argument("--role", help="the child's mesh role")
+    p_spawn.add_argument(
+        "--connect", action="append", metavar="HANDLE",
+        help="another member the child may message (repeatable); it can "
+             "always reach its parent",
+    )
+    p_spawn.add_argument("--workflow", help="cflow workflow to start for the child")
+    p_spawn.add_argument("--task", help="opening instruction typed into the child")
+    p_spawn.add_argument(
+        "--harness", help="a different harness (needs spawn.allow_harness)"
+    )
+    p_spawn.set_defaults(func=_cmd_spawn)
 
     p_ls = sub.add_parser("sessions", aliases=["lss"], help="list daemon-managed sessions")
     p_ls.set_defaults(func=_cmd_sessions)

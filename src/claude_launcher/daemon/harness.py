@@ -63,6 +63,16 @@ class SessionDef:
     #: never ``--continue``, which grabs whatever conversation in the same
     #: cwd+profile happens to be the most recent and can hijack another one.
     conversation_id: Optional[str] = None
+    #: The session that spawned this one, by name — the edge that makes the
+    #: session list a tree (see :mod:`claude_launcher.spawn`). ``None`` for a
+    #: session a human started, which is what a tree root *is* here.
+    #:
+    #: Stored as a name rather than resolved at creation because the parent
+    #: outlives neither the daemon nor necessarily the child: a parent that
+    #: exited leaves its children running and still recorded, and a name is
+    #: the only reference that survives that. Consumers must treat a parent
+    #: that no longer resolves as a root.
+    parent: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -76,6 +86,7 @@ class SessionDef:
             "cols": self.cols,
             "rows": self.rows,
             "conversation_id": self.conversation_id,
+            "parent": self.parent,
         }
 
     @classmethod
@@ -91,6 +102,7 @@ class SessionDef:
             cols=int(data.get("cols") or 120),
             rows=int(data.get("rows") or 30),
             conversation_id=data.get("conversation_id") or None,
+            parent=str(data.get("parent") or "").strip() or None,
         )
 
 

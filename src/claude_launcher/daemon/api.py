@@ -16,7 +16,7 @@ from pathlib import Path
 
 from aiohttp import web
 
-from .. import __version__, profile as profile_mod
+from .. import __version__, profile as profile_mod, spawn as spawn_mod
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
@@ -25,7 +25,7 @@ from ..profile import ProfileError
 from .harness import HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
 from .mesh import MeshConflict, MeshError, MeshManager
-from .session import SessionGone
+from .session import STATUS_IDLE, SessionGone
 from . import ws as ws_mod
 
 COOKIE_NAME = "claunch_session"
@@ -168,6 +168,7 @@ def build_app(
     r.add_delete("/api/mesh/{mesh}/guests/{machine}", h_mesh_guest_revoke)
     r.add_put("/api/mesh/{mesh}/peers", h_mesh_peers_reorder)
     r.add_patch("/api/mesh/{mesh}/links/{a}/{b}", h_mesh_link_set)
+    r.add_patch("/api/mesh/{mesh}/members/{a}/links/{b}", h_mesh_member_link_set)
     r.add_get("/api/mesh/{mesh}/policy", h_mesh_policy_get)
     r.add_put("/api/mesh/{mesh}/policy", h_mesh_policy_set)
     r.add_get("/api/mesh/{mesh}/roles", h_mesh_roles_get)
@@ -191,6 +192,7 @@ def build_app(
     r.add_post("/peer/mesh/join", h_peer_join)
     r.add_post("/peer/mesh/leave", h_peer_leave)
     r.add_post("/peer/mesh/link", h_peer_link)
+    r.add_post("/peer/mesh/member-link", h_peer_member_link)
     r.add_post("/peer/mesh/roles", h_peer_roles)
     r.add_post("/peer/mesh/send", h_peer_send)
     r.add_post("/peer/mesh/sync", h_peer_sync)
@@ -199,6 +201,8 @@ def build_app(
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
     r.add_get("/api/sessions/{name}", h_session_get)
+    r.add_get("/api/sessions/{name}/children", h_session_children)
+    r.add_post("/api/sessions/{name}/children", h_session_spawn)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
@@ -800,6 +804,44 @@ async def h_mesh_link_set(request: web.Request) -> web.Response:
     return web.json_response(result)
 
 
+async def h_mesh_member_link_set(request: web.Request) -> web.Response:
+    """Connect or disconnect two members — the mesh's own topology, one
+    layer up from the peer-daemon graph ``/links`` edits.
+
+    ``actor`` names the session asking, and is what makes this callable by an
+    agent: with it, the edit is checked against the session tree (a session
+    rewires only what it spawned). Without it the caller is a human at the
+    CLI or dashboard, who owns the whole graph.
+    """
+    body = await _json_body(request)
+    if "enabled" not in body:
+        return json_error(400, "'enabled' must be true or false")
+    result = await _mesh_mgr(request).set_member_link(
+        request.match_info["mesh"],
+        request.match_info["a"],
+        request.match_info["b"],
+        enabled=bool(body.get("enabled")),
+        actor=str(body.get("actor") or ""),
+    )
+    return web.json_response(result)
+
+
+async def h_peer_member_link(request: web.Request) -> web.Response:
+    """A peer forwards a member-graph edit up to us (the authority)."""
+    body = await _json_body(request)
+    if "enabled" not in body:
+        return json_error(400, "'enabled' must be true or false")
+    result = _mesh_mgr(request).peer_member_link_accept(
+        str(body.get("mesh") or ""),
+        str(body.get("machine") or ""),
+        str(body.get("token") or ""),
+        str(body.get("a") or ""),
+        str(body.get("b") or ""),
+        bool(body.get("enabled")),
+    )
+    return web.json_response(result)
+
+
 async def h_peer_join_request(request: web.Request) -> web.Response:
     body = await _json_body(request)
     result = _mesh_mgr(request).peer_join_request_accept(
@@ -952,6 +994,10 @@ async def h_peer_sync(request: web.Request) -> web.Response:
         epoch=body.get("epoch"),
         links=links if isinstance(links, list) else None,
         edges=body.get("edges") if isinstance(body.get("edges"), dict) else None,
+        member_edges=(
+            body.get("member_edges")
+            if isinstance(body.get("member_edges"), dict) else None
+        ),
         roles=body.get("roles") if isinstance(body.get("roles"), dict) else None,
     )
     return web.json_response(result)
@@ -991,6 +1037,183 @@ async def h_sessions_create(request: web.Request) -> web.Response:
             return json_error(409, str(exc))
         raise
     return web.json_response(session.info(), status=201)
+
+
+async def h_session_children(request: web.Request) -> web.Response:
+    """A session's subtree plus what it may still spawn."""
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    manager.get(name)  # 404 for an unknown parent, before reporting on it
+    return web.json_response(
+        {
+            "session": name,
+            "parent": manager.get(name).sdef.parent,
+            "children": [
+                {
+                    "name": child,
+                    "status": manager.get(child).status(),
+                    "children": manager.children(child),
+                }
+                for child in manager.children(name)
+            ],
+            "descendants": manager.descendants(name),
+            **manager.spawn_capabilities(name),
+        }
+    )
+
+
+async def h_session_spawn(request: web.Request) -> web.Response:
+    """Create a child session — the agent-facing way a session grows a team.
+
+    One call because the steps are not independently useful: a child spawned
+    but not enrolled is a terminal nobody is listening to, and a child
+    enrolled but not briefed is an agent that does not know why it exists.
+    Doing them here also makes the ordering a property of the daemon rather
+    than of whichever client got it right — join before the opening task, so
+    the child's first turn already has its mesh identity.
+
+    Everything past the session itself is optional and reported back
+    individually, so a partial success is legible: the caller is told the
+    child exists even when the mesh join is what failed.
+    """
+    manager: SessionManager = request.app["manager"]
+    parent = request.match_info["name"]
+    body = await _json_body(request)
+    try:
+        session = manager.spawn(parent, body)
+    except spawn_mod.SpawnDenied as exc:
+        return json_error(403, str(exc))
+    except (HarnessError, ValueError, TypeError) as exc:
+        return json_error(400, f"bad spawn request: {exc}")
+    except ManagerError as exc:
+        return json_error(409 if "already exists" in str(exc) else 400, str(exc))
+
+    result = {"session": session.info(), "parent": parent}
+    mesh_name = str(body.get("mesh") or "").strip()
+    if mesh_name:
+        result["mesh"] = await _spawn_join_mesh(request, parent, session, body)
+    workflow = str(body.get("workflow") or "").strip()
+    if workflow:
+        result["workflow"] = _spawn_start_workflow(session, workflow, body)
+    task = str(body.get("task") or "").strip()
+    if task:
+        result["task"] = await _spawn_open_task(session, task)
+    return web.json_response(result, status=201)
+
+
+async def _spawn_join_mesh(
+    request: web.Request, parent: str, session, body: dict
+) -> dict:
+    """Enrol the new child, then cut it down to the peers it should see.
+
+    The child starts connected to its parent only. That is the conservative
+    direction: a child that cannot yet reach a peer says so and asks, while a
+    child wired to everyone by default has already broadcast to them by the
+    time anyone notices the arrangement was wrong.
+    """
+    mm = _mesh_mgr(request)
+    mesh_name = str(body.get("mesh") or "").strip()
+    manager: SessionManager = request.app["manager"]
+    try:
+        member = await mm.join(
+            mesh_name,
+            session.sdef.name,
+            handle=str(body.get("handle") or ""),
+            role=str(body.get("role") or ""),
+        )
+    except MeshError as exc:
+        return {"ok": False, "error": str(exc)}
+    if isinstance(member, dict):  # a remote join pended for approval
+        return {"ok": False, "pending": member}
+
+    # The parent's own handle in this mesh, if it has one — the single peer
+    # the child keeps. A parent that is not itself a member leaves the child
+    # connected to whatever `connect` names, or to nobody.
+    parent_member = mm.resolve_sender(mesh_name, parent)
+    keep = {str(h) for h in (body.get("connect") or []) if str(h).strip()}
+    if parent_member is not None:
+        keep.add(parent_member.handle)
+    try:
+        cut = await mm.isolate_member(mesh_name, member.handle, keep=keep)
+    except MeshError as exc:
+        return {"ok": True, "handle": member.handle, "isolate_error": str(exc)}
+    del manager  # only needed for the lookup above
+    return {
+        "ok": True,
+        "mesh": mesh_name,
+        "handle": member.handle,
+        "role": member.role,
+        "connected_to": sorted(keep),
+        "disconnected_from": cut,
+    }
+
+
+def _spawn_start_workflow(session, workflow: str, body: dict) -> dict:
+    """Start a cflow run scoped to the child.
+
+    Runs are keyed by ``(cwd, scope)`` and a session-scoped run uses the
+    session name as its scope, so the child's own agent picks this up as
+    *its* run — not the parent's, even though both sit in the same directory.
+    """
+    try:
+        payload = cflow_engine.start(
+            workflow,
+            context=str(body.get("context") or "") or None,
+            cwd=session.sdef.cwd,
+            scope=session.sdef.name,
+        )
+    except Exception as exc:  # noqa: BLE001 — engine raises several types
+        return {"ok": False, "error": str(exc)}
+    return {
+        "ok": True,
+        "workflow": workflow,
+        "scope": session.sdef.name,
+        "step": payload.get("step") or payload.get("id"),
+    }
+
+
+async def _spawn_open_task(session, task: str) -> dict:
+    """Type the child's opening instruction once it has finished booting.
+
+    Fire-and-forget for the same reason the mesh briefing is: the harness
+    takes seconds to come up, and a spawn call that waited for it would tie
+    the parent's tool call to another program's startup time. The injection
+    is idle-gated, so it lands in a prompt rather than halfway through one.
+    """
+    asyncio.ensure_future(_deliver_task(session, task))
+    return {"ok": True, "queued": True}
+
+
+#: How long the child must stay idle before its opening task is typed in.
+#: A single idle *sample* is not enough: the mesh join briefing is pasted at
+#: almost the same moment, and its submitting Enter is a deliberately delayed
+#: write (``PASTE_ENTER_DELAY``), so there is a real window where the session
+#: reads idle mid-briefing. Typing into that window glues the task onto the
+#: briefing's closing fence. Comfortably longer than that delay, and longer
+#: than the gap between a harness printing its banner and taking input.
+TASK_SETTLE = 1.5
+
+
+async def _deliver_task(session, task: str, *, hold: float = 60.0) -> None:
+    deadline = time.monotonic() + hold
+    idle_since = None
+    while time.monotonic() < deadline:
+        if session.exited:
+            return
+        if session.status() == STATUS_IDLE:
+            if idle_since is None:
+                idle_since = time.monotonic()
+            elif time.monotonic() - idle_since >= TASK_SETTLE:
+                break
+        else:
+            idle_since = None  # something is still arriving; start over
+        await asyncio.sleep(0.2)
+    else:
+        return  # never settled; better nothing than a half-typed prompt
+    try:
+        await session.paste(task, enter=True)
+    except Exception:  # noqa: BLE001 — best-effort, as with the join briefing
+        return
 
 
 async def h_sessions_clear(request: web.Request) -> web.Response:

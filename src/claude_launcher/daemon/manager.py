@@ -19,6 +19,7 @@ import re
 import shutil
 from typing import Dict, List, Optional, Union
 
+from .. import spawn as spawn_mod
 from . import harness as harness_mod
 from . import paths
 from .harness import SessionDef
@@ -75,6 +76,56 @@ class SessionManager:
         self.persist()
         return session
 
+    def spawn(self, parent: str, request: dict) -> Session:
+        """Create a child of ``parent`` under the spawn policy.
+
+        The agent-facing counterpart of :meth:`create`: the child is built
+        from the parent's own definition, with only the fields
+        :mod:`claude_launcher.spawn` permits taken from ``request``. Raises
+        :class:`~claude_launcher.spawn.SpawnDenied` when the policy refuses,
+        which callers map to 403 rather than 400 — the request was well
+        formed, it was simply not allowed.
+
+        A child never inherits ``restore``. A restored parent would replay its
+        whole subtree on every daemon restart, and those children would come
+        back with no agent left to brief them — the tree is a runtime
+        arrangement, so it is rebuilt by the parent, not by the daemon.
+        """
+        session = self.get(parent)
+        if session.exited:
+            raise ManagerError(
+                f"session {parent!r} has exited — an exited session cannot "
+                "spawn children"
+            )
+        policy = spawn_mod.SpawnPolicy.load()
+        child = spawn_mod.check(
+            policy,
+            request,
+            parent=session.sdef.to_dict(),
+            depth=self.depth(parent),
+            children=len(self.children(parent)),
+        )
+        return self.create(
+            SessionDef.from_dict(
+                {
+                    **child,
+                    "name": str(request.get("name") or "").strip(),
+                    "cols": int(request.get("cols") or session.sdef.cols),
+                    "rows": int(request.get("rows") or session.sdef.rows),
+                    "parent": parent,
+                    "restore": False,
+                }
+            )
+        )
+
+    def spawn_capabilities(self, parent: str) -> dict:
+        """What ``parent`` may spawn right now (policy + its current counts)."""
+        return spawn_mod.capabilities(
+            spawn_mod.SpawnPolicy.load(),
+            depth=self.depth(parent),
+            children=len(self.children(parent)),
+        )
+
     def _auto_name(self) -> str:
         """The first free ``sN``.
 
@@ -96,6 +147,82 @@ class SessionManager:
 
     def list(self) -> List[AnySession]:
         return [self._sessions[k] for k in sorted(self._sessions)]
+
+    # ------------------------------------------------------------------ #
+    # hierarchy
+    #
+    # The tree is derived from ``SessionDef.parent`` on every call rather than
+    # kept as a second structure. There are tens of sessions, not thousands,
+    # and a cached tree would need invalidating on create, kill, clear and
+    # restore — four chances for the list and the tree to disagree about who
+    # exists, which is exactly the bug a spawn limit must not have.
+    #
+    # Every walk is cycle-guarded. A cycle cannot be built through
+    # :meth:`spawn` (the parent must already exist, so an edge always points
+    # at an older session), but ``parent`` is a plain field on a definition
+    # the API accepts and ``sessions.json`` persists, so a hand-edited file or
+    # a direct POST can still produce one. Guarding costs a ``set`` and turns
+    # a daemon hang into a wrong-but-finite answer.
+    # ------------------------------------------------------------------ #
+    def children(self, name: str) -> List[str]:
+        """Direct children of ``name``, live or exited, in name order."""
+        return sorted(
+            n for n, s in self._sessions.items() if s.sdef.parent == name and n != name
+        )
+
+    def ancestors(self, name: str) -> List[str]:
+        """``name``'s ancestors, nearest first, stopping at the first one that
+        no longer exists — a dangling parent makes its child a root."""
+        out: List[str] = []
+        seen = {name}
+        current = self._sessions[name].sdef.parent if name in self._sessions else None
+        while current and current in self._sessions and current not in seen:
+            out.append(current)
+            seen.add(current)
+            current = self._sessions[current].sdef.parent
+        return out
+
+    def depth(self, name: str) -> int:
+        """How deep ``name`` sits: a session with no (resolvable) parent is 0."""
+        return len(self.ancestors(name))
+
+    def descendants(self, name: str) -> List[str]:
+        """Every session under ``name``, breadth-first."""
+        out: List[str] = []
+        queue = self.children(name)
+        seen = {name}
+        while queue:
+            current = queue.pop(0)
+            if current in seen:
+                continue
+            seen.add(current)
+            out.append(current)
+            queue.extend(self.children(current))
+        return out
+
+    def commands(self, actor: str, target: str) -> bool:
+        """Whether session ``actor`` may act on session ``target``.
+
+        Authority runs down the tree only: a session commands its own
+        descendants and nothing else. Siblings are explicitly excluded — two
+        workers spawned by the same lead are peers, and a peer that can kill
+        its peer turns a coordination bug into a lost session.
+
+        Humans are not subject to this at all; it gates the agent-facing
+        surface, which is the only caller that has an ``actor``.
+        """
+        return bool(actor) and actor != target and actor in self.ancestors(target)
+
+    def require_commands(self, actor: str, target: str) -> None:
+        """:meth:`commands`, as a raise — the check every agent path shares."""
+        if actor == target:
+            return
+        if not self.commands(actor, target):
+            raise ManagerError(
+                f"session {actor!r} does not command {target!r}: a session may "
+                "act on the sessions it spawned (and their descendants), not "
+                "on its siblings or its parent"
+            )
 
     def kill(self, name: str, *, force: bool = False) -> AnySession:
         """Kill a running session; deregister an already-exited one."""

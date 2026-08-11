@@ -36,7 +36,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Union
+from typing import Callable, Dict, Iterable, List, Optional, Union
 
 import yaml
 
@@ -310,6 +310,18 @@ class Mesh:
         #: and ships it to everyone, so every daemon can draw the same
         #: graph — including edges it is not itself an endpoint of.
         self.edges: Dict[str, bool] = {}
+        #: Whether two *members* may message each other, ``"h1|h2"`` (sorted
+        #: handles) -> enabled. A missing key means connected, so a mesh that
+        #: never touches this stays the complete graph it has always been and
+        #: nothing has to be migrated — exactly the convention ``edges`` uses
+        #: one layer down.
+        #:
+        #: Unlike ``edges`` this is a hard ACL, not a fast-path hint: there is
+        #: no multi-hop routing between members either, so a cut here has
+        #: nowhere to fall back to and a send across it is refused. Owned by
+        #: the authority and shipped to every peer, so a guest cannot let
+        #: through what the authority forbids.
+        self.member_edges: Dict[str, bool] = {}
         #: Bumped on every authority handover; messages carry it alongside
         #: ``seq`` so a forced takeover cannot silently interleave with the
         #: old authority's late traffic.
@@ -468,15 +480,105 @@ class Mesh:
         return bool(link) and link.get("enabled", True)
 
     # ------------------------------------------------------------------ #
+    # member graph
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def member_key(a: str, b: str) -> str:
+        """The canonical key for a member pair — sorted, so one edge has one
+        key whichever end asks about it."""
+        return "|".join(sorted((a, b)))
+
+    def connected(self, a: str, b: str) -> bool:
+        """May ``a`` and ``b`` message each other? Unknown pairs are connected.
+
+        A member is always 'connected' to itself: self-addressed sends are
+        rejected elsewhere (a sender is never its own recipient), and
+        answering False here would make that read as a topology error.
+        """
+        if a == b:
+            return True
+        return bool(self.member_edges.get(self.member_key(a, b), True))
+
+    def neighbours(self, handle: str) -> List[str]:
+        """Every other member ``handle`` may talk to, in handle order."""
+        return sorted(
+            h for h in self.members if h != handle and self.connected(handle, h)
+        )
+
+    def member_edge_table(self) -> List[dict]:
+        """Every member pair with its state — what a topology view needs.
+
+        Emitted for all pairs, not just the cut ones, because "connected" is
+        a default rather than a stored fact: a caller handed only the cut set
+        would have to know the default to draw the graph, and the two answers
+        would drift the first time the default changed.
+        """
+        handles = sorted(self.members)
+        return [
+            {"a": a, "b": b, "enabled": self.connected(a, b)}
+            for i, a in enumerate(handles)
+            for b in handles[i + 1:]
+        ]
+
+    def isolate(self, handle: str, *, keep: Iterable[str] = ()) -> List[str]:
+        """Cut ``handle`` off from every current member except ``keep``.
+
+        This is what makes a spawned child start out talking only to its
+        parent. It is deliberately a *snapshot*: members who join later are
+        connected by default, exactly as they are to everyone else. A rule
+        that kept isolating a member against all future joins would be a
+        third kind of state (the graph, plus a per-member policy about the
+        graph), and the parent that spawned the child is the thing that knows
+        when a newcomer should reach it.
+        """
+        kept = set(keep) | {handle}
+        cut = []
+        for other in sorted(self.members):
+            if other in kept:
+                continue
+            self.member_edges[self.member_key(handle, other)] = False
+            cut.append(other)
+        return cut
+
+    def prune_member_edges(self) -> None:
+        """Drop edges naming a member that has left, so a rejoining handle
+        does not silently inherit the cuts made against its predecessor."""
+        for key in list(self.member_edges):
+            if any(h not in self.members for h in key.split("|")):
+                del self.member_edges[key]
+
+    # ------------------------------------------------------------------ #
     # views
     # ------------------------------------------------------------------ #
     def addressed_to(self, msg: dict, handle: str) -> bool:
+        """Is ``handle`` a recipient of ``msg``?
+
+        The member graph is applied here as well as at send time, and it has
+        to be: the log stores the *address* (``"*"``, or a handle list), not
+        the recipients it resolved to, and delivery, ``pending`` and ``owed``
+        all re-derive membership from that address. Checking only on the way
+        in would leave a broadcast reaching everyone on the way out — an ACL
+        with a second entrance is not an ACL.
+
+        Re-derivation makes this current rather than historical: a message
+        already accepted stops being delivered if the edge is cut before it
+        lands. That is the same direction the fast path takes when it
+        re-resolves, and the safe one — the alternative delivers across a
+        connection the operator has just removed.
+        """
+        sender = msg.get("from")
         to = msg.get("to")
         if to == "*":
-            return msg.get("from") != handle
-        if isinstance(to, list):
-            return handle in to
-        return to == handle
+            addressed = sender != handle
+        elif isinstance(to, list):
+            addressed = handle in to
+        else:
+            addressed = to == handle
+        # An external send (an operator speaking as themselves) has no member
+        # behind it, so it is in no one's graph and `connected` waves it
+        # through on the unknown-pair default. That is intended: the human is
+        # not a member and is not subject to the members' topology.
+        return addressed and self.connected(str(sender or ""), handle)
 
     def pending(self, handle: str) -> List[dict]:
         """Undelivered messages for ``handle`` — sequenced tail first, then
@@ -1041,16 +1143,25 @@ class MeshManager:
             await asyncio.sleep(0.5)
         else:
             return  # never went idle; skip rather than interleave
+        # Only who this member can actually reach. A briefing that listed the
+        # whole roster would have a spawned child addressing peers it is not
+        # connected to, and reading the refusal as a bug rather than as the
+        # arrangement it was started under.
+        reachable = mesh.neighbours(member.handle)
         others = ", ".join(
-            f"{h} ({m.role})" for h, m in sorted(mesh.members.items())
-            if h != member.handle
+            f"{h} ({mesh.members[h].role})" for h in reachable
         ) or "(nobody else yet)"
+        hidden = len(mesh.members) - 1 - len(reachable)
         block = (
             "---\n"
             "# claunch mesh: join briefing -- machine-generated, not typed by the user\n"
             f"mesh: {mesh.name}\n"
             f"you: {member.handle} (role: {member.role})\n"
             f"members: {others}\n"
+            + (
+                f"note: {hidden} other member(s) exist that you are not "
+                "connected to and cannot message\n" if hidden > 0 else ""
+            ) +
             f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
             + self._stance_lines(mesh, member) +
             f"protocol: activate your 'mesh' skill NOW (/mesh {mesh.name}) to "
@@ -1083,6 +1194,11 @@ class MeshManager:
         mesh.members.pop(handle, None)
         mesh.cursors.pop(handle, None)
         mesh._first_pending.pop(handle, None)
+        # Edges naming a departed member go with it: handles are reusable, so
+        # a rejoining name would otherwise inherit the isolation imposed on
+        # whoever wore it last — a member that mysteriously cannot reach
+        # anyone, with nothing in the roster to explain it.
+        mesh.prune_member_edges()
         if mesh.primary:
             self._persist_def(mesh)
             self._persist_cursors(mesh)
@@ -1206,9 +1322,7 @@ class MeshManager:
         body = _CTRL_RE.sub("", str(body)).strip()
         recipients = self._resolve_recipients(mesh, from_handle, to)
         if not recipients:
-            raise MeshError(
-                f"mesh {mesh.name!r} has no other members to deliver to"
-            )
+            raise MeshError(self._nobody_to_deliver_to(mesh, from_handle))
         norm_sections = _normalize_sections(sections, recipients, from_handle)
         if norm_sections is None and not body:
             raise MeshError("empty message body")
@@ -1328,9 +1442,7 @@ class MeshManager:
         body = _CTRL_RE.sub("", str(body)).strip()
         recipients = self._resolve_recipients(mesh, from_handle, to)
         if not recipients:
-            raise MeshError(
-                f"mesh {mesh.name!r} has no other members to deliver to"
-            )
+            raise MeshError(self._nobody_to_deliver_to(mesh, from_handle))
         norm_sections = _normalize_sections(sections, recipients, from_handle)
         if norm_sections is None and not body:
             raise MeshError("empty message body")
@@ -1396,16 +1508,74 @@ class MeshManager:
             ),
         }
 
+    @staticmethod
+    def _nobody_to_deliver_to(mesh: Mesh, from_handle: str) -> str:
+        """Why a send resolved to nobody — an empty mesh and a fully isolated
+        member look identical at the call site and need opposite fixes."""
+        others = [h for h in mesh.members if h != from_handle]
+        if not others:
+            return f"mesh {mesh.name!r} has no other members to deliver to"
+        return (
+            f"{from_handle!r} is not connected to any of the "
+            f"{len(others)} other member(s) of mesh {mesh.name!r} — ask the "
+            "session that spawned you to connect you to a peer"
+        )
+
     def _resolve_recipients(
-        self, mesh: Mesh, from_handle: str, to: Union[str, List[str]]
+        self,
+        mesh: Mesh,
+        from_handle: str,
+        to: Union[str, List[str]],
+        *,
+        strict: bool = True,
     ) -> List[str]:
+        """Expand and validate ``to``, honouring the member graph.
+
+        ``strict=False`` filters unreachable targets instead of refusing
+        them. That is for re-resolving a message the authority has *already*
+        accepted (the fast path): its recipients were checked when it was
+        admitted, and an edge cut in the meantime must narrow the delivery,
+        not raise inside a background worker.
+
+        The graph is applied here rather than at the API edge because every
+        send — local, MCP, relayed from a guest, sliced out of a batch —
+        funnels through this one call. An ACL with a second entrance is not
+        an ACL.
+
+        ``*`` narrows silently to the sender's neighbours (a broadcast means
+        "everyone I can reach", and has always excluded the sender itself),
+        while a handle named explicitly and unreachable is an error: the
+        agent asked for that peer by name and must not be told it was
+        delivered.
+        """
         if to == "*":
-            return [h for h in mesh.members if h != from_handle]
+            return [
+                h for h in mesh.members
+                if h != from_handle and mesh.connected(from_handle, h)
+            ]
         targets = [to] if isinstance(to, str) else list(to)
         unknown = [t for t in targets if t not in mesh.members]
         if unknown:
+            if not strict:
+                targets = [t for t in targets if t not in set(unknown)]
+            else:
+                raise MeshError(
+                    f"unknown recipient(s) in mesh {mesh.name!r}: "
+                    f"{', '.join(unknown)}"
+                )
+        cut = [
+            t for t in targets
+            if t != from_handle and not mesh.connected(from_handle, t)
+        ]
+        if cut and not strict:
+            return [t for t in targets if t not in set(cut)]
+        if cut:
+            reachable = ", ".join(mesh.neighbours(from_handle)) or "(nobody)"
             raise MeshError(
-                f"unknown recipient(s) in mesh {mesh.name!r}: {', '.join(unknown)}"
+                f"{from_handle!r} has no connection to {', '.join(sorted(cut))} "
+                f"in mesh {mesh.name!r} — it can reach: {reachable}. Ask the "
+                "session that spawned you to connect you, or route through a "
+                "peer you share."
             )
         return targets
 
@@ -1727,6 +1897,137 @@ class MeshManager:
             mesh.name, machine, "restored" if enabled else "cut", a, b,
         )
         return {"a": a, "b": b, "enabled": bool(enabled)}
+
+    # ------------------------------------------------------------------ #
+    # the member graph
+    # ------------------------------------------------------------------ #
+    async def set_member_link(
+        self,
+        name: str,
+        a: str,
+        b: str,
+        *,
+        enabled: bool,
+        actor: str = "",
+    ) -> dict:
+        """Connect or disconnect two members of ``name``.
+
+        Ownership follows the roster, not the endpoints: the authority owns
+        membership, so it owns who may speak to whom, and a guest forwards
+        the edit up (``/peer/mesh/member-link``) instead of applying it
+        locally. That is stricter than the machine graph, where either end of
+        an edge may cut it — but the endpoints there are *daemons*, mutually
+        consenting adults with their own operators, whereas the endpoints
+        here are agents, and a member that could cut its own edges could quit
+        the supervision it was spawned under.
+
+        ``actor`` is the session making the request (empty for a human
+        acting through the CLI or dashboard, who is not restricted). An agent
+        may only edit an edge that touches a session it commands — the
+        children it spawned, and their descendants. So a lead wires its own
+        workers together, and a worker cannot wire itself to anybody.
+        """
+        mesh = self.get(name)
+        self._validate_member_edge(mesh, a, b)
+        if actor:
+            self._require_member_authority(mesh, actor, a, b)
+        if mesh.primary:
+            await self._peer_call_primary(
+                mesh, "/peer/mesh/member-link", {"a": a, "b": b, "enabled": enabled}
+            )
+            # Optimistic, as with a machine edge: the authority accepted, and
+            # the next sync re-sends the whole table anyway.
+            mesh.member_edges[Mesh.member_key(a, b)] = bool(enabled)
+            self._persist_def(mesh)
+            return {"a": a, "b": b, "enabled": bool(enabled)}
+        mesh.member_edges[Mesh.member_key(a, b)] = bool(enabled)
+        self._persist_def(mesh)
+        self._roster_changed(mesh)
+        self._flush_guests_soon(mesh)
+        log.info(
+            "mesh %r: %s the member edge %s <-> %s",
+            mesh.name, "connected" if enabled else "disconnected", a, b,
+        )
+        return {"a": a, "b": b, "enabled": bool(enabled)}
+
+    async def isolate_member(
+        self, name: str, handle: str, *, keep: Iterable[str] = ()
+    ) -> List[str]:
+        """Cut ``handle`` off from every member except ``keep``.
+
+        The seed a spawned child joins with: connected to its parent, to
+        nobody else, and wired up from there by the parent. Applied one edge
+        at a time through :meth:`set_member_link` so a mirror's cuts reach
+        the authority by the same forwarding path a hand edit uses — a bulk
+        shortcut here would be a second way for the graph to change, and the
+        one that skipped the authority.
+        """
+        mesh = self.get(name)
+        if handle not in mesh.members:
+            raise MeshError(f"no member {handle!r} in mesh {name!r}")
+        kept = set(keep) | {handle}
+        cut = []
+        for other in sorted(mesh.members):
+            if other in kept:
+                continue
+            await self.set_member_link(name, handle, other, enabled=False)
+            cut.append(other)
+        return cut
+
+    def peer_member_link_accept(
+        self, name: str, machine: str, token: str, a: str, b: str, enabled: bool
+    ) -> dict:
+        """Authority side: apply a member-edge edit forwarded by a peer."""
+        mesh = self.get(name)
+        self._check_link_token(mesh, machine, token)
+        self._require_authority(mesh, "the member graph")
+        self._validate_member_edge(mesh, a, b)
+        mesh.member_edges[Mesh.member_key(a, b)] = bool(enabled)
+        self._persist_def(mesh)
+        self._roster_changed(mesh)
+        self._flush_guests_soon(mesh)
+        log.info(
+            "mesh %r: %s %s the member edge %s <-> %s",
+            mesh.name, machine, "connected" if enabled else "disconnected", a, b,
+        )
+        return {"a": a, "b": b, "enabled": bool(enabled)}
+
+    def _validate_member_edge(self, mesh: Mesh, a: str, b: str) -> None:
+        for handle in (a, b):
+            if handle not in mesh.members:
+                raise MeshError(
+                    f"{handle!r} is not a member of mesh {mesh.name!r}"
+                )
+        if a == b:
+            raise MeshError("a member edge needs two different members")
+
+    def _require_member_authority(
+        self, mesh: Mesh, actor: str, a: str, b: str
+    ) -> None:
+        """An agent may only rewire an edge that touches a session it commands.
+
+        Resolved through the *session* behind each handle, because the
+        hierarchy is a property of sessions and a handle is only a name a
+        session wears inside one mesh. A remote member is never commandable
+        from here: its session lives on another daemon, whose tree this one
+        does not know.
+        """
+        actor_member = self.resolve_sender(mesh.name, actor)
+        actor_handle = actor_member.handle if actor_member else actor
+        owned = []
+        for handle in (a, b):
+            member = mesh.members.get(handle)
+            if member is None or not self._is_local(mesh, member):
+                continue
+            if self.manager.commands(actor, member.session):
+                owned.append(handle)
+        if not owned:
+            raise MeshError(
+                f"{actor_handle!r} may not rewire {a!r} <-> {b!r}: an agent "
+                "edits only the edges touching a session it spawned (or a "
+                "descendant of one). Ask the session that spawned you, or an "
+                "operator (claunch mesh connect/disconnect)."
+            )
 
     def _require_machine(self) -> str:
         if not self.machine:
@@ -2759,6 +3060,7 @@ class MeshManager:
         epoch: Optional[int] = None,
         links: Optional[List[dict]] = None,
         edges: Optional[dict] = None,
+        member_edges: Optional[dict] = None,
         roles: Optional[dict] = None,
     ) -> dict:
         """The authority pushes state at us: log tail, roster, rank order,
@@ -2818,6 +3120,10 @@ class MeshManager:
             self._apply_link_grants(mesh, links, sender=machine)
         if isinstance(edges, dict):
             mesh.edges = {str(k): bool(v) for k, v in edges.items()}
+        if isinstance(member_edges, dict):
+            mesh.member_edges = {
+                str(k): bool(v) for k, v in member_edges.items()
+            }
         if isinstance(roles, dict):
             # Present only when the authority thinks we are behind. `doc` may
             # legitimately be None — that is the mesh returning to the
@@ -2977,7 +3283,7 @@ class MeshManager:
         by message id anyway.
         """
         recipients = self._resolve_recipients(
-            mesh, str(entry.get("from") or ""), entry.get("to") or "*"
+            mesh, str(entry.get("from") or ""), entry.get("to") or "*", strict=False
         )
         done = set(entry.get("fast_sent") or [])
         for machine in self._fast_targets(mesh, recipients):
@@ -3102,6 +3408,11 @@ class MeshManager:
                     # State of every edge, including ones this peer is not an
                     # endpoint of, so its diagram shows the same graph as ours.
                     "edges": dict(mesh.edges),
+                    # The member graph rides the same sync for the same
+                    # reason, and for one more: a guest resolves recipients
+                    # locally before forwarding, so it has to know the cuts
+                    # or it would accept a send the authority then refuses.
+                    "member_edges": dict(mesh.member_edges),
                     # Only when this peer is behind (see roles_due). Sent as
                     # {doc, version} so a null doc — the mesh going back to the
                     # packaged vocabulary — is distinguishable from "omitted".
@@ -3283,6 +3594,10 @@ class MeshManager:
             "provisional": len(mesh.provisional),
             "peers": peers,
             "links": self.edge_table(mesh),
+            # The member graph, one layer up from `links`: who may message
+            # whom. Every pair is listed with its state — see
+            # Mesh.member_edge_table on why the cut set alone is not enough.
+            "member_links": mesh.member_edge_table(),
             "requests": requests,
             "policy": mesh.policy,
             # A summary only — the stance prose is fetched on demand from
@@ -3511,6 +3826,9 @@ class MeshManager:
                 for k, v in (doc.get("pair_links") or {}).items()
                 if isinstance(v, dict)
             }
+        mesh.member_edges = {
+            str(k): bool(v) for k, v in (doc.get("member_edges") or {}).items()
+        }
         try:
             mesh.authority_epoch = int(doc.get("authority_epoch") or 0)
         except (TypeError, ValueError):
@@ -3604,6 +3922,10 @@ class MeshManager:
                 "links": mesh.links,
                 "pair_links": mesh.pair_links,
                 "authority_epoch": mesh.authority_epoch,
+                # Absent while the member graph is complete, so a mesh that
+                # never cuts a member edge writes exactly the file it always
+                # did — and an older daemon reading it sees no new key.
+                **({"member_edges": mesh.member_edges} if mesh.member_edges else {}),
                 "members": {h: m.to_dict() for h, m in sorted(mesh.members.items())},
                 "invites": mesh.invites,
                 "requests": mesh.pending_requests,
