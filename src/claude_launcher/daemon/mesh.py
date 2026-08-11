@@ -2030,10 +2030,10 @@ class MeshManager:
             )
             # Optimistic, as with a machine edge: the authority accepted, and
             # the next sync re-sends the whole table anyway.
-            mesh.member_edges[Mesh.member_key(a, b)] = bool(enabled)
+            self._mark_member_edge(mesh, a, b, enabled)
             self._persist_def(mesh)
             return {"a": a, "b": b, "enabled": bool(enabled)}
-        mesh.member_edges[Mesh.member_key(a, b)] = bool(enabled)
+        self._mark_member_edge(mesh, a, b, enabled)
         self._persist_def(mesh)
         self._roster_changed(mesh)
         self._flush_guests_soon(mesh)
@@ -2075,7 +2075,7 @@ class MeshManager:
         self._check_link_token(mesh, machine, token)
         self._require_authority(mesh, "the member graph")
         self._validate_member_edge(mesh, a, b)
-        mesh.member_edges[Mesh.member_key(a, b)] = bool(enabled)
+        self._mark_member_edge(mesh, a, b, enabled)
         self._persist_def(mesh)
         self._roster_changed(mesh)
         self._flush_guests_soon(mesh)
@@ -2084,6 +2084,31 @@ class MeshManager:
             mesh.name, machine, "connected" if enabled else "disconnected", a, b,
         )
         return {"a": a, "b": b, "enabled": bool(enabled)}
+
+    def _mark_member_edge(
+        self, mesh: Mesh, a: str, b: str, enabled: bool
+    ) -> None:
+        """Record an edge's state and settle any debt it just made undischargeable.
+
+        ``owed`` is recomputed from the log through :meth:`Mesh.addressed_to`,
+        so it drops a debt the moment the edge carrying it is cut. The
+        heartbeat is not recomputed — ``last_asked`` was stamped at delivery
+        and simply stays — so without this the two would disagree: the
+        dashboard would show nothing owed while the policy engine kept
+        nudging the member to answer. That nudge is worse than noise, because
+        a member that obeyed it would have its reply **refused** by the very
+        graph that cut the edge.
+
+        Only a member that now owes nothing at all is settled; one with other
+        outstanding mail is still legitimately being chased.
+        """
+        mesh.member_edges[Mesh.member_key(a, b)] = bool(enabled)
+        if enabled:
+            return
+        for handle in (a, b):
+            st = mesh.activity.get(handle)
+            if st and st.get("last_asked") and not mesh.owed(handle):
+                st["last_asked"] = 0.0
 
     def _validate_member_edge(self, mesh: Mesh, a: str, b: str) -> None:
         for handle in (a, b):

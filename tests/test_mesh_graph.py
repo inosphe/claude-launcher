@@ -766,3 +766,58 @@ def test_deleting_a_mesh_survives_a_reload(home, tmp_path):
         await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# H. the member graph federates
+#
+# It rides the same authority-owned sync as `edges`, but for a stricter
+# reason: a guest resolves its own members' recipients BEFORE forwarding, so
+# a guest that had not heard about a cut would accept a send the authority
+# then refuses -- an inconsistency the sender sees as a message that
+# vanished.
+# --------------------------------------------------------------------------- #
+def test_a_member_cut_converges_on_every_daemon(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mms = await _trio(mgr, tmp_path)
+
+        # the authority cuts two of its guests' members off from each other
+        await mms["pcA"].set_member_link("m", "bob", "carol", enabled=False)
+        for name in ("pcB", "pcC"):
+            await mms["pcA"]._flush_guest(mms["pcA"].get("m"), name)
+
+        for name in ("pcA", "pcB", "pcC"):
+            assert mms[name].get("m").connected("bob", "carol") is False, name
+            assert mms[name].get("m").connected("alice", "bob") is True, name
+
+        # ...and the guest refuses the send locally, before forwarding
+        with pytest.raises(MeshError) as exc:
+            await mms["pcB"].send("m", "bob", "carol", "hello")
+        assert "no connection to carol" in str(exc.value)
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_guest_may_forward_a_member_edit_to_the_authority(home, tmp_path):
+    """The authority owns the roster and therefore the member graph, so a
+    guest's edit travels up rather than being applied where it was made."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mms = await _trio(mgr, tmp_path)
+
+        await mms["pcB"].set_member_link("m", "bob", "carol", enabled=False)
+        # recorded at the authority, not just optimistically at pcB
+        assert mms["pcA"].get("m").connected("bob", "carol") is False
+        await mms["pcA"]._flush_guest(mms["pcA"].get("m"), "pcC")
+        assert mms["pcC"].get("m").connected("bob", "carol") is False
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())

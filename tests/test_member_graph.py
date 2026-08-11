@@ -75,6 +75,33 @@ async def _team(mm: MeshManager, mgr: SessionManager, *, names=("lead", "w1", "w
     return mm.get("team")
 
 
+async def _settled(mgr, timeout: float = 20.0):
+    """Wait until every session has booted and gone idle (delivery is
+    idle-gated, so a test that sends immediately would just queue)."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if all(s.status() == "idle" for s in mgr.list()):
+            return
+        await asyncio.sleep(0.1)
+    raise AssertionError("sessions never settled")
+
+
+async def _drained(mesh, handle: str, timeout: float = 20.0):
+    """Wait until `handle` has actually been delivered its mail -- `owed` only
+    counts DELIVERED messages, so asserting before this races the worker."""
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        if mesh.pending(handle) == []:
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"{handle!r} still has pending mail")
+
+
+def _unanswered(mesh, handle: str) -> bool:
+    """The heartbeat's own verdict, computed exactly as mesh_policy does."""
+    st = mesh.activity.get(handle) or {}
+    return st.get("last_asked", 0.0) > 0 and st.get("last_sent", 0.0) < st["last_asked"]
+
 # --------------------------------------------------------------------------- #
 # A. default
 # --------------------------------------------------------------------------- #
@@ -309,6 +336,65 @@ def test_the_graph_survives_a_reload(home, tmp_path):
         reloaded = MeshManager(mgr, root=root)
         reloaded.load_all()
         assert reloaded.get("team").connected("w1", "w2") is False
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# F. the graph and the debt ledger agree
+# --------------------------------------------------------------------------- #
+def test_cutting_an_edge_settles_the_debt_it_carried(home, tmp_path):
+    """F1: `owed` is recomputed through the graph, the heartbeat's
+    `last_asked` is a stamp that would just sit there. Left alone the two
+    disagree -- and the nudge would be worse than noise, because a member
+    that obeyed it would have its reply refused by the same cut."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh", settle=0.05)
+        mm.start()
+        mesh = await _team(mm, mgr, names=("lead", "w1"))
+        await _settled(mgr)
+
+        await mm.send("team", "lead", "w1", "please answer", type="ask")
+        await _drained(mesh, "w1")
+        assert len(mesh.owed("w1")) == 1
+        assert _unanswered(mesh, "w1") is True
+
+        await mm.set_member_link("team", "lead", "w1", enabled=False)
+        assert mesh.owed("w1") == []
+        assert _unanswered(mesh, "w1") is False
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_cut_elsewhere_leaves_a_real_debt_being_chased(home, tmp_path):
+    """F2: settling is per member and only when nothing is left -- a member
+    that still owes someone reachable must still be nudged."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh", settle=0.05)
+        mm.start()
+        mesh = await _team(mm, mgr, names=("lead", "w1", "w2"))
+        await _settled(mgr)
+
+        await mm.send("team", "lead", "w1", "answer me", type="ask")
+        await mm.send("team", "w2", "w1", "and me", type="ask")
+        await _drained(mesh, "w1")
+        assert len(mesh.owed("w1")) == 2
+
+        await mm.set_member_link("team", "w2", "w1", enabled=False)
+        assert len(mesh.owed("w1")) == 1        # lead's question stands
+        assert _unanswered(mesh, "w1") is True  # ...so the chase continues
+
+        await mm.shutdown()
         await mgr.shutdown_all()
 
     asyncio.run(run())
