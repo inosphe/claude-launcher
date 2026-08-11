@@ -1462,7 +1462,12 @@ claunch install --project .       # MCP tools + the /mesh and /cflow skills
   from its own CLI or its own dashboard — while an edge between two other
   daemons stays the authority's call. The mesh page leads with an editable
   diagram of all of this, backed by a Links list that does the same edits
-  without having to hit a hairline.
+  without having to hit a hairline. Each daemon on that ring is drawn as a
+  **cluster holding its agents**, arranged as the tree of who spawned whom,
+  so one picture answers all three questions a mesh raises: which daemons
+  are linked, who reports to whom, and who may message whom. That last one
+  is complete by default, so only the exceptions are drawn — a cut pair gets
+  a line, and clicking an agent lights up everyone it can currently reach.
 - **Joining is asking to be admitted**: the first join from a machine is a
   *request* the mesh's owner sees in `claunch mesh requests` (and in the web
   UI) and answers with `approve`/`deny`; the grant is delivered back over

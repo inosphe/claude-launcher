@@ -2752,27 +2752,49 @@ function renderInviteWizard(info, fed, members) {
 }
 
 /* ---- topology diagram --------------------------------------------------- */
-/* Phase 7 turned the mesh into a ranked peer graph, and a graph is the one
-   thing a list cannot show: who is linked to whom, and what each edge is
-   doing. Hand-rolled inline SVG — same as everything else here, no build
-   step and no vendored library.
+/* Three things are true about a mesh at once, and they live at three
+   different layers: which daemons are linked (the peer graph), who spawned
+   whom (the session tree), and who may message whom (the member graph). One
+   picture holds all three, because separate pictures make the reader do the
+   join — and the join is where the interesting questions are ("that agent is
+   isolated; is that the spawn, or a cut?").
 
-   Layout is a RANK RING: rank 0 at 12 o'clock, the rest clockwise, so a
-   node's position *is* its precedence and every edge of the complete graph
-   stays visible. Dragging a node onto another's slot rewrites the order. */
+   So: a CLUSTER per daemon, laid out on the rank ring that used to hold bare
+   nodes — rank 0 at 12 o'clock, clockwise from there, position still reading
+   as precedence. Inside each cluster, its agents as a tidy spawn forest.
+   Between clusters, the peer edges, with the four states they always had.
 
-/* The ring is drawn at 1:1 — one SVG unit is one CSS pixel — so the diagram
-   stays the same modest size whatever the peer count, instead of a fixed
-   canvas width stretching a two-node sliver into a wall. The radius is the
-   smallest one that still separates neighbours by a whole cell, so two peers
-   make a small dumbbell rather than a huge circle with everything else empty.
-   The cell is sized for the NAME LABEL, not the disc — the label is the wide
-   part, and clearing only the discs lets names collide. */
+   What is NOT drawn is the point of the design. The member graph is complete
+   by default, so drawing every member pair would be n² hairlines saying
+   nothing; the information lives in the exceptions. Cuts are drawn (dashed
+   red). Everything else answers on demand: click an agent and its reachable
+   set lights up. And the transport behind a cross-machine conversation is a
+   property of the two DAEMONS, not of the pair of agents — so it belongs on
+   the cluster boundary, drawn once, rather than smeared over every member
+   pair that crosses it.
+
+   Hand-rolled inline SVG, like the rest of the dashboard — no build step and
+   no vendored library. Drawn 1:1 (one SVG unit is one CSS pixel) so the panel
+   stays the size the content needs instead of stretching to a fixed canvas. */
 const RING = {
-  node: 26, cell: 126, cellY: 88, pad: { x: 56, top: 36, bottom: 50 },
+  /* Cluster chrome, and the gap the ring must clear between neighbours.
+     pad.top holds the machine-name header AND the disc of the first row,
+     which hangs half its radius above that row's centre line — too small a
+     value here and a long machine name runs under the topmost agents. */
+  gap: 42, pad: { x: 26, top: 46, bottom: 14 },
+  /* One agent: disc radius, its column, and the row a generation occupies.
+     colW is sized for the HANDLE, not the disc — the label is the wide part,
+     and clearing only the discs lets names collide. */
+  node: 15, colW: 104, rowH: 54,
+  /* Room under the deepest row for a disc and the handle hanging below it. */
+  leaf: 40,
 };
-let meshDrag = null;   // {from: machine} while a node is being dragged
+let meshDrag = null;   // {from: machine} while a cluster is being dragged
 let meshBusy = false;  // an edit is in flight; suppress the poll's redraw
+/* The agent whose reachable set is on show, or null. Module state, not DOM
+   state, so the 2s poll rebuilding the whole panel does not drop the
+   selection out from under whoever is reading it. */
+let meshFocus = null;
 
 /* A drag released anywhere but on a node is a cancel. Registered once, at
    the window, because the node handlers only see drops that land on them —
@@ -2789,12 +2811,11 @@ window.addEventListener("pointerup", () => {
 });
 
 /* Chord between neighbours is 2r·sin(pi/n); asking that to span one cell
-   gives the radius directly. One peer sits at the centre. */
-function ringRadius(count) {
+   gives the radius directly. One cluster sits at the centre. The cell is the
+   caller's, because what has to clear is now a whole cluster box and only the
+   caller has measured them. */
+function ringRadius(count, cell) {
   if (count < 2) return 0;
-  // Two peers sit on a vertical diameter, where the wide label is never
-  // beside anything — only disc-plus-label height has to clear.
-  const cell = count === 2 ? RING.cellY : RING.cell;
   return cell / (2 * Math.sin(Math.PI / count));
 }
 
@@ -2914,111 +2935,249 @@ function renderLinkEditor(info) {
   return box;
 }
 
+/* Group the roster into one cluster per daemon, in rank order.
+
+   A mesh that never federated has no peer list at all — and that is exactly
+   the case where the tree is the whole story, so it gets a single unnamed
+   cluster rather than the "nothing to draw yet" the bare ring used to show.
+   `machine` is blank on the primary's own members (federation v2), so the
+   daemon's own name fills in, matching how the daemon buckets them itself. */
+function meshClusters(info) {
+  const peers = info.peers || [];
+  const order = peers.length
+    ? peers.map((p) => p.machine)
+    : [info.self || ""];
+  const buckets = new Map(order.map((m) => [m, []]));
+  for (const m of info.members || []) {
+    const home = m.machine || info.self || "";
+    buckets.get(buckets.has(home) ? home : order[0]).push(m);
+  }
+  return order.map((machine, i) => ({
+    machine, peer: peers[i] || null, members: buckets.get(machine) || [],
+  }));
+}
+
+/* The spawn forest inside one cluster: parent handles turned into children
+   lists, with anything unreachable from a root promoted to one.
+
+   That promotion is not distrust of the daemon, it is what makes a cycle
+   drawable. `parent` resolves to a plain field that a hand-edited
+   sessions.json can point in a circle, and a pair pointing at each other sits
+   in no root's subtree — so without this the two of them would simply vanish
+   from the picture. A wrong-but-visible tree beats a missing agent. */
+function meshForest(members) {
+  const known = new Set(members.map((m) => m.handle));
+  const kids = new Map();
+  const roots = [];
+  for (const m of members) {
+    // A child is always spawned on its parent's own daemon, so a parent that
+    // is not in this cluster is lineage gone stale — draw it as a root.
+    const p = m.parent && m.parent !== m.handle && known.has(m.parent)
+      ? m.parent : null;
+    if (!p) { roots.push(m.handle); continue; }
+    if (!kids.has(p)) kids.set(p, []);
+    kids.get(p).push(m.handle);
+  }
+  const seen = new Set();
+  const walk = (h) => {
+    if (seen.has(h)) return;
+    seen.add(h);
+    for (const c of kids.get(h) || []) walk(c);
+  };
+  roots.forEach(walk);
+  for (const m of members) {
+    if (!seen.has(m.handle)) { roots.push(m.handle); walk(m.handle); }
+  }
+  return { roots, kids };
+}
+
+/* Tidy layered layout: depth picks the row, a leaf takes the next free column
+   and a parent centres over its children. Deterministic on purpose — the
+   panel is rebuilt every 2s, and a force simulation would redraw a slightly
+   different picture each time for a graph whose shape we already know. */
+function layoutForest(forest) {
+  const pos = new Map();
+  let col = 0;
+  const place = (handle, depth) => {
+    if (pos.has(handle)) return null;  // already placed: a cycle led back here
+    pos.set(handle, null);             // reserve before recursing
+    const xs = (forest.kids.get(handle) || [])
+      .map((c) => place(c, depth + 1))
+      .filter((x) => x !== null);
+    const x = xs.length ? (xs[0] + xs[xs.length - 1]) / 2 : col++;
+    pos.set(handle, { x: x * RING.colW, y: depth * RING.rowH });
+    return x;
+  };
+  for (const root of forest.roots) {
+    place(root, 0);
+    col += 0.55;  // a gap between sibling trees, so two teams read as two
+  }
+  return pos;
+}
+
+/* Lay a cluster out in its own coordinates and measure the box it needs. */
+function measureCluster(cluster) {
+  const pos = layoutForest(meshForest(cluster.members));
+  const nodes = [...pos].map(([handle, p]) => ({ handle, ...p }));
+  const xs = nodes.map((n) => n.x);
+  const minX = nodes.length ? Math.min(...xs) : 0;
+  const maxX = nodes.length ? Math.max(...xs) : 0;
+  const maxY = nodes.length ? Math.max(...nodes.map((n) => n.y)) : 0;
+  const offX = RING.pad.x + RING.colW / 2 - minX;
+  for (const n of nodes) { n.x += offX; n.y += RING.pad.top; }
+  return {
+    nodes,
+    at: new Map(nodes.map((n) => [n.handle, n])),
+    w: maxX - minX + RING.colW + 2 * RING.pad.x,
+    h: maxY + RING.leaf + RING.pad.top + RING.pad.bottom,
+  };
+}
+
+/* Who this agent may message, from the member graph the daemon ships whole. */
+function meshReachable(info, handle) {
+  const out = new Set();
+  for (const e of info.member_links || []) {
+    if (!e.enabled) continue;
+    if (e.a === handle) out.add(e.b);
+    else if (e.b === handle) out.add(e.a);
+  }
+  return out;
+}
+
+/* Where the centre-to-centre line leaves a cluster box, so a peer edge stops
+   at the boundary instead of running under the agents inside it. */
+function boxExit(box, tx, ty) {
+  const dx = tx - box.cx, dy = ty - box.cy;
+  if (!dx && !dy) return { x: box.cx, y: box.cy };
+  const s = Math.min(
+    dx ? (box.w / 2) / Math.abs(dx) : Infinity,
+    dy ? (box.h / 2) / Math.abs(dy) : Infinity
+  );
+  return { x: box.cx + dx * s, y: box.cy + dy * s };
+}
+
+function topoHint(info, clusters) {
+  const focus = meshFocus
+    ? ` · showing what ${meshFocus} can reach — click it again to clear`
+    : " · click an agent to see who it can reach";
+  if (clusters.length < 2) {
+    return "one daemon — clusters appear as others join" + focus;
+  }
+  // Only the authority can edit the graph, so only it is told how.
+  return (info.primary === null
+    ? "rank 0 holds the authority · drag a cluster onto another to reorder · "
+      + "click a link to cut or restore it"
+    : `rank 0 holds the authority — edit the graph on ${info.authority}`
+  ) + focus;
+}
+
 function renderTopology(info) {
   const peers = info.peers || [];
+  // A selection outliving the member it named would leave the panel claiming
+  // to show the reach of somebody who has left.
+  if (meshFocus && !(info.members || []).some((m) => m.handle === meshFocus)) {
+    meshFocus = null;
+  }
+  const clusters = meshClusters(info).map((c) => ({ ...c, ...measureCluster(c) }));
   const box = el("div", "mesh-topo");
   const head = el("div", "mesh-topo-head");
   head.appendChild(el("h3", null, "Topology"));
-  // Only the authority can edit the graph, so only it is told how.
-  head.appendChild(el(
-    "span", "wf-note",
-    !peers.length
-      ? "local mesh — no other daemon has joined yet"
-      : info.primary === null
-        ? "rank 0 holds the authority · drag a node onto another to reorder · " +
-          "click an edge to cut or restore it"
-        : `rank 0 holds the authority — edit the graph on ${info.authority}`
-  ));
+  head.appendChild(el("span", "wf-note", topoHint(info, clusters)));
   box.appendChild(head);
-  if (!peers.length) return box;
 
-  const at = {};
-  const radius = ringRadius(peers.length);
-  peers.forEach((p, i) => { at[p.machine] = ringPoint(i, peers.length, radius); });
-  // Fit the box to the nodes plus room for the name labels, which hang below
-  // each disc and are wider than it. Asymmetric on y: only the bottom side
-  // carries a label past the disc.
-  const xs = Object.values(at).map((p) => p.x);
-  const ys = Object.values(at).map((p) => p.y);
+  // Cluster centres on the rank ring. The cell is the widest box rather than
+  // a label, since that is what has to clear now; two clusters sit on a
+  // vertical diameter, where only their heights are ever side by side.
+  const cell = RING.gap + Math.max(...clusters.map(
+    (c) => (clusters.length === 2 ? c.h : Math.max(c.w, c.h))
+  ));
+  const radius = ringRadius(clusters.length, cell);
+  clusters.forEach((c, i) => {
+    const p = ringPoint(i, clusters.length, radius);
+    c.cx = p.x; c.cy = p.y;
+    c.left = p.x - c.w / 2; c.top = p.y - c.h / 2;
+  });
+
+  // Absolute position of every agent, so cuts and reachability can cross a
+  // cluster boundary without either side knowing about the other's layout.
+  const at = new Map();
+  for (const c of clusters) {
+    for (const n of c.nodes) {
+      at.set(n.handle, { x: c.left + n.x, y: c.top + n.y, cluster: c });
+    }
+  }
+
   const vb = {
-    x: Math.min(...xs) - RING.pad.x, y: Math.min(...ys) - RING.pad.top,
-    w: Math.max(...xs) - Math.min(...xs) + 2 * RING.pad.x,
-    h: Math.max(...ys) - Math.min(...ys) + RING.pad.top + RING.pad.bottom,
+    x: Math.min(...clusters.map((c) => c.left)) - 4,
+    y: Math.min(...clusters.map((c) => c.top)) - 4,
   };
-  // width/height in units == viewBox units: drawn 1:1, never upscaled.
+  vb.w = Math.max(...clusters.map((c) => c.left + c.w)) - vb.x + 4;
+  vb.h = Math.max(...clusters.map((c) => c.top + c.h)) - vb.y + 4;
   const canvas = svg("svg", {
     viewBox: `${vb.x} ${vb.y} ${vb.w} ${vb.h}`,
     width: Math.round(vb.w), height: Math.round(vb.h),
-    class: "mesh-ring",
+    class: "mesh-ring" + (meshFocus ? " focusing" : ""),
+  });
+  // Clicking anywhere that is not an agent or a link clears the selection —
+  // the gesture people try first, and the cluster boxes cover most of the
+  // panel, so waiting for a click on bare canvas would rarely fire.
+  canvas.addEventListener("click", (ev) => {
+    if (!meshFocus || ev.target.closest(".mesh-agent, .mesh-edge-group")) return;
+    meshFocus = null;
+    refreshMeshView(true);
   });
 
-  // edges first so nodes paint over them
-  const byName = {};
-  for (const p of peers) byName[p.machine] = p;
-  for (const edge of info.links || []) {
-    const { a, b } = edge;
-    if (!at[a] || !at[b]) continue;
-    const cls = edgeClass(edge, byName);
-    const ends = { x1: at[a].x, y1: at[a].y, x2: at[b].x, y2: at[b].y };
-    const group = svg("g", { class: `mesh-edge-group ${cls}` });
-    // A 1.6px stroke is far too thin to aim at (and a horizontal one has a
-    // zero-height box), so a transparent fat line underneath does the
-    // hit-testing while the visible one stays hairline.
-    group.appendChild(svg("line", { ...ends, class: "mesh-edge-hit" }));
-    group.appendChild(svg("line", { ...ends, class: `mesh-edge ${cls}` }));
-    group.appendChild(svg("title", {}, `${a} <-> ${b} — ${cls}`));
-    // `editable` is the daemon's own answer for THIS daemon: the authority
-    // may edit any edge, a peer only the ones it terminates, and nobody cuts
-    // an authority edge (those carry the sequenced log — revoke instead).
-    if (edge.editable) {
-      group.classList.add("editable");
-      group.addEventListener("click", () => toggleEdge(info, edge));
-    }
-    canvas.appendChild(group);
-  }
+  const byMachine = {};
+  for (const p of peers) byMachine[p.machine] = p;
+  const byName = Object.fromEntries(clusters.map((c) => [c.machine, c]));
 
-  peers.forEach((p, i) => {
-    const pos = at[p.machine];
+  /* 1. cluster boxes, behind everything they contain */
+  clusters.forEach((c, i) => {
+    const rank = c.peer ? c.peer.rank : 0;
     const g = svg("g", {
-      class: "mesh-node"
-        + (p.self ? " self" : "")
-        + (p.rank === 0 ? " authority" : "")
-        + (p.ok === false ? " down" : "")
-        + (meshDrag && meshDrag.from === p.machine ? " dragging" : ""),
-      transform: `translate(${pos.x} ${pos.y})`,
+      class: "mesh-cluster"
+        + (c.peer && c.peer.self ? " self" : "")
+        + (rank === 0 && c.peer ? " authority" : "")
+        + (c.peer && c.peer.ok === false ? " down" : "")
+        + (meshDrag && meshDrag.from === c.machine ? " dragging" : ""),
     });
-    g.appendChild(svg("circle", { r: RING.node, class: "mesh-node-disc" }));
-    // Only what always fits goes inside the disc: the rank, and the member
-    // count under it. Machine names are long enough to spill out of any disc
-    // small enough to be worth drawing, so they hang below it instead.
-    const chips = (p.members || []).length;
-    g.appendChild(svg("text", { class: "mesh-node-rank", y: -2 },
-                      p.rank === 0 ? "★ 0" : String(p.rank)));
-    g.appendChild(svg("text", { class: "mesh-node-members", y: 11 },
-                      chips ? `${chips} member${chips === 1 ? "" : "s"}` : "—"));
+    g.appendChild(svg("rect", {
+      x: c.left, y: c.top, width: c.w, height: c.h, rx: 10,
+      class: "mesh-cluster-box",
+    }));
+    const label = c.machine || "this daemon";
     g.appendChild(svg(
-      "text", { class: "mesh-node-name", y: RING.node + 14 },
-      p.machine.length > 17 ? `${p.machine.slice(0, 16)}…` : p.machine
+      "text", { x: c.left + 12, y: c.top + 19, class: "mesh-cluster-name" },
+      (c.peer ? (rank === 0 ? "★ " : `${rank} · `) : "")
+        + (label.length > 20 ? `${label.slice(0, 19)}…` : label)
     ));
-    const marks = [`rank ${p.rank}`, p.rank === 0 ? "authority" : "peer"];
-    if (p.self) marks.push("this daemon");
-    if (p.ok === false) marks.push(`unreachable: ${p.error}`);
-    if (p.queued) marks.push(`${p.queued} queued`);
-    if ((p.members || []).length) marks.push((p.members || []).join(", "));
-    g.appendChild(svg("title", {}, `${p.machine} — ${marks.join(" · ")}`));
+    if (!c.members.length) {
+      g.appendChild(svg(
+        "text",
+        { x: c.cx, y: c.cy + 6, class: "mesh-cluster-empty" },
+        "no agents"
+      ));
+    }
+    const marks = [];
+    if (c.peer) {
+      marks.push(`rank ${rank}`, rank === 0 ? "authority" : "peer");
+      if (c.peer.self) marks.push("this daemon");
+      if (c.peer.ok === false) marks.push(`unreachable: ${c.peer.error}`);
+      if (c.peer.queued) marks.push(`${c.peer.queued} queued`);
+    }
+    marks.push(`${c.members.length} agent${c.members.length === 1 ? "" : "s"}`);
+    g.appendChild(svg("title", {}, `${label} — ${marks.join(" · ")}`));
 
-    // Reordering is the authority's call, so only it offers the gesture.
-    if (info.primary === null && peers.length > 1) {
+    // Reordering is the authority's call, so only it offers the gesture. As
+    // before, no setPointerCapture: capturing would route the release back to
+    // the cluster the drag started on and no drop could ever land.
+    if (info.primary === null && clusters.length > 1) {
       g.classList.add("draggable");
-      // No setPointerCapture here: capturing would route the pointerup back
-      // to the node the drag started on, so a drop could never land on the
-      // target. Releasing outside any node is handled by the window
-      // listener registered below.
-      g.addEventListener("pointerdown", () => { meshDrag = { from: p.machine }; });
+      g.addEventListener("pointerdown", () => { meshDrag = { from: c.machine }; });
       g.addEventListener("pointerup", () => {
         const from = meshDrag && meshDrag.from;
         meshDrag = null;
-        if (!from || from === p.machine) return refreshMeshView(true);
+        if (!from || from === c.machine) return refreshMeshView(true);
         const order = peers.map((q) => q.machine).filter((m) => m !== from);
         order.splice(i, 0, from);
         if (order[0] !== info.authority && !confirm(
@@ -3033,12 +3192,103 @@ function renderTopology(info) {
     }
     canvas.appendChild(g);
   });
+
+  /* 2. peer edges — the transport behind every conversation that crosses a
+        machine boundary, drawn once at the boundary rather than smeared over
+        each pair of agents that uses it. */
+  for (const edge of info.links || []) {
+    const a = byName[edge.a], b = byName[edge.b];
+    if (!a || !b) continue;
+    const cls = edgeClass(edge, byMachine);
+    const ea = boxExit(a, b.cx, b.cy), eb = boxExit(b, a.cx, a.cy);
+    const ends = { x1: ea.x, y1: ea.y, x2: eb.x, y2: eb.y };
+    const group = svg("g", { class: `mesh-edge-group ${cls}` });
+    // A 1.6px stroke is far too thin to aim at (and a horizontal one has a
+    // zero-height box), so a transparent fat line underneath does the
+    // hit-testing while the visible one stays hairline.
+    group.appendChild(svg("line", { ...ends, class: "mesh-edge-hit" }));
+    group.appendChild(svg("line", { ...ends, class: `mesh-edge ${cls}` }));
+    group.appendChild(svg("title", {}, `${edge.a} <-> ${edge.b} — ${cls}`));
+    if (edge.editable) {
+      group.classList.add("editable");
+      group.addEventListener("click", () => toggleEdge(info, edge));
+    }
+    canvas.appendChild(group);
+  }
+
+  /* 3. spawn edges, inside their cluster */
+  for (const m of info.members || []) {
+    const child = at.get(m.handle), parent = m.parent && at.get(m.parent);
+    if (!child || !parent || parent.cluster !== child.cluster) continue;
+    // An elbow rather than a diagonal: with several children the fan of
+    // straight lines is hard to follow back to one parent.
+    const mid = (parent.y + child.y) / 2;
+    canvas.appendChild(svg("path", {
+      class: "mesh-spawn",
+      d: `M ${parent.x} ${parent.y} V ${mid} H ${child.x} V ${child.y}`,
+    }));
+  }
+
+  /* 4. member-graph exceptions. Connected is the default and says nothing;
+        a cut is a decision somebody made, so a cut is what gets a line. */
+  for (const e of info.member_links || []) {
+    if (e.enabled) continue;
+    const a = at.get(e.a), b = at.get(e.b);
+    if (!a || !b) continue;
+    const g = svg("g", { class: "mesh-mcut" });
+    g.appendChild(svg("line", { x1: a.x, y1: a.y, x2: b.x, y2: b.y }));
+    g.appendChild(svg("title", {}, `${e.a} ✕ ${e.b} — cannot message each other`));
+    canvas.appendChild(g);
+  }
+
+  /* 5. the answer to "who can this one talk to", on demand */
+  const reachable = meshFocus ? meshReachable(info, meshFocus) : new Set();
+  if (meshFocus && at.has(meshFocus)) {
+    const from = at.get(meshFocus);
+    for (const handle of reachable) {
+      const to = at.get(handle);
+      if (!to) continue;
+      canvas.appendChild(svg("line", {
+        class: "mesh-reach", x1: from.x, y1: from.y, x2: to.x, y2: to.y,
+      }));
+    }
+  }
+
+  /* 6. the agents themselves, over everything */
+  for (const m of info.members || []) {
+    const p = at.get(m.handle);
+    if (!p) continue;
+    const lit = !meshFocus || m.handle === meshFocus || reachable.has(m.handle);
+    const g = svg("g", {
+      class: "mesh-agent " + meshDotClass(m.reachability)
+        + (m.handle === meshFocus ? " focus" : "")
+        + (lit ? "" : " dim"),
+      transform: `translate(${p.x} ${p.y})`,
+    });
+    g.appendChild(svg("circle", { r: RING.node, class: "mesh-agent-disc" }));
+    g.appendChild(svg(
+      "text", { class: "mesh-agent-name", y: RING.node + 14 },
+      m.handle.length > 14 ? `${m.handle.slice(0, 13)}…` : m.handle
+    ));
+    const owed = m.owed ? `${m.owed} unanswered` : null;
+    g.appendChild(svg("title", {}, [
+      `${m.handle} (${m.role})`, m.session, m.reachability,
+      m.parent ? `spawned by ${m.parent}` : "not spawned by a member",
+      owed,
+    ].filter(Boolean).join(" · ")));
+    g.addEventListener("click", () => {
+      meshFocus = meshFocus === m.handle ? null : m.handle;
+      refreshMeshView(true);
+    });
+    canvas.appendChild(g);
+  }
   box.appendChild(canvas);
 
   const legend = el("div", "mesh-legend");
   for (const [cls, label] of [
     ["ok", "linked"], ["queued", "queued"],
     ["down", "unreachable"], ["cut", "cut"],
+    ["spawn", "spawned"], ["mcut", "cannot message"],
   ]) {
     const item = el("span", "mesh-legend-item");
     item.appendChild(el("i", `mesh-legend-swatch ${cls}`));

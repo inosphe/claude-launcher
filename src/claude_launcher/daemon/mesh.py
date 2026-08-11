@@ -385,6 +385,12 @@ class Mesh:
         #: Primary side: freshest activity report per remote member handle
         #: (piggybacked on guest sync acks; read by the policy tick).
         self.remote_activity: Dict[str, dict] = {}
+        #: Parent handle per member hosted somewhere else. Lineage is a fact
+        #: about a *session*, so only the daemon running it can derive one;
+        #: this is what the rest of the mesh is told. Kept beside the roster
+        #: rather than on Member because it stays derived at the source — a
+        #: parent stored on a member would be a second truth to keep in step.
+        self.remote_lineage: Dict[str, str] = {}
         #: Primary side: policy nudge instructions awaiting fanout,
         #: machine -> [{handle, kind, body}].
         self.pending_nudges: Dict[str, List[dict]] = {}
@@ -1330,6 +1336,7 @@ class MeshManager:
             self._persist_cursors(mesh)
         else:
             mesh.remote_activity.pop(handle, None)
+            mesh.remote_lineage.pop(handle, None)
             self._persist_cursors(mesh)
             self._roster_changed(mesh)
         return member
@@ -2842,6 +2849,7 @@ class MeshManager:
     def _rollback_admission(self, mesh: Mesh, machine: str, handle: str) -> None:
         mesh.members.pop(handle, None)
         mesh.remote_activity.pop(handle, None)
+        mesh.remote_lineage.pop(handle, None)
         if not any(m.machine == machine for m in mesh.members.values()):
             self._unrank(mesh, machine)
         mesh.roster_version += 1
@@ -2865,6 +2873,7 @@ class MeshManager:
         for h in removed:
             mesh.members.pop(h, None)
             mesh.remote_activity.pop(h, None)
+            mesh.remote_lineage.pop(h, None)
         mesh.roster_version += 1
         self._persist_def(mesh)
         self._persist_cursors(mesh)
@@ -3048,6 +3057,7 @@ class MeshManager:
             )
         mesh.members.pop(handle, None)
         mesh.remote_activity.pop(handle, None)
+        mesh.remote_lineage.pop(handle, None)
         self._roster_changed(mesh)
         return member.to_dict()
 
@@ -3213,10 +3223,11 @@ class MeshManager:
         edges: Optional[dict] = None,
         member_edges: Optional[dict] = None,
         roles: Optional[dict] = None,
+        lineage: Optional[dict] = None,
     ) -> dict:
         """The authority pushes state at us: log tail, roster, rank order,
-        brokered edges, policy, nudges, and — only when we are behind on it —
-        the role set.
+        brokered edges, policy, nudges, lineage, and — only when we are
+        behind on it — the role set.
 
         ``base`` must equal our log length — a mismatch means the authority's
         cursor for us is stale, so we answer with ``resync`` and our true
@@ -3275,6 +3286,16 @@ class MeshManager:
             mesh.member_edges = {
                 str(k): bool(v) for k, v in member_edges.items()
             }
+        if isinstance(lineage, dict):
+            # Adopted wholesale like the roster: the authority is the hub that
+            # collects every host's answer. Our own members are re-derived on
+            # read, so the copy of ours that comes back here is harmless. A
+            # self-parent is dropped rather than trusted — it would be a cycle
+            # of one in whatever walks this next.
+            mesh.remote_lineage = {
+                str(h): str(p) for h, p in lineage.items()
+                if p and str(h) != str(p)
+            }
         if isinstance(roles, dict):
             # Present only when the authority thinks we are behind. `doc` may
             # legitimately be None — that is the mesh returning to the
@@ -3313,6 +3334,13 @@ class MeshManager:
         return {
             "cursor": len(mesh.messages),
             "activity": self._activity_report(mesh),
+            # Lineage rides the ack for the same reason activity does: it is
+            # observable only here. Roots are sent as "" rather than omitted,
+            # so a member that stopped having a parent clears the authority's
+            # copy instead of leaving it frozen at the last thing we said.
+            "lineage": {
+                h: p or "" for h, p in self._local_lineage(mesh).items()
+            },
         }
 
     def _apply_nudge_soon(self, mesh: Mesh, nudge: dict) -> None:
@@ -3567,6 +3595,11 @@ class MeshManager:
                     # locally before forwarding, so it has to know the cuts
                     # or it would accept a send the authority then refuses.
                     "member_edges": dict(mesh.member_edges),
+                    # Who spawned whom, in handles. Relayed rather than
+                    # discovered: only the daemon hosting a session can see
+                    # its parent, so this is the one path by which a guest
+                    # learns the shape of another guest's team.
+                    "lineage": self._lineage_map(mesh),
                     # Only when this peer is behind (see roles_due). Sent as
                     # {doc, version} so a null doc — the mesh going back to the
                     # packaged vocabulary — is distinguishable from "omitted".
@@ -3618,6 +3651,30 @@ class MeshManager:
                     and not self._is_local(mesh, member)
                 ):
                     mesh.remote_activity[str(handle)] = {**rep, "at": now}
+        lineage = resp.get("lineage")
+        if isinstance(lineage, dict):
+            # Per handle rather than wholesale: this guest speaks only for the
+            # members it hosts, and overwriting the map would erase what every
+            # other guest has told us.
+            before = dict(mesh.remote_lineage)
+            for handle, parent in lineage.items():
+                member = mesh.members.get(str(handle))
+                if member is None or self._is_local(mesh, member):
+                    continue
+                if parent and str(parent) != str(handle):
+                    mesh.remote_lineage[str(handle)] = str(parent)
+                else:
+                    mesh.remote_lineage.pop(str(handle), None)
+            if mesh.remote_lineage != before:
+                # Lineage arrives one hop later than the roster it describes:
+                # the join fans out immediately, but who spawned whom is only
+                # learned from the host's next ack. Without marking the others
+                # due, that answer would sit here until some unrelated message
+                # gave it a lift, and their diagrams would draw a flat team.
+                # Bumping the roster is how "a member fact changed" is already
+                # said; the worker's next pass does the sending, since we are
+                # inside a flush and must not start another.
+                mesh.roster_version += 1
         self._persist_cursors(mesh)
         if msgs:
             log.info(
@@ -3762,8 +3819,69 @@ class MeshManager:
             "heartbeat": dict(mesh.policy["heartbeat"]),
         }
 
+    # ------------------------------------------------------------------ #
+    # lineage
+    #
+    # Who spawned whom, expressed in handles. The session tree is the only
+    # source (``SessionDef.parent``); these two just carry it to the layer
+    # that draws it, and no further — nothing routes or authorises on it.
+    # ------------------------------------------------------------------ #
+    def _local_lineage(self, mesh: Mesh) -> Dict[str, Optional[str]]:
+        """Parent handle for each member this daemon hosts, or None for a root.
+
+        The tree is a tree of *sessions* and the roster is a list of
+        *members*, and the two need not line up: a session in the middle of a
+        lineage may never have been enrolled. So a member's parent is its
+        nearest *enrolled* ancestor rather than its immediate one — a worker
+        whose lead never joined hangs off whoever above it did, and off
+        nothing if nobody did. Collapsing rather than breaking is what keeps
+        the drawn result a tree instead of a scatter of orphans.
+
+        ``SessionManager.ancestors`` walks nearest-first, stops at the first
+        parent that no longer exists (a dangling parent makes its child a
+        root) and is cycle-guarded, so all three of those cases arrive here
+        already answered.
+        """
+        by_session = {
+            m.session: h for h, m in mesh.members.items()
+            if self._is_local(mesh, m) and m.session
+        }
+        out: Dict[str, Optional[str]] = {}
+        for handle, member in mesh.members.items():
+            if not self._is_local(mesh, member) or not member.session:
+                continue
+            out[handle] = next(
+                (
+                    by_session[name]
+                    for name in self.manager.ancestors(member.session)
+                    if by_session.get(name, handle) != handle
+                ),
+                None,
+            )
+        return out
+
+    def _lineage_map(self, mesh: Mesh) -> Dict[str, str]:
+        """Every member's parent, ours derived and the rest as reported.
+
+        The authority relays this the way it relays the roster, and for the
+        same reason it relays the edge table: lineage is knowable only where
+        the session runs, so without a hub every dashboard but the host's
+        would draw a remote machine's agents as a flat pile.
+        """
+        out = dict(mesh.remote_lineage)
+        for handle, parent in self._local_lineage(mesh).items():
+            if parent:
+                out[handle] = parent
+            else:
+                out.pop(handle, None)  # became a root; say so, don't go quiet
+        return {
+            h: p for h, p in out.items()
+            if h in mesh.members and p in mesh.members
+        }
+
     def mesh_info(self, mesh: Mesh) -> dict:
         members = []
+        lineage = self._local_lineage(mesh)
         for handle in sorted(mesh.members):
             m = mesh.members[handle]
             local = self._is_local(mesh, m)
@@ -3779,12 +3897,19 @@ class MeshManager:
                 owed = 1 if rep["unanswered"] else 0
             else:
                 owed = None
+            # Ours is derived on the spot; everyone else's is what their
+            # daemon last told us. A parent that has since left reads as no
+            # parent at all — the same rule the session tree uses for a
+            # dangling one, so a departure cannot leave an edge pointing at
+            # nobody.
+            parent = lineage.get(handle) if local else mesh.remote_lineage.get(handle)
             members.append(
                 {
                     **m.to_dict(),
                     "pending": len(mesh.pending(handle)) if local else None,
                     "owed": owed,
                     "reachability": self._reachability(mesh, m),
+                    "parent": parent if parent in mesh.members else None,
                 }
             )
         # The whole rank list, ourselves included — the diagram draws nodes

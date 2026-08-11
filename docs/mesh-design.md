@@ -557,14 +557,12 @@ vendored library, no external fetch.
 - **Layout**: a rank ring. `peers[0]` sits at 12 o'clock wearing the authority
   mark, the rest follow clockwise by rank, so position reads as precedence
   and every edge of the complete graph stays visible. It is drawn 1:1 at a
-  radius derived from the peer count — the smallest that still separates
-  neighbouring *labels* — so the panel stays small and does not stretch.
-- **Nodes** are peer daemons: rank badge and member count inside the disc,
-  machine name below it (names are longer than any disc worth drawing).
+  radius derived from the ring's contents — the smallest that still separates
+  neighbours — so the panel stays small and does not stretch.
 - **Edges** are links, styled by state: solid = ok, dashed = queued, red =
   unreachable, grey = cut. A transparent fat line under each hairline does
   the hit-testing, or they would be unclickable.
-- **Editing**: drag a node onto another rank slot to reorder (authority
+- **Editing**: drag a daemon onto another rank slot to reorder (authority
   handover is confirmed explicitly), click an edge to cut or restore it.
   Peers are revoked from the *Peer daemons* box below, since removing a
   daemon is not an edge operation.
@@ -578,6 +576,76 @@ vendored library, no external fetch.
 Both editing surfaces are driven by the edge table's `editable` flag, so a
 peer's dashboard can cut its own links without the operator having to go find
 the authority's browser.
+
+## Hierarchy in the diagram (phase 9 — implemented)
+
+Phase 8 gave a mesh two more structures — the session tree and the member
+graph — and the diagram showed neither. A daemon ring cannot: its nodes are
+the wrong kind of thing. What replaces it is the same ring with **clusters**
+in the slots, and that one change lets all three layers share a picture:
+
+| layer | drawn as |
+|---|---|
+| peer graph (daemons) | the ring, and the connectors between clusters |
+| session tree (who spawned whom) | a tidy forest inside each cluster |
+| member graph (who may message whom) | cuts only, plus reach on demand |
+
+**Why one picture.** Separate diagrams make the reader do the join, and the
+join is where the questions are — *that agent is isolated; is that the spawn,
+or a cut?* Splitting them also duplicates the cluster: an agent has to appear
+in both to be found in either.
+
+**Why the member graph is drawn as exceptions.** It is complete by default
+(`connected()` answers True for a pair nobody has touched), so every pair
+drawn is n² hairlines carrying no information — and the picture is *worst*
+exactly when the mesh is healthy. The information lives in what somebody
+decided: a cut. So cuts get a line (dashed red) and nothing else does.
+"Who can this one reach" is a question, and gets an answer when asked: click
+an agent and its neighbours light up while the rest dim. `Mesh.neighbours()`
+already computes it for the join briefing and the `reachable` field.
+
+**Why transport sits on the cluster boundary.** "lead and scout are
+connected" means two different things — *may they speak* (the member edge)
+and *how does it get there* (fast path, via the authority, or queued). The
+second is a property of the two **daemons**, so it varies per machine pair,
+not per agent pair: every conversation crossing that boundary degrades
+together. Drawing it once on the boundary says exactly that; drawing it on
+each member pair would say it n×m times and imply it could differ between
+them. This is the two-graph distinction from phase 8 made visual.
+
+**Lineage on the wire.** `SessionDef.parent` is knowable only where the
+session runs, so `mesh_info` reports a `parent` **handle** per member and the
+daemon has to be told about everyone else's:
+
+- ours is derived per read (`_local_lineage`), never stored — same reasoning
+  as the session tree itself, one source that cannot drift;
+- a guest reports its own on the **sync ack**, beside the activity report,
+  which is the existing channel for "facts only the host can see";
+- the authority **relays** the collected map downstream (`_lineage_map`), the
+  way it relays the roster. Without that hop a mesh would be drawn correctly
+  only on the machine hosting each team.
+
+Two details that are easy to get wrong:
+
+- **A member's parent is its nearest *enrolled* ancestor**, not its immediate
+  one. The tree is of sessions, the roster is of members, and a session in
+  the middle may never have joined. Collapsing keeps a team together;
+  breaking the chain would scatter it into unrelated roots. A parent that has
+  left, or that never existed, reads as no parent — the same rule the session
+  tree already uses for a dangling one.
+- **Learning lineage bumps `roster_version`.** It arrives one hop behind the
+  join it describes (the roster fans out immediately; the host's ack comes
+  later), so without marking the other guests due it would sit on the
+  authority until unrelated traffic gave it a lift.
+
+The layout is deterministic — a layered forest, depth for the row, leaves
+packed left to right, parents centred over their children. A force-directed
+layout was considered and rejected: the panel is rebuilt every 2s, so a
+simulation would redraw a slightly different picture each time; a
+near-complete graph collapses into a featureless blob under n² springs; and
+constraining y to depth and x to the cluster — which is what "hierarchical"
+would mean here — leaves the simulation nothing left to decide. There are
+tens of agents, and the shape is known exactly.
 
 ## Delivery pipeline
 
@@ -983,3 +1051,11 @@ members it is *not* showing.
    `spawn` policy, and the member graph. Scenario-derived tests in
    `tests/test_spawn.py`, `tests/test_member_graph.py` and
    `tests/test_spawn_api.py` (TDD). See "Agent-spawned sessions" below.
+9. **Hierarchy in the diagram** (done): the peer ring becomes a ring of
+   per-daemon clusters, each holding its spawn forest, with member-graph
+   cuts overlaid and reachability on demand; `mesh_info` gains a `parent`
+   handle per member and the sync carries lineage in both directions.
+   Scenario-derived tests in `tests/test_mesh_lineage.py`, plus the first
+   client-side tests in the project (`tests/test_web_topology.py` runs
+   `tests/web/*.js` under node, against functions sliced out of the shipped
+   `app.js`). See "Hierarchy in the diagram" above.
