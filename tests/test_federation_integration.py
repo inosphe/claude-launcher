@@ -127,6 +127,21 @@ class _Daemon:
             await self.runner.cleanup()
 
 
+def _terminal_text(session) -> str:
+    """Everything the session has printed — scrollback AND the visible grid.
+
+    The 30-row viewport alone is not evidence of delivery: a delivery block
+    is 16 lines, the echo harness prints every one of them back, and the
+    message body sits a third of the way down. So the body is on screen for
+    only the few milliseconds it takes the rest of the block to drain, and a
+    poll that looks at the visible grid is racing that scroll. `capture()`
+    and `capture(history=True)` are disjoint — the second returns only what
+    has scrolled OFF — so the question "did it ever reach the terminal" is
+    the two of them together.
+    """
+    return "\n".join(session.capture(history=True) + session.capture())
+
+
 async def _wait(cond, what: str, timeout: float = 15.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -200,7 +215,7 @@ def test_mesh_federation_over_real_relay(home, tmp_path):
             assert sent["recipients"] == ["alice"]
             session_a = a.manager.get("sa")
             await _wait(
-                lambda: "hello over relay" in "\n".join(session_a.capture()),
+                lambda: "hello over relay" in _terminal_text(session_a),
                 "cross-machine delivery into the recipient terminal",
                 timeout=25.0,
             )
