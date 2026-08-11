@@ -668,22 +668,11 @@ def _cmd_mcp(_args: argparse.Namespace) -> int:
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
-    from pathlib import Path
+    from .cli import run_install
 
-    from . import mesh_install, profile as profile_mod
-
-    if args.profile and args.project is not None:
-        print("error: choose --profile or --project, not both", file=sys.stderr)
-        return 1
-    if args.profile:
-        p = profile_mod.require(args.profile)
-        done = mesh_install.install_into_profile(p)
-    else:
-        done = mesh_install.install_into_project(Path(args.project or ".").resolve())
-    for line in done:
-        print(f"installed: {line}")
-    print("note: restart claude for the MCP server to be picked up")
-    return 0
+    print("note: 'mesh install' is now 'claunch install'; installing both "
+          "skills and the merged MCP server")
+    return run_install(args.profile, args.project)
 
 
 def _cmd_history(args: argparse.Namespace) -> int:
@@ -1001,7 +990,7 @@ def register(sub) -> None:
 
     p = msub.add_parser(
         "install",
-        help="register the mesh MCP server + /mesh skill (project or profile)",
+        help="alias for 'claunch install' (one MCP server + both skills)",
     )
     p.add_argument("--profile", help="install into this profile's config dir")
     p.add_argument("--project", nargs="?", const=".", default=None,

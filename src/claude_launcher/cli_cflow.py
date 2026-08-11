@@ -14,7 +14,7 @@ import os
 import sys
 from pathlib import Path
 
-from . import daemon_client, profile as profile_mod
+from . import daemon_client
 from .cflow import engine, install, model, state as state_mod
 
 
@@ -280,19 +280,11 @@ def _cmd_journal(args: argparse.Namespace) -> int:
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
-    if args.profile and args.project is not None:
-        print("error: choose --profile or --project, not both", file=sys.stderr)
-        return 1
-    if args.profile:
-        p = profile_mod.require(args.profile)
-        done = install.install_into_profile(p)
-    else:
-        target = Path(args.project or ".").resolve()
-        done = install.install_into_project(target)
-    for line in done:
-        print(f"installed: {line}")
-    print("note: restart claude for the MCP server to be picked up")
-    return 0
+    from .cli import run_install
+
+    print("note: 'cflow install' is now 'claunch install'; installing both "
+          "skills and the merged MCP server")
+    return run_install(args.profile, args.project)
 
 
 def _cmd_example(args: argparse.Namespace) -> int:
@@ -393,8 +385,7 @@ def register(sub) -> None:
 
     q = csub.add_parser(
         "install",
-        help="register the cflow MCP server + /cflow skill "
-        "(--profile NAME, or --project [DIR])",
+        help="alias for 'claunch install' (one MCP server + both skills)",
     )
     q.add_argument("--profile", help="install into this claunch profile")
     q.add_argument(

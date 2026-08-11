@@ -437,6 +437,38 @@ def _cmd_harnesses(_args: argparse.Namespace) -> int:
     return 0
 
 
+def run_install(profile_name: Optional[str], project: Optional[str]) -> int:
+    """Register the MCP server and both skills — the body of ``claunch install``.
+
+    Shared with the ``cflow install`` / ``mesh install`` aliases, which now
+    install the same lot: the tools ship in one server, so there is no half of
+    it to register on its own.
+    """
+    from . import install as install_mod
+
+    if profile_name and project is not None:
+        print("error: choose --profile or --project, not both", file=sys.stderr)
+        return 1
+    if profile_name:
+        done = install_mod.install_into_profile(profile.require(profile_name))
+    else:
+        done = install_mod.install_into_project(Path(project or ".").resolve())
+    for line in done:
+        print(f"installed: {line}")
+    print("note: restart claude for the MCP server to be picked up")
+    return 0
+
+
+def _cmd_install(args: argparse.Namespace) -> int:
+    return run_install(args.profile, args.project)
+
+
+def _cmd_mcp(_args: argparse.Namespace) -> int:
+    from . import mcp_server
+
+    return mcp_server.serve()
+
+
 def _cmd_usage(args: argparse.Namespace) -> int:
     p = profile.require(args.name)
     report = usage.fetch(p)
@@ -775,6 +807,30 @@ def build_parser() -> argparse.ArgumentParser:
         "whether this machine can run them",
     )
     p_harn.set_defaults(func=_cmd_harnesses)
+
+    p_install = sub.add_parser(
+        "install",
+        help="give an agent the claunch toolkit: register the MCP server "
+        "(workflow + mesh + team-building tools) and write the /cflow and "
+        "/mesh skills",
+    )
+    p_install.add_argument("--profile", help="install into this profile's config dir")
+    p_install.add_argument(
+        "--project",
+        nargs="?",
+        const=".",
+        default=None,
+        metavar="DIR",
+        help="install into a project (.mcp.json + .claude/skills; "
+        "default: current directory)",
+    )
+    p_install.set_defaults(func=_cmd_install)
+
+    p_mcp = sub.add_parser(
+        "mcp",
+        help="the stdio MCP server itself (spawned by claude, not by hand)",
+    )
+    p_mcp.set_defaults(func=_cmd_mcp)
 
     cli_sessions.register(sub)
     cli_mesh.register(sub)

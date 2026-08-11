@@ -843,7 +843,8 @@ without a human at the keyboard.
 | Command | Description |
 | ------- | ----------- |
 | `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `-a/--attach` to attach immediately, trailing args pass to the harness). |
-| `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. |
+| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`). See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
+| `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
 | `send-keys [-l] S KEYS...` | tmux semantics: `Enter`, `Escape`, `Tab`, `C-c`, `M-x`, `Up`... are keys; everything else is literal text. `-l` sends all args literally. `-t S` also accepted. |
@@ -853,7 +854,7 @@ without a human at the keyboard.
 | `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their output logs, freeing their auto-generated names. |
 | `resize S COLS ROWS`  | Resize the session's terminal. |
 | `harnesses`           | List the declared harnesses (`claude`, `codex`, `pi`, plus your own) and whether each is installed here. |
-| `workspace add\|ls\|rm` (`ws`) | Register / list / unregister the directories a session may be spawned in — the web UI's Directory picker is exactly this list (see [Workspaces](#workspaces-where-a-session-may-be-spawned)). `add` defaults to the current directory and refuses one that does not exist. |
+| `workspace add\|ls\|rm` (`ws`) | Register / list / unregister the directories a session may be spawned in — the web UI's Directory picker is exactly this list, and (unless `spawn.allow_workspace` is off) where an agent may send a child (see [Workspaces](#workspaces-where-a-session-may-be-spawned)). `add` defaults to the current directory and refuses one that does not exist. |
 | `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
 | `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claunch.yaml`). |
@@ -1090,6 +1091,12 @@ registry is what the *browser* offers, which has neither. The daemon's own
 directory is always available in the picker as `(daemon cwd)`, so the form
 works before you register anything.
 
+An **agent** spawning a child is in the browser's position, not the shell's,
+so it gets the picker too, and registering a directory is what puts it within
+reach of one — see
+[`spawn.allow_workspace`](#agents-that-build-their-own-team-spawn--hierarchy--member-graph),
+which is on unless you turn it off.
+
 ### Spawning with a role, or from another session's conversation
 
 Two things are decided at spawn and cannot be typed in afterwards: **who the
@@ -1221,6 +1228,34 @@ builds its environment exactly like `claunch run` (profile config dir,
 provider, token) and additionally strips nested-session markers so a claude
 launched from inside another claude session still persists transcripts.
 
+## Toolkit commands (what an agent gets)
+
+Everything an agent can drive — workflows, mesh messaging, creating and wiring
+up child sessions — arrives in **one install**:
+
+```bash
+claunch install --project .        # .mcp.json + .claude/skills (default: cwd)
+claunch install --profile work     # or a profile's config dir
+```
+
+| Command | Description |
+| ------- | ----------- |
+| `install --profile P \| --project [DIR]` | Register the MCP server and write the `/cflow` and `/mesh` skills. Supersedes the separate `cflow`/`mesh` server entries an earlier version registered — they are removed, not left running alongside. Restart claude afterwards. |
+| `mcp` | The stdio MCP server itself (spawned by claude, not by hand): `start`/`report`/`next`/`select`/`status` from cflow, `send`/`members`/`history` plus `spawn`/`children`/`connect`/`disconnect` from mesh. |
+
+**One server, two skills** — the asymmetry is deliberate. A skill's body is
+loaded whole when it triggers, so merging the two would make every session
+running a workflow carry messaging rules it will never use, and each
+`description` would have to cover enough ground to stop triggering precisely.
+The server has no such cost (its tool schemas are in context either way), and
+splitting it had a real one: the team-building tools ride with mesh, so a
+cflow-only install used to leave an agent with no way to create a helper at
+all.
+
+`cflow install` / `cflow mcp` and `mesh install` / `mesh mcp` still work —
+the first two now install everything, and the `mcp` pair keeps serving its own
+half so an install written before the merge is not broken by an upgrade.
+
 ## Mesh (session-to-session messaging)
 
 Group sessions into a **mesh** and let the agents inside them message each
@@ -1260,7 +1295,7 @@ claunch mesh disconnect dev worker_1 worker_2   # ...or stop them (send refused)
 claunch mesh invite dev           # optional ticket that pre-approves one join
 claunch mesh join dev@work-pc --code <ticket>   # ...admitted without waiting
 claunch mesh revoke dev other-pc  # unlink a guest machine (persistent until then)
-claunch mesh install --project .  # register MCP tools + /mesh skill
+claunch install --project .       # MCP tools + the /mesh and /cflow skills
 ```
 
 - Inside a session, `join`/`send`/`leave` need no identity flags —
@@ -1322,15 +1357,18 @@ claunch mesh install --project .  # register MCP tools + /mesh skill
   every daemon reads the same handle the same way. **Uploads are not
   retroactive**: members keep the role they joined with, and one holding a
   role the new set dropped is surfaced as an *orphan* rather than migrated.
-- **MCP tools + /mesh skill**: `claunch mesh install` (`--project [DIR]` or
-  `--profile NAME`) registers a stdio MCP server (`send`/`members`/`history`
-  — deliberately no receive tool: incoming messages arrive by injection) and
-  writes the `/mesh` skill, the member protocol: idempotent join, how to
+- **MCP tools + /mesh skill**: `claunch install` (`--project [DIR]` or
+  `--profile NAME`) registers the stdio MCP server — whose mesh half is
+  `send`/`members`/`history` (deliberately no receive tool: incoming messages
+  arrive by injection) plus the team-building `spawn`/`children`/`connect`/
+  `disconnect` (see [Agents that build their own
+  team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph)) —
+  and writes the `/mesh` skill, the member protocol: idempotent join, how to
   read delivery blocks (`needs_reply`, intents, ids), sending discipline
   (direct over broadcast, batch sections for fan-outs, reply threading),
-  role stances, and membership recovery after a context compaction. The
-  join briefing the daemon types into a new member's terminal tells the
-  agent to activate this skill.
+  role stances, growing a team, and membership recovery after a context
+  compaction. The join briefing the daemon types into a new member's terminal
+  tells the agent to activate this skill.
 - **Cross-machine meshes (primary/mirror)**: every mesh has ONE owner — the
   daemon that created it is its **primary**, holding the authoritative
   roster, the single message log, the policy engine and invite minting.
@@ -1400,10 +1438,36 @@ mesh and decide who they may talk to — via the `spawn`, `children`,
 
   ```yaml
   spawn:
-    max_children: 4        # direct children per session
-    max_depth: 3           # root session = depth 0
-    allow_harness: [codex] # [] = the parent's harness only
-    allow_cwd: false       # ...allow_profile / allow_args / allow_env too
+    max_children: 4          # direct children per session
+    max_depth: 3             # root session = depth 0
+    allow_harness: [codex]   # [] = the parent's harness only
+    allow_workspace: true    # ...the one that starts open (see below)
+    allow_cwd: false         # ...allow_profile / allow_args / allow_env too
+  ```
+- **A child may be sent to another directory — by name, not by path.**
+  `allow_workspace` lets the agent pass a `workspace` from your
+  [registry](#workspaces-where-a-session-may-be-spawned); `allow_cwd` lets it
+  pass a raw path. Separate unlocks, because they are separate risks — and
+  the first is the **only one that defaults to on**. Every other field lets an
+  agent invent a value; this one only lets it pick from a list you vouched
+  for, an unknown name is refused *with the known ones* rather than spawning
+  somewhere nobody chose, a directory that is not mounted right now is caught
+  in the policy instead of surfacing three layers down as a harness that
+  could not start — and if you have registered nothing, there is nowhere to
+  send a child and the parent's directory is inherited as before. It is the
+  picker the web UI's Directory field already is, handed to an agent, which
+  has neither a filesystem in front of it nor a shell that completes paths.
+
+  What it does widen is **reach**: a child can be sent into another
+  registered repository and will edit the files there. If you registered your
+  workspaces for the browser and would rather agents stayed put, set
+  `allow_workspace: false`.
+
+  An agent cannot read the registry, so the names come to it: `children`
+  reports them alongside its budget.
+
+  ```bash
+  claunch spawn --workspace hq --task "port the API client"
   ```
 
   This is a **surface, not a sandbox**: an agent holds the daemon's API
@@ -1626,7 +1690,7 @@ tools to receive each step, report results, and take branches, while humans
 keep the controls that matter.
 
 ```bash
-claunch cflow install --profile work   # register MCP server + /cflow skill
+claunch install --profile work         # register MCP server + /cflow skill
 claunch cflow example                  # scaffold .claunch/workflows/feature-dev.yaml
 # then, inside claude:
 #   /cflow feature-dev add rate limiting to the API
@@ -1805,9 +1869,8 @@ outside — a supervising script or another agent can watch
 | `cflow journal [-n N]`   | Print the run journal (JSONL). |
 | `cflow archive`          | Retire the run (finished or not) into `.cflow/.../archive/`, freeing the slot for a new start. Active runs are aborted first; a new `start` auto-archives finished runs. On the dashboard: the Archive button + start picker. |
 | `cflow abort` / `reset`  | Abort the run / clear run state (journal kept). |
-| `cflow install --profile P \| --project [DIR]` | Register the MCP server + `/cflow` skill. |
 | `cflow example [name]`   | Scaffold the example workflow above. |
-| `cflow mcp`              | The stdio MCP server itself (spawned by claude). |
+| `cflow install` / `cflow mcp` | Aliases kept for installs written before the servers merged — see `install` and `mcp` in [Toolkit commands](#toolkit-commands-what-an-agent-gets). |
 
 ## How it works
 

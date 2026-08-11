@@ -1,34 +1,15 @@
-"""Install cflow into a profile or a project: MCP registration + /cflow skill.
+"""The ``/cflow`` skill: the execution protocol, and where it is written.
 
-- MCP: registers ``cflow`` as a stdio server running ``claunch cflow mcp``
-  (into a profile's user-scope ``.claude.json`` ``mcpServers`` — the location
-  Claude Code actually reads, not ``settings.json`` — or a project
-  ``.mcp.json``).
-- Skill: writes ``skills/cflow/SKILL.md`` so ``/cflow <workflow> [context]``
-  primes the agent with the execution protocol.
+Registering the MCP server that backs it is :mod:`claude_launcher.install`'s
+job — the tools ship in one merged server, so there is no cflow-only
+registration to do here. This module owns the skill text: what
+``/cflow <workflow> [context]`` primes the agent with, plus the example
+workflow ``claunch cflow example`` scaffolds.
 """
 
 from __future__ import annotations
 
-import json
-import sys
 from pathlib import Path
-from typing import List
-
-from .. import settings
-from ..profile import Profile
-
-
-def mcp_server_def() -> dict:
-    """The stdio server entry for the cflow MCP bridge.
-
-    On Windows ``claunch`` on PATH is typically a ``.bat``/``.cmd`` shim,
-    which Claude Code's spawn (no shell) cannot exec directly — wrap in
-    ``cmd /c``.
-    """
-    if sys.platform == "win32":
-        return {"command": "cmd", "args": ["/c", "claunch", "cflow", "mcp"]}
-    return {"command": "claunch", "args": ["cflow", "mcp"]}
 
 SKILL_MD = """\
 ---
@@ -125,35 +106,7 @@ workflow to be started here), that is the answer; otherwise list candidates
 """
 
 
-def install_into_profile(profile: Profile) -> List[str]:
-    """Register the MCP server + skill inside a profile's config dir."""
-    done = []
-    settings.merge_mcp_servers(profile, {"cflow": mcp_server_def()})
-    done.append(f"mcp server 'cflow' -> {profile.config_dir / settings.CLAUDE_JSON}")
-    done.append(f"skill -> {_write_skill(profile.config_dir / 'skills')}")
-    return done
-
-
-def install_into_project(project_dir: Path) -> List[str]:
-    """Register the MCP server (.mcp.json) + skill (.claude/skills) in a project."""
-    done = []
-    mcp_path = project_dir / ".mcp.json"
-    try:
-        doc = json.loads(mcp_path.read_text(encoding="utf-8")) if mcp_path.is_file() else {}
-    except ValueError:
-        doc = {}
-    if not isinstance(doc, dict):
-        doc = {}
-    servers = doc.setdefault("mcpServers", {})
-    if isinstance(servers, dict):
-        servers["cflow"] = mcp_server_def()
-    mcp_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    done.append(f"mcp server 'cflow' -> {mcp_path}")
-    done.append(f"skill -> {_write_skill(project_dir / '.claude' / 'skills')}")
-    return done
-
-
-def _write_skill(skills_dir: Path) -> Path:
+def write_skill(skills_dir: Path) -> Path:
     path = skills_dir / "cflow" / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(SKILL_MD, encoding="utf-8")

@@ -77,7 +77,11 @@ def unset_env(profile: Profile, keys: Iterable[str]) -> Dict[str, str]:
 CLAUDE_JSON = ".claude.json"
 
 
-def merge_mcp_servers(profile: Profile, servers: Mapping[str, dict]) -> Dict[str, dict]:
+def merge_mcp_servers(
+    profile: Profile,
+    servers: Mapping[str, dict],
+    remove: Iterable[str] = (),
+) -> Dict[str, dict]:
     """Merge MCP servers into the profile's user-scope config (``.claude.json``).
 
     Claude Code silently ignores ``mcpServers`` in ``settings.json``; the
@@ -85,6 +89,12 @@ def merge_mcp_servers(profile: Profile, servers: Mapping[str, dict]) -> Dict[str
     Same-named entries that earlier launcher versions wrote into
     ``settings.json`` are dropped so no dead config lingers (other entries
     there are left untouched — they are not ours).
+
+    ``remove`` names servers a *previous* launcher version registered and this
+    one supersedes. Without it an upgrade would leave the old entries running
+    alongside the new one, and the agent would see every tool twice — the
+    superseded copies are not stale config, they are a working server that has
+    to be switched off deliberately.
     """
     path = profile.config_dir / CLAUDE_JSON
     try:
@@ -96,20 +106,22 @@ def merge_mcp_servers(profile: Profile, servers: Mapping[str, dict]) -> Dict[str
     existing = doc.get("mcpServers")
     if not isinstance(existing, dict):
         existing = {}
+    for name in remove:
+        existing.pop(name, None)
     existing.update(servers)
     doc["mcpServers"] = existing
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    _drop_stale_settings_servers(profile, servers)
+    _drop_stale_settings_servers(profile, [*servers, *remove])
     return existing
 
 
-def _drop_stale_settings_servers(profile: Profile, servers: Mapping[str, dict]) -> None:
+def _drop_stale_settings_servers(profile: Profile, names: Iterable[str]) -> None:
     data = load(profile)
     stale = data.get("mcpServers")
     if not isinstance(stale, dict):
         return
     hit = False
-    for name in servers:
+    for name in names:
         if name in stale:
             del stale[name]
             hit = True

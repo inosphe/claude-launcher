@@ -13,7 +13,7 @@ them into `.claunch/workflows/<name>.yaml` in your project (or
 Setup, once per profile or project:
 
 ```sh
-claunch cflow install --profile work    # or: claunch cflow install --project
+claunch install --profile work          # or: claunch install --project
 ```
 
 ---

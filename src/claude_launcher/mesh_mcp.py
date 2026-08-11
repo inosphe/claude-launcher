@@ -1,8 +1,10 @@
-"""A minimal MCP stdio server for mesh: talk to peers, and build the team.
+"""The mesh half of claunch's MCP surface: talk to peers, and build the team.
 
-Same newline-delimited JSON-RPC 2.0 subset as :mod:`claude_launcher.cflow.mcp`
-(initialize / tools/list / tools/call / ping), no SDK dependency. Spawned by
-Claude Code as ``claunch mesh mcp``.
+The wire protocol lives in :mod:`claude_launcher.mcp_rpc`; this module is the
+tools and what they do. Normally these are served alongside the cflow tools by
+one ``claunch mcp`` process (see :mod:`claude_launcher.mcp_server`); the
+standalone ``claunch mesh mcp`` entry point remains for installs written
+before the servers were merged.
 
 A convenience wrapper around the daemon's HTTP API for agents that prefer
 tools over shell, in two groups:
@@ -23,13 +25,9 @@ session's children inherit — exactly like the CLI.
 
 from __future__ import annotations
 
-import json
 import os
-import sys
 
-from . import __version__, daemon_client
-
-PROTOCOL_VERSION = "2024-11-05"
+from . import daemon_client, mcp_rpc
 
 TOOLS = [
     {
@@ -116,7 +114,8 @@ TOOLS = [
             "it in a mesh with you. The child inherits your harness, profile "
             "and working directory — you choose who it is, not what it runs. "
             "It starts connected to YOU only: use 'connect' to let it reach "
-            "other members. Check your budget with 'children' first; limits "
+            "other members. Check your budget with 'children' first (it also "
+            "lists the workspaces you may send a child to, if any); limits "
             "come from the 'spawn' block in ~/.claunch.yaml."
         ),
         "inputSchema": {
@@ -181,6 +180,16 @@ TOOLS = [
                         "lists it; otherwise yours is inherited)"
                     ),
                 },
+                "workspace": {
+                    "type": "string",
+                    "description": (
+                        "put the child in a different directory: one of the "
+                        "registered workspaces 'children' lists. A name, not "
+                        "a path — an unregistered directory is refused, and "
+                        "if nothing is registered there is nowhere to send it "
+                        "and yours is inherited"
+                    ),
+                },
             },
             "required": [],
         },
@@ -189,7 +198,8 @@ TOOLS = [
         "name": "children",
         "description": (
             "The sessions you spawned (and theirs), plus how many more you "
-            "may spawn and which fields you are allowed to choose. Call this "
+            "may spawn, which fields you are allowed to choose, and the "
+            "registered workspaces you may send a child to. Call this "
             "before spawning rather than provoking a refusal."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
@@ -256,7 +266,7 @@ def _session() -> str:
     return sender
 
 
-def _call_tool(name: str, args: dict) -> dict:
+def call_tool(name: str, args: dict) -> dict:
     # The team-building tools are not scoped to a mesh (a child can be
     # spawned without one), so they are dispatched before the mesh check the
     # messaging tools share.
@@ -335,9 +345,15 @@ def _my_handle(members: list) -> str:
 #: Keys passed straight through to the spawn endpoint. Listed rather than
 #: forwarded wholesale so a mistyped argument is dropped here instead of
 #: reaching the daemon as a field it silently ignores.
+#:
+#: A few of these are deliberately *not* in the tool schema: ``cwd``,
+#: ``profile``, ``args`` and ``env`` are honoured if a caller supplies them
+#: (the CLI does), but they are not offered, because the offered way to move
+#: a child is ``workspace`` — a pick from the registry rather than a path
+#: spelled from memory.
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "connect", "workflow", "context",
-    "task", "harness", "profile", "cwd", "args", "env",
+    "task", "harness", "workspace", "profile", "cwd", "args", "env",
 )
 
 
@@ -352,68 +368,17 @@ def _relay_summary(relay) -> str:
     return relay_line(relay if isinstance(relay, dict) else None)
 
 
+SERVER = mcp_rpc.Server(
+    name="claunch-mesh",
+    tools=tuple(TOOLS),
+    dispatch=call_tool,
+    errors=(MeshMcpError, daemon_client.DaemonClientError),
+)
+
+
 def _handle(msg: dict):
-    method = msg.get("method")
-    msg_id = msg.get("id")
-    params = msg.get("params") or {}
-
-    if method == "initialize":
-        return _result(
-            msg_id,
-            {
-                "protocolVersion": params.get("protocolVersion") or PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "claunch-mesh", "version": __version__},
-            },
-        )
-    if method in ("notifications/initialized", "notifications/cancelled"):
-        return None
-    if method == "ping":
-        return _result(msg_id, {})
-    if method == "tools/list":
-        return _result(msg_id, {"tools": TOOLS})
-    if method == "tools/call":
-        name = str(params.get("name") or "")
-        args = params.get("arguments") or {}
-        try:
-            payload = _call_tool(name, args if isinstance(args, dict) else {})
-            text = json.dumps(payload, ensure_ascii=False, indent=2)
-            return _result(
-                msg_id, {"content": [{"type": "text", "text": text}], "isError": False}
-            )
-        except (MeshMcpError, daemon_client.DaemonClientError) as exc:
-            return _result(
-                msg_id,
-                {"content": [{"type": "text", "text": f"error: {exc}"}], "isError": True},
-            )
-    if msg_id is None:
-        return None
-    return {
-        "jsonrpc": "2.0",
-        "id": msg_id,
-        "error": {"code": -32601, "message": f"method not found: {method}"},
-    }
-
-
-def _result(msg_id, result: dict) -> dict:
-    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+    return SERVER.handle(msg)
 
 
 def serve() -> int:
-    stdin = sys.stdin.buffer
-    stdout = sys.stdout.buffer
-    for raw in iter(stdin.readline, b""):
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            msg = json.loads(raw.decode("utf-8"))
-        except ValueError:
-            continue
-        if not isinstance(msg, dict):
-            continue
-        response = _handle(msg)
-        if response is not None:
-            stdout.write(json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n")
-            stdout.flush()
-    return 0
+    return SERVER.serve()

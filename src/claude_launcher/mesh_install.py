@@ -1,38 +1,21 @@
-"""Install mesh into a profile or a project: MCP registration + /mesh skill.
+"""The ``/mesh`` skill: the member protocol, and where it is written.
 
-Mirrors :mod:`claude_launcher.cflow.install`:
+Registering the MCP server that backs it is :mod:`claude_launcher.install`'s
+job — the tools ship in one merged server, so there is no mesh-only
+registration to do here. This module owns the skill text that
+``/mesh <mesh> [handle]`` primes the agent with; the join briefing the daemon
+types into a new member's terminal points at it.
 
-- MCP: registers ``mesh`` as a stdio server running ``claunch mesh mcp``
-  (profile user-scope ``.claude.json`` ``mcpServers``, or a project
-  ``.mcp.json``).
-- Skill: writes ``skills/mesh/SKILL.md`` so ``/mesh <mesh> [handle]`` primes
-  the agent with the member protocol — the join briefing the daemon types
-  into a new member's terminal points at this skill.
-
-The skill is deliberately much smaller than interconnect's: everything about
+Two things keep it shorter than interconnect's equivalent: everything about
 receiving (recv loops, socket watches, doorbell recovery, parking) has no
-claunch counterpart — delivery is a terminal injection, so only the *sending*
-discipline and the compaction-recovery procedure need teaching.
+claunch counterpart, since delivery is a terminal injection — so only the
+*sending* discipline, the team-building tools and the compaction-recovery
+procedure need teaching.
 """
 
 from __future__ import annotations
 
-import json
-import sys
 from pathlib import Path
-from typing import List
-
-from . import settings
-from .profile import Profile
-
-
-def mcp_server_def() -> dict:
-    """The stdio server entry for the mesh MCP bridge (cmd-wrapped on
-    Windows, where ``claunch`` is a batch shim Claude Code cannot exec)."""
-    if sys.platform == "win32":
-        return {"command": "cmd", "args": ["/c", "claunch", "mesh", "mcp"]}
-    return {"command": "claunch", "args": ["mesh", "mcp"]}
-
 
 SKILL_MD = """\
 ---
@@ -209,36 +192,7 @@ if coordination depends on it, but do not retry-spam.
 """
 
 
-def install_into_profile(profile: Profile) -> List[str]:
-    """Register the MCP server + skill inside a profile's config dir."""
-    done = []
-    settings.merge_mcp_servers(profile, {"mesh": mcp_server_def()})
-    done.append(f"mcp server 'mesh' -> {profile.config_dir / settings.CLAUDE_JSON}")
-    done.append(f"skill -> {_write_skill(profile.config_dir / 'skills')}")
-    return done
-
-
-def install_into_project(project_dir: Path) -> List[str]:
-    """Register the MCP server (.mcp.json) + skill (.claude/skills) in a project."""
-    done = []
-    project_dir.mkdir(parents=True, exist_ok=True)
-    mcp_path = project_dir / ".mcp.json"
-    try:
-        doc = json.loads(mcp_path.read_text(encoding="utf-8")) if mcp_path.is_file() else {}
-    except ValueError:
-        doc = {}
-    if not isinstance(doc, dict):
-        doc = {}
-    servers = doc.setdefault("mcpServers", {})
-    if isinstance(servers, dict):
-        servers["mesh"] = mcp_server_def()
-    mcp_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    done.append(f"mcp server 'mesh' -> {mcp_path}")
-    done.append(f"skill -> {_write_skill(project_dir / '.claude' / 'skills')}")
-    return done
-
-
-def _write_skill(skills_dir: Path) -> Path:
+def write_skill(skills_dir: Path) -> Path:
     path = skills_dir / "mesh" / "SKILL.md"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(SKILL_MD, encoding="utf-8")

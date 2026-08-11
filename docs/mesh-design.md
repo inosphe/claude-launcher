@@ -774,10 +774,14 @@ separate, explicit decision.
 - **Join briefing**: on join the daemon injects an idle-gated briefing block
   (mesh, handle/role, member list, how to send) into the new member's
   terminal — so a session enrolled from the web learns it joined something.
-- **MCP wrapper**: `claunch mesh mcp` is a stdio MCP server exposing
-  `send` / `members` / `history` (the caller is `$CLAUNCH_SESSION`, like the
-  CLI). Deliberately no `recv`: receiving needs no tool by design.
-- **/mesh skill + installer**: `claunch mesh install` registers the MCP
+- **MCP wrapper**: the mesh tools are `send` / `members` / `history` plus the
+  team-building `spawn` / `children` / `connect` / `disconnect` (the caller is
+  `$CLAUNCH_SESSION`, like the CLI). Deliberately no `recv`: receiving needs
+  no tool by design. They are served together with cflow's by one stdio
+  server, `claunch mcp` — splitting them meant a cflow-only install left an
+  agent unable to spawn at all. `claunch mesh mcp` still serves the mesh half
+  alone, for installs written before the merge.
+- **/mesh skill + installer**: `claunch install` registers the MCP
   server and writes `skills/mesh/SKILL.md` (profile or project), the agent
   protocol adapted from interconnect's — everything about *receiving*
   (recv loops, watches, parking, doorbell recovery) is gone by design, so
@@ -825,6 +829,25 @@ profile, cwd, args and env; the agent supplies only what makes it a
 different worker — name, handle, role, opening task. Each inherited field
 has its own unlock (`allow_profile`, `allow_cwd`, `allow_args`,
 `allow_env`, `allow_harness`), plus `max_children` and `max_depth`.
+
+The working directory has **two** unlocks, because it has two spellings.
+`allow_cwd` takes a raw path; `allow_workspace` takes a name from the
+registry (`claude_launcher/workspaces.py`) and resolves it in the policy, so
+an unknown name is refused *with the known ones* and an unmounted one is
+caught before a PTY is built.
+
+`allow_workspace` is the **only unlock that defaults to true**, and the
+reason is structural rather than a judgement about how much to trust an
+agent: every other field lets the request invent a value, while this one can
+only name an entry the user put in the registry, so an empty registry leaves
+nothing to choose and the parent's directory is inherited exactly as before.
+Registering a directory is the consent; the unlock is the off switch for a
+fleet that registered its workspaces for the browser and does not want agents
+moving between them. Since an agent cannot read the registry, the capability
+report (`spawn.capabilities`, which `GET /api/sessions/{name}/children`
+merges into its budget answer) carries the workspace list itself — and drops
+it when the unlock is off, so the offer and the permission cannot drift
+apart.
 
 > This is a **surface, not a sandbox.** An agent holds the daemon's API
 > token — it reads the same token file the CLI does — so nothing here stops
@@ -924,7 +947,7 @@ members it is *not* showing.
    daemon-resident, per-mesh config editable on the web. See "Nudge
    policies" above.
 4. **Agent polish** (done): MCP wrapper for send/members/history, the join
-   briefing injection, and the `/mesh` skill + `claunch mesh install`.
+   briefing injection, and the `/mesh` skill + `claunch install`.
 5. **Federation v2** (done): primary/mirror redesign — see "Federation v2"
    above. Retires the symmetric model of phase 2; scenario-derived tests in
    `tests/test_mesh_v2.py` (TDD) plus the multi-daemon e2e.

@@ -915,13 +915,13 @@ def test_join_briefing_lands_in_terminal(home, tmp_path):
 
 
 def test_mesh_install_project(tmp_path):
-    from claude_launcher import mesh_install
+    from claude_launcher import install
 
-    done = mesh_install.install_into_project(tmp_path)
-    assert len(done) == 2
+    done = install.install_into_project(tmp_path)
+    assert len(done) == 3  # one server, two skills
     doc = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
-    server = doc["mcpServers"]["mesh"]
-    assert "mesh" in server["args"] and "mcp" in server["args"]
+    server = doc["mcpServers"]["claunch"]
+    assert server["args"][-1] == "mcp"
     skill = (tmp_path / ".claude" / "skills" / "mesh" / "SKILL.md").read_text(
         encoding="utf-8"
     )
@@ -932,12 +932,100 @@ def test_mesh_install_project(tmp_path):
     assert "--section" in skill                # batch fan-out discipline
     assert "--reply-to" in skill               # threading
     assert "Recovery" in skill                 # compaction recovery
+    # the cflow skill lands from the same install
+    assert (tmp_path / ".claude" / "skills" / "cflow" / "SKILL.md").is_file()
     # installing again is idempotent and keeps other servers
     doc["mcpServers"]["other"] = {"command": "x"}
     (tmp_path / ".mcp.json").write_text(json.dumps(doc), encoding="utf-8")
-    mesh_install.install_into_project(tmp_path)
+    install.install_into_project(tmp_path)
     doc2 = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
-    assert set(doc2["mcpServers"]) == {"mesh", "other"}
+    assert set(doc2["mcpServers"]) == {"claunch", "other"}
+
+
+def test_install_supersedes_the_split_servers(tmp_path):
+    """An upgrade must switch the old servers off, not run them alongside.
+
+    Two live servers would offer the agent every tool twice — the same tool
+    name from two processes, with nothing to say which is current.
+    """
+    from claude_launcher import install
+
+    (tmp_path / ".mcp.json").write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "cflow": {"command": "claunch", "args": ["cflow", "mcp"]},
+                    "mesh": {"command": "claunch", "args": ["mesh", "mcp"]},
+                    "other": {"command": "x"},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    install.install_into_project(tmp_path)
+    doc = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
+    assert set(doc["mcpServers"]) == {"claunch", "other"}
+
+
+def test_merged_server_offers_both_toolsets():
+    from claude_launcher import mcp_server, mesh_mcp
+    from claude_launcher.cflow import mcp as cflow_mcp
+
+    names = [t["name"] for t in mcp_server.TOOLS]
+    assert names == [t["name"] for t in cflow_mcp.TOOLS] + [
+        t["name"] for t in mesh_mcp.TOOLS
+    ]
+    assert len(set(names)) == len(names)  # merge() guards this too
+    listed = mcp_server.SERVER.handle(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}
+    )
+    assert [t["name"] for t in listed["result"]["tools"]] == names
+    init = mcp_server.SERVER.handle(
+        {"jsonrpc": "2.0", "id": 2, "method": "initialize", "params": {}}
+    )
+    assert init["result"]["serverInfo"]["name"] == "claunch"
+
+
+def test_merged_server_routes_errors_to_the_owning_half(home, monkeypatch):
+    """A refusal from either half must come back as a tool error, not a crash."""
+    from claude_launcher import mcp_server
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    # mesh half: nothing to reach (MeshMcpError, not a traceback)
+    resp = mcp_server.SERVER.handle(
+        {
+            "jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "children", "arguments": {}},
+        }
+    )
+    assert resp["result"]["isError"] is True
+    assert "daemon is not running" in resp["result"]["content"][0]["text"]
+    # cflow half: no run here
+    resp = mcp_server.SERVER.handle(
+        {
+            "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+            "params": {"name": "status", "arguments": {}},
+        }
+    )
+    assert resp["result"]["isError"] is False
+    # and an unknown name is still an agent-readable error
+    resp = mcp_server.SERVER.handle(
+        {
+            "jsonrpc": "2.0", "id": 3, "method": "tools/call",
+            "params": {"name": "nope", "arguments": {}},
+        }
+    )
+    assert resp["result"]["isError"] is True
+    assert "unknown tool" in resp["result"]["content"][0]["text"]
+
+
+def test_merge_refuses_colliding_tool_names():
+    from claude_launcher import mcp_rpc
+
+    a = mcp_rpc.Server("a", ({"name": "dup"},), lambda n, x: {}, (ValueError,))
+    b = mcp_rpc.Server("b", ({"name": "dup"},), lambda n, x: {}, (ValueError,))
+    with pytest.raises(mcp_rpc.ToolNameCollision):
+        mcp_rpc.merge("both", [a, b])
 
 
 def test_mesh_mcp_tools(home, monkeypatch):

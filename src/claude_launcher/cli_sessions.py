@@ -116,6 +116,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("workflow", args.workflow),
             ("task", args.task),
             ("harness", args.harness),
+            ("workspace", args.workspace),
         )
         if v
     }
@@ -126,6 +127,10 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         return 1
     child = result.get("session") or {}
     print(f"spawned {child.get('name')} (child of {parent})")
+    if args.workspace and child.get("cwd"):
+        # The one field that was asked for by name and answered by path:
+        # printing it is how the caller sees the registry resolved.
+        print(f"  in {child['cwd']}")
     mesh = result.get("mesh") or {}
     if mesh.get("ok"):
         reach = ", ".join(mesh.get("connected_to") or []) or "(nobody)"
@@ -629,6 +634,12 @@ def register(sub) -> None:
     p_spawn.add_argument("--task", help="opening instruction typed into the child")
     p_spawn.add_argument(
         "--harness", help="a different harness (needs spawn.allow_harness)"
+    )
+    p_spawn.add_argument(
+        "--workspace", "-w", metavar="NAME",
+        help="run the child in a registered workspace instead of the "
+             "parent's directory ('claunch workspace ls' lists them; "
+             "spawn.allow_workspace turns this off)",
     )
     p_spawn.set_defaults(func=_cmd_spawn)
 

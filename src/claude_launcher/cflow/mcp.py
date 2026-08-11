@@ -1,8 +1,10 @@
-"""A minimal MCP (Model Context Protocol) stdio server for cflow.
+"""The cflow half of claunch's MCP surface.
 
-Speaks newline-delimited JSON-RPC 2.0 on stdin/stdout — just enough of the MCP
-surface (initialize / tools/list / tools/call / ping) for Claude Code and
-compatible clients, with no SDK dependency.
+The wire protocol lives in :mod:`claude_launcher.mcp_rpc`; this module is the
+tools and what they do. Normally these are served alongside the mesh tools by
+one ``claunch mcp`` process (see :mod:`claude_launcher.mcp_server`); the
+standalone ``claunch cflow mcp`` entry point remains for installs written
+before the servers were merged.
 
 Exposed tools: ``start``, ``report``, ``next``, ``select``, ``status``. There
 is deliberately **no approve tool** and no user-side select confirmation here:
@@ -18,14 +20,10 @@ refused rather than silently applied to a run this agent has never read.
 
 from __future__ import annotations
 
-import json
-import sys
 from typing import Optional
 
-from .. import __version__
+from .. import mcp_rpc
 from . import engine, model, state as state_mod
-
-PROTOCOL_VERSION = "2024-11-05"
 
 TOOLS = [
     {
@@ -161,7 +159,7 @@ def _check_fence(name: str) -> None:
     )
 
 
-def _call_tool(name: str, args: dict) -> dict:
+def call_tool(name: str, args: dict) -> dict:
     global _seen_run
     _check_fence(name)
     if name == "start":
@@ -193,74 +191,19 @@ def _call_tool(name: str, args: dict) -> dict:
     return payload
 
 
+SERVER = mcp_rpc.Server(
+    name="cflow",
+    tools=tuple(TOOLS),
+    dispatch=call_tool,
+    errors=(engine.CflowError, model.WorkflowError, state_mod.StateError),
+)
+
+
 def _handle(msg: dict):
     """Return a response dict, or None for notifications."""
-    method = msg.get("method")
-    msg_id = msg.get("id")
-    params = msg.get("params") or {}
-
-    if method == "initialize":
-        return _result(
-            msg_id,
-            {
-                "protocolVersion": params.get("protocolVersion") or PROTOCOL_VERSION,
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "cflow", "version": __version__},
-            },
-        )
-    if method in ("notifications/initialized", "notifications/cancelled"):
-        return None
-    if method == "ping":
-        return _result(msg_id, {})
-    if method == "tools/list":
-        return _result(msg_id, {"tools": TOOLS})
-    if method == "tools/call":
-        name = str(params.get("name") or "")
-        args = params.get("arguments") or {}
-        try:
-            payload = _call_tool(name, args if isinstance(args, dict) else {})
-            text = json.dumps(payload, ensure_ascii=False, indent=2)
-            return _result(
-                msg_id, {"content": [{"type": "text", "text": text}], "isError": False}
-            )
-        except (
-            engine.CflowError,
-            model.WorkflowError,
-            state_mod.StateError,
-        ) as exc:
-            return _result(
-                msg_id,
-                {"content": [{"type": "text", "text": f"error: {exc}"}], "isError": True},
-            )
-    if msg_id is None:
-        return None  # unknown notification: ignore
-    return {
-        "jsonrpc": "2.0",
-        "id": msg_id,
-        "error": {"code": -32601, "message": f"method not found: {method}"},
-    }
-
-
-def _result(msg_id, result: dict) -> dict:
-    return {"jsonrpc": "2.0", "id": msg_id, "result": result}
+    return SERVER.handle(msg)
 
 
 def serve() -> int:
     """Blocking stdio loop; returns when stdin closes."""
-    stdin = sys.stdin.buffer
-    stdout = sys.stdout.buffer
-    for raw in iter(stdin.readline, b""):
-        raw = raw.strip()
-        if not raw:
-            continue
-        try:
-            msg = json.loads(raw.decode("utf-8"))
-        except ValueError:
-            continue
-        if not isinstance(msg, dict):
-            continue
-        response = _handle(msg)
-        if response is not None:
-            stdout.write(json.dumps(response, ensure_ascii=False).encode("utf-8") + b"\n")
-            stdout.flush()
-    return 0
+    return SERVER.serve()

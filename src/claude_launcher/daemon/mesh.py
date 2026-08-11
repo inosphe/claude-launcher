@@ -1259,7 +1259,7 @@ class MeshManager:
             + self._stance_lines(mesh, member) +
             f"protocol: activate your 'mesh' skill NOW (/mesh {mesh.name}) to "
             "load the member protocol; if you have no such skill, run "
-            "'claunch mesh install' first and retry\n"
+            "'claunch install' first and retry\n"
             f"note: incoming mesh messages will be typed into this terminal\n"
             "---"
         )

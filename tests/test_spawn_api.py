@@ -12,7 +12,7 @@ import asyncio
 import sys
 import time
 
-from claude_launcher import store
+from claude_launcher import store, workspaces
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -228,6 +228,101 @@ def test_children_reports_the_subtree_and_the_remaining_budget(home, tmp_path):
             assert body["descendants"] == ["w1", "w1a"]  # the whole subtree
             assert body["children_remaining"] == 2
             assert body["can_spawn"] is True
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_child_runs_in_the_workspace_it_was_given(home, tmp_path):
+    """The end the feature exists for: an agent names a workspace and the
+    child's PTY actually starts there, without a path ever being typed."""
+    _register_py_harness()
+    elsewhere = tmp_path / "hq"
+    elsewhere.mkdir()
+    workspaces.add(str(elsewhere), name="hq")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "workspace": "hq"},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            assert (await resp.json())["session"]["cwd"] == str(elsewhere.resolve())
+
+            # the parent stayed where it was — a child moves, not the tree
+            assert mgr.get("lead").sdef.cwd == str(tmp_path)
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_children_lists_the_workspaces_a_child_may_be_sent_to(home, tmp_path):
+    """An agent cannot read ~/.claunch.yaml's registry, so the budget report
+    is where the names come from — otherwise 'workspace' is a field it can
+    only guess at."""
+    _register_py_harness()
+    elsewhere = tmp_path / "hq"
+    elsewhere.mkdir()
+    workspaces.add(str(elsewhere), name="hq")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+
+            resp = await client.get("/api/sessions/lead/children", headers=BEARER)
+            body = await resp.json()
+            assert "workspace" in body["may_choose"]
+            assert [w["name"] for w in body["workspaces"]] == ["hq"]
+
+            store.update(
+                lambda doc: doc.update({"spawn": {"allow_workspace": False}})
+            )
+            resp = await client.get("/api/sessions/lead/children", headers=BEARER)
+            body = await resp.json()
+            assert "workspaces" not in body  # locked: no list, no field
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_an_unregistered_workspace_is_refused_with_403(home, tmp_path):
+    _register_py_harness()
+    store.update(lambda doc: doc.update({"spawn": {"allow_workspace": True}}))
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "workspace": "nowhere"},
+                headers=BEARER,
+            )
+            assert resp.status == 403
+            assert "no workspace named" in (await resp.json())["error"]
+            # refused before anything was built: no half-made session left
+            assert mgr.children("lead") == []
 
             await mgr.shutdown_all()
         finally:
