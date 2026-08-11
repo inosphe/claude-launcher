@@ -355,7 +355,12 @@ def test_delivery_waits_for_respawn(home, tmp_path):
         assert mm.get("m2").pending("bob")
 
         revived = mgr.respawn("dst")
-        await _wait_screen(revived, "READY")
+        # Wait on the session's state, not on its screen: the queued delivery
+        # lands the moment the child is up, and the block is long enough to
+        # scroll the harness banner out of the viewport before a 0.1s poll
+        # can see it. What matters is that the message arrives, which the
+        # next two assertions establish.
+        await revived.wait_for("idle", timeout=20.0, threshold=0.5)
         await _wait_screen(revived, "are you there")
         assert mm.get("m2").pending("bob") == []
 
@@ -894,7 +899,10 @@ def test_join_briefing_lands_in_terminal(home, tmp_path):
         s = mgr.get("s1")
         await _wait_screen(s, "READY")
         await mm.join("brief", "s1", handle="worker_1")
-        await _wait_screen(s, "join briefing", timeout=30.0)
+        # Wait for the block's LAST line, not its first: the child echoes the
+        # paste line by line, so waiting on the header and reading the screen
+        # races the rest of the block onto it.
+        await _wait_screen(s, "typed into this terminal", timeout=30.0)
         text = _screen_text(s)
         assert "you: worker_1 (role: worker)" in text
         assert "claunch mesh send brief" in text
@@ -959,7 +967,10 @@ def test_mesh_mcp_tools(home, monkeypatch):
     assert init["result"]["serverInfo"]["name"] == "claunch-mesh"
     tools = mesh_mcp._handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert [t["name"] for t in tools["result"]["tools"]] == [
+        # talking ...
         "send", "members", "history",
+        # ... and building the team that does it
+        "spawn", "children", "connect", "disconnect",
     ]
 
     # send requires a session identity

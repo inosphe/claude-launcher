@@ -74,6 +74,16 @@ class SessionDef:
     #: Resume into a *copy* (``--fork-session``): the resumed conversation is
     #: left untouched and this session gets its own from that point on.
     fork_session: bool = False
+    #: The session that spawned this one, by name — the edge that makes the
+    #: session list a tree (see :mod:`claude_launcher.spawn`). ``None`` for a
+    #: session a human started, which is what a tree root *is* here.
+    #:
+    #: Stored as a name rather than resolved at creation because the parent
+    #: outlives neither the daemon nor necessarily the child: a parent that
+    #: exited leaves its children running and still recorded, and a name is
+    #: the only reference that survives that. Consumers must treat a parent
+    #: that no longer resolves as a root.
+    parent: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -90,6 +100,7 @@ class SessionDef:
             "role": self.role,
             "resume": self.resume,
             "fork_session": self.fork_session,
+            "parent": self.parent,
         }
 
     @classmethod
@@ -108,6 +119,7 @@ class SessionDef:
             role=str(data.get("role") or "").strip() or None,
             resume=_resume_field(data.get("resume")),
             fork_session=bool(data.get("fork_session")),
+            parent=str(data.get("parent") or "").strip() or None,
         )
 
 

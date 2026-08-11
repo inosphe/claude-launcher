@@ -777,6 +777,132 @@ separate, explicit decision.
   stances, and compaction recovery. The join briefing prompts the agent to
   activate the skill (`/mesh <name>`).
 
+## Agent-spawned sessions (phase 8 — implemented)
+
+Until now every session had a human behind it. An agent could talk to peers
+an operator had assembled, but it could not assemble any — so a mesh's shape
+was fixed before the work started, by whoever guessed at it. Phase 8 lets a
+session **create further sessions**, enrol them, and set who they may talk
+to. Three separate mechanisms, deliberately not one:
+
+**1. The session tree.** `SessionDef.parent` names the session that spawned
+this one. That is the whole model — the tree is derived from those edges on
+every read, never cached, because there are tens of sessions and a cached
+tree needs invalidating on create, kill, clear *and* restore, which is four
+chances for the list and the tree to disagree about who exists.
+
+The parent is a **name**, not a resolved reference: a parent that exits
+leaves its children running, and a name is the only reference that survives
+that. A child whose parent no longer resolves is a root. Every walk is
+cycle-guarded — a cycle is unreachable through `spawn` (the parent must
+already exist, so edges point at older sessions) but `parent` is a plain
+field on a definition the API accepts and `sessions.json` persists, so a
+hand-edited file can still produce one, and a guard turns a daemon hang into
+a wrong-but-finite answer.
+
+Authority runs **down** the tree only: a session commands its descendants,
+never its parent and never its siblings. Two workers spawned by the same
+lead are peers, and a peer that could kill its peer turns a coordination bug
+into a lost session.
+
+Children are never restored on daemon restart. A restored parent would
+replay its whole subtree, and those children would come back with no agent
+left to brief them — the arrangement is a runtime one, rebuilt by the
+parent, not by the daemon.
+
+**2. The spawn policy** (`spawn:` in `~/.claunch.yaml`, see
+`claude_launcher/spawn.py`). A child **inherits** its parent's harness,
+profile, cwd, args and env; the agent supplies only what makes it a
+different worker — name, handle, role, opening task. Each inherited field
+has its own unlock (`allow_profile`, `allow_cwd`, `allow_args`,
+`allow_env`, `allow_harness`), plus `max_children` and `max_depth`.
+
+> This is a **surface, not a sandbox.** An agent holds the daemon's API
+> token — it reads the same token file the CLI does — so nothing here stops
+> it calling `POST /api/sessions` directly. What the policy buys is what
+> cflow's deliberately-absent `approve` tool buys: the *offered* action is
+> the safe one, so an agent following its tools cannot wander into spawning
+> under another profile, in another directory, with flags nobody chose.
+> The numbers are blast-radius limits on honest mistakes — runaway
+> recursion, a fan-out loop — not a boundary against a hostile session.
+
+A refusal is **403, not 400**: the request was well formed and was refused,
+and that distinction is what tells an agent to stop retrying and ask a
+human. A malformed `spawn:` block reads as the defaults rather than raising
+— it is consulted on a path an agent triggers, and a YAML typo that failed
+every spawn would be diagnosed as a broken feature.
+
+**3. The member graph.** `Mesh.member_edges`, `"h1|h2"` (sorted) ->
+enabled, missing = connected. Same convention as the peer graph's `edges`
+one layer down, so a mesh that never touches it stays the complete graph it
+has always been and nothing migrates.
+
+The two graphs are **not** the same kind of thing, and the difference is the
+whole design:
+
+| | peer graph (`edges`) | member graph (`member_edges`) |
+|---|---|---|
+| endpoints | daemons | members (agents) |
+| a cut means | lose the fast path | cannot speak at all |
+| fallback | the authority's fanout | none — the send is refused |
+| who may cut | either end, or the authority | the authority, gated by the session tree |
+
+Members are not routed, so a cut here has nowhere to fall back to. And
+either-end-may-cut is wrong at this layer: the endpoints of a peer edge are
+daemons with their own operators, mutually consenting adults; the endpoints
+here are agents, and a member that could cut its own edges could quit the
+supervision it was spawned under. So an agent may only edit an edge
+touching a session it commands — a lead wires its own workers together, a
+worker wires nothing. A human (no `actor`) owns the whole graph.
+
+**Enforced in one place.** `_resolve_recipients()` is the single call every
+send funnels through — local, MCP, relayed from a guest, sliced out of a
+batch — so that is where the graph is applied. `'*'` narrows silently to the
+sender's neighbours (a broadcast has always meant "everyone I can reach"),
+while a handle named *explicitly* and unreachable is an error: the agent
+asked for that peer by name and must not be told it was delivered.
+
+`Mesh.addressed_to()` applies it too, and has to. The log stores the
+*address* (`"*"`, or a handle list), not the recipients it resolved to, and
+delivery, `pending` and `owed` all re-derive membership from that address —
+so checking only on the way in would leave a broadcast reaching everyone on
+the way out. An ACL with a second entrance is not an ACL. Re-derivation
+makes this **current rather than historical**: a message already accepted
+stops being delivered if the edge is cut before it lands, which is the same
+direction the fast path takes and the safe one.
+
+Two consequences worth stating:
+
+- **Isolation is a snapshot, not a standing rule.** A spawned child is cut
+  from everyone except its parent *at join time*; members who join later are
+  connected by default. A rule that kept isolating a child against all
+  future joins would be a second kind of state — the graph, plus a policy
+  about the graph — and the parent is the thing that knows when a newcomer
+  should reach its child.
+- **Leaving prunes the edges that named you.** Handles are reusable, so a
+  rejoining handle would otherwise inherit the isolation imposed on whoever
+  wore it last: a member that mysteriously cannot reach anyone, with nothing
+  in the roster to explain it.
+
+**Surface.** `POST /api/sessions/{name}/children` does the whole thing in
+one call — session, mesh join, isolation, optional cflow run scoped to the
+child's own session, optional opening task typed in once it settles. One
+call because the steps are not independently useful: a child spawned but not
+enrolled is a terminal nobody is listening to, and one enrolled but not
+briefed is an agent that does not know why it exists. Each optional step
+reports separately, so a partial success is legible. `GET` on the same path
+answers "what may I spawn" before a refusal has to be provoked.
+
+`PATCH /api/mesh/{mesh}/members/{a}/links/{b}` rewires a pair (`actor` names
+the session asking; omitted = a human). MCP gains `spawn`, `children`,
+`connect`, `disconnect`; `members` now also answers `reachable` — who *you*
+can message — because an agent left to derive its own reachability from an
+edge list will eventually address a peer it cannot reach and read the
+refusal as a bug. CLI: `claunch spawn`, `claunch mesh connect|disconnect`,
+disconnected pairs in `mesh members`, and `claunch sessions` indented by
+lineage. The join briefing lists only reachable peers, and says how many
+members it is *not* showing.
+
 ## Phases
 
 1. **Local mesh MVP** (done): paste mode, mesh module + API + CLI +
@@ -804,3 +930,8 @@ separate, explicit decision.
    web page leads with an editable SVG topology diagram. Scenario-derived
    tests in `tests/test_mesh_graph.py` (TDD). See "Ranked peer graph" and
    "Topology diagram" above.
+8. **Agent-spawned sessions** (done): a session creates further sessions,
+   enrols them and decides who they may talk to — the session tree, the
+   `spawn` policy, and the member graph. Scenario-derived tests in
+   `tests/test_spawn.py`, `tests/test_member_graph.py` and
+   `tests/test_spawn_api.py` (TDD). See "Agent-spawned sessions" below.

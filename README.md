@@ -1253,6 +1253,10 @@ claunch mesh peers                # the other daemons registered on the relay
 claunch mesh peers dev            # ...or this mesh's daemons in RANK order
 claunch mesh rank dev laptop 0    # move a peer; position 0 hands it authority
 claunch mesh cut dev laptop pc-b  # drop one direct link (falls back to rank 0)
+claunch spawn --mesh dev --as worker_2 --role worker --task "take the API"
+                                  # ...an agent can do this itself (MCP 'spawn')
+claunch mesh connect dev worker_1 worker_2      # let two MEMBERS talk directly
+claunch mesh disconnect dev worker_1 worker_2   # ...or stop them (send refused)
 claunch mesh invite dev           # optional ticket that pre-approves one join
 claunch mesh join dev@work-pc --code <ticket>   # ...admitted without waiting
 claunch mesh revoke dev other-pc  # unlink a guest machine (persistent until then)
@@ -1381,6 +1385,48 @@ claunch mesh install --project .  # register MCP tools + /mesh skill
   (a single backend token), so the remote side does not re-confirm. On the
   web, pasting an invite code into the sidebar's mesh field decodes it in
   place and turns the form into a ready-made join.
+
+### Agents that build their own team (spawn · hierarchy · member graph)
+
+An agent inside a session can create **more** sessions, enrol them in its
+mesh and decide who they may talk to — via the `spawn`, `children`,
+`connect` and `disconnect` MCP tools, or `claunch spawn` by hand.
+
+- **A child inherits what it runs** — harness, profile, working directory,
+  args, env — from the session that spawned it. The agent chooses *who* it
+  is: name, mesh handle, role, an opening `task`, optionally a `workflow`
+  (a cflow run scoped to the child's own session). Each inherited field has
+  its own unlock in `~/.claunch.yaml`, alongside the limits:
+
+  ```yaml
+  spawn:
+    max_children: 4        # direct children per session
+    max_depth: 3           # root session = depth 0
+    allow_harness: [codex] # [] = the parent's harness only
+    allow_cwd: false       # ...allow_profile / allow_args / allow_env too
+  ```
+
+  This is a **surface, not a sandbox**: an agent holds the daemon's API
+  token, so the limits are blast-radius protection against runaway recursion
+  and fan-out loops, not a boundary against a hostile session.
+- **Sessions form a tree.** `claunch sessions` indents children under the
+  session that spawned them. Authority runs *down* the tree only: a session
+  may act on its descendants, never its parent and never its siblings.
+  Children are not restored on daemon restart — the arrangement is the
+  parent's to rebuild.
+- **A spawned child starts connected to its parent and nobody else**, and
+  the parent wires it up from there. This member graph is a different thing
+  from the peer-daemon links `cut`/`uncut` edit: members are never routed,
+  so a disconnected pair simply **cannot speak** — a direct send is refused
+  and `'*'` skips them. `claunch mesh members dev` lists the disconnected
+  pairs; the join briefing tells a member only who it can actually reach.
+
+  ```
+  lead spawns w1, w2  ->        lead            then: mesh connect dev w1 w2
+                               /    \                        lead
+                             w1      w2                     /    \
+                          (w1 and w2 cannot talk)         w1 ---- w2
+  ```
 
 ### Nudge policies (heartbeat · task-poll · stall warnings)
 

@@ -39,11 +39,13 @@ SKILL_MD = """\
 name: mesh
 description: >-
   Join a claunch mesh and message other agent sessions; incoming messages are
-  typed into your terminal by the daemon. Usage: /mesh MESH [HANDLE] — join
-  (or resume membership in) MESH as HANDLE (its leading word picks your role;
-  omit to use your session name). Also use when a mesh delivery or briefing
-  block tells you to activate the mesh skill, or after a compaction/restart
-  to recover your membership.
+  typed into your terminal by the daemon. Also how to SPAWN further agent
+  sessions, enrol them in the mesh and set who may talk to whom. Usage:
+  /mesh MESH [HANDLE] — join (or resume membership in) MESH as HANDLE (its
+  leading word picks your role; omit to use your session name). Also use when
+  a mesh delivery or briefing block tells you to activate the mesh skill,
+  after a compaction/restart to recover your membership, or when you need
+  another agent to help with the work.
 ---
 
 # Procedure: mesh member
@@ -114,6 +116,49 @@ from your session automatically):
 - **Thread answers**: `--reply-to <msgid>` (ids appear in delivery blocks
   and history).
 
+## Step 4 — growing the team (only if the work needs it)
+
+You can create further agent sessions on this daemon and put them in the mesh
+with you. Do this when the work genuinely splits — parallel tracks, or a
+second pair of eyes you will actually talk to — not to look busy. Every child
+is a real terminal burning real tokens, and one you never message is pure
+cost.
+
+- `children` (MCP) or `claunch spawn --help` — what you may spawn *before*
+  you try: how many are left, how deep you are, which fields you may choose.
+- **Spawn**: MCP `spawn` with `mesh`, `handle`, `role` and a `task`, or
+  `claunch spawn --mesh MESH --as HANDLE --role ROLE --task "..."`. The child
+  inherits your harness, profile and working directory — you choose WHO it
+  is, not what it runs. Give it a `role` from this mesh's vocabulary
+  (`claunch mesh roles MESH`) and a `task` that says what it is for; a child
+  that has to ask what it exists for has already cost you a turn.
+- `workflow: NAME` starts a cflow run scoped to the child's own session, so
+  the run is its work and not yours.
+- A refusal that mentions `spawn.<something>` is policy, not a bug: the limit
+  is in the user's `~/.claunch.yaml`. Do not retry it — tell the user which
+  key would allow it, and carry on without the child.
+
+**Your children start connected to YOU and to nobody else.** That is the
+point: you decide who they may talk to.
+
+- `members` shows `reachable` — who *you* can message — and `member_links`,
+  the whole graph. `claunch mesh members MESH` lists disconnected pairs.
+- MCP `connect` / `disconnect` (or `claunch mesh connect|disconnect MESH A
+  B`) rewires a pair. You may only edit an edge touching a session you
+  spawned, or one of its descendants — you wire your own team, not somebody
+  else's, and you cannot connect yourself to anyone.
+- Connect two workers when they need to coordinate directly and you would
+  only be relaying. Leave them apart when you want their work independent —
+  two reviewers who cannot compare notes give you two opinions instead of
+  one.
+- A send to a member you are not connected to is **refused**, and `'*'`
+  silently skips them. There is no routing: if a peer must be reached and is
+  not connected, ask whoever spawned you, or the user.
+
+Children are not restored when the daemon restarts — the arrangement is
+yours to rebuild, and a subtree that came back with no one briefing it would
+be a room full of agents with no reason to be there.
+
 ## Your role
 
 Your handle's leading word picks your role (`worker_1`/`coder2` -> worker,
@@ -138,10 +183,15 @@ Membership lives in the daemon and survives; your context may not. Recover:
 1. SESSION = `CLAUNCH_SESSION` env var.
 2. `claunch mesh ls` — the meshes on this daemon.
 3. `claunch mesh members <mesh>` — the row whose session is SESSION is you
-   (handle + role).
+   (handle + role). Its "disconnected pairs" section is the topology you set
+   up and forgot.
 4. `claunch mesh stance <mesh>` — re-read your role's stance, which the
    compaction dropped along with the join briefing.
 5. `claunch mesh history <mesh> -n 30` — re-read the recent conversation.
+6. If you were coordinating others: the `children` tool lists the sessions
+   you spawned. They are still running and still waiting on you — a
+   compaction is invisible to them, so a child you forget is a child that
+   sits idle holding a finished result.
 
 Undelivered messages are redelivered by the daemon automatically — never ask
 peers to retransmit.
