@@ -47,8 +47,52 @@ class SessionManager:
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
-    def create(self, sdef: SessionDef, *, restoring: bool = False) -> Session:
+    def stage(self, sdef: SessionDef, *, restoring: bool = False) -> Session:
+        """Register a session without starting it.
+
+        The first half of :meth:`create`, separated because onboarding has to
+        happen in between: a mesh join and a cflow run both key on the session
+        (the join refuses a name that is not a live session here), while the
+        opening message they compose has to be known *before* the harness is
+        spawned to be passed on its command line. So the session is real from
+        this point — named, registered, joinable — and not yet running.
+
+        Every staged session must be either :meth:`launch`ed or
+        :meth:`discard`ed; nothing else should be handed one.
+        """
         name = (sdef.name or "").strip() or self._auto_name()
+        self._check_name(name)
+        sdef = self._resolve_resume(
+            SessionDef.from_dict({**sdef.to_dict(), "name": name})
+        )
+        session = Session(
+            harness_mod.normalize(sdef, restoring=restoring),
+            idle_threshold=self.idle_threshold,
+            scrollback=self.scrollback,
+        )
+        self._sessions[name] = session
+        return session
+
+    def launch(
+        self, session: Session, *, restoring: bool = False, opening: str = ""
+    ) -> Session:
+        """Start a staged session. ``opening`` is a first user message for the
+        harnesses that take one on their command line (see
+        :func:`harness.takes_opening_argv`)."""
+        argv, env, cwd = harness_mod.build_command(
+            session.sdef, restoring=restoring, opening=opening
+        )
+        session.start(argv, env, cwd)
+        self.persist()
+        return session
+
+    def discard(self, name: str) -> None:
+        """Drop a staged session that will never start."""
+        session = self._sessions.get(name)
+        if session is not None and getattr(session, "pty", None) is None:
+            self._sessions.pop(name, None)
+
+    def _check_name(self, name: str) -> None:
         if not _NAME_RE.match(name):
             raise ManagerError(
                 f"invalid session name {name!r}: use letters, digits, '.', '_' or '-'"
@@ -61,22 +105,21 @@ class SessionManager:
                     f"with 'claunch kill-session {name}'"
                 )
             raise ManagerError(f"session {name!r} already exists")
-        sdef = self._resolve_resume(
-            SessionDef.from_dict({**sdef.to_dict(), "name": name})
-        )
-        sdef = harness_mod.normalize(sdef, restoring=restoring)
-        argv, env, cwd = harness_mod.build_command(sdef, restoring=restoring)
-        session = Session(
-            sdef,
-            argv,
-            env,
-            cwd,
-            idle_threshold=self.idle_threshold,
-            scrollback=self.scrollback,
-        )
-        self._sessions[name] = session
-        self.persist()
-        return session
+
+    def create(
+        self, sdef: SessionDef, *, restoring: bool = False, opening: str = ""
+    ) -> Session:
+        """Build and start a session.
+
+        ``opening`` is a first user message for harnesses that take one on
+        their command line; see :func:`harness.takes_opening_argv`.
+        """
+        session = self.stage(sdef, restoring=restoring)
+        try:
+            return self.launch(session, restoring=restoring, opening=opening)
+        except Exception:
+            self.discard(session.sdef.name)
+            raise
 
     def _resolve_resume(self, sdef: SessionDef) -> SessionDef:
         """Turn a ``resume`` that names a session into that session's
@@ -102,8 +145,35 @@ class SessionManager:
             )
         return replace(sdef, resume=cid)
 
-    def spawn(self, parent: str, request: dict, *, identity: str = "") -> Session:
-        """Create a child of ``parent`` under the spawn policy.
+    def assign_identity(self, session: Session, identity: str) -> None:
+        """Fix who a staged session is, before its command line is built.
+
+        Identity goes into the system prompt, which is settled when the harness
+        is spawned — so it can be decided any time before :meth:`launch`, and
+        not one moment after.
+        """
+        if identity:
+            session.sdef = replace(session.sdef, identity=identity)
+
+    def spawn(
+        self, parent: str, request: dict, *, identity: str = "", opening: str = ""
+    ) -> Session:
+        """Create and start a child of ``parent`` under the spawn policy.
+
+        :meth:`stage_child` plus :meth:`launch`, for callers with nothing to
+        arrange in between.
+        """
+        session = self.stage_child(parent, request, identity=identity)
+        try:
+            return self.launch(session, opening=opening)
+        except Exception:
+            self.discard(session.sdef.name)
+            raise
+
+    def stage_child(
+        self, parent: str, request: dict, *, identity: str = ""
+    ) -> Session:
+        """Register a child of ``parent`` under the spawn policy, unstarted.
 
         The agent-facing counterpart of :meth:`create`: the child is built
         from the parent's own definition, with only the fields
@@ -131,7 +201,7 @@ class SessionManager:
             depth=self.depth(parent),
             children=len(self.children(parent)),
         )
-        return self.create(
+        return self.stage(
             SessionDef.from_dict(
                 {
                     **child,
@@ -143,9 +213,9 @@ class SessionManager:
                     ),
                     "parent": parent,
                     "restore": False,
-                    # Who the child IS, resolved by the caller before this
-                    # point because the system prompt is fixed when the PTY
-                    # starts and the mesh join happens after it.
+                    # Who the child IS. Optional here: a caller that needs the
+                    # child's resolved cwd to work it out can stage first and
+                    # :meth:`assign_identity` before launching.
                     "identity": identity,
                 }
             )

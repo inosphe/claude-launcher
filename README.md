@@ -1178,10 +1178,19 @@ Two properties are worth knowing:
   system prompt is fixed when the PTY starts, so anything going into it must
   be known before the session exists.)
 - **One opening block, not three.** The mesh briefing, the workflow assignment
-  and the task arrive as a single delivery. They used to be three independently
+  and the task arrive as a single message. They used to be three independently
   idle-gated pastes racing into the same terminal, which needed a settle
   constant tuned against the paste-Enter delay to keep the task from being
   glued onto the briefing's closing fence.
+- **It is not typed in at all.** The join and the run happen while the session
+  is registered but not yet started, so the block they compose is handed to
+  `claude` as its positional prompt (`claude [options] [prompt]`) and *is* the
+  first turn. A TUI spends about ten seconds between going quiet and being
+  able to accept a submit — long enough that an opening message typed into it
+  reliably ended up in the composer, unsent. A message on the command line is
+  read before the process reads a key, so that window does not exist. Harnesses
+  with no such argument are still typed into, and `Session.deliver` waits them
+  out (see [docs/mesh-design.md](docs/mesh-design.md#why-delivery-is-always-send-keys)).
 
 What goes in the **system prompt** versus the opening block follows what is
 true for how long. The handle this session answers to and the run it drives

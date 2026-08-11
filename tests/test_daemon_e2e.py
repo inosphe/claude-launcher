@@ -363,6 +363,9 @@ def test_cflow_nudge_goes_through_deliver(home, tmp_path, monkeypatch):
         screen = ScreenState(80, 24)
         paste = session_mod.Session.paste
         deliver = session_mod.Session.deliver
+        _await_readable = session_mod.Session._await_readable
+        _started_mono = 0.0
+        _input_ready = True  # a session already up; nothing to wait for
 
         async def write_bytes(self, data: bytes) -> None:
             writes.append(data)

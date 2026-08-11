@@ -14,6 +14,7 @@ import os
 import secrets
 import time
 from pathlib import Path
+from typing import Optional
 
 from aiohttp import web
 
@@ -1212,7 +1213,9 @@ async def h_sessions_create(request: web.Request) -> web.Response:
     optional and composed here, the same way and in the same order the spawn
     endpoint has always composed them for an agent's children (see
     :mod:`claude_launcher.daemon.onboard`). They are checked *before* anything
-    is built, so a mistyped mesh is a 400 with no session left behind.
+    is built, so a mistyped mesh is a 400 with no session left behind, and
+    *arranged* before it too, so the opening message can be handed to the
+    harness on its command line instead of typed into it.
 
     The response keeps the session's own fields at the top level, as it always
     has, and reports each onboarding leg beside them.
@@ -1222,33 +1225,63 @@ async def h_sessions_create(request: web.Request) -> web.Response:
     body.setdefault("restore", manager.restore_default)
     body.setdefault("name", "")
     try:
-        plan = onboard.preflight(
-            body,
-            mesh_mgr=_mesh_mgr(request),
-            session_name=str(body.get("name") or ""),
-            cwd=str(body.get("cwd") or ""),
-            harness=str(body.get("harness") or "") or CLAUDE_HARNESS,
-        )
-    except onboard.OnboardError as exc:
-        return json_error(400, str(exc))
-    if plan.identity:
-        body["identity"] = plan.identity
-    try:
         sdef = SessionDef.from_dict(body)
     except (KeyError, ValueError, TypeError) as exc:
         return json_error(400, f"bad session definition: {exc}")
     try:
-        session = manager.create(sdef)
+        session = manager.stage(sdef)
     except ManagerError as exc:
-        if "already exists" in str(exc):
-            return json_error(409, str(exc))
-        raise
-    result = dict(session.info())
-    if plan.wanted:
-        result.update(
-            await onboard.run(plan, session, mesh_mgr=_mesh_mgr(request))
+        return json_error(409 if "already exists" in str(exc) else 400, str(exc))
+    try:
+        result = await _onboard_and_launch(request, session, body)
+    except onboard.OnboardError as exc:
+        return json_error(400, str(exc))
+    return web.json_response({**session.info(), **result}, status=201)
+
+
+async def _onboard_and_launch(
+    request: web.Request, session, body: dict, *, parent: Optional[str] = None
+) -> dict:
+    """Arrange a staged session, then start it — the shared second half of
+    create and spawn.
+
+    The order is the point. Everything checkable is checked before the harness
+    exists, so a mistyped mesh costs nothing; the join and the run then happen
+    while the session is registered but not running, which is what lets their
+    composed opening message go in as an argument rather than be typed into a
+    terminal that may not be reading yet. Anything arranged is undone if the
+    harness then fails to start, because the name goes straight back into
+    circulation and a leftover membership would be inherited by whoever takes
+    it next.
+    """
+    manager: SessionManager = request.app["manager"]
+    name, cwd = session.sdef.name, session.sdef.cwd
+    try:
+        plan = onboard.preflight(
+            body,
+            mesh_mgr=_mesh_mgr(request),
+            session_name=name,
+            cwd=cwd,
+            harness=session.sdef.harness,
         )
-    return web.json_response(result, status=201)
+    except Exception:
+        manager.discard(name)
+        raise
+    manager.assign_identity(session, plan.identity)
+
+    report, opening = {}, ""
+    if plan.wanted:
+        report, opening = await onboard.arrange(
+            plan, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request), parent=parent
+        )
+    try:
+        manager.launch(session, opening=opening)
+    except Exception:
+        manager.discard(name)
+        await onboard.unwind(report, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request))
+        raise
+    onboard.open_with(session, opening)
+    return report
 
 
 async def h_session_children(request: web.Request) -> web.Response:
@@ -1292,32 +1325,26 @@ async def h_session_spawn(request: web.Request) -> web.Response:
     parent = request.match_info["name"]
     body = await _json_body(request)
     try:
-        plan = onboard.preflight(
-            body,
-            mesh_mgr=_mesh_mgr(request),
-            session_name=str(body.get("name") or ""),
-            cwd=manager.get(parent).sdef.cwd,
-            harness=str(body.get("harness") or "")
-            or manager.get(parent).sdef.harness,
-        )
+        manager.get(parent)
     except ManagerError as exc:
         return json_error(404, str(exc))
-    except onboard.OnboardError as exc:
-        return json_error(400, str(exc))
     try:
-        session = manager.spawn(parent, body, identity=plan.identity)
+        session = manager.stage_child(parent, body)
     except spawn_mod.SpawnDenied as exc:
         return json_error(403, str(exc))
     except (HarnessError, ValueError, TypeError) as exc:
         return json_error(400, f"bad spawn request: {exc}")
     except ManagerError as exc:
         return json_error(409 if "already exists" in str(exc) else 400, str(exc))
-
-    result = {"session": session.info(), "parent": parent}
-    result.update(
-        await onboard.run(plan, session, mesh_mgr=_mesh_mgr(request), parent=parent)
+    try:
+        result = await _onboard_and_launch(request, session, body, parent=parent)
+    except onboard.OnboardError as exc:
+        return json_error(400, str(exc))
+    except (HarnessError, ValueError, TypeError) as exc:
+        return json_error(400, f"bad spawn request: {exc}")
+    return web.json_response(
+        {"session": session.info(), "parent": parent, **result}, status=201
     )
-    return web.json_response(result, status=201)
 
 
 async def h_sessions_clear(request: web.Request) -> web.Response:

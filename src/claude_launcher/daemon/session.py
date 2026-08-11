@@ -26,7 +26,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from . import keys as keys_mod
 from . import paths, pty_backend
-from .harness import SessionDef
+from .harness import CLAUDE_HARNESS, SessionDef
 from .idle import IdleTracker
 from .screen import ScreenState
 
@@ -41,6 +41,18 @@ LOG_MAX_BYTES = 10 * 1024 * 1024
 #: 0 never submits, 20ms already does; 150ms leaves room for a busy renderer.
 PASTE_ENTER_DELAY = float(os.environ.get("CLAUNCH_PASTE_ENTER_DELAY") or 0.15)
 
+#: How long a TUI has, from spawn, to become deliverable-to before
+#: :meth:`Session.deliver` stops waiting and writes anyway. Generous: it is
+#: paid at most once per session, and being late is free while being early
+#: loses the message.
+INPUT_READY_TIMEOUT = float(os.environ.get("CLAUNCH_INPUT_READY_TIMEOUT") or 30.0)
+
+#: How long a TUI must stay idle *after* taking the keyboard before it is
+#: considered done starting up. On top of the idle threshold, so the real wait
+#: is longer; measured against Claude Code, whose input mounts a few seconds
+#: before it finishes loading and starts accepting a submit.
+INPUT_SETTLE = float(os.environ.get("CLAUNCH_INPUT_SETTLE") or 3.0)
+
 log = logging.getLogger(__name__)
 
 STATUS_STARTING = "starting"
@@ -54,20 +66,30 @@ def _utcnow() -> str:
 
 
 class Session:
-    """Owns one PTY child; created and torn down by the SessionManager."""
+    """Owns one PTY child; created and torn down by the SessionManager.
+
+    Constructed and *started* in two steps. Between them the session exists —
+    it is in the registry, it has a name, it can be joined into a mesh — but
+    nothing is running yet and its command line is not fixed. That gap is what
+    lets a session be arranged before it runs: its mesh membership and its
+    cflow run are settled first, and the opening message they compose is handed
+    to the harness as an argument instead of typed into a terminal that may not
+    be reading yet (see :meth:`_await_readable`). Only
+    :class:`~claude_launcher.daemon.manager.SessionManager` should hold an
+    unstarted one.
+    """
 
     def __init__(
         self,
         sdef: SessionDef,
-        argv: List[str],
-        env: Dict[str, str],
-        cwd: str,
         *,
         idle_threshold: float,
         scrollback: int,
     ) -> None:
         self.sdef = sdef
-        self.argv = argv
+        self.argv: List[str] = []
+        self.pty = None
+        self.pid: Optional[int] = None
         self.idle_threshold = idle_threshold
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
         self.tracker = IdleTracker()
@@ -81,13 +103,22 @@ class Session:
         self._loop = asyncio.get_running_loop()
         self._status = STATUS_STARTING
         self._saw_output = False
+        #: Latched once the harness has been seen ready to take a message; see
+        #: :meth:`_await_readable`.
+        self._input_ready = False
 
         session_dir = paths.session_dir(sdef.name)
         session_dir.mkdir(parents=True, exist_ok=True)
         self._log_path = paths.session_log(sdef.name)
         self._log = open(self._log_path, "ab")
 
-        self.pty = pty_backend.spawn(argv, env=env, cwd=cwd, cols=sdef.cols, rows=sdef.rows)
+    def start(self, argv: List[str], env: Dict[str, str], cwd: str) -> None:
+        """Spawn the child and begin reading it. Called once, by the manager."""
+        self.argv = argv
+        self._started_mono = time.monotonic()
+        self.pty = pty_backend.spawn(
+            argv, env=env, cwd=cwd, cols=self.sdef.cols, rows=self.sdef.rows
+        )
         self.pid = self.pty.pid
 
         # A dedicated *daemon* thread, NOT the loop's default executor: at
@@ -95,7 +126,7 @@ class Session:
         # blocking ConPTY read would hold the whole process (and its singleton
         # lock) hostage. A daemon thread can never block interpreter exit.
         self._reader = threading.Thread(
-            target=self._read_pump, name=f"pty-read-{sdef.name}", daemon=True
+            target=self._read_pump, name=f"pty-read-{self.sdef.name}", daemon=True
         )
         self._reader.start()
         self._sampler = self._loop.create_task(self._sample_loop())
@@ -234,11 +265,57 @@ class Session:
         hold its position and retry on the next tick.
         """
         try:
+            await self._await_readable()
             await self.paste(text, enter=True)
         except Exception as exc:  # noqa: BLE001 — SessionGone, PTY write, ...
             log.debug("deliver to %r failed: %s", self.sdef.name, exc)
             return False
         return True
+
+    async def _await_readable(self) -> None:
+        """Block until a starting TUI can actually take a message.
+
+        Quiet is not ready. A just-started Claude Code prints its banner and
+        pauses long enough to read as idle, mounts its input a few seconds
+        after that, and only finishes loading a few seconds after *that*.
+        Written into any of those gaps, a paste and its separately-written
+        Enter come back out of one read with the CR folded into the text: the
+        message is typed and never sent — the exact failure :meth:`paste`
+        splits the writes to avoid, reintroduced by the reader rather than the
+        writer. No delay between the two writes can fix it.
+
+        Ready is two things together, and neither alone is enough (both were
+        measured against Claude Code):
+
+        * **DECSET 2004 is on.** A program enables bracketed paste when it
+          takes over the keyboard, so this is the input existing at all.
+        * **...and it has been quiet since.** The mode goes on partway through
+          startup, several seconds before the first submit is accepted; the
+          burst of work that follows it is what has to finish.
+
+        Latched: once a session has been seen ready it never waits again, so
+        this is paid at most once. Only a harness known to set the mode is
+        waited on — a shell never does and would stall here forever — and the
+        whole wait is bounded from the moment the session was spawned, so a
+        harness that never settles delays a message rather than losing it.
+        """
+        if self._input_ready or self.exited:
+            return
+        if self.sdef.harness != CLAUDE_HARNESS:
+            self._input_ready = True  # not a TUI we know; nothing to wait for
+            return
+        deadline = self._started_mono + INPUT_READY_TIMEOUT
+        quiet_since = None
+        while time.monotonic() < deadline and not self.exited:
+            if self.screen.bracketed_paste and self.status() == STATUS_IDLE:
+                if quiet_since is None:
+                    quiet_since = time.monotonic()
+                elif time.monotonic() - quiet_since >= INPUT_SETTLE:
+                    break
+            else:
+                quiet_since = None  # still starting; begin the count again
+            await asyncio.sleep(0.2)
+        self._input_ready = True
 
     async def send_keys(self, args: List[str], *, literal: bool = False) -> bytes:
         """Raw keystrokes — the passthrough for a human at a keyboard (the
@@ -287,14 +364,14 @@ class Session:
         return data + b"\r"
 
     async def write_bytes(self, data: bytes) -> None:
-        if self.exited:
+        if self.exited or self.pty is None:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         # PTY writes can block briefly (ConPTY pipe backpressure); keep the
         # event loop responsive by writing from the thread pool.
         await self._loop.run_in_executor(None, self.pty.write, data)
 
     def resize(self, cols: int, rows: int) -> None:
-        if self.exited:
+        if self.exited or self.pty is None:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         self.pty.resize(cols, rows)
         self.screen.resize(cols, rows)
@@ -324,13 +401,13 @@ class Session:
             await asyncio.sleep(0.2)
 
     def kill(self, *, force: bool = False) -> None:
-        if self.exited:
+        if self.exited or self.pty is None:
             return
         self.pty.terminate(force=force)
 
     async def shutdown(self, grace: float = 5.0) -> None:
         """Terminate the child and wait briefly; force-kill stragglers."""
-        if self.exited:
+        if self.exited or self.pty is None:
             return
         self.pty.terminate(force=False)
         deadline = time.monotonic() + grace

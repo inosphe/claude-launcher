@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import time
 from pathlib import Path
 
 import pytest
@@ -113,21 +114,30 @@ def test_no_second_http_path_for_delivering_messages():
     )
 
 
-def _fake_session(*, bracketed: bool):
+def _fake_session(*, bracketed: bool, ready: bool = True):
+    """A stand-in Session. ``ready`` is the latch every already-running session
+    carries; the readiness tests below clear it to watch it being set."""
     writes: list = []
 
     class FakeSession:
         exited = False
         sdef = SessionDef(name="s")
         screen = ScreenState(80, 24)
+        idle_threshold = 0.0
         paste = session_mod.Session.paste
         deliver = session_mod.Session.deliver
         send_keys = session_mod.Session.send_keys
+        _await_readable = session_mod.Session._await_readable
+
+        def status(self, threshold=None):
+            return session_mod.STATUS_IDLE
 
         async def write_bytes(self, data: bytes) -> None:
             writes.append(data)
 
     s = FakeSession()
+    s._started_mono = time.monotonic()  # a session that just came up
+    s._input_ready = ready
     if bracketed:
         s.screen.feed(b"\x1b[?2004h")
     return s, writes
@@ -184,3 +194,77 @@ def test_send_keys_leaves_a_plain_program_alone(monkeypatch):
 )
 def test_split_submit(data, expected):
     assert keys_mod.split_submit(data) == expected
+
+
+# --------------------------------------------------------------------------- #
+# the other half of the rule: two writes are only two *reads* if the program is
+# reading. A harness that has gone quiet may not be there yet.
+# --------------------------------------------------------------------------- #
+def test_deliver_waits_for_a_booting_tui_to_take_the_keyboard(monkeypatch):
+    """Quiet is not ready.
+
+    A just-started Claude Code prints its banner and pauses long enough to read
+    as idle well before its input exists. Written into that gap, the paste and
+    its separately-written CR sit in one buffer and come out of one read --
+    which folds the CR into the text and leaves the message typed but never
+    sent, the exact symptom the split was introduced to prevent.
+    """
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "INPUT_SETTLE", 0.0)
+    s, writes = _fake_session(bracketed=False, ready=False)
+
+    async def run():
+        sending = asyncio.ensure_future(s.deliver("cflow: go"))
+        await asyncio.sleep(0.3)
+        assert writes == [], "wrote into a terminal that was not reading"
+        s.screen.feed(b"\x1b[?2004h")  # the TUI takes the keyboard
+        assert await asyncio.wait_for(sending, timeout=5) is True
+
+    asyncio.run(run())
+    assert writes == [b"\x1b[200~cflow: go\x1b[201~", b"\r"]
+
+
+def test_deliver_waits_out_the_startup_that_follows_the_keyboard(monkeypatch):
+    """...and taking the keyboard is not ready either.
+
+    Claude Code enables bracketed paste partway through startup and keeps
+    loading for several seconds after; a submit sent in there is dropped even
+    though the paste before it lands and renders. So the mode has to be on AND
+    the session quiet since, which is what marks the end of it.
+    """
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "INPUT_SETTLE", 0.5)
+    s, writes = _fake_session(bracketed=True, ready=False)
+    busy = {"now": True}
+    s.status = lambda threshold=None: (
+        session_mod.STATUS_BUSY if busy["now"] else session_mod.STATUS_IDLE
+    )
+
+    async def run():
+        sending = asyncio.ensure_future(s.deliver("cflow: go"))
+        await asyncio.sleep(0.3)
+        assert writes == [], "wrote into a harness that was still starting"
+        busy["now"] = False
+        assert await asyncio.wait_for(sending, timeout=5) is True
+
+    asyncio.run(run())
+    assert writes == [b"\x1b[200~cflow: go\x1b[201~", b"\r"]
+    assert s._input_ready is True  # latched: the next message pays nothing
+
+
+def test_deliver_does_not_wait_on_a_harness_that_never_sets_the_mode():
+    """A shell or a REPL never enables bracketed paste, so waiting for it would
+    be waiting forever. Only the harness known to be an Ink TUI is held back."""
+    s, writes = _fake_session(bracketed=False, ready=False)
+    s.sdef = SessionDef(name="s", harness="py")
+    assert asyncio.run(s.deliver("echo hi")) is True
+    assert writes == [b"echo hi", b"\r"]
+
+
+def test_deliver_gives_up_waiting_once_the_session_is_no_longer_young():
+    """The wait is bounded from the moment the session was spawned: a harness
+    that never settles delays a message rather than losing it."""
+    s, writes = _fake_session(bracketed=False, ready=False)
+    s._started_mono = time.monotonic() - session_mod.INPUT_READY_TIMEOUT - 1
+    assert asyncio.run(s.deliver("cflow: go")) is True
+    assert writes == [b"cflow: go", b"\r"]

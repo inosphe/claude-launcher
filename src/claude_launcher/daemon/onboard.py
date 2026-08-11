@@ -21,7 +21,16 @@ failed" into a 400 with nothing created.
 and the opening task used to be three independently idle-gated pastes racing
 each other into the same terminal; the race was real enough to need a settle
 constant tuned against the paste-Enter delay. Composed here, they are one
-delivery: ordered, atomic, and impossible to interleave.
+message: ordered, atomic, and impossible to interleave.
+
+**Arranged before the session runs.** :func:`arrange` does every leg — the
+join, the run — while the session is registered but not yet started, and
+returns the composed block. That is what lets the block be handed to ``claude``
+as its positional prompt: a message on the command line is read before the
+process reads a key, so it cannot be lost in the ten-odd seconds a TUI spends
+between going quiet and being able to accept a submit (the failure
+:meth:`Session._await_readable` describes and only partly mitigates).
+Harnesses that take no such argument are typed into instead.
 
 The split between the two channels follows what is *true for how long*:
 
@@ -37,15 +46,17 @@ The split between the two channels follows what is *true for how long*:
 from __future__ import annotations
 
 import asyncio
-import time
+import logging
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
+from . import harness as harness_mod
 from .harness import CLAUDE_HARNESS
 from .mesh import MeshError
-from .session import STATUS_IDLE
+
+log = logging.getLogger(__name__)
 
 
 class OnboardError(Exception):
@@ -183,20 +194,26 @@ def _identity_block(
     return "\n\n".join(lines)
 
 
-async def run(plan: Plan, session, *, mesh_mgr, parent: Optional[str] = None) -> dict:
-    """Apply a validated plan to a session that now exists.
+async def arrange(
+    plan: Plan, *, name: str, cwd: str, mesh_mgr, parent: Optional[str] = None
+) -> Tuple[dict, str]:
+    """Do every leg of a validated plan, for a session that does not exist yet.
 
-    Returns one entry per leg attempted, so a partial success stays legible:
-    the caller is told the session exists even when the mesh join is what
-    failed. The opening block is assembled from whatever succeeded and
-    delivered once, in the background — a create call must not be tied to
-    another program's startup time.
+    Returns ``(report, block)``: one report entry per leg attempted, so a
+    partial success stays legible, and the opening message composed from
+    whatever succeeded. Nothing here touches a terminal — ``name`` is a
+    reserved session name, which is all a mesh join and a cflow run need — so
+    the block is in hand before the harness is spawned and can be given to it
+    directly.
+
+    The caller owns the session that follows. If it fails to start, undo this
+    with :func:`unwind`.
     """
     result: dict = {}
     sections: list = []
 
     if plan.mesh:
-        joined = await _join(plan, session, mesh_mgr=mesh_mgr, parent=parent)
+        joined = await _join(plan, name, mesh_mgr=mesh_mgr, parent=parent)
         result["mesh"] = joined
         if joined.get("briefing"):
             sections.append(joined.pop("briefing"))
@@ -204,7 +221,7 @@ async def run(plan: Plan, session, *, mesh_mgr, parent: Optional[str] = None) ->
             joined.pop("briefing", None)
 
     if plan.workflow:
-        started = _start_workflow(plan, session)
+        started = _start_workflow(plan, name=name, cwd=cwd)
         result["workflow"] = started
         if started.get("ok"):
             sections.append(
@@ -231,12 +248,32 @@ async def run(plan: Plan, session, *, mesh_mgr, parent: Optional[str] = None) ->
         sections.append(plan.task)
         result["task"] = {"ok": True, "queued": True}
 
-    if sections:
-        asyncio.ensure_future(_deliver_opening(session, "\n\n".join(sections)))
-    return result
+    return result, "\n\n".join(sections)
 
 
-async def _join(plan: Plan, session, *, mesh_mgr, parent: Optional[str]) -> dict:
+async def unwind(report: dict, *, name: str, cwd: str, mesh_mgr) -> None:
+    """Undo an :func:`arrange` whose session then failed to start.
+
+    Both legs leave state keyed to a session name, and that name goes back into
+    circulation the moment the create fails — so a membership or a run left
+    behind here does not merely leak, it is inherited by whatever session takes
+    the name next. Best-effort: this runs while another error is already on its
+    way to the caller, and a failure to tidy up must not replace it.
+    """
+    joined = report.get("mesh") or {}
+    if joined.get("ok"):
+        try:
+            await mesh_mgr.leave(joined["mesh"], joined["handle"])
+        except Exception as exc:  # noqa: BLE001 — best effort
+            log.warning("could not undo mesh join for %r: %s", name, exc)
+    if (report.get("workflow") or {}).get("ok"):
+        try:
+            cflow_engine.abort(by="claunch", cwd=cwd, scope=name)
+        except Exception as exc:  # noqa: BLE001 — best effort
+            log.warning("could not undo cflow run for %r: %s", name, exc)
+
+
+async def _join(plan: Plan, name: str, *, mesh_mgr, parent: Optional[str]) -> dict:
     """Enrol the session, cut it down to the peers it should see, and return
     the briefing text for the opening block.
 
@@ -252,10 +289,9 @@ async def _join(plan: Plan, session, *, mesh_mgr, parent: Optional[str]) -> dict
         # The briefing is held back so it can go out inside the opening block
         # rather than as a paste racing it — and so it is built *after* the
         # isolation below, which decides what it is allowed to list.
-        with mesh_mgr.defer_briefing(session.sdef.name):
+        with mesh_mgr.defer_briefing(name):
             member = await mesh_mgr.join(
-                plan.mesh, session.sdef.name,
-                handle=plan.handle, role=plan.role,
+                plan.mesh, name, handle=plan.handle, role=plan.role,
             )
     except MeshError as exc:
         return {"ok": False, "error": str(exc)}
@@ -288,7 +324,7 @@ async def _join(plan: Plan, session, *, mesh_mgr, parent: Optional[str]) -> dict
     return out
 
 
-def _start_workflow(plan: Plan, session) -> dict:
+def _start_workflow(plan: Plan, *, name: str, cwd: str) -> dict:
     """Start a cflow run scoped to this session.
 
     Runs are keyed by ``(cwd, scope)`` and a session-scoped run uses the
@@ -297,49 +333,28 @@ def _start_workflow(plan: Plan, session) -> dict:
     """
     try:
         payload = cflow_engine.start(
-            plan.workflow,
-            context=plan.context or None,
-            cwd=session.sdef.cwd,
-            scope=session.sdef.name,
+            plan.workflow, context=plan.context or None, cwd=cwd, scope=name
         )
     except Exception as exc:  # noqa: BLE001 — the engine raises several types
         return {"ok": False, "error": str(exc)}
     return {
         "ok": True,
         "workflow": plan.workflow,
-        "scope": session.sdef.name,
+        "scope": name,
         "step": payload.get("step") or payload.get("id"),
     }
 
 
-#: How long the session must read idle before the opening block is typed in.
-#: One delivery now, so this no longer has to out-wait another paste's delayed
-#: Enter — it only has to out-wait the harness printing its banner and settling
-#: into a prompt.
-OPENING_SETTLE = 0.6
+def open_with(session, block: str) -> None:
+    """Get ``block`` in front of the agent, whichever way this harness allows.
 
-
-async def _deliver_opening(session, block: str, *, hold: float = 60.0) -> None:
-    """Type the opening block in once the harness has finished booting.
-
-    Fire-and-forget: the harness takes seconds to come up and a create call
-    that waited for it would tie the caller to another program's startup. The
-    injection is idle-gated, so it lands in a prompt rather than halfway
-    through one.
+    A no-op when the harness already took the block on its command line — the
+    good case, and the one :func:`arrange` exists to make possible. Otherwise
+    it is typed in, in the background: the harness takes seconds to come up and
+    a create call that waited for it would tie its caller to another program's
+    startup time. Waiting for the terminal to be able to receive it is
+    :meth:`Session.deliver`'s job, not this one's.
     """
-    deadline = time.monotonic() + hold
-    idle_since = None
-    while time.monotonic() < deadline:
-        if session.exited:
-            return
-        if session.status() == STATUS_IDLE:
-            if idle_since is None:
-                idle_since = time.monotonic()
-            elif time.monotonic() - idle_since >= OPENING_SETTLE:
-                break
-        else:
-            idle_since = None  # something is still arriving; start over
-        await asyncio.sleep(0.2)
-    else:
-        return  # never settled; skip rather than interleave
-    await session.deliver(block)
+    if not block or harness_mod.takes_opening_argv(session.sdef.harness):
+        return
+    asyncio.ensure_future(session.deliver(block))

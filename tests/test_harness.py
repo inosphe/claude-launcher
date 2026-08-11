@@ -297,3 +297,46 @@ def test_unix_gets_term_default(home, tmp_path):
     sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
     _, env, _ = harness.build_command(sdef)
     assert "TERM" in env
+
+
+def test_the_opening_message_rides_in_as_the_positional_prompt(home, tmp_path):
+    """Where a new session's assignment actually goes.
+
+    Typed into the terminal it can be lost: a just-started Claude Code reads
+    idle for a few seconds before its input is live, and a paste plus its
+    separately-written Enter written into that gap come back out of one read
+    with the Enter folded into the text. On the command line there is no such
+    window -- the message is the process's first turn.
+    """
+    profile.create("work")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work", cwd=str(tmp_path), args=["--verbose"])
+    )
+    block = "---\n# claunch mesh: join briefing\n---\n\ntake the API"
+    argv, _, _ = harness.build_command(sdef, opening=block)
+    assert argv[-1] == block
+    # behind the end-of-options marker: an opening block routinely starts with
+    # a fence of dashes, which claude's option parser would refuse to start on
+    assert argv[-2] == "--"
+    assert argv[-3] == "--verbose"  # after the flags, as a prompt must be
+
+
+def test_a_restore_does_not_repeat_the_opening_message(home, tmp_path):
+    """It is true once. The conversation already contains it, and claude comes
+    back into that same conversation -- sending it again would be the session
+    receiving its opening instruction twice."""
+    profile.create("work")
+    sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+    argv, _, _ = harness.build_command(sdef, restoring=True, opening="take the API")
+    assert "take the API" not in argv
+
+
+def test_a_harness_with_no_prompt_argument_is_not_given_one(home, tmp_path):
+    """Only claude documents 'claude [options] [prompt]'. Anything else would
+    be handed a stray argument, so those are typed into instead."""
+    _declare_harness("h")
+    sdef = harness.normalize(SessionDef(name="x", harness="h", cwd=str(tmp_path)))
+    argv, _, _ = harness.build_command(sdef, opening="take the API")
+    assert "take the API" not in argv
+    assert harness.takes_opening_argv("h") is False
+    assert harness.takes_opening_argv(harness.CLAUDE_HARNESS) is True

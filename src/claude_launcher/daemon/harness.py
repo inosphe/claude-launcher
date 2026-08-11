@@ -268,10 +268,29 @@ def _normalize_resume(sdef: SessionDef) -> SessionDef:
     return sdef
 
 
+def takes_opening_argv(harness: str) -> bool:
+    """Whether this harness accepts an opening message on its command line.
+
+    ``claude`` does (``claude [options] [prompt]``), and that is worth a lot
+    more than a convenience: a message handed over as argv is read by the
+    process before it ever reads a key, so it cannot be caught in the window
+    between the harness going quiet and its input actually being live. Every
+    other harness has to be typed into, which is what :func:`onboard.deliver`
+    is for.
+    """
+    return harness == CLAUDE_HARNESS
+
+
 def build_command(
-    sdef: SessionDef, *, restoring: bool = False
+    sdef: SessionDef, *, restoring: bool = False, opening: str = ""
 ) -> Tuple[List[str], Dict[str, str], str]:
     """Resolve a definition to the ``(argv, env, cwd)`` to spawn.
+
+    ``opening`` is a first user message to hand the harness directly, for the
+    harnesses that take one (see :func:`takes_opening_argv`). It is deliberately
+    *not* a :class:`SessionDef` field: it is true once, at the first spawn, and
+    a restore that replayed it would send the session's opening instruction a
+    second time into a conversation that already contains it.
 
     A fresh claude session is started with ``--session-id <uuid>`` (the id
     pinned in the definition); ``restoring`` relaunches it with ``--resume``
@@ -327,6 +346,12 @@ def build_command(
         if blocks:
             argv.extend(["--append-system-prompt", "\n\n".join(blocks)])
         argv.extend(sdef.args)
+        if opening and not restoring:
+            # The positional prompt — claude's first turn. Behind ``--``
+            # because an opening block routinely starts with a line of dashes
+            # (the mesh briefing's own fence does), and claude's option parser
+            # reads that as a flag and refuses to start.
+            argv.extend(["--", opening])
     else:
         entry = harness_registry.get(sdef.harness)
         if entry is None:  # normalize() refuses these; belt and braces

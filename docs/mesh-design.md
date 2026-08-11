@@ -40,6 +40,22 @@ mesh/policy nudges, cflow nudges and spawned-child tasks are all callers of it.
 `tests/test_delivery_contract.py` fails the build if a new sender reaches for
 the raw writers instead.
 
+Two writes are only two *reads* if the program is reading, and a starting TUI
+is not. Measured against Claude Code: it prints its banner and goes quiet at
+~2.5s, enables bracketed paste at ~6s, and does not accept a submit until
+~10s. Anything written before that comes back out of one read with the CR
+folded into the text — the same typed-but-unsent symptom, caused by the reader
+rather than the writer, and unfixable by any delay between the two writes. So
+`deliver` waits for the two together: bracketed paste **on**, and the session
+quiet **since**. It latches, so only a session's first message pays for it,
+and it is bounded from spawn, so a harness that never settles delays a message
+rather than losing it.
+
+A session's *own* opening message sidesteps this entirely: it is arranged
+before the harness starts and handed to `claude` as its positional prompt, so
+it is the first turn rather than something typed in. See "sessions that start
+with a job" in the README.
+
 Consequences:
 
 - Receivers need zero cooperation and zero setup. Any harness works.

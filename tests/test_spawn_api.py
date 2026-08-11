@@ -13,6 +13,8 @@ import sys
 import time
 
 from claude_launcher import store, workspaces
+from claude_launcher.cflow import state as cflow_state
+from claude_launcher.daemon import harness as harness_mod
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -566,3 +568,103 @@ class _FakeMeshMgr:
 
     def list(self):
         return [self._Mesh()]
+
+
+def test_the_join_and_the_run_happen_before_the_harness_starts(home, tmp_path):
+    """The ordering the opening message depends on.
+
+    A harness that takes its first message as an argument has to be handed one
+    before it is spawned -- which means the mesh join and the cflow run, whose
+    briefing and assignment make up that message, have to be done while the
+    session exists but is not yet running. So by the time argv is built, both
+    have already landed.
+    """
+    _register_py_harness()
+    _declare_review_workflow(tmp_path)
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        seen: dict = {}
+        real_build = harness_mod.build_command
+
+        def spy(sdef, **kw):
+            seen["opening"] = kw.get("opening", "")
+            seen["in_mesh"] = "worker_1" in mm.get("team").members
+            seen["has_run"] = sdef.name in cflow_state.scopes_in(sdef.cwd)
+            return real_build(sdef, **kw)
+
+        try:
+            mm.create("team")
+            harness_mod.build_command = spy
+            resp = await client.post(
+                "/api/sessions",
+                json={
+                    "name": "w1", "harness": "py", "cwd": str(tmp_path),
+                    "mesh": "team", "handle": "worker_1",
+                    "workflow": "review", "task": "take the API",
+                },
+                headers=BEARER,
+            )
+            assert resp.status == 201
+        finally:
+            harness_mod.build_command = real_build
+            await mgr.shutdown_all()
+            await client.close()
+
+        assert seen["in_mesh"] is True, "joined after the harness was spawned"
+        assert seen["has_run"] is True, "run started after the harness was spawned"
+        # ...and the whole assignment was composed and available as one message
+        assert "worker_1" in seen["opening"]
+        assert "review" in seen["opening"]
+        assert seen["opening"].endswith("take the API")
+
+    asyncio.run(run())
+
+
+def test_a_session_that_fails_to_start_does_not_leave_its_mesh_seat_behind(
+    home, tmp_path
+):
+    """Arranging before starting means there is something to undo.
+
+    The name goes straight back into circulation when the create fails, so a
+    membership left behind would not merely leak -- the next session to take
+    the name would inherit it.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        real_build = harness_mod.build_command
+
+        def boom(sdef, **kw):
+            raise harness_mod.HarnessError("no such program")
+
+        try:
+            mm.create("team")
+            harness_mod.build_command = boom
+            resp = await client.post(
+                "/api/sessions",
+                json={
+                    "name": "w1", "harness": "py", "cwd": str(tmp_path),
+                    "mesh": "team", "handle": "worker_1",
+                },
+                headers=BEARER,
+            )
+            assert resp.status == 400
+        finally:
+            harness_mod.build_command = real_build
+
+        try:
+            assert "worker_1" not in mm.get("team").members
+            # and the name is genuinely free again
+            resp = await client.get("/api/sessions", headers=BEARER)
+            assert [s["name"] for s in (await resp.json())["sessions"]] == []
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
