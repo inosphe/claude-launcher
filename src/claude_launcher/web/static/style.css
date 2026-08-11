@@ -565,28 +565,53 @@ body {
 .mesh-edge-group { pointer-events: none; }
 .mesh-edge-group.editable { pointer-events: stroke; cursor: pointer; }
 .mesh-edge-group.editable:hover .mesh-edge { stroke-width: 3.4; opacity: 1; }
-.mesh-node .mesh-node-disc {
-  fill: #22262d; stroke: #3d444d; stroke-width: 1.5;
+/* one daemon and the agents it hosts */
+.mesh-cluster-box {
+  fill: #202429; stroke: #2f343d; stroke-width: 1.5; stroke-dasharray: 4 3;
 }
-.mesh-node.self .mesh-node-disc { stroke: #58a6ff; stroke-width: 2; }
-.mesh-node.authority .mesh-node-disc { fill: #1c2b1f; stroke: #3fb950; stroke-width: 2; }
-.mesh-node.down .mesh-node-disc { stroke: #ff7b72; }
-.mesh-node.draggable { cursor: grab; }
-.mesh-node.dragging { cursor: grabbing; opacity: 0.55; }
-.mesh-node text { text-anchor: middle; pointer-events: none; }
-.mesh-node-rank { font-size: 12px; font-weight: 600; fill: #adb5bd; }
-.mesh-node.authority .mesh-node-rank { fill: #3fb950; }
-.mesh-node-name {
+.mesh-cluster.self .mesh-cluster-box { stroke: #58a6ff; stroke-dasharray: none; }
+.mesh-cluster.authority .mesh-cluster-box { stroke: #3fb950; stroke-dasharray: none; }
+.mesh-cluster.down .mesh-cluster-box { stroke: #ff7b72; }
+.mesh-cluster.draggable { cursor: grab; }
+.mesh-cluster.dragging { cursor: grabbing; opacity: 0.55; }
+.mesh-cluster text { pointer-events: none; }
+.mesh-cluster-name {
+  font-size: 11px; font-weight: 600; fill: #8b949e;
+  font-family: Cascadia Mono, Consolas, Menlo, monospace;
+}
+.mesh-cluster.self .mesh-cluster-name { fill: #58a6ff; }
+.mesh-cluster.authority .mesh-cluster-name { fill: #3fb950; }
+.mesh-cluster-empty { font-size: 10px; fill: #5c636b; text-anchor: middle; }
+
+/* who spawned whom — the skeleton, so it is quiet and always on */
+.mesh-spawn { fill: none; stroke: #454c56; stroke-width: 1.4; }
+
+/* the exceptions in the member graph. Connected is the default and says
+   nothing; a cut is a decision, and gets the only line it needs. */
+.mesh-mcut line { stroke: #ff7b72; stroke-width: 1.4; stroke-dasharray: 3 3; opacity: 0.8; }
+.mesh-reach { stroke: #58a6ff; stroke-width: 1.2; opacity: 0.5; }
+
+.mesh-agent { cursor: pointer; }
+.mesh-agent text { text-anchor: middle; pointer-events: none; }
+.mesh-agent-disc { fill: #22262d; stroke: #6e7681; stroke-width: 1.6; }
+.mesh-agent.idle .mesh-agent-disc { stroke: #3fb950; }
+.mesh-agent.busy .mesh-agent-disc { stroke: #d29922; }
+.mesh-agent.starting .mesh-agent-disc { stroke: #58a6ff; }
+.mesh-agent.exited .mesh-agent-disc { stroke: #6e7681; fill: #1e2126; }
+.mesh-agent:hover .mesh-agent-disc { stroke-width: 2.6; }
+.mesh-agent.focus .mesh-agent-disc { fill: #17324f; stroke: #58a6ff; stroke-width: 2.6; }
+/* Dimmed rather than hidden: a member you cannot reach is the answer to the
+   question, so it has to stay on the page to be read. */
+.mesh-agent.dim { opacity: 0.28; }
+.mesh-agent-name {
   font-size: 10px; fill: #c6cdd5; font-weight: 600;
   font-family: Cascadia Mono, Consolas, Menlo, monospace;
-  /* the label hangs where edges converge, so knock the panel colour out
+  /* the label sits where edges converge, so knock the panel colour out
      behind the glyphs instead of letting a line run through them */
-  paint-order: stroke; stroke: #1b1e24; stroke-width: 3px;
+  paint-order: stroke; stroke: #202429; stroke-width: 3px;
 }
-.mesh-node.self .mesh-node-name { fill: #58a6ff; }
-/* sized so "N members" clears the disc it sits inside */
-.mesh-node-members { font-size: 8px; fill: #6b7280; }
-.mesh-legend { display: flex; gap: 14px; margin-top: 6px; }
+.mesh-agent.focus .mesh-agent-name { fill: #58a6ff; }
+.mesh-legend { display: flex; gap: 14px; margin-top: 6px; flex-wrap: wrap; }
 .mesh-legend-item {
   display: flex; align-items: center; gap: 5px; font-size: 11px; color: #7d8590;
 }
@@ -594,6 +619,8 @@ body {
 .mesh-legend-swatch.queued { border-top-style: dashed; border-top-color: #d29922; }
 .mesh-legend-swatch.down { border-top-style: dotted; border-top-color: #ff7b72; }
 .mesh-legend-swatch.cut { border-top-style: dotted; border-top-color: #4a5058; }
+.mesh-legend-swatch.spawn { border-top-color: #454c56; }
+.mesh-legend-swatch.mcut { border-top-style: dashed; border-top-color: #ff7b72; }
 
 /* the dead-route panel: leave, jump to a mesh that exists, or create one */
 .mesh-missing-actions {

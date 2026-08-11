@@ -1184,6 +1184,10 @@ async def h_peer_sync(request: web.Request) -> web.Response:
             if isinstance(body.get("member_edges"), dict) else None
         ),
         roles=body.get("roles") if isinstance(body.get("roles"), dict) else None,
+        lineage=(
+            body.get("lineage")
+            if isinstance(body.get("lineage"), dict) else None
+        ),
     )
     return web.json_response(result)
 
