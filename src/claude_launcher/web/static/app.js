@@ -145,6 +145,7 @@ async function refreshSessions() {
     li.addEventListener("click", () => attach(s.name));
     list.appendChild(li);
   }
+  refreshResumeChoices();  // the spawn form offers these same conversations
   // Exited sessions are kept indefinitely so they stay resumable; dropping
   // them is the user's call, in bulk, from here.
   const dead = sessionsCache.filter((s) => s.status === "exited");
@@ -310,16 +311,202 @@ async function refreshProfiles() {
   } catch { /* ignore */ }
 }
 
+/* ------------------------------------------------------------------ */
+/* new-session form: role, resume, fork                               */
+/* ------------------------------------------------------------------ */
+/* The DOM sentinel for a bare --resume. The API spells it as an empty
+   string, which the <select> already spends on "(new conversation)". */
+const PICKER = "@picker";
+
+/* Roles keyed by name, so picking one can show the stance it would inject
+   without a second round-trip. The vocabulary is fixed for the daemon's
+   lifetime — fetched once at boot, never polled. */
+let rolesByName = {};
+
+/* Signature of the workspace list currently rendered. The registry changes
+   from the CLI (`claunch workspace add`), so it IS polled — but rebuilding
+   the <select> on every poll would slam shut a dropdown the user has open,
+   so the options are only rebuilt when the list actually differs. */
+let workspacesRendered = null;
+
+/* The declared harnesses. Fetched once: the set is declared in YAML and
+   changes when someone edits config or installs a program, neither of which
+   happens mid-session — a reload is the honest way to pick those up. */
+async function refreshHarnesses() {
+  const select = document.querySelector("#new-session select[name=harness]");
+  let list = [];
+  try {
+    const resp = await api("/api/harnesses");
+    if (!resp.ok) throw new Error(String(resp.status));
+    list = (await resp.json()).harnesses || [];
+  } catch {
+    // Older daemon, same fallback reasoning as refreshWorkspaces: claude is
+    // the one harness that is always there, so the form stays usable.
+    list = [{ name: "claude", available: true, description: "" }];
+  }
+  select.innerHTML = "";
+  for (const h of list) {
+    const opt = new Option(
+      h.available ? h.name : `${h.name} (not installed)`,
+      h.name
+    );
+    // Declared but missing: shown, not hidden. Hiding it would read as
+    // "claunch does not support pi", which is the wrong thing to learn.
+    opt.disabled = !h.available;
+    opt.title = h.available
+      ? h.description || h.name
+      : `${h.description || h.name}\n\n'${h.program || h.name}' is not on PATH`;
+    select.appendChild(opt);
+  }
+  const first = [...select.options].find((o) => !o.disabled);
+  select.value = first ? first.value : "";
+  syncForkAvailability();  // role/resume/fork only apply to the claude harness
+}
+
+async function refreshWorkspaces() {
+  const select = document.querySelector("#new-session select[name=cwd]");
+  let list;
+  try {
+    const resp = await api("/api/workspaces");
+    if (!resp.ok) throw new Error(String(resp.status));
+    list = (await resp.json()).workspaces || [];
+  } catch {
+    // A daemon older than these assets has no /api/workspaces (it serves
+    // static files from disk but runs the Python it started with). Leave the
+    // form usable rather than showing an empty, un-submittable picker.
+    if (!select.options.length) {
+      select.appendChild(new Option("(daemon cwd)", ""));
+      const stale = $("cwd-hint");
+      stale.textContent =
+        "workspace list unavailable — 'claunch daemon restart' to pick up this version";
+      stale.classList.remove("hidden");
+    }
+    return;
+  }
+  const signature = JSON.stringify(list);
+  if (signature === workspacesRendered) return;
+  workspacesRendered = signature;
+
+  const previous = select.value;
+  select.innerHTML = "";
+  // The daemon's own directory is always available and needs no registering,
+  // so the form still works on a machine with an empty registry.
+  select.appendChild(new Option("(daemon cwd)", ""));
+  for (const w of list) {
+    const opt = new Option(
+      w.exists ? `${w.name} — ${w.path}` : `${w.name} — ${w.path} (missing)`,
+      w.path
+    );
+    opt.title = w.path;
+    // A directory that is not there right now would fail to spawn; the entry
+    // stays visible (it is still the user's) but cannot be chosen.
+    opt.disabled = !w.exists;
+    select.appendChild(opt);
+  }
+  // Falling back to "(daemon cwd)" also covers a workspace that went missing
+  // while it was selected: Chrome will happily keep a disabled option
+  // selected, and Create would then fail on a directory that isn't there.
+  const kept = [...select.options].find((o) => o.value === previous);
+  select.value = kept && !kept.disabled ? previous : "";
+
+  const hint = $("cwd-hint");
+  hint.textContent = list.length
+    ? ""
+    : "no workspaces yet — register one with: claunch workspace add <dir>";
+  hint.classList.toggle("hidden", list.length > 0);
+}
+
+async function refreshRoles() {
+  const select = document.querySelector("#new-session select[name=role]");
+  try {
+    const resp = await api("/api/roles");
+    const data = await resp.json();
+    rolesByName = {};
+    select.innerHTML = "";
+    select.appendChild(new Option("(no role)", ""));
+    for (const role of data.roles || []) {
+      rolesByName[role.name] = role;
+      const label = role.aliases && role.aliases.length
+        ? `${role.name} — ${role.aliases.join(", ")}`
+        : role.name;
+      select.appendChild(new Option(label, role.name));
+    }
+  } catch { /* ignore */ }
+}
+
+/* What the chosen role would put in the session's system prompt. Shown in
+   full rather than summarised: it is the one thing about a spawned session
+   the user cannot inspect afterwards from the terminal. */
+function renderRoleStance() {
+  const select = document.querySelector("#new-session select[name=role]");
+  const box = $("role-stance");
+  const role = rolesByName[select.value];
+  box.textContent = role ? (role.stance || "(this role declares no stance)") : "";
+  box.classList.toggle("hidden", !role);
+}
+
+/* The resume picker: claude's own interactive picker, or the conversation of
+   a session this daemon knows. Exited sessions are offered too — their
+   conversation outlives them, and picking one up elsewhere is the point.
+   Rebuilt on every poll, so the current choice is preserved by hand. */
+function refreshResumeChoices() {
+  const select = document.querySelector("#new-session select[name=resume]");
+  const previous = select.value;
+  select.innerHTML = "";
+  select.appendChild(new Option("(new conversation)", ""));
+  select.appendChild(new Option("pick in claude's picker (--resume)", PICKER));
+  for (const s of sessionsCache) {
+    if (!s.conversation_id) continue;  // nothing pinned to resume
+    select.appendChild(new Option(`${s.name} — ${s.status}`, s.name));
+  }
+  // A session that vanished (cleared, renamed) takes its option with it;
+  // falling back to "(new conversation)" beats silently resuming a stranger.
+  select.value = [...select.options].some((o) => o.value === previous)
+    ? previous
+    : "";
+  syncForkAvailability();
+}
+
+/* --fork-session is claude's own "use with --resume or --continue": with
+   nothing to fork it is not a weaker choice, it is a rejected one. */
+function syncForkAvailability() {
+  const f = $("new-session");
+  const resuming = f.resume.value !== "";
+  const claude = (f.harness.value || "claude") === "claude";
+  f.fork.disabled = !resuming || !claude;
+  if (f.fork.disabled) f.fork.checked = false;
+  f.role.disabled = !claude;
+  f.resume.disabled = !claude;
+  if (!claude) {
+    f.role.value = "";
+    f.resume.value = "";
+    renderRoleStance();
+  }
+}
+
+document
+  .querySelector("#new-session select[name=role]")
+  .addEventListener("change", renderRoleStance);
+$("new-session").resume.addEventListener("change", syncForkAvailability);
+$("new-session").harness.addEventListener("change", syncForkAvailability);
+
 $("new-session").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target;
   const body = {
     name: f.name.value.trim(),
-    harness: f.harness.value.trim() || "claude",
+    harness: f.harness.value || "claude",
     profile: f.profile.value || null,
-    cwd: f.cwd.value.trim(),
+    cwd: f.cwd.value,  // a registered workspace path, or "" = the daemon's cwd
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
+  if (f.role.value) body.role = f.role.value;
+  if (f.resume.value) {
+    // "" (no resume) is left off entirely: the API reads a missing key as
+    // "a new conversation" and an empty string as "open the picker".
+    body.resume = f.resume.value === PICKER ? "" : f.resume.value;
+    body.fork_session = f.fork.checked;
+  }
   const resp = await api("/api/sessions", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -334,6 +521,11 @@ $("new-session").addEventListener("submit", async (e) => {
   }
   err.classList.add("hidden");
   f.name.value = "";
+  // A resume choice is spent: leaving it selected would point the next
+  // Create at the same conversation and quietly open it twice. The role is
+  // left alone — spawning a second worker is a normal thing to want.
+  f.resume.value = "";
+  syncForkAvailability();
   const info = await resp.json();
   await refreshSessions();
   attach(info.name);
@@ -2542,6 +2734,9 @@ async function boot() {
     return; // auth overlay is up
   }
   refreshProfiles();
+  refreshHarnesses();
+  refreshRoles();
+  refreshWorkspaces();
   refreshSessions();
   refreshMeshList();
   refreshCflow();
@@ -2551,6 +2746,9 @@ async function boot() {
     refreshSessions();
     refreshMeshList();
     refreshCflow();
+    // Polled because the registry is edited from the CLI, in another window;
+    // it redraws only when the list really changed (see refreshWorkspaces).
+    refreshWorkspaces();
   }, 2000);
 }
 

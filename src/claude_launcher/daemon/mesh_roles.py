@@ -461,3 +461,20 @@ def load_override(doc) -> Optional[dict]:
 def to_yaml(doc: dict) -> str:
     """A role-set document as YAML the user can edit and upload back."""
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=88)
+
+
+def system_prompt(role: Role) -> str:
+    """The stance as a session's system-prompt injection.
+
+    A *mesh* member reads its stance through a file the join briefing points
+    at — it is already running, and an injection would cost it a turn. A
+    session spawned WITH a role has no such turn to spend: it is told who it
+    is before its first prompt, by appending this to claude's system prompt
+    (``--append-system-prompt``, which adds to the built-in one rather than
+    replacing it).
+    """
+    head = (
+        f"Your role in this session is {role.name!r}. It was chosen when the "
+        f"session was spawned and holds for the whole session."
+    )
+    return f"{head}\n\n{role.stance.rstrip()}" if role.stance else head

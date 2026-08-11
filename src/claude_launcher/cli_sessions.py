@@ -57,12 +57,25 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     }
     if args.restore is not None:
         body["restore"] = args.restore
+    if args.role:
+        body["role"] = args.role
+    # `--resume` with no value is the picker, which argparse hands back as the
+    # empty string — the same spelling the API uses, so it passes through.
+    if args.resume is not None:
+        body["resume"] = args.resume
+        body["fork_session"] = args.fork_session
+    elif args.fork_session:
+        print(
+            "error: --fork-session needs --resume [SESSION|UUID]", file=sys.stderr
+        )
+        return 1
     client = daemon_client.ensure_running()
     info = client.post("/api/sessions", body)
     print(
         f"created session {info['name']!r} "
         f"(harness: {info['harness']}"
         + (f", profile: {info['profile']}" if info.get("profile") else "")
+        + (f", role: {info['role']}" if info.get("role") else "")
         + f", pid: {info.get('pid')})"
     )
     if args.attach:
@@ -454,11 +467,31 @@ def register(sub) -> None:
     )
     p_new.add_argument("-s", "--name", help="session name (auto-generated if omitted)")
     p_new.add_argument("--profile", help="claunch profile (required for the claude harness)")
-    p_new.add_argument("--harness", default="claude", help="harness to run (default: claude)")
+    p_new.add_argument(
+        "--harness", default="claude",
+        help="harness to run: claude (default), codex, pi, or one you declared "
+        "under 'harnesses:' — see 'claunch harnesses'",
+    )
     p_new.add_argument("-c", "--cwd", help="working directory (default: current dir)")
     p_new.add_argument("--cols", type=int, default=120)
     p_new.add_argument("--rows", type=int, default=30)
     p_new.add_argument("--env", action="append", metavar="KEY=VALUE", help="extra env override")
+    p_new.add_argument(
+        "--role",
+        help="run as this role — leader, operator, worker, reviewer or "
+        "specialist (aliases accepted): its stance is injected into the "
+        "session's system prompt at every spawn",
+    )
+    p_new.add_argument(
+        "--resume", nargs="?", const="", metavar="SESSION|UUID",
+        help="open an existing conversation instead of a new one: another "
+        "session's name, a conversation uuid, or bare for claude's picker",
+    )
+    p_new.add_argument(
+        "--fork-session", dest="fork_session", action="store_true",
+        help="with --resume, work on a COPY of that conversation and leave "
+        "the original untouched",
+    )
     restore = p_new.add_mutually_exclusive_group()
     restore.add_argument(
         "--restore", dest="restore", action="store_true", default=None,

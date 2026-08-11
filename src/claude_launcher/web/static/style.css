@@ -87,6 +87,24 @@ body {
   width: 100%; margin-top: 2px; padding: 5px 8px; font-size: 13px;
   background: #14161a; color: #d8dbe0; border: 1px solid #30363d; border-radius: 4px;
 }
+/* checkbox rows sit inline; the label's text must not stretch like a field */
+#new-session label.check {
+  display: flex; align-items: flex-start; gap: 6px; margin-bottom: 8px;
+}
+#new-session label.check input { width: auto; margin-top: 3px; }
+#new-session input:disabled, #new-session select:disabled {
+  opacity: 0.45; cursor: not-allowed;
+}
+#cwd-hint {
+  margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #d29922;
+}
+/* the stance the selected role would inject — scrolls rather than pushing
+   the Create button off the sidebar */
+#role-stance {
+  margin: -2px 0 8px; padding: 6px 8px; max-height: 140px; overflow-y: auto;
+  font-size: 11px; line-height: 1.45; color: #9da5b0; white-space: pre-wrap;
+  background: #14161a; border: 1px solid #262b33; border-radius: 4px;
+}
 #new-session button, #auth-submit, #term-kill, #term-resume {
   margin-top: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
   background: #238636; color: #fff; border: none; border-radius: 4px;

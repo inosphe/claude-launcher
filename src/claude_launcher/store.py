@@ -22,6 +22,8 @@ Schema::
         parent: <other>         # optional
         provider: <name>        # optional
         env: {KEY: VALUE, ...}
+    workspaces:                 # machine-local; see :mod:`workspaces`
+      <name>: <absolute path>
 
 The on-disk file is first created from a bootstrap *template* (``template.yaml``,
 see :mod:`template`); after that this file is authoritative and is read live —

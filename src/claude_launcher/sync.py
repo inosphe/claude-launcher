@@ -5,8 +5,9 @@ module keeps that file in step with the same document held by a sync server, so
 several machines share one profile set. What travels is *configuration only* —
 profiles and their ``env``/``parent``/``provider``, provider definitions, the
 template and any harnesses. Login tokens never leave the machine (they live in
-:mod:`credentials`), and the ``daemon`` block stays local too: ports, bind host
-and the relay token describe *this* machine, not the profile set.
+:mod:`credentials`), and the ``daemon`` and ``workspaces`` blocks stay local
+too: ports, bind host, the relay token and absolute directory paths all
+describe *this* machine, not the profile set.
 
 Configure the server in the config file::
 
@@ -50,8 +51,9 @@ import yaml
 
 from . import bootstrap, config, store
 
-#: Sections synced when the config file does not say otherwise. ``daemon`` is
-#: deliberately absent (machine-local), and ``sync`` can never be included.
+#: Sections synced when the config file does not say otherwise. ``daemon`` and
+#: ``workspaces`` are deliberately absent (machine-local: ports and absolute
+#: paths mean nothing elsewhere), and ``sync`` can never be included.
 DEFAULT_SECTIONS: Tuple[str, ...] = (
     "template",
     "provider",

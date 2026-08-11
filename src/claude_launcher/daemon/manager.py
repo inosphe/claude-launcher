@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+from dataclasses import replace
 from typing import Dict, List, Optional, Union
 
 from . import harness as harness_mod
@@ -58,10 +59,10 @@ class SessionManager:
                     f"with 'claunch kill-session {name}'"
                 )
             raise ManagerError(f"session {name!r} already exists")
-        sdef = harness_mod.normalize(
-            SessionDef.from_dict({**sdef.to_dict(), "name": name}),
-            restoring=restoring,
+        sdef = self._resolve_resume(
+            SessionDef.from_dict({**sdef.to_dict(), "name": name})
         )
+        sdef = harness_mod.normalize(sdef, restoring=restoring)
         argv, env, cwd = harness_mod.build_command(sdef, restoring=restoring)
         session = Session(
             sdef,
@@ -74,6 +75,30 @@ class SessionManager:
         self._sessions[name] = session
         self.persist()
         return session
+
+    def _resolve_resume(self, sdef: SessionDef) -> SessionDef:
+        """Turn a ``resume`` that names a session into that session's
+        conversation id.
+
+        The registry is the only place that mapping exists, which is why it
+        happens here rather than in :mod:`harness`. Callers name a *session*
+        because that is what they can see (in the web UI's picker, in
+        ``claunch sessions``); a raw conversation uuid passes straight
+        through, so the stored definition — and every later restore of it —
+        only ever deals in ids.
+        """
+        if not sdef.resume:
+            return sdef
+        source = self._sessions.get(sdef.resume)
+        if source is None:
+            return sdef  # a conversation uuid (or claude's own history)
+        cid = source.sdef.conversation_id
+        if not cid:
+            raise ManagerError(
+                f"session {sdef.resume!r} has no pinned conversation to resume "
+                f"(it was started with its own --resume/--continue args)"
+            )
+        return replace(sdef, resume=cid)
 
     def _auto_name(self) -> str:
         """The first free ``sN``.

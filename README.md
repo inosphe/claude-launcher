@@ -682,7 +682,7 @@ without a human at the keyboard.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `-a/--attach` to attach immediately, trailing args pass to the harness). |
+| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `-a/--attach` to attach immediately, trailing args pass to the harness). |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
@@ -692,6 +692,8 @@ without a human at the keyboard.
 | `kill-session S`      | Terminate a running session, or drop the record of an exited one (`--force` skips graceful terminate). |
 | `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their output logs, freeing their auto-generated names. |
 | `resize S COLS ROWS`  | Resize the session's terminal. |
+| `harnesses`           | List the declared harnesses (`claude`, `codex`, `pi`, plus your own) and whether each is installed here. |
+| `workspace add\|ls\|rm` (`ws`) | Register / list / unregister the directories a session may be spawned in — the web UI's Directory picker is exactly this list (see [Workspaces](#workspaces-where-a-session-may-be-spawned)). `add` defaults to the current directory and refuses one that does not exist. |
 | `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
 | `daemon config [KEY [VALUE]]` | Show or set daemon settings (stored in `~/.claunch.yaml`). |
@@ -896,6 +898,83 @@ done
   harness keeps running — decide in the script whether to keep waiting,
   capture what's there, or `kill-session`.
 
+### Workspaces (where a session may be spawned)
+
+A **workspace** is a directory you have vouched for once, on this machine:
+
+```bash
+claunch workspace add .                  # register the current directory
+claunch workspace add D:\works\hq --name hq
+claunch workspace ls
+claunch workspace rm hq                  # unregisters; the directory stays
+```
+
+The registry lives under `workspaces:` in `~/.claunch.yaml` (name → path) and
+is read live, so a workspace added in a terminal shows up in an open browser
+tab within a couple of seconds. It is **machine-local by default** — absolute
+paths mean nothing on another machine, so `workspaces` is deliberately absent
+from the [synced sections](#profile-sync-server); add it to `sync.sections`
+if your machines really do share a layout.
+
+`add` refuses a directory that is not there, which is the whole point: **the
+web UI's Directory field is a picker over the registry, not a text box.** A
+working directory typed free-hand is the easiest thing in the create form to
+get wrong — a typo, a stale path, the wrong drive — and it used to fail late,
+as `could not spawn 'claude'`. A session's directory is now checked before
+anything spawns either way, so even `new-session -c` reports the bad path
+instead of blaming the harness.
+
+The CLI's `-c/--cwd` still takes **any** directory: it is typed by someone
+already standing in the filesystem, with a shell that completes paths. The
+registry is what the *browser* offers, which has neither. The daemon's own
+directory is always available in the picker as `(daemon cwd)`, so the form
+works before you register anything.
+
+### Spawning with a role, or from another session's conversation
+
+Two things are decided at spawn and cannot be typed in afterwards: **who the
+session is**, and **which conversation it opens**. Both are options on
+`new-session` and controls in the web UI's create form (claude harness only —
+they are spelled in claude's own flags):
+
+```bash
+claunch new-session -s rev --profile work --role reviewer   # spawn as the adversary
+claunch new-session -s side --profile work --resume rev --fork-session
+claunch new-session -s pick --profile work --resume         # claude's own picker
+```
+
+**`--role NAME`** takes a role from the same vocabulary the
+[mesh](#mesh-session-to-session-messaging) uses — `leader`, `operator`,
+`worker`, `reviewer`, `specialist`, and their aliases (`--role mod` is
+`leader`). The role's **stance is injected into the system prompt** at spawn
+(`--append-system-prompt`, which *adds to* claude's built-in prompt rather
+than replacing it), so the session knows what it is before its first turn —
+no priming message, no turn spent. It is re-injected on every restore, since
+an appended system prompt lives in the process, not in the transcript. A role
+is optional; without one nothing is injected. Unknown names are refused
+rather than silently ignored, and `GET /api/roles` lists the vocabulary with
+each stance (that is what fills the web picker, stance and all).
+
+This is *not* the same thing as a mesh role: joining a mesh resolves a role
+for the roster, on a vocabulary the mesh's authority can override. This one is
+about a single session's own system prompt, so it always reads the packaged
+set.
+
+**`--resume [SESSION|UUID]`** opens an existing conversation instead of a new
+one. Name a session this daemon knows and the registry maps it to that
+session's pinned conversation; pass a uuid and it goes through as-is; pass the
+flag bare and claude opens its interactive picker. **`--fork-session`** (a
+checkbox in the web form, and claude's own flag) resumes into a *copy*: the
+original conversation is left untouched, and the copy is minted at an id
+claunch pins — so the fork restores and respawns like any other session. Both
+are refused alongside raw args that already steer the conversation, rather
+than silently letting one win.
+
+Resuming *without* a fork means the two sessions share one conversation, which
+is the point when you are picking up an exited session's work elsewhere — and
+a footgun if the source is still running. The web picker shows each session's
+status next to its name for exactly that reason.
+
 ### Restore on daemon restart
 
 Sessions die with the daemon (the tmux model), but their *definitions* persist.
@@ -933,7 +1012,28 @@ log; `--logs` is what frees those numbers again.
 
 ### Other harnesses (codex, pi, ...)
 
-Declare them in `~/.claunch.yaml`; the `claude` harness is built in:
+Which harnesses exist is **declared, not hard-coded**. The packaged set ships
+`claude`, `codex` and `pi`; `claunch harnesses` shows it, along with whether
+this machine can actually run each one:
+
+```
+$ claunch harnesses
+declared harnesses:
+  claude     [ready        ] profile-managed
+  codex      [ready        ] codex
+  pi         [not installed] pi
+```
+
+**Declared is not installed.** `pi` ships in the set whether or not you have
+it — the web UI lists it as a *disabled* option rather than hiding it, since a
+missing option reads as "claunch does not support pi", which is the wrong
+thing to learn. Spawning one that is not installed is refused up front, naming
+the program it looked for, instead of failing later as `could not spawn`.
+
+`~/.claunch.yaml` overrides or extends the set. Overriding is **per harness,
+not per field** — a name in the config replaces that harness's whole
+definition, so a half-merged declaration (new command, inherited flags) cannot
+happen:
 
 ```yaml
 harnesses:
@@ -941,7 +1041,12 @@ harnesses:
     command: codex          # string or argv list
     args: []                # optional, before the session's own args
     env: {KEY: VALUE}       # optional overrides
+    description: "..."      # optional, shown in the picker
+  pi: null                  # a tombstone: drop a packaged harness
 ```
+
+`claude` is the one harness the document does not describe a command for: it
+runs through the profile machinery, and its executable is `CLAUDE_LAUNCHER_BIN`.
 
 ```bash
 claunch new-session -s cdx --harness codex -c ~/proj
@@ -1165,6 +1270,26 @@ The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
 a session list (status badges, create/kill) plus a **live xterm.js terminal**
 attached over WebSocket — full input and output, multiple viewers allowed.
 
+Both fields that used to take free text are now pickers. **Harness** lists the
+[declared set](#other-harnesses-codex-pi-) — one that is declared but not
+installed on this machine (`pi`, out of the box) is shown greyed out as
+`pi (not installed)` rather than hidden.
+
+The create form's **Directory** is a picker over your
+[workspaces](#workspaces-where-a-session-may-be-spawned) — free-text paths are
+deliberately not accepted here, since a mistyped one is both easy and
+expensive. Register directories once with `claunch workspace add <dir>`; the
+list refreshes in place, and `(daemon cwd)` is always available.
+
+The form otherwise spawns sessions the same way the CLI does, including the
+two choices that can only be made at spawn (see
+[Spawning with a role…](#spawning-with-a-role-or-from-another-sessions-conversation)):
+a **Role** picker that shows the stance it would inject before you commit to
+it, and a **Resume** picker offering claude's own conversation picker or any
+session this daemon knows — exited ones included, since their conversations
+outlive them — with **`--fork-session`** as a checkbox that only unlocks once
+there is something to fork.
+
 An **exited** session is not a dead end in the browser either: open it and the
 header offers **resume**, the `claunch respawn` of the UI — the session comes
 back under its own name, claude with `--resume` of its pinned conversation, and
@@ -1203,7 +1328,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/auth/session`            | token → HttpOnly cookie (browser login) |
 | GET    | `/api/daemon`                  | version/uptime/session count |
 | POST   | `/api/daemon/shutdown`         | graceful stop |
-| GET/POST | `/api/sessions`              | list / create |
+| GET/POST | `/api/sessions`              | list / create (`{name?, harness?, profile?, cwd?, args?, env?, role?, resume?, fork_session?}`; `resume` = session name, conversation uuid, or `""`/`true` for claude's picker) |
 | DELETE | `/api/sessions`                | clear all exited records (`?logs=1` deletes their logs) |
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
@@ -1213,6 +1338,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | profile names (for the UI's create form) |
+| GET    | `/api/roles`                   | the roles a session can be spawned with, each with its aliases, stance and the exact system-prompt injection |
+| GET    | `/api/workspaces`              | registered directories for the create form's picker (read-only — the registry is edited with `claunch workspace`) |
+| GET    | `/api/harnesses`               | declared harnesses, each with `available` (is it installed on this machine) and `builtin` |
 | GET/POST | `/api/mesh`                  | list meshes (+ relay status) / create `{name}` |
 | GET/DELETE | `/api/mesh/{mesh}`         | members + reachability / remove |
 | POST   | `/api/mesh/{mesh}/members`     | `{session, handle?, role?, code?}` — enrol a session; `{mesh}` may be `mesh@machine` (201 admitted, 202 pending approval) |

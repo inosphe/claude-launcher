@@ -55,10 +55,18 @@
     <form id="new-session">
       <h3>New session</h3>
       <label>Name <input name="name" placeholder="(auto)"></label>
-      <label>Harness <input name="harness" value="claude"></label>
+      <label>Harness <select name="harness"></select></label>
       <label>Profile <select name="profile"></select></label>
-      <label>Directory <input name="cwd" placeholder="(daemon cwd)"></label>
-      <label>Args <input name="args" placeholder="--resume ..."></label>
+      <label>Directory <select name="cwd"></select></label>
+      <p id="cwd-hint" class="hidden"></p>
+      <label>Role <select name="role"></select></label>
+      <p id="role-stance" class="hidden"></p>
+      <label>Resume <select name="resume"></select></label>
+      <label class="check">
+        <input type="checkbox" name="fork" disabled>
+        <span><code>--fork-session</code> (leave the original untouched)</span>
+      </label>
+      <label>Args <input name="args" placeholder="extra harness flags"></label>
       <button type="submit">Create</button>
       <p id="create-error" class="error hidden"></p>
     </form>

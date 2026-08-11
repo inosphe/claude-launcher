@@ -18,7 +18,7 @@ from claude_launcher import store
 from claude_launcher.daemon import paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
-from claude_launcher.daemon.manager import SessionManager
+from claude_launcher.daemon.manager import ManagerError, SessionManager
 from claude_launcher.daemon.session import SessionGone
 
 CHILD = (
@@ -765,6 +765,150 @@ def test_api_end_to_end(home, tmp_path):
                 headers=bearer,
             )
             assert resp.status == 409
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_resume_names_a_session_and_stores_its_conversation(home, tmp_path):
+    """Callers name the session they can SEE (in the web picker, in `claunch
+    sessions`); the registry is the only place that maps it to a conversation,
+    so the stored definition only ever holds the id."""
+    mgr = _manager()
+    cid = "11111111-2222-3333-4444-555555555555"
+    mgr._retire(
+        SessionDef(name="old", profile="p", cwd=str(tmp_path), conversation_id=cid),
+        {},
+    )
+    resolved = mgr._resolve_resume(SessionDef(name="new", resume="old"))
+    assert resolved.resume == cid
+    # A uuid (or a conversation only claude knows about) passes straight through
+    assert mgr._resolve_resume(SessionDef(name="new", resume=cid)).resume == cid
+
+    mgr._retire(SessionDef(name="raw", profile="p", cwd=str(tmp_path)), {})
+    with pytest.raises(ManagerError, match="no pinned conversation"):
+        mgr._resolve_resume(SessionDef(name="new", resume="raw"))
+
+
+def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
+    """The picker lists a harness claunch knows about even when the machine
+    cannot run it — hiding it would read as "claunch does not support pi"."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            store.update(
+                lambda doc: doc.update(
+                    {
+                        "harnesses": {
+                            "codex": {"command": sys.executable},
+                            "pi": {"command": "no-such-program-xyz"},
+                        }
+                    }
+                )
+            )
+            resp = await client.get("/api/harnesses", headers=bearer)
+            assert resp.status == 200
+            by_name = {h["name"]: h for h in (await resp.json())["harnesses"]}
+            assert by_name["codex"]["available"] is True
+            assert by_name["pi"]["available"] is False
+            assert by_name["pi"]["program"] == "no-such-program-xyz"
+            assert by_name["claude"]["builtin"] is True
+
+            # ...and a harness that is declared but not installed is refused
+            # with a message that says so, not a spawn failure
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "nope", "harness": "pi", "cwd": str(tmp_path)},
+                headers=bearer,
+            )
+            assert resp.status == 400
+            assert "not found on PATH" in (await resp.json())["error"]
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_api_workspaces_feed_the_directory_picker(home, tmp_path):
+    """The web form picks a directory from this list instead of taking one
+    typed free-hand — so the endpoint has to carry enough to render it, and
+    to stay read-only."""
+    from aiohttp.test_utils import TestClient, TestServer
+    from claude_launcher import workspaces
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            resp = await client.get("/api/workspaces", headers=bearer)
+            assert resp.status == 200
+            assert (await resp.json())["workspaces"] == []
+
+            (tmp_path / "proj").mkdir()
+            workspaces.add(str(tmp_path / "proj"))
+            # read live from the config file: no daemon restart needed after
+            # a `claunch workspace add` in another window
+            resp = await client.get("/api/workspaces", headers=bearer)
+            (entry,) = (await resp.json())["workspaces"]
+            assert entry["name"] == "proj"
+            assert entry["exists"] is True
+            assert entry["path"] == str((tmp_path / "proj").resolve())
+
+            # the browser picks from the registry; it does not write to it
+            resp = await client.post("/api/workspaces", json={}, headers=bearer)
+            assert resp.status == 405
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_api_roles_offers_the_spawnable_vocabulary(home, tmp_path):
+    """The spawn form needs the stance BEFORE anyone commits to a role — it
+    is the one thing about a session you cannot read back off its terminal."""
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            resp = await client.get("/api/roles", headers=bearer)
+            assert resp.status == 200
+            roles = (await resp.json())["roles"]
+            by_name = {r["name"]: r for r in roles}
+            assert {"leader", "worker", "reviewer"} <= set(by_name)
+            assert "mod" in by_name["leader"]["aliases"]
+            assert by_name["reviewer"]["stance"]
+            assert "reviewer" in by_name["reviewer"]["prompt"]
+
+            # ...and it is claude's flag, so another harness must not take it
+            _register_py_harness()
+            resp = await client.post(
+                "/api/sessions",
+                json={
+                    "name": "roled", "harness": "py", "cwd": str(tmp_path),
+                    "role": "worker",
+                },
+                headers=bearer,
+            )
+            assert resp.status == 400
+            assert "claude harness" in (await resp.json())["error"]
         finally:
             await mgr.shutdown_all()
             await client.close()

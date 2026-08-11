@@ -16,12 +16,14 @@ from pathlib import Path
 
 from aiohttp import web
 
-from .. import __version__, profile as profile_mod
+from .. import __version__, harnesses as harness_registry
+from .. import profile as profile_mod, workspaces
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
 from ..cflow.state import StateError
 from ..profile import ProfileError
+from . import mesh_roles
 from .harness import HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
 from .mesh import MeshConflict, MeshError, MeshManager
@@ -142,6 +144,9 @@ def build_app(
     r.add_get("/api/daemon", h_daemon_info)
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
     r.add_get("/api/profiles", h_profiles)
+    r.add_get("/api/roles", h_roles)
+    r.add_get("/api/workspaces", h_workspaces)
+    r.add_get("/api/harnesses", h_harnesses)
     r.add_get("/api/cflow", h_cflow_runs)
     r.add_get("/api/cflow/run", h_cflow_run_detail)
     r.add_get("/api/cflow/workflows", h_cflow_workflows)
@@ -267,6 +272,60 @@ async def h_daemon_shutdown(request: web.Request) -> web.Response:
 
 async def h_profiles(request: web.Request) -> web.Response:
     return web.json_response({"profiles": [p.name for p in profile_mod.list_all()]})
+
+
+async def h_harnesses(request: web.Request) -> web.Response:
+    """The declared harnesses, each with whether this machine can run it.
+
+    ``available`` is reported rather than filtered on: a harness claunch knows
+    about but the machine has not installed is a *different* thing from one
+    claunch does not know about, and the picker should say which it is.
+    """
+    return web.json_response(
+        {
+            "harnesses": [
+                harness_registry.registry()[name].to_dict()
+                for name in harness_registry.names()
+            ]
+        }
+    )
+
+
+async def h_workspaces(request: web.Request) -> web.Response:
+    """The directories a session may be spawned in, for the create form.
+
+    Read-only on purpose: the point of the registry is that a directory is
+    vouched for once, from a shell that can complete paths and see what is
+    actually there. A browser can pick from it, not add to it — a POST here
+    would put the free-text directory field back, one level down.
+    """
+    return web.json_response(
+        {"workspaces": [w.to_dict() for w in workspaces.list_all()]}
+    )
+
+
+async def h_roles(request: web.Request) -> web.Response:
+    """The roles a session can be spawned with — the packaged vocabulary.
+
+    Deliberately not a mesh's role set: a session being spawned belongs to no
+    mesh yet, and a per-mesh override is scoped to that mesh's roster (see
+    :mod:`mesh_roles`). The stance travels with each entry so the picker can
+    show what a role would inject before anyone commits to it.
+    """
+    roleset = mesh_roles.resolve()
+    return web.json_response(
+        {
+            "roles": [
+                {
+                    "name": r.name,
+                    "aliases": list(r.aliases),
+                    "stance": r.stance,
+                    "prompt": mesh_roles.system_prompt(r),
+                }
+                for r in (roleset.roles[n] for n in sorted(roleset.roles))
+            ]
+        }
+    )
 
 
 #: Recent step reports included per run in the /api/cflow payload.

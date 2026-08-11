@@ -21,8 +21,10 @@ from . import (
     cli_mesh,
     cli_sessions,
     cli_sync,
+    cli_workspace,
     config,
     credentials,
+    harnesses,
     lineage,
     migrate as migrate_mod,
     profile,
@@ -35,6 +37,7 @@ from . import (
     store,
     template,
     usage,
+    workspaces,
 )
 from .cflow.engine import CflowError
 from .cflow.model import WorkflowError
@@ -415,6 +418,25 @@ def _cmd_providers(_args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_harnesses(_args: argparse.Namespace) -> int:
+    """List the declared harnesses and whether this machine can run them."""
+    reg = harnesses.registry()
+    print(f"config file: {config.sync_file()}")
+    print("declared harnesses:")
+    for name in harnesses.names():
+        h = reg[name]
+        state = "ready" if h.available() else "not installed"
+        run = "profile-managed" if h.builtin else " ".join(h.command + h.args)
+        print(f"  {name:<10} [{state:<13}] {run}")
+        if h.description:
+            print(f"             {h.description}")
+    print(
+        "\ndeclare or override one under 'harnesses:' in the config file "
+        "(name: null drops a packaged one)"
+    )
+    return 0
+
+
 def _cmd_usage(args: argparse.Namespace) -> int:
     p = profile.require(args.name)
     report = usage.fetch(p)
@@ -747,10 +769,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_provs.set_defaults(func=_cmd_providers)
 
+    p_harn = sub.add_parser(
+        "harnesses",
+        help="list the declared harnesses (claude, codex, pi, ...) and "
+        "whether this machine can run them",
+    )
+    p_harn.set_defaults(func=_cmd_harnesses)
+
     cli_sessions.register(sub)
     cli_mesh.register(sub)
     cli_cflow.register(sub)
     cli_sync.register(sub)
+    cli_workspace.register(sub)
 
     return parser
 
@@ -801,6 +831,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         CflowError,
         WorkflowError,
         CflowStateError,
+        workspaces.WorkspaceError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
