@@ -21,8 +21,8 @@
 </div>
 
 <div id="layout">
-  <!-- Mobile only: the status line that stands in for the sidebar while a
-       session is on screen. Its ☰ flips the whole screen over to the menu. -->
+  <!-- Mobile only: the status line that stands in for the rail while a page
+       is on screen. Its ☰ flips the whole screen over to the rail. -->
   <div id="mobile-top">
     <button id="m-menu" type="button" aria-label="open menu">☰</button>
     <span id="m-dot" class="dot"></span>
@@ -31,23 +31,67 @@
     <button id="m-resume" class="m-act hidden" type="button">resume</button>
     <button id="m-kill" class="m-act hidden" type="button">kill</button>
   </div>
+
+  <!-- The rail. Only things that move on their own live here: the session
+       list is a monitor, not a menu — you watch it while working in a
+       terminal beside it. Everything you *do* is a page in #main. -->
   <aside id="sidebar">
     <header>
       <h1>claunch</h1>
       <span id="relay-badge" class="badge hidden"></span>
       <span id="daemon-info"></span>
     </header>
-    <!-- Mobile only: the menu's top-level sections, one screenful each. -->
-    <nav id="mobile-tabs">
-      <button type="button" data-tab="sessions" class="active">Sessions</button>
-      <button type="button" data-tab="new">New</button>
-      <button type="button" data-tab="mesh">Mesh</button>
-      <button type="button" data-tab="flows">Flows</button>
-    </nav>
     <ul id="session-list"></ul>
     <button id="clear-exited" class="hidden"></button>
-    <div id="mesh-panel">
-      <h3>Mesh</h3>
+    <nav id="rail-nav">
+      <a href="#/" data-page="home"><span>⌂</span>Home</a>
+      <a href="#/new" data-page="new"><span>+</span>New</a>
+      <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
+      <a href="#/flows" data-page="flows"><span>⇶</span>Flows</a>
+      <a href="#/workspaces" data-page="ws"><span>⌸</span>Spaces</a>
+    </nav>
+  </aside>
+
+  <main id="main">
+    <!-- The terminal is never rebuilt by navigation: it holds a live PTY
+         socket and 5000 lines of scrollback, so pages are laid over it. -->
+    <div id="term-header" class="hidden">
+      <span id="term-title"></span>
+      <span id="term-status" class="badge"></span>
+      <button id="term-details" title="this session's metadata and workflow">details</button>
+      <button id="term-resume" class="hidden">resume</button>
+      <button id="term-kill">kill</button>
+    </div>
+    <div id="terminal"></div>
+
+    <div id="home-view" class="hidden"></div>
+
+    <div id="new-view" class="hidden">
+      <form id="new-session">
+        <div class="page-head"><h2>New session</h2></div>
+        <label>Name <input name="name" placeholder="(auto)"></label>
+        <label>Harness <select name="harness"></select></label>
+        <label>Profile <select name="profile"></select></label>
+        <label class="with-link">
+          <span>Directory <a href="#/workspaces">manage</a></span>
+          <select name="cwd"></select>
+        </label>
+        <p id="cwd-hint" class="hidden"></p>
+        <label>Role <select name="role"></select></label>
+        <p id="role-stance" class="hidden"></p>
+        <label>Resume <select name="resume"></select></label>
+        <label class="check">
+          <input type="checkbox" name="fork" disabled>
+          <span><code>--fork-session</code> (leave the original untouched)</span>
+        </label>
+        <label>Args <input name="args" placeholder="extra harness flags"></label>
+        <button type="submit">Create</button>
+        <p id="create-error" class="error hidden"></p>
+      </form>
+    </div>
+
+    <div id="meshes-view" class="hidden">
+      <div class="page-head"><h2>Mesh</h2></div>
       <ul id="mesh-list"></ul>
       <ul id="mesh-outgoing" class="hidden"></ul>
       <form id="new-mesh">
@@ -65,48 +109,19 @@
         <p id="mesh-error" class="error hidden"></p>
       </form>
     </div>
-    <div id="cflow-panel" class="hidden">
-      <h3>Workflows</h3>
+
+    <div id="flows-view" class="hidden">
+      <div class="page-head"><h2>Workflows</h2></div>
       <ul id="cflow-list"></ul>
     </div>
-    <form id="new-session">
-      <h3>New session</h3>
-      <label>Name <input name="name" placeholder="(auto)"></label>
-      <label>Harness <select name="harness"></select></label>
-      <label>Profile <select name="profile"></select></label>
-      <label class="with-link">
-        <span>Directory <a id="ws-manage" href="#/workspaces">manage</a></span>
-        <select name="cwd"></select>
-      </label>
-      <p id="cwd-hint" class="hidden"></p>
-      <label>Role <select name="role"></select></label>
-      <p id="role-stance" class="hidden"></p>
-      <label>Resume <select name="resume"></select></label>
-      <label class="check">
-        <input type="checkbox" name="fork" disabled>
-        <span><code>--fork-session</code> (leave the original untouched)</span>
-      </label>
-      <label>Args <input name="args" placeholder="extra harness flags"></label>
-      <button type="submit">Create</button>
-      <p id="create-error" class="error hidden"></p>
-    </form>
-  </aside>
-  <main id="main">
-    <div id="term-header" class="hidden">
-      <span id="term-title"></span>
-      <span id="term-status" class="badge"></span>
-      <button id="term-details" title="this session's metadata and workflow">details</button>
-      <button id="term-resume" class="hidden">resume</button>
-      <button id="term-kill">kill</button>
-    </div>
-    <div id="terminal"></div>
+
     <div id="sess-view" class="hidden"></div>
     <div id="wf-view" class="hidden"></div>
     <div id="mesh-view" class="hidden"></div>
     <div id="ws-view" class="hidden"></div>
-    <div id="placeholder">Select or create a session.</div>
   </main>
-  <!-- Mobile only: while the menu is up, what going "back" returns to. -->
+
+  <!-- Mobile only: while the rail is up, what going "back" returns to. -->
   <div id="mobile-bottom">
     <span id="mb-dot" class="dot"></span>
     <span class="mb-text">

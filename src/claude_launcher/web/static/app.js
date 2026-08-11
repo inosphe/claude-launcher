@@ -150,13 +150,16 @@ async function refreshSessions() {
     info.title = "session details: harness, directory, meshes, workflow";
     info.addEventListener("click", (e) => {
       e.stopPropagation();   // the row itself attaches; this button does not
-      location.hash = "#/s/" + encodeURIComponent(s.name);
+      location.hash = "#/s/" + encodeURIComponent(s.name) + "/info";
     });
     li.append(dot, label, meta, info);
-    li.addEventListener("click", () => attach(s.name));
+    li.addEventListener("click", () => {
+      location.hash = "#/s/" + encodeURIComponent(s.name);
+    });
     list.appendChild(li);
   }
   refreshResumeChoices();  // the spawn form offers these same conversations
+  if (currentPage === "home") renderHome();
   // Exited sessions are kept indefinitely so they stay resumable; dropping
   // them is the user's call, in bulk, from here.
   const dead = sessionsCache.filter((s) => s.status === "exited");
@@ -223,7 +226,8 @@ async function refreshCflow() {
     return;
   }
   const runs = data.runs || [];
-  $("cflow-panel").classList.remove("hidden");
+  cflowCache = runs;
+  if (currentPage === "home") renderHome();
   const list = $("cflow-list");
   list.innerHTML = "";
   if (runs.length === 0) {
@@ -294,7 +298,7 @@ async function refreshCflow() {
       sess.title = "attach the session's terminal";
       sess.addEventListener("click", (e) => {
         e.stopPropagation();
-        attach(r.sessions[0]);
+        location.hash = "#/s/" + encodeURIComponent(r.sessions[0]);
       });
       li.appendChild(sess);
     }
@@ -354,6 +358,9 @@ let workspacesRendered = null;
 
 /* Last workspace list the poll saw, for the manage page (#/workspaces). */
 let workspacesCache = [];
+
+/* Last cflow run list the poll saw, for the home dashboard. */
+let cflowCache = [];
 
 /* The declared harnesses. Fetched once: the set is declared in YAML and
    changes when someone edits config or installs a program, neither of which
@@ -416,6 +423,7 @@ async function refreshWorkspaces() {
   // shell, so a 'claunch workspace add' in another window lands here too.
   workspacesCache = list;
   if (wsOpen) renderWorkspaces();
+  if (currentPage === "home") renderHome();
 
   const previous = select.value;
   select.innerHTML = "";
@@ -558,11 +566,13 @@ $("new-session").addEventListener("submit", async (e) => {
   syncForkAvailability();
   const info = await resp.json();
   await refreshSessions();
-  attach(info.name);
+  location.hash = "#/s/" + encodeURIComponent(info.name);
 });
 
 $("term-details").addEventListener("click", () => {
-  if (currentName) location.hash = "#/s/" + encodeURIComponent(currentName);
+  if (currentName) {
+    location.hash = "#/s/" + encodeURIComponent(currentName) + "/info";
+  }
 });
 
 $("term-kill").addEventListener("click", async () => {
@@ -580,7 +590,7 @@ $("term-kill").addEventListener("click", async () => {
   if (exited) {
     detach();
     currentName = null;
-    showView("placeholder");
+    location.hash = "#/";
   }
   refreshSessions();
 });
@@ -596,7 +606,7 @@ $("clear-exited").addEventListener("click", async () => {
   if (currentName && dead.includes(currentName)) {
     detach();
     currentName = null;
-    showView("placeholder");
+    location.hash = "#/";
   }
   refreshSessions();
 });
@@ -654,17 +664,17 @@ function detach() {
   attachedPid = null; // re-learned from the next socket's init frame
 }
 
+/* Bind the terminal to a session. Called only by the #/s/<name> route, so
+   the attached session is in the URL: a reload, a bookmark or a shared link
+   lands back on the same terminal instead of on an empty slot. */
 function attach(name) {
   detach();
   currentName = name;
   stopWfPoll();
   stopMeshPoll();
-  // Before the terminal is opened: on mobile #main is display:none while the
-  // menu is up, and a terminal opened into a zero-height box fits to nothing.
-  setMenuOpen(false);
-  if (/^#\/(wf|mesh|s)\//.test(location.hash)) {
-    history.replaceState(null, "", "#");
-  }
+  // showView first, and before the terminal is opened: on mobile #main is
+  // display:none while the rail is up, and a terminal opened into a
+  // zero-height box fits to nothing.
   showView("terminal");
   $("term-title").textContent = name;
   // Seed the header from the list until the socket's `init` says otherwise,
@@ -746,10 +756,10 @@ function attach(name) {
   };
 }
 
-/* Not merely "the terminal isn't hidden": on mobile the menu takes the whole
+/* Not merely "the terminal isn't hidden": on mobile the rail takes the whole
    screen and #main goes with it, so the terminal is up but nobody can see it. */
 function terminalOnScreen() {
-  return !$("terminal").classList.contains("hidden") && !menuOpen;
+  return !$("terminal").classList.contains("hidden") && !railOpen;
 }
 
 /* A fit is only meaningful while the terminal is actually on screen — off it,
@@ -784,44 +794,61 @@ document.addEventListener("visibilitychange", () => {
 });
 
 /* ------------------------------------------------------------------ */
-/* mobile: the screen is either a session or the menu, never both      */
+/* layout: the one place that knows how wide the screen is             */
 /* ------------------------------------------------------------------ */
-/* On a phone the sidebar+terminal split leaves neither half usable, so below
-   the breakpoint they become two modes. Session mode: one status/menu line
-   on top, terminal underneath. Menu mode: the sidebar full-width with its
-   sections as tabs, and a bar along the bottom naming the session you came
-   from (tap it to go back). The CSS in style.css owns the geometry; this
-   owns the state — which mode, which tab, and refitting the grid when the
-   terminal comes back from display:none.  */
+/* Everything above the breakpoint shows the rail and the page at once;
+   everything below shows one or the other. That single rule is the whole
+   difference between the two form factors, and it lives HERE — routing and
+   the page renderers are written as if the screen were infinite.
+
+   It used to be scattered: four page-open functions each carried the same
+   `setMenuOpen(false)  // the page it opens lives where the terminal was`,
+   and the sidebar's sections were shown and hidden by CSS keyed on a
+   `data-mtab` attribute, which is to say navigation implemented in a
+   stylesheet. Both are gone: sections became routes, and the concern got a
+   home. */
 const MOBILE_MQ = window.matchMedia("(max-width: 820px)");
-let menuOpen = false;
 
-function setMenuOpen(open) {
-  menuOpen = !!open;
-  document.body.classList.toggle("menu-open", menuOpen);
-  syncMobileBars();
-  // Coming back from menu mode the terminal was display:none, so its grid is
-  // whatever it was before the viewport last changed. Re-fit it.
-  if (!menuOpen) refitSoon(60);
-}
+/* Below the breakpoint, whether the rail is the thing on screen. Above it
+   the rail is always docked and this stays false, so nothing else has to
+   read the flag and the media query together. */
+let railOpen = false;
 
-/* The tab lives on the body as a data attribute — the CSS shows exactly one
-   of the sidebar's sections off it, so there is nothing else to keep. */
-function setMobileTab(tab) {
-  document.body.dataset.mtab = tab;
-  document.querySelectorAll("#mobile-tabs button").forEach((b) =>
-    b.classList.toggle("active", b.dataset.tab === tab)
+/* Reconcile the chrome with (breakpoint, current page, attached session).
+   Derived, never toggled from the outside: every navigation ends here, so a
+   page cannot forget to do its half. */
+function syncLayout() {
+  const page = currentPage;
+  document.body.dataset.page = page;
+  document.querySelectorAll("#rail-nav a").forEach((a) =>
+    a.classList.toggle("active", a.dataset.page === page)
   );
+  // On a phone home IS the menu: the rail is the whole of that page, so
+  // there is nothing to lay over it. Above the breakpoint the rail is docked
+  // beside the page and is never a mode.
+  const wasOpen = railOpen;
+  railOpen = MOBILE_MQ.matches && page === "home";
+  document.body.classList.toggle("rail-open", railOpen);
+  syncMobileBars();
+  // Coming back from the rail the terminal was display:none, so its grid is
+  // whatever it was before the viewport last changed. Re-fit it.
+  if (wasOpen && !railOpen) refitSoon(60);
 }
 
-/* What the top bar calls the thing on screen. The mesh and workflow pages
-   live in the same slot as the terminal, so the bar names them too. */
+/* What the top bar calls the thing on screen. Pages live in the same slot as
+   the terminal, so the bar names them too. */
 function mobileTitle() {
-  if (wsOpen) return "workspaces";
-  if (meshName) return `mesh · ${meshName}`;
-  if (wfCwd) return `workflow · ${shortenPath(wfCwd)}`;
-  if (sessName) return `session · ${sessName}`;
-  return currentName || "no session";
+  switch (currentPage) {
+    case "home": return "claunch";
+    case "new": return "new session";
+    case "meshes": return "mesh";
+    case "flows": return "workflows";
+    case "ws": return "workspaces";
+    case "mesh": return `mesh · ${meshName}`;
+    case "wf": return `workflow · ${shortenPath(wfCwd || "")}`;
+    case "session": return `session · ${sessName}`;
+    default: return currentName || "no session";
+  }
 }
 
 function syncMobileBars() {
@@ -854,21 +881,18 @@ function syncMobileBars() {
   $("mobile-bottom").classList.toggle("empty", !has);
 }
 
-$("m-menu").addEventListener("click", () => setMenuOpen(true));
-document.querySelectorAll("#mobile-tabs button").forEach((b) =>
-  b.addEventListener("click", () => setMobileTab(b.dataset.tab))
-);
+// ☰ is "show me the rail" — which is the home route, the one page that IS
+// the rail on a phone. Going through the router rather than flipping the
+// flag keeps the URL honest about what is on screen.
+$("m-menu").addEventListener("click", () => { location.hash = "#/"; });
 // The header's controls are the real ones; these just reach them, so kill's
 // confirm-before-forgetting and resume's reattach stay in one place.
 $("m-kill").addEventListener("click", () => $("term-kill").click());
 $("m-resume").addEventListener("click", () => $("term-resume").click());
 
 $("mobile-bottom").addEventListener("click", () => {
-  if (!currentName) { setMobileTab("sessions"); return; }
-  // A mesh/workflow route owns #main; drop it so the terminal gets the slot.
-  if ((location.hash || "#") !== "#") location.hash = "#";
-  else route();
-  setMenuOpen(false);
+  if (!currentName) return;
+  location.hash = "#/s/" + encodeURIComponent(currentName);
 });
 
 /* The layout viewport doesn't shrink when the on-screen keyboard opens, so
@@ -888,15 +912,12 @@ if (window.visualViewport) {
 }
 window.addEventListener("resize", syncViewportHeight);
 syncViewportHeight();
-setMobileTab("sessions");   // before boot, so the auth overlay's page is sane
 
 MOBILE_MQ.addEventListener("change", () => {
-  // Rotating a tablet across the breakpoint. Above it both halves are on
-  // screen, so the flag must clear — it also gates the reattach poll. Below
-  // it, don't strand the user on a session slot they never chose.
-  if (!MOBILE_MQ.matches) setMenuOpen(false);
-  else if (!currentName) setMenuOpen(true);
-  syncMobileBars();
+  // Rotating a tablet, or dragging a window across the breakpoint. The route
+  // does not change — only whether the rail and the page can share the
+  // screen — so re-deriving the chrome from the same page is the whole job.
+  syncLayout();
   refitSoon();
 });
 
@@ -909,24 +930,37 @@ let wfPollTimer = null;
 let wfSelectedStep = null; // node picked in the diagram (null = show all)
 let wfLastData = null;     // last payload, for instant re-render on selection
 
+/* Every page's container, by page name. The terminal is deliberately not in
+   here: it is not swapped in and out, it is *covered* — see showView. */
+const VIEWS = {
+  home: "home-view",
+  new: "new-view",
+  meshes: "meshes-view",
+  flows: "flows-view",
+  session: "sess-view",
+  wf: "wf-view",
+  mesh: "mesh-view",
+  ws: "ws-view",
+};
+
+/* The page on screen. Read by the layout and the mobile bars; written only
+   by showView, which the router is the only caller of. */
+let currentPage = "home";
+
 function showView(name) {
+  currentPage = name;
   const showTerm = name === "terminal";
+  // The terminal element is never removed and `term`/`ws` are never touched
+  // here: a live PTY socket and 5000 lines of scrollback must survive every
+  // navigation, so pages hide it rather than replace it. Only attach() and
+  // detach() own that object's life.
   $("term-header").classList.toggle("hidden", !(showTerm && currentName));
   $("terminal").classList.toggle("hidden", !showTerm);
-  $("sess-view").classList.toggle("hidden", name !== "session");
-  $("wf-view").classList.toggle("hidden", name !== "wf");
-  $("mesh-view").classList.toggle("hidden", name !== "mesh");
-  $("ws-view").classList.toggle("hidden", name !== "ws");
-  $("placeholder").classList.toggle(
-    "hidden",
-    showTerm || ["wf", "mesh", "session", "ws"].includes(name)
-  );
-  // An empty session slot is nothing to look at on a phone — a killed or
-  // never-picked session drops you back into the menu rather than at a ☰ to
-  // go hunting for.
-  if (MOBILE_MQ.matches && name === "placeholder" && !menuOpen) setMenuOpen(true);
+  for (const [page, id] of Object.entries(VIEWS)) {
+    $(id).classList.toggle("hidden", name !== page);
+  }
   if (name !== "session") stopSessionPoll();
-  syncMobileBars();      // the top bar names whichever view this is
+  syncLayout();          // rail mode, nav highlight, and the bars' titles
   if (showTerm) refitSoon(60);
 }
 
@@ -941,7 +975,6 @@ async function openWorkflow(cwd, scope) {
   wfScope = scope || "default";
   wfSelectedStep = null;
   wfLastData = null;
-  setMenuOpen(false);   // the page it opens lives where the terminal was
   showView("wf");
   $("wf-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshWf();
@@ -973,32 +1006,70 @@ function selectWfStep(step) {
   if (wfLastData) renderWf(wfLastData);
 }
 
-function route() {
-  const h = location.hash || "";
-  // Every branch but the workspaces one leaves that page, so the flag that
-  // names it in the mobile bar is cleared here rather than in four places.
-  if (h !== "#/workspaces") closeWorkspaces();
-  if (h.startsWith("#/wf/")) {
-    stopMeshPoll();
-    const token = decodeURIComponent(h.slice(5));
+/* ------------------------------------------------------------------ */
+/* router: hash -> page. Knows nothing about screen width.             */
+/* ------------------------------------------------------------------ */
+/*   #/                  home — the dashboard, and the rail itself on a phone
+ *   #/s/<name>          that session's terminal (attached)
+ *   #/s/<name>/info     ...and what it *is*: definition, meshes, its run
+ *   #/new               the create form
+ *   #/mesh              the mesh list, and create/join
+ *   #/mesh/<name>       one mesh
+ *   #/flows             cflow runs
+ *   #/wf/<scope|cwd>    one run
+ *   #/workspaces        the workspace registry
+ */
+function parseHash(h) {
+  const raw = (h || "").replace(/^#\/?/, "");
+  if (!raw) return { page: "home" };
+  const parts = raw.split("/").map(decodeURIComponent);
+  if (parts[0] === "s" && parts[1]) {
+    return parts[2] === "info"
+      ? { page: "session", name: parts[1] }
+      : { page: "terminal", name: parts[1] };
+  }
+  if (parts[0] === "wf" && parts[1]) {
+    // The scope is glued to the cwd with '|' because a Windows path is full
+    // of the separators a path segment would otherwise be split on.
+    const token = parts.slice(1).join("/");
     const sep = token.indexOf("|");
-    if (sep >= 0) openWorkflow(token.slice(sep + 1), token.slice(0, sep));
-    else openWorkflow(token, "default"); // pre-scope links
-  } else if (h.startsWith("#/s/")) {
-    stopWfPoll();
-    stopMeshPoll();
-    openSession(decodeURIComponent(h.slice(4)));
-  } else if (h.startsWith("#/mesh/")) {
-    stopWfPoll();
-    openMesh(decodeURIComponent(h.slice(7)));
-  } else if (h === "#/workspaces") {
-    stopWfPoll();
-    stopMeshPoll();
-    openWorkspaces();
-  } else {
-    stopWfPoll();
-    stopMeshPoll();
-    showView(currentName && term ? "terminal" : "placeholder");
+    return sep >= 0
+      ? { page: "wf", cwd: token.slice(sep + 1), scope: token.slice(0, sep) }
+      : { page: "wf", cwd: token, scope: "default" };  // pre-scope links
+  }
+  if (parts[0] === "mesh") {
+    return parts[1] ? { page: "mesh", name: parts[1] } : { page: "meshes" };
+  }
+  if (parts[0] === "new") return { page: "new" };
+  if (parts[0] === "flows") return { page: "flows" };
+  if (parts[0] === "workspaces") return { page: "ws" };
+  return { page: "home" };   // an unknown link is a wrong turn, not an error
+}
+
+function route() {
+  const r = parseHash(location.hash);
+  // Leaving a page stops what it was polling. Done centrally so a page's
+  // open function never has to know which other pages exist.
+  if (r.page !== "wf") stopWfPoll();
+  if (r.page !== "mesh") stopMeshPoll();
+  if (r.page !== "ws") closeWorkspaces();
+
+  switch (r.page) {
+    case "terminal":
+      // Re-entering the route we are already attached to must not tear the
+      // socket down and build it again — coming back from another page is
+      // the common case, and it would cost the scrollback every time.
+      if (currentName === r.name && term) showView("terminal");
+      else attach(r.name);
+      break;
+    case "session": openSession(r.name); break;
+    case "wf": openWorkflow(r.cwd, r.scope); break;
+    case "mesh": openMesh(r.name); break;
+    case "meshes": showView("meshes"); refreshMeshList(); break;
+    case "new": showView("new"); break;
+    case "flows": showView("flows"); refreshCflow(); break;
+    case "ws": openWorkspaces(); break;
+    default: openHome();
   }
 }
 window.addEventListener("hashchange", route);
@@ -1008,6 +1079,95 @@ function el(tag, cls, text) {
   if (cls) node.className = cls;
   if (text !== undefined) node.textContent = text;
   return node;
+}
+
+/* ------------------------------------------------------------------ */
+/* home (#/) — what this daemon is doing, and the way in to each part  */
+/* ------------------------------------------------------------------ */
+/* On a phone this page IS the rail (see syncLayout), so #main is not on
+   screen and rendering it is wasted — but it is cheap, and rendering it
+   anyway means rotating a tablet never lands on a stale dashboard. */
+function openHome() {
+  showView("home");
+  renderHome();
+}
+
+function homeCard(title, href, subtitle) {
+  const card = el("a", "home-card");
+  card.href = href;
+  const head = el("div", "home-card-head");
+  head.appendChild(el("h3", null, title));
+  head.appendChild(el("span", "home-go", "›"));
+  card.appendChild(head);
+  if (subtitle) card.appendChild(el("p", "home-sub", subtitle));
+  return card;
+}
+
+function plural(n, one, many) {
+  return `${n} ${n === 1 ? one : many || one + "s"}`;
+}
+
+function renderHome() {
+  if (currentPage !== "home") return;
+  const view = $("home-view");
+  view.innerHTML = "";
+
+  const grid = el("div", "home-grid");
+
+  // Sessions. The rail already lists them on a wide screen, but this page is
+  // the menu on a narrow one, where the rail is all there is.
+  const live = sessionsCache.filter((s) => s.status !== "exited");
+  const busy = live.filter((s) => s.status === "busy").length;
+  const sessions = homeCard(
+    "Sessions",
+    "#/new",
+    live.length
+      ? `${plural(live.length, "running")}, ${busy} busy`
+      : "none running"
+  );
+  const rows = el("div", "home-rows");
+  for (const s of live.slice(0, 6)) {
+    const row = el("a", "home-row");
+    row.href = "#/s/" + encodeURIComponent(s.name);
+    row.appendChild(el("span", `dot ${s.status}`));
+    row.appendChild(el("span", "home-row-name", s.name));
+    row.appendChild(el("span", "meta", s.profile || s.harness || ""));
+    rows.appendChild(row);
+  }
+  if (live.length > 6) {
+    rows.appendChild(el("p", "wf-note", `…and ${live.length - 6} more`));
+  }
+  if (!live.length) {
+    rows.appendChild(el("p", "wf-note", "Create one to get started."));
+  }
+  sessions.appendChild(rows);
+  // The card's own href is the create form: with nothing running that is the
+  // only useful destination, and with something running it still is.
+  grid.appendChild(sessions);
+
+  grid.appendChild(homeCard(
+    "Mesh", "#/mesh",
+    meshCache.length
+      ? meshCache.map((m) => `${m.name} (${m.members.length})`).join(" · ")
+      : "no meshes yet"
+  ));
+
+  const runs = cflowCache.filter((r) => r.status && r.status !== "idle");
+  grid.appendChild(homeCard(
+    "Workflows", "#/flows",
+    runs.length ? plural(runs.length, "run") + " active" : "no active runs"
+  ));
+
+  const missing = workspacesCache.filter((w) => !w.exists).length;
+  grid.appendChild(homeCard(
+    "Workspaces", "#/workspaces",
+    workspacesCache.length
+      ? plural(workspacesCache.length, "directory", "directories") +
+        (missing ? ` · ${missing} missing` : "")
+      : "none registered"
+  ));
+
+  view.appendChild(grid);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1025,7 +1185,6 @@ let wsDraft = { path: "", name: "" }; // survives a poll-driven rebuild
 
 function openWorkspaces() {
   wsOpen = true;
-  setMenuOpen(false);   // the page it opens lives where the terminal was
   showView("ws");
   renderWorkspaces();
   refreshWorkspaces();  // don't make the user wait out the 2s poll
@@ -1269,7 +1428,7 @@ function renderWf(data) {
   for (const s of data.sessions || []) {
     const link = el("a", "wf-session", `attach: ${s}`);
     link.href = "#";
-    link.addEventListener("click", (e) => { e.preventDefault(); attach(s); });
+    link.href = "#/s/" + encodeURIComponent(s);
     meta.appendChild(link);
   }
   view.appendChild(meta);
@@ -1829,7 +1988,7 @@ function wfDiagramSvg(wf, run, selected) {
 }
 
 /* ------------------------------------------------------------------ */
-/* session detail page (#/s/<name>) — what a session IS, and its run   */
+/* session detail page (#/s/<name>/info) — what a session IS          */
 /* ------------------------------------------------------------------ */
 /* The session list answers "which sessions exist"; the terminal answers
    "what is it doing right now". Neither answers "what is this session" —
@@ -1850,7 +2009,6 @@ function stopSessionPoll() {
 async function openSession(name) {
   if (sessPollTimer) clearInterval(sessPollTimer);
   sessStartBox = null;
-  setMenuOpen(false);   // the page it opens lives where the terminal was
   showView("session");
   sessName = name;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
@@ -1903,7 +2061,10 @@ function renderSession(data) {
   head.appendChild(el("h2", null, s.name || "session"));
   head.appendChild(el("span", `badge ${s.status || ""}`, s.status || "?"));
   const open = el("button", "wf-btn", "Open terminal");
-  open.addEventListener("click", () => attach(s.name));
+  // Through the router, so the terminal it opens is the one the URL names.
+  open.addEventListener("click", () => {
+    location.hash = "#/s/" + encodeURIComponent(s.name);
+  });
   head.appendChild(open);
   view.appendChild(head);
 
@@ -2098,6 +2259,7 @@ async function refreshMeshList() {
     list.appendChild(li);
   }
   renderOutgoingJoins(data.outgoing || []);
+  if (currentPage === "home") renderHome();
 }
 
 /* Our own join requests still waiting on another machine's operator. They
@@ -2232,7 +2394,6 @@ async function openMesh(name) {
   meshName = name;
   missingMeshShown = "";   // a different route deserves a fresh verdict
   rolesEditor = "";        // never carry one mesh's open editor into another
-  setMenuOpen(false);      // the page it opens lives where the terminal was
   showView("mesh");
   $("mesh-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshMeshView();
@@ -2886,7 +3047,9 @@ function renderMesh(info, history, force, owed) {
     if (isLocalMember(m)) {
       where.classList.add("linkish");
       where.title = "attach this session's terminal";
-      where.addEventListener("click", () => attach(m.session));
+      where.addEventListener("click", () => {
+        location.hash = "#/s/" + encodeURIComponent(m.session);
+      });
     }
     // 'pending' is mail the daemon has not managed to deliver; 'owed' is mail
     // it delivered that the agent never answered. Different faults, so the
@@ -3283,7 +3446,9 @@ function renderMeshOwed(info, report) {
     if (r.local) {
       // The real diagnostic move is to go look at the session.
       const open = el("span", "mesh-session linkish", "open terminal");
-      open.addEventListener("click", () => attach(r.session));
+      open.addEventListener("click", () => {
+        location.hash = "#/s/" + encodeURIComponent(r.session);
+      });
       head.appendChild(open);
     } else {
       const badge = el(
@@ -3561,7 +3726,10 @@ async function boot() {
   refreshSessions();
   refreshMeshList();
   refreshCflow();
-  route();   // on a phone with nothing attached this lands in the menu
+  // Last, so the page it lands on renders against caches the refreshes
+  // above have already filled. A #/s/<name> link attaches here — which is
+  // why a reload puts you back in the session instead of at an empty slot.
+  route();
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => {
     refreshSessions();

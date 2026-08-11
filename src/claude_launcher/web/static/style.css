@@ -44,11 +44,58 @@ body {
 }
 #clear-exited:hover { background: #22262d; color: #ff7b72; }
 
-#cflow-panel { border-top: 1px solid #2a2e36; max-height: 45%; overflow-y: auto; flex: none; }
-#cflow-panel h3 {
-  font-size: 12px; text-transform: uppercase; color: #7d8590;
-  padding: 10px 16px 4px;
+/* The rail's nav. Everything you *do* is a page behind one of these; the
+   list above is the only thing that stays, because it moves on its own and
+   is meant to be watched while you work in the terminal beside it. */
+#rail-nav {
+  flex: none; display: flex; background: #1b1e24;
+  border-top: 1px solid #2a2e36;
 }
+#rail-nav a {
+  flex: 1; min-width: 0; padding: 9px 4px; text-align: center;
+  font-size: 11px; color: #7d8590; text-decoration: none;
+  border-top: 2px solid transparent;
+}
+#rail-nav a span { display: block; font-size: 15px; line-height: 1.3; }
+#rail-nav a:hover { color: #c6cdd5; background: #22262d; }
+#rail-nav a.active { color: #d8dbe0; border-top-color: #58a6ff; }
+
+/* ---- the pages that live in #main ---- */
+#home-view, #new-view, #meshes-view, #flows-view {
+  flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0;
+}
+.page-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
+.page-head h2 { font-size: 20px; }
+
+/* home: one card per part of the daemon, each its own way in */
+.home-grid {
+  display: grid; gap: 14px; max-width: 860px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+.home-card {
+  display: block; padding: 14px 16px; background: #1b1e24; color: inherit;
+  border: 1px solid #2a2e36; border-radius: 8px; text-decoration: none;
+}
+.home-card:hover { border-color: #3c444d; background: #1f232a; }
+.home-card-head { display: flex; align-items: baseline; gap: 8px; }
+.home-card-head h3 { font-size: 14px; color: #e6edf3; }
+.home-go { margin-left: auto; color: #58a6ff; font-size: 16px; }
+.home-sub {
+  margin-top: 4px; font-size: 12px; color: #7d8590;
+  overflow-wrap: anywhere;
+}
+.home-rows { margin-top: 10px; }
+.home-row {
+  display: flex; align-items: center; gap: 8px; padding: 5px 0;
+  font-size: 13px; color: #c6cdd5; text-decoration: none;
+  border-top: 1px solid #22262d;
+}
+.home-row:hover { color: #58a6ff; }
+.home-row .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.home-row-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.home-row .meta { margin-left: auto; color: #7d8590; font-size: 11px; }
+.home-rows .wf-note { padding-top: 6px; font-size: 12px; }
+
 #cflow-list { list-style: none; }
 #cflow-list .cflow-empty {
   padding: 8px 16px 10px; font-size: 12px; color: #6e7681;
@@ -83,8 +130,7 @@ body {
 .dot.wf-done { background: #3fb950; }
 .dot.wf-error { background: #ff7b72; }
 
-#new-session { padding: 12px 16px; border-top: 1px solid #2a2e36; }
-#new-session h3 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 8px; }
+#new-session { padding: 0; max-width: 520px; }
 #new-session label { display: block; font-size: 12px; color: #9da5b0; margin-bottom: 6px; }
 #new-session input, #new-session select {
   width: 100%; margin-top: 2px; padding: 5px 8px; font-size: 13px;
@@ -148,11 +194,6 @@ body {
 #terminal .xterm-viewport {
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
-#placeholder {
-  flex: 1; display: flex; align-items: center; justify-content: center;
-  color: #7d8590; font-size: 14px;
-}
-
 /* session detail page */
 #sess-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
 #session-list .sess-info {
@@ -322,12 +363,7 @@ body {
 .badge.relay-off { background: #30363d; color: #8b949e; }
 .badge.relay-down { background: #442022; color: #ff7b72; }
 
-/* mesh sidebar panel */
-#mesh-panel { border-top: 1px solid #2a2e36; max-height: 30%; overflow-y: auto; flex: none; }
-#mesh-panel h3 {
-  font-size: 12px; text-transform: uppercase; color: #7d8590;
-  padding: 10px 16px 4px;
-}
+/* mesh list page (#/mesh) */
 #mesh-list { list-style: none; }
 #mesh-list li {
   padding: 8px 16px; border-bottom: 1px solid #22262d; font-size: 13px;
@@ -613,7 +649,7 @@ body {
    sections promoted to tabs, with the session you'd return to pinned along
    the bottom. These three elements exist only for that — desktop never
    shows them. */
-#mobile-top, #mobile-bottom, #mobile-tabs { display: none; }
+#mobile-top, #mobile-bottom { display: none; }
 
 @media (max-width: 820px) {
   /* --app-h is the *visual* viewport: an on-screen keyboard shrinks that
@@ -656,55 +692,27 @@ body {
   #term-header { display: none !important; }
   #terminal { padding: 2px; }
 
-  /* ---- menu mode ---- */
-  body.menu-open #mobile-top, body.menu-open #main { display: none; }
-  body:not(.menu-open) #sidebar, body:not(.menu-open) #mobile-bottom { display: none; }
+  /* ---- rail mode ----
+     The rail and a page cannot share a phone, so exactly one is up. Which
+     one is a property of the route (home == the rail), decided in
+     syncLayout; CSS only lays out the winner. */
+  body.rail-open #mobile-top, body.rail-open #main { display: none; }
+  body:not(.rail-open) #sidebar, body:not(.rail-open) #mobile-bottom { display: none; }
 
   #sidebar {
     width: auto; min-width: 0; flex: 1 1 auto; min-height: 0;
     border-right: none; overflow-y: auto; overscroll-behavior: contain;
   }
   #sidebar header { padding: 10px 14px; }
-  #mobile-tabs {
-    display: flex; flex: none; position: sticky; top: 0; z-index: 2;
-    background: #1b1e24; border-bottom: 1px solid #2a2e36;
-  }
-  #mobile-tabs button {
-    flex: 1; padding: 12px 4px; font-size: 13px; cursor: pointer;
-    background: none; color: #7d8590; border: none;
-    border-bottom: 2px solid transparent;
-  }
-  #mobile-tabs button.active { color: #d8dbe0; border-bottom-color: #58a6ff; }
-
-  /* One tab's section at a time, filling the screen — that is the whole
-     point of the mode. The panels drop the height caps they need when four
-     of them share a sidebar. */
-  #session-list, #mesh-panel, #cflow-panel {
-    flex: none; max-height: none; overflow: visible;
-  }
-  #mesh-panel, #cflow-panel, #new-session, #clear-exited { border-top: none; }
-  body[data-mtab="sessions"] #mesh-panel,
-  body[data-mtab="sessions"] #cflow-panel,
-  body[data-mtab="sessions"] #new-session,
-  body[data-mtab="new"] #session-list,
-  body[data-mtab="new"] #clear-exited,
-  body[data-mtab="new"] #mesh-panel,
-  body[data-mtab="new"] #cflow-panel,
-  body[data-mtab="mesh"] #session-list,
-  body[data-mtab="mesh"] #clear-exited,
-  body[data-mtab="mesh"] #cflow-panel,
-  body[data-mtab="mesh"] #new-session,
-  body[data-mtab="flows"] #session-list,
-  body[data-mtab="flows"] #clear-exited,
-  body[data-mtab="flows"] #mesh-panel,
-  body[data-mtab="flows"] #new-session { display: none; }
-  /* the tab names it already — no need for the panel to say it again */
-  body[data-mtab="mesh"] #mesh-panel h3,
-  body[data-mtab="flows"] #cflow-panel h3,
-  body[data-mtab="new"] #new-session h3 { display: none; }
+  /* The rail is the whole screen here, so the list takes what it needs and
+     the nav sits at the thumb end rather than floating mid-screen. */
+  #session-list { flex: 1 0 auto; max-height: none; overflow: visible; }
+  #rail-nav { position: sticky; bottom: 0; }
+  #rail-nav a { padding: 12px 4px; font-size: 12px; }
 
   /* thumb-sized rows */
   #session-list li, #mesh-list li, #cflow-list li { padding: 13px 16px; font-size: 15px; }
+  #home-view, #new-view, #meshes-view, #flows-view { padding: 14px 12px; }
   #clear-exited { padding: 12px 16px; font-size: 13px; }
   /* iOS zooms the page on any input below 16px, and a zoomed page scrolls */
   #new-session input, #new-session select,
