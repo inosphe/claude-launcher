@@ -110,13 +110,16 @@ TOOLS = [
     {
         "name": "spawn",
         "description": (
-            "Create a CHILD agent session on this daemon and optionally put "
-            "it in a mesh with you. The child inherits your harness, profile "
-            "and working directory — you choose who it is, not what it runs. "
-            "It starts connected to YOU only: use 'connect' to let it reach "
-            "other members. Check your budget with 'children' first (it also "
-            "lists the workspaces you may send a child to, if any); limits "
-            "come from the 'spawn' block in ~/.claunch.yaml."
+            "Create a CHILD agent session on this daemon. THE way to make a "
+            "session from inside one — 'claunch new-session' is the human's "
+            "command and is refused here. The child inherits your harness, "
+            "profile and working directory — you choose who it is, not what "
+            "it runs — is recorded as yours, and lands in your mesh with you "
+            "unless you say otherwise. It starts connected to YOU only: use "
+            "'connect' to let it reach other members. Check your budget with "
+            "'children' first (it also lists the workspaces you may send a "
+            "child to, if any); limits come from the 'spawn' block in "
+            "~/.claunch.yaml."
         ),
         "inputSchema": {
             "type": "object",
@@ -128,8 +131,12 @@ TOOLS = [
                 "mesh": {
                     "type": "string",
                     "description": (
-                        "mesh to enrol the child in — normally one you are "
-                        "already a member of, so it can reach you"
+                        "mesh to enrol the child in. OMIT IT for the normal "
+                        "case: the child joins the mesh you are in, and one "
+                        "is opened for the two of you if you are in none, so "
+                        "you can always reach each other. Only name a mesh to "
+                        "put the child somewhere other than your own; '-' "
+                        "starts it in no mesh at all, unable to report back"
                     ),
                 },
                 "handle": {

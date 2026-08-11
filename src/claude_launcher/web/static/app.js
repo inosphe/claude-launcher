@@ -116,6 +116,41 @@ async function doAuth() {
 /* ------------------------------------------------------------------ */
 /* session list                                                       */
 /* ------------------------------------------------------------------ */
+/* Order sessions parent-before-child, returning [session, depth] pairs.
+   A fleet is a tree — one lead and the workers it spawned — and a flat
+   alphabetical list is the one view that hides which is which.
+
+   A session whose parent is not in the list (its record cleared away, a
+   hand-edited definition) is shown as a root rather than dropped: the list
+   accounts for every session, and a dangling name or a cycle must not make
+   one invisible. This mirrors _by_lineage in cli_sessions.py — the CLI has
+   printed the tree since sessions could have parents, and the two listings
+   disagreeing about who is whose would be worse than either being wrong. */
+function byLineage(sessions) {
+  const byName = new Map(sessions.map((s) => [s.name, s]));
+  const kids = new Map();
+  const roots = [];
+  for (const s of sessions) {
+    if (s.parent && s.parent !== s.name && byName.has(s.parent)) {
+      if (!kids.has(s.parent)) kids.set(s.parent, []);
+      kids.get(s.parent).push(s);
+    } else {
+      roots.push(s);
+    }
+  }
+  const out = [];
+  const seen = new Set();
+  const walk = (node, depth) => {
+    if (seen.has(node.name)) return;   // cycle guard
+    seen.add(node.name);
+    out.push([node, depth]);
+    for (const kid of kids.get(node.name) || []) walk(kid, depth + 1);
+  };
+  for (const root of roots) walk(root, 0);
+  for (const s of sessions) if (!seen.has(s.name)) out.push([s, 0]);
+  return out;
+}
+
 async function refreshSessions() {
   let data;
   try {
@@ -127,10 +162,17 @@ async function refreshSessions() {
   sessionsCache = data.sessions || [];
   const list = $("session-list");
   list.innerHTML = "";
-  for (const s of sessionsCache) {
+  for (const [s, depth] of byLineage(sessionsCache)) {
     const li = document.createElement("li");
     li.dataset.name = s.name;
     if (s.name === currentName) li.classList.add("active");
+    // The indent goes on the row, not on a spacer element, so the whole row
+    // stays one click target and the hover/active background still spans it.
+    if (depth) {
+      li.style.paddingLeft = `${16 + depth * 14}px`;
+      li.classList.add("child");
+      li.title = `spawned by ${s.parent}`;
+    }
     const dot = document.createElement("span");
     dot.className = `dot ${s.status}`;
     const label = document.createElement("span");
@@ -140,7 +182,9 @@ async function refreshSessions() {
     meta.textContent = s.status === "exited"
       ? `exit ${s.exit_code ?? "?"}`
       : (s.profile || s.harness);
-    if (s.status === "exited") li.title = "exited — open it to resume";
+    if (s.status === "exited") {
+      li.title = [li.title, "exited — open it to resume"].filter(Boolean).join(" · ");
+    }
     // A second destination per row: the terminal is what the session is
     // doing, this is what it *is* (definition, meshes, its cflow run).
     const info = document.createElement("button");
@@ -2167,6 +2211,10 @@ function renderSession(data) {
   const dl = el("dl", "sess-meta");
   metaRow(dl, "harness", s.harness, (data.harness || {}).description);
   metaRow(dl, "profile", s.profile);
+  // Whose this session is. Near the top because it changes how everything
+  // below it reads: an inherited mesh and a scoped run are the parent's
+  // arrangement, not choices this session made.
+  metaRow(dl, "spawned by", s.parent, "the session that created this one");
   metaRow(
     dl, "role", data.role ? data.role.name : s.role,
     data.role ? data.role.stance : ""

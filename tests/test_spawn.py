@@ -396,3 +396,106 @@ def test_a_role_outside_the_packaged_vocabulary_is_dropped_not_raised():
 def test_no_role_is_still_no_role():
     assert SessionManager._spawn_role("", "claude") is None
     assert SessionManager._spawn_role(None, "claude") is None
+
+
+# --------------------------------------------------------------------------- #
+# the two doors
+#
+# ``new-session`` and ``spawn`` build the same thing by different rights, and
+# the difference only shows up later: a session created through the human door
+# from inside an agent's session has no parent, no inherited mesh, and no way
+# to report back. The daemon cannot tell the callers apart — an HTTP request
+# carries no caller environment — so the CLI is where the split is kept.
+# --------------------------------------------------------------------------- #
+def test_new_session_refuses_from_inside_a_session_and_writes_the_spawn_line(
+    monkeypatch, capsys, tmp_path
+):
+    from claude_launcher import cli
+
+    workspaces.add(str(tmp_path), name="hq")
+    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
+    capsys.readouterr()
+
+    code = cli.main([
+        "new-session", "-s", "coder", "--profile", "nc",
+        "-c", str(tmp_path), "--role", "coder", "--workflow", "ecs-change",
+    ])
+
+    assert code == 2
+    err = capsys.readouterr().err
+    assert "'s7'" in err
+    # the whole command, not just its name: translating the flags is the step
+    # that sent the caller to the wrong door in the first place
+    assert "claunch spawn -s coder --workspace hq" in err
+    assert "--role coder" in err and "--workflow ecs-change" in err
+    # ...and the two fields that stop being the caller's business
+    assert "--profile nc is dropped" in err
+    assert "no --mesh needed" in err
+
+
+def test_an_unregistered_directory_is_named_as_the_missing_step(
+    monkeypatch, capsys, tmp_path
+):
+    """The refusal has to be actionable by the agent reading it, and 'use
+    spawn' is not actionable when the directory it needs cannot be reached
+    from spawn at all. Registering one is the user's call, so say so."""
+    from claude_launcher import cli
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
+    capsys.readouterr()
+
+    assert cli.main(["new-session", "-c", str(tmp_path), "--profile", "nc"]) == 2
+    err = capsys.readouterr().err
+    assert "not a registered workspace" in err
+    assert f"claunch workspace add {tmp_path}" in err
+
+
+def test_detached_is_the_way_out(monkeypatch, tmp_path):
+    """A session genuinely unrelated to the one it was typed in still has to
+    be creatable — the refusal is a default, not a wall."""
+    from claude_launcher import cli, daemon_client
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
+    reached = {}
+
+    class _Client:
+        base_url = "http://x"
+
+        def get(self, path):
+            return {}  # the relay status line every session command prints
+
+        def post(self, path, body=None):
+            reached["body"] = body
+            return {"name": "solo", "harness": "claude", "profile": "nc"}
+
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: _Client())
+
+    assert cli.main([
+        "new-session", "-s", "solo", "--profile", "nc",
+        "-c", str(tmp_path), "--detached",
+    ]) == 0
+    assert reached["body"]["name"] == "solo"
+    # nobody's child: --detached does not smuggle a parent through
+    assert "parent" not in reached["body"]
+
+
+def test_outside_a_session_new_session_is_untouched(monkeypatch, tmp_path):
+    from claude_launcher import cli, daemon_client
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    reached = {}
+
+    class _Client:
+        base_url = "http://x"
+
+        def get(self, path):
+            return {}
+
+        def post(self, path, body=None):
+            reached["body"] = body
+            return {"name": "s0", "harness": "claude", "profile": "nc"}
+
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: _Client())
+
+    assert cli.main(["new-session", "--profile", "nc", "-c", str(tmp_path)]) == 0
+    assert reached["body"]["profile"] == "nc"

@@ -1257,16 +1257,24 @@ async def _onboard_and_launch(
     harness then fails to start, because the name goes straight back into
     circulation and a leftover membership would be inherited by whoever takes
     it next.
+
+    A child's mesh is settled first of all, before the request is validated:
+    naming no mesh means *the parent's*, and preflight has to see the mesh
+    that decision produced — it is the one that has to exist, hold a free
+    handle, and end up in the system prompt.
     """
     manager: SessionManager = request.app["manager"]
     name, cwd = session.sdef.name, session.sdef.cwd
     try:
+        if parent:
+            await onboard.inherit_mesh(body, parent=parent, mesh_mgr=_mesh_mgr(request))
         plan = onboard.preflight(
             body,
             mesh_mgr=_mesh_mgr(request),
             session_name=name,
             cwd=cwd,
             harness=session.sdef.harness,
+            parent=parent or "",
         )
     except Exception:
         manager.discard(name)
@@ -1276,7 +1284,7 @@ async def _onboard_and_launch(
     report, opening = {}, ""
     if plan.wanted:
         report, opening = await onboard.arrange(
-            plan, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request), parent=parent
+            plan, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request)
         )
     try:
         manager.launch(session, opening=opening)

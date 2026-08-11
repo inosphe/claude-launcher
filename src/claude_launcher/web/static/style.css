@@ -42,6 +42,12 @@ body {
 }
 #session-list li:hover { background: #22262d; }
 #session-list li.active { background: #2b313b; }
+/* A spawned session sits under the one that spawned it. The indent is set
+   per row in JS (it depends on depth); this is the tick that says the indent
+   is lineage and not decoration. */
+#session-list li.child::before {
+  content: "└"; color: #6e7681; font-size: 11px; flex: none; margin-right: -2px;
+}
 #session-list .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .dot.idle { background: #3fb950; }
 .dot.busy { background: #d29922; }

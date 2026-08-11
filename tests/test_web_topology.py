@@ -1,14 +1,16 @@
-"""The topology diagram's client-side logic, run under node.
+"""The dashboard's client-side logic, run under node.
 
 The dashboard has no build step and no JS test runner, which was fine while
 `app.js` was mostly wiring. The clustered diagram is not: it derives a forest
 from parent handles, packs it into columns, places boxes on a ring and clips
-edges to them, and none of that is checked by anything Python can see.
+edges to them, and none of that is checked by anything Python can see. Nor is
+the sidebar's own forest, which orders the session list by lineage.
 
-So the two harnesses in ``tests/web`` slice the real functions out of the
-shipped ``app.js`` — not a copy of them — and exercise them: ``layout_check``
-on the maths, ``render_check`` on the SVG the drawing code assembles, against
-a stub DOM. This wrapper is what makes them run with everything else.
+So the harnesses in ``tests/web`` slice the real functions out of the shipped
+``app.js`` — not a copy of them — and exercise them: ``layout_check`` on the
+maths, ``render_check`` on the SVG the drawing code assembles against a stub
+DOM, ``lineage_check`` on the session list's tree ordering. This wrapper is
+what makes them run with everything else.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
@@ -25,7 +27,9 @@ import pytest
 WEB = Path(__file__).resolve().parent / "web"
 
 
-@pytest.mark.parametrize("script", ["layout_check.js", "render_check.js"])
+@pytest.mark.parametrize(
+    "script", ["layout_check.js", "render_check.js", "lineage_check.js"]
+)
 def test_topology_diagram_logic(script):
     node = shutil.which("node")
     if node is None:

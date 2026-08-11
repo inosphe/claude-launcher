@@ -1019,6 +1019,66 @@ disconnected pairs in `mesh members`, and `claunch sessions` indented by
 lineage. The join briefing lists only reachable peers, and says how many
 members it is *not* showing.
 
+## Lineage by default (phase 10 — implemented)
+
+Phase 8 built the tree and left three ways to end up outside it. All three
+were observed on the same session: an agent asked to "create a coder session
+in the other repo" ran `claunch new-session -s coder -c <path> --workflow
+ecs-change`, and got a session with no parent, in no mesh, holding a workflow
+it could not report on. Nothing errored. The parent went on waiting for a
+peer that was never enrolled, and the child finished into a terminal nobody
+was reading.
+
+**1. Two doors, and only one of them knew about lineage.** `new-session` and
+`spawn` build the same object by different rights — `new-session` spells
+every field out and inherits nothing, because the caller is the person who
+owns the machine; `spawn` inherits, records a parent, and obeys a policy.
+The agent took the human door, and reasonably so: its request named another
+directory, `spawn` locks `cwd` behind a policy and spells the alternative
+`--workspace`, and `new-session -c` was the phrasing it already knew.
+
+The split is now enforced — but **in the CLI, not the daemon**, because the
+daemon cannot see it. An HTTP request carries no caller environment, and
+`POST /api/sessions` is also the web UI's door; `$CLAUNCH_SESSION` exists
+only in the process that ran the command. So `claunch new-session` refuses
+when it finds itself inside a managed session, and prints the `spawn` line it
+would have been with the flags translated — `-c DIR` resolved through the
+workspace registry into the name that stands for it, `--profile` dropped as
+inherited. Telling an agent only "use spawn" leaves it to redo the
+translation that sent it to the wrong door. `--detached` is the way out, for
+a session that genuinely belongs to nobody.
+
+**2. A mesh had to be asked for.** Now silence means *the parent's own*
+(`onboard.inherit_mesh`), which is the only reading that makes a spawn a
+pair. A parent in no mesh gets one opened for the two of them, named after
+it — so the subtree converges on one mesh rather than one per spawn — and the
+parent is briefed about it in the ordinary way, because a session that learns
+of its own membership from a child's first message has been told by the wrong
+party. A parent in *several* is refused with them listed: the wrong guess
+here does not fail, it broadcasts, and the child would report its work to
+strangers. `mesh: "-"` opts out; it has to be a token, because omission is
+what now means inherit.
+
+Ordering: this runs before `preflight`, since preflight is where the mesh
+stops being negotiable — the identity block is built there and the system
+prompt is fixed the moment the harness starts.
+
+**3. The child was never told whose it is.** It now is, on both channels,
+and the split is the same one the phase-8 onboarding already draws. The
+system prompt takes the permanent half (the parent's name and its handle),
+because that is what survives a compaction — an agent that forgets who asked
+finishes for nobody. The opening block leads with the same fact plus the
+exact `claunch mesh send` that answers it: it is on screen during the first
+turn, which is the turn where a child decides whether reporting back is part
+of the job, and an agent left to assemble that command from a briefing and a
+roster will sometimes assemble it wrong — a misaddressed report reads exactly
+like no report at all.
+
+The web sidebar also indents by lineage now, using the same forest walk the
+CLI has printed since phase 8 (`byLineage` in `app.js`, checked under node in
+`tests/web/lineage_check.js`). Both listings must agree about who is whose;
+the rail was the one place a fleet looked flat.
+
 ## Phases
 
 1. **Local mesh MVP** (done): paste mode, mesh module + API + CLI +
@@ -1059,3 +1119,9 @@ members it is *not* showing.
    client-side tests in the project (`tests/test_web_topology.py` runs
    `tests/web/*.js` under node, against functions sliced out of the shipped
    `app.js`). See "Hierarchy in the diagram" above.
+10. **Lineage by default** (done): the tree stops being opt-in. `spawn`
+    becomes the only door from inside a session, a child inherits its
+    parent's mesh (opening one for the pair when there is none), and it is
+    told who is waiting on it in both the system prompt and the opening
+    block. Tests in `tests/test_spawn.py`, `tests/test_spawn_api.py` and
+    `tests/web/lineage_check.js`. See "Lineage by default" above.
