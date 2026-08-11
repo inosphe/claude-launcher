@@ -3789,6 +3789,28 @@ function fmtAge(secs) {
   return `${h}h${String(Math.floor((secs % 3600) / 60)).padStart(2, "0")}m`;
 }
 
+/* One button press against the ledger below: disable while it is in flight
+   (the 2s poll would otherwise repaint a live button under a pointer that
+   has already clicked), report the daemon's refusal verbatim, and redraw
+   from the daemon rather than from what we hoped happened. */
+async function owedAct(btn, call) {
+  btn.disabled = true;
+  try {
+    const resp = await call();
+    if (!resp.ok) {
+      const doc = await resp.json().catch(() => ({}));
+      alert(doc.error || `HTTP ${resp.status}`);
+      return;
+    }
+  } catch {
+    return;               // api() has already dealt with a lost session
+  } finally {
+    btn.disabled = false;
+  }
+  refreshMeshView(true);
+  refreshMeshList();
+}
+
 /* Unanswered mail: the mesh's silence detector.
 
    A mesh fails quietly. A member that was asked something and simply said
@@ -3800,7 +3822,11 @@ function fmtAge(secs) {
    It reports the SAME debt the nudger chases (Mesh.owed follows the policy
    engine's resolution rule exactly), so "listed here" and "being nudged" can
    never disagree — except when the nudge is switched off, which is called out
-   in as many words, because an unattended list reads as a handled one. */
+   in as many words, because an unattended list reads as a handled one.
+
+   Each row also carries the two answers to what it shows: nudge (ask again
+   now) and dismiss (stop asking). Both are the daemon's to perform and the
+   daemon's to allow — the buttons only appear where it says they can. */
 function renderMeshOwed(info, report) {
   const box = el("div", "mesh-owed");
   const rows = (report && report.members) || [];
@@ -3824,7 +3850,8 @@ function renderMeshOwed(info, report) {
   box.appendChild(el(
     "p", "wf-note",
     "asked something, said nothing back — a reply of any kind clears a " +
-    "member, so what is left is mail nobody has acknowledged at all"
+    "member, so what is left is mail nobody has acknowledged at all. " +
+    "Nudge asks again now; dismiss writes the debt off without an answer."
   ));
   for (const r of owing) {
     const head = el("div", "mesh-owed-head");
@@ -3853,6 +3880,39 @@ function renderMeshOwed(info, report) {
       if (r.stale) badge.classList.add("stale");
       head.appendChild(badge);
     }
+    // The two things an operator can do about a row, next to the row itself:
+    // ask again, or stop asking. Which of them this daemon can actually
+    // perform is the report's call (`can_nudge` / `can_dismiss`) — a remote
+    // member's mail is counted on its own daemon, and only the authority can
+    // reach that daemon at all.
+    if (r.can_nudge) {
+      const nudge = el("button", "mesh-owed-btn", "nudge");
+      nudge.title =
+        `inject the heartbeat reminder into ${r.handle} now` +
+        (r.local ? "" : ` — queued for ${r.machine} to deliver`);
+      nudge.addEventListener("click", () => owedAct(nudge, () => api(
+        `/api/mesh/${encodeURIComponent(info.name)}/members/` +
+        `${encodeURIComponent(r.handle)}/nudge`,
+        { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }
+      )));
+      head.appendChild(nudge);
+    }
+    if (r.can_dismiss) {
+      const drop = el("button", "mesh-owed-btn", "dismiss all");
+      drop.title = `write off all ${r.owed} unanswered message(s) for ${r.handle}`;
+      drop.addEventListener("click", () => {
+        if (r.owed > 1 && !confirm(
+          `Dismiss all ${r.owed} unanswered messages for '${r.handle}'?\n\n` +
+          "They stay in the message log; they just stop counting as a debt."
+        )) return;
+        owedAct(drop, () => api(
+          `/api/mesh/${encodeURIComponent(info.name)}/members/` +
+          `${encodeURIComponent(r.handle)}/owed`,
+          { method: "DELETE" }
+        ));
+      });
+      head.appendChild(drop);
+    }
     box.appendChild(head);
     for (const m of r.messages || []) {
       const line = el("div", "mesh-owed-msg");
@@ -3864,6 +3924,16 @@ function renderMeshOwed(info, report) {
       if (m.batch) meta.appendChild(el("span", "mesh-msg-type", "your slice"));
       meta.appendChild(el("span", "mono", m.id));
       meta.appendChild(el("span", "mesh-msg-at", `${fmtAge(m.age)} ago`));
+      if (r.can_dismiss && m.id) {
+        const x = el("button", "mesh-owed-x", "×");
+        x.title = "dismiss just this message";
+        x.addEventListener("click", () => owedAct(x, () => api(
+          `/api/mesh/${encodeURIComponent(info.name)}/members/` +
+          `${encodeURIComponent(r.handle)}/owed/${encodeURIComponent(m.id)}`,
+          { method: "DELETE" }
+        )));
+        meta.appendChild(x);
+      }
       line.appendChild(meta);
       line.appendChild(el("div", "mesh-msg-body", m.body || ""));
       box.appendChild(line);
@@ -3880,8 +3950,9 @@ function renderMeshOwed(info, report) {
   if (!hb.enabled) {
     box.appendChild(el(
       "p", "mesh-owed-warn",
-      "the heartbeat nudge is OFF for this mesh — nothing is chasing these; " +
-      "switch it on under Nudge policy, or message the member yourself below"
+      "the heartbeat nudge is OFF for this mesh — nothing is chasing these " +
+      "on its own; nudge a member by hand above, switch the heartbeat on " +
+      "under Nudge policy, or message the member yourself below"
     ));
   } else if (report.engine && info.primary) {
     box.appendChild(el(

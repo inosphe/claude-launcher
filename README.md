@@ -1623,6 +1623,17 @@ view ("Nudge policy"), via
 `claunch mesh policy <mesh> --set heartbeat.enabled=true ...`, or
 `PUT /api/mesh/{mesh}/policy`.
 
+The web mesh view's **Unanswered** box lists the same debt per message, and
+lets an operator act on a row without waiting for a timer: **nudge** sends the
+heartbeat's block to that member now (idleness is not re-checked — you are
+looking at the row, and the automatic heartbeat's next fire is pushed out so
+it does not pile on), and **dismiss** writes mail off that is never going to
+be answered, one message or the lot. A dismissal is the only closure that is
+not a reply: the message stays in the log, it just stops counting as a debt —
+and it settles the heartbeat with it, so the row and the nudger never
+disagree. A member hosted on another daemon can be nudged (its own daemon
+injects) but is dismissed there, where its mail is counted.
+
 ## Web UI & HTTP API
 
 The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
@@ -1737,6 +1748,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/mesh/{mesh}/members`     | `{session, handle?, role?, code?}` — enrol a session; `{mesh}` may be `mesh@machine` (201 admitted, 202 pending approval) |
 | DELETE | `/api/mesh/{mesh}/members/{handle}` | remove a member |
 | GET/POST | `/api/mesh/{mesh}/messages`  | history (`?limit=`) / send `{from, to, body, external?}` |
+| GET    | `/api/mesh/{mesh}/owed`        | unanswered mail per member: who was asked what, and how long ago |
+| POST   | `/api/mesh/{mesh}/members/{handle}/nudge` | ask that member about it now (`{body?}` overrides the heartbeat's wording) |
+| DELETE | `/api/mesh/{mesh}/members/{handle}/owed[/{id}]` | dismiss its unanswered mail — one message, or all of it |
 | GET/PUT | `/api/mesh/{mesh}/policy`     | read / edit the mesh's nudge policy (heartbeat, task-poll, stall warnings) |
 | GET/PUT | `/api/mesh/{mesh}/roles`      | read / upload the mesh's role set (`{yaml}` or `{roles}`; either null resets to the packaged vocabulary) |
 | POST   | `/api/mesh/{mesh}/invite`      | mint a single-use ticket pre-approving one join |

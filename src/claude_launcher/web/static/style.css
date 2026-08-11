@@ -555,6 +555,24 @@ body {
   padding: 6px 10px; margin: 4px 0 4px 22px;
 }
 .mesh-owed-msg .mesh-msg-body { font-size: 12px; }
+/* The two moves on a row: ask again (nudge), or stop asking (dismiss).
+   Quiet by default — the amber count is what should catch the eye, not the
+   buttons beside it — and they light up only under the pointer. */
+.mesh-owed-btn {
+  background: #21262d; border: 1px solid #30363d; color: #adbac7;
+  font-size: 11px; padding: 2px 9px; border-radius: 5px; cursor: pointer;
+  white-space: nowrap;
+}
+.mesh-owed-btn:hover:not(:disabled) { border-color: #58a6ff; color: #58a6ff; }
+.mesh-owed-btn:disabled { opacity: 0.45; cursor: default; }
+/* per-message dismiss: the row's own '×', held to the right edge */
+.mesh-owed-x {
+  margin-left: auto; background: none; border: none; color: #4a5058;
+  font-size: 14px; line-height: 1; cursor: pointer; padding: 0 2px;
+}
+.mesh-owed-msg:hover .mesh-owed-x { color: #7d8590; }
+.mesh-owed-x:hover:not(:disabled) { color: #d29922; }
+.mesh-owed-x:disabled { opacity: 0.45; cursor: default; }
 .mesh-owed-warn { font-size: 12px; color: #d29922; margin-top: 12px; }
 .mesh-member .meta.mesh-owes { color: #d29922; }
 

@@ -175,6 +175,13 @@ def build_app(
     r.add_post("/api/mesh/{mesh}/messages", h_mesh_send)
     r.add_get("/api/mesh/{mesh}/messages", h_mesh_history)
     r.add_get("/api/mesh/{mesh}/owed", h_mesh_owed)
+    r.add_post("/api/mesh/{mesh}/members/{handle}/nudge", h_mesh_nudge)
+    # Dismissing is deleting from the ledger, so it is a DELETE against it:
+    # the whole of a member's unanswered mail, or one message of it.
+    r.add_delete("/api/mesh/{mesh}/members/{handle}/owed", h_mesh_owed_dismiss)
+    r.add_delete(
+        "/api/mesh/{mesh}/members/{handle}/owed/{id}", h_mesh_owed_dismiss
+    )
     r.add_post("/api/mesh/{mesh}/invite", h_mesh_invite)
     r.add_get("/api/mesh/{mesh}/invites", h_mesh_invites_list)
     r.add_delete("/api/mesh/{mesh}/invites/{prefix}", h_mesh_invite_revoke)
@@ -833,6 +840,33 @@ async def h_mesh_owed(request: web.Request) -> web.Response:
     """Who has been asked something and answered nothing — per message."""
     mm = _mesh_mgr(request)
     return web.json_response(mm.owed_report(mm.get(request.match_info["mesh"])))
+
+
+async def h_mesh_nudge(request: web.Request) -> web.Response:
+    """Ask a member about its unanswered mail now, without waiting for the
+    heartbeat. Optional ``{"body": "..."}`` replaces the heartbeat's text."""
+    body = await _json_body(request)
+    note = body.get("body")
+    if note is not None and not isinstance(note, str):
+        return json_error(400, "'body' must be a string")
+    result = await _mesh_mgr(request).nudge(
+        request.match_info["mesh"],
+        request.match_info["handle"],
+        str(note or ""),
+    )
+    return web.json_response(result)
+
+
+async def h_mesh_owed_dismiss(request: web.Request) -> web.Response:
+    """Write off a member's unanswered mail: one message with ``{id}`` on the
+    path, the lot without it."""
+    mid = request.match_info.get("id")
+    result = _mesh_mgr(request).dismiss_owed(
+        request.match_info["mesh"],
+        request.match_info["handle"],
+        [mid] if mid else None,
+    )
+    return web.json_response(result)
 
 
 async def h_mesh_policy_get(request: web.Request) -> web.Response:

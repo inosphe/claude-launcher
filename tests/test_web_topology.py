@@ -9,8 +9,9 @@ the sidebar's own forest, which orders the session list by lineage.
 So the harnesses in ``tests/web`` slice the real functions out of the shipped
 ``app.js`` — not a copy of them — and exercise them: ``layout_check`` on the
 maths, ``render_check`` on the SVG the drawing code assembles against a stub
-DOM, ``lineage_check`` on the session list's tree ordering. This wrapper is
-what makes them run with everything else.
+DOM, ``lineage_check`` on the session list's tree ordering, ``owed_check`` on
+the Unanswered box and the requests its nudge/dismiss buttons send. This
+wrapper is what makes them run with everything else.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
@@ -28,7 +29,13 @@ WEB = Path(__file__).resolve().parent / "web"
 
 
 @pytest.mark.parametrize(
-    "script", ["layout_check.js", "render_check.js", "lineage_check.js"]
+    "script",
+    [
+        "layout_check.js",
+        "render_check.js",
+        "lineage_check.js",
+        "owed_check.js",
+    ],
 )
 def test_topology_diagram_logic(script):
     node = shutil.which("node")
