@@ -21,12 +21,29 @@
 </div>
 
 <div id="layout">
+  <!-- Mobile only: the status line that stands in for the sidebar while a
+       session is on screen. Its ☰ flips the whole screen over to the menu. -->
+  <div id="mobile-top">
+    <button id="m-menu" type="button" aria-label="open menu">☰</button>
+    <span id="m-dot" class="dot"></span>
+    <span id="m-title">no session</span>
+    <span id="m-status" class="badge"></span>
+    <button id="m-resume" class="m-act hidden" type="button">resume</button>
+    <button id="m-kill" class="m-act hidden" type="button">kill</button>
+  </div>
   <aside id="sidebar">
     <header>
       <h1>claunch</h1>
       <span id="relay-badge" class="badge hidden"></span>
       <span id="daemon-info"></span>
     </header>
+    <!-- Mobile only: the menu's top-level sections, one screenful each. -->
+    <nav id="mobile-tabs">
+      <button type="button" data-tab="sessions" class="active">Sessions</button>
+      <button type="button" data-tab="new">New</button>
+      <button type="button" data-tab="mesh">Mesh</button>
+      <button type="button" data-tab="flows">Flows</button>
+    </nav>
     <ul id="session-list"></ul>
     <button id="clear-exited" class="hidden"></button>
     <div id="mesh-panel">
@@ -83,6 +100,15 @@
     <div id="mesh-view" class="hidden"></div>
     <div id="placeholder">Select or create a session.</div>
   </main>
+  <!-- Mobile only: while the menu is up, what going "back" returns to. -->
+  <div id="mobile-bottom">
+    <span id="mb-dot" class="dot"></span>
+    <span class="mb-text">
+      <span id="mb-name">no session open</span>
+      <span id="mb-meta"></span>
+    </span>
+    <span class="mb-go">terminal ›</span>
+  </div>
 </div>
 
 <script src="static/vendor/xterm.js"></script>

@@ -117,6 +117,32 @@ def _slice_body(shared: str, section_text: Optional[str]) -> str:
     return "\n\n".join(p for p in (shared, section_text) if p)
 
 
+def recipient_body(msg: dict, handle: str) -> str:
+    """The text ``handle`` actually receives: for a batch, the shared preamble
+    plus its OWN section only — never another member's instructions. The log
+    keeps the composite, so anything showing a message back to (or about) one
+    recipient must slice it the same way delivery did."""
+    if msg.get("sections") is not None:
+        sec = (msg.get("sections") or {}).get(handle)
+        return _slice_body(
+            str(msg.get("shared") or ""),
+            sec.get("text") if isinstance(sec, dict) else None,
+        )
+    return str(msg.get("body") or "")
+
+
+def _age_secs(ts, now: datetime) -> Optional[float]:
+    """Seconds since an ISO ``ts``; None if it is missing or unparsable (a
+    message from a future/older daemon must not sink the whole report)."""
+    try:
+        then = datetime.fromisoformat(str(ts))
+    except (TypeError, ValueError):
+        return None
+    if then.tzinfo is None:
+        then = then.replace(tzinfo=timezone.utc)
+    return max(0.0, (now - then).total_seconds())
+
+
 def _composite_body(shared: str, sections: dict) -> str:
     """The full batch text kept in the log: shared + every @handle section."""
     parts = [shared] if shared else []
@@ -491,6 +517,49 @@ class Mesh:
             m for m in self.provisional
             if self.addressed_to(m, handle) and m.get("id") not in done
         )
+        return out
+
+    def owed(self, handle: str) -> List[dict]:
+        """Reply-expecting messages already DELIVERED to ``handle`` that it
+        has not answered — the per-message form of the policy engine's
+        ``unanswered`` flag, which is only ever a boolean.
+
+        Resolution follows the nudger exactly (``mesh_policy.tick`` compares
+        ``last_sent`` against ``last_asked``): ANY message the member sends
+        closes everything delivered to it beforehand. So this list can never
+        claim a debt the daemon is not also chasing — a dashboard that
+        disagreed with the heartbeat would be worse than no dashboard. The
+        rule is deliberately forgiving (one reply closes three questions),
+        and that is what makes the remainder worth reading: what survives is
+        mail nobody has said anything about at all.
+
+        Undelivered mail is NOT owed — see :meth:`pending`. The member has
+        not seen it yet, so that debt is the daemon's, not the member's, and
+        the two are diagnosed differently (a stuck delivery vs. a silent
+        agent). ``fyi``/``ack``/``ping`` never count: they were sent
+        precisely to say nothing is owed.
+        """
+        start = self.cursors.get(handle, 0)
+        done = self.delivered_ids.get(handle) or frozenset()
+        n = len(self.messages)
+        out: List[dict] = []
+        # Backwards from the newest, stopping at this member's own last send —
+        # the log is walked by index rather than sliced because mesh_info calls
+        # this for every member on every web poll.
+        for k in range(n + len(self.provisional) - 1, -1, -1):
+            if k < n:
+                m = self.messages[k]
+                delivered = k < start or m.get("id") in done
+            else:
+                m = self.provisional[k - n]
+                delivered = m.get("id") in done
+            if m.get("from") == handle:
+                break
+            if not delivered or not self.addressed_to(m, handle):
+                continue
+            if expects_reply(msg_type_for(m, handle)):
+                out.append(m)
+        out.reverse()
         return out
 
 
@@ -2922,6 +2991,11 @@ class MeshManager:
                 "caught_up": (not unanswered and pending == 0),
                 "unanswered": unanswered,
                 "pending": pending,
+                # How MANY messages are unanswered, not just whether any are:
+                # the policy engine only needs the boolean, but the owner's
+                # dashboard cannot count a remote member's mail itself (their
+                # cursors live here, not there). Ignored by older primaries.
+                "owed": len(mesh.owed(handle)),
                 "active_ago": max(0.0, now - active_at),
                 "first_pending_ago": (
                     max(0.0, now - first_pending)
@@ -3209,15 +3283,116 @@ class MeshManager:
     # ------------------------------------------------------------------ #
     # views
     # ------------------------------------------------------------------ #
+    #: Un-answered bodies are clipped to this in the owed report — it is a
+    #: triage list, and the full text is one click away in the message log.
+    OWED_PREVIEW = 240
+
+    def owed_report(self, mesh: Mesh) -> dict:
+        """Per-member ledger of unanswered mail: who owes what, since when.
+
+        Backs ``claunch mesh owed`` and the web dashboard. Local members are
+        read straight off the log (:meth:`Mesh.owed`); remote ones only
+        through the activity their own daemon piggybacks on the sync ack,
+        which carries counts rather than messages — so their rows are marked
+        ``reported`` and the per-message detail lives on that daemon. This is
+        the same split ``pending`` has always made, for the same reason: a
+        guest owns its members' cursors.
+        """
+        now = datetime.now(timezone.utc)
+        rows = []
+        for handle in sorted(mesh.members):
+            member = mesh.members[handle]
+            local = self._is_local(mesh, member)
+            row: dict = {
+                "handle": handle,
+                "role": member.role,
+                "machine": member.machine or mesh.me or "",
+                "session": member.session,
+                "local": local,
+                "reachability": self._reachability(mesh, member),
+                "source": "log" if local else "reported",
+                "messages": [],
+                "owed": None,
+                "pending": None,
+                "oldest_age": None,
+                "stale": False,
+            }
+            if local:
+                owed = mesh.owed(handle)
+                row["pending"] = len(mesh.pending(handle))
+                row["owed"] = len(owed)
+                for m in owed:
+                    body = recipient_body(m, handle)
+                    row["messages"].append(
+                        {
+                            "id": m.get("id"),
+                            "from": m.get("from"),
+                            "type": msg_type_for(m, handle),
+                            "ts": m.get("ts"),
+                            "age": _age_secs(m.get("ts"), now),
+                            "reply_to": m.get("reply_to"),
+                            "batch": m.get("sections") is not None,
+                            "body": (
+                                body[: self.OWED_PREVIEW] + " …"
+                                if len(body) > self.OWED_PREVIEW else body
+                            ),
+                        }
+                    )
+                ages = [e["age"] for e in row["messages"] if e["age"] is not None]
+                row["oldest_age"] = max(ages) if ages else None
+            else:
+                rep = mesh.remote_activity.get(handle)
+                if isinstance(rep, dict):
+                    row["pending"] = rep.get("pending")
+                    # 'owed' is only present from a daemon new enough to count
+                    # it; older guests still report the unanswered boolean, so
+                    # fall back to that rather than showing nothing.
+                    if rep.get("owed") is not None:
+                        row["owed"] = int(rep["owed"])
+                    elif rep.get("unanswered") is not None:
+                        row["owed"] = 1 if rep["unanswered"] else 0
+                    reported_at = float(rep.get("at") or 0.0)
+                    row["stale"] = (
+                        time.monotonic() - reported_at
+                        > max(15.0, 3 * self.report_interval)
+                    )
+            rows.append(row)
+        return {
+            "mesh": mesh.name,
+            "at": utcnow(),
+            "members": rows,
+            "owed": sum(r["owed"] or 0 for r in rows),
+            "pending": sum(r["pending"] or 0 for r in rows),
+            "owing": sum(1 for r in rows if (r["owed"] or 0) > 0),
+            # The nudger only chases members whose session is idle, and only
+            # on the mesh's own daemon — a mirror's dashboard can show a debt
+            # nothing here will act on, so say whose engine is in charge.
+            "engine": mesh.primary or mesh.me or None,
+            "heartbeat": dict(mesh.policy["heartbeat"]),
+        }
+
     def mesh_info(self, mesh: Mesh) -> dict:
         members = []
         for handle in sorted(mesh.members):
             m = mesh.members[handle]
             local = self._is_local(mesh, m)
+            # Unanswered mail alongside undelivered: 'pending' is the daemon's
+            # debt to the member, 'owed' the member's debt to the mesh. Remote
+            # members are counted from their own daemon's activity report.
+            rep = mesh.remote_activity.get(handle) or {}
+            if local:
+                owed = len(mesh.owed(handle))
+            elif rep.get("owed") is not None:
+                owed = int(rep["owed"])
+            elif rep.get("unanswered") is not None:
+                owed = 1 if rep["unanswered"] else 0
+            else:
+                owed = None
             members.append(
                 {
                     **m.to_dict(),
                     "pending": len(mesh.pending(handle)) if local else None,
+                    "owed": owed,
                     "reachability": self._reachability(mesh, m),
                 }
             )
@@ -3680,16 +3855,7 @@ def format_delivery(mesh_name: str, handle: str, msgs: List[dict]) -> str:
     """The fenced YAML block typed into the recipient's terminal."""
     batch = []
     for m in msgs:
-        if m.get("sections") is not None:
-            # batch message: this recipient reads only the shared preamble
-            # plus its own slice — never another member's instructions
-            sec = (m.get("sections") or {}).get(handle)
-            body = _slice_body(
-                str(m.get("shared") or ""),
-                sec.get("text") if isinstance(sec, dict) else None,
-            )
-        else:
-            body = str(m.get("body") or "")
+        body = recipient_body(m, handle)
         if len(body) > MAX_DELIVERY_BODY:
             body = body[:MAX_DELIVERY_BODY] + " …[clipped — see mesh history]"
         entry: dict = {"id": m.get("id"), "from": m.get("from")}
@@ -3710,8 +3876,13 @@ def format_delivery(mesh_name: str, handle: str, msgs: List[dict]) -> str:
         "needs_reply": needs_reply,
         "batch": batch,
         "note": (
+            # The ack clause lives HERE, not only in the skill: this is the one
+            # surface every member sees at the moment the duty applies, whatever
+            # its role and whether or not it ever ran /mesh.
             "mesh messages delivered to your terminal — reply with: "
             f'claunch mesh send {mesh_name} <handle|*> "..."'
+            " — if this puts work on you, answer NOW with a brief --type ack "
+            "and send the outcome when it is done; silence reads as not received"
             if needs_reply
             else "fyi/ack only — no reply expected; drain and continue"
         ),

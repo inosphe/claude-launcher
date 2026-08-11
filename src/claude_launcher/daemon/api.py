@@ -165,6 +165,7 @@ def build_app(
     r.add_delete("/api/mesh/{mesh}/members/{handle}", h_mesh_leave)
     r.add_post("/api/mesh/{mesh}/messages", h_mesh_send)
     r.add_get("/api/mesh/{mesh}/messages", h_mesh_history)
+    r.add_get("/api/mesh/{mesh}/owed", h_mesh_owed)
     r.add_post("/api/mesh/{mesh}/invite", h_mesh_invite)
     r.add_get("/api/mesh/{mesh}/invites", h_mesh_invites_list)
     r.add_delete("/api/mesh/{mesh}/invites/{prefix}", h_mesh_invite_revoke)
@@ -703,6 +704,12 @@ async def h_mesh_history(request: web.Request) -> web.Response:
         return json_error(400, "limit must be an integer")
     messages = _mesh_mgr(request).history(request.match_info["mesh"], limit)
     return web.json_response({"messages": messages})
+
+
+async def h_mesh_owed(request: web.Request) -> web.Response:
+    """Who has been asked something and answered nothing — per message."""
+    mm = _mesh_mgr(request)
+    return web.json_response(mm.owed_report(mm.get(request.match_info["mesh"])))
 
 
 async def h_mesh_policy_get(request: web.Request) -> web.Response:

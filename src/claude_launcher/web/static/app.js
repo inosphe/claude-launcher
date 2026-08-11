@@ -159,14 +159,18 @@ async function refreshSessions() {
     // our socket is bound to the replaced, now-dead child, so follow the new
     // one instead of showing its frozen last screen. Only while the terminal
     // is the visible view — reattaching must not yank the user off a
-    // workflow page (it stays pending until they come back).
-    if (!$("terminal").classList.contains("hidden")) attach(currentName);
+    // workflow page, or out of the mobile menu (it stays pending until they
+    // come back, since the stale pid keeps failing this test).
+    if (terminalOnScreen()) attach(currentName);
   } else if (cur && !(ws && ws.readyState === WebSocket.OPEN)) {
     // Otherwise an open socket stays authoritative: it sees this session's
     // every state change first-hand (an exit reaches it seconds before the
     // next poll), so a stale entry can't flicker the resume/kill controls.
     setStatusBadge(cur.status);
   }
+  // The mobile bottom bar carries this session's harness/profile, which only
+  // the list knows.
+  syncMobileBars();
 }
 
 /* ------------------------------------------------------------------ */
@@ -611,6 +615,7 @@ function setStatusBadge(status) {
   kill.title = exited
     ? "forget this exited session (it can no longer be resumed here)"
     : "terminate the program running in this session";
+  syncMobileBars();  // the mobile bars mirror this header
 }
 
 function detach() {
@@ -625,6 +630,9 @@ function attach(name) {
   stopWfPoll();
   stopMeshPoll();
   if (location.hash.startsWith("#/wf/") || location.hash.startsWith("#/mesh/")) {
+  // Before the terminal is opened: on mobile #main is display:none while the
+  // menu is up, and a terminal opened into a zero-height box fits to nothing.
+  setMenuOpen(false);
     history.replaceState(null, "", "#");
   }
   showView("terminal");
@@ -679,7 +687,7 @@ function attach(name) {
         attachedPid = msg.pid || null;
         setStatusBadge(msg.status);
         // Adopt the viewer's size once attached.
-        setTimeout(() => { if (fitAddon) fitAddon.fit(); }, 50);
+        refitSoon(50);
       } else if (msg.type === "state") {
         setStatusBadge(msg.status);
       } else if (msg.type === "resize") {
@@ -708,14 +716,27 @@ function attach(name) {
   };
 }
 
+/* Not merely "the terminal isn't hidden": on mobile the menu takes the whole
+   screen and #main goes with it, so the terminal is up but nobody can see it. */
+function terminalOnScreen() {
+  return !$("terminal").classList.contains("hidden") && !menuOpen;
+}
+
+/* A fit is only meaningful while the terminal is actually on screen — off it,
+   the box measures zero and the session would be sent a garbage size. */
+function canFit() {
+  return !!fitAddon && terminalOnScreen() && $("terminal").clientHeight > 0;
+}
+
 // Debounce viewport-driven fits. On a phone the visual viewport jitters (URL
 // bar collapsing, keyboard) and firing fit() on every event floods the session
 // with resizes — most visible over a relay, where each round-trip lags.
-window.addEventListener("resize", () => {
+function refitSoon(delay = 150) {
   if (!fitAddon) return;
   clearTimeout(fitTimer);
-  fitTimer = setTimeout(() => { if (fitAddon) fitAddon.fit(); }, 150);
-});
+  fitTimer = setTimeout(() => { if (canFit()) fitAddon.fit(); }, delay);
+}
+window.addEventListener("resize", () => refitSoon());
 
 /* Another viewer (e.g. `claunch attach`) may have resized the session while
    this tab was in the background, leaving the grid garbled. On focus regain,
@@ -723,13 +744,128 @@ window.addEventListener("resize", () => {
    event-driven only, no polling. */
 function resyncTerminal() {
   if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
-  fitAddon.fit(); // fires term.onResize -> server resize when dims changed
+  if (canFit()) fitAddon.fit(); // fires term.onResize -> server resize when dims changed
   ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
   ws.send(JSON.stringify({ type: "repaint" }));
 }
 window.addEventListener("focus", resyncTerminal);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) resyncTerminal();
+});
+
+/* ------------------------------------------------------------------ */
+/* mobile: the screen is either a session or the menu, never both      */
+/* ------------------------------------------------------------------ */
+/* On a phone the sidebar+terminal split leaves neither half usable, so below
+   the breakpoint they become two modes. Session mode: one status/menu line
+   on top, terminal underneath. Menu mode: the sidebar full-width with its
+   sections as tabs, and a bar along the bottom naming the session you came
+   from (tap it to go back). The CSS in style.css owns the geometry; this
+   owns the state — which mode, which tab, and refitting the grid when the
+   terminal comes back from display:none.  */
+const MOBILE_MQ = window.matchMedia("(max-width: 820px)");
+let menuOpen = false;
+
+function setMenuOpen(open) {
+  menuOpen = !!open;
+  document.body.classList.toggle("menu-open", menuOpen);
+  syncMobileBars();
+  // Coming back from menu mode the terminal was display:none, so its grid is
+  // whatever it was before the viewport last changed. Re-fit it.
+  if (!menuOpen) refitSoon(60);
+}
+
+/* The tab lives on the body as a data attribute — the CSS shows exactly one
+   of the sidebar's sections off it, so there is nothing else to keep. */
+function setMobileTab(tab) {
+  document.body.dataset.mtab = tab;
+  document.querySelectorAll("#mobile-tabs button").forEach((b) =>
+    b.classList.toggle("active", b.dataset.tab === tab)
+  );
+}
+
+/* What the top bar calls the thing on screen. The mesh and workflow pages
+   live in the same slot as the terminal, so the bar names them too. */
+function mobileTitle() {
+  if (meshName) return `mesh · ${meshName}`;
+  if (wfCwd) return `workflow · ${shortenPath(wfCwd)}`;
+  return currentName || "no session";
+}
+
+function syncMobileBars() {
+  const has = !!currentName;
+  // term-status is the socket-fed truth; the list poll trails it by seconds.
+  const status = has ? ($("term-status").textContent || "") : "";
+  const sess = has ? sessionsCache.find((s) => s.name === currentName) : null;
+
+  $("m-title").textContent = mobileTitle();
+  const dot = $("m-dot");
+  dot.className = `dot ${status}`;
+  dot.classList.toggle("hidden", !has);
+  const badge = $("m-status");
+  badge.textContent = status;
+  badge.className = `badge ${status}`;
+  badge.classList.toggle("hidden", !has);
+  // Mirrors of the hidden header's buttons — see the click handlers below.
+  $("m-resume").classList.toggle("hidden", status !== "exited");
+  const kill = $("m-kill");
+  kill.classList.toggle("hidden", !has);
+  kill.textContent = status === "exited" ? "remove" : "kill";
+
+  const bDot = $("mb-dot");
+  bDot.className = `dot ${status}`;
+  bDot.classList.toggle("hidden", !has);
+  $("mb-name").textContent = has ? currentName : "no session open";
+  $("mb-meta").textContent = has
+    ? [status, sess && (sess.profile || sess.harness)].filter(Boolean).join(" · ")
+    : "pick one from the list";
+  $("mobile-bottom").classList.toggle("empty", !has);
+}
+
+$("m-menu").addEventListener("click", () => setMenuOpen(true));
+document.querySelectorAll("#mobile-tabs button").forEach((b) =>
+  b.addEventListener("click", () => setMobileTab(b.dataset.tab))
+);
+// The header's controls are the real ones; these just reach them, so kill's
+// confirm-before-forgetting and resume's reattach stay in one place.
+$("m-kill").addEventListener("click", () => $("term-kill").click());
+$("m-resume").addEventListener("click", () => $("term-resume").click());
+
+$("mobile-bottom").addEventListener("click", () => {
+  if (!currentName) { setMobileTab("sessions"); return; }
+  // A mesh/workflow route owns #main; drop it so the terminal gets the slot.
+  if ((location.hash || "#") !== "#") location.hash = "#";
+  else route();
+  setMenuOpen(false);
+});
+
+/* The layout viewport doesn't shrink when the on-screen keyboard opens, so
+   100dvh would push the prompt behind the keys. Track the visual viewport
+   instead and let the terminal fit what's actually visible. */
+function syncViewportHeight() {
+  const vv = window.visualViewport;
+  document.documentElement.style.setProperty(
+    "--app-h", `${Math.round(vv ? vv.height : window.innerHeight)}px`
+  );
+}
+if (window.visualViewport) {
+  window.visualViewport.addEventListener("resize", () => {
+    syncViewportHeight();
+    refitSoon();
+  });
+}
+window.addEventListener("resize", syncViewportHeight);
+syncViewportHeight();
+setMobileTab("sessions");   // before boot, so the auth overlay's page is sane
+
+MOBILE_MQ.addEventListener("change", () => {
+  // Rotating a tablet across the breakpoint. Above it both halves are on
+  // screen, so the flag must clear — it also gates the reattach poll. Below
+  // it, don't strand the user on a session slot they never chose.
+  if (!MOBILE_MQ.matches) setMenuOpen(false);
+  else if (!currentName) setMenuOpen(true);
+  syncMobileBars();
+  refitSoon();
 });
 
 /* ------------------------------------------------------------------ */
@@ -750,6 +886,12 @@ function showView(name) {
   $("placeholder").classList.toggle(
     "hidden", showTerm || name === "wf" || name === "mesh"
   );
+  // An empty session slot is nothing to look at on a phone — a killed or
+  // never-picked session drops you back into the menu rather than at a ☰ to
+  // go hunting for.
+  if (MOBILE_MQ.matches && name === "placeholder" && !menuOpen) setMenuOpen(true);
+  syncMobileBars();      // the top bar names whichever view this is
+  if (showTerm) refitSoon(60);
 }
 
 function stopWfPoll() {
@@ -763,6 +905,7 @@ async function openWorkflow(cwd, scope) {
   wfScope = scope || "default";
   wfSelectedStep = null;
   wfLastData = null;
+  setMenuOpen(false);   // the page it opens lives where the terminal was
   showView("wf");
   $("wf-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshWf();
@@ -1532,6 +1675,7 @@ async function openMesh(name) {
   meshName = name;
   missingMeshShown = "";   // a different route deserves a fresh verdict
   rolesEditor = "";        // never carry one mesh's open editor into another
+  setMenuOpen(false);      // the page it opens lives where the terminal was
   showView("mesh");
   $("mesh-view").innerHTML = "<p class='wf-note'>loading…</p>";
   await refreshMeshView();
@@ -1547,11 +1691,12 @@ async function refreshMeshView(force = false) {
   // below would discard. A poll-driven refresh stands down until it closes;
   // an explicit one (a save, a cancel) still goes through.
   if (rolesEditor && !force) return;
-  let info, history;
+  let info, history, owed;
   try {
-    const [r1, r2] = await Promise.all([
+    const [r1, r2, r3] = await Promise.all([
       api(`/api/mesh/${encodeURIComponent(meshName)}`),
       api(`/api/mesh/${encodeURIComponent(meshName)}/messages?limit=100`),
+      api(`/api/mesh/${encodeURIComponent(meshName)}/owed`),
     ]);
     info = await r1.json();
     if (!r1.ok) {
@@ -1559,12 +1704,14 @@ async function refreshMeshView(force = false) {
       return;
     }
     history = r2.ok ? (await r2.json()).messages || [] : [];
+    // A daemon too old to know the route still renders everything else.
+    owed = r3.ok ? await r3.json() : null;
     missingMeshShown = "";  // it loaded, so arm the panel again
   } catch {
     return;
   }
   renderRelayBadge(info.relay);
-  renderMesh(info, history, force);
+  renderMesh(info, history, force, owed);
 }
 
 /* A mesh route can outlive its mesh: a bookmark or a shared link naming a
@@ -2124,7 +2271,7 @@ function formInUse(root) {
     ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
 }
 
-function renderMesh(info, history, force) {
+function renderMesh(info, history, force, owed) {
   const view = $("mesh-view");
   if (!force && formInUse(view)) return; // don't wipe in-progress input
   // ...nor yank the node out from under a drag, or race an in-flight edit
@@ -2184,8 +2331,13 @@ function renderMesh(info, history, force) {
       where.title = "attach this session's terminal";
       where.addEventListener("click", () => attach(m.session));
     }
+    // 'pending' is mail the daemon has not managed to deliver; 'owed' is mail
+    // it delivered that the agent never answered. Different faults, so the
+    // row names both rather than one "behind" number.
     const state = el("span", "meta", m.reachability +
-      (m.pending ? ` · ${m.pending} pending` : ""));
+      (m.pending ? ` · ${m.pending} pending` : "") +
+      (m.owed ? ` · ${m.owed} unanswered` : ""));
+    if (m.owed) state.classList.add("mesh-owes");
     row.append(dot, name, role, where, state);
     // A mirror may only remove its own members; the primary's roster is the
     // primary's to edit (and whole guest machines go via 'revoke' below).
@@ -2249,6 +2401,8 @@ function renderMesh(info, history, force) {
   addRow.append(sel, handle, addBtn);
   box.appendChild(addRow);
   view.appendChild(box);
+
+  view.appendChild(renderMeshOwed(info, owed));
 
   // membership from other machines: who joined us (guests) or who owns us
   const fed = el("div", "mesh-fed");
@@ -2511,6 +2665,116 @@ function renderMesh(info, history, force) {
   view.appendChild(logBox);
 }
 
+function fmtAge(secs) {
+  if (secs === null || secs === undefined) return "?";
+  secs = Math.floor(secs);
+  if (secs < 60) return `${secs}s`;
+  if (secs < 3600) return `${Math.floor(secs / 60)}m`;
+  const h = Math.floor(secs / 3600);
+  return `${h}h${String(Math.floor((secs % 3600) / 60)).padStart(2, "0")}m`;
+}
+
+/* Unanswered mail: the mesh's silence detector.
+
+   A mesh fails quietly. A member that was asked something and simply said
+   nothing looks exactly like a member with nothing to say — the message log
+   scrolls on either way, and until now the only thing that noticed was the
+   heartbeat nudge, which says nothing to the operator. This box is that state
+   made visible: who was asked, what they were asked, and how long ago.
+
+   It reports the SAME debt the nudger chases (Mesh.owed follows the policy
+   engine's resolution rule exactly), so "listed here" and "being nudged" can
+   never disagree — except when the nudge is switched off, which is called out
+   in as many words, because an unattended list reads as a handled one. */
+function renderMeshOwed(info, report) {
+  const box = el("div", "mesh-owed");
+  const rows = (report && report.members) || [];
+  const owing = rows.filter((r) => (r.owed || 0) > 0);
+  const total = (report && report.owed) || 0;
+  box.appendChild(el("h3", null, `Unanswered${total ? ` (${total})` : ""}`));
+  if (!report) {
+    box.appendChild(el("p", "wf-note", "the daemon did not report unanswered mail"));
+    return box;
+  }
+  if (!owing.length) {
+    box.appendChild(el(
+      "p", "wf-note",
+      rows.length
+        ? `every member has answered its mail (${rows.length} member${
+            rows.length === 1 ? "" : "s"})`
+        : "no members yet"
+    ));
+    return box;
+  }
+  box.appendChild(el(
+    "p", "wf-note",
+    "asked something, said nothing back — a reply of any kind clears a " +
+    "member, so what is left is mail nobody has acknowledged at all"
+  ));
+  for (const r of owing) {
+    const head = el("div", "mesh-owed-head");
+    head.appendChild(el("span", `dot ${meshDotClass(r.reachability)}`));
+    head.appendChild(el("span", "mesh-handle", r.handle));
+    head.appendChild(el("span", "mesh-role", r.role));
+    head.appendChild(el("span", "mesh-owed-count", `${r.owed} unanswered`));
+    if (r.oldest_age !== null && r.oldest_age !== undefined) {
+      head.appendChild(el("span", "meta", `oldest ${fmtAge(r.oldest_age)} ago`));
+    }
+    if (r.pending) {
+      head.appendChild(el("span", "meta", `· ${r.pending} still undelivered`));
+    }
+    if (r.local) {
+      // The real diagnostic move is to go look at the session.
+      const open = el("span", "mesh-session linkish", "open terminal");
+      open.addEventListener("click", () => attach(r.session));
+      head.appendChild(open);
+    } else {
+      const badge = el(
+        "span", "mesh-owed-remote",
+        r.stale ? `${r.machine} — report is stale` : `counted on ${r.machine}`
+      );
+      if (r.stale) badge.classList.add("stale");
+      head.appendChild(badge);
+    }
+    box.appendChild(head);
+    for (const m of r.messages || []) {
+      const line = el("div", "mesh-owed-msg");
+      const meta = el("div", "mesh-msg-meta");
+      meta.appendChild(el("span", "mesh-msg-from", m.from));
+      if (m.type && m.type !== "say") {
+        meta.appendChild(el("span", "mesh-msg-type", m.type));
+      }
+      if (m.batch) meta.appendChild(el("span", "mesh-msg-type", "your slice"));
+      meta.appendChild(el("span", "mono", m.id));
+      meta.appendChild(el("span", "mesh-msg-at", `${fmtAge(m.age)} ago`));
+      line.appendChild(meta);
+      line.appendChild(el("div", "mesh-msg-body", m.body || ""));
+      box.appendChild(line);
+    }
+    if (!r.local && !(r.messages || []).length) {
+      box.appendChild(el(
+        "p", "wf-note",
+        `${r.machine} counts this member's mail; open that daemon's mesh page ` +
+        "for the messages themselves"
+      ));
+    }
+  }
+  const hb = report.heartbeat || {};
+  if (!hb.enabled) {
+    box.appendChild(el(
+      "p", "mesh-owed-warn",
+      "the heartbeat nudge is OFF for this mesh — nothing is chasing these; " +
+      "switch it on under Nudge policy, or message the member yourself below"
+    ));
+  } else if (report.engine && info.primary) {
+    box.appendChild(el(
+      "p", "wf-note",
+      `the nudge engine runs on the primary daemon (${info.primary})`
+    ));
+  }
+  return box;
+}
+
 /* Nudge-policy editor: heartbeat / task-poll / stall warnings, per mesh.
    All nudges are terminal injections (they consume the agent's turn), so
    every section ships disabled until deliberately switched on here. */
@@ -2740,7 +3004,7 @@ async function boot() {
   refreshSessions();
   refreshMeshList();
   refreshCflow();
-  route();
+  route();   // on a phone with nothing attached this lands in the menu
   if (pollTimer) clearInterval(pollTimer);
   pollTimer = setInterval(() => {
     refreshSessions();

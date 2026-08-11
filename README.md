@@ -524,8 +524,9 @@ with the same profiles, providers and template.
 
 What travels is **configuration only**. Login tokens never leave the machine
 (they are per-profile secrets — run `claunch login` on each host), and the
-`daemon` block stays local too: its port, bind host and relay token describe
-*that* machine, not the profile set.
+`daemon` and [`workspaces`](#workspaces-where-a-session-may-be-spawned) blocks
+stay local too: ports, bind host, the relay token and absolute directory paths
+describe *that* machine, not the profile set.
 
 ### Client setup
 
@@ -638,6 +639,165 @@ upgrade that adds config keys needs no server change:
 what syncs. `claunch sync` therefore refuses plain `http` to anything but
 loopback unless you set `sync.allow_insecure: true`; put the server behind TLS,
 or keep provider tokens out of the synced sections.
+
+### Worked scenarios
+
+#### 1. One person, several machines
+
+A desktop that already has the profiles, a laptop that should match it, and a
+small VPS in between. **On the VPS, once:**
+
+```bash
+uv tool install claude-launcher
+claunch sync-server user add alice
+#   created user 'alice' (namespaces: alice)
+#   token (shown once — the server stores only its hash):
+#     N2I6WmX2r7pQ...                       <- copy this now; it is never shown again
+claunch sync-server serve --host 127.0.0.1 --port 8378
+#   then front it with nginx/caddy for TLS -> https://sync.example.com
+```
+
+**On the desktop** (the machine whose config wins first). Add to `~/.claunch.yaml`:
+
+```yaml
+sync:
+  url: https://sync.example.com
+  namespace: alice
+```
+
+```bash
+export CLAUNCH_SYNC_TOKEN=N2I6WmX2r7pQ...    # ~/.bashrc, or a secret manager
+claunch sync --dry-run                       # look before you leap
+claunch sync --mode up                       # publish this machine as the baseline
+#   synced 'alice' with https://sync.example.com  (mode: up)
+#     pushed to server:
+#       + profiles
+#       + template
+#     revision: 1
+```
+
+**On the laptop** — same `sync:` block, same token, then:
+
+```bash
+claunch sync --mode down     # the server is authoritative on a fresh machine
+claunch list                 # the profiles are here, directories already created
+claunch login work           # ...but log in per machine: tokens never sync
+```
+
+**From then on, on either machine**, one command in both directions:
+
+```bash
+claunch sync                 # merge
+claunch sync --status        # what is pending locally, without touching the network
+```
+
+#### 2. A team sharing one profile set
+
+Two people, one shared namespace `team-infra`, plus a private namespace each.
+**On the server:**
+
+```bash
+claunch sync-server user add alice --namespace alice --namespace team-infra
+claunch sync-server user add bob   --namespace bob   --namespace team-infra
+claunch sync-server user ls
+#   alice  namespaces: alice, team-infra
+#   bob    namespaces: bob, team-infra
+#   documents: (none yet)
+```
+
+Two accounts, two tokens, and both may write the *same* document — that is the
+whole point. Each member puts the shared namespace in their `~/.claunch.yaml`:
+
+```yaml
+sync:
+  url: https://sync.example.com
+  namespace: team-infra
+```
+
+```bash
+claunch sync                 # first run pulls the team's profiles
+```
+
+Bob adds a provider definition to his `~/.claunch.yaml` and shares it:
+
+```bash
+claunch sync
+#   synced 'team-infra' with https://sync.example.com  (mode: merge)
+#     pushed to server:
+#       + providers
+#     revision: 2
+```
+
+Alice picks it up on her next sync, without having touched providers herself:
+
+```bash
+claunch sync
+#   local changes (~/.claunch.yaml):
+#     + providers
+#   revision: 2
+```
+
+If they both changed the *same* key since their last sync, the second one to
+run gets a conflict and keeps their own value:
+
+```console
+$ claunch sync
+synced 'team-infra' with https://sync.example.com  (mode: merge)
+  conflicts (1, kept local):
+    ! profiles.work.env.REGION   local='apac'  remote='us'
+  pushed to server:
+    ~ profiles.work.env.REGION
+  revision: 5
+note: re-run with '--prefer remote' to resolve conflicts the other way
+```
+
+**Keeping a personal set *and* the team set on one machine:** give them separate
+launcher homes rather than switching `namespace` back and forth. The merge base
+is one file per launcher home, so alternating namespaces in a single home throws
+it away each time — merges silently degrade to a union and deletions stop
+propagating (`claunch sync --status` says `no base for this server yet`).
+
+```bash
+# personal (the default home)
+claunch sync
+
+# team, fully separate state (its own profiles, config file and merge base)
+export CLAUDE_LAUNCHER_HOME=~/.claude-launcher-team
+export CLAUDE_LAUNCHER_SYNC_FILE=~/.claunch-team.yaml
+export CLAUNCH_SYNC_URL=https://sync.example.com   # the new file has no sync: block
+export CLAUNCH_SYNC_NAMESPACE=team-infra
+claunch sync --mode down                           # first run on an empty home
+```
+
+#### 3. Disposable machines (CI, containers)
+
+A fresh container needs the config but has no `~/.claunch.yaml` to edit and must
+never push. Every setting has an env override, so **no file editing at all**:
+
+```bash
+export CLAUNCH_SYNC_URL=https://sync.example.com
+export CLAUNCH_SYNC_NAMESPACE=team-infra
+export CLAUNCH_SYNC_TOKEN="$SYNC_TOKEN"        # from the CI secret store
+
+claunch sync --mode down                       # config only, one way
+claunch list                                   # the synced profiles, dirs created
+
+claunch set-token work "$CLAUDE_OAUTH_TOKEN"   # the login is a separate secret
+claunch run work -- -p "review the diff on this branch"
+```
+
+`--mode down` is the whole contract here: it pulls and never pushes, so a
+throwaway machine cannot corrupt the shared document. It also refuses to run
+when the namespace has no document yet, rather than "winning" with an empty one
+and undeclaring every profile. No `sync:` block is ever written to disk — the
+env vars are read fresh on each command.
+
+Give CI its own account if you want to be able to revoke it alone:
+
+```bash
+claunch sync-server user add ci-runner --namespace team-infra
+claunch sync-server user token ci-runner   # rotate; the old token dies instantly
+```
 
 ## Managed sessions (tmux-style daemon)
 

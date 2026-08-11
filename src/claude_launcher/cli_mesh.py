@@ -474,10 +474,14 @@ def _cmd_members(args: argparse.Namespace) -> int:
         # the roster is absolute: '' = the primary daemon's own member
         where = m.get("machine") or (primary if primary else "local")
         pending = m.get("pending")
-        pending_s = f" pending:{pending}" if pending else ""
+        flags = f" pending:{pending}" if pending else ""
+        # 'owed' is the mirror image of 'pending': mail the member HAS seen
+        # and has said nothing about ('claunch mesh owed' shows which).
+        if m.get("owed"):
+            flags += f" owed:{m['owed']}"
         print(
             f"{m['handle']:<16} {m['role']:<10} {where + '/' + m['session']:<28} "
-            f"[{m['reachability']}]{pending_s}"
+            f"[{m['reachability']}]{flags}"
         )
     for p in info.get("peers", []):
         if p.get("ok") is False:
@@ -663,6 +667,64 @@ def _cmd_history(args: argparse.Namespace) -> int:
     return 0
 
 
+def _fmt_age(secs) -> str:
+    if secs is None:
+        return "?"
+    secs = int(secs)
+    if secs < 60:
+        return f"{secs}s"
+    if secs < 3600:
+        return f"{secs // 60}m"
+    return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+
+
+def _cmd_owed(args: argparse.Namespace) -> int:
+    """Unanswered mail, per member — the terminal form of the web dashboard."""
+    client = daemon_client.ensure_running()
+    report = client.get(f"/api/mesh/{args.mesh}/owed")
+    rows = report.get("members", [])
+    if args.handle:
+        rows = [r for r in rows if r["handle"] == args.handle]
+        if not rows:
+            print(f"no member {args.handle!r} in mesh {args.mesh!r}", file=sys.stderr)
+            return 1
+    if not report.get("owed"):
+        print(f"mesh {args.mesh!r}: nobody owes an answer")
+    for r in rows:
+        owed = r.get("owed")
+        if not owed and not args.handle:
+            continue  # the point of the command is who is silent
+        head = (
+            f"{r['handle']:<16} {r['role']:<10} "
+            f"owed:{'?' if owed is None else owed}"
+        )
+        if r.get("pending"):
+            head += f" undelivered:{r['pending']}"
+        if r.get("oldest_age") is not None:
+            head += f" oldest:{_fmt_age(r['oldest_age'])}"
+        if not r.get("local"):
+            # counted by the member's own daemon; the messages stay there
+            head += f" (reported by {r['machine']}"
+            head += ", STALE)" if r.get("stale") else ")"
+        print(head)
+        for m in r.get("messages", []):
+            intent = m.get("type") or "say"
+            body = " ".join(str(m.get("body") or "").split())
+            print(
+                f"    {m.get('id')} {_fmt_age(m.get('age')):>6} ago  "
+                f"from {m.get('from')} [{intent}]: {body}"
+            )
+    hb = report.get("heartbeat") or {}
+    if report.get("owed") and not hb.get("enabled"):
+        # A debt nobody is chasing: worth saying, because the obvious reading
+        # of this list is "the daemon is on it".
+        print(
+            "note: the heartbeat nudge is OFF for this mesh -- nothing will "
+            f"chase these ('claunch mesh policy {args.mesh} heartbeat.enabled=true')"
+        )
+    return 0
+
+
 def register(sub) -> None:
     p_mesh = sub.add_parser(
         "mesh", help="group sessions into a mesh and message between them"
@@ -696,6 +758,15 @@ def register(sub) -> None:
                                   "pre-approves the join; without one the "
                                   "request waits for the owner's approval")
     p.set_defaults(func=_cmd_join)
+
+    p = msub.add_parser(
+        "owed",
+        help="who was asked something and answered nothing (per message)",
+    )
+    p.add_argument("mesh")
+    p.add_argument("--handle", metavar="HANDLE",
+                   help="one member only (shown even when it owes nothing)")
+    p.set_defaults(func=_cmd_owed)
 
     p = msub.add_parser("leave", help="leave a mesh")
     p.add_argument("mesh")

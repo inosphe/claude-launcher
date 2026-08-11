@@ -86,6 +86,13 @@ Reading a delivery block:
   your work; do NOT reply (that is the point of those intents).
 - otherwise — act on it and/or answer the sender. Each entry shows `from`,
   its message `id`, a `type` when not `say`, and `reply_to` when threaded.
+- **Never leave a reply-expecting message unanswered.** If you can answer
+  now, answer. If it instead puts work on you that will take a while, answer
+  NOW with a brief `--type ack` ("taking it") and send the real outcome as an
+  ordinary message when it is done. This holds for every role, not just the
+  ones that produce: to the sender and to the daemon, silence is
+  indistinguishable from "never received", and the daemon will start nudging
+  you for it.
 - Blocks with `kind: heartbeat` or `kind: task-poll` come from the daemon's
   policy engine, not a member: follow their note, never reply to them.
 
@@ -95,6 +102,8 @@ from your session automatically):
 - **Intent, not label**: `--type say` (default) or `ask` invite an answer;
   `--type fyi` / `ack` explicitly do not. Never put your role or a topic in
   `--type` — an unknown type reads as reply-expected and invites reply-all.
+  Never dress an INSTRUCTION as `fyi`/`ack` either: it tells the recipient it
+  owes you nothing, and the daemon will not chase a member who owes nothing.
 - **Direct over broadcast**: address the peer(s) concerned; `'*'` is for
   genuinely shared announcements only.
 - **Fan-out with per-peer instructions = ONE batch send**: shared preamble
@@ -104,8 +113,6 @@ from your session automatically):
   only needs to know, ask for the one who must act).
 - **Thread answers**: `--reply-to <msgid>` (ids appear in delivery blocks
   and history).
-- Acknowledge an assignment with a brief `--type ack`, then report the real
-  outcome with a normal message when done.
 
 ## Your role
 
@@ -120,7 +127,9 @@ A mesh may define its own vocabulary, so do not assume the names above:
 `claunch mesh stance MESH` re-prints yours. Roles set stance, not
 permissions. A `stall:` message from the `policy` sender tells the watching
 roles that a member looks stuck — check on that member; never reply to the
-notice itself.
+notice itself. `claunch mesh owed MESH` is how you check: it lists who was
+asked something and has answered nothing, and it will list YOU if you have
+left mail hanging.
 
 ## Recovery (after compaction or restart)
 

@@ -180,6 +180,12 @@ def test_format_delivery_no_reply_batch():
     block = format_delivery("m1", "leader", mixed)
     assert "needs_reply: true" in block
     assert "reply with" in block
+    # The ack duty rides the delivery itself, not just the skill: this is the
+    # only surface a member sees at the moment it applies, whatever its role
+    # and whether or not it ever activated /mesh.
+    assert "--type ack" in block
+    # ...and never on a batch that explicitly owes nothing.
+    assert "--type ack" not in format_delivery("m1", "leader", fyi_only)
 
 
 def test_format_delivery_block():
@@ -586,6 +592,148 @@ def test_invite_and_remote_join_require_relay_identity(home):
         # remote join has nowhere to send the grant back to
         with pytest.raises(MeshError):
             await mm.join("other@pcX", "s1", handle="w1")
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# unanswered mail (the 'owed' ledger behind `mesh owed` and the web dashboard)
+# --------------------------------------------------------------------------- #
+def _mark_delivered(mesh) -> None:
+    """What the delivery worker does to the cursor, without a live PTY."""
+    for handle in mesh.members:
+        mesh.cursors[handle] = len(mesh.messages)
+
+
+def test_owed_is_delivered_mail_nobody_answered(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05)
+        mesh = mm.create("owe")
+        for name in ("a1", "b1"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("owe", "a1", handle="leader")
+        await mm.join("owe", "b1", handle="worker_1")
+
+        await mm.send("owe", "a1", "worker_1", "do the thing")
+        # Undelivered mail is the DAEMON's debt, not the member's — the two
+        # states are diagnosed differently and must not be conflated.
+        assert mesh.pending("worker_1")
+        assert mesh.owed("worker_1") == []
+
+        _mark_delivered(mesh)
+        assert [m["body"] for m in mesh.owed("worker_1")] == ["do the thing"]
+        assert mesh.owed("leader") == []      # the sender owes nothing
+
+        # fyi/ack were sent precisely to say nothing is owed
+        await mm.send("owe", "a1", "worker_1", "for info", type="fyi")
+        await mm.send("owe", "a1", "worker_1", "noted", type="ack")
+        _mark_delivered(mesh)
+        assert len(mesh.owed("worker_1")) == 1
+
+        # ...an unknown type is reply-expected, so it DOES count (type_notice)
+        await mm.send("owe", "a1", "worker_1", "labelled", type="worker")
+        _mark_delivered(mesh)
+        assert len(mesh.owed("worker_1")) == 2
+
+        # A reply of ANY kind clears the ledger — the same forgiving rule the
+        # heartbeat uses, so the dashboard can never disagree with the nudger.
+        await mm.send("owe", "b1", "leader", "on it", type="ack")
+        assert mesh.owed("worker_1") == []
+
+        # ...and a fresh question re-arms it
+        await mm.send("owe", "a1", "worker_1", "and this?", type="ask")
+        _mark_delivered(mesh)
+        assert [m["body"] for m in mesh.owed("worker_1")] == ["and this?"]
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_owed_counts_a_batch_slice_per_recipient(home, tmp_path):
+    """A batch message owes only the recipients whose OWN slice expects one."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05)
+        mesh = mm.create("batch")
+        for name in ("a1", "b1", "c1"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("batch", "a1", handle="leader")
+        await mm.join("batch", "b1", handle="w1")
+        await mm.join("batch", "c1", handle="w2")
+
+        await mm.send(
+            "batch", "a1", "*", "shared preamble",
+            sections={"w1": {"text": "you build it", "type": "ask"},
+                      "w2": {"text": "you just need to know", "type": "fyi"}},
+        )
+        _mark_delivered(mesh)
+        owed = mesh.owed("w1")
+        assert len(owed) == 1
+        assert mesh.owed("w2") == []  # its slice was fyi
+
+        # the report shows w1 ITS slice, never w2's instructions
+        report = mm.owed_report(mesh)
+        row = next(r for r in report["members"] if r["handle"] == "w1")
+        assert row["messages"][0]["batch"] is True
+        assert "you build it" in row["messages"][0]["body"]
+        assert "you just need to know" not in row["messages"][0]["body"]
+        assert report["owed"] == 1 and report["owing"] == 1
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_owed_report_and_route(home, tmp_path):
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            mesh = mm.create("dash")
+            mgr.create(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+            await mm.join("dash", "w1", handle="worker_1")
+            await mm.send("dash", "operator", "worker_1", "answer me",
+                          external=True, type="ask")
+
+            resp = await client.get("/api/mesh/dash/owed", headers=bearer)
+            assert resp.status == 200
+            doc = await resp.json()
+            # still undelivered: owed 0, pending 1 — the debt is the daemon's
+            row = doc["members"][0]
+            assert doc["owed"] == 0 and row["pending"] == 1
+
+            _mark_delivered(mesh)
+            doc = await (await client.get("/api/mesh/dash/owed", headers=bearer)).json()
+            row = doc["members"][0]
+            assert doc["owed"] == 1 and doc["owing"] == 1
+            assert row["source"] == "log" and row["local"] is True
+            assert row["messages"][0]["from"] == "operator"
+            assert row["messages"][0]["type"] == "ask"
+            assert row["messages"][0]["age"] is not None
+            assert row["oldest_age"] is not None
+            # the dashboard must say when nothing is chasing the debt
+            assert doc["heartbeat"]["enabled"] is False
+
+            # the members view carries the same count, next to 'pending'
+            info = await (await client.get("/api/mesh/dash", headers=bearer)).json()
+            assert info["members"][0]["owed"] == 1
+
+            resp = await client.get("/api/mesh/nosuch/owed", headers=bearer)
+            assert resp.status == 400
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
 
     asyncio.run(run())
 

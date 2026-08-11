@@ -648,6 +648,38 @@ three policies default **off**: unlike a socket append, a nudge consumes the
 recipient agent's turn, so enabling is a deliberate choice. Config persists
 in `mesh.json` (`policy`); timers are in-memory and restart with the daemon.
 
+## Unanswered mail
+
+The heartbeat above knows which members owe an answer, but it only ever told
+the *member*, by nudging it — the operator saw nothing, and a mesh that fails
+by going quiet is exactly the failure a message log cannot show. `Mesh.owed()`
+turns that boolean into a per-message ledger: reply-expecting messages already
+**delivered** to a member that it has not answered.
+
+- **Resolution follows the nudger exactly.** Any message the member sends
+  closes everything delivered to it beforehand — the same rule `mesh_policy`
+  applies when it compares `last_sent` with `last_asked`. It is forgiving (one
+  reply closes three questions), and deliberately so: a dashboard that listed
+  debts the heartbeat was not chasing would be worse than none. What survives
+  is mail nobody has said anything about at all.
+- **`owed` is not `pending`.** Undelivered mail is the *daemon's* debt (a
+  stuck injection); unanswered mail is the *member's* (a silent agent). Both
+  appear, separately, everywhere the other does.
+- `fyi`/`ack`/`ping` never count — `expects_reply` again, one definition.
+  Batches are counted per recipient off their own slice, so the peer whose
+  section was `fyi` owes nothing while its neighbour's `ask` still stands.
+
+Surfaced as `GET /api/mesh/{mesh}/owed` (per-member rows with the messages,
+ages and a `heartbeat` block), `claunch mesh owed <mesh>`, an `owed:` flag on
+`claunch mesh members`, and the web mesh view's **Unanswered** box. Remote
+members are counted by *their* daemon and ride in on the activity report the
+guest already piggybacks on sync acks (`owed`, next to `unanswered`); their
+rows say so, and the messages themselves stay on that daemon — the same split
+`pending` has always made, because a guest owns its members' cursors.
+
+Both the CLI and the web box call out a heartbeat that is switched **off**: an
+unattended list reads as a handled one.
+
 ## Roles
 
 A role is what a member **is** on the mesh: its stance, and the handful of
