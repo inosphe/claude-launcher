@@ -296,5 +296,12 @@ the file never corrupts an active run — but it also means edits only apply
 to the *next* run (`claunch cflow archive` to retire the active run —
 finished or not — into `.cflow/.../archive/`, then `/cflow <name> ...`
 again; the web dashboard's Archive button and start picker do the same).
+
+**Start it from outside the chat.** `claunch cflow request <name> -c "..."`
+(or the dashboard's session page) asks a running session's agent to start a
+workflow: the request is recorded, the session is nudged, and the *agent*
+performs the `start` it sees in its next `status`. That keeps the agent the
+only writer of run state — useful for scripts and phones alike, where typing
+`/cflow` into someone else's terminal is not an option.
 Iterate on a workflow by running `claunch cflow show <name>` after each edit
 until the graph and warnings look right.

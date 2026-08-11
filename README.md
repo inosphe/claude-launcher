@@ -1459,6 +1459,20 @@ which only drops the daemon's record — it asks first, since that is what makes
 the session unresumable. Since exited sessions are kept across daemon restarts,
 the sidebar also offers **clear N exited** to drop them all at once.
 
+Every session row carries an **ⓘ** (and the terminal header a **details**
+button) that opens the session's own page (`#/s/<name>`) — what the session
+*is*, as opposed to what it is printing: harness, profile, role (with the
+stance it injects), directory and the workspace it belongs to, pinned
+conversation, resume/fork, size, pid and timestamps, the meshes it is a
+member of — and its **workflow**. That last one is exact rather than
+guessed: a cflow run is keyed by (directory, scope) and the scope *is* the
+session name, so the page shows the one slot this session owns — the live
+run's step and latest reports (with a link to the run page), or, when it is
+idle, the picker that starts one. See
+[Who starts a run](#who-starts-a-run--two-paths-one-writer) for why the
+picker offers *Ask the agent to start* and *Start directly* as two different
+buttons.
+
 The sidebar also shows a **Workflows** panel monitoring every
 [cflow](#cflow-declarative-agent-workflows) run started on this machine
 (each `start` registers its directory; managed sessions running in that
@@ -1469,7 +1483,8 @@ the run's step **reports** with details, the journal, links to attach the
 session's terminal — and action buttons: **Approve** for gates and loop
 limits, and the option buttons for user-chooser selections. Web actions go
 through the same authenticated human channel as the CLI; the agent still
-has no way to approve.
+has no way to approve. A slot with a pending start request is listed there
+too, so the wait between asking and the agent picking it up is visible.
 
 - **Auth is mandatory** (even on loopback): the CLI reads the token from
   `~/.claude-launcher/daemon/token` automatically; the browser asks once for
@@ -1491,6 +1506,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET/POST | `/api/sessions`              | list / create (`{name?, harness?, profile?, cwd?, args?, env?, role?, resume?, fork_session?}`; `resume` = session name, conversation uuid, or `""`/`true` for claude's picker) |
 | DELETE | `/api/sessions`                | clear all exited records (`?logs=1` deletes their logs) |
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
+| GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
 | POST   | `/api/sessions/{name}/keys`    | `{keys: [...], literal}` — send-keys; or `{paste, enter}` — one bracketed paste (multiline-safe) |
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |
@@ -1520,6 +1536,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/peer/sessions`               | live session names for same-relay peers (wizard browsing) |
 | GET    | `/api/cflow`                   | all registered cflow runs, keyed (cwd, scope), with status + step reports; `?cwd=[&scope=]` inspects explicitly |
 | GET    | `/api/cflow/run`               | `?cwd=&scope=` — run detail: status, workflow graph, reports, journal |
+| POST   | `/api/cflow/request`           | `{cwd, scope, workflow, context?}` — **ask** the scope's agent to start a workflow (records the request + nudges; the agent runs the start) |
+| POST   | `/api/cflow/request/cancel`    | `{cwd, scope}` — withdraw a pending start request |
+| POST   | `/api/cflow/start`             | `{cwd, scope, workflow, context?}` — start a run **directly** (the fallback: no live session to ask) |
 | POST   | `/api/cflow/approve`           | `{cwd, scope}` — approve the gate / extend the loop limit |
 | POST   | `/api/cflow/select`            | `{cwd, scope, option, reason?}` — confirm a user-chooser branch |
 | POST   | `/api/cflow/nudge`             | `{cwd, scope}` — re-type the resume line into the run's own session |
@@ -1670,6 +1689,40 @@ running position.
 | `verify:` | a machine | the server runs the command on `next`; non-zero exit refuses to advance and returns the output |
 | `report` | the agent | required before `next`; journaled, shown live on the web dashboard, discarded by a failed `verify` |
 
+### Who starts a run — two paths, one writer
+
+A run can be created from two places, and they are not symmetric:
+
+- **the agent** calls the MCP `start` tool (`/cflow <workflow>`), or
+- **a human** creates one from the dashboard / CLI.
+
+Only the first is safe on its own: the agent that will drive the run is the
+process that created it. If the dashboard wrote the run instead, the agent's
+next `report`/`next` would land in a run it has never read — cflow's tools
+name no run id, so nothing would notice.
+
+So the human path is a **request**, not a write. `claunch cflow request <wf>`
+(or the dashboard's *Ask the agent to start*) records
+`.cflow/runs/<session>/request.json`, nudges the session, and stops. The
+agent sees `pending_start` in its next `status` — the call the `/cflow`
+protocol already makes it do after any nudge — and performs the `start`
+itself, which consumes the request. One writer, and an agent that always
+knows what it is running. Withdraw an unclaimed request with
+`claunch cflow request --cancel` (or *Withdraw request* on the dashboard).
+
+*Start directly* remains for the case with nobody to ask: a slot whose
+session is not live (an agent that attaches later, an orchestrator script).
+It writes the run and nudges whatever is there.
+
+Underneath, three mechanisms keep the two writers — the agent's MCP server
+and the daemon — from corrupting each other:
+
+| Hazard | Guard |
+| ------ | ----- |
+| two starts interleaving (one workflow's snapshot, another's cursor) | every state transition holds the slot's `.cflow/runs/<scope>/.lock`; a lock left by a killed process is reclaimed after 2 minutes |
+| a `verify` command (minutes to an hour) committing into a run a human moved meanwhile | verify runs **outside** the lock and commits only if run id / step / visit are unchanged — otherwise the result is discarded and journaled as `verify_discarded` |
+| an agent writing into a run that was archived and replaced under it | the MCP server fences on the run id it last handed out: the call is refused, nothing is applied, and the agent is told to re-read `status` |
+
 **Approvals are not agent-callable, by design.** The MCP surface is only
 `start` / `report` / `next` / `select` / `status` — there is no approve tool,
 so a gate cannot be talked past. Humans approve through the CLI or the
@@ -1697,7 +1750,8 @@ outside — a supervising script or another agent can watch
 | Command | Description |
 | ------- | ----------- |
 | `cflow ls` / `show <wf>` | List workflows / print a workflow's step tree. |
-| `cflow status [--json]`  | Active run: current step, state, how to unblock. |
+| `cflow status [--json]`  | Active run: current step, state, how to unblock (plus any pending start request). |
+| `cflow request <wf> [-c CTX]` / `--cancel` | Ask this session's agent to start a workflow / withdraw the request. The agent runs the `start` itself. On the dashboard: the session page's start picker. |
 | `cflow approve`          | Approve the current human gate (human-only: CLI or web dashboard). |
 | `cflow select <opt> [--reason]` | Confirm (or override) a user-chooser branch. |
 | `cflow goto <step> [--reason]` | Force the current step (`end` finishes; journaled, re-gates, auto-nudges). On the dashboard: click a diagram node. |

@@ -21,7 +21,7 @@ from .. import profile as profile_mod, workspaces
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
-from ..cflow.state import StateError
+from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
 from . import mesh_roles
 from .harness import HarnessError, SessionDef
@@ -73,7 +73,9 @@ async def revalidate_middleware(request: web.Request, handler):
 async def error_middleware(request: web.Request, handler):
     try:
         return await handler(request)
-    except (SessionGone, MeshConflict) as exc:
+    except (SessionGone, MeshConflict, LockBusy) as exc:
+        # LockBusy is transient by construction (the other writer is mid-
+        # transition), so it gets a retryable status, not a flat 400.
         return json_error(409, str(exc))
     except (
         ManagerError,
@@ -151,6 +153,8 @@ def build_app(
     r.add_get("/api/cflow/run", h_cflow_run_detail)
     r.add_get("/api/cflow/workflows", h_cflow_workflows)
     r.add_post("/api/cflow/start", h_cflow_start)
+    r.add_post("/api/cflow/request", h_cflow_request)
+    r.add_post("/api/cflow/request/cancel", h_cflow_request_cancel)
     r.add_post("/api/cflow/archive", h_cflow_archive)
     r.add_post("/api/cflow/approve", h_cflow_approve)
     r.add_post("/api/cflow/select", h_cflow_select)
@@ -205,6 +209,7 @@ def build_app(
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
     r.add_get("/api/sessions/{name}", h_session_get)
+    r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
@@ -367,31 +372,43 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
 
     runs = []
     for cwd, scope in keys:
-        entry = {
-            "cwd": cwd,
-            "scope": scope,
-            "sessions": _scope_sessions(manager, cwd, scope),
-        }
-        try:
-            payload = cflow_engine.status(cwd, scope=scope)
-        except (CflowError, WorkflowError, StateError, OSError) as exc:
-            runs.append({**entry, "status": "error", "error": str(exc)})
+        entry = _cflow_entry(manager, cwd, scope)
+        # An idle slot is only interesting when it was asked about explicitly,
+        # or when a human's start request is waiting to be picked up there.
+        if (
+            entry.get("status") == "idle"
+            and cwd != explicit
+            and not entry.get("pending_start")
+        ):
             continue
-        if payload.get("status") == "idle" and cwd != explicit:
-            continue
-        reports = [
-            {
-                "step": e.get("step"),
-                "visit": e.get("visit"),
-                "summary": e.get("summary"),
-                "details": e.get("details"),
-                "at": e.get("at"),
-            }
-            for e in cflow_state.read_journal(cwd, scope, run_id=payload.get("run"))
-            if e.get("event") == "step_report"
-        ]
-        runs.append({**entry, **payload, "reports": reports[-_CFLOW_REPORT_TAIL:]})
+        runs.append(entry)
     return web.json_response({"runs": runs})
+
+
+def _cflow_entry(manager: SessionManager, cwd: str, scope: str) -> dict:
+    """One (cwd, scope) slot as the dashboard sees it: live status, the recent
+    step reports, and any pending start request."""
+    entry = {
+        "cwd": cwd,
+        "scope": scope,
+        "sessions": _scope_sessions(manager, cwd, scope),
+    }
+    try:
+        payload = cflow_engine.status(cwd, scope=scope)
+    except (CflowError, WorkflowError, StateError, OSError) as exc:
+        return {**entry, "status": "error", "error": str(exc)}
+    reports = [
+        {
+            "step": e.get("step"),
+            "visit": e.get("visit"),
+            "summary": e.get("summary"),
+            "details": e.get("details"),
+            "at": e.get("at"),
+        }
+        for e in cflow_state.read_journal(cwd, scope, run_id=payload.get("run"))
+        if e.get("event") == "step_report"
+    ]
+    return {**entry, **payload, "reports": reports[-_CFLOW_REPORT_TAIL:]}
 
 
 def _serialize_workflow(wf) -> dict:
@@ -439,7 +456,13 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
     payload = cflow_engine.status(cwd, scope=scope)
     if payload.get("status") == "idle":
         return web.json_response(
-            {"cwd": cwd, "scope": scope, "status": "idle", "sessions": sessions}
+            {
+                "cwd": cwd,
+                "scope": scope,
+                "status": "idle",
+                "sessions": sessions,
+                "pending_start": payload.get("pending_start"),
+            }
         )
     workflow = _serialize_workflow(cflow_state.load_snapshot(cwd, scope))
     journal = cflow_state.read_journal(cwd, scope, run_id=payload.get("run"))
@@ -460,6 +483,7 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
             "scope": scope,
             "sessions": sessions,
             "run": payload,
+            "pending_start": payload.get("pending_start"),
             "workflow": workflow,
             "reports": reports,
             "journal": journal[-200:],
@@ -475,8 +499,15 @@ async def _cflow_action_cwd(request: web.Request):
     raw = str(body.get("cwd") or "")
     if not raw:
         return None, json_error(400, "'cwd' required in the JSON body")
+    cwd = Path(raw).resolve()
+    # Checked before anything touches the slot: acting on a run in a directory
+    # that is not there is always a mistake, and the first thing a mutating
+    # action does is take the slot's lock — which would otherwise create
+    # `<typo>/.cflow/runs/<scope>/` on the way to failing.
+    if not cwd.is_dir():
+        return None, json_error(400, f"no such directory: {cwd}")
     scope = str(body.get("scope") or "") or cflow_state.DEFAULT_SCOPE
-    return (str(Path(raw).resolve()), scope, body), None
+    return (str(cwd), scope, body), None
 
 
 async def _nudge_sessions(
@@ -495,13 +526,7 @@ async def _nudge_sessions(
     return nudged
 
 
-async def h_cflow_workflows(request: web.Request) -> web.Response:
-    """Workflows startable in a directory (project + global) — feeds the
-    dashboard's start picker."""
-    raw = request.query.get("cwd")
-    if not raw:
-        return json_error(400, "'cwd' query parameter required")
-    cwd = str(Path(raw).resolve())
+def _startable_workflows(cwd: str) -> list:
     flows = []
     for name, path in cflow_state.list_workflows(cwd):
         entry = {"name": name, "path": str(path)}
@@ -512,13 +537,66 @@ async def h_cflow_workflows(request: web.Request) -> web.Response:
         except WorkflowError as exc:
             entry["error"] = str(exc)
         flows.append(entry)
-    return web.json_response({"workflows": flows})
+    return flows
+
+
+async def h_cflow_workflows(request: web.Request) -> web.Response:
+    """Workflows startable in a directory (project + global) — feeds the
+    dashboard's start picker."""
+    raw = request.query.get("cwd")
+    if not raw:
+        return json_error(400, "'cwd' query parameter required")
+    cwd = str(Path(raw).resolve())
+    return web.json_response({"workflows": _startable_workflows(cwd)})
+
+
+async def h_cflow_request(request: web.Request) -> web.Response:
+    """Ask the scope's agent to start a workflow, and nudge it to look.
+
+    The preferred of the two creation paths (see ``h_cflow_start`` for the
+    other): nothing is written except the request itself, the agent performs
+    the ``start``, and so the run on disk and the run the agent believes it is
+    driving are the same object by construction.
+    """
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    workflow = str(body.get("workflow") or "")
+    if not workflow:
+        return json_error(400, "'workflow' required in the JSON body")
+    context = str(body.get("context") or "") or None
+    payload = cflow_engine.request_start(
+        workflow, context=context, by="web", cwd=cwd, scope=scope
+    )
+    name = (payload.get("request") or {}).get("workflow") or workflow
+    payload["nudged_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, cflow_engine.nudge_for_request(name)
+    )
+    return web.json_response(payload)
+
+
+async def h_cflow_request_cancel(request: web.Request) -> web.Response:
+    """Withdraw a pending start request (only until the agent acts on it)."""
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, _ = resolved
+    payload = cflow_engine.cancel_request(by="web", cwd=cwd, scope=scope)
+    return web.json_response(payload)
 
 
 async def h_cflow_start(request: web.Request) -> web.Response:
-    """Start a run from the dashboard, then nudge the scope's session so its
-    agent picks the run up. 400 while a run is still active in (cwd, scope) —
-    archive it first; the web deliberately has no force path."""
+    """Start a run *directly* from the dashboard, then nudge the scope's
+    session so its agent picks the run up. 400 while a run is still active in
+    (cwd, scope) — archive it first; the web deliberately has no force path.
+
+    This writes a run the agent has not read, which is why the dashboard
+    offers it as the fallback: for a scope with no live session (an agent that
+    will attach later, an orchestrator script) and for a human who explicitly
+    wants the run to exist now. When a session *is* live, prefer
+    ``/api/cflow/request``.
+    """
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
@@ -1080,6 +1158,58 @@ def _session(request: web.Request):
 
 async def h_session_get(request: web.Request) -> web.Response:
     return web.json_response(_session(request).info())
+
+
+async def h_session_meta(request: web.Request) -> web.Response:
+    """Everything known *about* one session, gathered in one call.
+
+    A session is described by four registries that otherwise only meet in the
+    operator's head: its own definition (harness, profile, role, conversation),
+    the workspace its directory belongs to, the meshes it is a member of, and —
+    the reason this endpoint exists — the cflow run it drives. That last link
+    is exact rather than heuristic: a run is keyed by (directory, scope) and
+    the scope IS the session name, so a session maps to exactly one slot, and
+    the workflows startable in it are the ones declared in its directory.
+    """
+    manager: SessionManager = request.app["manager"]
+    session = manager.get(request.match_info["name"])
+    info = session.info()
+    name = info["name"]
+    cwd = str(Path(info["cwd"]).resolve()) if info.get("cwd") else ""
+
+    harness = harness_registry.registry().get(info.get("harness") or "")
+    workspace = next(
+        (w for w in workspaces.list_all() if _same_dir(w.path, cwd)), None
+    )
+    role = None
+    if info.get("role"):
+        roleset = mesh_roles.resolve()
+        entry = roleset.roles.get(info["role"])
+        if entry:
+            role = {"name": entry.name, "stance": entry.stance}
+
+    body = {
+        "session": info,
+        "harness": harness.to_dict() if harness else None,
+        "workspace": workspace.to_dict() if workspace else None,
+        "role": role,
+        "meshes": request.app["mesh"].meshes_for_session(name),
+        "cflow": None,
+        "workflows": [],
+    }
+    if cwd:
+        body["cflow"] = _cflow_entry(manager, cwd, name)
+        body["workflows"] = _startable_workflows(cwd)
+    return web.json_response(body)
+
+
+def _same_dir(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    try:
+        return Path(a).resolve() == Path(b).resolve()
+    except OSError:
+        return False
 
 
 async def h_session_delete(request: web.Request) -> web.Response:

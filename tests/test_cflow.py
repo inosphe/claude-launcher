@@ -101,6 +101,9 @@ def flow_dir(home, tmp_path, monkeypatch):
     (proj / ".claunch" / "workflows").mkdir(parents=True)
     monkeypatch.chdir(proj)
     monkeypatch.delenv(state_mod.SESSION_ENV, raising=False)
+    # The MCP fence lives in module state (one server process = one agent);
+    # tests share a process, so each starts from a blank one.
+    mcp._seen_run = None
     return proj
 
 
@@ -658,6 +661,145 @@ def test_abort_and_reset(flow_dir):
 
 
 # --------------------------------------------------------------------------- #
+# two writers: start requests, the slot lock, and stale results
+# --------------------------------------------------------------------------- #
+def test_request_is_recorded_and_the_agent_fulfils_it(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    payload = engine.request_start("linear", "ship the thing", by="web")
+    assert payload["status"] == "start_requested"
+    assert payload["request"]["workflow"] == "linear"
+
+    # nothing was started: the slot is still idle, but it says what is coming
+    assert not state_mod.has_run()
+    status = engine.status()
+    assert status["status"] == "idle"
+    assert status["pending_start"]["context"] == "ship the thing"
+
+    # the agent performs the start itself; the request is consumed by it
+    started = engine.start("linear", "ship the thing")
+    assert started["step_id"] == "one"
+    assert engine.status().get("pending_start") is None
+    events = [e["event"] for e in state_mod.read_journal()]
+    assert events[:2] == ["start_requested", "started"]
+    assert "request_fulfilled" in events
+
+
+def test_request_refused_while_a_run_is_active(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    with pytest.raises(CflowError, match="already active"):
+        engine.request_start("linear")
+
+
+def test_request_rejects_an_unknown_workflow(flow_dir):
+    """Resolved in front of the human who asked, not inside the agent later."""
+    with pytest.raises(WorkflowError, match="no workflow named"):
+        engine.request_start("nope")
+    assert engine.status().get("pending_start") is None
+
+
+def test_request_keeps_the_slot_visible_and_can_be_withdrawn(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.request_start("linear", by="web")
+    # the dashboard finds a slot that holds no run at all
+    assert state_mod.scopes_in() == ["default"]
+    assert (str(flow_dir.resolve()), "default") in state_mod.known_runs()
+
+    engine.cancel_request(by="user")
+    assert engine.status().get("pending_start") is None
+    assert state_mod.scopes_in() == []
+    with pytest.raises(CflowError, match="no pending start request"):
+        engine.cancel_request()
+
+
+def test_starting_something_else_supersedes_the_request(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    _write(flow_dir, "gated", GATED)
+    engine.request_start("gated", by="web")
+    engine.start("linear")
+    events = [e["event"] for e in state_mod.read_journal()]
+    assert "request_superseded" in events
+    # consumed either way: it cannot be "fulfilled" a second time
+    assert engine.status().get("pending_start") is None
+
+
+def test_slot_lock_is_exclusive_and_reclaims_a_dead_holder(flow_dir):
+    import os
+    import time
+
+    with state_mod.run_lock():
+        with pytest.raises(state_mod.LockBusy):
+            with state_mod.run_lock(timeout=0.05):
+                pass
+    # released on the way out
+    with state_mod.run_lock(timeout=0.05):
+        pass
+
+    # a lock left behind by a killed process is not a permanent deadlock
+    lock = state_mod.scope_dir() / state_mod.LOCK_FILE
+    lock.write_text("999999 crashed", encoding="utf-8")
+    old = time.time() - state_mod.LOCK_STALE_AFTER - 60
+    os.utime(lock, (old, old))
+    with state_mod.run_lock(timeout=0.05):
+        pass
+
+
+def test_concurrent_starts_cannot_interleave(flow_dir):
+    """Two processes starting at once must not pair one workflow's snapshot
+    with another's cursor — the failure the slot lock exists to prevent."""
+    import threading
+
+    _write(flow_dir, "linear", LINEAR)
+    _write(flow_dir, "gated", GATED)
+    results = []
+
+    def go(name):
+        try:
+            results.append(engine.start(name)["workflow"])
+        except (CflowError, state_mod.StateError) as exc:
+            results.append(type(exc).__name__)
+
+    threads = [
+        threading.Thread(target=go, args=(name,))
+        for name in ("linear", "gated", "linear", "gated")
+    ]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    started = [r for r in results if r in ("linear", "gated")]
+    assert len(started) == 1  # the rest were refused, not silently applied
+    # cursor and snapshot describe the SAME workflow (the interleaving bug
+    # pairs one workflow's first step with the other's graph)
+    expected_first = {"linear": "one", "gated": "work"}[started[0]]
+    assert engine.status()["step_id"] == expected_first
+    assert state_mod.load_snapshot().start == expected_first
+
+
+def test_verify_result_is_discarded_when_the_run_moved(flow_dir, monkeypatch):
+    """A verify command runs unlocked (it can take an hour), so its result is
+    only committed if the run is still where it was."""
+    _write(flow_dir, "verified", _verified_yaml())
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("verified")
+    engine.report("built it")
+
+    def moving_verify(step, cwd):
+        # a human archives the run and starts another while the build runs
+        engine.archive(by="user")
+        engine.start("linear")
+        return None  # ... and the command would have passed
+
+    monkeypatch.setattr(engine, "_run_verify", moving_verify)
+    payload = engine.next_step()
+    assert payload["workflow"] == "linear"      # the run that is actually here
+    assert payload["step_id"] == "one"          # untouched by the stale pass
+    assert "discarded" in payload["note"]
+    assert "verify_discarded" in [e["event"] for e in state_mod.read_journal()]
+
+
+# --------------------------------------------------------------------------- #
 # MCP dispatch
 # --------------------------------------------------------------------------- #
 def _rpc(method, params=None, msg_id=1):
@@ -694,6 +836,38 @@ def test_mcp_tool_call_flow(flow_dir):
     resp = _rpc("tools/call", {"name": "next", "arguments": {}})
     payload = json.loads(resp["result"]["content"][0]["text"])
     assert payload["step_id"] == "two"
+
+
+def test_mcp_refuses_to_write_into_a_replaced_run(flow_dir):
+    """The agent's report must never land in a run it has not read."""
+    _write(flow_dir, "linear", LINEAR)
+    resp = _rpc("tools/call", {"name": "start", "arguments": {"workflow": "linear"}})
+    first = json.loads(resp["result"]["content"][0]["text"])["run"]
+
+    # someone else (the dashboard, another human) replaces the run
+    engine.archive(by="web")
+    engine.start("linear")
+
+    resp = _rpc("tools/call", {"name": "report", "arguments": {"summary": "done"}})
+    assert resp["result"]["isError"] is True
+    text = resp["result"]["content"][0]["text"]
+    assert first in text and "not the run here any more" in text
+    assert engine.status().get("report") is None  # nothing was applied
+
+    # re-reading the position re-arms the fence, and work resumes
+    resp = _rpc("tools/call", {"name": "status", "arguments": {}})
+    assert json.loads(resp["result"]["content"][0]["text"])["step_id"] == "one"
+    resp = _rpc("tools/call", {"name": "report", "arguments": {"summary": "done"}})
+    assert resp["result"]["isError"] is False
+
+
+def test_mcp_status_surfaces_a_pending_start(flow_dir):
+    _write(flow_dir, "linear", LINEAR)
+    engine.request_start("linear", "from the dashboard", by="web")
+    resp = _rpc("tools/call", {"name": "status", "arguments": {}})
+    payload = json.loads(resp["result"]["content"][0]["text"])
+    assert payload["pending_start"]["workflow"] == "linear"
+    assert "call 'start'" in payload["note"]
 
 
 def test_mcp_errors_are_soft(flow_dir):

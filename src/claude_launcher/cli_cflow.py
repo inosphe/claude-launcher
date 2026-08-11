@@ -88,9 +88,16 @@ def _cmd_status(args: argparse.Namespace) -> int:
         _print_payload(payload)
         return 0
     status = payload.get("status")
+    pending = payload.get("pending_start")
     if status == "idle":
         print("no active cflow run in this directory")
-        others = state_mod.scopes_in()
+        if pending:
+            _print_pending(pending)
+        # ...but not the one just reported on: a slot holding only a start
+        # request counts as a scope now, and "runs exist for: default" while
+        # standing in default is noise.
+        here = scope or state_mod.current_scope()
+        others = [s for s in state_mod.scopes_in() if s != here]
         if others:
             print(f"runs exist for: {', '.join(others)} (use -t <session>)")
         return 0
@@ -124,6 +131,43 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if status == "select":
         options = ", ".join(o["name"] for o in payload.get("options", []))
         print(f"decision pending ({payload.get('chooser')}): {options}")
+    if pending:
+        _print_pending(pending)
+    return 0
+
+
+def _print_pending(pending: dict) -> None:
+    ctx = pending.get("context")
+    print(
+        f"start requested: {pending.get('workflow')!r} "
+        f"(by {pending.get('by')}, {pending.get('at')})"
+    )
+    if ctx:
+        print(f"  context: {ctx}")
+    print(
+        "  the session's agent starts it itself; "
+        "withdraw: claunch cflow request --cancel"
+    )
+
+
+def _cmd_request(args: argparse.Namespace) -> int:
+    """Ask the scope's agent to start a workflow (it performs the start)."""
+    scope = _resolve_scope(args)
+    if args.cancel:
+        payload = engine.cancel_request(by="user", scope=scope)
+        print(f"withdrew the pending start of {payload['request'].get('workflow')!r}")
+        return 0
+    if not args.workflow:
+        raise engine.CflowError("a workflow name is required (or pass --cancel)")
+    payload = engine.request_start(
+        args.workflow, args.context, by="user", scope=scope
+    )
+    request = payload["request"]
+    _report_unblock(
+        f"requested a start of {request['name']!r}",
+        engine.nudge_for_request(request["workflow"]),
+        scope,
+    )
     return 0
 
 
@@ -292,6 +336,18 @@ def register(sub) -> None:
     q = _scoped(csub.add_parser("status", help="show the active run in this directory"))
     q.add_argument("--json", action="store_true", help="raw JSON payload")
     q.set_defaults(func=_cmd_status)
+
+    q = _scoped(csub.add_parser(
+        "request",
+        help="ask this session's agent to start a workflow (the agent runs "
+        "the start itself)",
+    ))
+    q.add_argument("workflow", nargs="?", help="workflow name or .yaml path")
+    q.add_argument("-c", "--context", help="task context carried into the run")
+    q.add_argument(
+        "--cancel", action="store_true", help="withdraw the pending request"
+    )
+    q.set_defaults(func=_cmd_request)
 
     q = _scoped(csub.add_parser(
         "approve", help="approve the current human gate (the agent cannot)"

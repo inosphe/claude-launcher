@@ -636,6 +636,30 @@ class MeshManager:
             return bool(self.machine) and member.machine == self.machine
         return member.machine in ("", self.machine)
 
+    def meshes_for_session(self, session: str) -> List[dict]:
+        """Every mesh THIS daemon's ``session`` is a member of, as
+        ``{mesh, handle, role, joined_at, members}``.
+
+        The roster is keyed by handle, and a handle on a mirrored mesh may
+        name a session on another machine — so locality is decided by
+        :meth:`_is_local`, not by the session name alone.
+        """
+        out: List[dict] = []
+        for mesh in self.list():
+            for handle in sorted(mesh.members):
+                member = mesh.members[handle]
+                if member.session == session and self._is_local(mesh, member):
+                    out.append(
+                        {
+                            "mesh": mesh.name,
+                            "handle": member.handle,
+                            "role": member.role,
+                            "joined_at": member.joined_at,
+                            "members": len(mesh.members),
+                        }
+                    )
+        return out
+
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #

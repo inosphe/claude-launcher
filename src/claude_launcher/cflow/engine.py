@@ -25,6 +25,14 @@ Enforcement lives here, not in prompts:
   explicit, timestamped account of what happened, which the daemon web
   dashboard shows live next to the run. A failed verify clears the report:
   the outcome it described did not survive, so the fix must be re-reported.
+
+Two processes write a run: the agent's MCP server and the daemon (dashboard
+and CLI actions). Every state transition therefore runs under the slot's
+lock, and the one long operation — a step's verify command — runs *outside*
+it and commits only if the run has not moved underneath (see
+:func:`next_step`). A human who wants a run started asks for one
+(:func:`request_start`); the agent still performs the ``start`` itself, so
+the run it drives and the run on disk can never be two different things.
 """
 
 from __future__ import annotations
@@ -49,6 +57,13 @@ NUDGE_CONTINUE = "cflow: continue per the /cflow protocol"
 NUDGE_STARTED = (
     "cflow: a new workflow run was started - continue per the /cflow protocol"
 )
+
+
+def nudge_for_request(workflow: str) -> str:
+    return (
+        f"cflow: a start of workflow '{workflow}' was requested - call the "
+        f"cflow 'status' tool, then start it per the /cflow protocol"
+    )
 
 
 def nudge_for_state(step_id: str) -> str:
@@ -77,6 +92,26 @@ def _scoped_op(fn):
         token = state_mod.push_scope(scope)
         try:
             return fn(*args, **kwargs)
+        finally:
+            state_mod.pop_scope(token)
+
+    return wrapper
+
+
+def _locked_op(fn):
+    """A scoped operation that also holds the slot's cross-process lock.
+
+    Everything that reads-then-writes run state goes through here: the agent's
+    MCP server and the daemon are separate processes acting on the same files,
+    so 'check it is idle, then write the run' has to be indivisible.
+    """
+
+    @functools.wraps(fn)
+    def wrapper(*args, scope: Optional[str] = None, **kwargs):
+        token = state_mod.push_scope(scope)
+        try:
+            with state_mod.run_lock(kwargs.get("cwd")):
+                return fn(*args, **kwargs)
         finally:
             state_mod.pop_scope(token)
 
@@ -295,7 +330,7 @@ def _archive_current(state: dict, by: str, cwd: Optional[str]) -> str:
     return str(state_mod.archive_run(cwd))
 
 
-@_scoped_op
+@_locked_op
 def start(
     workflow_ref: str,
     context: Optional[str] = None,
@@ -303,6 +338,7 @@ def start(
     force: bool = False,
     cwd: Optional[str] = None,
 ) -> dict:
+    pending = state_mod.read_request(cwd)
     if state_mod.has_run(cwd):
         old = state_mod.load_state(cwd)
         active = old.get("status") not in ("done", "aborted")
@@ -354,12 +390,98 @@ def start(
         },
         cwd,
     )
+    # A start settles any pending human request for this slot — whether it
+    # fulfils it or (starting something else) supersedes it. Either way the
+    # request must not survive to be "fulfilled" a second time.
+    if pending:
+        fulfilled = pending.get("workflow") == workflow_ref or (
+            pending.get("resolved") == str(path)
+        )
+        state_mod.journal(
+            "request_fulfilled" if fulfilled else "request_superseded",
+            {
+                "run": state["run_id"],
+                "request": pending.get("id"),
+                "requested": pending.get("workflow"),
+                "started": workflow.name,
+                "by": pending.get("by"),
+            },
+            cwd,
+        )
+        state_mod.clear_request(cwd)
     payload = _payload(workflow, state, cwd, mutate=True)
     if context:
         payload["context"] = context
     if workflow.warnings:
         payload["workflow_warnings"] = workflow.warnings
     return payload
+
+
+@_locked_op
+def request_start(
+    workflow_ref: str,
+    context: Optional[str] = None,
+    *,
+    by: str = "web",
+    cwd: Optional[str] = None,
+) -> dict:
+    """Ask this slot's agent to start ``workflow_ref`` — the human side of a
+    start, without writing a run.
+
+    The dashboard could write the run itself (and :func:`start` still lets it),
+    but then two independent writers create runs the agent has not read: its
+    next ``report``/``next`` lands in a run it never saw. Recording an intent
+    instead keeps a single writer — the agent — and the agent learns of the
+    request through the same ``status`` call the protocol already makes it do
+    after any nudge.
+    """
+    if state_mod.has_run(cwd):
+        old = state_mod.load_state(cwd)
+        if old.get("status") not in ("done", "aborted"):
+            raise CflowError(
+                f"a run of {old.get('workflow')!r} is already active here "
+                f"(step {old.get('current')}); retire it first "
+                f"('claunch cflow archive' or the dashboard's Archive button)"
+            )
+    # Resolve now, so a typo or an invalid workflow fails in front of the
+    # human who asked, not silently inside the agent's turn later.
+    path = state_mod.find_workflow(workflow_ref, cwd)
+    workflow = model.parse(path.read_text(encoding="utf-8"), default_name=path.stem)
+    request = {
+        "id": f"req-{secrets.token_hex(3)}",
+        "workflow": workflow_ref,
+        "name": workflow.name,
+        "resolved": str(path),
+        "context": (context or "").strip(),
+        "by": by,
+        "at": state_mod.utcnow(),
+    }
+    state_mod.write_request(request, cwd)
+    state_mod.register_run_dir(cwd)
+    state_mod.journal("start_requested", dict(request), cwd)
+    return {
+        "status": "start_requested",
+        "request": request,
+        "note": (
+            "recorded; the scope's agent starts it itself (it sees the request "
+            "in its next 'status' call) — nudge it if it is idle"
+        ),
+    }
+
+
+@_locked_op
+def cancel_request(*, by: str = "web", cwd: Optional[str] = None) -> dict:
+    """Withdraw a pending start request (nothing has run yet)."""
+    pending = state_mod.read_request(cwd)
+    if not pending:
+        raise CflowError("no pending start request here")
+    state_mod.clear_request(cwd)
+    state_mod.journal(
+        "request_cancelled",
+        {"request": pending.get("id"), "workflow": pending.get("workflow"), "by": by},
+        cwd,
+    )
+    return {"status": "request_cancelled", "request": pending}
 
 
 def _load(cwd: Optional[str]):
@@ -378,7 +500,7 @@ def _blocked(workflow: Workflow, state: dict) -> Optional[str]:
     return None
 
 
-@_scoped_op
+@_locked_op
 def report(
     summary: str,
     details: Optional[str] = None,
@@ -421,41 +543,100 @@ def report(
     }
 
 
+def _fence(state: dict) -> tuple:
+    """The identity of 'the position a long operation was started from'."""
+    current = state.get("current") or ""
+    return (
+        state.get("run_id"),
+        state.get("status"),
+        current,
+        _visits(state, current) if current else 0,
+    )
+
+
+def _advance(workflow: Workflow, state: dict, step: Step, filed: dict, cwd) -> dict:
+    """Journal the step's completion and move to its successor."""
+    state_mod.journal(
+        "step_completed",
+        {
+            "run": state["run_id"],
+            "step": step.id,
+            "visit": _visits(state, step.id),
+            "summary": filed["summary"],
+            "details": filed.get("details"),
+        },
+        cwd,
+    )
+    state["completed"] += 1
+    _move_to(workflow, state, step.next, cwd)
+    if state["status"] == "done":
+        return _done_payload(state, cwd)
+    return _payload(workflow, state, cwd, mutate=True)
+
+
 @_scoped_op
 def next_step(*, cwd: Optional[str] = None) -> dict:
-    workflow, state = _load(cwd)
-    if state["status"] in ("done", "aborted"):
-        return _done_payload(state, cwd)
-    step = workflow.step(state["current"])
+    with state_mod.run_lock(cwd):
+        workflow, state = _load(cwd)
+        if state["status"] in ("done", "aborted"):
+            return _done_payload(state, cwd)
+        step = workflow.step(state["current"])
 
-    if not state["delivered"] or _blocked(workflow, state):
-        # Nothing has been handed out yet (fresh arrival, or a gate/loop guard
-        # is closed): (re)attempt delivery.
-        return _payload(workflow, state, cwd, mutate=True)
+        if not state["delivered"] or _blocked(workflow, state):
+            # Nothing has been handed out yet (fresh arrival, or a gate/loop
+            # guard is closed): (re)attempt delivery.
+            return _payload(workflow, state, cwd, mutate=True)
 
-    if step.is_select:
-        payload = _payload(workflow, state, cwd, mutate=False)
-        payload["note"] = "this is a decision point — use the 'select' tool, not 'next'"
-        return payload
+        if step.is_select:
+            payload = _payload(workflow, state, cwd, mutate=False)
+            payload["note"] = (
+                "this is a decision point — use the 'select' tool, not 'next'"
+            )
+            return payload
 
-    # Completing a delivered executable step: the report comes first, so the
-    # journal/dashboard always carry an explicit account of what happened.
-    filed = _current_report(state, step.id)
-    if filed is None:
-        return {
-            **_base(state),
-            "step_id": step.id,
-            "status": "report_required",
-            "note": (
-                "no completion report filed for this step yet — call 'report' "
-                "with {summary, details?} describing what actually happened, "
-                "then call 'next' again"
-            ),
-        }
+        # Completing a delivered executable step: the report comes first, so
+        # the journal/dashboard always carry an explicit account of what
+        # happened.
+        filed = _current_report(state, step.id)
+        if filed is None:
+            return {
+                **_base(state),
+                "step_id": step.id,
+                "status": "report_required",
+                "note": (
+                    "no completion report filed for this step yet — call "
+                    "'report' with {summary, details?} describing what actually "
+                    "happened, then call 'next' again"
+                ),
+            }
+        if not step.verify:
+            return _advance(workflow, state, step, filed, cwd)
+        fence = _fence(state)
 
-    # Machine gate second: verify must confirm the reported outcome.
-    if step.verify:
-        result = _run_verify(step, cwd)
+    # Machine gate second: verify must confirm the reported outcome. It runs
+    # UNLOCKED — a build/test command can take an hour, and holding the slot
+    # that long would block every human control (approve, archive, goto) on
+    # the dashboard. The commit below re-checks the position instead.
+    result = _run_verify(step, cwd)
+
+    with state_mod.run_lock(cwd):
+        workflow, state = _load(cwd)
+        if _fence(state) != fence:
+            # A human moved (or retired) the run while the command ran. The
+            # result describes a position that no longer exists, so it is not
+            # applied — reporting that plainly beats advancing the wrong run.
+            state_mod.journal(
+                "verify_discarded",
+                {"run": state["run_id"], "step": step.id, "was": fence[2]},
+                cwd,
+            )
+            payload = _payload(workflow, state, cwd, mutate=False)
+            payload["note"] = (
+                f"the run moved while {step.verify.command!r} was running, so "
+                f"its result was discarded — this is the current position; "
+                f"re-read it and continue from here"
+            )
+            return payload
         if result is not None:
             state_mod.journal(
                 "verify_failed",
@@ -483,23 +664,8 @@ def next_step(*, cwd: Optional[str] = None) -> dict:
             {"run": state["run_id"], "step": step.id, "command": step.verify.command},
             cwd,
         )
-
-    state_mod.journal(
-        "step_completed",
-        {
-            "run": state["run_id"],
-            "step": step.id,
-            "visit": _visits(state, step.id),
-            "summary": filed["summary"],
-            "details": filed.get("details"),
-        },
-        cwd,
-    )
-    state["completed"] += 1
-    _move_to(workflow, state, step.next, cwd)
-    if state["status"] == "done":
-        return _done_payload(state, cwd)
-    return _payload(workflow, state, cwd, mutate=True)
+        filed = _current_report(state, step.id) or filed
+        return _advance(workflow, state, step, filed, cwd)
 
 
 def _run_verify(step: Step, cwd: Optional[str]) -> Optional[dict]:
@@ -527,7 +693,7 @@ def _run_verify(step: Step, cwd: Optional[str]) -> Optional[dict]:
     }
 
 
-@_scoped_op
+@_locked_op
 def select(
     option: str,
     reason: Optional[str] = None,
@@ -591,7 +757,7 @@ def select(
     }
 
 
-@_scoped_op
+@_locked_op
 def goto(
     step_id: str,
     *,
@@ -638,7 +804,7 @@ def goto(
     }
 
 
-@_scoped_op
+@_locked_op
 def approve(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     """Unblock the current gate or loop guard. CLI-only — not exposed over MCP."""
     workflow, state = _load(cwd)
@@ -686,10 +852,26 @@ def approve(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     raise CflowError(f"current step {step.id!r} has nothing waiting for approval")
 
 
+#: Told to an agent whose 'status' turns up a human's start request. The
+#: agent still performs the start, which is the whole point: it cannot end up
+#: driving a run it never read.
+REQUEST_NOTE = (
+    "a human asked for this workflow to be started here — confirm it is what "
+    "you should be doing, then call 'start' with {workflow, context} using "
+    "exactly this workflow (its context is the requester's own words). If it "
+    "looks wrong, do not start it: say so and stop"
+)
+
+
 @_scoped_op
 def status(cwd: Optional[str] = None) -> dict:
+    pending = state_mod.read_request(cwd)
     if not state_mod.has_run(cwd):
-        return {"status": "idle", "note": "no active cflow run in this directory"}
+        payload = {"status": "idle", "note": "no active cflow run in this directory"}
+        if pending:
+            payload["pending_start"] = pending
+            payload["note"] = REQUEST_NOTE
+        return payload
     workflow, state = _load(cwd)
     payload = _payload(workflow, state, cwd, mutate=False)
     payload["visits"] = dict(state["visits"])
@@ -698,10 +880,33 @@ def status(cwd: Optional[str] = None) -> dict:
         payload["context"] = state["context"]
     if state.get("current") and _current_report(state, state["current"]):
         payload["report"] = state["report"]
+    if pending:
+        # Only reachable when the run finished after the request was filed
+        # (an active run refuses one) — the next start will consume it.
+        payload["pending_start"] = pending
     return payload
 
 
-@_scoped_op
+def current_run_id(
+    cwd: Optional[str] = None, scope: Optional[str] = None
+) -> Optional[str]:
+    """The run id on disk for a slot, or None when it holds no run.
+
+    Read-only and cheap: the MCP server calls it before every mutating tool to
+    notice that the run it has been driving was replaced underneath it.
+    """
+    token = state_mod.push_scope(scope)
+    try:
+        if not state_mod.has_run(cwd):
+            return None
+        return str(state_mod.load_state(cwd).get("run_id") or "") or None
+    except state_mod.StateError:
+        return None
+    finally:
+        state_mod.pop_scope(token)
+
+
+@_locked_op
 def abort(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     workflow, state = _load(cwd)
     if state["status"] in ("done", "aborted"):
@@ -712,7 +917,7 @@ def abort(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     return _done_payload(state, cwd)
 
 
-@_scoped_op
+@_locked_op
 def archive(*, by: str = "user", cwd: Optional[str] = None) -> dict:
     """Retire the current run — finished or not — into the scope's archive
     folder, freeing the slot for a new ``start``. An active run is aborted

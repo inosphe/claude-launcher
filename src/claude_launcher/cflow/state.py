@@ -8,6 +8,11 @@ Runs are keyed by **(working directory, scope)** and stored under
 - ``state.json``   — cursor, status, approvals, pending selection
 - ``journal.jsonl``— append-only event log (started, delivered, completed,
   verify results, selections, approvals, done/aborted)
+- ``request.json`` — a *pending start request*: a human asked (from the
+  dashboard/CLI) for a workflow to be started here, for the scope's agent to
+  pick up and start itself. Outlives an archive; cleared by ``start``
+- ``.lock``        — held across every state transition, so the two processes
+  that write a run (the agent's MCP server and the daemon) cannot interleave
 - ``archive/<stamp>-<run_id>/`` — retired runs, one folder each holding the
   three files above; ``archive`` (or a new ``start`` over a finished run)
   moves them there, freeing the slot
@@ -28,9 +33,11 @@ An explicit path (ending in .yaml/.yml) is used as-is.
 
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import json
 import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -97,7 +104,10 @@ def register_run_dir(cwd: Optional[str] = None, scope: Optional[str] = None) -> 
 
 def _run_alive(cwd: str, scope: str) -> bool:
     base = Path(cwd) / ".cflow"
-    if (base / "runs" / scope / "state.json").is_file():
+    slot = base / "runs" / scope
+    # A pending start request keeps the slot listed even with no run yet —
+    # that is precisely the state a human wants to watch after asking for one.
+    if (slot / "state.json").is_file() or (slot / REQUEST_FILE).is_file():
         return True
     # legacy flat layout counts as the default scope until migrated
     return scope == DEFAULT_SCOPE and (base / "state.json").is_file()
@@ -165,7 +175,8 @@ def _migrate_legacy(base: Path, target: Path) -> None:
 
 
 def scopes_in(cwd: Optional[str] = None) -> List[str]:
-    """Scopes with run state in this directory (legacy layout = default)."""
+    """Scopes with run state (or a pending start request) in this directory
+    (legacy layout = default)."""
     base = cflow_dir(cwd)
     out: List[str] = []
     if (base / "state.json").is_file():
@@ -173,7 +184,8 @@ def scopes_in(cwd: Optional[str] = None) -> List[str]:
     runs = base / "runs"
     if runs.is_dir():
         for entry in sorted(runs.iterdir()):
-            if (entry / "state.json").is_file() and entry.name not in out:
+            has = (entry / "state.json").is_file() or (entry / REQUEST_FILE).is_file()
+            if has and entry.name not in out:
                 out.append(entry.name)
     return out
 
@@ -188,6 +200,127 @@ def _snapshot_path(cwd: Optional[str], scope: Optional[str] = None) -> Path:
 
 def journal_path(cwd: Optional[str] = None, scope: Optional[str] = None) -> Path:
     return scope_dir(cwd, scope) / "journal.jsonl"
+
+
+# --------------------------------------------------------------------------- #
+# cross-process lock
+# --------------------------------------------------------------------------- #
+#: Name of the per-scope lock file.
+LOCK_FILE = ".lock"
+
+#: How long to wait for another process to release the slot before failing.
+#: Every holder does a handful of small file writes, so this is a very long
+#: time in practice — verify commands deliberately run *outside* the lock.
+LOCK_TIMEOUT = 10.0
+
+#: A lock file older than this is treated as abandoned (its holder crashed or
+#: was killed mid-transition) and reclaimed.
+LOCK_STALE_AFTER = 120.0
+
+_POLL = 0.02
+
+
+class LockBusy(StateError):
+    """The scope's lock could not be taken (another process holds it)."""
+
+
+def _lock_stale(path: Path) -> bool:
+    try:
+        return (time.time() - path.stat().st_mtime) > LOCK_STALE_AFTER
+    except OSError:
+        return False
+
+
+@contextlib.contextmanager
+def run_lock(
+    cwd: Optional[str] = None,
+    scope: Optional[str] = None,
+    *,
+    timeout: float = LOCK_TIMEOUT,
+):
+    """Hold the ``(cwd, scope)`` slot exclusively for a state transition.
+
+    Two *processes* write a run — the daemon (web/CLI actions) and the agent's
+    own MCP server (``start``/``report``/``next``/``select``) — and the run is
+    several files (``state.json`` + ``workflow.yaml`` + the journal). Without
+    this, two concurrent starts both see an empty slot and both write: the
+    survivor can end up with one workflow's snapshot and another's cursor.
+
+    An exclusively-created lock file is the portable primitive here (Windows
+    has no ``flock``); a lock left behind by a killed process is reclaimed
+    after :data:`LOCK_STALE_AFTER`.
+    """
+    path = scope_dir(cwd, scope) / LOCK_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    deadline = time.monotonic() + timeout
+    fd = None
+    while True:
+        try:
+            fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            break
+        except FileExistsError:
+            if _lock_stale(path):
+                _unlink(path)
+                continue
+            if time.monotonic() >= deadline:
+                raise LockBusy(
+                    f"another process is changing this cflow run "
+                    f"({path.parent}); try again in a moment"
+                )
+            time.sleep(_POLL)
+        except OSError as exc:
+            raise StateError(f"cannot lock cflow run at {path}: {exc}") from exc
+    try:
+        try:
+            os.write(fd, f"{os.getpid()} {utcnow()}".encode("utf-8"))
+        except OSError:
+            pass
+        os.close(fd)
+        fd = None
+        yield
+    finally:
+        if fd is not None:
+            os.close(fd)
+        _unlink(path)
+
+
+def _unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
+# --------------------------------------------------------------------------- #
+# pending start request
+# --------------------------------------------------------------------------- #
+#: Name of the pending start-request file inside a scope directory.
+REQUEST_FILE = "request.json"
+
+
+def _request_path(cwd: Optional[str] = None, scope: Optional[str] = None) -> Path:
+    return scope_dir(cwd, scope) / REQUEST_FILE
+
+
+def read_request(
+    cwd: Optional[str] = None, scope: Optional[str] = None
+) -> Optional[dict]:
+    """The pending start request for this slot, if a human filed one."""
+    try:
+        doc = json.loads(_request_path(cwd, scope).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return doc if isinstance(doc, dict) and doc.get("workflow") else None
+
+
+def write_request(request: dict, cwd: Optional[str] = None) -> None:
+    path = _request_path(cwd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(request, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def clear_request(cwd: Optional[str] = None) -> None:
+    _unlink(_request_path(cwd))
 
 
 # --------------------------------------------------------------------------- #

@@ -42,8 +42,10 @@ description: >-
 # cflow — run a declared workflow step by step
 
 Argument form: `/cflow <workflow-name> [extra context...]`. With no name:
-call the `status` tool first — if a run is active, resume it; otherwise list
-candidates (`claunch cflow ls`) and ask which one to run.
+call the `status` tool first — if a run is active, resume it; if `status`
+carries a `pending_start` (a human asked from the dashboard/CLI for a
+workflow to be started here), that is the answer; otherwise list candidates
+(`claunch cflow ls`) and ask which one to run.
 
 ## Protocol
 
@@ -81,6 +83,14 @@ candidates (`claunch cflow ls`) and ask which one to run.
 4. Resuming after a stop: when nudged (any user message), call `status`
    first to see whether the gate/selection was granted, then continue with
    `next`.
+5. `pending_start` in a `status` payload = a human asked for a workflow to
+   be started in this session (from the dashboard or `claunch cflow
+   request`). You perform the start: check it makes sense for what you are
+   doing, tell the user you are starting it, then call `start {workflow,
+   context}` with exactly that workflow (its `context` is the requester's
+   own words — carry it through, adding anything relevant from the chat).
+   If it is clearly wrong, do NOT start it: say why and stop. The request
+   clears once you start.
 
 ## Rules
 
@@ -107,6 +117,11 @@ candidates (`claunch cflow ls`) and ask which one to run.
   pass `force` on your own initiative.
 - Finished (done/aborted) runs never block: `start` archives them
   automatically and begins the new run.
+- A run can be replaced under you (someone archived it and started another,
+  or started one from the dashboard). Then a tool answers that the run you
+  were driving *is not the run here any more* — nothing was applied. Do not
+  retry: call `status`, tell the user the run changed, and continue from
+  whatever position `status` reports.
 """
 
 

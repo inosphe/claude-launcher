@@ -112,6 +112,11 @@ body {
   margin-top: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
   background: #238636; color: #fff; border: none; border-radius: 4px;
 }
+#term-details {
+  margin-left: auto; padding: 3px 10px; font-size: 12px; cursor: pointer;
+  background: #30363d; color: #c6cdd5; border: none; border-radius: 4px;
+}
+#term-details:hover { background: #3c444d; }
 #term-kill { background: #8b2e2e; padding: 3px 10px; font-size: 12px; }
 #term-resume { background: #1f6feb; padding: 3px 10px; font-size: 12px; }
 #term-resume:hover { background: #388bfd; }
@@ -139,6 +144,38 @@ body {
   flex: 1; display: flex; align-items: center; justify-content: center;
   color: #7d8590; font-size: 14px;
 }
+
+/* session detail page */
+#sess-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
+#session-list .sess-info {
+  flex: none; background: none; border: none; color: #6e7681;
+  font-size: 13px; line-height: 1; padding: 2px 4px; cursor: pointer;
+}
+#session-list .sess-info:hover { color: #58a6ff; }
+.sess-meta {
+  display: grid; grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 16px; margin: 14px 0; max-width: 760px; font-size: 13px;
+}
+.sess-meta dt { color: #7d8590; }
+.sess-meta dd { color: #c6cdd5; overflow-wrap: anywhere; }
+.sess-meshes, .sess-wf {
+  margin: 14px 0; padding: 12px 16px; background: #1b1e24;
+  border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
+}
+.sess-meshes h3, .sess-wf h3 {
+  font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
+}
+.sess-mesh {
+  display: inline-block; margin: 0 8px 6px 0; padding: 3px 10px;
+  border-radius: 10px; background: #172947; color: #58a6ff;
+  font-size: 12px; text-decoration: none;
+}
+.sess-mesh:hover { background: #1f3660; }
+.sess-wf-run { display: flex; align-items: center; gap: 8px; }
+.sess-wf-name { font-size: 14px; color: #e6edf3; }
+.sess-wf-run .meta { color: #7d8590; font-size: 11px; }
+.sess-wf .wf-btn { margin-top: 10px; }
+.sess-wf .wf-start, .sess-wf .wf-pending { margin-left: 0; background: #14161a; }
 
 /* workflow detail page */
 #wf-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
@@ -186,6 +223,14 @@ body {
 .wf-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .wf-btn:disabled:hover { background: #30363d; }
 .wf-actions .wf-note { margin-top: 8px; }
+
+.wf-pending {
+  margin: 14px 0; padding: 12px 16px; background: #1d1a12;
+  border: 1px solid #4d3800; border-radius: 8px; max-width: 720px;
+}
+.wf-pending-head { font-size: 14px; color: #d29922; margin-bottom: 6px; }
+.wf-pending-ctx { font-size: 13px; color: #c6cdd5; margin-bottom: 6px; }
+.wf-pending .wf-note { margin-bottom: 10px; line-height: 1.5; }
 
 .wf-start {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
@@ -650,9 +695,10 @@ body {
   .auth-box { width: auto; max-width: 360px; margin: 0 16px; padding: 22px; }
 
   /* ---- the pages that live in #main ---- */
-  #wf-view, #mesh-view { padding: 14px 12px; overscroll-behavior: contain; }
+  #wf-view, #mesh-view, #sess-view { padding: 14px 12px; overscroll-behavior: contain; }
   .mesh-members, .mesh-send, .mesh-fed, .mesh-policy, .mesh-links,
-  .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo { max-width: none; }
+  .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo,
+  .sess-meta, .sess-meshes, .sess-wf, .wf-pending { max-width: none; }
   .wf-cols { gap: 16px; }
   .wf-diagram { flex: 1 1 auto; }
   .pol-row { flex-wrap: wrap; margin-left: 0; }
@@ -660,5 +706,5 @@ body {
   .mesh-send-row { flex-wrap: wrap; }
   /* a <select> is as wide as its longest option — a session name or a full
      path is enough to push the panel off the side of the screen */
-  #mesh-view select, #wf-view select { max-width: 100%; }
+  #mesh-view select, #wf-view select, #sess-view select { max-width: 100%; }
 }

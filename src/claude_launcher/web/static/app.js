@@ -141,7 +141,18 @@ async function refreshSessions() {
       ? `exit ${s.exit_code ?? "?"}`
       : (s.profile || s.harness);
     if (s.status === "exited") li.title = "exited — open it to resume";
-    li.append(dot, label, meta);
+    // A second destination per row: the terminal is what the session is
+    // doing, this is what it *is* (definition, meshes, its cflow run).
+    const info = document.createElement("button");
+    info.className = "sess-info";
+    info.type = "button";
+    info.textContent = "ⓘ";
+    info.title = "session details: harness, directory, meshes, workflow";
+    info.addEventListener("click", (e) => {
+      e.stopPropagation();   // the row itself attaches; this button does not
+      location.hash = "#/s/" + encodeURIComponent(s.name);
+    });
+    li.append(dot, label, meta, info);
     li.addEventListener("click", () => attach(s.name));
     list.appendChild(li);
   }
@@ -250,6 +261,14 @@ async function refreshCflow() {
       const visit = r.visit > 1 ? ` · visit ${r.visit}` : "";
       li.appendChild(cflowLine(
         `step: ${r.title || r.step_id}${visit} · ${r.steps_completed ?? 0} done`
+      ));
+    }
+    // A slot with no run but a request filed against it is listed too — that
+    // waiting period is exactly when a human wants to see something.
+    if (r.pending_start) {
+      li.appendChild(cflowLine(
+        `start requested: ${r.pending_start.name || r.pending_start.workflow}`,
+        "report"
       ));
     }
 
@@ -535,6 +554,10 @@ $("new-session").addEventListener("submit", async (e) => {
   attach(info.name);
 });
 
+$("term-details").addEventListener("click", () => {
+  if (currentName) location.hash = "#/s/" + encodeURIComponent(currentName);
+});
+
 $("term-kill").addEventListener("click", async () => {
   if (!currentName) return;
   const name = currentName;
@@ -629,10 +652,10 @@ function attach(name) {
   currentName = name;
   stopWfPoll();
   stopMeshPoll();
-  if (location.hash.startsWith("#/wf/") || location.hash.startsWith("#/mesh/")) {
   // Before the terminal is opened: on mobile #main is display:none while the
   // menu is up, and a terminal opened into a zero-height box fits to nothing.
   setMenuOpen(false);
+  if (/^#\/(wf|mesh|s)\//.test(location.hash)) {
     history.replaceState(null, "", "#");
   }
   showView("terminal");
@@ -789,6 +812,7 @@ function setMobileTab(tab) {
 function mobileTitle() {
   if (meshName) return `mesh · ${meshName}`;
   if (wfCwd) return `workflow · ${shortenPath(wfCwd)}`;
+  if (sessName) return `session · ${sessName}`;
   return currentName || "no session";
 }
 
@@ -881,15 +905,17 @@ function showView(name) {
   const showTerm = name === "terminal";
   $("term-header").classList.toggle("hidden", !(showTerm && currentName));
   $("terminal").classList.toggle("hidden", !showTerm);
+  $("sess-view").classList.toggle("hidden", name !== "session");
   $("wf-view").classList.toggle("hidden", name !== "wf");
   $("mesh-view").classList.toggle("hidden", name !== "mesh");
   $("placeholder").classList.toggle(
-    "hidden", showTerm || name === "wf" || name === "mesh"
+    "hidden", showTerm || name === "wf" || name === "mesh" || name === "session"
   );
   // An empty session slot is nothing to look at on a phone — a killed or
   // never-picked session drops you back into the menu rather than at a ☰ to
   // go hunting for.
   if (MOBILE_MQ.matches && name === "placeholder" && !menuOpen) setMenuOpen(true);
+  if (name !== "session") stopSessionPoll();
   syncMobileBars();      // the top bar names whichever view this is
   if (showTerm) refitSoon(60);
 }
@@ -945,6 +971,10 @@ function route() {
     const sep = token.indexOf("|");
     if (sep >= 0) openWorkflow(token.slice(sep + 1), token.slice(0, sep));
     else openWorkflow(token, "default"); // pre-scope links
+  } else if (h.startsWith("#/s/")) {
+    stopWfPoll();
+    stopMeshPoll();
+    openSession(decodeURIComponent(h.slice(4)));
   } else if (h.startsWith("#/mesh/")) {
     stopWfPoll();
     openMesh(decodeURIComponent(h.slice(7)));
@@ -1021,6 +1051,9 @@ function renderWf(data) {
   for (const w of wf.warnings || []) {
     view.appendChild(el("p", "wf-warning", `⚠ ${w}`));
   }
+
+  const pending = pendingBanner(data, () => refreshWf());
+  if (pending) view.appendChild(pending);
 
   view.appendChild(wfActions(data));
 
@@ -1184,15 +1217,85 @@ function wfActions(data) {
   return box;
 }
 
-/* Idle (cwd, scope): offer to start a new run. Starting nudges the scope's
-   session so its agent picks the workflow up per the /cflow protocol. */
+/* Idle (cwd, scope): offer to start a new run. */
 async function renderWfIdle(view, data) {
   view.innerHTML = "";
   view.appendChild(el("p", "wf-note", `no active cflow run in ${data.cwd}`));
+  const pending = pendingBanner(data, () => refreshWf());
+  if (pending) view.appendChild(pending);
   const box = el("div", "wf-start");
   view.appendChild(box); // present immediately so the poll doesn't rebuild
-  const cwd = data.cwd;
-  const scope = data.scope || "default";
+  await buildStartPanel(box, {
+    cwd: data.cwd,
+    scope: data.scope || "default",
+    sessions: data.sessions || [],
+    stillHere: () => wfCwd === data.cwd,
+    after: () => { refreshWf(); refreshCflow(); },
+  });
+}
+
+/* A human's pending start request, with the way to take it back.
+   Rendered wherever a slot is shown, because between the request and the
+   agent acting on it this is the only sign that anything is coming. */
+function pendingBanner(data, after) {
+  const req = data.pending_start || (data.run || {}).pending_start;
+  if (!req) return null;
+  const box = el("div", "wf-pending");
+  box.appendChild(el(
+    "p", "wf-pending-head",
+    `start requested: ${req.name || req.workflow}`
+  ));
+  if (req.context) box.appendChild(el("p", "wf-pending-ctx", req.context));
+  box.appendChild(el(
+    "p", "wf-note",
+    `asked by ${req.by || "?"} at ${(req.at || "").replace("T", " ")} — the ` +
+    `session's agent starts it itself, so it knows what it is running. It ` +
+    `picks the request up on its next cflow 'status' call.`
+  ));
+  const cancel = el("button", "wf-btn clear", "Withdraw request");
+  cancel.addEventListener("click", async () => {
+    if (!confirm(`Withdraw the pending start of '${req.name || req.workflow}'?`)) return;
+    await cflowPost("/api/cflow/request/cancel", {
+      cwd: data.cwd, scope: data.scope,
+    });
+    if (after) after();
+    refreshCflow();
+  });
+  box.appendChild(cancel);
+  return box;
+}
+
+/* POST a cflow action, surfacing the daemon's error text. Returns the parsed
+   body on success, null otherwise. */
+async function cflowPost(path, body) {
+  try {
+    const resp = await api(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(doc.error || `HTTP ${resp.status}`);
+      return null;
+    }
+    return doc;
+  } catch {
+    return null; // auth overlay is up
+  }
+}
+
+/* The workflow picker, shared by the run page and the session page.
+   It offers the two creation paths, deliberately unequal:
+
+   - "Ask the agent" writes only a request; the agent performs the start and
+     therefore knows the run exists and what it is for. The only path that
+     cannot leave an agent driving a run it never read.
+   - "Start directly" writes the run here and nudges the terminal. For a slot
+     with no live session (an agent that attaches later, a script), where
+     there is nobody to ask. */
+async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) {
+  box.dataset.slot = `${scope}|${cwd}`;
   box.appendChild(el("h3", null,
     scope !== "default" ? `Start a workflow — session ${scope}` : "Start a workflow"));
 
@@ -1201,7 +1304,7 @@ async function renderWfIdle(view, data) {
     const resp = await api(`/api/cflow/workflows?cwd=${encodeURIComponent(cwd)}`);
     flows = ((await resp.json()).workflows || []).filter((w) => !w.error);
   } catch { return; }
-  if (wfCwd !== cwd) return; // navigated away while loading
+  if (stillHere && !stillHere()) return; // navigated away while loading
   if (!flows.length) {
     box.appendChild(el(
       "p", "wf-note",
@@ -1223,38 +1326,69 @@ async function renderWfIdle(view, data) {
   ctx.type = "text";
   ctx.className = "wf-start-context";
   ctx.placeholder = "context for the run (optional)";
-  const btn = el("button", "wf-btn approve", "Start");
-  btn.addEventListener("click", async () => {
+
+  const live = (sessions || []).length > 0;
+  const ask = el("button", "wf-btn approve", "Ask the agent to start");
+  ask.title = live
+    ? `type a request into session ${sessions.join(", ")}; the agent starts it`
+    : "no live session in this slot to ask";
+  ask.disabled = !live;
+  ask.addEventListener("click", async () => {
     const workflow = sel.value;
-    const who = scope !== "default" ? ` for session '${scope}'` : "";
-    if (!confirm(`Start workflow '${workflow}'${who}?`)) return;
-    try {
-      const resp = await api("/api/cflow/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ cwd, scope, workflow, context: ctx.value.trim() }),
-      });
-      const doc = await resp.json().catch(() => ({}));
-      if (!resp.ok) {
-        alert(doc.error || `HTTP ${resp.status}`);
-        return;
-      }
-      if (!(doc.nudged_sessions || []).length) {
-        alert(
-          "run started, but no live session was nudged — tell the agent " +
-          "to continue (it picks the run up via the /cflow protocol)"
-        );
-      }
-    } catch { return; }
-    refreshWf();
-    refreshCflow();
+    if (!confirm(
+      `Ask session '${sessions[0]}' to start '${workflow}'?\n\n` +
+      `The request is recorded and the session is nudged; its agent reads ` +
+      `the request and runs the start itself.`
+    )) return;
+    const doc = await cflowPost("/api/cflow/request", {
+      cwd, scope, workflow, context: ctx.value.trim(),
+    });
+    if (doc && !(doc.nudged_sessions || []).length) {
+      alert(
+        "request recorded, but the session could not be nudged — it will " +
+        "still be picked up on the agent's next cflow 'status' call"
+      );
+    }
+    if (doc && after) after();
   });
+
+  const direct = el("button", "wf-btn", "Start directly");
+  direct.title =
+    "write the run now, without waiting for the agent to start it";
+  direct.addEventListener("click", async () => {
+    const workflow = sel.value;
+    if (!confirm(
+      `Start '${workflow}' directly?\n\n` +
+      (live
+        ? "The run is created here and the session is nudged. Its agent has " +
+          "NOT read the run yet — if it is mid-task it may keep working for a " +
+          "while. Prefer 'Ask the agent to start' when the session is live.\n\n"
+        : "This slot has no live session, so nothing will be nudged: the run " +
+          "waits for an agent to pick it up.\n\n") +
+      "Continue?"
+    )) return;
+    const doc = await cflowPost("/api/cflow/start", {
+      cwd, scope, workflow, context: ctx.value.trim(),
+    });
+    if (doc && !(doc.nudged_sessions || []).length) {
+      alert(
+        "run started, but no live session was nudged — tell the agent " +
+        "to continue (it picks the run up via the /cflow protocol)"
+      );
+    }
+    if (doc && after) after();
+  });
+
   const row = el("div", "wf-start-row");
-  row.append(sel, ctx, btn);
+  row.append(sel, ctx, ask, direct);
   box.appendChild(row);
   box.appendChild(el(
     "p", "wf-note",
-    "starting nudges this run's session so its agent picks the workflow up"
+    live
+      ? "asking keeps one writer: the agent starts the run, so the run on " +
+        "disk and the run it thinks it is driving are the same thing"
+      : "no live session here — 'Start directly' is the only path, and the " +
+        "run will sit until an agent picks it up"
   ));
 }
 
@@ -1466,6 +1600,203 @@ function wfDiagramSvg(wf, run, selected) {
   }
   parts.push("</svg>");
   return parts.join("");
+}
+
+/* ------------------------------------------------------------------ */
+/* session detail page (#/s/<name>) — what a session IS, and its run   */
+/* ------------------------------------------------------------------ */
+/* The session list answers "which sessions exist"; the terminal answers
+   "what is it doing right now". Neither answers "what is this session" —
+   which harness and profile, whose directory, which role, which meshes, and
+   above all which cflow run it drives. Four registries hold those answers and
+   they only ever met in the operator's head; /api/sessions/<name>/meta
+   gathers them, keyed by the one thing they share: the session name. */
+let sessName = null;
+let sessPollTimer = null;
+let sessStartBox = null;  // reused across polls: it holds the user's typing
+
+function stopSessionPoll() {
+  if (sessPollTimer) { clearInterval(sessPollTimer); sessPollTimer = null; }
+  sessName = null;
+  sessStartBox = null;
+}
+
+async function openSession(name) {
+  if (sessPollTimer) clearInterval(sessPollTimer);
+  sessStartBox = null;
+  setMenuOpen(false);   // the page it opens lives where the terminal was
+  showView("session");
+  sessName = name;
+  $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
+  await refreshSession();
+  sessPollTimer = setInterval(refreshSession, 2000);
+}
+
+async function refreshSession() {
+  if (!sessName) return;
+  const want = sessName;
+  let data;
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(want)}/meta`);
+    data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      $("sess-view").innerHTML = "";
+      $("sess-view").appendChild(el(
+        "p", "wf-warning",
+        // A daemon older than these assets serves the static files from disk
+        // but runs the Python it started with, so this route may not exist
+        // yet. Say what to do rather than sitting on "loading…".
+        data.error || (resp.status === 404
+          ? "this daemon has no session-details endpoint — " +
+            "'claunch daemon restart' to pick up this version"
+          : `cannot load this session (HTTP ${resp.status})`)
+      ));
+      return;
+    }
+  } catch {
+    return;
+  }
+  if (sessName !== want) return; // navigated away mid-flight
+  renderSession(data);
+}
+
+function metaRow(dl, label, value, title) {
+  if (value === null || value === undefined || value === "") return;
+  dl.appendChild(el("dt", null, label));
+  const dd = el("dd", null, String(value));
+  if (title) dd.title = title;
+  dl.appendChild(dd);
+}
+
+function renderSession(data) {
+  const view = $("sess-view");
+  const s = data.session || {};
+  view.innerHTML = "";
+
+  const head = el("div", "wf-head");
+  head.appendChild(el("h2", null, s.name || "session"));
+  head.appendChild(el("span", `badge ${s.status || ""}`, s.status || "?"));
+  const open = el("button", "wf-btn", "Open terminal");
+  open.addEventListener("click", () => attach(s.name));
+  head.appendChild(open);
+  view.appendChild(head);
+
+  const dl = el("dl", "sess-meta");
+  metaRow(dl, "harness", s.harness, (data.harness || {}).description);
+  metaRow(dl, "profile", s.profile);
+  metaRow(
+    dl, "role", data.role ? data.role.name : s.role,
+    data.role ? data.role.stance : ""
+  );
+  metaRow(
+    dl, "directory",
+    data.workspace ? `${s.cwd}  (workspace ${data.workspace.name})` : s.cwd,
+    s.cwd
+  );
+  metaRow(dl, "conversation", s.conversation_id, "claude --session-id");
+  if (s.resume !== null && s.resume !== undefined) {
+    metaRow(
+      dl, "opened",
+      (s.resume === "" ? "conversation picker" : `resume ${s.resume}`) +
+      (s.fork_session ? " (forked)" : "")
+    );
+  }
+  if ((s.args || []).length) metaRow(dl, "args", s.args.join(" "));
+  const envKeys = Object.keys(s.env || {});
+  if (envKeys.length) metaRow(dl, "env", envKeys.join(", "));
+  metaRow(dl, "size", `${s.cols}×${s.rows}`);
+  metaRow(dl, "restore", s.restore ? "yes (relaunched with the daemon)" : "no");
+  metaRow(dl, "pid", s.pid);
+  metaRow(dl, "created", (s.created_at || "").replace("T", " "));
+  metaRow(dl, "last output", (s.last_output_at || "").replace("T", " "));
+  if (s.status === "exited") {
+    metaRow(dl, "exited", `${(s.exited_at || "").replace("T", " ")} (code ${s.exit_code ?? "?"})`);
+  }
+  view.appendChild(dl);
+
+  const meshes = data.meshes || [];
+  const meshBox = el("div", "sess-meshes");
+  meshBox.appendChild(el("h3", null, `Meshes (${meshes.length})`));
+  if (!meshes.length) {
+    meshBox.appendChild(el("p", "wf-note", "not a member of any mesh"));
+  }
+  for (const m of meshes) {
+    const chip = el("a", "sess-mesh", `${m.mesh} · ${m.handle} (${m.role})`);
+    chip.href = "#/mesh/" + encodeURIComponent(m.mesh);
+    chip.title = `${m.members} member(s); joined ${(m.joined_at || "").replace("T", " ")}`;
+    meshBox.appendChild(chip);
+  }
+  view.appendChild(meshBox);
+
+  view.appendChild(sessWorkflow(data));
+}
+
+/* The session's cflow slot: a run is keyed by (directory, scope) and the
+   scope IS this session's name, so there is exactly one to show. */
+function sessWorkflow(data) {
+  const box = el("div", "sess-wf");
+  box.appendChild(el("h3", null, "Workflow"));
+  const flow = data.cflow;
+  if (!flow) {
+    box.appendChild(el("p", "wf-note", "this session has no working directory"));
+    return box;
+  }
+  const slot = { cwd: flow.cwd, scope: flow.scope, sessions: flow.sessions || [] };
+
+  if (flow.status === "error") {
+    box.appendChild(el("p", "wf-warning", flow.error || "cannot read this run"));
+    return box;
+  }
+
+  const pending = pendingBanner(flow, () => refreshSession());
+
+  if (flow.status && flow.status !== "idle") {
+    const line = el("div", "sess-wf-run");
+    line.appendChild(el("span", `dot ${wfDotClass(flow.status)}`));
+    line.appendChild(el("span", "sess-wf-name", flow.workflow || "(workflow)"));
+    line.appendChild(el("span", "meta", flow.status));
+    box.appendChild(line);
+    if (flow.step_id) {
+      box.appendChild(el(
+        "p", "wf-note",
+        `step: ${flow.title || flow.step_id}` +
+        (flow.visit > 1 ? ` · visit ${flow.visit}` : "") +
+        ` · ${flow.steps_completed ?? 0} done`
+      ));
+    }
+    if (flow.context) box.appendChild(el("p", "wf-context", `context: ${flow.context}`));
+    for (const rep of (flow.reports || []).slice(-3)) {
+      const line2 = cflowLine(`${rep.step}: ${rep.summary || ""}`, "report");
+      if (rep.details) line2.title = rep.details;
+      box.appendChild(line2);
+    }
+    const link = el("button", "wf-btn approve", "Open the run page");
+    link.title = "diagram, step reports, journal, and the human controls";
+    link.addEventListener("click", () => {
+      location.hash = "#/wf/" + encodeURIComponent(`${flow.scope}|${flow.cwd}`);
+    });
+    box.appendChild(link);
+    if (pending) box.appendChild(pending);
+    return box;
+  }
+
+  box.appendChild(el("p", "wf-note", `no active cflow run in ${flow.cwd}`));
+  if (pending) box.appendChild(pending);
+  // Rebuilt only when the slot changes: the poll must not wipe a half-typed
+  // context line out from under the user.
+  const key = `${slot.scope}|${slot.cwd}`;
+  if (sessStartBox && sessStartBox.dataset.slot === key) {
+    box.appendChild(sessStartBox);   // appending moves the live node here
+    return box;
+  }
+  sessStartBox = el("div", "wf-start");
+  box.appendChild(sessStartBox);
+  buildStartPanel(sessStartBox, {
+    ...slot,
+    stillHere: () => sessName === (data.session || {}).name,
+    after: () => { refreshSession(); refreshCflow(); },
+  });
+  return box;
 }
 
 /* ------------------------------------------------------------------ */

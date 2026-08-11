@@ -339,6 +339,161 @@ def test_api_cflow_monitoring(home, tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):
+    """A session's own page: its definition, its mesh memberships, and the
+    cflow slot it owns — plus the two ways to create a run in that slot."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher import workspaces
+    from claude_launcher.cflow import engine as cflow_engine
+
+    (tmp_path / ".claunch" / "workflows").mkdir(parents=True)
+    (tmp_path / ".claunch" / "workflows" / "demo.yaml").write_text(
+        "name: demo\ndescription: two steps\nsteps:\n"
+        "  one:\n    instructions: do one\n    next: two\n"
+        "  two:\n    instructions: do two\n",
+        encoding="utf-8",
+    )
+    workspaces.add(str(tmp_path), "proj")
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            bearer = {"Authorization": "Bearer sekrit"}
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(mgr.get("s1"), "READY")
+
+            resp = await client.get("/api/sessions/s1/meta")
+            assert resp.status == 401  # authed like the rest of /api
+
+            resp = await client.get("/api/sessions/s1/meta", headers=bearer)
+            meta = await resp.json()
+            assert meta["session"]["harness"] == "py"
+            assert meta["workspace"]["name"] == "proj"
+            assert meta["meshes"] == []
+            # the slot this session owns: keyed by (its cwd, its own name)
+            assert meta["cflow"]["scope"] == "s1"
+            assert meta["cflow"]["status"] == "idle"
+            assert meta["cflow"]["sessions"] == ["s1"]
+            assert [w["name"] for w in meta["workflows"]] == ["demo"]
+
+            # a mesh membership shows up on the session's page
+            app["mesh"].create("dev")
+            await app["mesh"].join("dev", "s1", handle="impl")
+            resp = await client.get("/api/sessions/s1/meta", headers=bearer)
+            assert (await resp.json())["meshes"][0]["mesh"] == "dev"
+
+            # path 1: ask the session's agent to start it. Nothing is started;
+            # the request is recorded and typed into the session.
+            resp = await client.post(
+                "/api/cflow/request",
+                json={"cwd": str(tmp_path), "scope": "s1",
+                      "workflow": "demo", "context": "from the web"},
+                headers=bearer,
+            )
+            doc = await resp.json()
+            assert resp.status == 200
+            assert doc["nudged_sessions"] == ["s1"]
+            await _wait_screen(mgr.get("s1"), "a start of workflow 'demo' was requested")
+
+            resp = await client.get("/api/sessions/s1/meta", headers=bearer)
+            flow = (await resp.json())["cflow"]
+            assert flow["status"] == "idle"          # still nothing running
+            assert flow["pending_start"]["workflow"] == "demo"
+            assert flow["pending_start"]["context"] == "from the web"
+            # and the waiting slot is listed on the dashboard
+            resp = await client.get("/api/cflow", headers=bearer)
+            runs = (await resp.json())["runs"]
+            assert [r["scope"] for r in runs] == ["s1"]
+            assert runs[0]["pending_start"]["workflow"] == "demo"
+
+            # the agent (its own process) performs the start, consuming it
+            cflow_engine.start("demo", "from the web", cwd=str(tmp_path), scope="s1")
+            resp = await client.get("/api/sessions/s1/meta", headers=bearer)
+            flow = (await resp.json())["cflow"]
+            assert flow["status"] == "step" and flow["step_id"] == "one"
+            assert flow.get("pending_start") is None
+
+            # a second request is refused while that run is active
+            resp = await client.post(
+                "/api/cflow/request",
+                json={"cwd": str(tmp_path), "scope": "s1", "workflow": "demo"},
+                headers=bearer,
+            )
+            assert resp.status == 400
+            assert "already active" in (await resp.json())["error"]
+
+            # path 2: after archiving, start directly (the run exists at once)
+            await client.post(
+                "/api/cflow/archive",
+                json={"cwd": str(tmp_path), "scope": "s1"}, headers=bearer,
+            )
+            resp = await client.post(
+                "/api/cflow/start",
+                json={"cwd": str(tmp_path), "scope": "s1", "workflow": "demo"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["step_id"] == "one"
+            resp = await client.get("/api/sessions/s1/meta", headers=bearer)
+            assert (await resp.json())["cflow"]["status"] == "step"
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_api_cflow_request_can_be_withdrawn(home, tmp_path, monkeypatch):
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    (tmp_path / "wf.yaml").write_text(
+        "name: demo\nsteps:\n  one:\n    instructions: do one\n", encoding="utf-8"
+    )
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            bearer = {"Authorization": "Bearer sekrit"}
+            body = {"cwd": str(tmp_path), "scope": "ghost", "workflow": "wf.yaml"}
+            resp = await client.post("/api/cflow/request", json=body, headers=bearer)
+            assert resp.status == 200
+            # no session named 'ghost' is alive: nothing to nudge, but the
+            # request stands for whoever attaches next
+            assert (await resp.json())["nudged_sessions"] == []
+
+            resp = await client.post(
+                "/api/cflow/request/cancel",
+                json={"cwd": str(tmp_path), "scope": "ghost"}, headers=bearer,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["status"] == "request_cancelled"
+
+            resp = await client.get("/api/cflow", headers=bearer)
+            assert (await resp.json())["runs"] == []
+
+            resp = await client.post(
+                "/api/cflow/request/cancel",
+                json={"cwd": str(tmp_path), "scope": "ghost"}, headers=bearer,
+            )
+            assert resp.status == 400  # nothing left to withdraw
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_api_session_respawn(home, tmp_path):
     """An exited session relaunches under its own name and definition;
     respawning a live one is refused."""
