@@ -743,6 +743,153 @@ def test_owed_report_and_route(home, tmp_path):
     asyncio.run(run())
 
 
+def test_dismiss_writes_off_unanswered_mail(home, tmp_path):
+    """The operator's closure: the one that is not a reply.
+
+    Dismissing has to leave the ledger and the nudger agreeing — that is the
+    whole rule the Unanswered box is built on — so it also settles the
+    heartbeat's ``last_asked`` when nothing is left owed.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05)
+        mesh = mm.create("drop")
+        for name in ("a1", "b1"):
+            mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+        await mm.join("drop", "a1", handle="leader")
+        await mm.join("drop", "b1", handle="worker_1")
+
+        await mm.send("drop", "a1", "worker_1", "first", type="ask")
+        await mm.send("drop", "a1", "worker_1", "second", type="ask")
+        _mark_delivered(mesh)
+        # what the heartbeat would be looking at, had a real delivery stamped it
+        mesh.activity["worker_1"] = {"anchor": 0.0, "last_asked": time.monotonic()}
+        first, second = (m["id"] for m in mesh.owed("worker_1"))
+
+        result = mm.dismiss_owed("drop", "worker_1", [first])
+        assert result["dismissed"] == [first] and result["owed"] == 1
+        assert [m["body"] for m in mesh.owed("worker_1")] == ["second"]
+        # one still stands, so the member is still legitimately being chased
+        assert mesh.activity["worker_1"]["last_asked"] > 0
+
+        row = next(
+            r for r in mm.owed_report(mesh)["members"] if r["handle"] == "worker_1"
+        )
+        assert row["owed"] == 1 and row["can_dismiss"] is True
+        assert row["can_nudge"] is True
+
+        # ...and now the rest, which settles the heartbeat with it
+        assert mm.dismiss_owed("drop", "worker_1")["dismissed"] == [second]
+        assert mesh.owed("worker_1") == []
+        assert mesh.activity["worker_1"]["last_asked"] == 0.0
+
+        # pressing × twice on a row the poll has not redrawn yet is a no-op,
+        # not an error — the message is already written off
+        assert mm.dismiss_owed("drop", "worker_1", [first])["dismissed"] == []
+        # ...but a debt that was never owed is refused: a suppression nothing
+        # could ever clear is worse than a failed button
+        with pytest.raises(MeshError, match="does not owe"):
+            mm.dismiss_owed("drop", "worker_1", ["msg-nosuch"])
+        with pytest.raises(MeshError, match="no member"):
+            mm.dismiss_owed("drop", "nobody", None)
+
+        # survives a restart — the write-off is delivery state, and lives
+        # with the cursors
+        mm2 = MeshManager(mgr)
+        mm2.load_all()
+        mesh2 = mm2.get("drop")
+        assert mesh2.dismissed["worker_1"] == {first, second}
+        assert mesh2.owed("worker_1") == []
+
+        # A reply closes everything before it anyway, so the ids stop
+        # suppressing anything: the next dismissal prunes them away rather
+        # than carrying them for the life of the log.
+        await mm.send("drop", "b1", "leader", "on it", type="ack")
+        await mm.send("drop", "a1", "worker_1", "and this?", type="ask")
+        _mark_delivered(mesh)
+        third = mesh.owed("worker_1")[0]["id"]
+        mm.dismiss_owed("drop", "worker_1", [third])
+        assert mesh.dismissed["worker_1"] == {third}
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_nudge_and_dismiss_routes(home, tmp_path):
+    """The two buttons on the Unanswered box, over HTTP.
+
+    The nudge is asserted on the recipient's actual screen: it is the same
+    injected block the heartbeat sends, so 'the operator nudged' and 'the
+    engine nudged' cannot drift into two delivery paths.
+    """
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            mesh = mm.create("act")
+            session = mgr.create(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(session, "READY")
+            await mm.join("act", "w1", handle="worker_1")
+            await mm.send("act", "operator", "worker_1", "answer me",
+                          external=True, type="ask")
+            mm.start()
+            await _wait_drained(mesh, "worker_1")
+            assert len(mesh.owed("worker_1")) == 1
+
+            resp = await client.post(
+                "/api/mesh/act/members/worker_1/nudge", headers=bearer, json={}
+            )
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["queued"] is False and doc["owed"] == 1
+            assert doc["body"] == mesh.policy["heartbeat"]["body"]
+            await _wait_screen(session, "kind: nudge")
+            # the engine must not pile a second one on top of a fresh nudge
+            assert mesh.activity["worker_1"]["hb_next"] > time.monotonic()
+
+            # a note of the operator's own, when the stock reminder will not do
+            resp = await client.post(
+                "/api/mesh/act/members/worker_1/nudge", headers=bearer,
+                json={"body": "the schema review is blocked on you"},
+            )
+            assert (await resp.json())["body"] == "the schema review is blocked on you"
+            await _wait_screen(session, "the schema review is blocked on you")
+
+            mid = mesh.owed("worker_1")[0]["id"]
+            resp = await client.delete(
+                f"/api/mesh/act/members/worker_1/owed/{mid}", headers=bearer
+            )
+            assert resp.status == 200
+            assert (await resp.json())["owed"] == 0
+            assert mesh.owed("worker_1") == []
+
+            doc = await (await client.get("/api/mesh/act/owed", headers=bearer)).json()
+            assert doc["owed"] == 0 and doc["owing"] == 0
+
+            # nudging is not conditional on a debt (an operator looking at the
+            # row has already made that call), but the member must exist
+            for path in ("/api/mesh/act/members/nobody/nudge",):
+                assert (await client.post(path, headers=bearer, json={})).status == 400
+            resp = await client.delete(
+                "/api/mesh/act/members/worker_1/owed/msg-nosuch", headers=bearer
+            )
+            assert resp.status == 400
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # nudge policy (heartbeat / task-poll / stall warnings)
 # --------------------------------------------------------------------------- #

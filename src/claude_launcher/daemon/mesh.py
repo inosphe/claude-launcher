@@ -378,6 +378,13 @@ class Mesh:
         #: still sit at or beyond the member's cursor, so folding a
         #: provisional message into the log never re-injects it.
         self.delivered_ids: Dict[str, set] = {}
+        #: handle -> message ids the OPERATOR has written off: mail that was
+        #: delivered and never answered, and never will be, because the human
+        #: watching the dashboard settled it by hand. Excluded from
+        #: :meth:`owed` — see there for why this is the operator's verdict
+        #: and not the member's reply. Persisted next to the cursors, since
+        #: it is per-member delivery state of exactly that kind.
+        self.dismissed: Dict[str, set] = {}
         #: Outstanding invite tickets (authority only; pre-approval for a
         #: join request): token -> minted-at ISO timestamp. TTL-checked at
         #: redemption (MeshManager.invite_ttl).
@@ -687,6 +694,24 @@ class Mesh:
         the two are diagnosed differently (a stuck delivery vs. a silent
         agent). ``fyi``/``ack``/``ping`` never count: they were sent
         precisely to say nothing is owed.
+
+        Messages the operator has **dismissed** are gone from here too — the
+        one closure that is not a reply. It is a deliberate second door: some
+        mail is never going to be answered (the asker moved on, the member
+        was restarted mid-question, the question answered itself), and the
+        list is only worth reading if what stays on it is what still matters.
+        """
+        dropped = self.dismissed.get(handle) or frozenset()
+        return [m for m in self.owed_all(handle) if m.get("id") not in dropped]
+
+    def owed_all(self, handle: str) -> List[dict]:
+        """:meth:`owed` before the operator's dismissals are subtracted.
+
+        Kept apart so a dismissal set can be pruned against the same window
+        the ledger is derived from: an id that has fallen out of it (the
+        member finally spoke, the edge was cut, the message aged past its own
+        reply) is not being suppressed by anything and should not be
+        remembered as if it were.
         """
         start = self.cursors.get(handle, 0)
         done = self.delivered_ids.get(handle) or frozenset()
@@ -1396,6 +1421,10 @@ class MeshManager:
         mesh.members.pop(handle, None)
         mesh.cursors.pop(handle, None)
         mesh._first_pending.pop(handle, None)
+        # Handles are reusable, so a rejoining name must not inherit the
+        # write-offs made against whoever wore it last — the same reason the
+        # member edges below are pruned.
+        mesh.dismissed.pop(handle, None)
         # Edges naming a departed member go with it: handles are reusable, so
         # a rejoining name would otherwise inherit the isolation imposed on
         # whoever wore it last — a member that mysteriously cannot reach
@@ -3502,6 +3531,7 @@ class MeshManager:
                 if handle not in adopted:
                     mesh.cursors.pop(handle, None)
                     mesh._first_pending.pop(handle, None)
+                    mesh.dismissed.pop(handle, None)
             mesh.members = adopted
             self._persist_def(mesh)
             self._persist_cursors(mesh)
@@ -3950,6 +3980,13 @@ class MeshManager:
                 "pending": None,
                 "oldest_age": None,
                 "stale": False,
+                # What this daemon can actually do about the row, decided
+                # here rather than re-derived by every reader: a nudge needs
+                # either the session (local) or the authority's channel to
+                # the daemon that has it, and a dismissal needs the log the
+                # debt is read from, which only the member's own daemon has.
+                "can_nudge": local or not mesh.primary,
+                "can_dismiss": local,
             }
             if local:
                 owed = mesh.owed(handle)
@@ -4003,6 +4040,154 @@ class MeshManager:
             # nothing here will act on, so say whose engine is in charge.
             "engine": mesh.primary or mesh.me or None,
             "heartbeat": dict(mesh.policy["heartbeat"]),
+        }
+
+    # ------------------------------------------------------------------ #
+    # acting on unanswered mail
+    #
+    # The ledger above is a reading; these two are the operator's answers to
+    # it, and they are deliberately the only two. Either the member is asked
+    # again (nudge — the heartbeat's move, made by hand and now), or the debt
+    # is written off (dismiss — the one closure that is not a reply). Both
+    # keep the dashboard and the nudger saying the same thing afterwards,
+    # which is the single rule this whole feature is built on.
+    # ------------------------------------------------------------------ #
+    async def nudge(self, name: str, handle: str, body: str = "") -> dict:
+        """Nudge ``handle`` about its unanswered mail, right now.
+
+        The heartbeat with the waiting taken out: same injected block, same
+        transport (inject locally, queue for the guest daemon otherwise), but
+        fired by an operator who is looking at the debt rather than by a timer
+        that has just come round. Unlike the heartbeat it does **not** check
+        idleness or whether anything is actually owed — a human clicking
+        'nudge' next to a row has already made both judgements, and refusing
+        because the member is mid-turn would make the button unreliable in
+        exactly the case it is reached for.
+
+        It does reset the automatic heartbeat's next fire, though: a member
+        that was just poked by hand should not be poked again by the engine a
+        second later, having had no chance to answer either.
+        """
+        mesh = self.get(name)
+        member = mesh.members.get(handle)
+        if member is None:
+            raise MeshError(f"no member {handle!r} in mesh {name!r}")
+        local = self._is_local(mesh, member)
+        if not local and mesh.primary:
+            # Only the authority holds a channel to the member's own daemon;
+            # a mirror queueing a nudge would queue it into a fanout it does
+            # not perform, and it would sit there forever.
+            raise MeshError(
+                f"{handle!r} runs on {member.machine or '?'} — nudge it from "
+                f"the primary daemon ({mesh.primary})"
+            )
+        session = None
+        if local:
+            try:
+                session = self.manager.get(member.session)
+            except ManagerError:
+                raise MeshError(
+                    f"{handle!r}'s session {member.session!r} is gone"
+                ) from None
+            if session.exited:
+                raise MeshError(
+                    f"{handle!r}'s session {member.session!r} has exited"
+                )
+        text = (
+            " ".join(str(body or "").split())[:500]
+            or mesh.policy["heartbeat"]["body"]
+        )
+        if not await mesh_policy.dispatch(
+            self, mesh, member, session, "nudge", handle, text
+        ):
+            # The heartbeat can shrug this off and try again in a minute; a
+            # button cannot. A terminal that will not take a message is the
+            # answer the operator came for, so it is reported, not swallowed.
+            raise MeshError(
+                f"{handle!r}'s terminal did not take the nudge — its session "
+                "may still be starting, or its agent may be mid-write"
+            )
+        st = mesh.activity.setdefault(handle, {"anchor": time.monotonic()})
+        hb = mesh.policy["heartbeat"]
+        st["hb_backoff"] = hb["interval"]
+        st["hb_next"] = time.monotonic() + hb["interval"]
+        log.info("mesh %r: manual nudge -> %r", mesh.name, handle)
+        return {
+            "mesh": mesh.name,
+            "handle": handle,
+            "body": text,
+            # Locally it is already in the terminal; for a remote member it is
+            # an instruction its daemon will carry out on its next sync.
+            "queued": not local,
+            "owed": len(mesh.owed(handle)) if local else None,
+        }
+
+    def dismiss_owed(
+        self, name: str, handle: str, ids: Optional[Iterable[str]] = None
+    ) -> dict:
+        """Write off unanswered mail for ``handle`` — one message, or all.
+
+        ``ids`` None dismisses everything currently owed; otherwise the ids
+        given, which must be either owed right now or dismissed already. A
+        second press on a row a poll has not yet redrawn is therefore a
+        no-op rather than an error, while an id this member never owed is
+        refused: it would install a suppression nothing could ever clear,
+        and a mistyped id would otherwise 'succeed' having done nothing.
+
+        Afterwards the heartbeat is settled the same way a cut member edge
+        settles it (:meth:`_mark_member_edge`): a member left owing nothing
+        has ``last_asked`` cleared, so the engine stops chasing a debt the
+        operator has just declared closed. Without that the button would be a
+        lie — the row would go away and the nudges would keep arriving.
+        """
+        mesh = self.get(name)
+        member = mesh.members.get(handle)
+        if member is None:
+            raise MeshError(f"no member {handle!r} in mesh {name!r}")
+        if not self._is_local(mesh, member):
+            # Their daemon owns the cursor, so it owns what is owed against
+            # it; we only ever hear the count. Same split as `pending`.
+            raise MeshError(
+                f"{handle!r} runs on {member.machine or '?'} — its unanswered "
+                "mail is counted there, so dismiss it on that daemon"
+            )
+        owed = {m.get("id") for m in mesh.owed(handle) if m.get("id")}
+        already = mesh.dismissed.get(handle) or frozenset()
+        if ids is None:
+            targets = set(owed)
+        else:
+            wanted = {str(i) for i in ids}
+            targets = wanted & owed
+            missing = sorted(wanted - owed - already)
+            if missing:
+                raise MeshError(
+                    f"{handle!r} does not owe an answer to: {', '.join(missing)}"
+                )
+        dropped = mesh.dismissed.setdefault(handle, set())
+        dropped |= targets
+        # Prune against the live window rather than letting the set grow with
+        # the log: once the member speaks, everything behind falls out of
+        # `owed_all` and no id in here is suppressing anything.
+        live = {m.get("id") for m in mesh.owed_all(handle)}
+        dropped &= live
+        if dropped:
+            mesh.dismissed[handle] = dropped
+        else:
+            mesh.dismissed.pop(handle, None)
+        remaining = mesh.owed(handle)
+        st = mesh.activity.get(handle)
+        if st and st.get("last_asked") and not remaining:
+            st["last_asked"] = 0.0
+        self._persist_cursors(mesh)
+        log.info(
+            "mesh %r: dismissed %d unanswered message(s) for %r (%d left)",
+            mesh.name, len(targets), handle, len(remaining),
+        )
+        return {
+            "mesh": mesh.name,
+            "handle": handle,
+            "dismissed": sorted(targets),
+            "owed": len(remaining),
         }
 
     # ------------------------------------------------------------------ #
@@ -4447,11 +4632,17 @@ class MeshManager:
                             raw.get("links") or raw.get("guests") or {}
                         ).items()
                     }
+                    mesh.dismissed = {
+                        str(k): {str(i) for i in v}
+                        for k, v in (raw.get("dismissed") or {}).items()
+                        if v
+                    }
                 else:  # phase-1 format: a flat {handle: index} map
                     mesh.cursors = {str(k): int(v) for k, v in raw.items()}
             except (ValueError, TypeError):
                 mesh.cursors = {}
                 mesh.link_cursors = {}
+                mesh.dismissed = {}
         outbox_path = d / "outbox.jsonl"
         if mesh.primary and outbox_path.is_file():
             for line in outbox_path.read_text(encoding="utf-8").splitlines():
@@ -4510,11 +4701,15 @@ class MeshManager:
 
     def _persist_cursors(self, mesh: Mesh) -> None:
         try:
+            doc = {"members": mesh.cursors, "links": mesh.link_cursors}
+            # Absent while nothing has been written off, so a mesh whose
+            # operator never touches 'dismiss' writes exactly the file it
+            # always did — and an older daemon reading it sees no new key.
+            dismissed = {h: sorted(ids) for h, ids in mesh.dismissed.items() if ids}
+            if dismissed:
+                doc["dismissed"] = dismissed
             (self._mesh_dir(mesh.name) / "cursors.json").write_text(
-                json.dumps(
-                    {"members": mesh.cursors, "links": mesh.link_cursors},
-                    indent=2,
-                ),
+                json.dumps(doc, indent=2),
                 encoding="utf-8",
             )
         except OSError as exc:

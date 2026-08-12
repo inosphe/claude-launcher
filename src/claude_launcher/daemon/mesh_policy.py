@@ -264,7 +264,7 @@ async def tick(mm, mesh) -> None:
         if hb["enabled"] and unanswered and idle:
             due = st.get("hb_next", hb_base + hb["interval"])
             if now >= due:
-                await _dispatch(
+                await dispatch(
                     mm, mesh, member, session, "heartbeat", handle, hb["body"]
                 )
                 backoff = min(
@@ -286,7 +286,7 @@ async def tick(mm, mesh) -> None:
             due = st.get("tp_next", active_at + tp["interval"])
             if now >= due:
                 body = task_poll_body(mesh, tp, member.role)
-                await _dispatch(
+                await dispatch(
                     mm, mesh, member, session, "task-poll", handle, body
                 )
                 backoff = min(
@@ -344,22 +344,36 @@ async def tick(mm, mesh) -> None:
                 st.pop("warn_backoff", None)
 
 
-async def _dispatch(mm, mesh, member, session, kind, handle, body) -> None:
+async def dispatch(mm, mesh, member, session, kind, handle, body) -> bool:
     """Deliver a nudge decision: inject locally, or queue for the member's
-    guest daemon to inject on its next sync."""
+    guest daemon to inject on its next sync.
+
+    The transport for every nudge, whichever end decided on it — the tick
+    above, or an operator pressing 'nudge' on a row of the Unanswered box
+    (``MeshManager.nudge``). Public for that second caller: a hand-fired
+    nudge that took a different road into the terminal would be a second
+    delivery path to keep in step, and the injected block is part of the
+    contract — it says 'machine-generated', which is true of both.
+
+    Returns whether the nudge is on its way: injected into the terminal, or
+    queued for the daemon that owns it. The tick has nobody to tell and drops
+    the answer (its next pass re-fires anyway); an operator who just pressed a
+    button has to be told, so ``MeshManager.nudge`` reads it.
+    """
     if session is not None:
-        await _inject(mm, session, mesh, kind, handle, body)
-        return
+        return await _inject(mm, session, mesh, kind, handle, body)
     mesh.pending_nudges.setdefault(member.machine, []).append(
         {"handle": handle, "kind": kind, "body": body}
     )
     mm._flush_guests_soon(mesh)
     log.info("mesh %r: %s nudge queued for %r (guest %r)",
              mesh.name, kind, handle, member.machine)
+    return True
 
 
-async def _inject(mm, session, mesh, kind: str, handle: str, body: str) -> None:
+async def _inject(mm, session, mesh, kind: str, handle: str, body: str) -> bool:
     block = format_nudge(mesh.name, kind, handle, body)
     if not await session.deliver(block):
-        return  # logged by deliver(); the next tick re-fires the nudge
+        return False  # logged by deliver(); the next tick re-fires the nudge
     log.info("mesh %r: %s nudge -> %r", mesh.name, kind, handle)
+    return True

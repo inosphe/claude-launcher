@@ -778,6 +778,38 @@ rows say so, and the messages themselves stay on that daemon — the same split
 Both the CLI and the web box call out a heartbeat that is switched **off**: an
 unattended list reads as a handled one.
 
+### Acting on it
+
+A list you can only read turns into wallpaper, so each row carries the only
+two answers there are — and both leave the ledger and the nudger saying the
+same thing afterwards, which is the rule the whole feature rests on.
+
+- **Nudge** (`POST /api/mesh/{mesh}/members/{handle}/nudge`) is the heartbeat
+  with the waiting taken out: the same block, through the same transport
+  (`mesh_policy.dispatch` — inject locally, queue for the member's own daemon
+  otherwise), fired by an operator who is looking at the debt. It does *not*
+  check idleness or that anything is owed: a human pressing the button has
+  made both calls already, and a button that silently declines is worse than
+  no button. It *does* push the automatic heartbeat's next fire out by one
+  interval, so the engine does not pile on a member that was just poked, and
+  it reports a terminal that refused the message rather than swallowing it.
+  An optional `body` replaces the heartbeat's wording for that one nudge.
+- **Dismiss** (`DELETE .../members/{handle}/owed[/{id}]`) is the one closure
+  that is not a reply: some mail is never going to be answered, and a ledger
+  is only worth reading if what stays on it still matters. Dismissed ids live
+  in `Mesh.dismissed`, are subtracted by `Mesh.owed()` (`owed_all()` is the
+  same walk without them), and persist beside the cursors — the same kind of
+  per-member delivery state, written under a `dismissed` key that is absent
+  until something is written off. Dismissing settles `last_asked` when nothing
+  is left owed, exactly as cutting a member edge does, or the row would
+  vanish while the nudges kept arriving. Ids are pruned against the live
+  window on each dismissal, and dropped with the member.
+
+Only the daemon hosting a member can dismiss its mail (its log is where the
+debt is read from) and only it or the authority can nudge it (someone has to
+reach the terminal). Each row says which, in `can_dismiss` / `can_nudge`, so
+the dashboard never draws a button this daemon would refuse.
+
 ## Roles
 
 A role is what a member **is** on the mesh: its stance, and the handful of
