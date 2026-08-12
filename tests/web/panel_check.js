@@ -64,12 +64,15 @@ const MOBILE_MQ = { get matches() { return narrow; } };
 /* The parts not under test, defined in the same scope as the sliced code so
    they share its state. showView and syncLayout mirror the real ones: both
    end in syncDetailPanel, and showView drops the detail when a phone
-   navigates off the page it was borrowing. */
+   navigates off the page it was borrowing. attach() mirrors the real one only
+   in what route() depends on — that it takes the terminal to the named
+   session, through showView. */
 const stubs = `
 let currentPage = "terminal", currentName = "coder2";
 let sessName = null, sessPollTimer = null, sessStartBox = null;
 let detailWasUp = false;
 let refreshes = 0, gone = null, fits = 0;
+let term = {}, location = { hash: "#/" };
 function refreshSession() { refreshes++; }
 function refitSoon() { fits++; }
 function showView(name) {
@@ -79,6 +82,19 @@ function showView(name) {
 }
 function syncLayout() { syncDetailPanel(); }
 function go(hash) { gone = hash; }
+function attach(name) { currentName = name; term = {}; showView("terminal"); }
+function stopWfPoll() {}
+function stopMeshPoll() {}
+function stopFlowPoll() {}
+function closeWorkspaces() {}
+function openWorkflow() {}
+function openMesh() {}
+function openFlowTopology() {}
+function openWorkspaces() {}
+function openHome() {}
+function refreshMeshList() {}
+function refreshWorkflowChoices() {}
+function refreshCflow() {}
 `;
 
 const ctx = {};
@@ -86,13 +102,15 @@ new Function(
   "exports", "$", "document", "MOBILE_MQ", "setInterval", "clearInterval",
   stubs +
   [slice("parseHash"), slice("syncDetailPanel"), slice("markDetailRow"),
-   slice("dropDetail"), slice("openDetail"), slice("closeDetail")].join("\n") +
+   slice("dropDetail"), slice("openDetail"), slice("repointDetail"),
+   slice("closeDetail"), slice("route")].join("\n") +
   `
 Object.assign(exports, {
   parseHash, syncDetailPanel, openDetail, closeDetail, dropDetail, showView,
   page: () => currentPage, open: () => sessName, polls: () => refreshes,
-  went: () => gone, fits: () => fits,
+  went: () => gone, fits: () => fits, cur: () => currentName,
   setPage: (p) => { currentPage = p; }, setCur: (c) => { currentName = c; },
+  goto: (h) => { location.hash = h; route(); },
 });`
 )(ctx, $, document, MOBILE_MQ, () => 1, () => {});
 
@@ -145,6 +163,27 @@ ctx.openDetail("coder2");                      // the same button closes it
 check("wide: the button toggles it off", !up() && ctx.open() === null);
 check("wide: closing gives the width back", ctx.fits() === fitsOpen + 1);
 
+/* ---- wide: the rail describes the session on screen ---- */
+/* The rail is not in the URL, so nothing re-aims it when the terminal
+   changes unless the router does. Left behind, it labels the session we came
+   FROM — and its Workflow block then offers to open another session's run,
+   which is exactly how one gets read as the other. */
+ctx.setCur("coder2");
+ctx.openDetail("coder2");
+ctx.goto("#/s/coder3");
+check("the terminal moved", ctx.cur() === "coder3", ctx.cur());
+check("the open rail follows it", ctx.open() === "coder3", ctx.open());
+check("and is still up", up() && where() === "layout");
+check("re-aiming re-polls at once", ctx.polls() > 0);
+
+ctx.goto("#/s/coder3");
+check("re-entering the same terminal keeps it", ctx.open() === "coder3");
+
+ctx.closeDetail();
+ctx.goto("#/s/coder2");
+check("a closed rail does not spring open", ctx.open() === null && !up(),
+      { open: ctx.open(), up: up() });
+
 /* ---- narrow: the page slot ---- */
 narrow = true;
 ctx.openDetail("coder2");
@@ -155,6 +194,13 @@ check("narrow: drops .docked", !view.classes.has("docked"));
 
 ctx.showView("home");                          // leaving the page closes it
 check("narrow: leaving the page closes it", ctx.open() === null && !up());
+
+ctx.openDetail("coder2");
+ctx.goto("#/s/coder3");                        // ...and so does another terminal
+check("narrow: a terminal takes the slot back rather than re-aiming the rail",
+      ctx.open() === null && !up() && ctx.page() === "terminal",
+      { open: ctx.open(), page: ctx.page() });
+ctx.setCur("coder2");                          // that navigation really moved
 
 ctx.openDetail("coder2");
 ctx.closeDetail();
