@@ -292,20 +292,20 @@ async function refreshCflow() {
     const dot = document.createElement("span");
     dot.className = `dot ${wfDotClass(r.status)}`;
     const name = document.createElement("span");
-    name.textContent = r.workflow || "(workflow)";
+    // A run is keyed by (directory, session), so a team working one workflow
+    // in one tree makes cards that differ ONLY by the session. That makes the
+    // session part of the run's name here, not a decoration beside it — the
+    // whole point of this list is picking the right one of them.
+    const scoped = r.scope && r.scope !== "default";
+    name.textContent = scoped
+      ? `${r.workflow || "(workflow)"} · ${r.scope}`
+      : (r.workflow || "(workflow)");
     const st = document.createElement("span");
     st.className = "meta";
     st.textContent =
       r.status === "waiting_approval" && r.reason === "loop_limit"
         ? "loop limit" : r.status;
-    head.append(dot, name);
-    if (r.scope && r.scope !== "default") {
-      const scope = document.createElement("span");
-      scope.className = "cflow-scope";
-      scope.textContent = r.scope;
-      head.appendChild(scope);
-    }
-    head.appendChild(st);
+    head.append(dot, name, st);
     li.appendChild(head);
 
     if (r.step_id) {
@@ -339,13 +339,21 @@ async function refreshCflow() {
     li.addEventListener("click", () => {
       location.hash = "#/wf/" + encodeURIComponent(`${r.scope || "default"}|${r.cwd}`);
     });
-    if ((r.sessions || []).length) {
-      const sess = cflowLine(`session: ${r.sessions.join(", ")}`, "dim");
+    // Always, not only while the session is alive: a run whose session has
+    // exited is exactly the one a human mistakes for someone else's, and the
+    // exited session is still there to attach (it resumes).
+    if (scoped) {
+      const live = (r.sessions || []).includes(r.scope);
+      const sess = cflowLine(
+        `session: ${r.scope}${live ? "" : " (not running)"}`, "dim"
+      );
       sess.classList.add("linkish");
-      sess.title = "attach the session's terminal";
+      sess.title = live
+        ? "attach the session's terminal"
+        : "this run's session is not running — open it to resume";
       sess.addEventListener("click", (e) => {
         e.stopPropagation();
-        location.hash = "#/s/" + encodeURIComponent(r.sessions[0]);
+        location.hash = "#/s/" + encodeURIComponent(r.scope);
       });
       li.appendChild(sess);
     }
@@ -1218,6 +1226,12 @@ function route() {
       // the common case, and it would cost the scrollback every time.
       if (currentName === r.name && term) showView("terminal");
       else attach(r.name);
+      // An open rail follows the terminal. Never *opened* here — a panel
+      // moving to the session the user just went to is one thing, one
+      // springing up because they changed terminals is another. On a phone
+      // this does nothing: showView above has already closed the detail,
+      // whose home there is the page slot the terminal just took.
+      if (sessName && sessName !== r.name) repointDetail(r.name);
       break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
     case "mesh": openMesh(r.name); break;
@@ -1633,8 +1647,17 @@ function renderWf(data) {
   if (wf.description) view.appendChild(el("p", "wf-desc", wf.description));
 
   const meta = el("div", "wf-meta");
+  // Which session owns this run is its identity, not a detail: several
+  // sessions run the same workflow in the same tree, and the pages are then
+  // identical but for this. A link either way — an exited session is still
+  // openable (it resumes), and that is the first thing wanted here.
   if (data.scope && data.scope !== "default") {
-    meta.appendChild(el("span", "cflow-scope", `session ${data.scope}`));
+    const owner = el("a", "cflow-scope", `session ${data.scope}`);
+    owner.href = "#/s/" + encodeURIComponent(data.scope);
+    owner.title = (data.sessions || []).includes(data.scope)
+      ? "attach this run's session"
+      : "this run's session is not running — open it to resume";
+    meta.appendChild(owner);
   }
   meta.appendChild(el("span", null, `run ${run.run || "?"}`));
   meta.appendChild(el("span", null, `started ${(run.started_at || "?").replace("T", " ")}`));
@@ -1642,7 +1665,6 @@ function renderWf(data) {
   meta.appendChild(el("span", "mono", data.cwd));
   for (const s of data.sessions || []) {
     const link = el("a", "wf-session", `attach: ${s}`);
-    link.href = "#";
     link.href = "#/s/" + encodeURIComponent(s);
     meta.appendChild(link);
   }
@@ -1723,6 +1745,20 @@ function renderWf(data) {
 function wfActions(data) {
   const run = data.run || {};
   const box = el("div", "wf-actions");
+  // Leads, because it changes how everything below it reads: a run whose
+  // session is not running is not being worked on, whatever position it
+  // recorded before it stopped. Said after "agent is working on 'survey'",
+  // it reads as a footnote to the opposite claim.
+  const homeless = !(data.sessions || []).length;
+  const scoped = data.scope && data.scope !== "default";
+  if (homeless && run.status !== "done" && run.status !== "aborted") {
+    box.appendChild(el(
+      "p", scoped ? "wf-warning" : "wf-note",
+      scoped
+        ? `session '${data.scope}' is not running — nothing is driving this run`
+        : "this run belongs to no managed session — nudge the agent wherever it runs"
+    ));
+  }
   if (run.status === "waiting_approval") {
     const isLoop = run.reason === "loop_limit";
     box.appendChild(el("p", "wf-gate", run.gate || "waiting for approval"));
@@ -1767,7 +1803,9 @@ function wfActions(data) {
   } else {
     box.appendChild(el(
       "p", "wf-note",
-      `agent is working on '${run.step_id}' — nothing needs a human right now`
+      homeless
+        ? `recorded position: step '${run.step_id}' — stopped here`
+        : `agent is working on '${run.step_id}' — nothing needs a human right now`
     ));
   }
   if (run.status !== "done" && run.status !== "aborted") {
@@ -1785,12 +1823,9 @@ function wfActions(data) {
         }
       });
     } else {
+      // Why it is dead is already stated at the top of this box.
       btn.disabled = true;
       btn.title = "nothing to nudge: this run has no live session of its own";
-      box.appendChild(el(
-        "p", "wf-note",
-        "this run is not bound to a live managed session — nudge the agent wherever it runs"
-      ));
     }
     box.appendChild(btn);
   }
@@ -1820,7 +1855,14 @@ function wfActions(data) {
 /* Idle (cwd, scope): offer to start a new run. */
 async function renderWfIdle(view, data) {
   view.innerHTML = "";
-  view.appendChild(el("p", "wf-note", `no active cflow run in ${data.cwd}`));
+  // Which slot is empty, not just which directory: the same directory holds
+  // one slot per session, and all but this one may well be busy.
+  view.appendChild(el(
+    "p", "wf-note",
+    data.scope && data.scope !== "default"
+      ? `no active cflow run for session '${data.scope}' in ${data.cwd}`
+      : `no active cflow run in ${data.cwd}`
+  ));
   const pending = pendingBanner(data, () => refreshWf());
   if (pending) view.appendChild(pending);
   const box = el("div", "wf-start");
@@ -2238,14 +2280,23 @@ function dropDetail() {
 function openDetail(name) {
   if (!name) return;
   if (name === sessName) { closeDetail(); return; }
-  if (sessPollTimer) clearInterval(sessPollTimer);
-  sessName = name;
-  sessStartBox = null;
-  $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
+  repointDetail(name);
   // On a phone the detail is the page; on a desktop the page does not change
   // at all — the right rail opens beside it.
   if (MOBILE_MQ.matches) showView("session");
   else syncLayout();
+}
+
+/* Aim the panel at a session, without deciding where it goes. Opening does
+   that (above); so does entering another terminal — the rail describes the
+   session on screen, and one left pointing at the session we came *from*
+   quietly mislabels everything in it, its cflow run most of all: the run page
+   it then offers is another session's. */
+function repointDetail(name) {
+  if (sessPollTimer) clearInterval(sessPollTimer);
+  sessName = name;
+  sessStartBox = null;
+  $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   refreshSession();
   sessPollTimer = setInterval(refreshSession, 2000);
@@ -2304,6 +2355,18 @@ function renderSession(data) {
   const head = el("div", "wf-head sess-head");
   head.appendChild(el("h2", null, s.name || "session"));
   head.appendChild(el("span", `badge ${s.status || ""}`, s.status || "?"));
+  // Opening another row's ⓘ is a legitimate thing to do — read one session
+  // while watching another — but then every line under this head, the
+  // workflow run included, belongs to a session that is not the one on
+  // screen. Unsaid, the panel simply reads as the terminal's own. Only worth
+  // saying while a terminal is actually up beside it to be mistaken for.
+  if (currentName && s.name && s.name !== currentName && terminalOnScreen()) {
+    const other = el("span", "sess-elsewhere", `not ${currentName}`);
+    other.title =
+      `these details are session '${s.name}'; the terminal on screen is ` +
+      `'${currentName}'`;
+    head.appendChild(other);
+  }
   // Through the router, so the terminal it opens is the one the URL names —
   // and via go(), because on a phone this panel is laid over the very route
   // that terminal lives at, where assigning the same hash would do nothing.
@@ -4479,7 +4542,8 @@ function flowState(f) {
     case "done": return "done";
     case "aborted": return "aborted";
     case "select": return "deciding";
-    case "idle": case "no_session": case undefined: case "": return "none";
+    case "idle": case "no_session": case "no_cwd":
+    case undefined: case "": return "none";
     default: return "running";
   }
 }
@@ -4892,7 +4956,9 @@ function flowDetail(info, member, f, wf) {
     box.appendChild(el("p", "wf-note",
       f.status === "no_session"
         ? "its session is not running here"
-        : "no cflow run in this session's directory"));
+        : f.status === "no_cwd"
+          ? "its session has no working directory, and a run is keyed by one"
+          : "no cflow run in this session's directory"));
     return box;
   }
   const dia = el("div", "wf-diagram");

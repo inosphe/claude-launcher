@@ -130,6 +130,9 @@ body {
   font-size: 11px; padding: 1px 7px; border-radius: 9px;
   background: #172947; color: #58a6ff;
 }
+/* On the run page the chip is the link to the session that owns the run. */
+a.cflow-scope { text-decoration: none; }
+a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .cflow-head .meta { margin-left: auto; color: #7d8590; font-size: 11px; }
 .cflow-line { font-size: 12px; color: #9da5b0; margin-top: 3px; }
 .cflow-line.report {
@@ -242,6 +245,11 @@ body {
 /* lit while this row is the one open in the right rail */
 #session-list .sess-info.on { color: #58a6ff; }
 .sess-head { flex-wrap: wrap; }
+/* This panel is describing a session other than the terminal on screen. */
+.sess-elsewhere {
+  font-size: 11px; padding: 1px 7px; border-radius: 9px;
+  background: #3a2c12; color: #d29922;
+}
 .sess-close {
   margin-left: auto; flex: none; cursor: pointer; background: none;
   border: none; color: #7d8590; font-size: 17px; line-height: 1; padding: 0 4px;

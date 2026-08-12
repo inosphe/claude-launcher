@@ -632,6 +632,45 @@ def test_scope_resolves_from_session_env(flow_dir, monkeypatch):
     assert engine.status(scope="sx")["status"] == "step"  # explicit override
 
 
+@pytest.mark.parametrize(
+    "scope",
+    ["../evil", "..", ".", "a/b", "a\\b", "  ", "has space", "sx;rm"],
+)
+def test_a_scope_that_is_not_a_session_name_is_refused(flow_dir, scope):
+    """The scope becomes a directory name, and the web hands one in from the
+    query string — so '../..' would read and write run files anywhere.
+
+    (An *absent* scope is not a bad one: no override means the ambient scope,
+    which is what every agent-side call passes.)"""
+    _write(flow_dir, "linear", LINEAR)
+    with pytest.raises(state_mod.StateError):
+        engine.start("linear", scope=scope)
+    with pytest.raises(state_mod.StateError):
+        engine.status(scope=scope)
+    assert not (flow_dir.parent / ".cflow").exists()  # nothing escaped upwards
+
+
+def test_a_bad_scope_in_the_registry_is_dropped_on_read(flow_dir):
+    """Written by an older build, or by hand — either way it names no slot."""
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear", scope="s1")
+    state_mod._write_registry(
+        state_mod._read_registry() + [{"cwd": str(flow_dir), "scope": "../evil"}]
+    )
+    assert state_mod.known_runs() == [(str(flow_dir.resolve()), "s1")]
+
+
+def test_agent_and_daemon_reach_one_slot_from_two_spellings(flow_dir):
+    """The agent's MCP server passes the cwd it inherited; every daemon entry
+    point passes its own resolved copy. Both have to land on the same run."""
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear", cwd=str(flow_dir), scope="s1")  # as the agent has it
+    resolved = str(flow_dir.resolve())
+    assert engine.status(cwd=resolved, scope="s1")["status"] == "step"
+    # ...and the registry the dashboard scans holds one canonical entry
+    assert state_mod.known_runs() == [(resolved, "s1")]
+
+
 def test_legacy_flat_layout_migrates_to_default_scope(flow_dir):
     import shutil
 
