@@ -3392,8 +3392,11 @@ function renderLinkEditor(info) {
    A mesh that never federated has no peer list at all — and that is exactly
    the case where the tree is the whole story, so it gets a single unnamed
    cluster rather than the "nothing to draw yet" the bare ring used to show.
-   `machine` is blank on the primary's own members (federation v2), so the
-   daemon's own name fills in, matching how the daemon buckets them itself. */
+   `machine` is blank on the AUTHORITY's own members (federation v2), so the
+   authority — rank 0, i.e. order[0] — fills in, matching how the daemon
+   buckets them itself. Reading it as `info.self` is right only while we hold
+   authority; on a mirror it draws the authority's agents inside our own
+   cluster and leaves the authority's empty. */
 function meshClusters(info) {
   const peers = info.peers || [];
   const order = peers.length
@@ -3401,7 +3404,7 @@ function meshClusters(info) {
     : [info.self || ""];
   const buckets = new Map(order.map((m) => [m, []]));
   for (const m of info.members || []) {
-    const home = m.machine || info.self || "";
+    const home = m.machine || order[0];
     buckets.get(buckets.has(home) ? home : order[0]).push(m);
   }
   return order.map((machine, i) => ({
