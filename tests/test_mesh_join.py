@@ -351,9 +351,12 @@ def test_join_address_collisions(home, tmp_path):
         with pytest.raises(MeshConflict):
             await mm_b.join("m@pcX", "sx", handle="bee")
 
-        # joining the primary's own address locally still works
+        # joining the primary's own address locally still works — and the
+        # mesh federated on the line above, so the new member is stamped
+        # rather than left blank: on a federated roster every entry is
+        # absolute, or a mirror reads the blank as one of its own.
         member = await mm_a.join("m@pcA", "sx", handle="amy")
-        assert isinstance(member, Member) and member.machine == ""
+        assert isinstance(member, Member) and member.machine == "pcA"
 
         await mgr.shutdown_all()
 

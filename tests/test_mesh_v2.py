@@ -844,3 +844,102 @@ def test_mesh_info_reports_roles_and_queues(home, tmp_path):
         await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+def test_authority_member_joined_after_federation_buckets_on_the_authority(
+    home, tmp_path
+):
+    """A member enrolled on the authority AFTER the mesh federated belongs to
+    the authority everywhere — including on a mirror's own view of it.
+
+    ``_stamp_own_members`` runs when a mesh federates, at a handover and on
+    migration; a join is none of those, so such a member used to keep the
+    blank machine that means "the authority's own". Readers that resolved
+    blank as *their own* name then drew it inside the reading daemon's
+    cluster and left the authority's empty — the roster contradicting its own
+    ``reachability``, which had it right all along.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path)
+        # the mesh is federated; NOW the authority enrols one of its own
+        mgr.create(SessionDef(name="sa2", harness="py", cwd=str(tmp_path)))
+        await mm_a.join("m", "sa2", handle="amy")
+        await asyncio.sleep(0.3)  # roster fanout to the mirror
+
+        mesh_a, mesh_b = mm_a.get("m"), mm_b.get("m")
+        # absolute from birth, on the authority and on the mirror's copy
+        assert mesh_a.members["amy"].machine == "pcA"
+        assert mesh_b.members["amy"].machine == "pcA"
+        # ...and it is the authority's, whichever daemon is asked
+        assert mm_a.is_local_member(mesh_a, mesh_a.members["amy"]) is True
+        assert mm_b.is_local_member(mesh_b, mesh_b.members["amy"]) is False
+
+        # the bucket the topology draws: 'amy' hangs off pcA on BOTH sides,
+        # and the mirror never claims her as its own
+        for mm, mesh in ((mm_a, mesh_a), (mm_b, mesh_b)):
+            peers = {p["machine"]: p for p in mm.mesh_info(mesh)["peers"]}
+            assert "amy" in peers["pcA"]["members"]
+            assert "amy" not in peers["pcB"]["members"]
+            assert peers["pcB"]["members"] == ["bob"]
+
+        # the owed ledger names the same machine rather than the reader's
+        assert {
+            r["handle"]: r["machine"] for r in mm_b.owed_report(mesh_b)["members"]
+        }["amy"] == "pcA"
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_blank_machine_on_a_mirror_reads_as_the_authoritys(home, tmp_path):
+    """A roster blank that predates the stamping rule still reads correctly.
+
+    Meshes federated before that fix have members already on disk with a
+    blank machine, and no reload re-stamps them (``_stamp_own_members`` is
+    reached through migration, which such a mesh has already done). So the
+    readers must resolve blank as the AUTHORITY's, not their own.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path)
+        mesh_b = mm_b.get("m")
+        # the legacy shape: the authority's member, left blank
+        mesh_b.members["alice"].machine = ""
+
+        peers = {p["machine"]: p for p in mm_b.mesh_info(mesh_b)["peers"]}
+        assert peers["pcA"]["members"] == ["alice"]
+        assert peers["pcB"]["members"] == ["bob"]
+        assert mm_b.is_local_member(mesh_b, mesh_b.members["alice"]) is False
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_unfederated_mesh_keeps_its_members_blank_and_local(home, tmp_path):
+    """The never-federated case the blank convention exists for is untouched:
+    no peer list, so no stamping, and the single cluster is still ours."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, root=tmp_path / "solo")
+        _wire({"pcA": mm})
+        mgr.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path)))
+        mm.create("m")
+        await mm.join("m", "sa", handle="alice")
+
+        mesh = mm.get("m")
+        assert mesh.peers == [] and mesh.members["alice"].machine == ""
+        assert mm.is_local_member(mesh, mesh.members["alice"]) is True
+        assert mm.mesh_info(mesh)["peers"] == []
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())

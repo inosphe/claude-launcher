@@ -1283,6 +1283,12 @@ class MeshManager:
         # roster to be found by it.
         parent = self.parent_handle_for(mesh, session)
         member = Member(handle, session, role=self._resolve_role(mesh, handle, role))
+        # Absolute from birth on a federated mesh, for the reason in
+        # _stamp_own_members: that runs when a mesh federates, at a handover
+        # and on migration — none of which is a join, so a member enrolled
+        # AFTER federation stayed blank and every mirror read it as its own.
+        if mesh.peers and mesh.me:
+            member.machine = mesh.me
         mesh.members[handle] = member
         self._wire_member(mesh, member, parent)
         # New members start caught up: joining must not replay the backlog.
@@ -3970,7 +3976,8 @@ class MeshManager:
             row: dict = {
                 "handle": handle,
                 "role": member.role,
-                "machine": member.machine or mesh.me or "",
+                # Blank means the authority's own member, not ours (v2).
+                "machine": member.machine or mesh.authority or "",
                 "session": member.session,
                 "local": local,
                 "reachability": self._reachability(mesh, member),
@@ -4314,9 +4321,14 @@ class MeshManager:
                     ),
                     "members": sorted(
                         h for h, m in mesh.members.items()
-                        # A blank machine only survives on a mesh that never
-                        # federated, where it can only mean us.
-                        if (m.machine or mesh.me) == machine
+                        # A blank machine is the AUTHORITY's own member (v2),
+                        # which is us only while we hold authority — bucketing
+                        # it under `me` on a mirror hands the authority's
+                        # agents to whoever is reading, and leaves the
+                        # authority's own cluster drawn empty. On a mesh that
+                        # never federated `authority` is `me`, so the
+                        # never-federated case is unchanged.
+                        if (m.machine or mesh.authority) == machine
                     ),
                 }
             )
