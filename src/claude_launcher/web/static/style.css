@@ -18,8 +18,11 @@ body {
 }
 #sidebar header {
   padding: 14px 16px; border-bottom: 1px solid #2a2e36;
-  display: flex; align-items: baseline; justify-content: space-between;
-  gap: 8px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+}
+#rail-title {
+  width: 100%; display: flex; align-items: baseline;
+  justify-content: space-between; gap: 8px;
 }
 #sidebar h1 { font-size: 16px; letter-spacing: 0.5px; }
 #daemon-info { font-size: 11px; color: #7d8590; }
@@ -431,7 +434,13 @@ body {
 .wf-journal-line { padding: 1px 0; color: #6e7681; }
 #cflow-list .linkish:hover { color: #58a6ff; }
 
-/* relay badge (header): permanent connectivity indicator */
+/* relay badge (header): permanent connectivity indicator. It owns a row of
+   its own, so it keeps to one line — a name too long for the rail is cut
+   short rather than allowed to grow the header; the title has the full one. */
+#relay-badge {
+  max-width: 100%; display: inline-block; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
+}
 .badge.relay-on { background: #1f4428; color: #3fb950; }
 .badge.relay-off { background: #30363d; color: #8b949e; }
 .badge.relay-down { background: #442022; color: #ff7b72; }

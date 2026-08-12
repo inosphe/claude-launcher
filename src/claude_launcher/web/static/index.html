@@ -37,11 +37,16 @@
        terminal beside it. Everything you *do* is a page in #main. -->
   <aside id="sidebar">
     <header>
-      <h1>claunch</h1>
+      <!-- Two rows, not one: the relay name is arbitrarily long (a machine
+           name someone else chose) and sharing a line with the title made it
+           wrap inside its own pill and shove the row open. -->
+      <div id="rail-title">
+        <h1>claunch</h1>
+        <button id="refresh-all" type="button"
+                title="reload the session list now">⟳</button>
+        <span id="daemon-info"></span>
+      </div>
       <span id="relay-badge" class="badge hidden"></span>
-      <button id="refresh-all" type="button"
-              title="reload the session list now">⟳</button>
-      <span id="daemon-info"></span>
     </header>
     <ul id="session-list"></ul>
     <button id="clear-exited" class="hidden"></button>
