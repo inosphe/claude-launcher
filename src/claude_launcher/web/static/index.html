@@ -65,16 +65,16 @@
     <div id="term-header" class="hidden">
       <span id="term-title"></span>
       <span id="term-status" class="badge"></span>
-      <!-- This one only reads the session, so it stays with what names the
-           session — the title and the badge — while the two that change it
-           are grouped away to the right. `details` was sitting against
-           `kill`, the same size and shape as it. -->
-      <button id="term-details" type="button" aria-pressed="false"
-              title="this session's metadata and workflow">ⓘ details</button>
+      <!-- The two that change the session keep to the left, in with the name
+           and the badge they act on. `details` holds the far right on its
+           own: it is the handle of the rail that opens along that edge, so it
+           sits against the thing it opens rather than against `kill`. -->
       <span class="term-actions">
         <button id="term-resume" class="hidden">resume</button>
         <button id="term-kill">kill</button>
       </span>
+      <button id="term-details" type="button" aria-pressed="false"
+              title="this session's metadata and workflow">ⓘ details</button>
     </div>
     <div id="terminal"></div>
 
