@@ -788,6 +788,11 @@ class MeshManager:
             return bool(self.machine) and member.machine == self.machine
         return member.machine in ("", self.machine)
 
+    #: Same question, asked from outside. The rule above is subtle enough
+    #: (blank machine means two different things either side of `primary`)
+    #: that a caller reimplementing it would get it wrong on a mirror.
+    is_local_member = _is_local
+
     def meshes_for_session(self, session: str) -> List[dict]:
         """Every mesh THIS daemon's ``session`` is a member of, as
         ``{mesh, handle, role, joined_at, members}``.

@@ -175,6 +175,7 @@ def build_app(
     r.add_post("/api/mesh/{mesh}/messages", h_mesh_send)
     r.add_get("/api/mesh/{mesh}/messages", h_mesh_history)
     r.add_get("/api/mesh/{mesh}/owed", h_mesh_owed)
+    r.add_get("/api/mesh/{mesh}/flows", h_mesh_flows)
     r.add_post("/api/mesh/{mesh}/invite", h_mesh_invite)
     r.add_get("/api/mesh/{mesh}/invites", h_mesh_invites_list)
     r.add_delete("/api/mesh/{mesh}/invites/{prefix}", h_mesh_invite_revoke)
@@ -833,6 +834,69 @@ async def h_mesh_owed(request: web.Request) -> web.Response:
     """Who has been asked something and answered nothing — per message."""
     mm = _mesh_mgr(request)
     return web.json_response(mm.owed_report(mm.get(request.match_info["mesh"])))
+
+
+async def h_mesh_flows(request: web.Request) -> web.Response:
+    """What every member of this mesh is *doing*: its cflow run, and the
+    workflow graph that run is walking.
+
+    The roster says who is in the room and who may speak to whom; this says
+    where each of them has got to. Kept off ``/api/mesh/{mesh}`` on purpose —
+    that payload is polled by a page which does not need the graphs, and a
+    workflow snapshot is an order of magnitude bigger than a member row.
+
+    Graphs are deduplicated by ``workflow@cwd``: a team of four running the
+    same workflow in the same tree is the ordinary case, and shipping that
+    graph four times a poll is waste. The first snapshot found under a key
+    wins, so two runs of the same name over an edited YAML would share the
+    older picture; the drawing side treats a step id it cannot find as
+    off-graph rather than trusting the key blindly.
+
+    Remote members carry no run: their state lives on their own daemon, and
+    saying so is more use than an empty track that reads as "not started".
+    """
+    mm = _mesh_mgr(request)
+    mesh = mm.get(request.match_info["mesh"])
+    manager: SessionManager = request.app["manager"]
+    live = {s.sdef.name: s for s in manager.list() if not s.exited}
+
+    flows: dict = {}
+    workflows: dict = {}
+    for handle in sorted(mesh.members):
+        member = mesh.members[handle]
+        if not mm.is_local_member(mesh, member):
+            flows[handle] = {
+                "session": member.session,
+                "machine": member.machine,
+                "remote": True,
+            }
+            continue
+        session = live.get(member.session)
+        if session is None:
+            flows[handle] = {"session": member.session, "status": "no_session"}
+            continue
+        cwd = str(Path(session.sdef.cwd).resolve())
+        entry = _cflow_entry(manager, cwd, member.session)
+        entry.pop("reports", None)  # the card shows a track, not prose
+        flows[handle] = {**entry, "session": member.session}
+        name = entry.get("workflow")
+        if entry.get("status") in (None, "idle", "error") or not name:
+            continue
+        key = f"{name}@{cwd}"
+        flows[handle]["key"] = key
+        if key not in workflows:
+            try:
+                workflows[key] = _serialize_workflow(
+                    cflow_state.load_snapshot(cwd, member.session)
+                )
+            except (WorkflowError, StateError, OSError) as exc:
+                # A missing or unreadable snapshot costs the track, not the
+                # card: status, step and blockage all still read.
+                flows[handle]["graph_error"] = str(exc)
+                flows[handle].pop("key", None)
+    return web.json_response(
+        {"mesh": mesh.name, "flows": flows, "workflows": workflows}
+    )
 
 
 async def h_mesh_policy_get(request: web.Request) -> web.Response:

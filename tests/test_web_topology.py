@@ -11,8 +11,10 @@ So the harnesses in ``tests/web`` slice the real functions out of the shipped
 maths, ``render_check`` on the SVG the drawing code assembles against a stub
 DOM, ``lineage_check`` on the session list's tree ordering, ``panel_check`` on
 where the session detail docks (the rail beside the terminal, or the page slot
-on a phone) and what closing it leaves behind. This wrapper is what makes them
-run with everything else.
+on a phone) and what closing it leaves behind, and the two ``flow*_check``
+harnesses on the flow view — one on the track a workflow becomes, one on the
+page those tracks are drawn into. This wrapper is what makes them run with
+everything else.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
@@ -31,7 +33,14 @@ WEB = Path(__file__).resolve().parent / "web"
 
 @pytest.mark.parametrize(
     "script",
-    ["layout_check.js", "render_check.js", "lineage_check.js", "panel_check.js"],
+    [
+        "layout_check.js",
+        "render_check.js",
+        "lineage_check.js",
+        "panel_check.js",
+        "flowtrack_check.js",
+        "flowrender_check.js",
+    ],
 )
 def test_topology_diagram_logic(script):
     node = shutil.which("node")

@@ -1158,6 +1158,94 @@ CLI has printed since phase 8 (`byLineage` in `app.js`, checked under node in
 `tests/web/lineage_check.js`). Both listings must agree about who is whose;
 the rail was the one place a fleet looked flat.
 
+## The flow view (phase 11 — implemented)
+
+Three pages each answered part of one question and none of them answered it.
+`#/mesh/<name>` says who is in the room and who may speak to whom.
+`#/flows` lists the cflow runs and where each stands. `#/wf/<scope|cwd>`
+draws one run's state machine in full. The question a person actually arrives
+with is the join of the first two: **which of my agents is stuck, and who do
+I ask about it** — and answering it meant holding a roster in your head while
+scrolling a list of runs, matching sessions to handles by eye.
+
+So `#/mesh/<name>/flows` puts the run *inside* the node. A separate route
+rather than a section on the mesh page: the roster answers "who is here" and
+this answers "how far along is each of them", and a page that tries to lead
+with both leads with neither.
+
+### The node becomes a track
+
+Same mesh, same clusters on the same rank ring, same spawn forest inside
+them, same dashed cuts — literally the same layout engine, `layoutForest` and
+`measureCluster` called with card-sized metrics instead of dot-sized ones.
+The two views have to place the same mesh the same way or they stop being two
+zoom levels of one thing. What changes is the node: an agent is a card, and
+the card carries its whole state machine as a line.
+
+```
+  ┌──────────────────────────────┐
+  │ ● w1                  review │   handle, liveness, workflow
+  │  ●───●───◆───◉───○───▷       │   the track
+  │      │       └ gate/verify bars flank their pip
+  │      └───────────┘           │   a back arc: this workflow loops
+  │ build           waiting on you│  where it is, and what that means
+  └──────────────────────────────┘
+```
+
+- **Order.** The track is the workflow breadth-first from `start` — the same
+  walk `wfDiagramSvg` uses to stack its rows. The strip *is* the run page's
+  diagram turned on its side, and `tests/web/flowtrack_check.js` pins the two
+  orders together by reading the `data-step` attributes out of the SVG the
+  run page emits. If they drift, the claim is false and the test says so.
+- **Shape says what kind of state it is**: circle for a plain step, diamond
+  for a select, a ringed pip for the `end` a workflow can terminate at. A
+  gate draws a bar to the *left* of its pip (you must be let IN) and a verify
+  one to the *right* (you must pass to get OUT); the side is the whole of the
+  distinction, and it costs no vertical room.
+- **Fill says where the run has been**: visited (green), here now (blue ring
+  with a halo), not reached (hollow). A step visited more than once carries
+  `×n`, so a loop that is actually looping is visible without opening it.
+- **Only edges that say something are drawn.** `i -> i+1` is what the rail
+  already means; a skip arcs over it, a loop back arcs under it. Drawing the
+  rest would be a hairline restatement of the line they sit on.
+- **Absence looks like absence.** A member with no run gets a dashed card and
+  the words, not an empty track — an empty track reads as "has not started",
+  and "there is no run here" is a different fact. A member whose session has
+  exited says *that* instead, because membership outlives the session it
+  named.
+
+### What the picture is for
+
+One rule decides the styling: **the loudest thing on it is an agent waiting
+on a human.** Those cards get an amber halo, and they are repeated above the
+canvas in a "Waiting on you" strip with the actual Approve / option buttons —
+a monitor you cannot act from just sends you somewhere else to act. An
+agent-chooser select is deliberately *not* in that strip: it is the agent's
+own branch and must not read as a queue for the operator.
+
+Everything else is one click away rather than in the picture. Clicking a card
+opens the run page's own diagram underneath it, unchanged, plus who spawned
+it, who it can message, and a link to the full run. The compact track is an
+index into that, never a replacement for it — a dense diagram that answers
+the wrong question is worse than a sparse one that answers the right one.
+
+### One request, not one per agent
+
+`GET /api/mesh/{mesh}/flows` does the join server-side: every member's run
+plus the workflow graphs behind them. Deliberately not folded into
+`/api/mesh/{mesh}` — that payload is polled by a page which does not need
+graphs, and a workflow snapshot is an order of magnitude bigger than a member
+row. Graphs are deduplicated by `workflow@cwd`, because a team of four on one
+workflow in one tree is the ordinary case and shipping that graph four times
+every two seconds is waste. The first snapshot under a key wins, so a re-run
+over an edited YAML could hand a sibling the older picture; the drawing side
+treats a `step_id` it cannot find in the graph as off-graph and says so,
+rather than drawing a track with nothing lit on it.
+
+Remote members carry no run at all: their state lives on their own daemon,
+and saying so beats an empty track. The federated answer would need the peer
+protocol to carry run state, which is a bigger change than this view earns.
+
 ## Phases
 
 1. **Local mesh MVP** (done): paste mode, mesh module + API + CLI +
@@ -1204,3 +1292,10 @@ the rail was the one place a fleet looked flat.
     told who is waiting on it in both the system prompt and the opening
     block. Tests in `tests/test_spawn.py`, `tests/test_spawn_api.py` and
     `tests/web/lineage_check.js`. See "Lineage by default" above.
+11. **The flow view** (done): a second reading of the same mesh at
+    `#/mesh/<name>/flows`, where every agent is a card carrying its whole
+    workflow as a track, and the ones blocked on a human come with the
+    buttons that unblock them. One endpoint (`GET /api/mesh/{mesh}/flows`)
+    does the roster/run join server-side. Tests in
+    `tests/test_mesh_flows_api.py`, `tests/web/flowtrack_check.js` and
+    `tests/web/flowrender_check.js`. See "The flow view" above.
