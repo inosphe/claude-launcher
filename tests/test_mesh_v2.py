@@ -746,6 +746,42 @@ def test_remote_heartbeat_decided_by_primary_injected_by_guest(home, tmp_path):
     asyncio.run(run())
 
 
+def test_operator_nudge_survives_a_busy_remote_member(home, tmp_path):
+    """A hand-fired nudge is not subject to the guest's idleness re-check.
+
+    The engine's nudges may be dropped by a busy member — the tick that
+    decided on one re-fires it a minute later, so nothing is lost. Nothing
+    re-fires an operator's, and the local path never checks idleness at all,
+    so without `force` the same button would mean two different things
+    depending on which machine happens to host the member.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path)
+        mesh_a, mesh_b = mm_a.get("m"), mm_b.get("m")
+        session = mgr.get("sb")
+        await _wait_screen(session, "READY")
+
+        # the primary queues it for the daemon that owns bob's terminal
+        result = await mm_a.nudge("m", "bob", "answer the schema question")
+        assert result["queued"] is True
+        queued = mesh_a.pending_nudges["pcB"][0]
+        assert queued["handle"] == "bob" and queued["force"] is True
+
+        # bob is mid-turn when it lands
+        session.status = lambda: "busy"
+        await mm_b._apply_nudge(mesh_b, {**queued, "force": False})
+        assert "note: answer the schema question" not in "\n".join(session.capture())
+        await mm_b._apply_nudge(mesh_b, queued)
+        await _wait_screen(session, "note: answer the schema question")
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_stall_warning_reaches_remote_leader(home, tmp_path):
     _register_py_harness()
 

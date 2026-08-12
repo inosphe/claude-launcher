@@ -3573,11 +3573,19 @@ class MeshManager:
         asyncio.ensure_future(self._apply_nudge(mesh, nudge))
 
     async def _apply_nudge(self, mesh: Mesh, nudge: dict) -> None:
-        """Inject a primary-decided policy nudge into a local member's PTY.
+        """Inject a primary-decided nudge into a local member's PTY.
 
         Idleness is re-checked at fire time (the primary decided from a
         report that may be stale); a busy member simply drops the nudge —
         the primary's timers re-fire it later.
+
+        Unless it was ``force``d, which marks a nudge an operator pressed a
+        button for rather than one a timer decided on. Nothing re-fires that
+        one, so dropping it would lose it silently — and the local path never
+        checked idleness in the first place, so re-checking here would make
+        the same button mean two different things depending on which machine
+        happens to host the member. An exited session still refuses: there is
+        nothing there to read it.
         """
         handle = str(nudge.get("handle") or "")
         member = mesh.members.get(handle)
@@ -3587,7 +3595,9 @@ class MeshManager:
             session = self.manager.get(member.session)
         except ManagerError:
             return
-        if session.exited or session.status() != STATUS_IDLE:
+        if session.exited:
+            return
+        if session.status() != STATUS_IDLE and not nudge.get("force"):
             return
         block = mesh_policy.format_nudge(
             mesh.name,
@@ -4069,7 +4079,11 @@ class MeshManager:
         idleness or whether anything is actually owed — a human clicking
         'nudge' next to a row has already made both judgements, and refusing
         because the member is mid-turn would make the button unreliable in
-        exactly the case it is reached for.
+        exactly the case it is reached for. That holds across the federation:
+        the queued form carries ``force``, so the member's own daemon does not
+        apply the idleness re-check it applies to the engine's nudges (which
+        it can drop safely, because the engine re-fires them and nothing
+        re-fires this one).
 
         It does reset the automatic heartbeat's next fire, though: a member
         that was just poked by hand should not be poked again by the engine a
@@ -4105,7 +4119,7 @@ class MeshManager:
             or mesh.policy["heartbeat"]["body"]
         )
         if not await mesh_policy.dispatch(
-            self, mesh, member, session, "nudge", handle, text
+            self, mesh, member, session, "nudge", handle, text, force=True
         ):
             # The heartbeat can shrug this off and try again in a minute; a
             # button cannot. A terminal that will not take a message is the

@@ -344,7 +344,9 @@ async def tick(mm, mesh) -> None:
                 st.pop("warn_backoff", None)
 
 
-async def dispatch(mm, mesh, member, session, kind, handle, body) -> bool:
+async def dispatch(
+    mm, mesh, member, session, kind, handle, body, *, force: bool = False
+) -> bool:
     """Deliver a nudge decision: inject locally, or queue for the member's
     guest daemon to inject on its next sync.
 
@@ -359,11 +361,22 @@ async def dispatch(mm, mesh, member, session, kind, handle, body) -> bool:
     queued for the daemon that owns it. The tick has nobody to tell and drops
     the answer (its next pass re-fires anyway); an operator who just pressed a
     button has to be told, so ``MeshManager.nudge`` reads it.
+
+    ``force`` travels with a queued nudge and says the decision was an
+    operator's, not a timer's: the guest daemon injects it whether or not the
+    member is idle. A policy nudge dropped by a busy member is re-fired by the
+    tick that decided on it, so dropping costs nothing; a hand-fired one has
+    no timer behind it, and dropping it would lose it — the local path does
+    not check idleness either, and the same button must not mean two things
+    depending on which machine hosts the member.
     """
     if session is not None:
         return await _inject(mm, session, mesh, kind, handle, body)
     mesh.pending_nudges.setdefault(member.machine, []).append(
-        {"handle": handle, "kind": kind, "body": body}
+        # Absent unless forced, so a guest too old to know the key sees the
+        # payload it always saw.
+        {"handle": handle, "kind": kind, "body": body,
+         **({"force": True} if force else {})}
     )
     mm._flush_guests_soon(mesh)
     log.info("mesh %r: %s nudge queued for %r (guest %r)",
