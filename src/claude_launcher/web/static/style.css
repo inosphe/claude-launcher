@@ -209,18 +209,21 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    session is. Pressed is the panel it toggles standing open on *this*
    session — the state that makes a second press a close. */
 #term-details {
-  padding: 2px 9px; font-size: 12px; line-height: 1.6; cursor: pointer;
-  background: none; color: #7d8590;
+  margin-left: auto; padding: 2px 9px; font-size: 12px; line-height: 1.6;
+  cursor: pointer; background: none; color: #7d8590;
   border: 1px solid #30363d; border-radius: 4px;
 }
 #term-details:hover { color: #c6cdd5; border-color: #3c444d; }
 #term-details[aria-pressed="true"] {
   background: #10203a; color: #58a6ff; border-color: #1f6feb;
 }
-/* the buttons that change the session, held together at the far end */
-.term-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-#term-kill { background: #8b2e2e; padding: 3px 10px; font-size: 12px; }
-#term-resume { background: #1f6feb; padding: 3px 10px; font-size: 12px; }
+/* the buttons that change the session, held together beside its name */
+.term-actions { display: flex; align-items: center; gap: 10px; }
+/* margin-top: the 6px comes from the form-button rule above, which needs it
+   in a stacked form and not in a centred row — beside the title it just hung
+   them low. */
+#term-kill { background: #8b2e2e; padding: 3px 10px; font-size: 12px; margin-top: 0; }
+#term-resume { background: #1f6feb; padding: 3px 10px; font-size: 12px; margin-top: 0; }
 #term-resume:hover { background: #388bfd; }
 #term-resume:disabled { opacity: 0.5; cursor: not-allowed; }
 
