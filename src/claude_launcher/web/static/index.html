@@ -67,13 +67,16 @@
       <span id="term-status" class="badge"></span>
       <!-- The two that change the session keep to the left, in with the name
            and the badge they act on. `details` holds the far right on its
-           own: it is the handle of the rail that opens along that edge, so it
-           sits against the thing it opens rather than against `kill`. -->
+           own — the handle of the rail that opens along that edge, and while
+           that rail is open, its close button too. It is taken out of this
+           row's flow by the stylesheet and pinned to the screen's right edge
+           so that opening the rail does not shift it; last here all the same,
+           because that is where it appears. -->
       <span class="term-actions">
-        <button id="term-resume" class="hidden">resume</button>
-        <button id="term-kill">kill</button>
+        <button id="term-resume" class="term-btn hidden">resume</button>
+        <button id="term-kill" class="term-btn">kill</button>
       </span>
-      <button id="term-details" type="button" aria-pressed="false"
+      <button id="term-details" class="term-btn" type="button" aria-pressed="false"
               title="this session's metadata and workflow">ⓘ details</button>
     </div>
     <div id="terminal"></div>

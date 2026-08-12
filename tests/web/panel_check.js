@@ -46,8 +46,20 @@ function node(id) {
   n.attrs = {};
   n.setAttribute = (k, v) => { n.attrs[k] = String(v); };
   n.getAttribute = (k) => (k in n.attrs ? n.attrs[k] : null);
+  n.addEventListener = () => {};
+  n.text = "";
+  Object.defineProperty(n, "textContent", {
+    get() { return n.text; }, set(v) { n.text = String(v); },
+  });
   return n;
 }
+function el(tag, cls, text) {
+  const n = node(tag);
+  if (cls) String(cls).split(/\s+/).forEach((c) => c && n.classes.add(c));
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+const kidsOf = (n, cls) => n.kids.filter((k) => k.classes.has(cls));
 const ids = {};
 for (const id of ["layout", "sidebar", "main", "mobile-bottom", "sess-view"]) {
   ids[id] = node(id);
@@ -63,6 +75,10 @@ const document = { querySelectorAll: () => [] };
 
 let narrow = false;
 const MOBILE_MQ = { get matches() { return narrow; } };
+// the real one is "#terminal is not hidden and the phone's rail is not over
+// it"; what the head cares about is only the answer
+let termUp = true;
+const terminalOnScreen = () => termUp;
 
 /* The parts not under test, defined in the same scope as the sliced code so
    they share its state. showView and syncLayout mirror the real ones: both
@@ -108,13 +124,15 @@ function refreshCflow() {}
 const ctx = {};
 new Function(
   "exports", "$", "document", "MOBILE_MQ", "setInterval", "clearInterval",
+  "el", "terminalOnScreen",
   stubs +
   [slice("parseHash"), slice("syncDetailPanel"), slice("markDetailRow"),
    slice("dropDetail"), slice("openDetail"), slice("repointDetail"),
-   slice("closeDetail"), slice("route")].join("\n") +
+   slice("closeDetail"), slice("route"), slice("sessHead")].join("\n") +
   `
 Object.assign(exports, {
   parseHash, syncDetailPanel, openDetail, closeDetail, dropDetail, showView,
+  sessHead,
   page: () => currentPage, open: () => sessName, polls: () => refreshes,
   went: () => gone, fits: () => fits, cur: () => currentName,
   setPage: (p) => { currentPage = p; }, setCur: (c) => { currentName = c; },
@@ -122,7 +140,7 @@ Object.assign(exports, {
   runFold: () => sessRunFold, runStops: () => sessRunStops,
   holdRun: () => { sessRunFold = "the open fold"; },
 });`
-)(ctx, $, document, MOBILE_MQ, () => 1, () => {});
+)(ctx, $, document, MOBILE_MQ, () => 1, () => {}, el, terminalOnScreen);
 
 let failures = 0;
 const check = (name, cond, extra) => {
@@ -224,6 +242,42 @@ ctx.goto("#/s/coder3");                        // ...until we walk into it
 check("walking into that terminal lights it", pressed() === "true", pressed());
 ctx.closeDetail();
 check("closing puts it out", pressed() === "false");
+ctx.setCur("coder2");
+check("and it says which press it is offering",
+      $("term-details").title.includes("metadata"), $("term-details").title);
+ctx.openDetail("coder2");
+check("...a close, once it is the panel's ×",
+      $("term-details").title.includes("close"), $("term-details").title);
+ctx.closeDetail();
+
+/* ---- the panel head hands its × to that chip, but only there ---- */
+/* Docked beside its own terminal, the chip is pinned over this head's corner
+   and closes the panel: a × under a close button, and an "Open terminal" for
+   the terminal already on screen, are both noise. Nowhere else. */
+const headOf = (name) => ctx.sessHead({ name, status: "idle" });
+narrow = false; termUp = true;
+ctx.setCur("coder3");
+let h = headOf("coder3");
+check("docked beside its own terminal: no ×", kidsOf(h, "sess-close").length === 0);
+check("...and no Open terminal that opens what is open",
+      kidsOf(h, "wf-btn").length === 0);
+check("...but still says which session", h.kids[0].text === "coder3");
+
+h = headOf("s7");
+check("aimed elsewhere it keeps both", kidsOf(h, "sess-close").length === 1 &&
+      kidsOf(h, "wf-btn").length === 1);
+check("...and says it is elsewhere", kidsOf(h, "sess-elsewhere").length === 1);
+
+termUp = false;                                // a page is over the terminal
+h = headOf("coder3");
+check("with the terminal covered both come back — there is no chip on screen",
+      kidsOf(h, "sess-close").length === 1 && kidsOf(h, "wf-btn").length === 1);
+
+termUp = true; narrow = true;                  // and a phone has no header at all
+h = headOf("coder3");
+check("on a phone both stay", kidsOf(h, "sess-close").length === 1 &&
+      kidsOf(h, "wf-btn").length === 1);
+narrow = false;
 ctx.setCur("coder2");
 
 /* ---- narrow: the page slot ---- */

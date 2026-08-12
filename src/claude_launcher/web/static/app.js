@@ -980,14 +980,18 @@ function syncDetailPanel() {
    The header's `details` is the same switch and gets the same treatment —
    pressed only while the open panel is describing the terminal under it,
    which is exactly when pressing it again would close rather than repoint.
-   Both names null (no terminal, no panel) is not a match. */
+   Both names null (no terminal, no panel) is not a match. In that state the
+   panel has handed this button its × (see sessHead), so it says so. */
 function markDetailRow() {
   document.querySelectorAll("#session-list .sess-info").forEach((b) =>
     b.classList.toggle("on", b.dataset.name === sessName)
   );
-  $("term-details").setAttribute(
-    "aria-pressed", String(!!sessName && sessName === currentName)
-  );
+  const closes = !!sessName && sessName === currentName;
+  const chip = $("term-details");
+  chip.setAttribute("aria-pressed", String(closes));
+  chip.title = closes
+    ? "close this session's details"
+    : "this session's metadata and workflow";
 }
 
 /* What the top bar calls the thing on screen. Pages live in the same slot as
@@ -2375,26 +2379,36 @@ function metaRow(dl, label, value, title) {
   dl.appendChild(dd);
 }
 
-function renderSession(data) {
-  const view = $("sess-view");
-  const s = data.session || {};
-  view.innerHTML = "";
+/* Who this panel is about, and the two ways out of it — both of which drop
+   away in the one arrangement where they are noise.
 
+   Docked beside the terminal it describes, the header's `details` chip is
+   anchored over this head's top-right corner and a second press of it closes
+   the panel. There is no sense in a × under a close button, nor in an "open
+   the terminal" that opens the terminal already on screen. Every other
+   arrangement keeps both and needs them: the panel aimed at another row's
+   session (that button travels), a page covering the terminal (it brings it
+   back), and the phone, where this panel IS the page and there is no header
+   anywhere on screen to close it from. */
+function sessHead(s) {
   const head = el("div", "wf-head sess-head");
   head.appendChild(el("h2", null, s.name || "session"));
   head.appendChild(el("span", `badge ${s.status || ""}`, s.status || "?"));
+  const mine = !!s.name && s.name === currentName;
   // Opening another row's ⓘ is a legitimate thing to do — read one session
   // while watching another — but then every line under this head, the
   // workflow run included, belongs to a session that is not the one on
   // screen. Unsaid, the panel simply reads as the terminal's own. Only worth
   // saying while a terminal is actually up beside it to be mistaken for.
-  if (currentName && s.name && s.name !== currentName && terminalOnScreen()) {
+  if (currentName && s.name && !mine && terminalOnScreen()) {
     const other = el("span", "sess-elsewhere", `not ${currentName}`);
     other.title =
       `these details are session '${s.name}'; the terminal on screen is ` +
       `'${currentName}'`;
     head.appendChild(other);
   }
+  if (mine && terminalOnScreen() && !MOBILE_MQ.matches) return head;
+
   // Through the router, so the terminal it opens is the one the URL names —
   // and via go(), because on a phone this panel is laid over the very route
   // that terminal lives at, where assigning the same hash would do nothing.
@@ -2405,7 +2419,15 @@ function renderSession(data) {
   close.title = "close details";
   close.addEventListener("click", closeDetail);
   head.appendChild(close);
-  view.appendChild(head);
+  return head;
+}
+
+function renderSession(data) {
+  const view = $("sess-view");
+  const s = data.session || {};
+  view.innerHTML = "";
+
+  view.appendChild(sessHead(s));
 
   const dl = el("dl", "sess-meta");
   metaRow(dl, "harness", s.harness, (data.harness || {}).description);
