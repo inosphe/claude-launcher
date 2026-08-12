@@ -132,7 +132,14 @@ const INFO = {
   name: "team", self: "work-pc", primary: null, authority: "work-pc",
   peers: [],
   members: [member("lead"), member("w1", "lead"), member("w2", "lead")],
-  member_links: [{ a: "w1", b: "w2", enabled: false }],
+  // A wired mesh: each worker hangs off the lead that spawned it, and the
+  // lead has introduced the two to each other. Only the last one is a line —
+  // the parent edges are already the spawn elbows.
+  member_links: [
+    { a: "lead", b: "w1", enabled: true },
+    { a: "lead", b: "w2", enabled: true },
+    { a: "w1", b: "w2", enabled: true },
+  ],
   links: [],
 };
 const DATA = {
@@ -167,8 +174,9 @@ const DATA = {
   check("the spawn tree is still drawn",
         withClass(view, "mesh-spawn").length === 2,
         withClass(view, "mesh-spawn").length);
-  check("a cut between two members is still drawn",
-        withClass(view, "mesh-mcut").length === 1);
+  check("an open member pair is drawn, the spawn edges excluded",
+        withClass(view, "mesh-mlink").length === 1,
+        withClass(view, "mesh-mlink").length);
 
   // The track: one pip per step plus the end, for each member that has a run.
   const pips = withClass(cards.find((c) => hasClass(c, "running")) || cards[0],

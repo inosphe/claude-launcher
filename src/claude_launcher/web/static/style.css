@@ -674,8 +674,6 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 /* who spawned whom — the skeleton, so it is quiet and always on */
 .mesh-spawn { fill: none; stroke: #454c56; stroke-width: 1.4; }
 
-/* the exceptions in the member graph. Connected is the default and says
-   nothing; a cut is a decision, and gets the only line it needs. */
 /* An open member pair beyond the spawn tree: somebody wired these two, by a
    rule or by hand. Violet keeps it clear of the peer graph's green (daemons)
    and the spawn forest's grey (who made whom) — three layers, three hues. */

@@ -4753,10 +4753,14 @@ function renderFlowTopo(info, data) {
     canvas.appendChild(g);
   }
 
-  /* 3. spawn edges, card edge to card edge rather than centre to centre */
+  /* 3. spawn edges, card edge to card edge rather than centre to centre.
+        Recorded, so step 4 does not draw the same relationship again as a
+        straight line across the forest. */
+  const spawnPair = new Set();
   for (const mem of members) {
     const child = at.get(mem.handle), parent = mem.parent && at.get(mem.parent);
     if (!child || !parent || parent.cluster !== child.cluster) continue;
+    spawnPair.add([mem.handle, mem.parent].sort().join("|"));
     const mid = (parent.y + m.cardH / 2 + child.y - m.cardH / 2) / 2;
     canvas.appendChild(svg("path", {
       class: "mesh-spawn",
@@ -4765,14 +4769,19 @@ function renderFlowTopo(info, data) {
     }));
   }
 
-  /* 4. cuts: connected is the default and says nothing, a cut is a decision */
+  /* 4. the member graph, the same way the mesh view draws it: the pairs that
+        CAN message. A join wires a member to its parent and to whatever the
+        mesh's rules match and leaves the rest closed, so the open set is the
+        sparse and informative one. The parent edge is already on the canvas
+        as the spawn elbow and is not drawn twice. */
   for (const e of info.member_links || []) {
-    if (e.enabled) continue;
+    if (!e.enabled) continue;
     const a = at.get(e.a), b = at.get(e.b);
     if (!a || !b) continue;
-    const g = svg("g", { class: "mesh-mcut" });
+    if (spawnPair.has([e.a, e.b].sort().join("|"))) continue;
+    const g = svg("g", { class: "mesh-mlink" });
     g.appendChild(svg("line", { x1: a.x, y1: a.y, x2: b.x, y2: b.y }));
-    g.appendChild(svg("title", {}, `${e.a} ✕ ${e.b} — cannot message each other`));
+    g.appendChild(svg("title", {}, `${e.a} ↔ ${e.b} — may message each other`));
     canvas.appendChild(g);
   }
 

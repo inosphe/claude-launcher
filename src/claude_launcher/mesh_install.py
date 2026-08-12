@@ -186,8 +186,8 @@ Membership lives in the daemon and survives; your context may not. Recover:
 1. SESSION = `CLAUNCH_SESSION` env var.
 2. `claunch mesh ls` — the meshes on this daemon.
 3. `claunch mesh members <mesh>` — the row whose session is SESSION is you
-   (handle + role). Its "disconnected pairs" section is the topology you set
-   up and forgot.
+   (handle + role). Its "connected pairs" section is the topology you set up
+   and forgot.
 4. `claunch mesh stance <mesh>` — re-read your role's stance, which the
    compaction dropped along with the join briefing.
 5. `claunch mesh history <mesh> -n 30` — re-read the recent conversation.

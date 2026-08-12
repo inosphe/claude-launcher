@@ -1126,7 +1126,7 @@ the session asking; omitted = a human). MCP gains `spawn`, `children`,
 can message — because an agent left to derive its own reachability from an
 edge list will eventually address a peer it cannot reach and read the
 refusal as a bug. CLI: `claunch spawn`, `claunch mesh connect|disconnect`,
-disconnected pairs in `mesh members`, and `claunch sessions` indented by
+the connected pairs in `mesh members`, and `claunch sessions` indented by
 lineage. The join briefing lists only reachable peers, and says how many
 members it is *not* showing.
 
