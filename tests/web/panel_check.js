@@ -74,6 +74,8 @@ const MOBILE_MQ = { get matches() { return narrow; } };
 const stubs = `
 let currentPage = "terminal", currentName = "coder2";
 let sessName = null, sessPollTimer = null, sessStartBox = null;
+let sessRunFold = null, sessRunStops = 0;
+function stopSessRun() { sessRunStops++; }
 let detailWasUp = false;
 let refreshes = 0, gone = null, fits = 0;
 let term = {}, location = { hash: "#/" };
@@ -117,6 +119,8 @@ Object.assign(exports, {
   went: () => gone, fits: () => fits, cur: () => currentName,
   setPage: (p) => { currentPage = p; }, setCur: (c) => { currentName = c; },
   goto: (h) => { location.hash = h; route(); },
+  runFold: () => sessRunFold, runStops: () => sessRunStops,
+  holdRun: () => { sessRunFold = "the open fold"; },
 });`
 )(ctx, $, document, MOBILE_MQ, () => 1, () => {});
 
@@ -189,6 +193,22 @@ ctx.closeDetail();
 ctx.goto("#/s/coder2");
 check("a closed rail does not spring open", ctx.open() === null && !up(),
       { open: ctx.open(), up: up() });
+
+/* ---- the run fold does not follow the panel to another session ---- */
+/* It holds a poll aimed at one (directory, scope). Carried across a repoint it
+   would keep reading the run we just navigated away from, under the new
+   session's name. */
+ctx.openDetail("coder2");
+ctx.holdRun();
+const stops = ctx.runStops();
+ctx.openDetail("coder3");                      // repoint
+check("re-aiming lets go of the open run fold", ctx.runFold() === null);
+check("...and stops its poll", ctx.runStops() > stops);
+ctx.holdRun();
+ctx.closeDetail();
+check("closing the panel does too",
+      ctx.runFold() === null && ctx.runStops() > stops + 1);
+ctx.setCur("coder2");
 
 /* ---- the header's `details` says whether it would close ---- */
 /* Pressing it is a toggle for the session on screen and a re-aim for any

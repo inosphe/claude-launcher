@@ -1618,7 +1618,10 @@ async function wsRemove(w, here) {
   renderWorkspaces();
 }
 
-async function cflowAction(path, body) {
+/* `after` is for the callers that are not the run page: refreshWf is a no-op
+   unless that page is the one open, and a control pressed somewhere else
+   still has to see its own view catch up. */
+async function cflowAction(path, body, after) {
   try {
     const resp = await api(path, {
       method: "POST",
@@ -1632,6 +1635,7 @@ async function cflowAction(path, body) {
   } catch { /* auth overlay is up */ }
   refreshWf();
   refreshCflow();
+  if (after) after();
 }
 
 function renderWf(data) {
@@ -1753,8 +1757,13 @@ function renderWf(data) {
   view.appendChild(journal);
 }
 
-function wfActions(data) {
+/* The human controls for a run. Shared with the session panel's fold, which
+   asks for two things the page does not: `after`, because refreshWf only
+   refreshes the run page, and no archive — aborting a run is not something to
+   offer in a corner of a terminal, and the page it points at has it. */
+function wfActions(data, opts = {}) {
   const run = data.run || {};
+  const after = opts.after;
   const box = el("div", "wf-actions");
   // Leads, because it changes how everything below it reads: a run whose
   // session is not running is not being worked on, whatever position it
@@ -1779,7 +1788,7 @@ function wfActions(data) {
         ? `Extend the loop limit at step '${run.step_id}'?`
         : `Approve the gate at step '${run.step_id}'?`;
       if (confirm(q)) {
-        cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope });
+        cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
       }
     });
     box.appendChild(btn);
@@ -1799,7 +1808,7 @@ function wfActions(data) {
           if (confirm(`Select '${o.name}'?`)) {
             cflowAction("/api/cflow/select", {
               cwd: data.cwd, scope: data.scope, option: o.name,
-            });
+            }, after);
           }
         });
         box.appendChild(btn);
@@ -1830,7 +1839,7 @@ function wfActions(data) {
           `Nudge session '${targets}'?\n\nThis types the following line ` +
           `into its terminal and presses Enter:\n\n    ${msg}`
         )) {
-          nudgeRun(data.cwd, data.scope);
+          nudgeRun(data.cwd, data.scope).then(() => { if (after) after(); });
         }
       });
     } else {
@@ -1840,6 +1849,8 @@ function wfActions(data) {
     }
     box.appendChild(btn);
   }
+
+  if (opts.archive === false) return box;
 
   const finished = run.status === "done" || run.status === "aborted";
   const arch = el(
@@ -2275,13 +2286,17 @@ function wfDiagramSvg(wf, run, selected) {
 let sessName = null;      // the session whose detail is open (null = closed)
 let sessPollTimer = null;
 let sessStartBox = null;  // reused across polls: it holds the user's typing
+let sessRunFold = null;   // reused across polls too: it holds open/shut
+let sessRunTimer = null;  // the fold's own poll, alive only while it is open
 
 /* Forget the open detail. State only — the caller syncs the layout, which is
    what actually takes the panel off the screen. */
 function dropDetail() {
   if (sessPollTimer) { clearInterval(sessPollTimer); sessPollTimer = null; }
+  stopSessRun();
   sessName = null;
   sessStartBox = null;
+  sessRunFold = null;
   $("sess-view").innerHTML = "";
   markDetailRow();
 }
@@ -2305,8 +2320,10 @@ function openDetail(name) {
    it then offers is another session's. */
 function repointDetail(name) {
   if (sessPollTimer) clearInterval(sessPollTimer);
+  stopSessRun();
   sessName = name;
   sessStartBox = null;
+  sessRunFold = null;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
   refreshSession();
@@ -2450,6 +2467,13 @@ function sessWorkflow(data) {
   const box = el("div", "sess-wf");
   box.appendChild(el("h3", null, "Workflow"));
   const flow = data.cflow;
+  // Only the branch below with a run in it hangs the fold; every other one
+  // has to let go of it, or its poll outlives the run it was reading and
+  // keeps asking about a slot that has nothing in it.
+  if (!flow || flow.status === "error" || !flow.status || flow.status === "idle") {
+    stopSessRun();
+    sessRunFold = null;
+  }
   if (!flow) {
     box.appendChild(el("p", "wf-note", "this session has no working directory"));
     return box;
@@ -2484,12 +2508,13 @@ function sessWorkflow(data) {
       box.appendChild(line2);
     }
     const link = el("button", "wf-btn approve", "Open the run page");
-    link.title = "diagram, step reports, journal, and the human controls";
+    link.title = "the full diagram, every report, and force-set state";
     link.addEventListener("click", () => {
       location.hash = "#/wf/" + encodeURIComponent(`${flow.scope}|${flow.cwd}`);
     });
     box.appendChild(link);
     if (pending) box.appendChild(pending);
+    box.appendChild(sessRunFoldFor(flow));
     return box;
   }
 
@@ -2510,6 +2535,170 @@ function sessWorkflow(data) {
     after: () => { refreshSession(); refreshCflow(); },
   });
   return box;
+}
+
+/* ---- the run, opened where you already are ----
+   The panel's Workflow block says which run and which step; everything else
+   about it — where that step sits in the graph, the gate wording, the buttons
+   that clear it, what each step reported — was a page away. That page replaces
+   the terminal you were reading the run *for*, which is the wrong trade for
+   "approve this and carry on". So the same material folds out here, at rail
+   width, and the page keeps what genuinely needs room: the full diagram, every
+   report, force-set-state and archive.
+
+   Shut by default, and it costs nothing shut: the fetch and the poll start on
+   the first open and stop on close. The node survives the panel's 2s rebuild
+   the way the start box does, so neither the fold's state nor the reports the
+   user just expanded blink away underneath them. */
+function sessRunFoldFor(flow) {
+  const key = `${flow.scope}|${flow.cwd}`;
+  if (sessRunFold && sessRunFold.dataset.slot === key) return sessRunFold;
+  stopSessRun();
+  const fold = document.createElement("details");
+  fold.className = "sess-run";
+  fold.dataset.slot = key;
+  fold.dataset.cwd = flow.cwd;
+  fold.dataset.scope = flow.scope;
+  const sum = el("summary", null, "the run, here");
+  sum.title = "where it is, what it is waiting for, and what each step reported";
+  fold.appendChild(sum);
+  fold.appendChild(el("div", "sess-run-body", ""));
+  fold.addEventListener("toggle", () => {
+    stopSessRun();
+    if (!fold.open) return;
+    refreshSessRun();
+    sessRunTimer = setInterval(refreshSessRun, 2000);
+  });
+  sessRunFold = fold;
+  return fold;
+}
+
+/* The fold's poll only. The node itself is left alone — a shut fold is inert,
+   and it is still the one the next render should re-use. */
+function stopSessRun() {
+  if (sessRunTimer) { clearInterval(sessRunTimer); sessRunTimer = null; }
+}
+
+async function refreshSessRun() {
+  const fold = sessRunFold;
+  if (!fold || !fold.open) return;
+  const body = fold.querySelector(".sess-run-body");
+  let data;
+  try {
+    const resp = await api(
+      `/api/cflow/run?cwd=${encodeURIComponent(fold.dataset.cwd)}` +
+      `&scope=${encodeURIComponent(fold.dataset.scope)}`
+    );
+    data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      body.innerHTML = "";
+      body.appendChild(el("p", "wf-warning", data.error || "cannot load this run"));
+      return;
+    }
+  } catch {
+    return;  // auth overlay is up; the poll will come back round
+  }
+  // The panel repoints, and the fold is rebuilt with it: a reply that lands
+  // after that belongs to a run this fold no longer shows.
+  if (sessRunFold !== fold || !fold.open) return;
+  renderSessRun(body, data);
+}
+
+const SESS_RUN_REPORTS = 8;   // newest kept; the rest are one click away
+const SESS_RUN_JOURNAL = 40;
+
+function renderSessRun(body, data) {
+  body.innerHTML = "";
+  const run = data.run || {};
+  const wf = data.workflow || null;
+  if (data.status === "idle" || !run.status) {
+    body.appendChild(el("p", "wf-note", "this slot has no run any more"));
+    return;
+  }
+
+  if (wf && (wf.steps || []).length) body.appendChild(sessRunTrack(wf, run));
+  const meta = el("div", "wf-meta");
+  meta.appendChild(el("span", null, `run ${run.run || "?"}`));
+  meta.appendChild(el("span", null, `${run.steps_completed ?? 0} steps done`));
+  meta.appendChild(el("span", null,
+    `started ${(run.started_at || "?").replace("T", " ")}`));
+  body.appendChild(meta);
+  for (const w of (wf || {}).warnings || []) {
+    body.appendChild(el("p", "wf-warning", `⚠ ${w}`));
+  }
+
+  // The point of the fold: the gate, and the button that clears it.
+  body.appendChild(wfActions(data, { archive: false, after: refreshSessRun }));
+
+  const reports = (data.reports || []).slice().reverse();  // newest first
+  body.appendChild(el("h4", null, `Reports (${reports.length})`));
+  if (!reports.length) body.appendChild(el("p", "wf-note", "no reports yet"));
+  for (const r of reports.slice(0, SESS_RUN_REPORTS)) {
+    const card = el("div", "sess-run-report");
+    const head = el("div", "wf-report-head");
+    head.appendChild(el("span", "wf-report-step",
+      r.visit > 1 ? `${r.step} ×${r.visit}` : r.step));
+    head.appendChild(el("span", "wf-report-at", (r.at || "").replace("T", " ")));
+    card.appendChild(head);
+    card.appendChild(el("p", "wf-report-summary", r.summary || ""));
+    if (r.details) {
+      const more = document.createElement("details");
+      more.className = "sess-run-more";
+      more.appendChild(el("summary", null, "details"));
+      more.appendChild(el("pre", "wf-report-details", r.details));
+      card.appendChild(more);
+    }
+    body.appendChild(card);
+  }
+  // Said, not silently dropped: a rail showing the newest few must not read
+  // as the whole history of the run.
+  if (reports.length > SESS_RUN_REPORTS) {
+    body.appendChild(el("p", "wf-note",
+      `newest ${SESS_RUN_REPORTS} of ${reports.length} — the run page has them all`));
+  }
+
+  const events = (data.journal || []).slice().reverse();
+  const journal = document.createElement("details");
+  journal.className = "wf-journal";
+  journal.appendChild(el("summary", null, `journal (${events.length} events)`));
+  for (const e of events.slice(0, SESS_RUN_JOURNAL)) {
+    journal.appendChild(el("div", "wf-journal-line mono",
+      `${(e.at || "").replace("T", " ")}  ${e.event || ""}` +
+      `${e.step ? "  " + e.step : ""}${e.option ? "  -> " + e.option : ""}`));
+  }
+  if (events.length > SESS_RUN_JOURNAL) {
+    journal.appendChild(el("p", "wf-note",
+      `newest ${SESS_RUN_JOURNAL} of ${events.length}`));
+  }
+  body.appendChild(journal);
+}
+
+/* Where the run is, as the flow view draws it: the whole state machine on one
+   line, which is the only rendering of it that fits a rail. The run page's
+   diagram is the same walk laid out in two dimensions — this is an index into
+   it, not a replacement, and the button above goes to the real thing. */
+function sessRunTrack(wf, run) {
+  const track = flowTrack(wf, run);
+  const m = flowMetrics(track.pips.length);
+  const here = track.offGraph
+    ? `step '${run.step_id}' is not in this workflow's graph`
+    : track.current >= 0
+      ? `here: ${track.pips[track.current].id}`
+      : run.status === "done" ? "finished" : run.status;
+  const wrap = el("div", "sess-run-here");
+  const node = svg("svg", {
+    class: `sess-run-track ${flowState(run)}`,
+    viewBox: `${-m.cardW / 2} -18 ${m.cardW} 40`,
+    // The line below is the picture's own caption, so it is also its name —
+    // a role="img" with nothing to read out is worse than an unlabelled one.
+    role: "img", "aria-label": `${wf.name || "workflow"}: ${here}`,
+  });
+  node.appendChild(flowTrackSvg(track, m));
+  wrap.appendChild(node);
+  const line = el("p", "sess-run-where", here);
+  line.title = "◆ a branch · | a gate to enter or a verify to leave · ×n revisits";
+  wrap.appendChild(line);
+  return wrap;
 }
 
 /* ------------------------------------------------------------------ */
