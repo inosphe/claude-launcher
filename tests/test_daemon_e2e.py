@@ -332,6 +332,30 @@ def test_api_cflow_monitoring(home, tmp_path, monkeypatch):
             mgr.create(SessionDef(name="idle1", harness="py", cwd=str(other)))
             resp = await client.get("/api/cflow", headers=bearer)
             assert len((await resp.json())["runs"]) == 2
+
+            # The scope arrives from the query string and goes on to BE a
+            # directory name, so it is checked before anything opens a path
+            # with it. This daemon is reachable through the relay; '../..'
+            # must not be a file browser.
+            escape = "../../../../etc"
+            for params in (
+                {"cwd": str(tmp_path), "scope": escape},
+                {"cwd": str(tmp_path), "scope": "has space"},
+            ):
+                resp = await client.get("/api/cflow", params=params, headers=bearer)
+                assert resp.status == 400
+                resp = await client.get(
+                    "/api/cflow/run", params=params, headers=bearer
+                )
+                assert resp.status == 400
+            # ...and the write side, which would otherwise create the slot
+            resp = await client.post(
+                "/api/cflow/request",
+                json={"cwd": str(tmp_path), "scope": escape, "workflow": "wf.yaml"},
+                headers=bearer,
+            )
+            assert resp.status == 400
+            assert not (tmp_path / ".cflow" / "runs" / escape).exists()
         finally:
             await mgr.shutdown_all()
             await client.close()

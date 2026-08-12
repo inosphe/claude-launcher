@@ -10,7 +10,6 @@ browser history.
 from __future__ import annotations
 
 import asyncio
-import os
 import secrets
 import time
 from pathlib import Path
@@ -389,13 +388,25 @@ async def h_roles(request: web.Request) -> web.Response:
 _CFLOW_REPORT_TAIL = 10
 
 
+def _session_cwd(session) -> str:
+    """A session's directory, canonical — or '' when it has none.
+
+    Canonical because that is the form a run is keyed by, and empty stays
+    empty: an empty cwd must not fall through to the resolver's default, the
+    *daemon's* own directory, which would silently hand this session the run
+    of whoever is working there.
+    """
+    raw = session.sdef.cwd
+    return cflow_state.resolve_cwd(raw) if raw else ""
+
+
 def _scope_sessions(manager: SessionManager, cwd: str, scope: str) -> list:
     """The session this run maps 1:1 to (scope == session name), if alive."""
     for session in manager.list():
         if (
             session.sdef.name == scope
             and not session.exited
-            and str(Path(session.sdef.cwd).resolve()) == cwd
+            and _session_cwd(session) == cwd
         ):
             return [scope]
     return []
@@ -414,9 +425,11 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
             keys.append((cwd, scope))
     explicit = request.query.get("cwd")
     if explicit:
-        explicit = str(Path(explicit).resolve())
+        explicit = cflow_state.resolve_cwd(explicit)
         scopes = cflow_state.scopes_in(explicit) or [cflow_state.DEFAULT_SCOPE]
         wanted = request.query.get("scope")
+        if wanted and not cflow_state.valid_scope(wanted):
+            return json_error(400, f"invalid scope: {wanted!r}")
         for scope in [wanted] if wanted else scopes:
             if (explicit, scope) not in keys:
                 keys.append((explicit, scope))
@@ -500,8 +513,10 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
     raw = request.query.get("cwd")
     if not raw:
         return json_error(400, "'cwd' query parameter required")
-    cwd = str(Path(raw).resolve())
+    cwd = cflow_state.resolve_cwd(raw)
     scope = request.query.get("scope") or cflow_state.DEFAULT_SCOPE
+    if not cflow_state.valid_scope(scope):
+        return json_error(400, f"invalid scope: {scope!r}")
     manager: SessionManager = request.app["manager"]
     sessions = _scope_sessions(manager, cwd, scope)
     payload = cflow_engine.status(cwd, scope=scope)
@@ -557,7 +572,12 @@ async def _cflow_action_cwd(request: web.Request):
     # `<typo>/.cflow/runs/<scope>/` on the way to failing.
     if not cwd.is_dir():
         return None, json_error(400, f"no such directory: {cwd}")
+    # Same reason, one level up: the scope becomes the *next* path component,
+    # and every action below writes through it (the lock, the request file,
+    # the run itself).
     scope = str(body.get("scope") or "") or cflow_state.DEFAULT_SCOPE
+    if not cflow_state.valid_scope(scope):
+        return None, json_error(400, f"invalid scope: {scope!r}")
     return (str(cwd), scope, body), None
 
 
@@ -599,7 +619,7 @@ async def h_cflow_workflows(request: web.Request) -> web.Response:
     # session created with no directory runs in — so the create form's
     # "(daemon cwd)" asks about the workflows it would really see.
     raw = request.query.get("cwd")
-    cwd = str(Path(raw).resolve()) if raw else os.getcwd()
+    cwd = cflow_state.resolve_cwd(raw)
     return web.json_response({"workflows": _startable_workflows(cwd)})
 
 
@@ -882,7 +902,13 @@ async def h_mesh_flows(request: web.Request) -> web.Response:
         if session is None:
             flows[handle] = {"session": member.session, "status": "no_session"}
             continue
-        cwd = str(Path(session.sdef.cwd).resolve())
+        cwd = _session_cwd(session)
+        if not cwd:
+            # A run is keyed by a directory; a session that has none drives no
+            # run. Saying so beats attributing it whatever is running in the
+            # daemon's own directory, which is where an empty cwd resolves to.
+            flows[handle] = {"session": member.session, "status": "no_cwd"}
+            continue
         entry = _cflow_entry(manager, cwd, member.session)
         entry.pop("reports", None)  # the card shows a track, not prose
         flows[handle] = {**entry, "session": member.session}
@@ -1496,7 +1522,7 @@ async def h_session_meta(request: web.Request) -> web.Response:
     session = manager.get(request.match_info["name"])
     info = session.info()
     name = info["name"]
-    cwd = str(Path(info["cwd"]).resolve()) if info.get("cwd") else ""
+    cwd = _session_cwd(session)
 
     harness = harness_registry.registry().get(info.get("harness") or "")
     workspace = next(

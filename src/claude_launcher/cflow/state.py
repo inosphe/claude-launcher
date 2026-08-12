@@ -24,7 +24,9 @@ and this module resolves it automatically — so three sessions in the same
 project directory drive three independent runs. Outside a managed session
 the scope falls back to ``default`` (one run per directory, the original
 behaviour; a legacy flat ``.cflow/`` layout is migrated on first access).
-Humans override the ambient scope explicitly (CLI ``-t``, web ``scope``).
+Humans override the ambient scope explicitly (CLI ``-t``, web ``scope``) — and
+because that override becomes a directory name, it is checked against the
+session-name spelling on the way in (:func:`normalize_scope`).
 
 Workflow files are looked up by name in the project first, then globally:
 ``<cwd>/.claunch/workflows/*.yaml`` → ``~/.claude-launcher/workflows/*.yaml``.
@@ -37,6 +39,7 @@ import contextlib
 import contextvars
 import json
 import os
+import re
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -54,6 +57,15 @@ SESSION_ENV = "CLAUNCH_SESSION"
 #: Scope used outside any managed session (and for pre-scope layouts).
 DEFAULT_SCOPE = "default"
 
+#: A scope names one managed session, so it is spelled like one (the daemon's
+#: own session-name rule) — and it becomes a directory under ``.cflow/runs/``.
+_SCOPE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+#: Legal names that are not legal *path components*: ``runs/..`` is ``.cflow``
+#: itself, where the legacy flat layout lives, and ``runs/.`` is the runs
+#: directory. Neither is a slot.
+_SCOPE_RESERVED = frozenset({".", ".."})
+
 _scope_override: contextvars.ContextVar = contextvars.ContextVar(
     "cflow_scope", default=None
 )
@@ -61,6 +73,33 @@ _scope_override: contextvars.ContextVar = contextvars.ContextVar(
 
 class StateError(Exception):
     """Raised for missing/corrupt run state."""
+
+
+def valid_scope(scope: Optional[str]) -> bool:
+    """Whether ``scope`` can name a run slot."""
+    return bool(
+        scope and _SCOPE_RE.match(scope) and scope not in _SCOPE_RESERVED
+    )
+
+
+def normalize_scope(scope: Optional[str]) -> str:
+    """The scope as a path component, or :class:`StateError`.
+
+    A scope reaches this module from three places: the session env (set by the
+    daemon, trustworthy), a CLI flag, and the web dashboard's query string or
+    JSON body — which is reachable from off the machine whenever the daemon is
+    relayed. Since the value goes on to *be* a directory name, an unchecked
+    one ('../../..') would read and write run files anywhere on disk. The
+    check therefore lives at the single point where a scope turns into a path,
+    not at each caller.
+    """
+    scope = (scope or "").strip()
+    if not valid_scope(scope):
+        raise StateError(
+            f"invalid cflow scope {scope!r}: a scope is a session name — "
+            f"letters, digits, '.', '_' or '-'"
+        )
+    return scope
 
 
 def current_scope() -> str:
@@ -94,8 +133,8 @@ def register_run_dir(cwd: Optional[str] = None, scope: Optional[str] = None) -> 
     orchestrator script). Best-effort: registry loss only affects listing.
     """
     target = {
-        "cwd": str(Path(cwd or os.getcwd()).resolve()),
-        "scope": scope or current_scope(),
+        "cwd": resolve_cwd(cwd),
+        "scope": normalize_scope(scope or current_scope()),
     }
     entries = [e for e in _read_registry() if e != target]
     entries.append(target)
@@ -103,7 +142,9 @@ def register_run_dir(cwd: Optional[str] = None, scope: Optional[str] = None) -> 
 
 
 def _run_alive(cwd: str, scope: str) -> bool:
-    base = Path(cwd) / ".cflow"
+    if not valid_scope(scope):
+        return False  # nothing legitimate wrote it; drop it on the next read
+    base = cflow_dir(cwd)
     slot = base / "runs" / scope
     # A pending start request keeps the slot listed even with no run yet —
     # that is precisely the state a human wants to watch after asking for one.
@@ -148,12 +189,25 @@ def _write_registry(entries: List[Dict[str, str]]) -> None:
         pass
 
 
+def resolve_cwd(cwd: Optional[str] = None) -> str:
+    """A run's directory, canonical.
+
+    Both processes that write a run have to agree byte-for-byte on which slot
+    they are in, and they arrive at it differently: the agent's MCP server
+    passes whatever ``os.getcwd()`` it inherited, while every daemon entry
+    point passes its own resolved copy. Half of what identifies a run is this
+    string — the registry stores it, ``_scope_sessions`` compares it — so it
+    is canonicalised in one place rather than at each caller.
+    """
+    return str(Path(cwd or os.getcwd()).resolve())
+
+
 def cflow_dir(cwd: Optional[str] = None) -> Path:
-    return Path(cwd or os.getcwd()) / ".cflow"
+    return Path(resolve_cwd(cwd)) / ".cflow"
 
 
 def scope_dir(cwd: Optional[str] = None, scope: Optional[str] = None) -> Path:
-    scope = scope or current_scope()
+    scope = normalize_scope(scope or current_scope())
     target = cflow_dir(cwd) / "runs" / scope
     if scope == DEFAULT_SCOPE:
         _migrate_legacy(cflow_dir(cwd), target)
@@ -184,6 +238,8 @@ def scopes_in(cwd: Optional[str] = None) -> List[str]:
     runs = base / "runs"
     if runs.is_dir():
         for entry in sorted(runs.iterdir()):
+            if not valid_scope(entry.name):
+                continue
             has = (entry / "state.json").is_file() or (entry / REQUEST_FILE).is_file()
             if has and entry.name not in out:
                 out.append(entry.name)

@@ -233,7 +233,11 @@ orchestrator drive that session from outside. The division of labor:
 
 Run state is keyed per session (`CLAUNCH_SESSION`, exported by the daemon),
 so several workers in the same project directory drive independent runs;
-from outside a session, target one with `-t <session>`.
+from outside a session, target one with `-t <session>`. That key is also the
+run's *identity* everywhere it is shown: with three workers on one workflow in
+one tree, the session name is the only thing telling their runs apart. It is
+spelled like a session name (letters, digits, `.`, `_`, `-`) because it
+becomes a directory under `.cflow/runs/`; anything else is refused.
 
 ```sh
 claunch new-session -s worker -- claude
