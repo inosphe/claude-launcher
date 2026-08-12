@@ -4526,9 +4526,10 @@ function flowTrack(wf, run) {
 
 /* Blocked on a HUMAN — the one state in this picture a person can clear. An
    agent-chooser select is the agent's own call and must not read as a queue
-   for the operator. */
+   for the operator; neither is a gate in front of a session that has exited,
+   since approving it would unblock a run nobody is driving. */
 function flowNeedsHuman(f) {
-  if (!f || f.remote) return false;
+  if (!f || f.remote || f.stopped) return false;
   if (f.status === "waiting_approval" || f.status === "waiting_selection") return true;
   return f.status === "select" && f.chooser === "user";
 }
@@ -4536,22 +4537,26 @@ function flowNeedsHuman(f) {
 /* One word for the whole card, and the class that colours it. */
 function flowState(f) {
   if (!f || f.remote) return "unknown";
+  if (f.status === "error") return "error";
+  if (f.status === "done") return "done";
+  if (f.status === "aborted") return "aborted";
+  // A finished run is finished whoever is (or is not) in front of it. An
+  // UNfinished one whose session has exited is where the agent left it —
+  // reporting that position as "running" is the reading this page exists to
+  // prevent, so it outranks everything below.
+  if (f.stopped) return "stopped";
   if (flowNeedsHuman(f)) return "blocked";
-  switch (f.status) {
-    case "error": return "error";
-    case "done": return "done";
-    case "aborted": return "aborted";
-    case "select": return "deciding";
-    case "idle": case "no_session": case "no_cwd":
-    case undefined: case "": return "none";
-    default: return "running";
-  }
+  if (f.status === "select") return "deciding";
+  if (!f.status || f.status === "idle" ||
+      f.status === "no_session" || f.status === "no_cwd") return "none";
+  return "running";
 }
 
 const FLOW_WORDS = {
   blocked: "waiting on you", running: "running", deciding: "agent deciding",
   done: "done", aborted: "aborted", error: "error",
-  none: "no run", unknown: "run lives on its own daemon",
+  stopped: "session stopped", none: "no run",
+  unknown: "run lives on its own daemon",
 };
 
 /* ---- drawing ---------------------------------------------------------- */
@@ -4952,10 +4957,17 @@ function flowDetail(info, member, f, wf) {
     return box;
   }
   if (f.graph_error) box.appendChild(el("p", "wf-warning", f.graph_error));
+  // Above the graph, because it changes what the graph means: this is where
+  // the run got to, not where it is going. Its session is resumable, so the
+  // attach link above is the way to pick it back up.
+  if (f.stopped) {
+    box.appendChild(el("p", "wf-warning",
+      `session '${member.session}' has exited — its run is where it stopped`));
+  }
   if (!wf) {
     box.appendChild(el("p", "wf-note",
       f.status === "no_session"
-        ? "its session is not running here"
+        ? "this session is not a record here any more — nothing to show"
         : f.status === "no_cwd"
           ? "its session has no working directory, and a run is keyed by one"
           : "no cflow run in this session's directory"));

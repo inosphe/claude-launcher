@@ -160,11 +160,11 @@ def test_a_member_with_no_run_says_so_rather_than_looking_unstarted(home, tmp_pa
     asyncio.run(run())
 
 
-def test_a_member_whose_session_is_gone_is_not_a_member_without_a_workflow(
-    home, tmp_path
-):
-    """Membership outlives the session it named. The card must say which of
-    the two things is missing, or a killed agent reads as an idle one."""
+def test_a_stopped_session_still_carries_the_run_it_stopped_in(home, tmp_path):
+    """A run outlives the agent driving it: the state is on disk and the
+    session is resumable. Reading "its session exited" as "no run" empties the
+    card of a run with real work in it — and leaves no way to the run page,
+    which is where that work can be read."""
     _register_py_harness()
     proj = tmp_path / "proj"
     proj.mkdir()
@@ -178,12 +178,27 @@ def test_a_member_whose_session_is_gone_is_not_a_member_without_a_workflow(
             mm.create("team")
             session = mgr.create(SessionDef(name="lead", harness="py", cwd=str(proj)))
             await mm.join("team", "lead", handle="lead")
+            cwd = str(proj.resolve())
+            cflow_engine.start("review", cwd=cwd, scope="lead")
+
             mgr.kill("lead")
             await session.wait_for("exited", timeout=10.0, threshold=0.5)
 
             resp = await client.get("/api/mesh/team/flows", headers=BEARER)
             body = await resp.json()
-            assert body["flows"]["lead"]["status"] == "no_session"
+            flow = body["flows"]["lead"]
+            assert flow["stopped"] is True          # the fact the card leads with
+            assert flow["sessions"] == []           # nothing to nudge
+            assert flow["step_id"] == "plan"        # ...where it got to
+            assert flow["cwd"] == cwd               # ...and the way to its run page
+            assert body["workflows"][flow["key"]]["start"] == "plan"  # track drawn
+
+            # Deregistered (killing an exited record drops it) is the other
+            # absence: no session, no directory, nothing to show.
+            mgr.kill("lead")
+            resp = await client.get("/api/mesh/team/flows", headers=BEARER)
+            body = await resp.json()
+            assert body["flows"]["lead"] == {"session": "lead", "status": "no_session"}
 
             await mgr.shutdown_all()
         finally:

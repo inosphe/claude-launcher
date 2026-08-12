@@ -449,9 +449,15 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
     return web.json_response({"runs": runs})
 
 
-def _cflow_entry(manager: SessionManager, cwd: str, scope: str) -> dict:
+def _cflow_entry(
+    manager: SessionManager, cwd: str, scope: str, *, reports: bool = True
+) -> dict:
     """One (cwd, scope) slot as the dashboard sees it: live status, the recent
-    step reports, and any pending start request."""
+    step reports, and any pending start request.
+
+    ``reports=False`` skips reading the run's journal — a whole file, parsed
+    per slot per poll — for the callers that show a track rather than prose.
+    """
     entry = {
         "cwd": cwd,
         "scope": scope,
@@ -461,7 +467,9 @@ def _cflow_entry(manager: SessionManager, cwd: str, scope: str) -> dict:
         payload = cflow_engine.status(cwd, scope=scope)
     except (CflowError, WorkflowError, StateError, OSError) as exc:
         return {**entry, "status": "error", "error": str(exc)}
-    reports = [
+    if not reports:
+        return {**entry, **payload}
+    recent = [
         {
             "step": e.get("step"),
             "visit": e.get("visit"),
@@ -472,7 +480,7 @@ def _cflow_entry(manager: SessionManager, cwd: str, scope: str) -> dict:
         for e in cflow_state.read_journal(cwd, scope, run_id=payload.get("run"))
         if e.get("event") == "step_report"
     ]
-    return {**entry, **payload, "reports": reports[-_CFLOW_REPORT_TAIL:]}
+    return {**entry, **payload, "reports": recent[-_CFLOW_REPORT_TAIL:]}
 
 
 def _serialize_workflow(wf) -> dict:
@@ -881,11 +889,18 @@ async def h_mesh_flows(request: web.Request) -> web.Response:
 
     Remote members carry no run: their state lives on their own daemon, and
     saying so is more use than an empty track that reads as "not started".
+
+    An *exited* session still carries one. A run outlives the agent driving
+    it — the state is on disk, and the session is resumable — so a stopped
+    member reports where its run got to, flagged ``stopped``; only a member
+    whose session is not even a record any more has nothing to show. Reading
+    the first as the second is how a run that has real work in it comes to
+    look like one that never started.
     """
     mm = _mesh_mgr(request)
     mesh = mm.get(request.match_info["mesh"])
     manager: SessionManager = request.app["manager"]
-    live = {s.sdef.name: s for s in manager.list() if not s.exited}
+    known = {s.sdef.name: s for s in manager.list()}
 
     flows: dict = {}
     workflows: dict = {}
@@ -898,7 +913,7 @@ async def h_mesh_flows(request: web.Request) -> web.Response:
                 "remote": True,
             }
             continue
-        session = live.get(member.session)
+        session = known.get(member.session)
         if session is None:
             flows[handle] = {"session": member.session, "status": "no_session"}
             continue
@@ -909,9 +924,16 @@ async def h_mesh_flows(request: web.Request) -> web.Response:
             # daemon's own directory, which is where an empty cwd resolves to.
             flows[handle] = {"session": member.session, "status": "no_cwd"}
             continue
-        entry = _cflow_entry(manager, cwd, member.session)
-        entry.pop("reports", None)  # the card shows a track, not prose
+        # No reports: the card shows a track, not prose — and this endpoint
+        # now reads every member's slot, retired ones included.
+        entry = _cflow_entry(manager, cwd, member.session, reports=False)
         flows[handle] = {**entry, "session": member.session}
+        if session.exited:
+            # Stated, not left to be inferred from an empty `sessions`: it
+            # outranks the run's own status on the card, because a recorded
+            # position nobody is driving is not progress and cannot be
+            # unblocked into any.
+            flows[handle]["stopped"] = True
         name = entry.get("workflow")
         if entry.get("status") in (None, "idle", "error") or not name:
             continue
