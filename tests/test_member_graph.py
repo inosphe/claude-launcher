@@ -6,9 +6,14 @@ routed, so a cut pair simply cannot speak.
 
 Scenario matrix:
 
-A. Default
-   A1 a mesh nobody has rewired is the complete graph it always was
-   A2 nothing new is written to mesh.json until an edge is actually cut
+A. What a join wires
+   A1 roots reach each other — the packaged rule, and the graph every mesh
+      had before there was a rule
+   A2 a spawned child reaches its parent and nobody else
+   A3 the join records what it opened, and records only that: isolating a
+      child costs one edge, not a cut against every member present
+   A4 a mesh written before any of this stays the complete graph it was —
+      nothing migrates
 
 B. Cutting
    B1 a send to a disconnected member is refused, and the refusal names who
@@ -17,9 +22,13 @@ B. Cutting
    B3 a cut is duplex — it holds whichever end sends
    B4 a fully isolated member's broadcast says so, not "no other members"
 
-C. Spawn seeding
-   C1 isolate() leaves a new member connected to the peers named, no others
-   C2 later joiners are connected by default (isolation is a snapshot)
+C. Rules and standing isolation
+   C1 isolate() leaves a member connected to the peers named, no others
+   C2 a wired member stays isolated from members who join LATER — the
+      standing rule the snapshot never was
+   C3 a role rule connects across the tree; `within: tree` keeps it home
+   C4 no rule ever withholds the parent edge, at either end of it — a parent
+      that rejoins after its children is wired back to them
 
 D. Authority
    D1 an agent may rewire an edge touching a session it spawned
@@ -51,6 +60,17 @@ CHILD = (
     "for line in sys.stdin:\n"
     "    print('echo:' + line.strip())\n"
 )
+
+#: A mesh that wants its producers to reach its auditors, but only inside one
+#: fleet. `coder` is an alias of `worker` and `qa` of `reviewer`, so the two
+#: handles below self-select into the pair this names.
+RULES_WORKER_REVIEWER = """
+auto_link:
+  rules:
+    - between: [{tier: root}, {tier: root}]
+    - between: [{role: worker}, {role: reviewer}]
+      within: tree
+"""
 
 
 def _register_py_harness():
@@ -105,38 +125,92 @@ def _unanswered(mesh, handle: str) -> bool:
 # --------------------------------------------------------------------------- #
 # A. default
 # --------------------------------------------------------------------------- #
-def test_an_untouched_mesh_is_the_complete_graph(home, tmp_path):
-    _register_py_harness()
-
-    async def run():
-        mgr = _manager()
-        mesh = await _team(MeshManager(mgr, root=tmp_path / "mesh"), mgr)
-        # A1
-        assert mesh.connected("w1", "w2") is True
-        assert mesh.neighbours("w1") == ["lead", "w2"]
-        await mgr.shutdown_all()
-
-    asyncio.run(run())
-
-
-def test_nothing_is_persisted_until_an_edge_is_cut(home, tmp_path):
-    """A2: a mesh that never touches this writes exactly the file it always
-    did, so an older daemon reading it sees no new key."""
+def test_sessions_a_human_started_all_reach_each_other(home, tmp_path):
+    """A1: nobody spawned them, so they are all tier 0 and the packaged rule
+    connects them — the complete graph a mesh of peers has always been."""
     _register_py_harness()
 
     async def run():
         mgr = _manager()
         mm = MeshManager(mgr, root=tmp_path / "mesh")
-        await _team(mm, mgr)
+        mm.create("team")
+        for name in ("a", "b", "c"):
+            mgr.create(SessionDef(name=name, harness="py"))
+            await mm.join("team", name)
+        mesh = mm.get("team")
+        assert mesh.neighbours("a") == ["b", "c"]
+        assert mesh.neighbours("c") == ["a", "b"]
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_spawned_child_reaches_its_parent_and_nobody_else(home, tmp_path):
+    """A2: the whole point. A child arriving into a room full of members is
+    connected to the one that asked for it, and to none of the others —
+    including the siblings it will never have been introduced to."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mesh = await _team(mm, mgr, names=("lead", "w1", "w2"))
+        assert mesh.neighbours("w1") == ["lead"]
+        assert mesh.neighbours("w2") == ["lead"]
+        assert mesh.connected("w1", "w2") is False
+        # ...and a grandchild goes no further either: one edge, upwards.
+        mgr.create(SessionDef(name="helper", harness="py", parent="w1"))
+        await mm.join("team", "helper")
+        assert mesh.neighbours("helper") == ["w1"]
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_the_join_records_what_it_opened_and_only_that(home, tmp_path):
+    """A3: isolating a child costs ONE edge — the parent's. The old seeding
+    wrote a cut against every member that happened to be in the room, which
+    is the n-per-spawn the wiring exists to stop."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        await _team(mm, mgr, names=("lead", "w1", "w2"))
         doc = json.loads(
             (mm._mesh_dir("team") / "mesh.json").read_text(encoding="utf-8")
         )
-        assert "member_edges" not in doc
-        await mm.set_member_link("team", "w1", "w2", enabled=False)
-        doc = json.loads(
-            (mm._mesh_dir("team") / "mesh.json").read_text(encoding="utf-8")
-        )
-        assert doc["member_edges"] == {"w1|w2": False}
+        assert doc["member_edges"] == {"lead|w1": True, "lead|w2": True}
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_mesh_from_before_the_wiring_stays_complete(home, tmp_path):
+    """A4: `wired` is per member exactly so this holds. A roster written by a
+    daemon that never heard of it carries no flag, reads as unwired, and its
+    members go on reaching each other with no migration run against them."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        root = tmp_path / "mesh"
+        mm = MeshManager(mgr, root=root)
+        await _team(mm, mgr, names=("lead", "w1", "w2"))
+        # Rewind the file to what an older daemon would have written: members
+        # with no `wired` key, and no edge table at all.
+        path = mm._mesh_dir("team") / "mesh.json"
+        doc = json.loads(path.read_text(encoding="utf-8"))
+        doc.pop("member_edges", None)
+        for entry in doc["members"].values():
+            entry.pop("wired", None)
+        path.write_text(json.dumps(doc), encoding="utf-8")
+
+        reloaded = MeshManager(mgr, root=root)
+        reloaded.load_all()
+        mesh = reloaded.get("team")
+        assert mesh.connected("w1", "w2") is True
+        assert mesh.neighbours("w1") == ["lead", "w2"]
         await mgr.shutdown_all()
 
     asyncio.run(run())
@@ -215,38 +289,117 @@ def test_an_isolated_members_broadcast_explains_itself(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
-# C. spawn seeding
+# C. rules and standing isolation
 # --------------------------------------------------------------------------- #
 def test_isolate_keeps_exactly_the_named_peers(home, tmp_path):
+    """C1: still the operator's blunt instrument, now on a graph where most
+    of the cuts it would make are already the default."""
     _register_py_harness()
 
     async def run():
         mgr = _manager()
         mm = MeshManager(mgr, root=tmp_path / "mesh")
-        mesh = await _team(mm, mgr, names=("lead", "w1", "w2", "qa"))
-        # C1
-        cut = await mm.isolate_member("team", "qa", keep={"lead"})
-        assert sorted(cut) == ["w1", "w2"]
-        assert mesh.neighbours("qa") == ["lead"]
-        assert mesh.neighbours("w1") == ["lead", "w2"]  # untouched pair
+        mm.create("team")
+        for name in ("a", "b", "c", "qa"):
+            mgr.create(SessionDef(name=name, harness="py"))
+            await mm.join("team", name)
+        mesh = mm.get("team")
+        cut = await mm.isolate_member("team", "qa", keep={"a"})
+        assert sorted(cut) == ["b", "c"]
+        assert mesh.neighbours("qa") == ["a"]
+        assert mesh.neighbours("b") == ["a", "c"]  # untouched pair
         await mgr.shutdown_all()
 
     asyncio.run(run())
 
 
-def test_isolation_is_a_snapshot_not_a_standing_rule(home, tmp_path):
-    """C2: a member who joins later is connected by default. Documented, and
-    the reason the parent — not the daemon — decides who reaches its child."""
+def test_a_wired_member_stays_isolated_from_later_joiners(home, tmp_path):
+    """C2: the reversal. Isolation used to be a snapshot — cuts against the
+    members present, and a standing invitation to everyone who arrived after
+    — so a child quietly gained a peer every time the fleet grew. A wired
+    member has the edges its join recorded and no others, whenever the other
+    end showed up."""
     _register_py_harness()
 
     async def run():
         mgr = _manager()
         mm = MeshManager(mgr, root=tmp_path / "mesh")
-        mesh = await _team(mm, mgr)
-        await mm.isolate_member("team", "w1", keep={"lead"})
+        mesh = await _team(mm, mgr, names=("lead", "w1"))
         mgr.create(SessionDef(name="late", harness="py"))
         await mm.join("team", "late")
-        assert mesh.connected("w1", "late") is True
+        # `late` is a root, so the packaged rule connects it to the other
+        # root — and to the child of that root, not at all.
+        assert mesh.connected("lead", "late") is True
+        assert mesh.connected("w1", "late") is False
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_role_rule_connects_across_the_tree(home, tmp_path):
+    """C3: what the tree cannot say. 'A worker should reach a reviewer' is a
+    relation the spawn forest does not have, and is the reason the rules are
+    a document rather than a constant."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("team")
+        await mm.set_roles("team", RULES_WORKER_REVIEWER)
+        for name, parent in (
+            ("lead", None), ("coder1", "lead"), ("qa1", "lead"),
+            ("lead2", None), ("coder2", "lead2"),
+        ):
+            mgr.create(SessionDef(name=name, harness="py", parent=parent))
+            await mm.join("team", name)
+        mesh = mm.get("team")
+        # coder1 is a worker, qa1 a reviewer (by handle), both under `lead`
+        assert mesh.connected("coder1", "qa1") is True
+        # ...and `within: tree` is what keeps the other fleet's reviewer out
+        assert mesh.connected("coder2", "qa1") is False
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_parent_arriving_after_its_child_still_gets_the_edge(home, tmp_path):
+    """C4, other end. A member can join at either end of a spawn edge — a
+    lead that left and rejoined would otherwise come back unable to reach the
+    workers still running for it, since leaving took its edges with it."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mesh = await _team(mm, mgr, names=("lead", "w1", "w2"))
+        await mm.leave("team", "lead")
+        assert not [k for k in mesh.member_edges if "lead" in k.split("|")]
+        await mm.join("team", "lead")
+        assert mesh.neighbours("lead") == ["w1", "w2"]
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_no_rule_can_withhold_the_parent_edge(home, tmp_path):
+    """C4: a child that cannot reach its parent cannot report, and the reply
+    command its briefing hands it fails. So the parent edge is the join's
+    doing — an empty rule set removes every other edge and not that one."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("team")
+        await mm.set_roles("team", "auto_link: {rules: []}")
+        for name, parent in (("lead", None), ("w1", "lead"), ("other", None)):
+            mgr.create(SessionDef(name=name, harness="py", parent=parent))
+            await mm.join("team", name)
+        mesh = mm.get("team")
+        assert mesh.neighbours("w1") == ["lead"]
+        # with no rules at all, even two roots are strangers
+        assert mesh.connected("lead", "other") is False
         await mgr.shutdown_all()
 
     asyncio.run(run())
@@ -312,12 +465,16 @@ def test_leaving_prunes_the_edges_that_named_you(home, tmp_path):
         mgr = _manager()
         mm = MeshManager(mgr, root=tmp_path / "mesh")
         mesh = await _team(mm, mgr)
-        await mm.set_member_link("team", "w1", "w2", enabled=False)
+        # The lead wires its two workers together, as a lead may.
+        await mm.set_member_link("team", "w1", "w2", enabled=True)
         await mm.leave("team", "w2")
-        # E1: a different session reusing the handle starts clean
+        assert not [k for k in mesh.member_edges if "w2" in k.split("|")]
+        # E1: a different session reusing the handle starts clean — it is
+        # wired by its own join, not by what its predecessor was granted.
         mgr.create(SessionDef(name="w2b", harness="py", parent="lead"))
         await mm.join("team", "w2b", handle="w2")
-        assert mesh.connected("w1", "w2") is True
+        assert mesh.neighbours("w2") == ["lead"]
+        assert mesh.connected("w1", "w2") is False
         await mgr.shutdown_all()
 
     asyncio.run(run())
@@ -384,6 +541,8 @@ def test_a_cut_elsewhere_leaves_a_real_debt_being_chased(home, tmp_path):
         mm.start()
         mesh = await _team(mm, mgr, names=("lead", "w1", "w2"))
         await _settled(mgr)
+        # Siblings are strangers until the lead introduces them.
+        await mm.set_member_link("team", "w2", "w1", enabled=True)
 
         await mm.send("team", "lead", "w1", "answer me", type="ask")
         await mm.send("team", "w2", "w1", "and me", type="ask")

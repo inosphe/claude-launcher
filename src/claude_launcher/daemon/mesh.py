@@ -271,12 +271,23 @@ class Member:
         machine: str = "",
         role: str = "",
         joined_at: str = "",
+        wired: bool = False,
     ) -> None:
         self.handle = handle
         self.session = session
         self.machine = machine  # "" = this daemon; set by federation later
         self.role = role or infer_role(handle)
         self.joined_at = joined_at or utcnow()
+        #: This member's edges were decided by its join (see
+        #: ``MeshManager._wire_member``), so a pair with no recorded edge is
+        #: CLOSED for it — where for everyone else an unrecorded pair is open.
+        #:
+        #: That inversion has to be per member rather than per mesh, and this
+        #: flag is the whole reason why: a mesh that predates the wiring keeps
+        #: the complete graph it has always had, and nothing migrates. A member
+        #: arriving from an older daemon has no flag in its roster entry and
+        #: reads as False here, which is the same answer.
+        self.wired = bool(wired)
 
     @property
     def local(self) -> bool:
@@ -289,6 +300,7 @@ class Member:
             "machine": self.machine,
             "role": self.role,
             "joined_at": self.joined_at,
+            "wired": self.wired,
         }
 
     @classmethod
@@ -299,6 +311,7 @@ class Member:
             machine=str(doc.get("machine") or ""),
             role=str(doc.get("role") or ""),
             joined_at=str(doc.get("joined_at") or ""),
+            wired=bool(doc.get("wired")),
         )
 
 
@@ -338,10 +351,12 @@ class Mesh:
         #: graph — including edges it is not itself an endpoint of.
         self.edges: Dict[str, bool] = {}
         #: Whether two *members* may message each other, ``"h1|h2"`` (sorted
-        #: handles) -> enabled. A missing key means connected, so a mesh that
-        #: never touches this stays the complete graph it has always been and
-        #: nothing has to be migrated — exactly the convention ``edges`` uses
-        #: one layer down.
+        #: handles) -> enabled. A recorded edge always wins; what a MISSING key
+        #: means depends on the two members (see :meth:`connected`) — closed if
+        #: either was wired by its join, connected otherwise. The second answer
+        #: is the original convention, the one ``edges`` still uses one layer
+        #: down, and it is why a mesh that predates the wiring stays the
+        #: complete graph it has always been with nothing to migrate.
         #:
         #: Unlike ``edges`` this is a hard ACL, not a fast-path hint: there is
         #: no multi-hop routing between members either, so a cut here has
@@ -522,15 +537,41 @@ class Mesh:
         return "|".join(sorted((a, b)))
 
     def connected(self, a: str, b: str) -> bool:
-        """May ``a`` and ``b`` message each other? Unknown pairs are connected.
+        """May ``a`` and ``b`` message each other?
+
+        Three answers, in the order they are asked for:
+
+        1. **A recorded edge wins.** Somebody decided this pair — a join's
+           wiring, an agent connecting its workers, a human cutting a link —
+           and a decision outranks any default.
+        2. **Otherwise, a wired member is closed.** A member whose join
+           decided its edges (:attr:`Member.wired`) has exactly the edges that
+           join recorded; a pair nobody wrote down is one nobody wanted. This
+           is what lets a spawned child be connected to its parent *and to
+           nothing else* while storing a single edge rather than a cut against
+           every member who happened to be present.
+        3. **Otherwise, open.** The original convention, kept for every member
+           that predates the wiring, so an existing mesh stays the complete
+           graph it has always been and nothing migrates.
 
         A member is always 'connected' to itself: self-addressed sends are
         rejected elsewhere (a sender is never its own recipient), and
         answering False here would make that read as a topology error.
+
+        A handle that is not a member at all is connected to everyone, because
+        it is not in this graph to be cut from it: an external sender is the
+        operator at a CLI or a dashboard (or the policy engine), and the member
+        graph governs what the members may do, not what may be said to them.
         """
         if a == b:
             return True
-        return bool(self.member_edges.get(self.member_key(a, b), True))
+        recorded = self.member_edges.get(self.member_key(a, b))
+        if recorded is not None:
+            return bool(recorded)
+        ends = (self.members.get(a), self.members.get(b))
+        if any(m is None for m in ends):
+            return True
+        return not any(m.wired for m in ends)
 
     def neighbours(self, handle: str) -> List[str]:
         """Every other member ``handle`` may talk to, in handle order."""
@@ -556,13 +597,12 @@ class Mesh:
     def isolate(self, handle: str, *, keep: Iterable[str] = ()) -> List[str]:
         """Cut ``handle`` off from every current member except ``keep``.
 
-        This is what makes a spawned child start out talking only to its
-        parent. It is deliberately a *snapshot*: members who join later are
-        connected by default, exactly as they are to everyone else. A rule
-        that kept isolating a member against all future joins would be a
-        third kind of state (the graph, plus a per-member policy about the
-        graph), and the parent that spawned the child is the thing that knows
-        when a newcomer should reach it.
+        A blunt instrument for an operator who wants one member quiet now: it
+        writes an explicit cut against every member present, which is a
+        *snapshot* — members who join later are wired by their own join like
+        anyone else. Starting a spawned child off connected to its parent
+        alone was once this method's job and is no longer: that is the join's
+        wiring (``MeshManager._wire_member``), which needs no cuts at all.
         """
         kept = set(keep) | {handle}
         cut = []
@@ -1101,6 +1141,9 @@ class MeshManager:
             if isinstance(entry, dict) and entry.get("handle"):
                 member = Member.from_dict(entry)
                 mesh.members[member.handle] = member
+        grant_edges = grant.get("member_edges")
+        if isinstance(grant_edges, dict):
+            mesh.member_edges = {str(k): bool(v) for k, v in grant_edges.items()}
         for m in grant.get("messages") or []:
             if not isinstance(m, dict) or not m.get("id"):
                 continue
@@ -1174,10 +1217,27 @@ class MeshManager:
             payload = await self._peer_call_primary(
                 mesh,
                 "/peer/mesh/join",
-                {"session": session, "handle": handle, "role": role},
+                {
+                    "session": session,
+                    "handle": handle,
+                    "role": role,
+                    # The authority wires the member, but only this daemon can
+                    # see the session tree behind it — and the lineage it will
+                    # eventually learn from our sync acks has not been sent
+                    # yet. Carried on the join so a child spawned across a
+                    # machine boundary is wired to its parent and not, for one
+                    # sync interval, mistaken for a root.
+                    "parent": self.parent_handle_for(mesh, session),
+                },
             )
             member = Member.from_dict(payload)
             mesh.members[member.handle] = member
+            # ...and the edges its join just decided, for the same reason the
+            # grant carries them: we resolve this member's recipients here,
+            # before forwarding, and would refuse its first send otherwise.
+            edges = payload.get("member_edges")
+            if isinstance(edges, dict):
+                mesh.member_edges = {str(k): bool(v) for k, v in edges.items()}
             # The primary tells us its log length at join time: messages
             # sequenced before the join never deliver to this member, even
             # ones still in flight to this mirror.
@@ -1188,8 +1248,13 @@ class MeshManager:
             self._persist_cursors(mesh)
             self._brief_soon(mesh, member)
             return member
+        # The parent is read BEFORE the member exists — `parent_handle_for`
+        # walks the session tree, and the joining session is not yet in the
+        # roster to be found by it.
+        parent = self.parent_handle_for(mesh, session)
         member = Member(handle, session, role=self._resolve_role(mesh, handle, role))
         mesh.members[handle] = member
+        self._wire_member(mesh, member, parent)
         # New members start caught up: joining must not replay the backlog.
         mesh.cursors[handle] = len(mesh.messages)
         self._persist_cursors(mesh)
@@ -2088,12 +2153,12 @@ class MeshManager:
     ) -> List[str]:
         """Cut ``handle`` off from every member except ``keep``.
 
-        The seed a spawned child joins with: connected to its parent, to
-        nobody else, and wired up from there by the parent. Applied one edge
-        at a time through :meth:`set_member_link` so a mirror's cuts reach
-        the authority by the same forwarding path a hand edit uses — a bulk
-        shortcut here would be a second way for the graph to change, and the
-        one that skipped the authority.
+        The operator's blunt instrument (see :meth:`Mesh.isolate`), not the
+        spawn seed it used to be. Applied one edge at a time through
+        :meth:`set_member_link` so a mirror's cuts reach the authority by the
+        same forwarding path a hand edit uses — a bulk shortcut here would be
+        a second way for the graph to change, and the one that skipped the
+        authority.
         """
         mesh = self.get(name)
         if handle not in mesh.members:
@@ -2106,6 +2171,103 @@ class MeshManager:
             await self.set_member_link(name, handle, other, enabled=False)
             cut.append(other)
         return cut
+
+    # ------------------------------------------------------------------ #
+    # wiring: what a join connects
+    # ------------------------------------------------------------------ #
+    def _link_facts(
+        self, mesh: Mesh, lineage: Dict[str, str]
+    ) -> Dict[str, mesh_roles.LinkFacts]:
+        """Every member's (role, tier, root) — all a rule may ask about.
+
+        Derived from the lineage rather than stored on the member, and that is
+        safe *because* it is used once: a join reads these, records edges, and
+        never consults them again. A parent that exits later re-roots its child
+        in the drawn tree, but cannot re-wire a member already wired.
+        """
+        facts: Dict[str, mesh_roles.LinkFacts] = {}
+        for handle, member in mesh.members.items():
+            tier, root, seen = 0, handle, {handle}
+            while tier < mesh_roles.MAX_TIER:
+                parent = lineage.get(root)
+                # `not in mesh.members` also stops the walk at a parent that
+                # never enrolled; `in seen` stops a hand-edited cycle.
+                if not parent or parent in seen or parent not in mesh.members:
+                    break
+                seen.add(parent)
+                root, tier = parent, tier + 1
+            facts[handle] = mesh_roles.LinkFacts(
+                role=member.role, tier=tier, root=root
+            )
+        return facts
+
+    def parent_handle_for(self, mesh: Mesh, session: str) -> str:
+        """The handle a joining local session would hang off, before it joins.
+
+        The same "nearest *enrolled* ancestor" rule :meth:`_local_lineage`
+        applies to members already in the roster — asked one join earlier,
+        because the wiring has to know the parent to connect the member to it.
+        """
+        by_session = {
+            m.session: h for h, m in mesh.members.items()
+            if self._is_local(mesh, m) and m.session
+        }
+        for name in self.manager.ancestors(session):
+            handle = by_session.get(name)
+            if handle:
+                return handle
+        return ""
+
+    def _wire_member(self, mesh: Mesh, member: Member, parent: str) -> dict:
+        """Decide and record the edges a new member starts with. Authority only.
+
+        Two sources, in this order:
+
+        * **every parent edge this member is an end of**, unconditionally —
+          the one to its parent, and one to each member already here that is a
+          child of *it*. Both directions, because a member can arrive at
+          either end of a spawn edge: a parent that left and rejoined would
+          otherwise come back unable to reach the children still working for
+          it (its edges went with it — see ``prune_member_edges``). A child
+          that cannot reach its parent cannot report, and the reply command
+          its briefing hands it fails, so this is the join's own doing and no
+          ``auto_link`` document can withhold it.
+        * **the mesh's rules**, evaluated once per existing member.
+
+        Only *connections* are written. The member is marked ``wired``, which
+        makes every pair nobody wrote down closed for it — so isolating a child
+        costs one edge to its parent instead of a cut against every member who
+        happened to be in the room, and stays isolated from members who arrive
+        later without any standing rule to keep re-applying.
+
+        Written straight into the table rather than through
+        :meth:`set_member_link`: both callers are already the authority (a
+        guest's join is forwarded here first), so the forwarding that method
+        exists for would be a round trip to ourselves, once per member.
+        """
+        lineage = dict(self._lineage_map(mesh))
+        if parent and parent in mesh.members:
+            lineage[member.handle] = parent
+        else:
+            parent = ""
+        facts = self._link_facts(mesh, lineage)
+        mine = facts[member.handle]
+        auto = mesh.roleset.auto_link
+        opened = []
+        for other in sorted(mesh.members):
+            if other == member.handle:
+                continue
+            kin = other == parent or lineage.get(other) == member.handle
+            if kin or auto.decide(mine, facts[other]):
+                mesh.member_edges[Mesh.member_key(member.handle, other)] = True
+                opened.append(other)
+        member.wired = True
+        log.info(
+            "mesh %r: wired %r (role %s, tier %d) to %s",
+            mesh.name, member.handle, mine.role, mine.tier,
+            ", ".join(opened) or "nobody",
+        )
+        return {"parent": parent, "connected_to": opened}
 
     def peer_member_link_accept(
         self, name: str, machine: str, token: str, a: str, b: str, enabled: bool
@@ -2407,13 +2569,15 @@ class MeshManager:
 
     # -- primary-side: join requests, grants, guest lifecycle ------------ #
     def _admit_member(
-        self, mesh: Mesh, machine: str, session: str, handle: str, role: str
+        self, mesh: Mesh, machine: str, session: str, handle: str, role: str,
+        parent: str = "",
     ):
         """Admit (or reclaim) a guest member — returns (member, created).
 
         The same (machine, session) re-joining reclaims its existing member
         record instead of conflicting: that is the mirror-lost recovery
-        path, not a duplicate.
+        path, not a duplicate — and it keeps the wiring it was admitted with,
+        because re-wiring it here would quietly undo every edge edited since.
         """
         for m in mesh.members.values():
             if m.machine == machine and m.session == session:
@@ -2432,6 +2596,10 @@ class MeshManager:
             role=self._resolve_role(mesh, handle, role),
         )
         mesh.members[handle] = member
+        # An establishment join carries no parent: the mesh did not exist on
+        # the guest until this call, so nothing over there was in it to have
+        # spawned the joiner. The rules decide the rest.
+        self._wire_member(mesh, member, str(parent or "").strip())
         return member, True
 
     def _ensure_ranked(self, mesh: Mesh, machine: str) -> None:
@@ -2629,6 +2797,12 @@ class MeshManager:
         return {
             "token": mesh.links[machine]["token_in"],
             "members": [m.to_dict() for m in mesh.members.values()],
+            # Shipped with the roster rather than left to the first sync: a
+            # guest resolves recipients locally before forwarding them up, so
+            # a mirror built without the edge table would refuse its own
+            # member's first send — the wiring its join just performed is
+            # invisible until a sync it has not had yet.
+            "member_edges": dict(mesh.member_edges),
             "messages": list(mesh.messages),
             "policy": mesh.policy,
             "roles": {"doc": mesh.roles_doc, "version": mesh.roles_version},
@@ -3011,7 +3185,7 @@ class MeshManager:
 
     def peer_join_accept(
         self, name: str, machine: str, token: str,
-        session: str, handle: str, role: str,
+        session: str, handle: str, role: str, parent: str = "",
     ) -> dict:
         """A guest daemon asks to enrol one of its sessions as a member."""
         mesh = self.get(name)
@@ -3037,9 +3211,16 @@ class MeshManager:
             role=self._resolve_role(mesh, handle, role),
         )
         mesh.members[handle] = member
+        # The guest names the parent (only it can see its own session tree);
+        # a name that is not a member of this mesh wires as a root.
+        self._wire_member(mesh, member, str(parent or "").strip())
         self._roster_changed(mesh)
         log.info("mesh %r: %r joined from guest %r", mesh.name, handle, machine)
-        return {**member.to_dict(), "cursor": len(mesh.messages)}
+        return {
+            **member.to_dict(),
+            "cursor": len(mesh.messages),
+            "member_edges": dict(mesh.member_edges),
+        }
 
     def peer_leave_accept(
         self, name: str, machine: str, token: str, handle: str

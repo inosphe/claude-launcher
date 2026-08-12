@@ -138,13 +138,14 @@ Spawn when the work genuinely splits — parallel tracks, or a second pair of
 eyes you will actually talk to. Every child is a real terminal burning real
 tokens, and one you never message is pure cost.
 
-**Your children start connected to YOU and to nobody else.** That is the
-point: you decide who they may talk to. Each is told that you are its parent
-and given the exact `mesh send` that reaches you, so expect reports — and
-when one goes quiet, ask it rather than assuming it is still working.
+**Your children start connected to YOU and to nobody else** (unless the mesh
+declares extra wiring — some meshes connect, say, every worker to a reviewer).
+That is the point: you decide who they may talk to. Each is told that you are
+its parent and given the exact `mesh send` that reaches you, so expect reports
+— and when one goes quiet, ask it rather than assuming it is still working.
 
 - `members` shows `reachable` — who *you* can message — and `member_links`,
-  the whole graph. `claunch mesh members MESH` lists disconnected pairs.
+  the whole graph. `claunch mesh members MESH` lists the connected pairs.
 - MCP `connect` / `disconnect` (or `claunch mesh connect|disconnect MESH A
   B`) rewires a pair. You may only edit an edge touching a session you
   spawned, or one of its descendants — you wire your own team, not somebody

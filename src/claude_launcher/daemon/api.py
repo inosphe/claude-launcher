@@ -1100,6 +1100,7 @@ async def h_peer_join(request: web.Request) -> web.Response:
         str(body.get("session") or ""),
         str(body.get("handle") or ""),
         str(body.get("role") or ""),
+        str(body.get("parent") or ""),
     )
     return web.json_response(result)
 

@@ -254,11 +254,17 @@ def _print_onboarding(result: dict) -> None:
     mesh = result.get("mesh") or {}
     if mesh:
         if mesh.get("ok"):
-            reach = ", ".join(mesh.get("connected_to") or []) or "the whole mesh"
+            # `connected_to` is now the whole answer — the join wires the
+            # member and everything it did not wire is closed, so there is no
+            # second "and cut off from" list to print. "nobody" is a real
+            # outcome (a mesh whose rules connect nothing but the parent, and
+            # a member with no parent in it) and reads better than an empty
+            # list, which looks like the field failed to arrive.
+            reach = ", ".join(mesh.get("connected_to") or []) or "nobody yet"
             print(f"  mesh {mesh.get('mesh')}: joined as {mesh.get('handle')}, "
                   f"can reach {reach}")
-            if mesh.get("disconnected_from"):
-                print(f"  cut off from: {', '.join(mesh['disconnected_from'])}")
+            for peer, err in sorted((mesh.get("connect_errors") or {}).items()):
+                print(f"  could not connect to {peer}: {err}")
         else:
             print(f"  mesh join failed: {mesh.get('error') or mesh.get('pending')}")
     flow = result.get("workflow") or {}

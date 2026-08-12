@@ -39,6 +39,16 @@ E. Behaviour keyed off the role
 
 F. Persistence
    F1 an override survives a reload; a mesh without one writes no roles key
+
+G. The wiring rules (`auto_link`), which ride the same document
+   G1 the packaged set connects roots to roots and nothing else
+   G2 a rule is an unordered pair predicate — either orientation matches
+   G3 `within: tree` confines a rule to one spawn tree
+   G4 a rule naming a role the vocabulary does not define is refused — the
+      payoff for keeping the wiring in the document that defines the roles
+   G5 a malformed rule is refused with the offending rule named
+   G6 auto_link replaces wholesale, and survives `replace: true` (which is
+      about the vocabulary, not the wiring)
 """
 
 from __future__ import annotations
@@ -576,3 +586,94 @@ def test_an_override_survives_a_reload_and_costs_nothing_when_unused(
         await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# G. the wiring rules
+#
+# Pure document tests: these ask what the rules MEAN, not what a join does
+# with them (that is tests/test_member_graph.py). No sessions, no mesh —
+# `resolve` and `decide` are the whole surface.
+# --------------------------------------------------------------------------- #
+def _facts(role, tier, root):
+    return mesh_roles.LinkFacts(role=role, tier=tier, root=root)
+
+
+def test_the_packaged_rules_connect_roots_and_nothing_else():
+    auto = mesh_roles.resolve().auto_link
+    lead, other = _facts("leader", 0, "lead"), _facts("reviewer", 0, "other")
+    child = _facts("worker", 1, "lead")
+    # G1
+    assert auto.decide(lead, other) is True
+    assert auto.decide(lead, child) is False       # the JOIN adds this one
+    assert auto.decide(child, _facts("worker", 1, "other")) is False
+
+
+def test_a_rule_matches_a_pair_in_either_orientation():
+    """G2: a rule is a predicate over a pair, not an instruction to whoever
+    joined second — otherwise the wiring would depend on the order a fleet
+    happens to come up in."""
+    auto = mesh_roles.resolve(mesh_roles.parse(
+        "auto_link: {rules: [{between: [{role: worker}, {role: reviewer}]}]}"
+    )).auto_link
+    w, r = _facts("worker", 1, "lead"), _facts("reviewer", 2, "lead")
+    assert auto.decide(w, r) is True
+    assert auto.decide(r, w) is True
+    assert auto.decide(w, _facts("worker", 1, "lead")) is False
+
+
+def test_within_tree_confines_a_rule_to_one_fleet():
+    auto = mesh_roles.resolve(mesh_roles.parse(
+        "auto_link: {rules: [{between: [{role: worker}, {role: reviewer}], "
+        "within: tree}]}"
+    )).auto_link
+    w = _facts("worker", 1, "leadA")
+    # G3
+    assert auto.decide(w, _facts("reviewer", 1, "leadA")) is True
+    assert auto.decide(w, _facts("reviewer", 1, "leadB")) is False
+
+
+def test_a_rule_naming_an_undefined_role_is_refused():
+    """G4: the reason the wiring lives in the role-set document. Deleting a
+    role while a rule still names it is caught here rather than becoming a
+    rule that quietly matches nothing for the rest of the mesh's life."""
+    with pytest.raises(mesh_roles.RoleError) as exc:
+        mesh_roles.resolve(mesh_roles.parse(
+            "auto_link: {rules: [{between: [{role: worker}, {}]}]}\n"
+            "roles: {worker: null}\n"
+        ))
+    assert "worker" in str(exc.value)
+    # ...and an alias resolves like a handle does, so `coder` is `worker`
+    auto = mesh_roles.resolve(mesh_roles.parse(
+        "auto_link: {rules: [{between: [{role: coder}, {}]}]}"
+    )).auto_link
+    assert auto.decide(_facts("worker", 3, "x"), _facts("leader", 0, "y")) is True
+
+
+@pytest.mark.parametrize("doc, needle", [
+    ("auto_link: {rules: [{between: [{}]}]}", "exactly two"),
+    ("auto_link: {rules: [{between: [{tier: leaf}, {}]}]}", "'root'"),
+    ("auto_link: {rules: [{between: [{}, {}], within: sometimes}]}", "within"),
+    ("auto_link: {rules: [{beteen: []}]}", "unknown key"),
+    ("auto_link: {rules: [{between: [{}, {}]}, {between: [{rank: 1}, {}]}]}",
+     "rule 2"),
+])
+def test_a_malformed_rule_is_refused_and_named(doc, needle):
+    # G5: the rule's ORDINAL is in the message — a document with a dozen of
+    # them is unusable if the error only says one of them is wrong.
+    with pytest.raises(mesh_roles.RoleError) as exc:
+        mesh_roles.parse(doc)
+    assert needle in str(exc.value)
+
+
+def test_auto_link_replaces_wholesale_and_outlives_replace():
+    """G6: a rule list has no key to merge on, so an upload's rules are the
+    rules. But `replace:` is about the VOCABULARY — a mesh bringing its own
+    role names does not also, silently, stop connecting its roots."""
+    empty = mesh_roles.resolve(mesh_roles.parse("auto_link: {rules: []}")).auto_link
+    assert empty.decide(_facts("leader", 0, "a"), _facts("leader", 0, "b")) is False
+
+    kept = mesh_roles.resolve(mesh_roles.parse(
+        "replace: true\ndefault: hand\nroles: {hand: {}}\n"
+    )).auto_link
+    assert kept.decide(_facts("hand", 0, "a"), _facts("hand", 0, "b")) is True

@@ -510,13 +510,15 @@ def _cmd_members(args: argparse.Namespace) -> int:
             f"{m['handle']:<16} {m['role']:<10} {where + '/' + m['session']:<28} "
             f"[{m['reachability']}]{flags}"
         )
-    # Only the cuts are printed. The complete graph is the norm, so listing
-    # every connected pair would bury the handful of edges someone chose.
-    cuts = [e for e in info.get("member_links") or [] if not e.get("enabled")]
-    if cuts:
-        print(f"\ndisconnected pairs ({len(cuts)}):")
-        for edge in cuts:
-            print(f"  {edge['a']} -x- {edge['b']}")
+    # The open pairs are printed, not the closed ones: a join wires a member
+    # to its parent and to whatever the mesh's rules match and leaves the rest
+    # closed, so "can message" is the short list and the one somebody chose.
+    # (The dashboard's diagram makes the same call, for the same reason.)
+    links = [e for e in info.get("member_links") or [] if e.get("enabled")]
+    if links:
+        print(f"\nconnected pairs ({len(links)}):")
+        for edge in links:
+            print(f"  {edge['a']} <-> {edge['b']}")
     for p in info.get("peers", []):
         if p.get("ok") is False:
             state = f"unreachable ({p.get('error')})"

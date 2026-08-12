@@ -136,7 +136,7 @@ def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
         return mm.peer_join_accept(
             body["mesh"], body["machine"], body["token"],
             body.get("session") or "", body.get("handle") or "",
-            body.get("role") or "",
+            body.get("role") or "", body.get("parent") or "",
         )
     if path == "/peer/mesh/leave":
         return mm.peer_leave_accept(
@@ -154,6 +154,7 @@ def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
             body.get("nudges") or [],
             peers=body.get("peers"), epoch=body.get("epoch"),
             links=body.get("links"), edges=body.get("edges"),
+            member_edges=body.get("member_edges"),
         )
     if path == "/peer/mesh/deliver":
         return mm.peer_deliver_accept(

@@ -29,6 +29,13 @@ and there is no sane way to "merge" two pieces of prose.
 and stored as a plain string; changing the vocabulary never rewrites it.
 A member whose role no longer exists simply matches no rule — which needs no
 code, and is the whole reason this stays simple.
+
+**The document also carries the wiring** (``auto_link``): which pairs a join
+should connect, stated as rules over role and tier rather than as edges. It
+lives here rather than in a document of its own because the rules *name
+roles*, and one document is the only place a rule pointing at a role somebody
+just deleted can be caught — at parse time, before it silently matches
+nothing. See :class:`AutoLink` for the semantics.
 """
 
 from __future__ import annotations
@@ -53,6 +60,14 @@ MAX_STANCE = 8000
 MAX_TASK_POLL = 500
 MAX_ROLES = 32
 MAX_DOC = 64_000
+#: Auto-link rules are evaluated once per (joiner, existing member) pair, so
+#: the cost is rules x members; the cap keeps a pathological document from
+#: making a join quadratic in something the author did not think about.
+MAX_RULES = 64
+#: How deep a spawn chain may be before ``tier`` stops counting. Beyond this a
+#: member is simply "deep" — no rule can name a tier this large anyway, and a
+#: bound is what makes the walk safe against a hand-edited cycle.
+MAX_TIER = 64
 
 #: A role/alias name: lower-case word characters, dashes and dots. Deliberately
 #: narrower than a handle — a role name appears in config, CLI output and the
@@ -97,11 +112,112 @@ class Role:
 
 
 @dataclass(frozen=True)
+class LinkFacts:
+    """What a rule may ask about one member, fixed at the moment of a join.
+
+    ``tier`` is the member's depth in the mesh's spawn forest (0 for a root)
+    and ``root`` the handle at the top of its tree — its own, for a root. Both
+    are derived from the lineage the mesh already carries, and derived *once*:
+    a rule is evaluated at join and the answer stored as an edge, so a parent
+    that later exits (which makes its child a root) cannot silently re-tier a
+    member that has already been wired.
+    """
+
+    role: str
+    tier: int
+    root: str
+
+
+@dataclass(frozen=True)
+class LinkPattern:
+    """One end of a rule. An omitted field matches anything."""
+
+    role: Optional[str] = None
+    tier: Optional[int] = None
+
+    def matches(self, facts: LinkFacts) -> bool:
+        if self.role is not None and facts.role != self.role:
+            return False
+        if self.tier is not None and facts.tier != self.tier:
+            return False
+        return True
+
+    def to_dict(self) -> dict:
+        out: dict = {}
+        if self.role is not None:
+            out["role"] = self.role
+        if self.tier is not None:
+            out["tier"] = "root" if self.tier == 0 else self.tier
+        return out
+
+
+@dataclass(frozen=True)
+class LinkRule:
+    """An unordered pair pattern: which two kinds of member to connect.
+
+    Unordered on purpose. A rule is a *predicate over a pair*, not an
+    instruction to the joiner, so it gives the same answer whichever of the
+    two members joined first — and that is what makes the wiring independent
+    of the order a fleet happens to come up in.
+    """
+
+    a: LinkPattern
+    b: LinkPattern
+    #: ``"tree"`` restricts the rule to two members of the same spawn tree;
+    #: ``"any"`` (the default) lets it reach across the whole mesh.
+    within: str = "any"
+
+    def matches(self, x: LinkFacts, y: LinkFacts) -> bool:
+        if self.within == "tree" and (not x.root or x.root != y.root):
+            return False
+        return (self.a.matches(x) and self.b.matches(y)) or (
+            self.a.matches(y) and self.b.matches(x)
+        )
+
+    def to_dict(self) -> dict:
+        out: dict = {"between": [self.a.to_dict(), self.b.to_dict()]}
+        if self.within != "any":
+            out["within"] = self.within
+        return out
+
+
+@dataclass(frozen=True)
+class AutoLink:
+    """The wiring a join performs — the rules, and nothing else.
+
+    Three things this is deliberately NOT:
+
+    * **Not an ACL.** It decides the edges a join *creates*; it never vetoes
+      one. An agent or a human may open or cut anything afterwards through
+      the member graph, and that decision is stored as an edge, so it outlives
+      any later edit of these rules.
+    * **Not retroactive.** Rules run at join and the result is recorded. Change
+      them and the members already wired keep the wiring they were given —
+      exactly as a role, resolved once and stored, survives a new vocabulary.
+    * **Not the parent edge.** A child is connected to its parent by the join
+      itself, outside these rules. A child that cannot reach its parent cannot
+      report, and the command its briefing hands it fails; that is not a
+      property a YAML typo gets to remove.
+    """
+
+    rules: List[LinkRule] = field(default_factory=list)
+
+    def decide(self, x: LinkFacts, y: LinkFacts) -> bool:
+        """Should a join connect these two? Any matching rule is enough."""
+        return any(rule.matches(x, y) for rule in self.rules)
+
+    def to_dict(self) -> dict:
+        return {"rules": [r.to_dict() for r in self.rules]}
+
+
+@dataclass(frozen=True)
 class RoleSet:
     """A resolved vocabulary: the roles, the default, and the alias index."""
 
     roles: Dict[str, Role]
     default: str
+    #: The wiring rules that ride this vocabulary (see :class:`AutoLink`).
+    auto_link: AutoLink = field(default_factory=AutoLink)
     #: alias/name -> role name. Built once at resolve time; ``infer`` is on the
     #: join path and must not rescan every role's aliases.
     index: Dict[str, str] = field(default_factory=dict)
@@ -149,6 +265,7 @@ class RoleSet:
         return {
             "version": SCHEMA_VERSION,
             "default": self.default,
+            "auto_link": self.auto_link.to_dict(),
             "roles": {n: self.roles[n].to_dict() for n in sorted(self.roles)},
         }
 
@@ -182,6 +299,19 @@ version: 1
 # The role a handle gets when its leading word names none of the roles below.
 # reviewer on purpose: an unlabelled member should audit, never rubber-stamp.
 default: reviewer
+
+# What a join wires up. A child is ALWAYS connected to its parent — that is
+# the join, not a rule — so everything here is about the edges beyond it.
+#
+# The packaged set has exactly one rule, and it is the one that keeps a mesh
+# usable: sessions a human started (tier 0, nobody spawned them) all reach
+# each other, the way every member always has. Everything a session spawns
+# hangs off its parent and goes no further, so a fleet is a tree until
+# somebody says otherwise — an agent wiring its own workers together, or a
+# rule added here.
+auto_link:
+  rules:
+    - between: [{tier: root}, {tier: root}]
 
 roles:
 
@@ -304,6 +434,97 @@ def _parse_role(name: str, body) -> Role:
     )
 
 
+def _parse_pattern(body, where: str) -> dict:
+    """One end of a rule -> its document form. ``{}`` matches every member."""
+    if body is None:
+        body = {}
+    if not isinstance(body, dict):
+        raise RoleError(f"{where} must be a mapping like {{role: worker}}")
+    unknown = sorted(set(body) - {"role", "tier"})
+    if unknown:
+        raise RoleError(
+            f"{where} has unknown key(s): {', '.join(unknown)} "
+            "(allowed: role, tier)"
+        )
+    out: dict = {}
+    if body.get("role") is not None:
+        # Left as written; it is checked against the *resolved* vocabulary in
+        # `resolve`, which is the only place that knows the merged role names.
+        out["role"] = _check_name(body["role"], f"role in {where}")
+    tier = body.get("tier")
+    if tier is not None:
+        # 'root' rather than 0 is the spelling to reach for — the rules are
+        # about position in the spawn forest, and 'root' says that where a
+        # bare 0 makes the reader count.
+        if isinstance(tier, str):
+            if tier.strip().lower() != "root":
+                raise RoleError(
+                    f"{where}: tier must be a number or 'root', got {tier!r}"
+                )
+            out["tier"] = 0
+        elif isinstance(tier, bool) or not isinstance(tier, int):
+            raise RoleError(
+                f"{where}: tier must be a number or 'root', got {tier!r}"
+            )
+        elif not (0 <= tier <= MAX_TIER):
+            raise RoleError(f"{where}: tier {tier} out of range [0, {MAX_TIER}]")
+        else:
+            out["tier"] = tier
+    return out
+
+
+def _parse_rule(body, index: int) -> dict:
+    where = f"auto_link rule {index + 1}"
+    if not isinstance(body, dict):
+        raise RoleError(
+            f"{where} must be a mapping with a 'between:' pair, got {body!r}"
+        )
+    unknown = sorted(set(body) - {"between", "within"})
+    if unknown:
+        raise RoleError(
+            f"{where} has unknown key(s): {', '.join(unknown)} "
+            "(allowed: between, within)"
+        )
+    pair = body.get("between")
+    if not isinstance(pair, list) or len(pair) != 2:
+        raise RoleError(
+            f"{where}: 'between' must be a list of exactly two patterns, "
+            "e.g. between: [{role: worker}, {role: reviewer}]"
+        )
+    within = str(body.get("within") or "any").strip().lower()
+    if within not in ("any", "tree"):
+        raise RoleError(
+            f"{where}: within must be 'any' or 'tree', got {body.get('within')!r}"
+        )
+    out: dict = {
+        "between": [
+            _parse_pattern(pair[0], f"{where} end 1"),
+            _parse_pattern(pair[1], f"{where} end 2"),
+        ]
+    }
+    if within != "any":
+        out["within"] = within
+    return out
+
+
+def _parse_auto_link(body) -> dict:
+    if not isinstance(body, dict):
+        raise RoleError("'auto_link' must be a mapping with a 'rules:' list")
+    unknown = sorted(set(body) - {"rules"})
+    if unknown:
+        raise RoleError(
+            f"auto_link has unknown key(s): {', '.join(unknown)} (allowed: rules)"
+        )
+    rules = body.get("rules")
+    if rules is None:
+        rules = []
+    if not isinstance(rules, list):
+        raise RoleError("auto_link.rules must be a list")
+    if len(rules) > MAX_RULES:
+        raise RoleError(f"{len(rules)} auto_link rules, over the {MAX_RULES} limit")
+    return {"rules": [_parse_rule(r, i) for i, r in enumerate(rules)]}
+
+
 def parse(text) -> dict:
     """Validate a role-set document (YAML text or an already-parsed mapping).
 
@@ -326,11 +547,13 @@ def parse(text) -> dict:
         raise RoleError("role set is empty")
     if not isinstance(doc, dict):
         raise RoleError(f"role set must be a mapping, got {type(doc).__name__}")
-    unknown = sorted(set(doc) - {"version", "default", "roles", "replace"})
+    unknown = sorted(
+        set(doc) - {"version", "default", "roles", "replace", "auto_link"}
+    )
     if unknown:
         raise RoleError(
             f"unknown top-level key(s): {', '.join(unknown)} "
-            "(allowed: version, default, roles, replace)"
+            "(allowed: version, default, roles, replace, auto_link)"
         )
     version = doc.get("version", SCHEMA_VERSION)
     try:
@@ -363,6 +586,8 @@ def parse(text) -> dict:
         out["replace"] = True
     if doc.get("default") is not None:
         out["default"] = _check_name(doc.get("default"), "default role")
+    if doc.get("auto_link") is not None:
+        out["auto_link"] = _parse_auto_link(doc.get("auto_link"))
     return out
 
 
@@ -418,24 +643,76 @@ def resolve(override: Optional[dict] = None) -> RoleSet:
             f"default role {default!r} is not defined (roles: "
             f"{', '.join(sorted(roles))})"
         )
-    return RoleSet(roles=roles, default=default, index=index)
+    return RoleSet(
+        roles=roles,
+        default=default,
+        auto_link=_resolve_auto_link(doc.get("auto_link"), index, roles),
+        index=index,
+    )
+
+
+def _resolve_auto_link(doc, index: Dict[str, str], roles: Dict[str, Role]) -> AutoLink:
+    """Rules -> the resolved predicate, with every role reference checked.
+
+    This is the payoff for keeping the wiring in the same document as the
+    vocabulary: a rule naming a role the upload just deleted is caught here,
+    at parse time, instead of quietly matching nothing for the rest of the
+    mesh's life. Role names go through the alias index too, so a rule may say
+    ``coder`` and mean ``worker`` exactly as a handle does.
+    """
+    if not doc:
+        return AutoLink()
+    out = []
+    for i, rule in enumerate(doc.get("rules") or []):
+        ends = []
+        for end in rule.get("between") or []:
+            token = end.get("role")
+            canon = None
+            if token is not None:
+                canon = index.get(token)
+                if canon is None:
+                    raise RoleError(
+                        f"auto_link rule {i + 1} names role {token!r}, which "
+                        f"this vocabulary does not define (roles: "
+                        f"{', '.join(sorted(roles))})"
+                    )
+            ends.append(LinkPattern(role=canon, tier=end.get("tier")))
+        out.append(
+            LinkRule(a=ends[0], b=ends[1], within=str(rule.get("within") or "any"))
+        )
+    return AutoLink(rules=out)
 
 
 def _merge(base: dict, patch: dict) -> dict:
-    """Apply a parsed override onto the parsed default set."""
+    """Apply a parsed override onto the parsed default set.
+
+    ``auto_link`` replaces wholesale where roles merge per-entry, because a
+    rule list has no key to merge on: two rules are not "the same rule with
+    new fields", and a set that half-arrived would wire a fleet in a shape
+    nobody wrote down. Stating ``auto_link: {rules: []}`` is therefore how a
+    mesh turns the packaged rule off and becomes a pure spawn tree.
+    """
     if patch.get("replace"):
+        # `replace` is about the VOCABULARY — it drops the packaged roles. The
+        # wiring is a separate axis and survives, so a mesh that brings its own
+        # role names does not also, silently, stop connecting its roots.
         out = {"version": SCHEMA_VERSION, "roles": dict(patch.get("roles") or {})}
         if patch.get("default"):
             out["default"] = patch["default"]
-        return out
-    out = copy.deepcopy(base)
-    for name, body in (patch.get("roles") or {}).items():
-        if body is None:
-            out["roles"].pop(name, None)  # tombstone
-        else:
-            out["roles"][name] = body     # whole-role replace
-    if patch.get("default"):
-        out["default"] = patch["default"]
+    else:
+        out = copy.deepcopy(base)
+        for name, body in (patch.get("roles") or {}).items():
+            if body is None:
+                out["roles"].pop(name, None)  # tombstone
+            else:
+                out["roles"][name] = body     # whole-role replace
+        if patch.get("default"):
+            out["default"] = patch["default"]
+    link = patch.get("auto_link")
+    if link is None:
+        link = base.get("auto_link")
+    if link is not None:
+        out["auto_link"] = copy.deepcopy(link)
     return out
 
 

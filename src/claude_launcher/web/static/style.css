@@ -647,7 +647,10 @@ body {
 
 /* the exceptions in the member graph. Connected is the default and says
    nothing; a cut is a decision, and gets the only line it needs. */
-.mesh-mcut line { stroke: #ff7b72; stroke-width: 1.4; stroke-dasharray: 3 3; opacity: 0.8; }
+/* An open member pair beyond the spawn tree: somebody wired these two, by a
+   rule or by hand. Violet keeps it clear of the peer graph's green (daemons)
+   and the spawn forest's grey (who made whom) — three layers, three hues. */
+.mesh-mlink line { stroke: #a371f7; stroke-width: 1.4; opacity: 0.75; }
 .mesh-reach { stroke: #58a6ff; stroke-width: 1.2; opacity: 0.5; }
 
 .mesh-agent { cursor: pointer; }
@@ -679,7 +682,7 @@ body {
 .mesh-legend-swatch.down { border-top-style: dotted; border-top-color: #ff7b72; }
 .mesh-legend-swatch.cut { border-top-style: dotted; border-top-color: #4a5058; }
 .mesh-legend-swatch.spawn { border-top-color: #454c56; }
-.mesh-legend-swatch.mcut { border-top-style: dashed; border-top-color: #ff7b72; }
+.mesh-legend-swatch.mlink { border-top-color: #a371f7; }
 
 /* the dead-route panel: leave, jump to a mesh that exists, or create one */
 .mesh-missing-actions {

@@ -588,18 +588,23 @@ in the slots, and that one change lets all three layers share a picture:
 |---|---|
 | peer graph (daemons) | the ring, and the connectors between clusters |
 | session tree (who spawned whom) | a tidy forest inside each cluster |
-| member graph (who may message whom) | cuts only, plus reach on demand |
+| member graph (who may message whom) | open pairs only, plus reach on demand |
 
 **Why one picture.** Separate diagrams make the reader do the join, and the
 join is where the questions are — *that agent is isolated; is that the spawn,
 or a cut?* Splitting them also duplicates the cluster: an agent has to appear
 in both to be found in either.
 
-**Why the member graph is drawn as exceptions.** It is complete by default
-(`connected()` answers True for a pair nobody has touched), so every pair
-drawn is n² hairlines carrying no information — and the picture is *worst*
-exactly when the mesh is healthy. The information lives in what somebody
-decided: a cut. So cuts get a line (dashed red) and nothing else does.
+**Why the member graph is drawn as its open pairs.** Only one side of it is
+ever sparse, and which side that is changed with the wiring (below). It used
+to be complete by default, so the cuts were the few and got the lines. Now a
+join connects a member to its parent and to whatever the mesh's rules match
+and leaves the rest closed, so the *open* pairs are the few — and a closed
+pair carries no decision to report, just the absence of one. Either way the
+rule is the same: draw what somebody chose, never n² hairlines that are worst
+exactly when the mesh is healthy. So an open pair gets a line (violet) and
+nothing else does, except the parent edge, which is already on the canvas as
+the spawn elbow and would only be a second line saying the same thing.
 "Who can this one reach" is a question, and gets an answer when asked: click
 an agent and its neighbours light up while the rest dim. `Mesh.neighbours()`
 already computes it for the join briefing and the `reachable` field.
@@ -949,9 +954,12 @@ human. A malformed `spawn:` block reads as the defaults rather than raising
 every spawn would be diagnosed as a broken feature.
 
 **3. The member graph.** `Mesh.member_edges`, `"h1|h2"` (sorted) ->
-enabled, missing = connected. Same convention as the peer graph's `edges`
-one layer down, so a mesh that never touches it stays the complete graph it
-has always been and nothing migrates.
+enabled. A recorded edge always wins; for a pair nobody recorded, the answer
+depends on whether either end was **wired** by its join (see "What a join
+wires" below) — wired means closed, unwired means connected. Same key
+convention as the peer graph's `edges` one layer down, and the unwired
+default is the original one, so a mesh that predates the wiring stays the
+complete graph it has always been and nothing migrates.
 
 The two graphs are **not** the same kind of thing, and the difference is the
 whole design:
@@ -989,16 +997,87 @@ direction the fast path takes and the safe one.
 
 Two consequences worth stating:
 
-- **Isolation is a snapshot, not a standing rule.** A spawned child is cut
-  from everyone except its parent *at join time*; members who join later are
-  connected by default. A rule that kept isolating a child against all
-  future joins would be a second kind of state — the graph, plus a policy
-  about the graph — and the parent is the thing that knows when a newcomer
-  should reach its child.
+- **Isolation is standing, not a snapshot.** It used to be the other way:
+  a spawned child was cut from everyone except its parent *at join time*, and
+  members who joined later were connected by default. That made isolation
+  leak — a child quietly gained a peer every time the fleet grew — and it
+  cost one stored cut per member present, so the graph grew as n² in exactly
+  the meshes least able to spare it. Wiring the member instead (below) makes
+  the isolation a property of the member rather than a set of cuts against a
+  roster that has since changed.
 - **Leaving prunes the edges that named you.** Handles are reusable, so a
-  rejoining handle would otherwise inherit the isolation imposed on whoever
-  wore it last: a member that mysteriously cannot reach anyone, with nothing
-  in the roster to explain it.
+  rejoining handle would otherwise inherit whatever its predecessor was
+  granted or denied. It is wired fresh by its own join instead.
+
+### What a join wires
+
+A join decides the edges a member starts with, and records them. Two sources,
+in this order:
+
+1. **The parent edge, unconditionally.** A child that cannot reach its parent
+   cannot report, and the `claunch mesh send <parent> "..."` its briefing
+   hands it fails. So this is the join's own doing, not a rule's, and no
+   document can withhold it.
+2. **The mesh's `auto_link` rules**, evaluated once per member already there.
+
+Then the member is marked `wired`, and that flag is what makes an unrecorded
+pair *closed* for it. This is the whole trick: isolating a child costs one
+stored edge — the parent's — instead of a cut against every member who
+happened to be in the room, and it stays isolated from members who arrive
+later without any standing policy that has to keep re-applying itself.
+
+`wired` is per member rather than per mesh for one reason: a roster written
+before any of this has no such key, reads as unwired, and goes on behaving
+exactly as it did. Nothing migrates.
+
+**The rules live in the role-set document** (`auto_link:`, alongside
+`roles:` — see `daemon/mesh_roles.py`), so they federate, are authority-owned
+and web-editable like the vocabulary they are written in terms of. One
+document rather than two because a rule *names roles*, and that is the only
+place a rule pointing at a role somebody just deleted can be caught — at
+parse time, rather than by quietly matching nothing forever after.
+
+```yaml
+auto_link:
+  rules:
+    - between: [{tier: root}, {tier: root}]        # the packaged rule
+    - between: [{role: worker}, {role: reviewer}]  # a mesh that adds one
+      within: tree
+```
+
+A rule is an **unordered pair pattern** — a predicate over a pair, not an
+instruction to the joiner — so it gives the same answer whichever of the two
+joined first, and the wiring does not depend on the order a fleet comes up
+in. A pattern matches on `role` (through the same alias index a handle goes
+through) and `tier` (depth in the spawn forest, `root` or a number); an
+omitted field matches anything. `within: tree` confines a rule to one spawn
+tree. Any matching rule connects the pair.
+
+The packaged set has exactly one rule, and it is the one that keeps a mesh
+usable: sessions a human started are all tier 0 and all reach each other, the
+way every member always did. Everything spawned hangs off its parent and goes
+no further — so a fleet is a **tree** until somebody says otherwise, either by
+adding a rule or by wiring two members directly.
+
+Three things the rules are deliberately **not**:
+
+- **Not an ACL.** They decide the edges a join *creates*; they never veto
+  one. An agent wiring its own workers together, or a human cutting a link,
+  writes an edge, and an edge outranks any default.
+- **Not retroactive.** They run at join and the result is recorded, exactly as
+  a role is resolved once and stored. Edit them and the members already wired
+  keep the wiring they were given.
+- **Not a second source of truth.** `tier` and `root` are read off the lineage
+  at join and never again, so a parent that exits — which re-roots its child
+  in the drawn tree — cannot silently re-wire a member already wired.
+
+Across machines the authority does the wiring, because it owns the graph. It
+cannot see a guest's session tree, and the lineage it will eventually learn
+from that guest's sync acks has not arrived yet at join time — so the guest
+names the parent **on the join** (`/peer/mesh/join`). The edges the join just
+decided ride back on the response (and on a grant), for the same reason a
+sync carries them: a guest resolves recipients locally before forwarding, and
+a mirror built without them would refuse its own member's first send.
 
 **Surface.** `POST /api/sessions/{name}/children` does the whole thing in
 one call — session, mesh join, isolation, optional cflow run scoped to the

@@ -109,17 +109,21 @@ const info = {
   links: [
     { a: "work-pc", b: "laptop", enabled: true, cuttable: true, editable: true },
   ],
+  // A wired mesh: the two roots reach each other (the packaged rule), each
+  // child hangs off its parent, and `lead` has wired one of its workers to
+  // the other cluster's root by hand. Everything else is closed — which is
+  // most of the ten pairs, and is exactly what does NOT get drawn.
   member_links: [
-    { a: "lead", b: "w-api", enabled: true },
-    { a: "lead", b: "w-web", enabled: true },
-    { a: "lead", b: "scout", enabled: true },
-    { a: "lead", b: "probe", enabled: true },
-    { a: "w-api", b: "w-web", enabled: false },   // the one cut
-    { a: "w-api", b: "scout", enabled: true },
-    { a: "w-api", b: "probe", enabled: true },
-    { a: "w-web", b: "scout", enabled: true },
-    { a: "w-web", b: "probe", enabled: true },
-    { a: "scout", b: "probe", enabled: true },
+    { a: "lead", b: "w-api", enabled: true },     // spawn: drawn as an elbow
+    { a: "lead", b: "w-web", enabled: true },     // spawn: drawn as an elbow
+    { a: "lead", b: "scout", enabled: true },     // root <-> root
+    { a: "lead", b: "probe", enabled: false },
+    { a: "w-api", b: "w-web", enabled: false },   // siblings are strangers
+    { a: "w-api", b: "scout", enabled: true },    // wired by hand
+    { a: "w-api", b: "probe", enabled: false },
+    { a: "w-web", b: "scout", enabled: false },
+    { a: "w-web", b: "probe", enabled: false },
+    { a: "scout", b: "probe", enabled: true },    // spawn: drawn as an elbow
   ],
 };
 
@@ -137,7 +141,11 @@ const info = {
         withClass(canvas, "mesh-agent").length);
   check("three spawn edges", withClass(canvas, "mesh-spawn").length === 3,
         withClass(canvas, "mesh-spawn").length);
-  check("one member cut", withClass(canvas, "mesh-mcut").length === 1);
+  // Open pairs get a line — but not the three that are already spawn elbows,
+  // so what is left is lead<->scout and the hand-wired w-api<->scout.
+  check("open member pairs, minus the spawn edges",
+        withClass(canvas, "mesh-mlink").length === 2,
+        withClass(canvas, "mesh-mlink").length);
   check("one peer edge", withClass(canvas, "mesh-edge-group").length === 1);
   check("the peer edge is clickable",
         hasClass(withClass(canvas, "mesh-edge-group")[0], "editable"));
@@ -168,12 +176,14 @@ const info = {
   ctx.setFocus("w-api");
   const canvas = byTag(ctx.renderTopology(info), "svg")[0];
   const lit = withClass(canvas, "mesh-agent").filter((n) => !hasClass(n, "dim"));
-  // w-api reaches everyone except w-web (cut), plus itself
-  check("focus lights the reachable set", lit.length === 4, lit.length);
-  check("the cut peer is dimmed",
-        withClass(canvas, "dim").length === 1);
+  // w-api reaches its parent and the peer it was wired to, plus itself —
+  // the sibling and the other cluster's child are strangers to it.
+  check("focus lights the reachable set", lit.length === 3, lit.length);
+  check("the unreachable peers are dimmed",
+        withClass(canvas, "dim").length === 2,
+        withClass(canvas, "dim").length);
   check("reach lines are drawn",
-        withClass(canvas, "mesh-reach").length === 3,
+        withClass(canvas, "mesh-reach").length === 2,
         withClass(canvas, "mesh-reach").length);
   check("the focused agent is marked", withClass(canvas, "focus").length === 1);
 }

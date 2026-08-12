@@ -454,16 +454,21 @@ async def unwind(report: dict, *, name: str, cwd: str, mesh_mgr) -> None:
 
 
 async def _join(plan: Plan, name: str, *, mesh_mgr) -> dict:
-    """Enrol the session, cut it down to the peers it should see, and return
-    the briefing text for the opening block.
+    """Enrol the session and return the briefing text for the opening block.
 
-    A spawned child starts connected to its parent only — the conservative
-    direction: a child that cannot yet reach a peer says so and asks, while a
-    child wired to everyone by default has already broadcast to them by the
-    time anyone notices the arrangement was wrong. A session with no parent
-    (one a human created) keeps whatever ``connect`` names, and is otherwise
-    left in the mesh unrestricted, because there is no "its own team" to be
-    conservative about.
+    Who the new member may talk to is **the join's** decision, not this
+    function's: it connects the child to its parent and to whatever the mesh's
+    ``auto_link`` rules match, and everything else stays closed (see
+    ``MeshManager._wire_member``). The conservative direction — a child that
+    cannot yet reach a peer says so and asks, while a child wired to everyone
+    by default has already broadcast to them by the time anyone notices the
+    arrangement was wrong.
+
+    What is left here is ``connect``: the extra peers the *spawner* named, one
+    call at a time so each goes through the same authority check a hand edit
+    does. They are opened after the join rather than passed into it because
+    they are the caller's decision about this one child, not a property of the
+    mesh's shape.
     """
     try:
         # The briefing is held back so it can go out inside the opening block
@@ -484,18 +489,17 @@ async def _join(plan: Plan, name: str, *, mesh_mgr) -> dict:
         "handle": member.handle,
         "role": member.role,
     }
-    keep = set(plan.connect)
-    if plan.parent:
-        parent_member = mesh_mgr.resolve_sender(plan.mesh, plan.parent)
-        if parent_member is not None:
-            keep.add(parent_member.handle)
+    mesh = mesh_mgr.get(plan.mesh)
+    for peer in sorted(set(plan.connect)):
+        if peer == member.handle or mesh.connected(member.handle, peer):
+            continue
         try:
-            out["disconnected_from"] = await mesh_mgr.isolate_member(
-                plan.mesh, member.handle, keep=keep
+            await mesh_mgr.set_member_link(
+                plan.mesh, member.handle, peer, enabled=True
             )
         except MeshError as exc:
-            out["isolate_error"] = str(exc)
-        out["connected_to"] = sorted(keep)
+            out.setdefault("connect_errors", {})[peer] = str(exc)
+    out["connected_to"] = mesh.neighbours(member.handle)
 
     try:
         out["briefing"] = mesh_mgr.briefing_block(mesh_mgr.get(plan.mesh), member)

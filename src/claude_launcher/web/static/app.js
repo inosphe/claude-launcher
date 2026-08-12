@@ -2940,14 +2940,17 @@ function renderInviteWizard(info, fed, members) {
    as precedence. Inside each cluster, its agents as a tidy spawn forest.
    Between clusters, the peer edges, with the four states they always had.
 
-   What is NOT drawn is the point of the design. The member graph is complete
-   by default, so drawing every member pair would be n² hairlines saying
-   nothing; the information lives in the exceptions. Cuts are drawn (dashed
-   red). Everything else answers on demand: click an agent and its reachable
-   set lights up. And the transport behind a cross-machine conversation is a
-   property of the two DAEMONS, not of the pair of agents — so it belongs on
-   the cluster boundary, drawn once, rather than smeared over every member
-   pair that crosses it.
+   What is NOT drawn is the point of the design. The member graph used to be
+   complete by default and was drawn as its exceptions — the cuts — because
+   every pair would have been n² hairlines saying nothing. A join now wires a
+   member to its parent and to whatever the mesh's rules match, and leaves the
+   rest closed, so the sparse side has swapped: the pairs that CAN message are
+   the few, and the ones that cannot are most of n² and carry no decision.
+   So the open pairs get the line and nothing else does. Everything further
+   answers on demand: click an agent and its reachable set lights up. And the
+   transport behind a cross-machine conversation is a property of the two
+   DAEMONS, not of the pair of agents — so it belongs on the cluster boundary,
+   drawn once, rather than smeared over every member pair that crosses it.
 
    Hand-rolled inline SVG, like the rest of the dashboard — no build step and
    no vendored library. Drawn 1:1 (one SVG unit is one CSS pixel) so the panel
@@ -3392,10 +3395,14 @@ function renderTopology(info) {
     canvas.appendChild(group);
   }
 
-  /* 3. spawn edges, inside their cluster */
+  /* 3. spawn edges, inside their cluster. The pairs drawn here are recorded
+        so step 4 does not draw the same relationship a second time as a
+        straight line across the forest. */
+  const spawnPair = new Set();
   for (const m of info.members || []) {
     const child = at.get(m.handle), parent = m.parent && at.get(m.parent);
     if (!child || !parent || parent.cluster !== child.cluster) continue;
+    spawnPair.add([m.handle, m.parent].sort().join("|"));
     // An elbow rather than a diagonal: with several children the fan of
     // straight lines is hard to follow back to one parent.
     const mid = (parent.y + child.y) / 2;
@@ -3405,15 +3412,27 @@ function renderTopology(info) {
     }));
   }
 
-  /* 4. member-graph exceptions. Connected is the default and says nothing;
-        a cut is a decision somebody made, so a cut is what gets a line. */
+  /* 4. the member graph: who may message whom. Drawn as the pairs that CAN,
+        which is the inversion the wiring bought. A join now connects a member
+        to its parent and to whatever the mesh's rules match, and leaves the
+        rest closed — so the open set is the sparse one and the informative
+        one, while the closed set is most of n² and says only "nobody asked
+        for this". A pair that cannot speak gets no line at all.
+
+        The parent edge is skipped: it is already on the canvas as the spawn
+        elbow, and drawing it twice would put a straight line across the tidy
+        forest the elbows exist to keep. */
   for (const e of info.member_links || []) {
-    if (e.enabled) continue;
+    if (!e.enabled) continue;
     const a = at.get(e.a), b = at.get(e.b);
     if (!a || !b) continue;
-    const g = svg("g", { class: "mesh-mcut" });
+    // Keyed sorted at both ends: the daemon happens to emit sorted pairs, but
+    // an edge is unordered and a suppression that only worked one way round
+    // would put a stray line across one arbitrary half of the forest.
+    if (spawnPair.has([e.a, e.b].sort().join("|"))) continue;
+    const g = svg("g", { class: "mesh-mlink" });
     g.appendChild(svg("line", { x1: a.x, y1: a.y, x2: b.x, y2: b.y }));
-    g.appendChild(svg("title", {}, `${e.a} ✕ ${e.b} — cannot message each other`));
+    g.appendChild(svg("title", {}, `${e.a} ↔ ${e.b} — may message each other`));
     canvas.appendChild(g);
   }
 
@@ -3464,7 +3483,7 @@ function renderTopology(info) {
   for (const [cls, label] of [
     ["ok", "linked"], ["queued", "queued"],
     ["down", "unreachable"], ["cut", "cut"],
-    ["spawn", "spawned"], ["mcut", "cannot message"],
+    ["spawn", "spawned"], ["mlink", "may message"],
   ]) {
     const item = el("span", "mesh-legend-item");
     item.appendChild(el("i", `mesh-legend-swatch ${cls}`));
@@ -4111,7 +4130,9 @@ function renderMeshRoles(info) {
     "p", "wf-note",
     (roles.custom ? "this mesh's own vocabulary" : "the packaged vocabulary") +
     ` · default role: ${roles.default || "?"} · a handle's leading word ` +
-    "picks its role, and changing this is never retroactive"
+    "picks its role. The same document carries auto_link — which pairs a " +
+    "join connects — so a rule can name a role and be checked against it. " +
+    "Editing either is never retroactive."
   ));
   const chips = el("div", "mesh-role-chips");
   const held = {};

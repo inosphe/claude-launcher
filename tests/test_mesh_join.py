@@ -151,6 +151,7 @@ def _dispatch_peer(mm: MeshManager, path: str, body: dict) -> dict:
             body.get("nudges") or [],
             peers=body.get("peers"), epoch=body.get("epoch"),
             links=body.get("links"), edges=body.get("edges"),
+            member_edges=body.get("member_edges"),
         )
     if path == "/peer/mesh/deliver":
         return mm.peer_deliver_accept(
