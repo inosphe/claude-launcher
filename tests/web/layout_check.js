@@ -60,6 +60,23 @@ const member = (handle, parent, machine) => ({
         cs[1].members.map((m) => m.handle).join() === "scout");
 }
 {
+  // Read from a MIRROR: blank means the AUTHORITY's own member, not ours.
+  // Resolving it as `self` drew the authority's agents inside our cluster and
+  // left the authority's empty — the bug this case exists to pin down.
+  const cs = ctx.meshClusters({
+    self: "laptop",
+    peers: [{ machine: "work-pc", rank: 0 }, { machine: "laptop", rank: 1 }],
+    members: [member("lead"), member("scout", null, "laptop")],
+  });
+  check("blank machine lands on the authority, not the reader",
+        cs[0].machine === "work-pc"
+        && cs[0].members.map((m) => m.handle).join() === "lead",
+        cs[0].members.map((m) => m.handle));
+  check("the mirror claims only its own",
+        cs[1].members.map((m) => m.handle).join() === "scout",
+        cs[1].members.map((m) => m.handle));
+}
+{
   // A mesh that never federated: one cluster, still drawn.
   const cs = ctx.meshClusters({ self: "", peers: [], members: [member("s0")] });
   check("local-only mesh still clusters", cs.length === 1 && cs[0].members.length === 1);
