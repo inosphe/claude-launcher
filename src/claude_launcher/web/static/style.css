@@ -204,11 +204,21 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   margin-top: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
   background: #238636; color: #fff; border: none; border-radius: 4px;
 }
+/* An outline chip, not a filled button: in this header a filled button does
+   something to the session (resume, kill) and this one only shows what the
+   session is. Pressed is the panel it toggles standing open on *this*
+   session — the state that makes a second press a close. */
 #term-details {
-  margin-left: auto; padding: 3px 10px; font-size: 12px; cursor: pointer;
-  background: #30363d; color: #c6cdd5; border: none; border-radius: 4px;
+  padding: 2px 9px; font-size: 12px; line-height: 1.6; cursor: pointer;
+  background: none; color: #7d8590;
+  border: 1px solid #30363d; border-radius: 4px;
 }
-#term-details:hover { background: #3c444d; }
+#term-details:hover { color: #c6cdd5; border-color: #3c444d; }
+#term-details[aria-pressed="true"] {
+  background: #10203a; color: #58a6ff; border-color: #1f6feb;
+}
+/* the buttons that change the session, held together at the far end */
+.term-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 #term-kill { background: #8b2e2e; padding: 3px 10px; font-size: 12px; }
 #term-resume { background: #1f6feb; padding: 3px 10px; font-size: 12px; }
 #term-resume:hover { background: #388bfd; }

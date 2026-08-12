@@ -781,6 +781,10 @@ function attach(name) {
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === name)
   );
+  // The panel may already have been pointing here (opened from the rail's ⓘ
+  // while another terminal was up); walking into that terminal is what makes
+  // the header's `details` its close button, so it has to light now.
+  markDetailRow();
 
   term = new Terminal({
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
@@ -972,10 +976,17 @@ function syncDetailPanel() {
 }
 
 /* Which row's ⓘ is lit. Rebuilt rows get this from refreshSessions; this is
-   for the rows already on screen when the panel opens or closes. */
+   for the rows already on screen when the panel opens or closes.
+   The header's `details` is the same switch and gets the same treatment —
+   pressed only while the open panel is describing the terminal under it,
+   which is exactly when pressing it again would close rather than repoint.
+   Both names null (no terminal, no panel) is not a match. */
 function markDetailRow() {
   document.querySelectorAll("#session-list .sess-info").forEach((b) =>
     b.classList.toggle("on", b.dataset.name === sessName)
+  );
+  $("term-details").setAttribute(
+    "aria-pressed", String(!!sessName && sessName === currentName)
   );
 }
 
