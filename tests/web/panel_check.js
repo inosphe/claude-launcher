@@ -43,6 +43,9 @@ function node(id) {
     toggle: (c, on) => (on ? n.classes.add(c) : n.classes.delete(c)),
     contains: (c) => n.classes.has(c),
   };
+  n.attrs = {};
+  n.setAttribute = (k, v) => { n.attrs[k] = String(v); };
+  n.getAttribute = (k) => (k in n.attrs ? n.attrs[k] : null);
   return n;
 }
 const ids = {};
@@ -66,10 +69,13 @@ const MOBILE_MQ = { get matches() { return narrow; } };
    end in syncDetailPanel, and showView drops the detail when a phone
    navigates off the page it was borrowing. attach() mirrors the real one only
    in what route() depends on — that it takes the terminal to the named
-   session, through showView. */
+   session, through showView, and re-marks the detail button, which is how
+   walking into the terminal an open panel already describes lights it. */
 const stubs = `
 let currentPage = "terminal", currentName = "coder2";
 let sessName = null, sessPollTimer = null, sessStartBox = null;
+let sessRunFold = null, sessRunStops = 0;
+function stopSessRun() { sessRunStops++; }
 let detailWasUp = false;
 let refreshes = 0, gone = null, fits = 0;
 let term = {}, location = { hash: "#/" };
@@ -82,7 +88,9 @@ function showView(name) {
 }
 function syncLayout() { syncDetailPanel(); }
 function go(hash) { gone = hash; }
-function attach(name) { currentName = name; term = {}; showView("terminal"); }
+function attach(name) {
+  currentName = name; term = {}; showView("terminal"); markDetailRow();
+}
 function stopWfPoll() {}
 function stopMeshPoll() {}
 function stopFlowPoll() {}
@@ -111,6 +119,8 @@ Object.assign(exports, {
   went: () => gone, fits: () => fits, cur: () => currentName,
   setPage: (p) => { currentPage = p; }, setCur: (c) => { currentName = c; },
   goto: (h) => { location.hash = h; route(); },
+  runFold: () => sessRunFold, runStops: () => sessRunStops,
+  holdRun: () => { sessRunFold = "the open fold"; },
 });`
 )(ctx, $, document, MOBILE_MQ, () => 1, () => {});
 
@@ -183,6 +193,38 @@ ctx.closeDetail();
 ctx.goto("#/s/coder2");
 check("a closed rail does not spring open", ctx.open() === null && !up(),
       { open: ctx.open(), up: up() });
+
+/* ---- the run fold does not follow the panel to another session ---- */
+/* It holds a poll aimed at one (directory, scope). Carried across a repoint it
+   would keep reading the run we just navigated away from, under the new
+   session's name. */
+ctx.openDetail("coder2");
+ctx.holdRun();
+const stops = ctx.runStops();
+ctx.openDetail("coder3");                      // repoint
+check("re-aiming lets go of the open run fold", ctx.runFold() === null);
+check("...and stops its poll", ctx.runStops() > stops);
+ctx.holdRun();
+ctx.closeDetail();
+check("closing the panel does too",
+      ctx.runFold() === null && ctx.runStops() > stops + 1);
+ctx.setCur("coder2");
+
+/* ---- the header's `details` says whether it would close ---- */
+/* Pressing it is a toggle for the session on screen and a re-aim for any
+   other, and those look nothing alike to the user pressing it. Lit means the
+   next press closes. */
+const pressed = () => $("term-details").getAttribute("aria-pressed");
+check("closed rail leaves the button unlit", pressed() === "false", pressed());
+ctx.openDetail("coder2");
+check("open on the terminal on screen lights it", pressed() === "true");
+ctx.openDetail("coder3");                      // another row's ⓘ, terminal unmoved
+check("open on some other session does not", pressed() === "false", pressed());
+ctx.goto("#/s/coder3");                        // ...until we walk into it
+check("walking into that terminal lights it", pressed() === "true", pressed());
+ctx.closeDetail();
+check("closing puts it out", pressed() === "false");
+ctx.setCur("coder2");
 
 /* ---- narrow: the page slot ---- */
 narrow = true;

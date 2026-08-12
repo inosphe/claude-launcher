@@ -204,11 +204,21 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   margin-top: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
   background: #238636; color: #fff; border: none; border-radius: 4px;
 }
+/* An outline chip, not a filled button: in this header a filled button does
+   something to the session (resume, kill) and this one only shows what the
+   session is. Pressed is the panel it toggles standing open on *this*
+   session — the state that makes a second press a close. */
 #term-details {
-  margin-left: auto; padding: 3px 10px; font-size: 12px; cursor: pointer;
-  background: #30363d; color: #c6cdd5; border: none; border-radius: 4px;
+  padding: 2px 9px; font-size: 12px; line-height: 1.6; cursor: pointer;
+  background: none; color: #7d8590;
+  border: 1px solid #30363d; border-radius: 4px;
 }
-#term-details:hover { background: #3c444d; }
+#term-details:hover { color: #c6cdd5; border-color: #3c444d; }
+#term-details[aria-pressed="true"] {
+  background: #10203a; color: #58a6ff; border-color: #1f6feb;
+}
+/* the buttons that change the session, held together at the far end */
+.term-actions { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 #term-kill { background: #8b2e2e; padding: 3px 10px; font-size: 12px; }
 #term-resume { background: #1f6feb; padding: 3px 10px; font-size: 12px; }
 #term-resume:hover { background: #388bfd; }
@@ -279,6 +289,36 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .sess-wf-run .meta { color: #7d8590; font-size: 11px; }
 .sess-wf .wf-btn { margin-top: 10px; }
 .sess-wf .wf-start, .sess-wf .wf-pending { margin-left: 0; background: #14161a; }
+
+/* the run itself, folded out under the block that names it */
+.sess-run { margin-top: 12px; border-top: 1px solid #262b33; padding-top: 8px; }
+.sess-run > summary {
+  cursor: pointer; font-size: 12px; color: #58a6ff; list-style: none;
+}
+.sess-run > summary::-webkit-details-marker { display: none; }
+.sess-run > summary::before { content: "▸ "; }
+.sess-run[open] > summary::before { content: "▾ "; }
+.sess-run-body { margin-top: 8px; }
+/* max-width is FLOW.maxCard: past it the strip is only being blown up */
+.sess-run-track {
+  display: block; width: 100%; max-width: 320px; height: auto; margin: 2px auto;
+}
+.sess-run-where { font-size: 11px; color: #7d8590; margin-bottom: 4px; }
+/* the same amber a blocked card gets in the flow view */
+.sess-run-track.blocked .flow-pip.current .flow-pip-mark { stroke: #d29922; }
+.sess-run-track.blocked .flow-halo { stroke: #d29922; opacity: 0.55; }
+.sess-run .wf-actions { margin: 10px 0; padding: 10px 12px; background: #14161a; }
+/* the rail's .wf-btn drops its right margin; these sit in rows and wrap */
+.sess-run .wf-actions .wf-btn { margin: 8px 8px 0 0; }
+.sess-run .wf-journal-line { overflow-wrap: anywhere; }
+.sess-run h4 {
+  margin: 14px 0 2px; font-size: 11px; text-transform: uppercase; color: #7d8590;
+}
+.sess-run-report { padding: 6px 0; border-top: 1px solid #22262d; font-size: 12px; }
+.sess-run-report .wf-report-head { flex-wrap: wrap; gap: 4px 8px; }
+.sess-run-more > summary { cursor: pointer; font-size: 11px; color: #7d8590; }
+.sess-run-more .wf-report-details { max-height: 220px; overflow: auto; }
+.sess-run .wf-journal { margin-top: 14px; }
 
 /* ---- the same node, docked as the right rail ----
    .docked is set by the layout rather than inferred from where the node

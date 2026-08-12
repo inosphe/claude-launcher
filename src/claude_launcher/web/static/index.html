@@ -65,9 +65,16 @@
     <div id="term-header" class="hidden">
       <span id="term-title"></span>
       <span id="term-status" class="badge"></span>
-      <button id="term-details" title="this session's metadata and workflow">details</button>
-      <button id="term-resume" class="hidden">resume</button>
-      <button id="term-kill">kill</button>
+      <!-- This one only reads the session, so it stays with what names the
+           session — the title and the badge — while the two that change it
+           are grouped away to the right. `details` was sitting against
+           `kill`, the same size and shape as it. -->
+      <button id="term-details" type="button" aria-pressed="false"
+              title="this session's metadata and workflow">ⓘ details</button>
+      <span class="term-actions">
+        <button id="term-resume" class="hidden">resume</button>
+        <button id="term-kill">kill</button>
+      </span>
     </div>
     <div id="terminal"></div>
 
