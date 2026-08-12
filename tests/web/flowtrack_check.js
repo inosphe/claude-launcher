@@ -176,6 +176,16 @@ const WF = {
     [{ status: "no_session" }, false, "none"],
     [{ remote: true, status: "waiting_approval" }, false, "unknown"],
     [null, false, "unknown"],
+    // A run whose session exited keeps its position — the card draws the
+    // track — but the position is where the agent LEFT it. It must not read
+    // as progress, and its gate is not something a human can clear into
+    // motion, so 'stopped' outranks both.
+    [{ status: "step", stopped: true }, false, "stopped"],
+    [{ status: "waiting_approval", stopped: true }, false, "stopped"],
+    [{ status: "idle", stopped: true }, false, "stopped"],
+    // ...but a finished run is finished, however its session ended
+    [{ status: "done", stopped: true }, false, "done"],
+    [{ status: "error", stopped: true }, false, "error"],
   ];
   for (const [f, human, state] of cases) {
     check(`needs-a-human: ${JSON.stringify(f)}`, flowNeedsHuman(f) === human);

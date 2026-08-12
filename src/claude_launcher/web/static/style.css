@@ -740,6 +740,10 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .flow-card.none .flow-card-box, .flow-card.unknown .flow-card-box {
   fill: #1e2126; stroke: #2f343d; stroke-dasharray: 4 3;
 }
+/* Its run is real and drawn; the agent that was walking it is not here.
+   Dashed like the empty cards — nothing is going to move on its own — but
+   not dimmed, because there IS something to read. */
+.flow-card.stopped .flow-card-box { stroke: #4a5160; stroke-dasharray: 5 3; }
 .flow-handle { fill: #d8dbe0; font-size: 12.5px; font-weight: 600; }
 .flow-wf { fill: #7d8590; font-size: 10.5px; }
 .flow-foot { fill: #8fa1b3; font-size: 10.5px; }
@@ -749,6 +753,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .flow-state.running { fill: #3fb950; }
 .flow-state.deciding { fill: #58a6ff; }
 .flow-state.error { fill: #ff7b72; }
+.flow-state.stopped { fill: #8b949e; }
 .flow-dot { fill: #6e7681; }
 .flow-dot.idle { fill: #3fb950; }
 .flow-dot.busy { fill: #d29922; }
