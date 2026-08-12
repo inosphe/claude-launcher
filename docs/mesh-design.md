@@ -794,6 +794,13 @@ same thing afterwards, which is the rule the whole feature rests on.
   interval, so the engine does not pile on a member that was just poked, and
   it reports a terminal that refused the message rather than swallowing it.
   An optional `body` replaces the heartbeat's wording for that one nudge.
+  The queued form carries `force`, and a guest daemon skips its idleness
+  re-check for those: the engine can drop a nudge at a busy member because
+  its own tick re-fires it, but nothing re-fires an operator's, and the local
+  path never checked idleness — so without the flag the same button would
+  mean two different things depending on which machine hosts the member.
+  Absent unless forced, so a guest too old to know the key sees the payload
+  it always saw.
 - **Dismiss** (`DELETE .../members/{handle}/owed[/{id}]`) is the one closure
   that is not a reply: some mail is never going to be answered, and a ledger
   is only worth reading if what stays on it still matters. Dismissed ids live
