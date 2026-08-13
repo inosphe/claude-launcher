@@ -890,6 +890,7 @@ async def h_mesh_send(request: web.Request) -> web.Response:
     if not isinstance(text, str):
         return json_error(400, "'body' must be a string")
     sections = body.get("sections")
+    ref = body.get("ref")
     result = await _mesh_mgr(request).send(
         request.match_info["mesh"],
         sender,
@@ -899,6 +900,7 @@ async def h_mesh_send(request: web.Request) -> web.Response:
         type=str(body.get("type") or "say"),
         reply_to=str(body.get("reply_to") or "") or None,
         sections=sections if isinstance(sections, dict) else None,
+        ref=ref if isinstance(ref, dict) else None,
     )
     return web.json_response({**result, "relay": request.app["relay_state"]()})
 

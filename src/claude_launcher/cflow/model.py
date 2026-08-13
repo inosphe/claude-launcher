@@ -22,7 +22,7 @@ and loops need no duplicated content::
             human: {description: needs review, next: impl}
       impl:
         instructions: ...
-        gate: "message"     # DEPRECATED spelling of `ask: {from: [human]}`
+        gate: "message"     # DEPRECATED spelling of `ask: {prompt: message}`
         verify: "pytest -q" # machine gate to LEAVE (exit 0)
         next: test
       test:
@@ -38,10 +38,10 @@ and loops need no duplicated content::
       ship:
         ask:                    # approval to ENTER, re-required per visit
           prompt: ship it?
-          from:                 # preference order; `up` is hops of lineage
-            - {role: leader, up: 1}
-            - {role: leader, up: {min: 2, max: 4}}
-            - human
+          from:                 # preference order; each entry names a role
+            - {role: reviewer}
+            - {role: leader, scope: ancestor}
+          otherwise: human      # human (default) | self
           timeout: 900
           on_decline: impl
         instructions: ...
@@ -55,24 +55,39 @@ Cycles are legal (they model iteration; a select is the loop exit) but are
 Delegated decisions
 -------------------
 ``ask`` (approval to enter a step) and ``select.chooser`` (which branch to
-take) both accept the same declaration of **who may answer**: an ordered list
-of candidate patterns, tried a group at a time. A group that resolves to
-nobody — and, once the daemon owns the clock, a group that does not answer
-within ``timeout`` — escalates to the next one, so "the direct parent, else a
-grandparent, else the human" is one list rather than three mechanisms.
+take) both accept the same declaration, and it has **two independent axes**:
 
-A member candidate MUST say how far **up** the spawn lineage to look. That is
-not sugar: an agent can spawn its own children, so an unconstrained
-``{role: reviewer}`` would let a run manufacture its own approver. Restricting
-candidates to ancestors is what makes a delegated approval mean anything, and
-is why ``up`` has no default.
+``from``
+    Who is *asked* — an ordered list of roles, tried a group at a time. A
+    group that resolves to nobody, or that does not answer within ``timeout``,
+    escalates to the next one, so "a reviewer, else a leader" is one list
+    rather than two mechanisms. Omitted, no agent is asked at all.
+``otherwise``
+    What happens when that list runs out: ``human`` (default — hold the run
+    for ``claunch cflow approve|select``) or ``self`` (the driving agent
+    decides alone, journaled as unanswered and never as an approval).
+
+A human is never an entry in ``from``: nothing resolves them, nothing notifies
+them, and they answer through a different door. Keeping them on the other axis
+is what stops the two spellings from saying the same thing twice — and is why
+``gate: <msg>`` deprecates into a ``from``-less ``ask: {prompt: <msg>}``.
+
+A candidate needs a ``role`` — a delegation is to a *function*, and "whoever
+happens to be connected" is not one. ``scope`` narrows further: ``any``
+(default) is anything the asking session can reach over the mesh that is not
+itself or something it spawned, ``ancestor`` is the chain of command only.
+Descendants are excluded either way, and that exclusion is what makes a
+delegated approval mean anything: an agent can spawn children and wire itself
+to them, so an unfiltered pool would let a run manufacture its own approver.
+It cannot spawn a sibling or wire itself to one, so siblings, uncles and roots
+are as safe as ancestors — and a sibling reviewer is the common shape here.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Set
 
 import yaml
 
@@ -82,18 +97,19 @@ DEFAULT_MAX_VISITS = 25
 #: Reserved next-target meaning "the workflow ends here".
 END = "end"
 
-#: Reserved candidate meaning "a human, through the CLI or the dashboard".
-#: Humans are not mesh members — they hold no handle, receive no stance and
-#: have nothing typed into a terminal — so they are a token in the list rather
-#: than a role in the mesh vocabulary. The answer channel differs (an agent
-#: calls a tool, a human runs ``claunch cflow approve|select``); the request
-#: they answer is the same one.
-HUMAN = "human"
+#: ``otherwise``: what happens once every candidate group has been tried.
+#: Hold the run for a human, through the CLI or the dashboard...
+OTHERWISE_HUMAN = "human"
+#: ...or let the driving agent carry on alone. Never called an approval.
+OTHERWISE_SELF = "self"
+OTHERWISE = (OTHERWISE_HUMAN, OTHERWISE_SELF)
 
-#: How far up a lineage a candidate may reach. Deliberately a local constant
-#: rather than an import from the daemon's role vocabulary: this module parses
-#: workflow files with no daemon in sight, and must keep doing so.
-MAX_UP = 64
+#: ``scope``: which part of the reachable mesh a candidate may match.
+#: Anything the asking session can reach that it did not spawn...
+SCOPE_ANY = "any"
+#: ...or its own chain of command only.
+SCOPE_ANCESTOR = "ancestor"
+SCOPES = (SCOPE_ANY, SCOPE_ANCESTOR)
 
 
 class WorkflowError(Exception):
@@ -117,39 +133,38 @@ class Option:
 class Candidate:
     """One entry of a delegation's preference list: a kind of responder.
 
-    Either the reserved :data:`HUMAN` token, or a member pattern matched
-    against the asking session's ancestors — ``up`` hops of lineage, with an
-    optional ``role``. The hop range is inclusive and always at least 1: a
-    candidate is by construction somebody *above* the run, never the run
-    itself and never something it spawned.
+    A role, matched against the mesh members the asking session can reach,
+    minus itself and everything below it in the spawn tree. ``scope`` narrows
+    that pool to the session's own ancestors when only the chain of command
+    will do.
     """
 
-    human: bool = False
-    role: Optional[str] = None
-    #: Inclusive ``(from, to)`` hop range; ``None`` for the human token.
-    up: Optional[Tuple[int, int]] = None
+    role: str
+    scope: str = SCOPE_ANY
 
     def describe(self) -> str:
         """One line for a payload, a message or an error — never parsed."""
-        if self.human:
-            return HUMAN
-        low, high = self.up  # type: ignore[misc]
-        hops = f"{low}" if low == high else f"{low}..{high}"
-        return f"{self.role or 'anyone'} {hops} up"
+        return self.role if self.scope == SCOPE_ANY else f"{self.role} ({self.scope})"
 
 
 @dataclass(frozen=True)
 class Delegate:
-    """Who may answer a decision, in preference order.
+    """Who may answer a decision, and what to do when nobody does.
 
-    The list is read a group at a time — index 0 first — and every candidate
-    in a group is asked together, so "the direct parent, else a grandparent"
-    and "any of the three reviewers above me" are the same declaration read
-    two ways. ``timeout`` is per group, not for the whole list.
+    ``candidates`` is read a group at a time — index 0 first — and everybody a
+    group matches is asked together, so "a reviewer, else a leader" and "any of
+    the three reviewers I can reach" are the same declaration read two ways.
+    ``timeout`` is per group, not for the whole list. An empty list is legal
+    and means no agent is asked: ``otherwise`` decides straight away.
     """
 
     candidates: List[Candidate] = field(default_factory=list)
+    otherwise: str = OTHERWISE_HUMAN
     timeout: Optional[float] = None
+
+    def describe(self) -> str:
+        """The preference list as one line, ending in the fallback."""
+        return " -> ".join([c.describe() for c in self.candidates] + [self.otherwise])
 
 
 @dataclass(frozen=True)
@@ -294,9 +309,9 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
 def _deprecations(workflow: Workflow) -> List[str]:
     return [
         f"step {step.id!r}: 'gate:' is deprecated — write it as "
-        f"'ask: {{prompt: <the gate message>, from: [{HUMAN}]}}'. That is the "
-        f"same human approval, in the form that can also name an agent "
-        f"(role + how far up the lineage) as the approver"
+        f"'ask: {{prompt: <the gate message>}}'. That is the same human "
+        f"approval, in the form that can also name agents ('from: "
+        f"[{{role: reviewer}}]') as the approvers"
         for step in workflow.steps.values()
         if step.gate
     ]
@@ -336,7 +351,7 @@ def _parse_step(step_id: str, raw) -> Step:
     if ask is not None and gate is not None:
         raise WorkflowError(
             f"step {step_id!r}: 'gate' and 'ask' are both entry approvals — "
-            f"keep one. 'ask' with 'from: [{HUMAN}]' is the same gate"
+            f"keep one. An 'ask' with no 'from' is the same gate"
         )
     verify = _parse_verify(raw.get("verify"), step_id)
     select = _parse_select(raw.get("select"), step_id)
@@ -365,105 +380,66 @@ def _parse_step(step_id: str, raw) -> Step:
     )
 
 
-def _hops(raw, where: str, what: str) -> int:
-    if isinstance(raw, bool) or not isinstance(raw, int):
-        raise WorkflowError(f"{where}: 'up.{what}' must be a number, got {raw!r}")
-    return raw
-
-
-def _parse_up(raw, where: str) -> Tuple[int, int]:
-    """``1`` or ``{min: 2, max: 4}`` -> an inclusive hop range.
-
-    Absent is an ERROR, not "anywhere". See the module docstring: a candidate
-    with no direction is a self-approval hole, because the asking agent can
-    spawn a session with any handle it likes and so conjure a member matching
-    a bare ``{role: ...}``. Writing an explicit ``up`` is the whole point, so
-    an empty ``{}`` is refused too — it is the same omission, spelled longer.
-    """
-    if raw is None:
-        raise WorkflowError(
-            f"{where}: a member candidate needs 'up' (how far up the spawn "
-            f"lineage to look — up: 1 for the direct parent, or "
-            f"up: {{min: 2, max: 4}} for a range). It has no default on "
-            f"purpose: a candidate with no direction could be matched by a "
-            f"session the run spawned itself"
-        )
-    if isinstance(raw, dict):
-        unknown = sorted(set(raw) - {"min", "max"})
-        if unknown:
-            raise WorkflowError(
-                f"{where}: 'up' has unknown key(s): {', '.join(unknown)} "
-                "(allowed: min, max)"
-            )
-        if not raw:
-            raise WorkflowError(
-                f"{where}: 'up: {{}}' says nothing — give at least a 'min' or "
-                f"a 'max' (up: {{min: 2}} means the grandparent or higher)"
-            )
-        low = _hops(raw["min"], where, "min") if raw.get("min") is not None else 1
-        high = _hops(raw["max"], where, "max") if raw.get("max") is not None else MAX_UP
-    elif isinstance(raw, bool) or not isinstance(raw, int):
-        raise WorkflowError(
-            f"{where}: 'up' must be a number (up: 1) or a range "
-            f"(up: {{min: 2, max: 4}}), got {raw!r}"
-        )
-    else:
-        low = high = raw
-    if low < 1:
-        raise WorkflowError(
-            f"{where}: 'up' starts at 1 (the direct parent); {low} would name "
-            f"the asking session itself or something below it"
-        )
-    if high < low:
-        raise WorkflowError(f"{where}: 'up' range {low}..{high} is empty")
-    if high > MAX_UP:
-        raise WorkflowError(f"{where}: 'up' reaches {high}, over the {MAX_UP} limit")
-    return (low, high)
-
-
 def _parse_candidate(raw, where: str) -> Candidate:
-    if isinstance(raw, str):
-        if raw.strip().lower() != HUMAN:
-            raise WorkflowError(
-                f"{where}: the only bare candidate is {HUMAN!r}; a member "
-                f"candidate is a mapping like {{role: leader, up: 1}}, got {raw!r}"
-            )
-        return Candidate(human=True)
     if not isinstance(raw, dict):
         raise WorkflowError(
-            f"{where} must be {HUMAN!r} or a mapping like {{role: leader, up: 1}}, "
-            f"got {raw!r}"
+            f"{where} must be a mapping naming a role, like {{role: reviewer}} "
+            f"or {{role: leader, scope: ancestor}}, got {raw!r}"
         )
-    unknown = sorted(set(raw) - {"role", "up"})
+    unknown = sorted(set(raw) - {"role", "scope"})
     if unknown:
         raise WorkflowError(
-            f"{where} has unknown key(s): {', '.join(unknown)} (allowed: role, up)"
+            f"{where} has unknown key(s): {', '.join(unknown)} (allowed: role, scope)"
         )
-    role = raw.get("role")
-    if role is not None:
-        role = str(role).strip().lower()
-        if not role:
-            raise WorkflowError(f"{where}: 'role' must be a non-empty name")
-        # NOT checked against a vocabulary here: roles are defined per mesh and
-        # this parser runs with no daemon in reach. A role nothing answers to
-        # surfaces when the ask is opened, naming the mesh it looked in.
-    return Candidate(role=role, up=_parse_up(raw.get("up"), where))
+    role = str(raw.get("role") or "").strip().lower()
+    if not role:
+        # No default, and not optional: a delegation is to a function. Asking
+        # "whoever I happen to be wired to" would make the answer depend on
+        # topology alone, which is not a decision anybody declared.
+        raise WorkflowError(
+            f"{where} needs a 'role' — which kind of session may answer, e.g. "
+            f"{{role: reviewer}}"
+        )
+        # The role is NOT checked against a vocabulary here: roles are defined
+        # per mesh and this parser runs with no daemon in reach. A role nothing
+        # answers to surfaces when the ask is opened, naming the mesh it
+        # looked in.
+    scope = str(raw.get("scope") or SCOPE_ANY).strip().lower()
+    if scope not in SCOPES:
+        raise WorkflowError(
+            f"{where}: 'scope' must be one of {', '.join(SCOPES)}, got {scope!r} "
+            f"({SCOPE_ANY} = anyone reachable that this run did not spawn, "
+            f"{SCOPE_ANCESTOR} = its own chain of command only)"
+        )
+    return Candidate(role=role, scope=scope)
 
 
 def _parse_delegate(raw, where: str) -> Delegate:
-    """The ``from``/``timeout`` pair shared by ``ask`` and a select chooser."""
+    """The ``from``/``otherwise``/``timeout`` trio shared by ask and chooser."""
     if not isinstance(raw, dict):
-        raise WorkflowError(f"{where} must be a mapping with a 'from:' list")
+        raise WorkflowError(f"{where} must be a mapping")
     candidates_raw = raw.get("from")
-    if not isinstance(candidates_raw, list) or not candidates_raw:
+    if candidates_raw is None:
+        # Legal, and the shape `gate:` deprecates into: nobody is asked, so
+        # `otherwise` decides immediately.
+        candidates_raw = []
+    if not isinstance(candidates_raw, list):
         raise WorkflowError(
-            f"{where} needs a non-empty 'from' list — who may answer, in "
-            f"preference order, e.g. from: [{{role: leader, up: 1}}, {HUMAN}]"
+            f"{where}: 'from' must be a list of roles in preference order, "
+            f"e.g. from: [{{role: reviewer}}, {{role: leader, scope: ancestor}}]"
         )
     candidates = [
         _parse_candidate(c, f"{where} from[{i}]")
         for i, c in enumerate(candidates_raw)
     ]
+    otherwise = str(raw.get("otherwise") or OTHERWISE_HUMAN).strip().lower()
+    if otherwise not in OTHERWISE:
+        raise WorkflowError(
+            f"{where}: 'otherwise' must be one of {', '.join(OTHERWISE)}, got "
+            f"{otherwise!r} (what happens once every candidate has been tried: "
+            f"{OTHERWISE_HUMAN} = hold for a person, {OTHERWISE_SELF} = the "
+            f"running agent decides alone)"
+        )
     timeout = raw.get("timeout")
     if timeout is not None:
         try:
@@ -472,7 +448,7 @@ def _parse_delegate(raw, where: str) -> Delegate:
             raise WorkflowError(f"{where}: 'timeout' must be a number of seconds") from None
         if timeout <= 0:
             raise WorkflowError(f"{where}: 'timeout' must be greater than 0")
-    return Delegate(candidates=candidates, timeout=timeout)
+    return Delegate(candidates=candidates, otherwise=otherwise, timeout=timeout)
 
 
 def _parse_ask(raw, step_id: str) -> Optional[Ask]:
@@ -481,11 +457,11 @@ def _parse_ask(raw, step_id: str) -> Optional[Ask]:
     where = f"step {step_id!r}: ask"
     if not isinstance(raw, dict):
         raise WorkflowError(f"{where} must be a mapping")
-    unknown = sorted(set(raw) - {"prompt", "from", "timeout", "on_decline"})
+    unknown = sorted(set(raw) - {"prompt", "from", "otherwise", "timeout", "on_decline"})
     if unknown:
         raise WorkflowError(
             f"{where} has unknown key(s): {', '.join(unknown)} "
-            "(allowed: prompt, from, timeout, on_decline)"
+            "(allowed: prompt, from, otherwise, timeout, on_decline)"
         )
     prompt = raw.get("prompt")
     if not prompt:
@@ -531,11 +507,11 @@ def _parse_select(raw, step_id: str) -> Optional[Select]:
     delegate = None
     if isinstance(raw_chooser, dict):
         where = f"step {step_id!r}: select chooser"
-        unknown = sorted(set(raw_chooser) - {"from", "timeout"})
+        unknown = sorted(set(raw_chooser) - {"from", "otherwise", "timeout"})
         if unknown:
             raise WorkflowError(
                 f"{where} has unknown key(s): {', '.join(unknown)} "
-                "(allowed: from, timeout)"
+                "(allowed: from, otherwise, timeout)"
             )
         delegate = _parse_delegate(raw_chooser, where)
         chooser = "delegate"
@@ -545,7 +521,7 @@ def _parse_select(raw, step_id: str) -> Optional[Select]:
             raise WorkflowError(
                 f"step {step_id!r}: select chooser must be 'agent', 'user', or "
                 f"a mapping naming who decides, e.g. "
-                f"chooser: {{from: [{{role: reviewer, up: 1}}, {HUMAN}]}}"
+                f"chooser: {{from: [{{role: reviewer}}], otherwise: human}}"
             )
     raw_options = raw.get("options")
     if not isinstance(raw_options, dict) or not raw_options:
