@@ -481,6 +481,17 @@ member would be claimed by whoever holds rank 0 next, and delivery would
 follow it to a daemon that does not host the session. Migration stamps
 existing members on load.
 
+Stamping (`_absolutize_roster`) writes `mesh.authority`, not `mesh.me`. It
+has no ownership filter — it rewrites every blank row in the mesh — so on a
+mirror it is the *authority's* rows it touches, and `me` would hand us
+members whose sessions we do not host: the very outcome the paragraph above
+exists to prevent, persisted and fanned out. The two names differ only while
+someone else holds rank 0, which is why `me` was right everywhere except a
+forced takeover and a legacy mirror's migration. Each of the three call sites
+runs with `peers` already in the state that makes `authority` the owner of
+the blanks, so a call moved across its rank-list assignment silently changes
+who they are attributed to.
+
 **Locality is answered, not implied.** A blank `machine` still means
 different things either side of `primary` — the authority's own row on the
 authority, somebody else's row on a mirror — so `is_local_member` is the only

@@ -51,6 +51,11 @@ F. Self-identification ("which member am I?")
    F3 an authority member still resolves after a stamping pass
    F4 a session name colliding with the authority's does not steal its row
    F5 'nobody asked' stays distinct from 'you are nobody'
+
+G. Absolutising a roster (blanks belong to the AUTHORITY, not the writer)
+   G1 a forced takeover leaves the departed authority's blanks to it
+   G2 a legacy mirror's migration leaves its blanks to the primary
+   G3 a graceful handover does not give our blanks to the incoming authority
 """
 
 from __future__ import annotations
@@ -67,6 +72,7 @@ from claude_launcher.daemon import mesh_policy
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
 from claude_launcher.daemon.mesh import (
+    Member,
     MeshConflict,
     MeshError,
     MeshManager,
@@ -895,7 +901,7 @@ def test_authority_member_joined_after_federation_buckets_on_the_authority(
     """A member enrolled on the authority AFTER the mesh federated belongs to
     the authority everywhere — including on a mirror's own view of it.
 
-    ``_stamp_own_members`` runs when a mesh federates, at a handover and on
+    ``_absolutize_roster`` runs when a mesh federates, at a handover and on
     migration; a join is none of those, so such a member used to keep the
     blank machine that means "the authority's own". Readers that resolved
     blank as *their own* name then drew it inside the reading daemon's
@@ -942,9 +948,11 @@ def test_blank_machine_on_a_mirror_reads_as_the_authoritys(home, tmp_path):
     """A roster blank that predates the stamping rule still reads correctly.
 
     Meshes federated before that fix have members already on disk with a
-    blank machine, and no reload re-stamps them (``_stamp_own_members`` is
-    reached through migration, which such a mesh has already done). So the
-    readers must resolve blank as the AUTHORITY's, not their own.
+    blank machine, and a reload only re-stamps them if migration still has
+    something to do — one that has already migrated keeps them (a v2-shaped
+    one does not: see G2, where the setter reaches ``_absolutize_roster`` and
+    attributes them to the primary). Either way the readers must resolve
+    blank as the AUTHORITY's, not their own.
     """
     _register_py_harness()
 
@@ -1067,7 +1075,7 @@ def test_a_stamped_authority_member_still_identifies_itself(home, tmp_path):
 
         mesh_a.members["alice"].machine = ""  # the pre-stamp shape
         assert mm_a.mesh_info(mesh_a, session="sa")["you"] == "alice"
-        mm_a._stamp_own_members(mesh_a)  # federation / handover / migration
+        mm_a._absolutize_roster(mesh_a)  # federation / handover / migration
         assert mesh_a.members["alice"].machine == "pcA"
         assert mm_a.mesh_info(mesh_a, session="sa")["you"] == "alice"
 
@@ -1119,6 +1127,126 @@ def test_you_is_absent_until_a_session_asks(home, tmp_path):
         assert mm_b.mesh_info(mesh_b, session="")["you"] is None
         assert mm_b.mesh_info(mesh_b, session="nosuch")["you"] is None
         assert mm_b.mesh_info(mesh_b, session="sb")["you"] == "bob"
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# G. absolutising a roster attributes blanks to the AUTHORITY
+# --------------------------------------------------------------------------- #
+def test_forced_takeover_leaves_the_old_authoritys_blanks_to_it(home, tmp_path):
+    """G1 seizing rank 0 does not seize the departing authority's members.
+
+    ``_absolutize_roster`` has no ownership filter — it rewrites every blank
+    row it can see — and a forced takeover runs it on a mirror, where the
+    blanks are the authority's. Stamped with the taker's own name they became
+    its members: persisted, fanned out to every peer by ``_roster_changed``,
+    and thereafter delivered to a daemon that does not host those sessions.
+    That is the exact hazard the docstring names, reached through the very
+    path ``force`` exists for — an authority that is gone for good, whose
+    unstamped rows are still in the roster.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path)
+        mesh_b = mm_b.get("m")
+        mesh_b.members["alice"].machine = ""  # legacy blank: pcA's own
+
+        # pcA is gone for good; pcB takes rank 0
+        await mm_b.reorder_peers("m", ["pcB", "pcA"], force=True)
+
+        assert mesh_b.authority == "pcB" and not mesh_b.primary
+        # the taker's own row is now absolute...
+        assert mesh_b.members["bob"].machine == "pcB"
+        # ...and the departed authority's is still the departed authority's
+        assert mesh_b.members["alice"].machine == "pcA"
+        assert mm_b.is_local_member(mesh_b, mesh_b.members["alice"]) is False
+        assert mm_b.mesh_info(mesh_b, session="sa")["you"] is None
+
+        # and the guard `leave` relies on is back in force for that row: as
+        # the authority pcB may kick, so nothing below this stops it
+        peers = {p["machine"]: p for p in mm_b.mesh_info(mesh_b)["peers"]}
+        assert peers["pcA"]["members"] == ["alice"]
+        assert peers["pcB"]["members"] == ["bob"]
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_migrating_a_legacy_mirror_leaves_blanks_to_the_primary(home, tmp_path):
+    """G2 the same rule on the unattended path.
+
+    ``_migrate_v2`` runs off the ``machine`` setter, so a legacy mirror
+    absolutises its roster the moment the relay name lands — nobody asks for
+    it. Its blanks are the primary's, and ``peers`` is assigned before the
+    call precisely so ``authority`` names the primary rather than us.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, root=tmp_path / "legacy")
+        mgr.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
+        mm.create("m")
+        mesh = mm.get("m")
+        await mm.join("m", "sb", handle="bob")
+
+        # the v1 shape on disk: a mirror of pcA, rosters not yet absolute
+        mesh.peers = []
+        mesh.members["bob"].machine = ""
+        mesh.members["alice"] = Member("alice", "sa")
+        mesh._v2 = {
+            "primary": "pcA",
+            "link": {"token_in": "in", "token_out": "out", "created_at": "t"},
+            "guests": {},
+        }
+        mm.machine = "pcB"  # the relay name lands -> migration runs
+
+        assert mesh.peers == ["pcA", "pcB"] and mesh.authority == "pcA"
+        # every blank went to the primary, ours included — it is the
+        # primary's roster we are mirroring, and ours arrives stamped
+        assert mesh.members["alice"].machine == "pcA"
+        assert mm.is_local_member(mesh, mesh.members["alice"]) is False
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_graceful_handover_does_not_give_our_blanks_away(home, tmp_path):
+    """G3 the other half of G1: rank 0 leaving does not take the roster.
+
+    The authority may hand rank 0 to a peer without `force`. Its own blanks
+    are still its own, and the call runs before the rank list moves so that
+    they are stamped with the name losing authority rather than the one
+    gaining it.
+
+    Unlike G1 this passed before the fix too — on the authority ``me`` and
+    ``authority`` are the same name, which is why writing ``me`` looked right
+    for so long. What it pins is the ordering: move the call past
+    ``mesh.peers = order`` and it fails, because the blanks would then be
+    attributed to whoever is arriving at rank 0.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path)
+        mesh_a = mm_a.get("m")
+        mesh_a.members["alice"].machine = ""  # our own, pre-stamp
+
+        await mm_a.reorder_peers("m", ["pcB", "pcA"])  # graceful, no force
+
+        assert mesh_a.authority == "pcB" and mesh_a.primary == "pcB"
+        # ours, kept — not handed to the incoming authority
+        assert mesh_a.members["alice"].machine == "pcA"
+        assert mm_a.is_local_member(mesh_a, mesh_a.members["alice"]) is True
+        assert mm_a.mesh_info(mesh_a, session="sa")["you"] == "alice"
 
         await mgr.shutdown_all()
 
