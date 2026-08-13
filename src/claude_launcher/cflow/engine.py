@@ -1248,12 +1248,19 @@ def answer(
         )
     note = (reason or "").strip()
     handle = _asked_handle(ask, session)
+    # The question goes back with the answer. A responder working several of
+    # these has only its own turn to tell them apart, and an id plus a verb is
+    # too thin to check against: the receipt should be readable as a record of
+    # what was decided, not just that something was.
     receipt = {
         **_base(state),
         "status": "answered",
         "step_id": step.id,
+        "step_title": step.title or step.id,
         "ask": ask_id,
+        "prompt": ask["prompt"],
         "decision": choice,
+        "reason": note,
         "as": handle,
     }
 

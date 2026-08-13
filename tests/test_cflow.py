@@ -120,7 +120,7 @@ steps:
   ship:
     ask:
       prompt: ship it?
-      from: [{role: leader, up: 1}, {role: leader, up: '2..3'}, human]
+      from: [{role: leader, up: 1}, {role: leader, up: {min: 2, max: 3}}, human]
     instructions: ship it
 """
 
@@ -1030,7 +1030,20 @@ steps:
         model.parse(bad)
 
 
-@pytest.mark.parametrize("up", ["0", "-1", "'3..1'", "'x..y'", "true"])
+@pytest.mark.parametrize(
+    "up",
+    [
+        "0",                        # would name the asking session itself
+        "-1",
+        "{min: 3, max: 1}",         # empty range
+        "{min: x}",
+        "{}",                       # the same omission, spelled longer
+        "{depth: 2}",               # not a key we have
+        "'2..4'",                   # the range is a mapping, not a string
+        "true",
+        "999",                      # past the lineage cap
+    ],
+)
 def test_bad_up_values_are_rejected(up):
     bad = f"""
 steps:
@@ -1042,6 +1055,22 @@ steps:
 """
     with pytest.raises(WorkflowError, match="up"):
         model.parse(bad)
+
+
+def test_up_range_ends_are_each_optional():
+    text = """
+steps:
+  ship:
+    ask:
+      prompt: ok?
+      from:
+        - {role: leader, up: {min: 2}}
+        - {role: leader, up: {max: 3}}
+    instructions: ship
+"""
+    lo, hi = model.parse(text).steps["ship"].ask.delegate.candidates
+    assert lo.up == (2, model.MAX_UP)   # the grandparent or anywhere above
+    assert hi.up == (1, 3)              # never below the parent, whatever else
 
 
 def test_only_human_is_a_bare_candidate():
@@ -1258,7 +1287,9 @@ def test_abstain_escalates_to_the_next_group(flow_dir, monkeypatch):
     ask_id = payload["ask"]["id"]
     assert [e["handle"] for e in payload["ask"]["asked"]] == ["leader-boss"]
 
-    engine.answer(ask_id, "abstain", "not my call", by_session="boss")
+    receipt = engine.answer(ask_id, "abstain", "not my call", by_session="boss")
+    assert receipt["prompt"] == "ship it?"  # the question comes back with it
+    assert receipt["reason"] == "not my call"
     payload = engine.status()
     assert payload["status"] == "waiting_answer"
     assert [e["handle"] for e in payload["ask"]["asked"]] == ["leader-bigboss"]

@@ -38,7 +38,10 @@ and loops need no duplicated content::
       ship:
         ask:                    # approval to ENTER, re-required per visit
           prompt: ship it?
-          from: [{role: leader, up: 1}, human]   # preference order
+          from:                 # preference order; `up` is hops of lineage
+            - {role: leader, up: 1}
+            - {role: leader, up: {min: 2, max: 4}}
+            - human
           timeout: 900
           on_decline: impl
         instructions: ...
@@ -362,38 +365,50 @@ def _parse_step(step_id: str, raw) -> Step:
     )
 
 
+def _hops(raw, where: str, what: str) -> int:
+    if isinstance(raw, bool) or not isinstance(raw, int):
+        raise WorkflowError(f"{where}: 'up.{what}' must be a number, got {raw!r}")
+    return raw
+
+
 def _parse_up(raw, where: str) -> Tuple[int, int]:
-    """``2`` or ``"2..4"`` -> an inclusive hop range.
+    """``1`` or ``{min: 2, max: 4}`` -> an inclusive hop range.
 
     Absent is an ERROR, not "anywhere". See the module docstring: a candidate
     with no direction is a self-approval hole, because the asking agent can
     spawn a session with any handle it likes and so conjure a member matching
-    a bare ``{role: ...}``.
+    a bare ``{role: ...}``. Writing an explicit ``up`` is the whole point, so
+    an empty ``{}`` is refused too — it is the same omission, spelled longer.
     """
     if raw is None:
         raise WorkflowError(
-            f"{where}: a member candidate needs 'up' (how many steps up the "
-            f"spawn lineage to look, e.g. up: 1 for the direct parent, or "
-            f"up: 2..4). It has no default on purpose — a candidate with no "
-            f"direction could be matched by a session the run spawned itself"
+            f"{where}: a member candidate needs 'up' (how far up the spawn "
+            f"lineage to look — up: 1 for the direct parent, or "
+            f"up: {{min: 2, max: 4}} for a range). It has no default on "
+            f"purpose: a candidate with no direction could be matched by a "
+            f"session the run spawned itself"
         )
-    if isinstance(raw, bool):
-        raise WorkflowError(f"{where}: 'up' must be a number or 'a..b', got {raw!r}")
-    if isinstance(raw, int):
-        low = high = raw
-    elif isinstance(raw, str) and ".." in raw:
-        head, _, tail = raw.partition("..")
-        try:
-            low, high = int(head.strip()), int(tail.strip())
-        except ValueError:
+    if isinstance(raw, dict):
+        unknown = sorted(set(raw) - {"min", "max"})
+        if unknown:
             raise WorkflowError(
-                f"{where}: 'up' range must be two numbers like '2..4', got {raw!r}"
-            ) from None
-    else:
+                f"{where}: 'up' has unknown key(s): {', '.join(unknown)} "
+                "(allowed: min, max)"
+            )
+        if not raw:
+            raise WorkflowError(
+                f"{where}: 'up: {{}}' says nothing — give at least a 'min' or "
+                f"a 'max' (up: {{min: 2}} means the grandparent or higher)"
+            )
+        low = _hops(raw["min"], where, "min") if raw.get("min") is not None else 1
+        high = _hops(raw["max"], where, "max") if raw.get("max") is not None else MAX_UP
+    elif isinstance(raw, bool) or not isinstance(raw, int):
         raise WorkflowError(
-            f"{where}: 'up' must be a number (up: 1) or an inclusive range "
-            f"(up: '2..4'), got {raw!r}"
+            f"{where}: 'up' must be a number (up: 1) or a range "
+            f"(up: {{min: 2, max: 4}}), got {raw!r}"
         )
+    else:
+        low = high = raw
     if low < 1:
         raise WorkflowError(
             f"{where}: 'up' starts at 1 (the direct parent); {low} would name "
