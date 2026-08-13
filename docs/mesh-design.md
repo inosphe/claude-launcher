@@ -1393,3 +1393,66 @@ protocol to carry run state, which is a bigger change than this view earns.
     does the roster/run join server-side. Tests in
     `tests/test_mesh_flows_api.py`, `tests/web/flowtrack_check.js` and
     `tests/web/flowrender_check.js`. See "The flow view" above.
+12. **Delegated decisions** (done): a cflow run puts an approval, or the
+    choice of branch, to a *different* session — declared as an ordered list
+    of roles plus a fallback, resolved against the member graph and the spawn
+    tree this phase's predecessors built. The mesh contributes three things
+    and one new intent: the roster read (`GET /api/mesh`), the `member_links`
+    table phase 11 publishes, the `parent` chain from phase 9, and a `decide`
+    message type. Everything else lives in cflow. See "Delegated decisions
+    ride the member graph" below.
+
+## Delegated decisions ride the member graph
+
+The member graph was built so an operator could say who may talk to whom, and
+the spawn tree so a fleet could be drawn. cflow now reads both for a second
+purpose: deciding who is allowed to approve a step of somebody else's workflow
+(see the README's cflow section for the workflow-side rules).
+
+The whole coupling is small, and it is worth naming what is NOT among it.
+
+**What the mesh supplies.** The roster read that says which mesh a session
+belongs to and who its members are; the `member_links` edge table, which is
+what "may reach" means; the `parent` handle per member that phase 9 added;
+and the `decide` intent.
+
+**Why `decide` and not `ask`.** `ask` invites a reply, and `Mesh.owed` closes
+a debt on *any* subsequent message from that member. A cflow question is
+never answered by a reply — the answer is a tool call against the asking run
+— so an `ask`-typed question would sit in the owed ledger until the responder
+happened to say something unrelated, at which point the dashboard would report
+a decision as handled that nobody made. `decide` states the obligation at the
+mesh level (*a decision is required of you, and you record it somewhere other
+than this thread*) and stays out of the ledger. It carries an opaque `ref`
+the mesh relays and never interprets, so a reader can link to the run without
+the mesh learning cflow's schema.
+
+**What it does not supply: the answer.** The question is delivered as a
+message, but the *answer* is a cflow tool call against a closed option set,
+not a reply to parse. That is deliberate. A reply is prose typed into a
+terminal by a language model; a workflow branching on it would be branching
+on wording. So the message is a doorbell with the question attached, and it
+is explicitly not load-bearing — a send that fails is journaled and the
+question stays answerable through `asks`.
+
+**Why the exclusion is descendants, not "ancestors only".** A session can
+`spawn` children with any handle it likes, and a role is inferred from a
+handle's leading word — so a candidate that could match downward would let a
+run conjure its own approver (`spawn` a session called `reviewer1`, have it
+approve, and the journal reads "a reviewer approved it"). But the boundary is
+what a run could *manufacture*, and that is exactly its descendants: it can
+spawn them and it can wire itself to them, because `SessionManager.commands`
+runs strictly down the tree. It can do neither to a sibling — for the edge
+`(me, sib)` neither handle is commanded by it, so
+`MeshManager._require_member_authority` refuses — which makes siblings,
+uncles and roots as safe as ancestors, and a sibling reviewer is the *common*
+shape for this feature. That the run cannot widen its own candidate set is
+the property doing the work here, and it is a property of the member graph,
+not of cflow.
+
+**Locality is a real boundary.** Answering means writing the asking run's
+state, and a run's files live on the machine that hosts its session. A member
+on another daemon cannot do that, so a remote match is skipped *as remote* —
+a different problem, with a different fix, from "nobody holds that role". The
+federation carries messages, not run state, and this phase did not change
+that.

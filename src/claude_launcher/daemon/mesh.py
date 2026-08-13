@@ -72,11 +72,28 @@ _CTRL_RE = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 #: a recipient drains ``fyi``/``ack``/``ping`` without answering — this is how
 #: the mesh stops every peer from replying to every utterance. Everything
 #: else — ``ask``, the default ``say``, or any custom type — invites reply.
-REPLY_OPTIONAL_TYPES = frozenset({"fyi", "ack", "ping"})
+#:
+#: ``decide`` sits here for a subtler reason than the others: it *does* demand
+#: something of the recipient, but the answer is recorded elsewhere (see
+#: :data:`INTENT_TYPES`), so no reply can ever arrive to close the debt. Left
+#: reply-expected, :meth:`Mesh.owed` would close it on the member's next
+#: unrelated message and report a decision as handled that nobody made.
+REPLY_OPTIONAL_TYPES = frozenset({"fyi", "ack", "ping", "decide"})
 
 #: The known message INTENTS. Other types are still accepted (and count as
 #: reply-expected) but draw an advisory — see :func:`type_notice`.
-INTENT_TYPES = frozenset({"say", "ask"}) | REPLY_OPTIONAL_TYPES
+#:
+#: ``decide`` means: *a decision is required of you, and you record it
+#: somewhere other than this thread.* Stated at the mesh level rather than as
+#: a hook for the one system that sends it, because the recipient's obligation
+#: is a property of the message, not of who wrote it. What is being decided
+#: travels in :data:`REF_KEY`, which the mesh carries and does not interpret.
+INTENT_TYPES = frozenset({"say", "ask", "decide"}) | REPLY_OPTIONAL_TYPES
+
+#: An opaque pointer a sender may attach so a reader can follow a message back
+#: to whatever it is about. The mesh stores and relays it verbatim: knowing its
+#: shape would mean the mesh learning every schema that ever rides on it.
+REF_KEY = "ref"
 
 
 def expects_reply(message_type) -> bool:
@@ -98,8 +115,8 @@ def type_notice(message_type) -> Optional[str]:
     if str(message_type or "say").strip().lower() in INTENT_TYPES:
         return None
     return (
-        f"type {message_type!r} is not a known intent (ask/say/fyi/ack) — it "
-        "counts as reply-expected. 'type' is the message INTENT, not your "
+        f"type {message_type!r} is not a known intent (ask/say/fyi/ack/decide) "
+        "— it counts as reply-expected. 'type' is the message INTENT, not your "
         "role or a label; use 'fyi'/'ack' for no-reply status so peers "
         "don't reply-all."
     )
@@ -1544,14 +1561,17 @@ class MeshManager:
         type: str = "say",
         reply_to: Optional[str] = None,
         sections: Optional[dict] = None,
+        ref: Optional[dict] = None,
     ) -> dict:
         """Send a message into the mesh.
 
         ``sender`` is a member handle or a local session name; ``external``
         admits a non-member sender (the human on the dashboard). ``to`` is
         ``"*"``, a handle, or a list of handles. ``type`` is the message
-        *intent* (``say``/``ask`` invite a reply; ``fyi``/``ack`` do not).
-        ``reply_to`` threads this message to an earlier message id.
+        *intent* (``say``/``ask`` invite a reply; ``fyi``/``ack``/``decide`` do
+        not). ``reply_to`` threads this message to an earlier message id, and
+        ``ref`` points at whatever the message is *about* — carried verbatim,
+        never interpreted (see :data:`REF_KEY`).
 
         ``sections`` turns this into a BATCH send: ``{handle: text}`` (or
         ``{handle: {text, type}}``) of per-recipient addenda. ``body`` becomes
@@ -1569,11 +1589,11 @@ class MeshManager:
         if mesh.primary:
             return await self._send_from_mirror(
                 mesh, sender, to, body, external=external, type=type,
-                reply_to=reply_to, sections=sections,
+                reply_to=reply_to, sections=sections, ref=ref,
             )
         result = self._send_core(
             mesh, sender, to, body, external=external, type=type,
-            reply_to=reply_to, sections=sections,
+            reply_to=reply_to, sections=sections, ref=ref,
         )
         self._flush_guests_soon(mesh)
         return result
@@ -1589,6 +1609,7 @@ class MeshManager:
         type: str = "say",
         reply_to: Optional[str] = None,
         sections: Optional[dict] = None,
+        ref: Optional[dict] = None,
         msg_id: Optional[str] = None,
         sender_machine: Optional[str] = None,
         ts: Optional[str] = None,
@@ -1662,6 +1683,8 @@ class MeshManager:
         }
         if reply_to:
             msg["reply_to"] = str(reply_to)
+        if isinstance(ref, dict) and ref:
+            msg[REF_KEY] = ref
         if norm_sections is not None:
             msg["shared"] = body
             msg["sections"] = norm_sections
@@ -1725,6 +1748,7 @@ class MeshManager:
         type: str,
         reply_to: Optional[str],
         sections: Optional[dict],
+        ref: Optional[dict] = None,
     ) -> dict:
         """Forward a mirror-side send to the primary (or queue it durably).
 
@@ -1764,6 +1788,8 @@ class MeshManager:
             entry["external"] = True
         if reply_to:
             entry["reply_to"] = str(reply_to)
+        if isinstance(ref, dict) and ref:
+            entry[REF_KEY] = ref
         if norm_sections is not None:
             entry["sections"] = norm_sections
         if member is not None and self._is_local(mesh, member):
@@ -3407,6 +3433,7 @@ class MeshManager:
         if not isinstance(to, (str, list)) or not to:
             raise MeshError("'to' must be '*', a handle, or a list of handles")
         sections = message.get("sections")
+        ref = message.get(REF_KEY)
         result = self._send_core(
             mesh,
             sender,
@@ -3416,6 +3443,7 @@ class MeshManager:
             type=str(message.get("type") or "say"),
             reply_to=str(message.get("reply_to") or "") or None,
             sections=sections if isinstance(sections, dict) else None,
+            ref=ref if isinstance(ref, dict) else None,
             msg_id=mid,
             sender_machine=None if external else machine,
             ts=str(message.get("ts") or "") or None,
@@ -3451,6 +3479,11 @@ class MeshManager:
                     pass
         if m.get("reply_to"):
             msg["reply_to"] = str(m["reply_to"])
+        if isinstance(m.get(REF_KEY), dict) and m[REF_KEY]:
+            # Relayed as it arrived. A pointer this daemon cannot follow (it
+            # names a run on another machine) is still worth keeping: dropping
+            # it would leave the two histories describing different messages.
+            msg[REF_KEY] = m[REF_KEY]
         # Batch fields ride along so this daemon can slice deliveries for
         # its own local members.
         if isinstance(m.get("sections"), dict):

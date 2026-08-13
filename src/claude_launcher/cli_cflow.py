@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from . import daemon_client
-from .cflow import engine, install, model, state as state_mod
+from .cflow import engine, install, model, responders, state as state_mod
 
 
 def _resolve_scope(args: argparse.Namespace):
@@ -62,11 +62,18 @@ def _cmd_show(args: argparse.Namespace) -> int:
         flags = []
         if s.gate:
             flags.append("gate")
+        if s.ask:
+            flags.append(f"ask: {s.ask.delegate.describe()}")
+            if s.ask.on_decline:
+                flags.append(f"decline -> {s.ask.on_decline}")
         if s.verify:
             flags.append(f"verify: {s.verify.command}")
         suffix = f"  ({'; '.join(flags)})" if flags else ""
         if s.select:
-            print(f"- {s.id} [select, chooser={s.select.chooser}]{suffix}")
+            chooser = s.select.chooser
+            if s.select.delegate:
+                chooser = s.select.delegate.describe()
+            print(f"- {s.id} [select, chooser={chooser}]{suffix}")
             for name, opt in s.select.options.items():
                 print(f"    {name}: {opt.description}  -> {opt.next or 'end'}")
         else:
@@ -74,11 +81,45 @@ def _cmd_show(args: argparse.Namespace) -> int:
             print(f"- {s.id}{title}{suffix}  -> {s.next or 'end'}")
     for warning in wf.warnings:
         print(f"warning: {warning}")
+    # Advice to whoever is WRITING this file, which is why it lives here and
+    # not in front of every run (see `Workflow.deprecations`).
+    for note in wf.deprecations:
+        print(f"deprecated: {note}")
     return 0
 
 
 def _print_payload(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
+
+
+def _cmd_asks(args: argparse.Namespace) -> int:
+    """Decisions other sessions' runs are waiting on someone for.
+
+    Deliberately not a way to answer one: the CLI is the HUMAN channel, and a
+    human settles a delegated question through the approval and selection
+    doors that already exist (which is also how an override gets recorded as
+    an override). This is the read — most useful for seeing why a run has
+    gone quiet, and for checking that a responder was actually asked.
+    """
+    session = args.session or state_mod.current_scope()
+    waiting = engine.open_asks(session)
+    if args.json:
+        _print_payload({"session": session, "waiting_on": waiting})
+        return 0
+    if not waiting:
+        print(f"nothing is waiting on {session!r}")
+        return 0
+    for entry in waiting:
+        options = "|".join(o["name"] for o in entry.get("options") or [])
+        print(
+            f"{entry['ask']}  {entry['workflow']}/{entry['step']}  "
+            f"from {entry['from_session']}  [{options}|abstain]"
+        )
+        print(f"  {(entry.get('prompt') or '').strip().splitlines()[0]}")
+        if entry.get("deadline"):
+            print(f"  moves on after {entry['deadline']}")
+        print(f"  {entry['cwd']}")
+    return 0
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
@@ -172,40 +213,17 @@ def _cmd_request(args: argparse.Namespace) -> int:
 
 
 def _nudge_via_daemon(message: str, scope) -> list:
-    """Best-effort: type a resume nudge into the run's own session (scope ==
-    session name, 1:1). Needs the daemon; silently a no-op without it, and
-    default-scope runs belong to no session.
+    """Type a resume nudge into the run's own session (scope == session name).
 
-    Goes through the daemon's ``/deliver`` — the same door in-process senders
-    use — rather than typing keys, so how a message gets submitted stays a
-    single decision made in one place."""
-    target = scope or state_mod.current_scope()
-    if target == state_mod.DEFAULT_SCOPE:
-        return []
+    The run being unblocked is always the one in THIS directory, so that is
+    the cwd half of the pair; see :func:`responders.nudge` for the rest.
+    """
     try:
-        client = daemon_client.connect()
+        return responders.nudge(
+            scope or state_mod.current_scope(), message, cwd=str(Path.cwd())
+        )
     except Exception:
-        return []
-    if client is None:
-        return []
-    here = Path.cwd().resolve()
-    try:
-        sessions = (client.get("/api/sessions") or {}).get("sessions") or []
-    except daemon_client.DaemonClientError:
-        return []
-    for s in sessions:
-        try:
-            same = Path(str(s.get("cwd") or "")).resolve() == here
-        except OSError:
-            same = False
-        if s.get("name") != target or not same or s.get("status") == "exited":
-            continue
-        try:
-            client.post(f"/api/sessions/{s['name']}/deliver", {"text": message})
-        except daemon_client.DaemonClientError:
-            return []
-        return [target]
-    return []
+        return []  # a nudge is a convenience; never fail a CLI action on it
 
 
 def _report_unblock(action: str, message: str, scope) -> None:
@@ -365,6 +383,17 @@ def register(sub) -> None:
     q.add_argument("step")
     q.add_argument("--reason", help="recorded in the journal")
     q.set_defaults(func=_cmd_goto)
+
+    q = csub.add_parser(
+        "asks",
+        help="decisions other runs are waiting on a session for (read-only)",
+    )
+    q.add_argument(
+        "--session",
+        help="whose decisions to list (default: this session)",
+    )
+    q.add_argument("--json", action="store_true", help="print raw JSON")
+    q.set_defaults(func=_cmd_asks)
 
     q = _scoped(csub.add_parser("abort", help="abort the active run"))
     q.set_defaults(func=_cmd_abort)

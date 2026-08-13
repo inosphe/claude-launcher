@@ -56,10 +56,29 @@ workflow to be started here), that is the answer; otherwise list candidates
      `! claunch cflow select <option>` or from the daemon web dashboard
      (they may pick a different one).
    - `waiting_approval` — a human gate (or the loop guard, when `reason` is
-     `loop_limit`). STOP your turn: present the work so far (for a loop
-     limit, explain why the loop keeps repeating) and tell the user to
-     approve with `! claunch cflow approve` or the web dashboard's Approve
-     button. You cannot approve and must not simulate approval.
+     `loop_limit`; or a delegated decision that reached a human, when it is
+     `ask`, or that nobody refused but nobody could take, when the payload's
+     `ask.skipped` is non-empty). STOP your turn: present the work so far
+     (for a loop limit, explain why the loop keeps repeating; for an `ask`,
+     say who was meant to decide it and why they could not — that is what
+     `ask.skipped` is), and tell the user to approve with `! claunch cflow
+     approve` or the web dashboard's Approve button. You cannot approve and
+     must not simulate approval.
+   - `waiting_answer` — the workflow delegated this decision to another
+     session, and `ask.asked` says who. STOP your turn: present what you
+     have so far and say who is deciding. You cannot answer it — not with
+     `select`, not with `answer`, not by asking them over the mesh and
+     acting on the reply. They record it themselves; you will be nudged.
+   - `status: step` or `select` where the payload says the decision was
+     meant to be somebody else's — the workflow declared `otherwise: self`
+     and nobody could be reached, so it is yours by default. Say so plainly
+     when you report: nobody approved this, and reporting it as approved
+     would be false.
+   - `waiting_approval` with `reason: declined` — a responder refused, and
+     the workflow declared nowhere for a refusal to go. Relay the refusal
+     and its reason (`declined.by`, `declined.reason`) to the user and stop:
+     a human decides whether to override (`! claunch cflow approve`) or send
+     the run elsewhere (`! claunch cflow goto <step>`).
    - `done` — report the run using the returned journal and finish.
 4. Resuming after a stop: when nudged (any user message), call `status`
    first to see whether the gate/selection was granted, then continue with
@@ -73,6 +92,33 @@ workflow to be started here), that is the answer; otherwise list candidates
    If it is clearly wrong, do NOT start it: say why and stop. The request
    clears once you start.
 
+## Answering for someone else
+
+Other sessions' runs may delegate a decision to your role — anything you are
+wired to in the mesh except your own descendants. That is independent of
+whether you are running a workflow yourself. A `decide` message on the mesh
+is the doorbell; `asks` is where the question actually lives.
+
+1. Call `asks {}` when a mesh message says a run needs a decision, whenever
+   you are nudged, and before going idle. It lists what is waiting on you:
+   the question, the options you may answer with, and the deadline.
+2. Investigate before deciding. You were asked *because the run does not get
+   to decide this one* — so check the actual code, tests and diff, not the
+   asking agent's account of them. An approval you granted on the strength
+   of the request text is worth nothing.
+3. Call `answer {ask, decision, reason}`. The decision must be one of that
+   request's options, or `abstain`. Put what you actually checked in
+   `reason`; it is journaled and a human reads it.
+4. `abstain` when you have no basis to decide — it passes the question to
+   whoever is next, which is strictly better than a guess. Do not abstain
+   to avoid the work of looking.
+5. You never receive the asking step's instructions, and must not do its
+   work, take over its run, or tell it what you would have implemented.
+   Decide, say why, and stop.
+
+You cannot answer a request that was not put to you, nor one from your own
+run. Both are refused; neither is a thing to work around.
+
 ## Rules
 
 - One step at a time. Do not skip ahead, merge steps, or invent steps.
@@ -83,7 +129,13 @@ workflow to be started here), that is the answer; otherwise list candidates
   are watched live by humans — write them as status updates for a reviewer,
   not as praise for yourself.
 - Approvals and user selections happen OUTSIDE your tools (CLI / `!`
-  commands / the web dashboard); nothing you can call grants them.
+  commands / the web dashboard); nothing you can call grants them. The same
+  holds for a delegated decision: `answer` acts on OTHER sessions' runs and
+  refuses your own, so there is no arrangement of tool calls that unblocks
+  a gate on you.
+- Gates and selects apply on every visit, and so do delegated decisions: a
+  loop that passes an `ask` twice asks twice, and the second answer may
+  differ from the first.
 - A human may force the run's position while you are stopped
   (`claunch cflow goto <step>`). Whatever `status` serves after a nudge IS
   the current truth — even if it revisits a step you already finished.
@@ -157,7 +209,10 @@ steps:
 
   review:
     title: Review
-    gate: present the diff summary and wait for human review
+    ask:
+      # No 'from', so nobody is asked and this is a plain human gate. Name a
+      # role there (from: [{role: reviewer}]) to put it to another session.
+      prompt: present the diff summary and wait for human review
     instructions: |
       Relay the review feedback you received into concrete follow-ups.
     next: verdict
