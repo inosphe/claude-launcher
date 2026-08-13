@@ -2067,6 +2067,17 @@ function renderWf(data) {
     meta.appendChild(link);
   }
   view.appendChild(meta);
+  /* The run reads a snapshot, so this file is where it CAME from — which is
+     the only way to tell two same-named workflows apart after the fact, and
+     the thing to open when the run is doing something surprising. */
+  if (run.source) {
+    const src = el("p", "wf-source mono");
+    src.appendChild(el("span", "wf-source-path", run.source));
+    if (run.origin) {
+      src.appendChild(el("span", "wf-source-origin", ` — ${run.origin}`));
+    }
+    view.appendChild(src);
+  }
   if (run.context) view.appendChild(el("p", "wf-context", `context: ${run.context}`));
   for (const w of wf.warnings || []) {
     view.appendChild(el("p", "wf-warning", `⚠ ${w}`));
@@ -2408,8 +2419,31 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     const opt = document.createElement("option");
     opt.value = w.name;
     opt.textContent = w.description ? `${w.name} — ${w.description}` : w.name;
+    opt.title = w.path;
     sel.appendChild(opt);
   }
+  /* A name is not a file: the same name can be declared in the project and in
+     the shared layer, and picking from a list of names hides which one runs.
+     The path goes under the select rather than into the option text — an
+     option cannot wrap, and these are absolute paths. */
+  const source = el("p", "wf-source mono");
+  const showSource = () => {
+    const w = flows.find((f) => f.name === sel.value);
+    source.replaceChildren();
+    if (!w) return;
+    source.appendChild(el("span", "wf-source-path", w.path));
+    if (w.shadowed && w.shadowed.length) {
+      source.appendChild(el(
+        "span", "wf-source-shadow",
+        ` — ${w.origin} copy, overriding ${w.shadowed.join(", ")}`
+      ));
+    } else if (w.origin) {
+      source.appendChild(el("span", "wf-source-origin", ` — ${w.origin}`));
+    }
+  };
+  sel.addEventListener("change", showSource);
+  showSource();
+
   const ctx = document.createElement("input");
   ctx.type = "text";
   ctx.className = "wf-start-context";
@@ -2470,6 +2504,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   const row = el("div", "wf-start-row");
   row.append(sel, ctx, ask, direct);
   box.appendChild(row);
+  box.appendChild(source);
   box.appendChild(el(
     "p", "wf-note",
     live
