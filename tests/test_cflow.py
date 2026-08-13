@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from datetime import datetime, timedelta, timezone
 
@@ -1912,3 +1913,51 @@ def test_a_human_can_settle_a_delegated_branch(flow_dir, monkeypatch):
     assert engine.status()["status"] == "done"
     events = [e["event"] for e in state_mod.read_journal()]
     assert "ask_answered" in events and "ask_discarded" not in events
+
+
+# --------------------------------------------------------------------------- #
+# the authoring skill
+# --------------------------------------------------------------------------- #
+def test_the_authoring_skill_only_shows_yaml_the_parser_accepts(tmp_path):
+    """A skill that teaches a spelling the parser rejects is worse than none.
+
+    So its examples are parsed rather than eyeballed — which is the whole
+    reason the text lives in a module beside the parser instead of in a loose
+    markdown file that nothing reads.
+    """
+    from claude_launcher.cflow import authoring
+
+    path = authoring.write_skill(tmp_path / "skills")
+    text = path.read_text(encoding="utf-8")
+    assert path.name == "SKILL.md" and path.parent.name == "cflow-author"
+    assert text.startswith("---\nname: cflow-author\n")
+    assert "NOT for running one" in text  # it must not trigger on execution
+
+    blocks = re.findall(r"```yaml\n(.*?)```", text, re.S)
+    assert blocks, "the skill shows no YAML at all"
+    for block in blocks:
+        # The fragments are step definitions that route to steps they do not
+        # define, so give those somewhere real to land.
+        wf = model.parse(
+            "steps:\n"
+            + "".join(f"  {line}\n" for line in block.splitlines())
+            + "  impl:\n    instructions: x\n"
+            "  netverify:\n    instructions: x\n"
+            "  review:\n    instructions: x\n"
+        )
+        assert wf.deprecations == [], f"deprecated spelling shown: {wf.deprecations}"
+
+
+def test_the_authoring_skill_states_the_rule_it_exists_for():
+    """The incentive rule is the one line here that prevents an incident."""
+    from claude_launcher.cflow import authoring
+
+    # Whitespace-normalized: the source is hard-wrapped prose, so a phrase
+    # asserted against it must not also be asserting where the line broke.
+    text = " ".join(authoring.SKILL_MD.split())
+    assert "whose answer lets it skip work" in text
+    # ...and the mechanics that make a delegation worth anything, since an
+    # author who does not know them will design around them
+    assert "descendants are never candidates" in text
+    assert "never as an approval" in text  # what `otherwise: self` records
+    assert "never receives the asking step's instructions" in text

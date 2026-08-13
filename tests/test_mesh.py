@@ -1138,7 +1138,7 @@ def test_mesh_install_project(tmp_path):
     from claude_launcher import install
 
     done = install.install_into_project(tmp_path)
-    assert len(done) == 3  # one server, two skills
+    assert len(done) == 4  # one server, three skills
     doc = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
     server = doc["mcpServers"]["claunch"]
     assert server["args"][-1] == "mcp"
@@ -1152,8 +1152,9 @@ def test_mesh_install_project(tmp_path):
     assert "--section" in skill                # batch fan-out discipline
     assert "--reply-to" in skill               # threading
     assert "Recovery" in skill                 # compaction recovery
-    # the cflow skill lands from the same install
+    # the cflow skills land from the same install
     assert (tmp_path / ".claude" / "skills" / "cflow" / "SKILL.md").is_file()
+    assert (tmp_path / ".claude" / "skills" / "cflow-author" / "SKILL.md").is_file()
     # installing again is idempotent and keeps other servers
     doc["mcpServers"]["other"] = {"command": "x"}
     (tmp_path / ".mcp.json").write_text(json.dumps(doc), encoding="utf-8")
