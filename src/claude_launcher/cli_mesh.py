@@ -13,6 +13,7 @@ import argparse
 import os
 import sys
 from typing import Optional
+from urllib.parse import quote
 
 from . import daemon_client
 
@@ -37,6 +38,20 @@ def _print_relay(relay: Optional[dict]) -> None:
 def _own_session(args: argparse.Namespace) -> Optional[str]:
     """The session this command speaks for: --session, else $CLAUNCH_SESSION."""
     return getattr(args, "session", None) or os.environ.get("CLAUNCH_SESSION")
+
+
+def _mesh_as_me(client, mesh: str, session: str = "") -> dict:
+    """The mesh document, with ``you`` resolved when a session is named.
+
+    Which member a session is, is the daemon's to answer: the rule is
+    ``is_local_member``, and its blank-``machine`` case means opposite things
+    on an authority and on a mirror. Matching on blankness here finds nobody
+    on a mirror, where our own members are always stamped. That asymmetry is
+    why ``send`` has always worked from a bare session — it resolves server
+    side — while the commands that identified themselves did not.
+    """
+    q = f"?session={quote(session)}" if session else ""
+    return client.get(f"/api/mesh/{mesh}{q}")
 
 
 def _cmd_create(args: argparse.Namespace) -> int:
@@ -124,18 +139,13 @@ def _cmd_leave(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 1
-        info = client.get(f"/api/mesh/{args.mesh}")
-        mine = [
-            m for m in info.get("members", [])
-            if not m.get("machine") and m.get("session") == session
-        ]
-        if not mine:
+        handle = _mesh_as_me(client, args.mesh, session).get("you")
+        if not handle:
             print(
                 f"error: session {session!r} is not a member of mesh {args.mesh!r}",
                 file=sys.stderr,
             )
             return 1
-        handle = mine[0]["handle"]
     client.delete(f"/api/mesh/{args.mesh}/members/{handle}")
     print(f"left mesh {args.mesh!r} (handle {handle!r})")
     return 0
@@ -622,19 +632,16 @@ def _cmd_roles(args: argparse.Namespace) -> int:
 def _cmd_stance(args: argparse.Namespace) -> int:
     """Print the stance for a handle's role — the post-compaction recovery."""
     client = daemon_client.ensure_running()
-    info = client.get(f"/api/mesh/{args.mesh}")
     handle = args.handle
+    session = "" if handle else (_own_session(args) or "")
+    if not handle and not session:
+        print("error: no session — pass --as HANDLE, or run inside a "
+              "claunch session (where $CLAUNCH_SESSION is set)",
+              file=sys.stderr)
+        return 1
+    info = _mesh_as_me(client, args.mesh, session)
     if not handle:
-        session = _own_session(args)
-        if not session:
-            print("error: no session — pass --as HANDLE, or run inside a "
-                  "claunch session (where $CLAUNCH_SESSION is set)",
-                  file=sys.stderr)
-            return 1
-        for m in info.get("members", []):
-            if m.get("session") == session and not m.get("machine"):
-                handle = m.get("handle")
-                break
+        handle = info.get("you")
         if not handle:
             print(f"error: session {session!r} is not a member of "
                   f"{args.mesh!r}", file=sys.stderr)

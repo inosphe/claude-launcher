@@ -1268,3 +1268,45 @@ def test_cursors_phase1_format_migrates(home, tmp_path):
         await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+def test_mesh_get_answers_which_member_the_asking_session_is(home, tmp_path):
+    """``?session=`` is the seam the CLI stopped guessing across.
+
+    ``stance`` and ``leave`` used to pick their own handle out of the roster
+    by matching a blank ``machine``, which is the daemon's rule to apply and
+    means opposite things on an authority and a mirror. The endpoint answers
+    it now; a poll that names no session still gets ``None``, so "nobody
+    asked" and "you are nobody" stay apart.
+    """
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            mm.create("web")
+            mgr.create(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+            await mm.join("web", "w1", handle="worker_1")
+
+            doc = await (await client.get(
+                "/api/mesh/web?session=w1", headers=bearer)).json()
+            assert doc["you"] == "worker_1"
+            # and the locality it used to make readers re-derive
+            assert doc["members"][0]["local"] is True
+
+            for q in ("", "?session=", "?session=ghost"):
+                doc = await (await client.get(
+                    f"/api/mesh/web{q}", headers=bearer)).json()
+                assert doc["you"] is None
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

@@ -165,7 +165,8 @@ All under the existing auth (Bearer token / web cookie):
 
 - `GET  /api/mesh` — meshes + member counts (+ relay status)
 - `POST /api/mesh` `{name}` — create
-- `GET  /api/mesh/{mesh}` — members, per-member pending/reachability
+- `GET  /api/mesh/{mesh}[?session=S]` — members, per-member
+  `local`/pending/reachability; `you` is the handle `S` wears here (or null)
 - `DELETE /api/mesh/{mesh}`
 - `POST /api/mesh/{mesh}/members` `{session, handle?, role?}` — join
 - `DELETE /api/mesh/{mesh}/members/{handle}` — leave
@@ -472,6 +473,18 @@ moved. It moves now, so every member names its own daemon: left blank, a
 member would be claimed by whoever holds rank 0 next, and delivery would
 follow it to a daemon that does not host the session. Migration stamps
 existing members on load.
+
+**Locality is answered, not implied.** A blank `machine` still means
+different things either side of `primary` — the authority's own row on the
+authority, somebody else's row on a mirror — so `is_local_member` is the only
+place that reads it, and the payloads say the answer outright: every member
+row in `mesh_info` and `owed_report` carries `local`. `GET /api/mesh/{mesh}`
+also takes `?session=` and replies with `you`, the handle that session wears
+here, or `null`. That is what `stance` and `leave` ask; `send` has always
+resolved a bare session name server side, and this closes the gap. A reader
+matching on blankness instead finds nobody on a mirror, where our own rows
+are always stamped, and on the authority finds only the rows no stamping pass
+has reached yet — so the same command works or fails by who joined when.
 
 **State.** `primary` / `link` / `guests` collapse into:
 
