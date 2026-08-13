@@ -1,8 +1,12 @@
 """One install step for everything an agent needs from claunch.
 
 ``claunch install`` registers a single MCP server — ``claunch mcp``, serving
-the cflow and mesh tools together (see :mod:`claude_launcher.mcp_server`) — and
-writes the three skills that teach their protocols.
+the cflow and mesh tools together (see :mod:`claude_launcher.mcp_server`) —
+writes the three skills that teach their protocols, and seeds the shared
+workflow layer with the workflows that ship in the package. That last part is
+what makes ``~/.claude-launcher/workflows/`` a real layer rather than a
+documented empty directory: before it, a workflow was only ever findable from
+the one project directory somebody happened to write it in.
 
 Separate skills, one server, on purpose. A skill's body is loaded whole when
 it triggers, so folding the workflow protocol and the mesh protocol into one
@@ -53,6 +57,24 @@ def mcp_server_def() -> dict:
     return {"command": "claunch", "args": ["mcp"]}
 
 
+def _workflow_lines() -> List[str]:
+    """Report the shared-layer seeding, in the same voice as the rest.
+
+    Machine-local, not per-profile and not per-project: the shared workflow
+    layer is one directory under the launcher home, so every install writes
+    the same place. Saying so on every install is the point — that directory
+    is where a workflow goes to be available from every project, and nothing
+    else advertises it.
+    """
+    lines = []
+    for _, dest, outcome in cflow_install.seed_global_workflows():
+        if outcome == cflow_install.KEPT:
+            lines.append(f"workflow -> {dest} (kept; yours differs from the packaged one)")
+        elif outcome == cflow_install.SEEDED:
+            lines.append(f"workflow -> {dest}")
+    return lines
+
+
 def install_into_profile(profile: Profile) -> List[str]:
     """Register the MCP server + every skill inside a profile's config dir."""
     settings.merge_mcp_servers(
@@ -64,7 +86,7 @@ def install_into_profile(profile: Profile) -> List[str]:
         f"skill -> {cflow_install.write_skill(skills)}",
         f"skill -> {cflow_authoring.write_skill(skills)}",
         f"skill -> {mesh_install.write_skill(skills)}",
-    ]
+    ] + _workflow_lines()
 
 
 def install_into_project(project_dir: Path) -> List[str]:
@@ -89,4 +111,4 @@ def install_into_project(project_dir: Path) -> List[str]:
         f"skill -> {cflow_install.write_skill(skills)}",
         f"skill -> {cflow_authoring.write_skill(skills)}",
         f"skill -> {mesh_install.write_skill(skills)}",
-    ]
+    ] + _workflow_lines()

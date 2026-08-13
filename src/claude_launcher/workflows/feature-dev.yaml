@@ -41,7 +41,10 @@ steps:
 
   review:
     title: Review
-    gate: present the diff summary and wait for human review
+    ask:
+      # No 'from', so nobody is asked and this is a plain human gate. Name a
+      # role there (from: [{role: reviewer}]) to put it to another session.
+      prompt: present the diff summary and wait for human review
     instructions: |
       Relay the review feedback you received into concrete follow-ups.
     next: verdict
@@ -61,7 +64,8 @@ steps:
 
   ship:
     title: Ship
-    gate: approve committing and opening a PR
+    ask:
+      prompt: approve committing and opening a PR
     instructions: |
       Commit the work with a clear message and prepare the PR description
       from the run journal (design note, decisions, review outcomes).

@@ -30,7 +30,13 @@ session-name spelling on the way in (:func:`normalize_scope`).
 
 Workflow files are looked up by name in the project first, then globally:
 ``<cwd>/.claunch/workflows/*.yaml`` → ``~/.claude-launcher/workflows/*.yaml``.
-An explicit path (ending in .yaml/.yml) is used as-is.
+An explicit path (ending in .yaml/.yml) is used as-is. The global layer is
+where the workflows shipped with claunch land — ``claunch install`` copies
+them out of the package (:func:`bundled_workflows_dir`), and ``claunch cflow
+add`` puts more there — so a project directory only needs a file of its own
+when it wants to *differ*. A name that exists in both layers is not
+ambiguous, but the loser is reported (:class:`Located`) rather than silently
+dropped, because two copies of one workflow otherwise drift unnoticed.
 """
 
 from __future__ import annotations
@@ -41,6 +47,7 @@ import json
 import os
 import re
 import time
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -50,6 +57,15 @@ from . import model
 
 #: Directory (relative to a project) holding its workflow declarations.
 PROJECT_WORKFLOWS = Path(".claunch") / "workflows"
+
+#: The layers a name is searched in, nearest first. A project's own
+#: declarations override the shared ones; nothing overrides a project.
+LAYER_PROJECT = "project"
+LAYER_GLOBAL = "global"
+
+#: Origin reported for a reference that named a file outright, which belongs
+#: to no layer at all.
+LAYER_FILE = "file"
 
 #: Environment variable the daemon sets in every managed session.
 SESSION_ENV = "CLAUNCH_SESSION"
@@ -119,6 +135,26 @@ def pop_scope(token) -> None:
 
 def global_workflows_dir() -> Path:
     return config.launcher_home() / "workflows"
+
+
+def bundled_workflows_dir() -> Path:
+    """The workflows that ship inside the package.
+
+    Not a search layer: nothing resolves a name here. ``claunch install``
+    copies these out into :func:`global_workflows_dir`, where they become
+    ordinary files a human may edit, override per project, or delete. Keeping
+    them in the package (rather than in this checkout's ``.claunch/``) is what
+    makes them survive a wheel install, which has no checkout to read.
+    """
+    return Path(__file__).resolve().parent.parent / "workflows"
+
+
+def bundled_workflows() -> List[Tuple[str, Path]]:
+    """The ``(name, path)`` pairs shipped with claunch."""
+    base = bundled_workflows_dir()
+    if not base.is_dir():
+        return []
+    return [(p.stem, p) for p in sorted(base.glob("*.y*ml"))]
 
 
 def runs_registry_path() -> Path:
@@ -382,43 +418,86 @@ def clear_request(cwd: Optional[str] = None) -> None:
 # --------------------------------------------------------------------------- #
 # workflow discovery
 # --------------------------------------------------------------------------- #
+@dataclass(frozen=True)
+class Located:
+    """A resolved workflow, and what resolving it passed over.
+
+    ``shadows`` is the point: a name that exists in more than one layer is not
+    ambiguous — the nearest layer wins — but the losers are worth naming,
+    because two copies of one workflow drift silently otherwise. Every surface
+    that lists workflows carries this so a human can see which file will run.
+    """
+
+    name: str
+    path: Path
+    origin: str
+    shadows: Tuple[Path, ...] = ()
+
+    @property
+    def overrides(self) -> bool:
+        return bool(self.shadows)
+
+
+def search_layers(cwd: Optional[str] = None) -> List[Tuple[str, Path]]:
+    """The layers a name is searched in, nearest first."""
+    return [
+        (LAYER_PROJECT, Path(cwd or os.getcwd()) / PROJECT_WORKFLOWS),
+        (LAYER_GLOBAL, global_workflows_dir()),
+    ]
+
+
 def search_dirs(cwd: Optional[str] = None) -> List[Path]:
-    return [Path(cwd or os.getcwd()) / PROJECT_WORKFLOWS, global_workflows_dir()]
+    return [base for _, base in search_layers(cwd)]
+
+
+def _candidates(cwd: Optional[str] = None) -> Dict[str, List[Tuple[str, Path]]]:
+    """Every declaration of every name, per name, nearest layer first."""
+    found: Dict[str, List[Tuple[str, Path]]] = {}
+    for layer, base in search_layers(cwd):
+        if not base.is_dir():
+            continue
+        for path in sorted(base.glob("*.y*ml")):
+            found.setdefault(path.stem, []).append((layer, path))
+    return found
+
+
+def resolved_workflows(cwd: Optional[str] = None) -> List[Located]:
+    """Every available workflow, each one knowing what it shadows."""
+    out = []
+    for name, hits in _candidates(cwd).items():
+        layer, path = hits[0]
+        out.append(Located(name, path, layer, tuple(p for _, p in hits[1:])))
+    return sorted(out, key=lambda w: w.name)
 
 
 def list_workflows(cwd: Optional[str] = None) -> List[Tuple[str, Path]]:
     """All available ``(name, path)`` pairs, project first, deduped by name."""
-    out: List[Tuple[str, Path]] = []
-    seen = set()
-    for base in search_dirs(cwd):
-        if not base.is_dir():
-            continue
-        for path in sorted(base.glob("*.y*ml")):
-            if path.stem not in seen:
-                seen.add(path.stem)
-                out.append((path.stem, path))
-    return out
+    return [(w.name, w.path) for w in resolved_workflows(cwd)]
 
 
-def find_workflow(ref: str, cwd: Optional[str] = None) -> Path:
+def locate(ref: str, cwd: Optional[str] = None) -> Located:
     """Resolve a workflow reference: an explicit path, or a name to search."""
     if ref.endswith((".yaml", ".yml")):
         path = Path(ref).expanduser()
         if not path.is_absolute():
             path = Path(cwd or os.getcwd()) / path
         if path.is_file():
-            return path
+            return Located(path.stem, path, LAYER_FILE)
         raise model.WorkflowError(f"workflow file not found: {path}")
-    for base in search_dirs(cwd):
-        for suffix in (".yaml", ".yml"):
-            path = base / f"{ref}{suffix}"
-            if path.is_file():
-                return path
+    hits = _candidates(cwd).get(ref)
+    if hits:
+        layer, path = hits[0]
+        return Located(ref, path, layer, tuple(p for _, p in hits[1:]))
     names = ", ".join(n for n, _ in list_workflows(cwd)) or "(none)"
     raise model.WorkflowError(
         f"no workflow named {ref!r} (available: {names}; "
         f"searched {', '.join(str(d) for d in search_dirs(cwd))})"
     )
+
+
+def find_workflow(ref: str, cwd: Optional[str] = None) -> Path:
+    """Where a reference resolves to, for callers that need only the file."""
+    return locate(ref, cwd).path
 
 
 # --------------------------------------------------------------------------- #

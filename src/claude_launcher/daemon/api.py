@@ -659,11 +659,22 @@ async def _nudge_sessions(
 
 
 def _startable_workflows(cwd: str) -> list:
+    """What can be started here, each entry saying which file it would run.
+
+    ``origin``/``shadowed`` travel with the path because the dashboard is
+    where somebody picks a workflow by name — the one surface where two
+    same-named files in two layers look like one thing.
+    """
     flows = []
-    for name, path in cflow_state.list_workflows(cwd):
-        entry = {"name": name, "path": str(path)}
+    for found in cflow_state.resolved_workflows(cwd):
+        entry = {
+            "name": found.name,
+            "path": str(found.path),
+            "origin": found.origin,
+            "shadowed": [str(p) for p in found.shadows],
+        }
         try:
-            wf = cflow_model.load(path)
+            wf = cflow_model.load(found.path)
             entry["description"] = wf.description
             entry["steps"] = wf.step_count()
         except WorkflowError as exc:

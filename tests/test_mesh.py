@@ -1134,11 +1134,15 @@ def test_join_briefing_lands_in_terminal(home, tmp_path):
     asyncio.run(run())
 
 
-def test_mesh_install_project(tmp_path):
+def test_mesh_install_project(tmp_path, home):
     from claude_launcher import install
 
     done = install.install_into_project(tmp_path)
-    assert len(done) == 4  # one server, three skills
+    # one server, three skills, and the packaged workflows seeded into the
+    # shared layer (which the `home` fixture has pointed somewhere throwaway)
+    assert len([line for line in done if line.startswith("skill ->")]) == 3
+    assert sum(1 for line in done if line.startswith("mcp server")) == 1
+    assert [line for line in done if line.startswith("workflow ->")]
     doc = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
     server = doc["mcpServers"]["claunch"]
     assert server["args"][-1] == "mcp"
@@ -1163,7 +1167,7 @@ def test_mesh_install_project(tmp_path):
     assert set(doc2["mcpServers"]) == {"claunch", "other"}
 
 
-def test_install_supersedes_the_split_servers(tmp_path):
+def test_install_supersedes_the_split_servers(tmp_path, home):
     """An upgrade must switch the old servers off, not run them alongside.
 
     Two live servers would offer the agent every tool twice — the same tool

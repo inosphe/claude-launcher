@@ -462,6 +462,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .wf-warning { margin-top: 8px; color: #d29922; font-size: 12px; }
 .wf-note { color: #7d8590; font-size: 13px; }
 
+/* Which YAML a run came from / a pick would run. Quiet by default; the
+   override half is not, because that is the line somebody needs to read. */
+.wf-source { margin-top: 6px; color: #7d8590; word-break: break-all; }
+.wf-source-path { color: #9da5b0; }
+.wf-source-shadow { color: #d29922; }
+
 .wf-actions {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px;

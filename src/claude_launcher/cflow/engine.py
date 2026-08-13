@@ -908,7 +908,8 @@ def start(
         # Finished runs never block a new start; a forced start retires the
         # active run the same way. Either way the history is kept, not lost.
         _archive_current(old, "force" if active else "auto", cwd)
-    path = state_mod.find_workflow(workflow_ref, cwd)
+    located = state_mod.locate(workflow_ref, cwd)
+    path = located.path
     text = path.read_text(encoding="utf-8")
     workflow = model.parse(text, default_name=path.stem)
 
@@ -916,6 +917,10 @@ def start(
         "run_id": f"run-{secrets.token_hex(4)}",
         "workflow": workflow.name,
         "source": str(path),
+        # Recorded, not derived later: a name can start resolving to a
+        # different layer the moment somebody adds or deletes a file, and this
+        # run's answer must stay the one that was true when it started.
+        "origin": located.origin,
         "context": context or "",
         "mesh": (mesh or "").strip(),
         "started_at": state_mod.utcnow(),
@@ -942,6 +947,8 @@ def start(
             "run": state["run_id"],
             "workflow": workflow.name,
             "source": str(path),
+            "origin": located.origin,
+            "shadowed": [str(p) for p in located.shadows],
             "context": context or "",
             "total_steps": workflow.step_count(),
             "warnings": workflow.warnings,
@@ -1846,6 +1853,13 @@ def status(cwd: Optional[str] = None) -> dict:
     payload = _payload(workflow, state, cwd, mutate=False)
     payload["visits"] = dict(state["visits"])
     payload["started_at"] = state.get("started_at")
+    # Which file this run is a snapshot of. The run itself reads the snapshot
+    # from here on, so the source is history, not a live dependency — but it
+    # is the only thing that answers "the project one or the shared one?"
+    # once two layers declare the same name.
+    if state.get("source"):
+        payload["source"] = state["source"]
+        payload["origin"] = state.get("origin") or ""
     if state.get("context"):
         payload["context"] = state["context"]
     if state.get("current") and _current_report(state, state["current"]):

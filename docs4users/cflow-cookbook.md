@@ -3,8 +3,14 @@
 The [README](../README.md#cflow-declarative-agent-workflows) explains what
 cflow *is*; this document shows how to *use* it well. Each recipe is a
 complete, copy-pasteable workflow YAML that teaches one pattern. Drop any of
-them into `.claunch/workflows/<name>.yaml` in your project (or
-`~/.claude-launcher/workflows/` to share across projects) and run it with:
+them into `.claunch/workflows/<name>.yaml` in your project — or install them
+once into the shared layer, where every project can run them:
+
+```sh
+claunch cflow add ./recipe.yaml         # -> ~/.claude-launcher/workflows/
+```
+
+Then run it with:
 
 ```
 /cflow <name> <one line describing the concrete task>
@@ -15,6 +21,10 @@ Setup, once per profile or project:
 ```sh
 claunch install --profile work          # or: claunch install --project
 ```
+
+That install also seeds the shared layer with the workflows claunch ships, so
+`claunch cflow ls` is not empty on a fresh machine. It never overwrites one
+you have edited.
 
 That install also writes the **`/cflow-author` skill**, which is the same
 material as this cookbook aimed at an agent rather than at you: ask a session

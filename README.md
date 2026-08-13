@@ -1892,8 +1892,8 @@ tools to receive each step, report results, and take branches, while humans
 keep the controls that matter.
 
 ```bash
-claunch install --profile work         # register MCP server + /cflow skill
-claunch cflow example                  # scaffold .claunch/workflows/feature-dev.yaml
+claunch install --profile work         # MCP server + /cflow skill + the shipped workflows
+claunch cflow ls                       # what this directory can run, and from which file
 # then, inside claude:
 #   /cflow feature-dev add rate limiting to the API
 ```
@@ -1989,8 +1989,39 @@ Arriving at a step beyond `max_visits` (default 25) pauses the run the same
 way until a human extends it with `claunch cflow approve`, so an agent-driven
 loop cannot spin forever.
 
-Files live in `.claunch/workflows/*.yaml` (project) or
-`~/.claude-launcher/workflows/` (global). Runs are keyed by **(directory,
+**Where workflows live.** Two layers, nearest first:
+
+| | | |
+|---|---|---|
+| `<cwd>/.claunch/workflows/*.yaml` | project | this directory only; **wins** |
+| `~/.claude-launcher/workflows/*.yaml` | shared | every directory on the machine |
+
+`claunch install` seeds the shared layer with the workflows that ship in the
+package (`feature-dev`, `delegated-dev`), and never overwrites one you have
+edited — it says `kept; yours differs` and leaves it. Put your own there with
+
+```bash
+claunch cflow add ./ops.yaml           # a file
+claunch cflow add ecs-change           # or promote this project's copy
+claunch cflow add ops --project        # the other direction: fork it locally
+```
+
+which parses the workflow before installing it, so a broken YAML is refused
+where you are standing rather than in someone else's picker a week later.
+
+A project only needs a file of its own when it wants to **differ**; that copy
+then shadows the shared one. Nothing about that is ambiguous — the project
+always wins — but the loser is *named* everywhere the winner appears
+(`claunch cflow ls`, the dashboard's start picker, and a running run's
+header), because two copies of one workflow drift silently otherwise:
+
+```
+$ claunch cflow ls
+ecs-change       15 steps  LSP recon -> ... -> ship  [F:\works\ShelterZero\.claunch\workflows\ecs-change.yaml]
+                 project copy overrides [C:\Users\me\.claude-launcher\workflows\ecs-change.yaml]
+```
+
+Runs are keyed by **(directory,
 session)**: the daemon exports `CLAUNCH_SESSION=<name>` into every managed
 session (tmux's `$TMUX` equivalent), the claude → MCP chain inherits it, and
 run state lands in `.cflow/runs/<session>/` — so three sessions in the same
@@ -2122,7 +2153,7 @@ outside — a supervising script or another agent can watch
 
 | Command | Description |
 | ------- | ----------- |
-| `cflow ls` / `show <wf>` | List workflows / print a workflow's step tree. |
+| `cflow ls` / `show <wf>` | List workflows (with the file each name resolves to, and what it overrides) / print a workflow's step tree. |
 | `cflow status [--json]`  | Active run: current step, state, how to unblock (plus any pending start request). |
 | `cflow request <wf> [-c CTX]` / `--cancel` | Ask this session's agent to start a workflow / withdraw the request. The agent runs the `start` itself. On the dashboard: the session page's start picker. |
 | `cflow approve`          | Approve the current entry approval or loop guard — including overriding a responder's decline, or taking a delegated question away from an agent that is stuck (human-only: CLI or web dashboard). |
@@ -2132,7 +2163,8 @@ outside — a supervising script or another agent can watch
 | `cflow journal [-n N]`   | Print the run journal (JSONL). |
 | `cflow archive`          | Retire the run (finished or not) into `.cflow/.../archive/`, freeing the slot for a new start. Active runs are aborted first; a new `start` auto-archives finished runs. On the dashboard: the Archive button + start picker. |
 | `cflow abort` / `reset`  | Abort the run / clear run state (journal kept). |
-| `cflow example [name]`   | Scaffold the example workflow above. |
+| `cflow example [name]`   | Scaffold the example workflow above into this project. |
+| `cflow add <wf>... [--name N] [--project] [--force]` | Install a workflow (a `.yaml` path, or a name findable from here) into the shared layer, so every directory can run it — `--project` installs into this one instead. Parses it first; refuses to replace a different file without `--force`. |
 | `cflow install` / `cflow mcp` | Aliases kept for installs written before the servers merged — see `install` and `mcp` in [Toolkit commands](#toolkit-commands-what-an-agent-gets). |
 
 ## How it works

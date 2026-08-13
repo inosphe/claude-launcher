@@ -837,6 +837,12 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
             assert resp.status == 200
             flows = (await resp.json())["workflows"]
             assert any(f["name"] == "tiny" and f["steps"] == 1 for f in flows)
+            # the picker shows a name, so the wire has to carry the file: which
+            # layer answered, and what that answer overrode
+            tiny = next(f for f in flows if f["name"] == "tiny")
+            assert tiny["path"] == str(wfdir / "tiny.yaml")
+            assert tiny["origin"] == "project"
+            assert tiny["shadowed"] == []
 
             # web start over a still-active run: clean 400 pointing at archive
             resp = await client.post(

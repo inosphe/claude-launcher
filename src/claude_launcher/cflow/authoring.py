@@ -179,11 +179,31 @@ Cycles are legal and are warned about (`cflow show` prints them). Two rules:
   journaled, shown live on the dashboard, and become the PR text; a step whose
   report is "done" has taught the agent nothing about what to record.
 
+## Where the file goes
+
+Two layers answer a name, nearest first:
+
+| `<cwd>/.claunch/workflows/<name>.yaml` | this project only; **wins** |
+| `~/.claude-launcher/workflows/<name>.yaml` | every directory on the machine |
+
+Write to the project layer by default. Reach for the shared one only when the
+workflow is genuinely project-independent — a workflow that names this repo's
+build command, test framework or module layout belongs to this repo, and
+putting it where every project sees it is how one copy silently becomes two.
+
+If it IS general, do not copy it by hand: `claunch cflow add <name>` promotes
+this project's copy (parsing it first) and tells you if the project copy will
+keep shadowing it. Never write the same workflow into both layers "to be
+safe": that is two files to keep in step, and nothing warns you when they
+diverge except the shadow note in `claunch cflow ls`.
+
 ## Before you hand it over
 
 - `claunch cflow show <workflow>` — prints the graph, each step's control
   points, cycle/unreachable warnings, and any deprecated spellings still in
   the file.
+- `claunch cflow ls` — confirms the name resolves to the file you just wrote,
+  and not to an older copy of it in the other layer.
 - `claunch cflow request <workflow>` — reports `delegation_check`: what each
   delegated step resolves to *right now*, and which would fall to a human. It
   never blocks; a leader that has not spawned yet is legitimate.
