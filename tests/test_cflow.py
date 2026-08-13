@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from claude_launcher import daemon_client
 from claude_launcher.cflow import engine, mcp, model, responders, state as state_mod
 from claude_launcher.cflow.engine import CflowError
 from claude_launcher.cflow.model import WorkflowError
@@ -187,25 +188,25 @@ def _driving_session(monkeypatch, name="driver"):
     monkeypatch.setenv(state_mod.SESSION_ENV, name)
 
 
-def _mesh(monkeypatch, *members):
-    """Stand in for the daemon lookup: ``members`` are (role, session, up).
+def _mesh(monkeypatch, *members, problem="", local=True):
+    """Stand in for the daemon roster read: ``members`` are (role, session, up).
 
-    Phase 3 replaces `responders.resolve` with the real roster/lineage walk;
-    everything the engine does with the result is decided here, so the tests
-    that matter can be written against a table.
+    Only the lookup is faked; the matching (ranges, roles, locality) is the
+    real :class:`responders.Ancestry`, so these tests exercise the code that
+    decides who gets asked rather than a re-implementation of it.
     """
-
-    def fake(candidate, *, session, cwd):
-        found = [
-            responders.Responder(
-                session=s, handle=f"{role}-{s}", role=role, up=up
-            )
-            for (role, s, up) in members
-            if role == candidate.role and candidate.up[0] <= up <= candidate.up[1]
-        ]
-        return found, None if found else f"no {candidate.describe()} above {session}"
-
-    monkeypatch.setattr(responders, "resolve", fake)
+    chain = [
+        responders.Responder(
+            session=s, handle=f"{role}-{s}", role=role, up=up, local=local
+        )
+        for (role, s, up) in sorted(members, key=lambda m: m[2])
+    ]
+    found = responders.Ancestry(
+        mesh="team", me="dev1", chain=chain, problem=problem
+    )
+    monkeypatch.setattr(responders, "ancestry", lambda **kw: found)
+    monkeypatch.setattr(responders, "deliver", lambda ask, **kw: None)
+    return found
 
 
 # --------------------------------------------------------------------------- #
@@ -1004,6 +1005,140 @@ def test_mcp_errors_are_soft(flow_dir):
     assert "no active cflow run" in resp["result"]["content"][0]["text"]
     resp = _rpc("nonsense")
     assert resp["error"]["code"] == -32601
+
+
+# --------------------------------------------------------------------------- #
+# responders: reading the lineage out of the mesh
+# --------------------------------------------------------------------------- #
+def _member(handle, session, role, parent=None, local=True):
+    return {
+        "handle": handle, "session": session, "role": role,
+        "parent": parent, "local": local,
+    }
+
+
+def _roster(monkeypatch, *meshes, fail=None):
+    """Answer `GET /api/mesh` with these mesh_info documents."""
+
+    class FakeClient:
+        def get(self, path, **kw):
+            assert path == "/api/mesh"
+            if fail:
+                raise daemon_client.DaemonClientError(fail)
+            return {"meshes": list(meshes)}
+
+    monkeypatch.setattr(daemon_client, "connect", lambda: FakeClient())
+
+
+TEAM = {
+    "name": "team",
+    "members": [
+        _member("dev1", "dev1", "worker", parent="rev1"),
+        _member("rev1", "rev1", "reviewer", parent="lead1"),
+        _member("lead1", "lead1", "leader"),
+    ],
+}
+
+
+def test_ancestry_walks_the_enrolled_parent_chain(monkeypatch):
+    _roster(monkeypatch, TEAM)
+    found = responders.ancestry(session="dev1")
+    assert found.problem == ""
+    assert found.mesh == "team" and found.me == "dev1"
+    assert [(a.handle, a.role, a.up) for a in found.chain] == [
+        ("rev1", "reviewer", 1),
+        ("lead1", "leader", 2),
+    ]
+
+
+def test_ancestry_needs_an_unambiguous_mesh(monkeypatch):
+    other = {"name": "other", "members": [_member("dev1", "dev1", "worker")]}
+    _roster(monkeypatch, TEAM, other)
+    assert "several meshes (other, team)" in responders.ancestry(session="dev1").problem
+    # naming one settles it
+    picked = responders.ancestry(session="dev1", mesh="team")
+    assert picked.problem == "" and len(picked.chain) == 2
+
+
+def test_ancestry_will_not_mistake_a_remote_namesake_for_us(monkeypatch):
+    """Session names are unique per machine, so a roster match is not identity."""
+    mirrored = {
+        "name": "team",
+        "members": [
+            _member("their-dev", "dev1", "worker", parent="lead1", local=False),
+            _member("lead1", "lead1", "leader"),
+        ],
+    }
+    _roster(monkeypatch, mirrored)
+    assert "not a member of any mesh" in responders.ancestry(session="dev1").problem
+
+
+@pytest.mark.parametrize(
+    "kwargs, expected",
+    [
+        ({"session": ""}, "not driven by a managed session"),
+        ({"session": "dev1", "mesh": "nope"}, "not a member of mesh 'nope'"),
+    ],
+)
+def test_ancestry_reports_rather_than_raises(monkeypatch, kwargs, expected):
+    _roster(monkeypatch, TEAM)
+    assert expected in responders.ancestry(**kwargs).problem
+
+
+def test_a_dead_daemon_is_a_reason_not_a_crash(monkeypatch):
+    monkeypatch.setattr(daemon_client, "connect", lambda: None)
+    assert "daemon is not running" in responders.ancestry(session="dev1").problem
+    _roster(monkeypatch, TEAM, fail="connection refused")
+    assert "could not be read" in responders.ancestry(session="dev1").problem
+
+
+def test_a_cycle_in_the_lineage_terminates(monkeypatch):
+    looped = {
+        "name": "team",
+        "members": [
+            _member("dev1", "dev1", "worker", parent="rev1"),
+            _member("rev1", "rev1", "reviewer", parent="dev1"),
+        ],
+    }
+    _roster(monkeypatch, looped)
+    assert [a.handle for a in responders.ancestry(session="dev1").chain] == ["rev1"]
+
+
+def _candidate(role, up):
+    return model.Candidate(role=role, up=up)
+
+
+def test_match_names_the_specific_miss(monkeypatch):
+    _roster(monkeypatch, TEAM)
+    found = responders.ancestry(session="dev1")
+
+    hit, reason = found.match(_candidate("leader", (2, 4)))
+    assert reason is None and [r.handle for r in hit] == ["lead1"]
+
+    _, reason = found.match(_candidate("leader", (5, 6)))
+    assert "is 2 deep" in reason
+    _, reason = found.match(_candidate("leader", (1, 1)))
+    assert "nobody in range holds that role" in reason and "rev1 (reviewer)" in reason
+    # a role-less candidate takes whoever is at that distance
+    hit, reason = found.match(_candidate(None, (1, 1)))
+    assert reason is None and [r.handle for r in hit] == ["rev1"]
+
+
+def test_a_remote_match_is_skipped_with_that_reason(monkeypatch):
+    _roster(
+        monkeypatch,
+        {
+            "name": "team",
+            "members": [
+                _member("dev1", "dev1", "worker", parent="lead1"),
+                _member("lead1", "lead1", "leader", local=False),
+            ],
+        },
+    )
+    found = responders.ancestry(session="dev1")
+    hit, reason = found.match(_candidate("leader", (1, 4)))
+    assert hit == []
+    assert "another daemon has no access to this run's state" in reason
 
 
 # --------------------------------------------------------------------------- #

@@ -277,16 +277,24 @@ def _open_ask(
     session = state_mod.current_scope()
     if session == state_mod.DEFAULT_SCOPE:
         session = ""  # not a managed session: there is no lineage to walk
+    # One roster read for the whole list. The groups are a preference order
+    # over a single moment's mesh, not a series of questions about a moving
+    # one — resolving each against its own snapshot could pick a parent that
+    # only exists in between two of them.
+    lineage = responders.ancestry(
+        session=session, mesh=str(state.get("mesh") or ""), cwd=cwd
+    )
     candidates = delegate.candidates
     skipped = list(skipped or [])
     asked: List[dict] = []
+    found: List[responders.Responder] = []
     group = from_group
     while group < len(candidates):
         candidate = candidates[group]
         if candidate.human:
             asked = [dict(responders.HUMAN_ENTRY)]
             break
-        found, reason = responders.resolve(candidate, session=session, cwd=cwd)
+        found, reason = lineage.match(candidate)
         if found:
             asked = [r.to_dict() for r in found]
             break
@@ -312,6 +320,18 @@ def _open_ask(
         "opened_at": state_mod.utcnow(),
         "deadline": _deadline(delegate.timeout) if asked else None,
     }
+    if found:
+        # Announcing it is the last thing, and the least load-bearing: the
+        # question is already recorded and answerable without the message.
+        undelivered = responders.deliver(
+            ask,
+            mesh=lineage.mesh,
+            sender=lineage.me,
+            workflow=state["workflow"],
+            to=[r.handle for r in found],
+        )
+        if undelivered:
+            ask["undelivered"] = undelivered
     state["ask"] = ask
     state_mod.save_state(state, cwd)
     state_mod.journal(
@@ -325,6 +345,7 @@ def _open_ask(
             "group": group,
             "asked": [e.get("handle") or e["kind"] for e in asked],
             "skipped": [s["reason"] for s in skipped],
+            **({"undelivered": ask["undelivered"]} if ask.get("undelivered") else {}),
         },
         cwd,
     )
@@ -700,8 +721,18 @@ def start(
     context: Optional[str] = None,
     *,
     force: bool = False,
+    mesh: Optional[str] = None,
     cwd: Optional[str] = None,
 ) -> dict:
+    """Begin a run here.
+
+    ``mesh`` names which mesh a delegated decision looks up its responders in,
+    and is a property of the RUN rather than of the workflow: a workflow says
+    "ask the leader above me", which is portable, while which mesh that leader
+    is in is a fact about this deployment. It is only needed when the driving
+    session belongs to more than one — with a single membership the run finds
+    it, and with none the delegation falls to a human either way.
+    """
     pending = state_mod.read_request(cwd)
     if state_mod.has_run(cwd):
         old = state_mod.load_state(cwd)
@@ -727,6 +758,7 @@ def start(
         "workflow": workflow.name,
         "source": str(path),
         "context": context or "",
+        "mesh": (mesh or "").strip(),
         "started_at": state_mod.utcnow(),
         "status": "running",
         "current": workflow.start,
@@ -778,6 +810,8 @@ def start(
     payload = _payload(workflow, state, cwd, mutate=True)
     if context:
         payload["context"] = context
+    if state["mesh"]:
+        payload["mesh"] = state["mesh"]
     if workflow.warnings:
         payload["workflow_warnings"] = workflow.warnings
     return payload
