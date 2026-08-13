@@ -62,11 +62,21 @@ def _cmd_show(args: argparse.Namespace) -> int:
         flags = []
         if s.gate:
             flags.append("gate")
+        if s.ask:
+            who = " > ".join(c.describe() for c in s.ask.delegate.candidates)
+            flags.append(f"ask: {who}")
+            if s.ask.on_decline:
+                flags.append(f"decline -> {s.ask.on_decline}")
         if s.verify:
             flags.append(f"verify: {s.verify.command}")
         suffix = f"  ({'; '.join(flags)})" if flags else ""
         if s.select:
-            print(f"- {s.id} [select, chooser={s.select.chooser}]{suffix}")
+            chooser = s.select.chooser
+            if s.select.delegate:
+                chooser = " > ".join(
+                    c.describe() for c in s.select.delegate.candidates
+                )
+            print(f"- {s.id} [select, chooser={chooser}]{suffix}")
             for name, opt in s.select.options.items():
                 print(f"    {name}: {opt.description}  -> {opt.next or 'end'}")
         else:
@@ -74,6 +84,10 @@ def _cmd_show(args: argparse.Namespace) -> int:
             print(f"- {s.id}{title}{suffix}  -> {s.next or 'end'}")
     for warning in wf.warnings:
         print(f"warning: {warning}")
+    # Advice to whoever is WRITING this file, which is why it lives here and
+    # not in front of every run (see `Workflow.deprecations`).
+    for note in wf.deprecations:
+        print(f"deprecated: {note}")
     return 0
 
 

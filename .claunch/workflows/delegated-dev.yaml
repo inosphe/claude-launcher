@@ -1,0 +1,63 @@
+name: delegated-dev
+description: design -> implement -> test -> (reviewer decides) -> (leader approves) -> ship
+start: design
+
+steps:
+  design:
+    title: Design
+    instructions: |
+      Write a short design note (goal, approach, files to touch, risks).
+    next: impl
+
+  impl:
+    title: Implement
+    instructions: |
+      Implement the design, or address the latest review feedback.
+    next: test
+
+  test:
+    title: Test
+    instructions: |
+      Run the suite; add or extend tests covering the change.
+    verify: "uv run pytest -q"
+    next: verdict
+
+  verdict:
+    title: Review verdict
+    select:
+      prompt: |
+        The diff is on the branch and the suite is green. Is this ready to
+        ship, or does it need another implement/test pass? Answer against the
+        code, not the description of it.
+      chooser:
+        # The reviewer that spawned this run decides. If there is none, look
+        # further up the lineage; if nobody is there, it lands on the human.
+        from:
+          - {role: reviewer, up: 1}
+          - {role: reviewer, up: "2..4"}
+          - human
+        timeout: 1800
+      options:
+        ready:
+          description: reviewer satisfied - go to the ship approval
+          next: ship
+        rework:
+          description: needs another implement/test/review pass
+          next: impl        # intentional cycle; the verdict is the exit
+
+  ship:
+    title: Ship
+    ask:
+      prompt: |
+        Reviewer passed this. Approve the commit and push?
+      from:
+        # The leader is rarely the direct parent — it is whoever is above the
+        # reviewer that spawned this run — so reach up the chain, not at 1.
+        - {role: leader, up: "1..4"}
+        - human
+      timeout: 900
+      on_decline: impl
+    instructions: |
+      Commit with a clear message and draft the PR description from the run
+      journal.
+    next: end

@@ -20,6 +20,31 @@ Enforcement lives here, not in prompts:
   MCP-callable approve — an agent-callable approval is not a gate.
 - ``select`` with ``chooser: user`` records the agent's call as a *proposal*
   and blocks until ``claunch cflow select`` confirms (any option).
+- ``ask`` steps, and selects whose ``chooser`` names responders, put the
+  decision to somebody else entirely (see :func:`answer`).
+
+Delegated decisions
+-------------------
+The rule the no-approve-tool decision protects is not "only humans approve" —
+it is that *the identity recording an approval is not the identity being
+approved*. A human satisfies that; so does another agent, provided three
+things hold, and all three are enforced here rather than asked for:
+
+1. **The responder's identity is ambient, never an argument.** ``answer``
+   takes no "who am I"; the MCP layer fills ``by_session`` from the session
+   environment the daemon set, and a session that is not in the ask's
+   recorded list is refused.
+2. **Candidates are ancestors.** The schema requires ``up``, so a run cannot
+   spawn its own approver (see :mod:`.responders`).
+3. **The question is closed.** A decision is one of the options the workflow
+   declared, plus ``abstain``; nothing is parsed out of prose, so no wording
+   an LLM happens to produce can widen the answer set.
+
+Anything unanswerable — no candidate resolved, a group timed out, everyone
+abstained, a decline with no declared route — lands the run in front of a
+human on the channels that already exist (``claunch cflow approve|select``).
+Failing *open* is not an option a workflow can select: a delegated approval
+that fell back to the run approving itself would be worse than no gate.
 - ``next`` is refused until the step's completion **report** is filed
   (``report {summary, details?}``) — every advance therefore leaves an
   explicit, timestamped account of what happened, which the daemon web
@@ -40,19 +65,40 @@ from __future__ import annotations
 import functools
 import secrets
 import subprocess
-from typing import Optional
+from datetime import datetime, timedelta, timezone
+from typing import List, Optional
 
-from . import model, state as state_mod
-from .model import Step, Workflow
+from . import model, responders, state as state_mod
+from .model import Delegate, Step, Workflow
 
 #: Kept from a verify command's combined output when reporting failure.
 VERIFY_OUTPUT_TAIL = 4000
+
+#: The two decisions an ``ask`` (an approval) offers, and the escape hatch
+#: every delegated decision offers on top of its own options. ``abstain`` is
+#: first-class on purpose: a responder with no basis to decide must have
+#: something to say other than a guess, and saying it escalates.
+APPROVE = "approve"
+DECLINE = "decline"
+ABSTAIN = "abstain"
+
+APPROVAL_OPTIONS = [
+    {"name": APPROVE, "description": "grant entry to this step"},
+    {
+        "name": DECLINE,
+        "description": (
+            "refuse entry; the run takes the workflow's declared decline route, "
+            "or holds for a human if none was declared"
+        ),
+    },
+]
 
 #: Typed into the run directory's managed sessions after a human unblocks the
 #: run, so a stopped agent resumes without a manual nudge. Per the /cflow
 #: skill, any user message makes the agent re-check 'status' first.
 NUDGE_APPROVED = "cflow: approved - continue per the /cflow protocol"
 NUDGE_SELECTED = "cflow: selection confirmed - continue per the /cflow protocol"
+NUDGE_ANSWERED = "cflow: your request was answered - continue per the /cflow protocol"
 NUDGE_CONTINUE = "cflow: continue per the /cflow protocol"
 NUDGE_STARTED = (
     "cflow: a new workflow run was started - continue per the /cflow protocol"
@@ -150,12 +196,259 @@ def _current_report(state: dict, step_id: str) -> Optional[dict]:
     return None
 
 
+# --------------------------------------------------------------------------- #
+# delegated decisions
+# --------------------------------------------------------------------------- #
+def _deadline(timeout: Optional[float]) -> Optional[str]:
+    """When the current group's turn expires, or None for "no clock".
+
+    Recorded rather than enforced here: nothing calls into a stopped run, so
+    the expiry belongs to the daemon, which is already scanning the registry.
+    Without a daemon the question simply keeps waiting — which is the same
+    thing a human gate has always done, and is the safe direction to fail.
+    """
+    if not timeout:
+        return None
+    at = datetime.now(timezone.utc) + timedelta(seconds=float(timeout))
+    return at.isoformat(timespec="seconds")
+
+
+def _delegate_for(step: Step, kind: str) -> Delegate:
+    """The declaration behind an open ask of this ``kind`` on this step."""
+    if kind == "approval":
+        return step.ask.delegate
+    return step.select.delegate
+
+
+def _current_ask(state: dict, step_id: str, visit: int, kind: str) -> Optional[dict]:
+    """The open ask for this step, visit and kind — anything else is stale.
+
+    Keyed exactly like a step report (:func:`_current_report`), and for the
+    same reason: a gate inside a loop closes again on every pass, so an answer
+    to the previous pass must not be able to land on this one.
+    """
+    ask = state.get("ask")
+    if (
+        ask
+        and ask.get("step") == step_id
+        and ask.get("visit") == visit
+        and ask.get("kind") == kind
+    ):
+        return ask
+    return None
+
+
+def _awaits_human(ask: dict) -> bool:
+    """Whether this ask now sits in front of a person.
+
+    True both when the workflow named ``human`` in the group being asked and
+    when the list ran out with nobody resolved — the run holds either way, and
+    the CLI/dashboard answer it the same way. They read differently to whoever
+    is looking at it, which is what ``skipped`` is for.
+    """
+    return not any(entry.get("kind") == "member" for entry in ask.get("asked") or [])
+
+
+def _open_ask(
+    state: dict,
+    step: Step,
+    *,
+    kind: str,
+    prompt: str,
+    options: List[dict],
+    delegate: Delegate,
+    cwd,
+    ask_id: Optional[str] = None,
+    from_group: int = 0,
+    skipped: Optional[List[dict]] = None,
+) -> dict:
+    """Put the decision to the first candidate group that resolves to anyone.
+
+    Groups are tried in declared order and every one that resolves to nobody
+    is recorded in ``skipped`` with its reason, so a question that reaches a
+    human arrives with the account of why no agent took it. Running out of
+    groups is not an error: the ask stays open with nobody asked, which is the
+    "hold for a human" state.
+
+    ``ask_id`` is carried across an escalation on purpose — the decision is
+    the same one, so a responder from an earlier group that answers late is
+    told it is no longer theirs to answer rather than that the id is unknown.
+    """
+    session = state_mod.current_scope()
+    if session == state_mod.DEFAULT_SCOPE:
+        session = ""  # not a managed session: there is no lineage to walk
+    candidates = delegate.candidates
+    skipped = list(skipped or [])
+    asked: List[dict] = []
+    group = from_group
+    while group < len(candidates):
+        candidate = candidates[group]
+        if candidate.human:
+            asked = [dict(responders.HUMAN_ENTRY)]
+            break
+        found, reason = responders.resolve(candidate, session=session, cwd=cwd)
+        if found:
+            asked = [r.to_dict() for r in found]
+            break
+        skipped.append(
+            {
+                "group": group,
+                "candidate": candidate.describe(),
+                "reason": reason or "nobody matched",
+            }
+        )
+        group += 1
+
+    ask = {
+        "id": ask_id or f"ask-{secrets.token_hex(3)}",
+        "step": step.id,
+        "visit": _visits(state, step.id),
+        "kind": kind,
+        "prompt": prompt,
+        "options": options,
+        "group": group,
+        "asked": asked,
+        "skipped": skipped,
+        "opened_at": state_mod.utcnow(),
+        "deadline": _deadline(delegate.timeout) if asked else None,
+    }
+    state["ask"] = ask
+    state_mod.save_state(state, cwd)
+    state_mod.journal(
+        "ask_unresolved" if not asked else "ask_opened",
+        {
+            "run": state["run_id"],
+            "ask": ask["id"],
+            "step": step.id,
+            "visit": ask["visit"],
+            "kind": kind,
+            "group": group,
+            "asked": [e.get("handle") or e["kind"] for e in asked],
+            "skipped": [s["reason"] for s in skipped],
+        },
+        cwd,
+    )
+    return ask
+
+
+def _escalate(state: dict, step: Step, ask: dict, cwd, why: str) -> dict:
+    """Hand the same decision to the next candidate group.
+
+    The one path that serves all three ways a group can fail to produce an
+    answer — nobody resolved, everybody abstained, and (once the daemon owns
+    the clock) nobody replied in time. That is the whole reason the preference
+    list is one declaration instead of separate "fallback" and "escalation"
+    settings: they are the same list read on different triggers.
+    """
+    state_mod.journal(
+        "ask_escalated",
+        {
+            "run": state["run_id"],
+            "ask": ask["id"],
+            "step": step.id,
+            "from_group": ask["group"],
+            "why": why,
+        },
+        cwd,
+    )
+    skipped = list(ask.get("skipped") or [])
+    skipped.append(
+        {
+            "group": ask["group"],
+            "candidate": ", ".join(
+                e.get("handle") or e["kind"] for e in ask.get("asked") or []
+            )
+            or "nobody",
+            "reason": why,
+        }
+    )
+    return _open_ask(
+        state,
+        step,
+        kind=ask["kind"],
+        prompt=ask["prompt"],
+        options=ask["options"],
+        delegate=_delegate_for(step, ask["kind"]),
+        cwd=cwd,
+        ask_id=ask["id"],
+        from_group=ask["group"] + 1,
+        skipped=skipped,
+    )
+
+
+def _ask_payload(base: dict, ask: dict) -> dict:
+    """How an open ask is described to whoever reads the run.
+
+    A question waiting on an *agent* is its own status, because it is a state
+    no operator control resolves — the run is not stuck on a person. Once it
+    falls to a human it is reported as the plain approval/selection it has
+    become, so the CLI and the dashboard keep working on it unchanged.
+    """
+    payload = {**base, "ask": ask}
+    if not _awaits_human(ask):
+        who = ", ".join(e.get("handle", "?") for e in ask["asked"])
+        payload["status"] = "waiting_answer"
+        payload["reason"] = ask["kind"]
+        payload["how_to_unblock"] = (
+            f"{who} was asked to decide this and has not answered yet. You "
+            f"cannot answer it yourself. Stop your turn, present what you have "
+            f"so far, and wait to be nudged."
+        )
+        return payload
+    unresolved = bool(ask["skipped"]) and not ask["asked"]
+    if ask["kind"] == "branch":
+        payload["status"] = "waiting_selection"
+        payload["prompt"] = ask["prompt"]
+        payload["options"] = ask["options"]
+        payload["how_to_unblock"] = (
+            "a human must choose with 'claunch cflow select <option>' (inside "
+            "a chat session: '! claunch cflow select <option>') or an option "
+            "button on the daemon web dashboard. Stop your turn, present your "
+            "recommendation and reasoning, and wait to be nudged."
+        )
+    else:
+        payload["status"] = "waiting_approval"
+        payload["reason"] = "ask"
+        payload["gate"] = ask["prompt"]
+        payload["how_to_unblock"] = (
+            "a human must approve: 'claunch cflow approve' in this directory "
+            "(inside a chat session: '! claunch cflow approve') or the Approve "
+            "button on the daemon web dashboard; the agent cannot approve. "
+            "Stop your turn, present your work so far, and wait to be nudged."
+        )
+    if unresolved:
+        payload["note"] = (
+            "this was meant to be answered by another agent, but no candidate "
+            "could be reached — it is in front of a human instead. Tell the "
+            "user that, and why (see ask.skipped)."
+        )
+    return payload
+
+
 def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> None:
     """Advance to ``target`` (None = termination)."""
+    # An ask still open here is one nobody answered — a human forced the run
+    # somewhere else while it was out. Say so in the journal rather than
+    # letting the question evaporate: a responder about to answer it is about
+    # to be told it is closed, and this is the entry that explains why.
+    open_ask = state.get("ask")
+    if open_ask:
+        state_mod.journal(
+            "ask_discarded",
+            {
+                "run": state["run_id"],
+                "ask": open_ask.get("id"),
+                "step": open_ask.get("step"),
+                "reason": "the run moved before it was answered",
+            },
+            cwd,
+        )
     state["delivered"] = False
     state["gate_approved"] = False
     state["gate_logged"] = None
     state["pending_select"] = None
+    state["ask"] = None
+    state["declined"] = None
     state["report"] = None
     if target is None:
         state["current"] = None
@@ -221,6 +514,29 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
             state_mod.save_state(state, cwd)
         return payload
 
+    # A refusal with nowhere declared to go. Checked BEFORE the entry
+    # approvals below, or the ask that was just declined would be re-opened
+    # and put to the same responder in a loop.
+    declined = state.get("declined")
+    if declined and declined.get("step") == step.id and declined.get("visit") == visit:
+        return {
+            **base,
+            "status": "waiting_approval",
+            "reason": "declined",
+            "gate": (
+                f"{declined.get('by') or 'a responder'} declined this step"
+                + (f": {declined['reason']}" if declined.get("reason") else "")
+            ),
+            "declined": declined,
+            "how_to_unblock": (
+                "the workflow declares no route for a decline, so the run is "
+                "held. A human decides what happens: 'claunch cflow approve' "
+                "to override and enter anyway, or 'claunch cflow goto <step>' "
+                "to send the run somewhere else. Stop your turn, relay the "
+                "refusal and its reason to the user, and wait to be nudged."
+            ),
+        }
+
     # Human entry gate: re-required on every visit.
     if step.gate and not state["gate_approved"]:
         payload = {
@@ -244,12 +560,60 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
             state_mod.save_state(state, cwd)
         return payload
 
+    # Delegated entry approval — the same per-visit gate, put to somebody.
+    if step.ask and not state["gate_approved"]:
+        ask = _current_ask(state, step.id, visit, "approval")
+        if ask is None:
+            if not mutate:
+                # A read-only look between arriving here and the agent's next
+                # call. Describe the position honestly rather than opening a
+                # question as a side effect of somebody watching.
+                return {
+                    **base,
+                    "status": "waiting_answer",
+                    "reason": "approval",
+                    "prompt": step.ask.prompt,
+                    "note": "this approval has not been put to anyone yet",
+                }
+            ask = _open_ask(
+                state,
+                step,
+                kind="approval",
+                prompt=step.ask.prompt,
+                options=APPROVAL_OPTIONS,
+                delegate=step.ask.delegate,
+                cwd=cwd,
+            )
+        return _ask_payload(base, ask)
+
     if step.is_select:
         pending = state.get("pending_select")
         options = [
             {"name": o.name, "description": o.description}
             for o in step.select.options.values()
         ]
+        if step.select.chooser == "delegate":
+            ask = _current_ask(state, step.id, visit, "branch")
+            if ask is None:
+                if not mutate:
+                    return {
+                        **base,
+                        "status": "waiting_answer",
+                        "reason": "branch",
+                        "prompt": step.select.prompt,
+                        "options": options,
+                        "note": "this decision has not been put to anyone yet",
+                    }
+                ask = _open_ask(
+                    state,
+                    step,
+                    kind="branch",
+                    prompt=step.select.prompt,
+                    options=options,
+                    delegate=step.select.delegate,
+                    cwd=cwd,
+                )
+            return _ask_payload(base, ask)
         if pending and pending.get("step") == step.id:
             return {
                 **base,
@@ -370,6 +734,8 @@ def start(
         "gate_approved": False,
         "gate_logged": None,
         "pending_select": None,
+        "ask": None,
+        "declined": None,
         "report": None,
         "completed": 0,
         "visits": {workflow.start: 1},
@@ -491,12 +857,23 @@ def _load(cwd: Optional[str]):
 
 
 def _blocked(workflow: Workflow, state: dict) -> Optional[str]:
-    """Why the current step's content is withheld ('loop_limit'/'gate'), if so."""
+    """Why the current step's content is withheld, if it is.
+
+    Entry approvals only: a delegated *select* is the step rather than a lock
+    on it, so it is not "blocked" — the step has been delivered and the run is
+    waiting on the decision itself.
+    """
     step = workflow.step(state["current"])
-    if _visits(state, step.id) > _limit(workflow, state, step.id):
+    visit = _visits(state, step.id)
+    if visit > _limit(workflow, state, step.id):
         return "loop_limit"
+    declined = state.get("declined")
+    if declined and declined.get("step") == step.id and declined.get("visit") == visit:
+        return "declined"
     if step.gate and not state["gate_approved"]:
         return "gate"
+    if step.ask and not state["gate_approved"]:
+        return "ask"
     return None
 
 
@@ -589,9 +966,13 @@ def next_step(*, cwd: Optional[str] = None) -> dict:
 
         if step.is_select:
             payload = _payload(workflow, state, cwd, mutate=False)
-            payload["note"] = (
-                "this is a decision point — use the 'select' tool, not 'next'"
-            )
+            if payload.get("status") == "select":
+                # Only when the decision is actually this agent's to make; a
+                # delegated one already explains that it is waiting on someone
+                # else, and must not be told to call a tool it may not call.
+                payload["note"] = (
+                    "this is a decision point — use the 'select' tool, not 'next'"
+                )
             return payload
 
         # Completing a delivered executable step: the report comes first, so
@@ -715,6 +1096,14 @@ def select(
             f"(options: {', '.join(step.select.options)})"
         )
 
+    if by == "agent" and step.select.chooser == "delegate":
+        raise CflowError(
+            f"step {step.id!r} delegates this decision — it is not yours to "
+            f"make, and recording a proposal would not help. The responders "
+            f"answer it with the 'answer' tool; stop your turn and wait to be "
+            f"nudged (call 'status' to see who was asked)"
+        )
+
     if by == "agent" and step.select.chooser == "user":
         state["pending_select"] = {
             "step": step.id,
@@ -732,6 +1121,19 @@ def select(
         )
         return _payload(workflow, state, cwd, mutate=False)
 
+    open_ask = _current_ask(state, step.id, _visits(state, step.id), "branch")
+    if open_ask:
+        # A human settling a delegated decision — from the dashboard, or
+        # because the responders never got to it. Close the question here so
+        # `_move_to` does not log it as one the run walked away from.
+        state["ask"] = None
+        state_mod.journal(
+            "ask_answered",
+            {"run": state["run_id"], "ask": open_ask["id"], "step": step.id,
+             "decision": option, "by": by, "by_session": None,
+             "in_group": _awaits_human(open_ask)},
+            cwd,
+        )
     state_mod.journal(
         "select_confirmed",
         {"run": state["run_id"], "step": step.id, "option": option,
@@ -755,6 +1157,177 @@ def select(
         "option": option,
         "note": "selection confirmed; nudge the agent to continue",
     }
+
+
+def _asked_handle(ask: dict, session: str) -> str:
+    """The handle the asked list recorded for ``session`` (else the session)."""
+    for entry in ask.get("asked") or []:
+        if entry.get("session") == session:
+            return str(entry.get("handle") or session)
+    return session
+
+
+def _closed(ask_id: str, state: dict) -> "CflowError":
+    return CflowError(
+        f"request {ask_id!r} is not open any more — it was answered, it timed "
+        f"out and moved on, or the run left the step it belonged to. Nothing "
+        f"was applied. Call 'asks' to see what is actually waiting on you"
+    )
+
+
+@_locked_op
+def answer(
+    ask_id: str,
+    decision: str,
+    reason: Optional[str] = None,
+    *,
+    by_session: str = "",
+    cwd: Optional[str] = None,
+) -> dict:
+    """Record another session's decision on an open ask, and act on it.
+
+    ``by_session`` is the answering session's name and is NOT the caller's to
+    choose: the MCP layer reads it from the environment the daemon exported
+    into that session, so it identifies the process rather than the claim. All
+    the authority checking there is, is that this identity appears in the list
+    frozen into the ask when it was opened.
+
+    Nothing here delivers the asking step. A responder that received the
+    asker's instructions would be a second agent working the run, which is the
+    opposite of what a reviewer is for — it gets a receipt, and the asking
+    session picks the run up through its own ``status``/``next``.
+    """
+    workflow, state = _load(cwd)
+    if state["status"] in ("done", "aborted"):
+        raise _closed(ask_id, state)
+    step = workflow.step(state["current"])
+    visit = _visits(state, step.id)
+    ask = state.get("ask")
+    if (
+        not ask
+        or ask.get("id") != ask_id
+        or ask.get("step") != step.id
+        or ask.get("visit") != visit
+    ):
+        raise _closed(ask_id, state)
+
+    session = str(by_session or "").strip()
+    if not session:
+        raise CflowError(
+            "this call carries no session identity, so it cannot be attributed "
+            "to anyone — a delegated decision has to be recorded against the "
+            "session that made it. Answer from a managed session"
+        )
+    if session == state_mod.current_scope():
+        # Unreachable through `responders.resolve` (candidates are ancestors),
+        # and checked anyway: this is the one invariant the whole feature
+        # rests on, and it costs a comparison to prove rather than assume.
+        raise CflowError(
+            "this is your own run — a step cannot approve itself. That is the "
+            "entire point of delegating the decision"
+        )
+    if not any(
+        e.get("kind") == "member" and e.get("session") == session
+        for e in ask.get("asked") or []
+    ):
+        who = ", ".join(
+            e.get("handle") or e["kind"] for e in ask.get("asked") or []
+        ) or "nobody"
+        raise CflowError(
+            f"{session!r} was not asked this — it is with {who}. If it "
+            f"escalated past you, it is no longer yours to answer"
+        )
+
+    choice = str(decision or "").strip().lower()
+    allowed = [o["name"] for o in ask.get("options") or []]
+    if choice not in allowed and choice != ABSTAIN:
+        raise CflowError(
+            f"unknown decision {decision!r} — answer with one of: "
+            f"{', '.join(allowed)}, or {ABSTAIN!r} if you have no basis to "
+            f"decide (which passes it on rather than guessing)"
+        )
+    note = (reason or "").strip()
+    handle = _asked_handle(ask, session)
+    receipt = {
+        **_base(state),
+        "status": "answered",
+        "step_id": step.id,
+        "ask": ask_id,
+        "decision": choice,
+        "as": handle,
+    }
+
+    if choice == ABSTAIN:
+        state_mod.journal(
+            "ask_abstained",
+            {"run": state["run_id"], "ask": ask_id, "step": step.id,
+             "by": handle, "by_session": session, "reason": note},
+            cwd,
+        )
+        _escalate(
+            state, step, ask, cwd,
+            why=f"{handle} abstained" + (f": {note}" if note else ""),
+        )
+        receipt["note"] = (
+            "recorded as an abstention; the decision moved on to the next "
+            "candidate group (or to a human if there is none)"
+        )
+        return receipt
+
+    state["ask"] = None
+    state_mod.journal(
+        "ask_answered",
+        {"run": state["run_id"], "ask": ask_id, "step": step.id, "visit": visit,
+         "kind": ask["kind"], "decision": choice, "reason": note,
+         "by": handle, "by_session": session, "in_group": True},
+        cwd,
+    )
+
+    if ask["kind"] == "branch":
+        state["completed"] += 1  # the decision itself counts as a step
+        _move_to(workflow, state, step.select.options[choice].next, cwd)
+        receipt["note"] = (
+            "decision recorded and the run routed; the asking session is "
+            "nudged to continue"
+        )
+        return receipt
+
+    if choice == APPROVE:
+        state["gate_approved"] = True
+        state_mod.save_state(state, cwd)
+        receipt["note"] = (
+            "approval recorded; the asking session is nudged to continue"
+        )
+        return receipt
+
+    # A refusal. Where it goes was declared (or deliberately not) by the
+    # workflow, never chosen here — a responder decides the answer, not the
+    # shape of the run.
+    target = step.ask.on_decline
+    state_mod.journal(
+        "ask_declined",
+        {"run": state["run_id"], "ask": ask_id, "step": step.id, "by": handle,
+         "by_session": session, "reason": note, "route": target or "hold"},
+        cwd,
+    )
+    if target is None:
+        state["declined"] = {
+            "step": step.id,
+            "visit": visit,
+            "by": handle,
+            "by_session": session,
+            "reason": note,
+            "at": state_mod.utcnow(),
+        }
+        state_mod.save_state(state, cwd)
+        receipt["note"] = (
+            "refusal recorded; the workflow declares no decline route, so the "
+            "run is held for a human"
+        )
+        return receipt
+    _move_to(workflow, state, None if target == model.END else target, cwd)
+    receipt["note"] = f"refusal recorded; the run was routed to {target!r}"
+    return receipt
 
 
 @_locked_op
@@ -806,7 +1379,14 @@ def goto(
 
 @_locked_op
 def approve(*, by: str = "user", cwd: Optional[str] = None) -> dict:
-    """Unblock the current gate or loop guard. CLI-only — not exposed over MCP."""
+    """Unblock the current entry approval or loop guard. CLI-only.
+
+    Covers all four ways a step can be held shut — a ``gate``, a delegated
+    ``ask`` that reached a human, one that reached nobody, and a decline the
+    workflow declared no route for — because they are one thing to the person
+    looking at them: the run is stopped and they have decided it may proceed.
+    Still not exposed over MCP: an agent-callable approval is not an approval.
+    """
     workflow, state = _load(cwd)
     if state["status"] in ("done", "aborted"):
         return _done_payload(state, cwd)
@@ -832,13 +1412,33 @@ def approve(*, by: str = "user", cwd: Optional[str] = None) -> dict:
                 f"visits; nudge the agent to continue"
             ),
         }
-    if blocked == "gate":
+    if blocked in ("gate", "ask", "declined"):
+        visit = _visits(state, step.id)
+        open_ask = _current_ask(state, step.id, visit, "approval")
+        if open_ask:
+            # The human is answering the delegated question, whether or not
+            # they were one of the candidates. That is not a hole to close:
+            # the CLI is the trusted channel by construction — anyone holding
+            # it can already `goto` the run anywhere — so the honest thing is
+            # to record whether the answer came from inside the asked group,
+            # not to pretend the override is impossible.
+            state_mod.journal(
+                "ask_answered",
+                {"run": state["run_id"], "ask": open_ask["id"], "step": step.id,
+                 "decision": APPROVE, "by": by, "by_session": None,
+                 "in_group": _awaits_human(open_ask)},
+                cwd,
+            )
+        state["ask"] = None
+        overridden = state.get("declined") if blocked == "declined" else None
+        state["declined"] = None
         state["gate_approved"] = True
         state_mod.save_state(state, cwd)
         state_mod.journal(
             "approved",
             {"run": state["run_id"], "step": step.id, "by": by,
-             "visit": _visits(state, step.id)},
+             "visit": visit,
+             **({"overrode_decline": overridden} if overridden else {})},
             cwd,
         )
         # Do NOT deliver here: the agent must fetch its own instructions via

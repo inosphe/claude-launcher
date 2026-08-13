@@ -7,7 +7,7 @@ import sys
 
 import pytest
 
-from claude_launcher.cflow import engine, mcp, model, state as state_mod
+from claude_launcher.cflow import engine, mcp, model, responders, state as state_mod
 from claude_launcher.cflow.engine import CflowError
 from claude_launcher.cflow.model import WorkflowError
 
@@ -93,6 +93,69 @@ steps:
         "yes": {description: done, next: end}
 """
 
+ASK_FLOW = """
+steps:
+  impl:
+    instructions: implement
+    next: ship
+  ship:
+    ask:
+      prompt: ship it?
+      from: [{role: leader, up: 1}, human]
+      on_decline: impl
+    instructions: ship it
+"""
+
+ASK_HOLD = """
+steps:
+  ship:
+    ask:
+      prompt: ship it?
+      from: [{role: leader, up: 1}]
+    instructions: ship it
+"""
+
+ASK_TWO_GROUPS = """
+steps:
+  ship:
+    ask:
+      prompt: ship it?
+      from: [{role: leader, up: 1}, {role: leader, up: '2..3'}, human]
+    instructions: ship it
+"""
+
+ASK_LOOP = """
+steps:
+  ship:
+    ask:
+      prompt: ship it?
+      from: [{role: leader, up: 1}]
+    instructions: ship it
+    next: again
+  again:
+    select:
+      prompt: once more?
+      chooser: agent
+      options:
+        "yes": {description: loop, next: ship}
+        "no":  {description: done, next: end}
+"""
+
+DELEGATED_BRANCH = """
+steps:
+  verdict:
+    select:
+      prompt: ready?
+      chooser:
+        from: [{role: reviewer, up: 1}, human]
+      options:
+        ready:  {description: ship it, next: end}
+        rework: {description: another pass, next: impl}
+  impl:
+    instructions: rework
+    next: verdict
+"""
+
 
 @pytest.fixture
 def flow_dir(home, tmp_path, monkeypatch):
@@ -117,6 +180,32 @@ def _advance(summary, details=None):
     """The full completion protocol for one executable step: report, then next."""
     engine.report(summary, details)
     return engine.next_step()
+
+
+def _driving_session(monkeypatch, name="driver"):
+    """Run as a managed session, so the run has an identity to delegate FROM."""
+    monkeypatch.setenv(state_mod.SESSION_ENV, name)
+
+
+def _mesh(monkeypatch, *members):
+    """Stand in for the daemon lookup: ``members`` are (role, session, up).
+
+    Phase 3 replaces `responders.resolve` with the real roster/lineage walk;
+    everything the engine does with the result is decided here, so the tests
+    that matter can be written against a table.
+    """
+
+    def fake(candidate, *, session, cwd):
+        found = [
+            responders.Responder(
+                session=s, handle=f"{role}-{s}", role=role, up=up
+            )
+            for (role, s, up) in members
+            if role == candidate.role and candidate.up[0] <= up <= candidate.up[1]
+        ]
+        return found, None if found else f"no {candidate.describe()} above {session}"
+
+    monkeypatch.setattr(responders, "resolve", fake)
 
 
 # --------------------------------------------------------------------------- #
@@ -915,3 +1004,381 @@ def test_mcp_errors_are_soft(flow_dir):
     assert "no active cflow run" in resp["result"]["content"][0]["text"]
     resp = _rpc("nonsense")
     assert resp["error"]["code"] == -32601
+
+
+# --------------------------------------------------------------------------- #
+# model: delegated decisions
+# --------------------------------------------------------------------------- #
+def test_ask_parses_a_preference_list():
+    wf = model.parse(ASK_FLOW)
+    ask = wf.steps["ship"].ask
+    assert [c.describe() for c in ask.delegate.candidates] == ["leader 1 up", "human"]
+    assert ask.on_decline == "impl"
+    assert wf.steps["ship"].entry_prompt == "ship it?"
+
+
+def test_member_candidate_must_declare_a_direction():
+    bad = """
+steps:
+  ship:
+    ask:
+      prompt: ok?
+      from: [{role: leader}]
+    instructions: ship
+"""
+    with pytest.raises(WorkflowError, match="spawned"):
+        model.parse(bad)
+
+
+@pytest.mark.parametrize("up", ["0", "-1", "'3..1'", "'x..y'", "true"])
+def test_bad_up_values_are_rejected(up):
+    bad = f"""
+steps:
+  ship:
+    ask:
+      prompt: ok?
+      from: [{{role: leader, up: {up}}}]
+    instructions: ship
+"""
+    with pytest.raises(WorkflowError, match="up"):
+        model.parse(bad)
+
+
+def test_only_human_is_a_bare_candidate():
+    bad = """
+steps:
+  ship:
+    ask:
+      prompt: ok?
+      from: [boss]
+    instructions: ship
+"""
+    with pytest.raises(WorkflowError, match="human"):
+        model.parse(bad)
+
+
+def test_gate_and_ask_cannot_both_guard_a_step():
+    bad = """
+steps:
+  ship:
+    gate: approve
+    ask:
+      prompt: ok?
+      from: [human]
+    instructions: ship
+"""
+    with pytest.raises(WorkflowError, match="both entry approvals"):
+        model.parse(bad)
+
+
+def test_decline_target_must_exist():
+    bad = """
+steps:
+  ship:
+    ask:
+      prompt: ok?
+      from: [human]
+      on_decline: nowhere
+    instructions: ship
+"""
+    with pytest.raises(WorkflowError, match="unknown step 'nowhere'"):
+        model.parse(bad)
+
+
+def test_a_decline_route_is_a_real_edge():
+    """A loop whose only exit is a decline still counts as finishable."""
+    text = """
+steps:
+  work:
+    ask:
+      prompt: again?
+      from: [human]
+      on_decline: end
+    instructions: work
+    next: work
+"""
+    wf = model.parse(text)  # no 'no termination is reachable' error
+    assert set(wf.steps["work"].successors()) == {None, "work"}
+
+
+def test_gate_is_deprecated_without_becoming_a_run_warning():
+    wf = model.parse(GATED)
+    assert wf.warnings == []
+    assert len(wf.deprecations) == 1
+    assert "'gate:' is deprecated" in wf.deprecations[0]
+    assert "from: [human]" in wf.deprecations[0]
+    assert model.parse(ASK_FLOW).deprecations == []
+
+
+def test_select_chooser_accepts_a_delegation():
+    select = model.parse(DELEGATED_BRANCH).steps["verdict"].select
+    assert select.chooser == "delegate"
+    assert [c.describe() for c in select.delegate.candidates] == [
+        "reviewer 1 up",
+        "human",
+    ]
+
+
+def test_unknown_chooser_names_the_delegation_form():
+    bad = """
+steps:
+  s:
+    select:
+      prompt: p
+      chooser: nobody
+      options:
+        a: {description: d}
+"""
+    with pytest.raises(WorkflowError, match="from:"):
+        model.parse(bad)
+
+
+# --------------------------------------------------------------------------- #
+# engine: delegated approvals
+# --------------------------------------------------------------------------- #
+def test_ask_withholds_the_step_until_a_responder_answers(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow")
+
+    payload = _advance("implemented")
+    assert payload["status"] == "waiting_answer"
+    assert payload["reason"] == "approval"
+    assert "instructions" not in payload
+    assert [e["handle"] for e in payload["ask"]["asked"]] == ["leader-boss"]
+    # the driver cannot talk its own way past it
+    with pytest.raises(CflowError, match="not been delivered"):
+        engine.report("pretending")
+    assert engine.next_step()["status"] == "waiting_answer"
+
+    ask_id = payload["ask"]["id"]
+    receipt = engine.answer(ask_id, "approve", "diff looks right", by_session="boss")
+    assert receipt["status"] == "answered"
+    assert receipt["decision"] == "approve"
+    assert "instructions" not in receipt  # a responder never gets the step
+
+    payload = engine.next_step()
+    assert payload["status"] == "step"
+    assert payload["instructions"].strip() == "ship it"
+
+
+def test_a_run_cannot_answer_its_own_ask(flow_dir, monkeypatch):
+    _driving_session(monkeypatch, "driver")
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow")
+    ask_id = _advance("implemented")["ask"]["id"]
+
+    with pytest.raises(CflowError, match="cannot approve itself"):
+        engine.answer(ask_id, "approve", by_session="driver")
+    assert engine.status()["status"] == "waiting_answer"
+
+
+def test_a_session_that_was_not_asked_is_refused(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow")
+    ask_id = _advance("implemented")["ask"]["id"]
+
+    with pytest.raises(CflowError, match="was not asked this"):
+        engine.answer(ask_id, "approve", by_session="bystander")
+    with pytest.raises(CflowError, match="cannot be attributed"):
+        engine.answer(ask_id, "approve", by_session="")
+    assert engine.status()["status"] == "waiting_answer"
+
+
+def test_the_decision_set_is_closed(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow")
+    ask_id = _advance("implemented")["ask"]["id"]
+
+    for wording in ("lgtm", "yes", "approved!", ""):
+        with pytest.raises(CflowError, match="unknown decision"):
+            engine.answer(ask_id, wording, by_session="boss")
+    assert engine.status()["status"] == "waiting_answer"
+
+
+def test_an_answer_lands_once(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow")
+    ask_id = _advance("implemented")["ask"]["id"]
+
+    engine.answer(ask_id, "approve", by_session="boss")
+    with pytest.raises(CflowError, match="not open any more"):
+        engine.answer(ask_id, "decline", by_session="boss")
+
+
+def test_decline_routes_where_the_workflow_declared(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow")
+    ask_id = _advance("implemented")["ask"]["id"]
+
+    engine.answer(ask_id, "decline", "the tests do not cover it", by_session="boss")
+    payload = engine.status()
+    assert payload["step_id"] == "impl"
+    assert payload["visit"] == 2
+    events = [e["event"] for e in state_mod.read_journal()]
+    assert "ask_declined" in events
+
+
+def test_decline_without_a_route_holds_for_a_human(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "hold", ASK_HOLD)
+    engine.start("hold")
+    ask_id = engine.status()["ask"]["id"]
+
+    engine.answer(ask_id, "decline", "not yet", by_session="boss")
+    payload = engine.status()
+    assert payload["status"] == "waiting_approval"
+    assert payload["reason"] == "declined"
+    assert "not yet" in payload["gate"]
+    assert "instructions" not in payload
+    # and it does NOT re-ask the same responder in a loop
+    assert engine.next_step()["reason"] == "declined"
+
+    engine.approve(by="user")  # a human overrides
+    assert engine.next_step()["status"] == "step"
+
+
+def test_abstain_escalates_to_the_next_group(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1), ("leader", "bigboss", 2))
+    _write(flow_dir, "two", ASK_TWO_GROUPS)
+    engine.start("two")
+    payload = engine.status()
+    ask_id = payload["ask"]["id"]
+    assert [e["handle"] for e in payload["ask"]["asked"]] == ["leader-boss"]
+
+    engine.answer(ask_id, "abstain", "not my call", by_session="boss")
+    payload = engine.status()
+    assert payload["status"] == "waiting_answer"
+    assert [e["handle"] for e in payload["ask"]["asked"]] == ["leader-bigboss"]
+    assert payload["ask"]["id"] == ask_id  # the same decision, further up
+    assert "not my call" in payload["ask"]["skipped"][-1]["reason"]
+
+    # the group that already passed cannot answer any more
+    with pytest.raises(CflowError, match="no longer yours"):
+        engine.answer(ask_id, "approve", by_session="boss")
+    engine.answer(ask_id, "approve", by_session="bigboss")
+    assert engine.next_step()["status"] == "step"
+
+
+def test_an_unreachable_group_falls_through_to_the_human(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)  # nobody is up there
+    _write(flow_dir, "two", ASK_TWO_GROUPS)
+    engine.start("two")
+    payload = engine.status()
+    assert payload["status"] == "waiting_approval"
+    assert payload["reason"] == "ask"
+    assert payload["ask"]["asked"] == [{"kind": "human"}]
+    assert [s["candidate"] for s in payload["ask"]["skipped"]] == [
+        "leader 1 up",
+        "leader 2..3 up",
+    ]
+    engine.approve(by="user")
+    assert engine.next_step()["status"] == "step"
+
+
+def test_nobody_at_all_still_reaches_a_human(flow_dir, monkeypatch):
+    """A list with no human token, and nothing resolvable, must not self-approve."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)
+    _write(flow_dir, "hold", ASK_HOLD)
+    engine.start("hold")
+    payload = engine.status()
+    assert payload["status"] == "waiting_approval"
+    assert payload["ask"]["asked"] == []
+    assert "no candidate could be reached" in payload["note"]
+    with pytest.raises(CflowError, match="was not asked this"):
+        engine.answer(payload["ask"]["id"], "approve", by_session="boss")
+    engine.approve(by="user")
+    assert engine.next_step()["status"] == "step"
+
+
+def test_an_ask_closes_again_on_every_visit(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askloop", ASK_LOOP)
+    engine.start("askloop")
+    first = engine.status()["ask"]["id"]
+    engine.answer(first, "approve", by_session="boss")
+    # an approval unblocks; the step is still fetched by the agent itself
+    assert engine.next_step()["status"] == "step"
+    _advance("shipped once")
+    engine.select("yes", "round two", by="agent")
+
+    payload = engine.status()
+    assert payload["status"] == "waiting_answer"
+    assert payload["visit"] == 2
+    assert payload["ask"]["id"] != first  # a new decision, not a kept approval
+
+
+def test_goto_discards_an_open_ask(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow")
+    ask_id = _advance("implemented")["ask"]["id"]
+
+    engine.goto("impl", by="user", reason="redo it")
+    assert "ask_discarded" in [e["event"] for e in state_mod.read_journal()]
+    with pytest.raises(CflowError, match="not open any more"):
+        engine.answer(ask_id, "approve", by_session="boss")
+
+
+# --------------------------------------------------------------------------- #
+# engine: delegated branches
+# --------------------------------------------------------------------------- #
+def test_a_responder_picks_the_branch(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("reviewer", "peer", 1))
+    _write(flow_dir, "branch", DELEGATED_BRANCH)
+    engine.start("branch")
+    payload = engine.status()
+    assert payload["status"] == "waiting_answer"
+    assert payload["reason"] == "branch"
+    assert {o["name"] for o in payload["ask"]["options"]} == {"ready", "rework"}
+
+    ask_id = payload["ask"]["id"]
+    with pytest.raises(CflowError, match="unknown decision"):
+        engine.answer(ask_id, "ship", by_session="peer")
+
+    engine.answer(ask_id, "rework", "tests are thin", by_session="peer")
+    payload = engine.status()
+    assert payload["step_id"] == "impl"
+    assert payload["steps_completed"] == 1  # the decision counted as a step
+
+
+def test_the_driver_cannot_take_a_delegated_branch(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("reviewer", "peer", 1))
+    _write(flow_dir, "branch", DELEGATED_BRANCH)
+    engine.start("branch")
+    with pytest.raises(CflowError, match="not yours to make"):
+        engine.select("ready", "looks fine to me", by="agent")
+    assert engine.status()["status"] == "waiting_answer"
+
+
+def test_a_human_can_settle_a_delegated_branch(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)  # no reviewer above us
+    _write(flow_dir, "branch", DELEGATED_BRANCH)
+    engine.start("branch")
+    payload = engine.status()
+    assert payload["status"] == "waiting_selection"
+    assert payload["prompt"] == "ready?"
+
+    engine.select("ready", "I looked myself", by="user")
+    assert engine.status()["status"] == "done"
+    events = [e["event"] for e in state_mod.read_journal()]
+    assert "ask_answered" in events and "ask_discarded" not in events
