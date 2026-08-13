@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -1540,6 +1541,59 @@ def test_the_driver_cannot_take_a_delegated_branch(flow_dir, monkeypatch):
     engine.start("branch")
     with pytest.raises(CflowError, match="not yours to make"):
         engine.select("ready", "looks fine to me", by="agent")
+    assert engine.status()["status"] == "waiting_answer"
+
+
+def test_a_deadline_moves_the_question_up(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1), ("leader", "bigboss", 2))
+    _write(flow_dir, "two", ASK_TWO_GROUPS.replace("from:", "timeout: 600\n      from:"))
+    engine.start("two")
+    payload = engine.status()
+    ask_id = payload["ask"]["id"]
+    assert payload["ask"]["deadline"]
+
+    # not due yet: the clock is not a nudge to hurry up
+    assert engine.expire_ask() is None
+    assert [e["handle"] for e in engine.status()["ask"]["asked"]] == ["leader-boss"]
+
+    later = datetime.now(timezone.utc) + timedelta(seconds=601)
+    moved = engine.expire_ask(now=later)
+    assert moved["expired"] == "leader-boss"
+    assert moved["now_with"] == ["leader-bigboss"]
+    payload = engine.status()
+    assert payload["ask"]["id"] == ask_id  # the same decision, further up
+    assert "did not answer by" in payload["ask"]["skipped"][-1]["reason"]
+
+    # the group that lapsed cannot answer late
+    with pytest.raises(CflowError, match="no longer yours"):
+        engine.answer(ask_id, "approve", by_session="boss")
+
+
+def test_expiry_walks_off_the_end_to_a_human(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "hold", ASK_HOLD.replace("from:", "timeout: 60\n      from:"))
+    engine.start("hold")
+    later = datetime.now(timezone.utc) + timedelta(seconds=61)
+    engine.expire_ask(now=later)
+
+    payload = engine.status()
+    assert payload["status"] == "waiting_approval"  # never "proceed anyway"
+    assert payload["ask"]["asked"] == []
+    assert payload["ask"]["deadline"] is None  # nobody left to run a clock on
+    assert engine.expire_ask(now=later) is None
+
+
+def test_an_unclocked_ask_waits_forever(flow_dir, monkeypatch):
+    """No timeout means no timeout — it must not lapse into proceeding."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow")
+    _advance("implemented")
+    far = datetime.now(timezone.utc) + timedelta(days=365)
+    assert engine.expire_ask(now=far) is None
     assert engine.status()["status"] == "waiting_answer"
 
 

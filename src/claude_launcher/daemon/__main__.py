@@ -17,7 +17,7 @@ import time
 from aiohttp import web
 
 from .. import daemon_client, store
-from . import paths, runtime_state
+from . import cflow_clock, paths, runtime_state
 from .api import build_app
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -109,6 +109,8 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     if uplink is not None:
         _wire_federation(mesh_manager, uplink)
     mesh_manager.start()
+    ask_clock = cflow_clock.AskClock()
+    ask_clock.start()
 
     try:
         await app["shutdown_event"].wait()
@@ -124,6 +126,7 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
                 await uplink_task
             except (asyncio.CancelledError, Exception):
                 pass
+        await ask_clock.shutdown()
         await mesh_manager.shutdown()
         runtime_state.remove_daemon_json()
         await manager.shutdown_all()

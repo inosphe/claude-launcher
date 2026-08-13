@@ -1193,6 +1193,56 @@ def select(
     }
 
 
+@_locked_op
+def expire_ask(*, now: Optional[datetime] = None, cwd: Optional[str] = None) -> Optional[dict]:
+    """Move a timed-out ask on to the next candidate group. Daemon-driven.
+
+    Nothing calls into a stopped run, so an expiry cannot be noticed lazily
+    the way a gate is: the agent that would ask is the one waiting. The daemon
+    owns this clock (see :mod:`..daemon.cflow_clock`), which is also why a
+    workflow with no daemon behind it simply keeps waiting — the timeout
+    lapses into "no timeout", never into "proceed unapproved".
+
+    Returns what happened, or ``None`` when there was nothing to expire.
+    """
+    if not state_mod.has_run(cwd):
+        return None
+    try:
+        workflow, state = _load(cwd)
+    except state_mod.StateError:
+        return None
+    if state.get("status") in ("done", "aborted"):
+        return None
+    ask = state.get("ask")
+    deadline = (ask or {}).get("deadline")
+    if not ask or not deadline:
+        return None
+    step = workflow.step(state["current"])
+    if ask.get("step") != step.id or ask.get("visit") != _visits(state, step.id):
+        return None  # stale; the run moved and `_move_to` will have cleared it
+    try:
+        due = datetime.fromisoformat(str(deadline))
+    except ValueError:
+        return None
+    if due.tzinfo is None:
+        due = due.replace(tzinfo=timezone.utc)
+    if (now or datetime.now(timezone.utc)) < due:
+        return None
+    who = ", ".join(e.get("handle") or e["kind"] for e in ask.get("asked") or [])
+    reopened = _escalate(
+        state, step, ask, cwd, why=f"{who or 'nobody'} did not answer by {deadline}"
+    )
+    return {
+        "run": state["run_id"],
+        "ask": ask["id"],
+        "step": step.id,
+        "expired": who,
+        "now_with": [
+            e.get("handle") or e["kind"] for e in reopened.get("asked") or []
+        ],
+    }
+
+
 def _ask_addresses(ask: Optional[dict], session: str) -> bool:
     return bool(ask) and any(
         e.get("kind") == "member" and e.get("session") == session
