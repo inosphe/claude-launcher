@@ -679,8 +679,8 @@ def _cmd_mcp(_args: argparse.Namespace) -> int:
 def _cmd_install(args: argparse.Namespace) -> int:
     from .cli import run_install
 
-    print("note: 'mesh install' is now 'claunch install'; installing both "
-          "skills and the merged MCP server")
+    print("note: 'mesh install' is now 'claunch install'; installing every "
+          "skill and the merged MCP server")
     return run_install(args.profile, args.project)
 
 
@@ -999,7 +999,7 @@ def register(sub) -> None:
 
     p = msub.add_parser(
         "install",
-        help="alias for 'claunch install' (one MCP server + both skills)",
+        help="alias for 'claunch install' (one MCP server + every skill)",
     )
     p.add_argument("--profile", help="install into this profile's config dir")
     p.add_argument("--project", nargs="?", const=".", default=None,

@@ -300,8 +300,8 @@ def _cmd_journal(args: argparse.Namespace) -> int:
 def _cmd_install(args: argparse.Namespace) -> int:
     from .cli import run_install
 
-    print("note: 'cflow install' is now 'claunch install'; installing both "
-          "skills and the merged MCP server")
+    print("note: 'cflow install' is now 'claunch install'; installing every "
+          "skill and the merged MCP server")
     return run_install(args.profile, args.project)
 
 
@@ -414,7 +414,7 @@ def register(sub) -> None:
 
     q = csub.add_parser(
         "install",
-        help="alias for 'claunch install' (one MCP server + both skills)",
+        help="alias for 'claunch install' (one MCP server + every skill)",
     )
     q.add_argument("--profile", help="install into this claunch profile")
     q.add_argument(

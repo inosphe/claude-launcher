@@ -438,7 +438,7 @@ def _cmd_harnesses(_args: argparse.Namespace) -> int:
 
 
 def run_install(profile_name: Optional[str], project: Optional[str]) -> int:
-    """Register the MCP server and both skills — the body of ``claunch install``.
+    """Register the MCP server and every skill — the body of ``claunch install``.
 
     Shared with the ``cflow install`` / ``mesh install`` aliases, which now
     install the same lot: the tools ship in one server, so there is no half of
