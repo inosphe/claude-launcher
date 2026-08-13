@@ -123,6 +123,15 @@ def build_app(
     relay_state=None,
 ) -> web.Application:
     cookie_sessions: set = set()
+    # Identifies this daemon *process*, and is handed out by /api/health (which
+    # needs no auth), /api/daemon and every terminal socket's init frame. A
+    # value a client has not seen before means the daemon it was talking to is
+    # gone: its login cookie died with it (they live in memory, above), the pids
+    # it published belong to the previous incarnation, and any socket still held
+    # open is bound to nothing. Uptime could be read the same way, but only by
+    # subtraction and only if the client kept the previous reading; an id says
+    # it outright, and says it identically on all three surfaces.
+    boot_id = secrets.token_hex(8)
     app = web.Application(
         middlewares=[
             revalidate_middleware,
@@ -136,6 +145,7 @@ def build_app(
     app["token"] = token
     app["cookie_sessions"] = cookie_sessions
     app["started_at"] = started_at
+    app["boot_id"] = boot_id
     app["shutdown_event"] = asyncio.Event()
     app["websockets"] = set()
     # Open terminal sockets never close on their own; without this, runner
@@ -255,7 +265,13 @@ async def _close_websockets(app: web.Application) -> None:
 # handlers
 # --------------------------------------------------------------------------- #
 async def h_health(request: web.Request) -> web.Response:
-    return web.json_response({"status": "ok", "version": __version__})
+    # Open, and deliberately the only place a client can learn *both* that the
+    # daemon is answering and which daemon it is without holding a credential:
+    # a browser whose cookie died in the restart still needs to be able to tell
+    # "not back yet" from "back, and I must log in again".
+    return web.json_response(
+        {"status": "ok", "version": __version__, "boot_id": request.app["boot_id"]}
+    )
 
 
 async def h_auth_session(request: web.Request) -> web.Response:
@@ -278,6 +294,7 @@ async def h_daemon_info(request: web.Request) -> web.Response:
     return web.json_response(
         {
             "version": __version__,
+            "boot_id": request.app["boot_id"],
             "uptime": round(time.monotonic() - request.app["started_at"], 1),
             # 'sessions' counts records, most of which may be exited ones kept
             # for respawn; 'running' is how many have a live child.

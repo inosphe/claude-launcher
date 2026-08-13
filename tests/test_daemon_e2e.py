@@ -203,6 +203,14 @@ def test_ws_attach_to_a_retired_record(home, tmp_path):
             # the pid of the child it *had*: an incarnation tag that survives
             # the restart, so a viewer can spot a later respawn
             assert init["pid"] == last_pid
+            # ...which is exactly why the frame carries the daemon's boot id as
+            # well. The pid here belongs to the *previous* daemon's child, so a
+            # browser reconnecting across the restart cannot tell from the pid
+            # alone that its socket is looking at something new. The boot id
+            # can: it is this process's, and it matches what /api/health says.
+            assert init["boot_id"] == app["boot_id"]
+            health = await (await client.get("/api/health")).json()
+            assert health["boot_id"] == app["boot_id"]
             repaint = await ws.receive(timeout=10)
             assert repaint.type == aiohttp.WSMsgType.BINARY
             assert b"READY" in repaint.data  # its last screen, replayed from the log
@@ -907,12 +915,22 @@ def test_api_end_to_end(home, tmp_path):
             # health is open; everything else requires auth
             resp = await client.get("/api/health")
             assert resp.status == 200
+            health = await resp.json()
             resp = await client.get("/api/sessions")
             assert resp.status == 401
 
             bearer = {"Authorization": "Bearer sekrit"}
             resp = await client.get("/api/sessions", headers=bearer)
             assert resp.status == 200
+
+            # A browser that lost its cookie in a restart has only the open
+            # endpoint left, so that is where the daemon's identity has to be
+            # readable: same id from behind the auth wall, and a different one
+            # from a different process (which is what makes it worth reading).
+            resp = await client.get("/api/daemon", headers=bearer)
+            assert (await resp.json())["boot_id"] == health["boot_id"]
+            other = build_app(_manager(), "sekrit", started_at=time.monotonic())
+            assert other["boot_id"] != health["boot_id"]
 
             # browser cookie flow
             resp = await client.post("/api/auth/session", json={"token": "wrong"})

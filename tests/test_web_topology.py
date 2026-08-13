@@ -20,9 +20,11 @@ message trace's event list — the order a mesh's traffic is read in, and what
 the picture is allowed to claim about where each message got to —
 ``seqrender_check`` on the sequence that list is drawn into, ``zoom_check`` on
 the header's text-size knob — which sizes the session's grid and not merely
-this tab's view — and the two ``flow*_check`` harnesses on the flow view — one
-on the track a workflow becomes, one on the page those tracks are drawn into.
-This wrapper is what makes them run with everything else.
+this tab's view — ``reconnect_check`` on the terminal's link, the one thing
+here that is not a poll and so has to repair itself deliberately, and the two
+``flow*_check`` harnesses on the flow view — one on the track a workflow
+becomes, one on the page those tracks are drawn into. This wrapper is what
+makes them run with everything else.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
@@ -52,6 +54,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "seq_check.js",
         "seqrender_check.js",
         "zoom_check.js",
+        "reconnect_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
     ],

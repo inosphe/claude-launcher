@@ -1641,6 +1641,22 @@ The daemon doubles as a web server. `claunch web --open` prints/opens the UI:
 a session list (status badges, create/kill) plus a **live xterm.js terminal**
 attached over WebSocket — full input and output, multiple viewers allowed.
 
+That socket **repairs itself**. A daemon restart, a laptop waking up or a
+relay dropping its tunnel takes the terminal's connection with it, and the tab
+goes and gets another one: a chip in the header counts the attempts down while
+it retries on a backoff, and each attempt first asks the open `/api/health`
+endpoint whether the daemon is even back — which also renews the login cookie,
+since those live in the daemon's memory and die with it. Reconnecting is
+cheap and lossless because every socket opens with a full repaint, so the
+screen comes back as it now *is*, scrollback intact. Keystrokes typed while it
+was down are held and replayed, but only into the same child — a session
+relaunched under the same name gets a clean prompt and a note saying so.
+The retries are bounded rather than endless: when they run out the chip says
+`disconnected` and waits, and pressing it (or the network coming back, or the
+daemon answering with a boot id the page has not seen) tries again. The rail's
+version readout says `daemon offline` for as long as nothing answers, so a
+list of sessions is never mistaken for a list of *current* sessions.
+
 Both fields that used to take free text are now pickers. **Harness** lists the
 [declared set](#other-harnesses-codex-pi-) — one that is declared but not
 installed on this machine (`pi`, out of the box) is shown greyed out as
@@ -1780,9 +1796,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 
 | Method | Path | Purpose |
 | ------ | ---- | ------- |
-| GET    | `/api/health`                  | liveness (unauthenticated) |
+| GET    | `/api/health`                  | liveness + `boot_id` (unauthenticated — a client whose login died in a restart can still tell "not back yet" from "back, log in again") |
 | POST   | `/api/auth/session`            | token → HttpOnly cookie (browser login) |
-| GET    | `/api/daemon`                  | version/uptime/session count |
+| GET    | `/api/daemon`                  | version/`boot_id`/uptime/session count |
 | POST   | `/api/daemon/shutdown`         | graceful stop |
 | GET/POST | `/api/sessions`              | list / create (`{name?, harness?, profile?, cwd?, args?, env?, role?, resume?, fork_session?}`; `resume` = session name, conversation uuid, or `""`/`true` for claude's picker). Onboarding is optional and composed in the same call: `{mesh?, handle?, connect?, workflow?, context?, task?}` — checked before anything is built, and reported per leg beside the session's own fields |
 | DELETE | `/api/sessions`                | clear all exited records (`?logs=1` deletes their logs) |

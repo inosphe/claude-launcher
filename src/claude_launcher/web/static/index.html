@@ -28,6 +28,10 @@
     <span id="m-dot" class="dot"></span>
     <span id="m-title">no session</span>
     <span id="m-status" class="badge"></span>
+    <!-- Mirror of the header's link chip. It says what the *socket* is doing,
+         which the badge beside it cannot: that one reports the session, and
+         the session runs on happily while this phone cannot see it. -->
+    <button id="m-link" class="m-act link-chip hidden" type="button"></button>
     <!-- The header's text-size knob goes down with the header on a phone, and
          it is the control a small screen needs most. Two of its three parts
          come along: the readout that doubles as a reset is what a bar this
@@ -75,6 +79,11 @@
     <div id="term-header" class="hidden">
       <span id="term-title"></span>
       <span id="term-status" class="badge"></span>
+      <!-- Up only while the socket is down: reconnecting (with the try it is
+           on) or given up. Pressing it retries at once, which is the whole
+           reason it is a button — the automatic retries are bounded, and after
+           they are spent this is how a person says "now". -->
+      <button id="term-link" class="term-btn link-chip hidden" type="button"></button>
       <!-- The two that change the session keep to the left, in with the name
            and the badge they act on. `details` holds the far right on its
            own — the handle of the rail that opens along that edge, and while
