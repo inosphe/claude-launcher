@@ -1320,9 +1320,12 @@ class MeshManager:
         parent = self.parent_handle_for(mesh, session)
         member = Member(handle, session, role=self._resolve_role(mesh, handle, role))
         # Absolute from birth on a federated mesh, for the reason in
-        # _stamp_own_members: that runs when a mesh federates, at a handover
+        # _absolutize_roster: that runs when a mesh federates, at a handover
         # and on migration — none of which is a join, so a member enrolled
         # AFTER federation stayed blank and every mirror read it as its own.
+        # `me`, not `authority`: this path only ever enrols OUR sessions. A
+        # guest's join is the authority's `peer_join_accept`, which is handed
+        # the guest's machine and names it outright.
         if mesh.peers and mesh.me:
             member.machine = mesh.me
         mesh.members[handle] = member
@@ -1452,7 +1455,13 @@ class MeshManager:
         if member is None:
             raise MeshError(f"no member {handle!r} in mesh {name!r}")
         if mesh.primary:
-            if member.machine != self.machine:
+            # Same shape as `_is_local`'s mirror arm, blank relay name and
+            # all: without the first clause an unnamed daemon compares "" to
+            # "" and waves a blank row through. `_peer_call` refuses that
+            # case a line later, so this is agreement rather than a fix — but
+            # a guard that reads differently from the rule it enforces is how
+            # the two got out of step to begin with.
+            if not (bool(self.machine) and member.machine == self.machine):
                 raise MeshError(
                     f"{handle!r} is not a member from this daemon — the "
                     f"primary ({mesh.primary}) owns the roster"
@@ -2064,8 +2073,11 @@ class MeshManager:
                 "a forced takeover has to put this daemon at rank 0 — it is "
                 "the only order the other peers can be told about from here"
             )
-        # Absolute roster before anything moves: see _stamp_own_members.
-        self._stamp_own_members(mesh)
+        # Absolutise against the OUTGOING rank order, which is why this runs
+        # before the assignment below and must not be moved past it: the
+        # blanks belong to the authority losing rank 0, not to whoever is
+        # taking it. In a forced takeover that is somebody else's daemon.
+        self._absolutize_roster(mesh)
         before = (list(mesh.peers), mesh.authority_epoch, mesh.next_seq)
         mesh.peers = order
         if now != was:
@@ -2722,26 +2734,43 @@ class MeshManager:
         keeps the authority it already had as its sole owner.
         """
         if mesh.me and mesh.me not in mesh.peers:
+            # After the insert, so `authority` is us — which it is: this is
+            # the daemon federating its own mesh, and the blanks are its own.
             mesh.peers.insert(0, mesh.me)
-            self._stamp_own_members(mesh)
+            self._absolutize_roster(mesh)
         if machine and machine not in mesh.peers:
             mesh.peers.append(machine)
 
     @staticmethod
-    def _stamp_own_members(mesh: Mesh) -> None:
-        """Give our own members an explicit machine.
+    def _absolutize_roster(mesh: Mesh) -> None:
+        """Give every unstamped member the authority's machine.
 
         Before phase 7 a blank ``machine`` meant "the authority's own", which
         was unambiguous only because authority never moved. It moves now, so
         the roster has to be absolute: a member left blank would be claimed
         by whoever holds rank 0 next, and delivery would follow it to a
         daemon that does not have the session.
+
+        The owner of a blank row is therefore ``mesh.authority``, not
+        ``mesh.me`` — the same value only while we hold rank 0, which is why
+        writing ``me`` was right everywhere except the one place it mattered.
+        There is no ownership filter here and never was: on a mirror this
+        rewrites the *authority's* rows, so stamping them with our own name
+        hands us members whose sessions we do not host.
+
+        Callers must have ``mesh.peers`` already in the state that makes
+        ``mesh.authority`` the owner of the blanks — three call sites, four
+        branches (``_migrate_v2`` has two), and each does, on its own side of
+        its rank-list assignment. Moving a call across that assignment
+        silently changes who the blanks are attributed to, and ``authority``
+        falls back to ``mesh.me`` whenever ``peers`` is empty.
         """
-        if not mesh.me:
+        owner = mesh.authority
+        if not owner:
             return
         for member in mesh.members.values():
             if not member.machine:
-                member.machine = mesh.me
+                member.machine = owner
 
     @staticmethod
     def _raise_seq_floor(mesh: Mesh) -> None:
@@ -4649,7 +4678,11 @@ class MeshManager:
         mesh.peers = peers
         for machine, link_doc in links.items():
             mesh.links.setdefault(machine, link_doc)
-        self._stamp_own_members(mesh)
+        # After the assignment above, and must not be moved before it: until
+        # then `peers` is empty (this runs only when it is — see the guard at
+        # the top), so `authority` would fall back to `mesh.me` and the
+        # mirror branch would claim the primary's rows as ours.
+        self._absolutize_roster(mesh)
         mesh._v2 = None
         log.info(
             "mesh %r: migrated federation state to rank order %s",
