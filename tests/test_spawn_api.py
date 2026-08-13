@@ -51,6 +51,18 @@ async def _serve(mgr, mm):
     return client
 
 
+async def _wait_for(cond, what: str, timeout: float = 15.0) -> None:
+    """Poll ``cond`` until it holds. A kill is a signal, not a state change:
+    the process is gone when it is gone, so the assertions after one have to
+    wait for it rather than read the tick they were written on."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if cond():
+            return
+        await asyncio.sleep(0.05)
+    raise AssertionError(f"timed out waiting for {what}")
+
+
 
 def _declare_review_workflow(cwd) -> None:
     """A one-step workflow declared in ``cwd``, so preflight can find it."""
@@ -899,6 +911,153 @@ def test_a_session_that_fails_to_start_does_not_leave_its_mesh_seat_behind(
             # and the name is genuinely free again
             resp = await client.get("/api/sessions", headers=BEARER)
             assert [s["name"] for s in (await resp.json())["sessions"]] == []
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_an_agent_ends_the_child_it_spawned(home, tmp_path):
+    """The counterpart of the POST: a slot given back by the one who took it.
+
+    Without it a session could grow a team and never retire it — every child
+    is a live terminal against the spawn budget, and the only way to end one
+    was to ask a human.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            resp = await client.post(
+                "/api/sessions/lead/children", json={"name": "w1"}, headers=BEARER
+            )
+            assert resp.status == 201
+            assert mgr.children("lead") == ["w1"]
+
+            resp = await client.delete(
+                "/api/sessions/lead/children/w1", headers=BEARER
+            )
+            assert resp.status == 200
+            assert (await resp.json())["name"] == "w1"
+            await _wait_for(lambda: mgr.get("w1").exited, "w1 to exit")
+
+            # the mesh row stays, saying what it is rather than vanishing:
+            # the child is respawnable until somebody clears it, and a roster
+            # that forgot it would forget the work it was doing
+            mesh = mm.get(mm.list()[0].name)
+            assert "w1" in mesh.members
+            assert mm.mesh_info(mesh)["members"][-1]["reachability"] == "exited"
+
+            # calling again on the exited child drops the record instead
+            resp = await client.delete(
+                "/api/sessions/lead/children/w1", headers=BEARER
+            )
+            assert resp.status == 200
+            resp = await client.get("/api/sessions", headers=BEARER)
+            names = [s["name"] for s in (await resp.json())["sessions"]]
+            assert names == ["lead"]
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_session_may_not_end_a_peer_or_itself(home, tmp_path):
+    """Authority runs down the tree only.
+
+    Two workers spawned by one lead are peers, and a peer that can end its
+    peer turns a coordination bug into a lost session. Ending yourself is
+    refused for a plainer reason: the caller would be answering from a
+    terminal it had just closed. Both are the operator's to do.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            for child in ("w1", "w2"):
+                resp = await client.post(
+                    "/api/sessions/lead/children",
+                    json={"name": child},
+                    headers=BEARER,
+                )
+                assert resp.status == 201
+
+            # sibling: refused
+            resp = await client.delete(
+                "/api/sessions/w1/children/w2", headers=BEARER
+            )
+            assert resp.status == 403
+            assert "not a peer" in (await resp.json())["error"]
+
+            # upwards: refused (a child does not retire its parent)
+            resp = await client.delete(
+                "/api/sessions/w1/children/lead", headers=BEARER
+            )
+            assert resp.status == 403
+
+            # itself: refused
+            resp = await client.delete(
+                "/api/sessions/w1/children/w1", headers=BEARER
+            )
+            assert resp.status == 400
+            assert "cannot end itself" in (await resp.json())["error"]
+
+            # nobody died
+            assert not mgr.get("w1").exited and not mgr.get("w2").exited
+            assert not mgr.get("lead").exited
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_grandchild_is_reachable_but_a_stranger_is_not(home, tmp_path):
+    """``commands`` is the whole subtree, not just direct children — a lead
+    retires a team its worker built. A session outside the subtree is not
+    reachable at all, spawned by nobody in it."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name="rogue", harness="py", cwd=str(tmp_path)))
+            resp = await client.post(
+                "/api/sessions/lead/children", json={"name": "w1"}, headers=BEARER
+            )
+            assert resp.status == 201
+            resp = await client.post(
+                "/api/sessions/w1/children", json={"name": "gc"}, headers=BEARER
+            )
+            assert resp.status == 201
+
+            # a root session it never spawned
+            resp = await client.delete(
+                "/api/sessions/lead/children/rogue", headers=BEARER
+            )
+            assert resp.status == 403
+            assert not mgr.get("rogue").exited
+
+            # its worker's worker
+            resp = await client.delete(
+                "/api/sessions/lead/children/gc", headers=BEARER
+            )
+            assert resp.status == 200
+            await _wait_for(lambda: mgr.get("gc").exited, "gc to exit")
+            assert not mgr.get("w1").exited
         finally:
             await mgr.shutdown_all()
             await client.close()

@@ -226,6 +226,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_get("/api/sessions/{name}/children", h_session_children)
     r.add_post("/api/sessions/{name}/children", h_session_spawn)
+    r.add_delete("/api/sessions/{name}/children/{child}", h_session_child_kill)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
@@ -1593,6 +1594,47 @@ async def h_session_delete(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     force = request.query.get("force") in ("1", "true")
     session = manager.kill(request.match_info["name"], force=force)
+    return web.json_response(session.info())
+
+
+async def h_session_child_kill(request: web.Request) -> web.Response:
+    """Retire a session an agent spawned — the counterpart of the POST above.
+
+    Scoped by the route rather than by a flag: ``DELETE /api/sessions/{name}``
+    is the operator's, who may end anything, and this one only reaches down
+    ``name``'s own subtree. The rule is :meth:`SessionManager.commands`, the
+    same one that decides which mesh edges an agent may rewire, so an agent
+    ends what it created and nothing else — not a sibling, and not itself,
+    which would leave the caller answering from a terminal it just closed.
+
+    An already-exited child is deregistered rather than signalled, which is
+    what makes this the tidy-up call too. What it does not do is touch the
+    mesh: the member row stays, reading ``exited``, because that is what it
+    is, and because a killed child is respawnable until somebody clears it.
+    """
+    manager: SessionManager = request.app["manager"]
+    parent = request.match_info["name"]
+    child = request.match_info["child"]
+    try:
+        manager.get(parent)
+        manager.get(child)
+    except ManagerError as exc:
+        return json_error(404, str(exc))
+    if parent == child:
+        return json_error(
+            400,
+            f"{parent!r} cannot end itself here — this route ends a session "
+            "you spawned. An operator can (claunch kill-session).",
+        )
+    if not manager.commands(parent, child):
+        return json_error(
+            403,
+            f"{parent!r} may not end {child!r}: an agent ends a session it "
+            "spawned (or a descendant of one), not a peer. Ask the session "
+            "that spawned it, or an operator (claunch kill-session).",
+        )
+    force = request.query.get("force") in ("1", "true")
+    session = manager.kill(child, force=force)
     return web.json_response(session.info())
 
 

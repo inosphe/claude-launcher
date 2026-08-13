@@ -1277,8 +1277,8 @@ def test_mesh_mcp_tools(home, monkeypatch):
     assert [t["name"] for t in tools["result"]["tools"]] == [
         # talking ...
         "send", "members", "history",
-        # ... and building the team that does it
-        "spawn", "children", "connect", "disconnect",
+        # ... and building the team that does it: made, counted, ended, wired
+        "spawn", "children", "kill", "connect", "disconnect",
     ]
 
     # send requires a session identity
@@ -1317,6 +1317,46 @@ def test_mesh_mcp_tools(home, monkeypatch):
     assert json.loads(resp["result"]["content"][0]["text"])["members"] == [
         {"handle": "w1"}
     ]
+
+    # kill addresses the caller's own subtree — the route carries the scope,
+    # so the tool cannot express "end somebody else's child" at all
+    killed = []
+
+    class KillClient(FakeClient):
+        def delete(self, path, **kw):
+            killed.append(path)
+            return {"name": "w1", "exited": True}
+
+    monkeypatch.setattr(mesh_mcp.daemon_client, "connect", lambda: KillClient())
+    resp = mesh_mcp._handle(
+        {
+            "jsonrpc": "2.0", "id": 6, "method": "tools/call",
+            "params": {"name": "kill", "arguments": {"session": "w1"}},
+        }
+    )
+    assert resp["result"]["isError"] is False
+    resp = mesh_mcp._handle(
+        {
+            "jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            "params": {"name": "kill",
+                       "arguments": {"session": "w1", "force": True}},
+        }
+    )
+    assert resp["result"]["isError"] is False
+    assert killed == [
+        "/api/sessions/s0/children/w1",
+        "/api/sessions/s0/children/w1?force=1",
+    ]
+
+    # and it names what to end rather than defaulting to something
+    resp = mesh_mcp._handle(
+        {
+            "jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            "params": {"name": "kill", "arguments": {}},
+        }
+    )
+    assert resp["result"]["isError"] is True
+    assert "'session' is required" in resp["result"]["content"][0]["text"]
 
 
 def test_cursors_phase1_format_migrates(home, tmp_path):

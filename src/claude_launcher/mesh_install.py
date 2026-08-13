@@ -25,7 +25,8 @@ description: >-
   typed into your terminal by the daemon. ALSO the only correct way to CREATE
   a session from inside one — read it before running any 'claunch
   new-session', which is the user's command and is refused here — including
-  how to spawn a child, enrol it in the mesh and set who may talk to whom.
+  how to spawn a child, enrol it in the mesh, set who may talk to whom, and
+  end it when it is done.
   Usage: /mesh MESH [HANDLE] — join (or resume membership in) MESH as HANDLE
   (its leading word picks your role; omit to use your session name). Also use
   when a mesh delivery or briefing block tells you to activate the mesh skill,
@@ -137,6 +138,16 @@ yours to carry out, with `spawn`.
 Spawn when the work genuinely splits — parallel tracks, or a second pair of
 eyes you will actually talk to. Every child is a real terminal burning real
 tokens, and one you never message is pure cost.
+
+**`kill` ends one and gives the slot back.** MCP `kill` with the child's
+`session` name — the same authority as `connect`: your own subtree, never a
+peer and never yourself. Use it when a child's work is done and you have its
+report, not to quiet one you stopped reading: ending a session mid-task loses
+whatever it had not sent you, and if you are unsure whether it is still
+working, ask it first. Its mesh row stays, reading `exited`, so the roster
+still shows who did the work; calling `kill` again on an exited child drops
+the record. Killing is yours to do, but clearing and respawning are the
+user's (`claunch clear-sessions`, `claunch respawn`).
 
 **Your children start connected to YOU and to nobody else** (unless the mesh
 declares extra wiring — some meshes connect, say, every worker to a reviewer).

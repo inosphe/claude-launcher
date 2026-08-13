@@ -13,11 +13,13 @@ tools over shell, in two groups:
   deliberately no ``recv``, because incoming messages are typed into the
   member's terminal by the daemon, so receiving needs no tool, no polling and
   no cooperation (the design's core invariant; see ``docs/mesh-design.md``).
-- **Building** — ``spawn``, ``children``, ``connect``, ``disconnect``. A
-  session can create further sessions, enrol them in its mesh and decide who
-  they may talk to. What it may spawn is capped by the ``spawn`` policy (see
-  :mod:`claude_launcher.spawn`); which edges it may rewire is capped by the
-  session tree — an agent rewires only what it spawned.
+- **Building** — ``spawn``, ``children``, ``kill``, ``connect``,
+  ``disconnect``. A session can create further sessions, enrol them in its
+  mesh, decide who they may talk to and end them when they are done. What it
+  may spawn is capped by the ``spawn`` policy (see
+  :mod:`claude_launcher.spawn`); which edges it may rewire and which sessions
+  it may end are capped by the session tree — an agent touches only what it
+  spawned.
 
 The caller is identified by ``$CLAUNCH_SESSION`` — the env var every managed
 session's children inherit — exactly like the CLI.
@@ -212,6 +214,41 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "kill",
+        "description": (
+            "End a session you spawned (or one of its descendants) and give "
+            "its slot back — the counterpart of 'spawn'. A peer is refused "
+            "and so are you: authority runs down the tree only. Use it when "
+            "a child's work is done, not to silence one you have stopped "
+            "reading — a child you never message is cost either way, but "
+            "ending one mid-task loses whatever it had not reported. Its "
+            "mesh row stays, reading 'exited', and it can be respawned by an "
+            "operator until somebody clears it; calling this on an "
+            "already-exited child drops the record instead."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session": {
+                    "type": "string",
+                    "description": (
+                        "the child's session name, as 'children' lists it "
+                        "(the session name, not its mesh handle)"
+                    ),
+                },
+                "force": {
+                    "type": "boolean",
+                    "description": (
+                        "skip the graceful terminate. Default false, which "
+                        "lets the harness shut itself down; force only after "
+                        "a graceful end has visibly failed to take"
+                    ),
+                },
+            },
+            "required": ["session"],
+        },
+    },
+    {
         "name": "connect",
         "description": (
             "Let two members of a mesh message each other. At least one of "
@@ -281,6 +318,14 @@ def call_tool(name: str, args: dict) -> dict:
         return _client().get(f"/api/sessions/{_session()}/children")
     if name == "spawn":
         return _spawn(args)
+    if name == "kill":
+        child = str(args.get("session") or "")
+        if not child:
+            raise MeshMcpError("'session' is required")
+        q = "?force=1" if args.get("force") else ""
+        return _client().delete(
+            f"/api/sessions/{_session()}/children/{child}{q}"
+        )
 
     mesh = str(args.get("mesh") or "")
     if not mesh:
