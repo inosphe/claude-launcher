@@ -36,20 +36,25 @@ def _resolve_scope(args: argparse.Namespace):
 
 
 def _cmd_ls(_args: argparse.Namespace) -> int:
-    flows = state_mod.list_workflows()
+    flows = state_mod.resolved_workflows()
     if not flows:
         dirs = ", ".join(str(d) for d in state_mod.search_dirs())
         print(f"no workflows found (searched: {dirs})")
         print("write one, or scaffold an example: claunch cflow example")
         return 0
-    for name, path in flows:
+    for wf_ref in flows:
         try:
-            wf = model.load(path)
+            wf = model.load(wf_ref.path)
             desc = wf.description or ""
             count = wf.step_count()
-            print(f"{name:<24} {count:>3} steps  {desc}  [{path}]")
+            print(f"{wf_ref.name:<24} {count:>3} steps  {desc}  [{wf_ref.path}]")
         except model.WorkflowError as exc:
-            print(f"{name:<24} (invalid: {exc})  [{path}]")
+            print(f"{wf_ref.name:<24} (invalid: {exc})  [{wf_ref.path}]")
+        # Which layer answered, and — the part worth the extra line — what it
+        # kept from answering. Two copies of one workflow drift; a listing
+        # that shows only the winner is how nobody notices.
+        for shadowed in wf_ref.shadows:
+            print(f"{'':<24} {wf_ref.origin} copy overrides [{shadowed}]")
     return 0
 
 
@@ -310,11 +315,81 @@ def _cmd_example(args: argparse.Namespace) -> int:
     if target.exists():
         print(f"error: {target} already exists", file=sys.stderr)
         return 1
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(install.EXAMPLE_WORKFLOW, encoding="utf-8")
+    install.install_workflow(install.example_workflow(), target)
     print(f"wrote example workflow: {target}")
     print(f"run it with: /cflow {args.name} <task description>")
     return 0
+
+
+def _cmd_add(args: argparse.Namespace) -> int:
+    """Put a workflow file into a layer, having first read it.
+
+    The reason this exists rather than a documented ``cp``: the destination
+    layer is the one nobody looks at. A broken YAML copied into a project is
+    found the next time somebody runs it; copied into the shared layer it sits
+    there until an unrelated project's picker breaks on it. So the file is
+    parsed before it is installed, and a failure is refused here, once, where
+    the person who can fix it is standing.
+    """
+    if args.name and len(args.workflow) > 1:
+        print(
+            "error: --name renames one workflow; you gave several",
+            file=sys.stderr,
+        )
+        return 1
+    if args.project:
+        dest_dir = Path(".") / state_mod.PROJECT_WORKFLOWS
+        layer = state_mod.LAYER_PROJECT
+    else:
+        dest_dir = state_mod.global_workflows_dir()
+        layer = state_mod.LAYER_GLOBAL
+
+    failed = False
+    for ref in args.workflow:
+        # A name, not just a path: promoting a project's workflow to the
+        # shared layer is the common case, and it should not require knowing
+        # where either layer keeps its files.
+        try:
+            src = state_mod.locate(ref).path
+            wf = model.load(src)
+        except model.WorkflowError as exc:
+            print(f"error: {ref}: {exc}", file=sys.stderr)
+            failed = True
+            continue
+        dest = dest_dir / f"{args.name or src.stem}.yaml"
+        if dest.resolve() == src.resolve():
+            print(f"error: {src} is already the {layer} copy", file=sys.stderr)
+            failed = True
+            continue
+        outcome = install.install_workflow(src, dest, force=args.force)
+        if outcome == install.KEPT:
+            print(
+                f"error: {dest} already exists and differs; pass --force to "
+                f"replace it",
+                file=sys.stderr,
+            )
+            failed = True
+            continue
+        verb = "already there" if outcome == install.UNCHANGED else "added"
+        print(f"{verb}: {dest}  ({wf.step_count()} steps, {layer})")
+        _report_shadowing(dest.stem, layer)
+    return 1 if failed else 0
+
+
+def _report_shadowing(name: str, layer: str) -> None:
+    """Say if what was just added is not what would run here.
+
+    Adding to the shared layer from inside a project that declares the same
+    name is a real thing to do (you are publishing it for *other* projects),
+    so this is a note, not an error — but a silent one would look like the
+    add had no effect.
+    """
+    try:
+        winner = state_mod.locate(name)
+    except model.WorkflowError:
+        return
+    if winner.origin != layer:
+        print(f"  note: here, {winner.origin} wins — {winner.path}")
 
 
 def _cmd_mcp(_args: argparse.Namespace) -> int:
@@ -428,6 +503,29 @@ def register(sub) -> None:
     q = csub.add_parser("example", help="scaffold an example workflow in this project")
     q.add_argument("name", nargs="?", default="feature-dev")
     q.set_defaults(func=_cmd_example)
+
+    q = csub.add_parser(
+        "add",
+        help="install a workflow into the shared layer, so every project "
+        "can run it (--project to install into this one instead)",
+    )
+    q.add_argument(
+        "workflow",
+        nargs="+",
+        help="a .yaml path, or the name of a workflow findable from here "
+        "(which promotes this project's copy to the shared layer)",
+    )
+    q.add_argument("--name", help="install under this name instead of the file's")
+    q.add_argument(
+        "--project",
+        action="store_true",
+        help=f"install into ./{state_mod.PROJECT_WORKFLOWS.as_posix()}/ "
+        f"instead of the shared layer",
+    )
+    q.add_argument(
+        "--force", action="store_true", help="replace a different file already there"
+    )
+    q.set_defaults(func=_cmd_add)
 
     q = csub.add_parser("mcp", help="run the stdio MCP server (spawned by claude)")
     q.set_defaults(func=_cmd_mcp)
