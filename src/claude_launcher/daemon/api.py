@@ -861,7 +861,11 @@ async def h_mesh_history(request: web.Request) -> web.Response:
         limit = int(request.query.get("limit", 50))
     except ValueError:
         return json_error(400, "limit must be an integer")
-    messages = _mesh_mgr(request).history(request.match_info["mesh"], limit)
+    # Annotated: each message carries who it resolves to *now*, and which of
+    # those have actually had it typed in. The sequence view is drawn from
+    # this — an arrow that has left but not landed is a different fact from
+    # one that landed, and the log alone cannot tell them apart.
+    messages = _mesh_mgr(request).history_annotated(request.match_info["mesh"], limit)
     return web.json_response({"messages": messages})
 
 

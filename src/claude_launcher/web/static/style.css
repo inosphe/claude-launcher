@@ -294,12 +294,27 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .sess-meta dt { color: #7d8590; }
 .sess-meta dd { color: #c6cdd5; overflow-wrap: anywhere; }
-.sess-meshes, .sess-wf {
+.sess-meshes, .sess-wf, .sess-send {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
 }
-.sess-meshes h3, .sess-wf h3 {
+.sess-meshes h3, .sess-wf h3, .sess-send h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
+}
+/* write to this session: the mesh page's send box, with the recipient already
+   answered by the panel it sits in */
+.sess-send-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.sess-send select, .sess-send textarea {
+  background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
+  border-radius: 5px; padding: 6px 9px; font-size: 13px;
+}
+.sess-send select { flex: 1 1 auto; min-width: 0; }
+.sess-send textarea {
+  width: 100%; resize: vertical; margin-bottom: 8px; font-family: inherit;
+}
+.sess-send .wf-btn { margin-right: 0; }
+.sess-send .wf-note, .sess-send .wf-warning {
+  margin-top: 8px; overflow-wrap: anywhere;
 }
 .sess-mesh {
   display: inline-block; margin: 0 8px 6px 0; padding: 3px 10px;
@@ -374,9 +389,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   max-width: none; font-size: 12px;
 }
 .docked .sess-meta dt { margin-top: 7px; font-size: 11px; }
-.docked .sess-meshes, .docked .sess-wf {
+.docked .sess-meshes, .docked .sess-wf, .docked .sess-send {
   margin: 10px 0; padding: 10px 12px; max-width: none; background: #16181d;
 }
+/* a rail column has no room for two controls side by side */
+.docked .sess-send-row { flex-wrap: wrap; }
+.docked .sess-send-row select { flex: 1 1 100%; }
 .docked .wf-start, .docked .wf-pending { padding: 10px 12px; max-width: none; }
 .docked .wf-start-select, .docked .wf-start-context {
   flex: 1 1 100%; max-width: 100%; min-width: 0;
@@ -947,6 +965,91 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .ws-row .wf-btn { flex: none; }
 
 /* ------------------------------------------------------------------ */
+/* the message trace (#/msg/<name>) — a session's traffic as a sequence */
+/* ------------------------------------------------------------------ */
+/* Unlike the other pages, this one does not scroll itself: the head, the
+   tabs and the legend hold still while the diagram scrolls under them, so
+   that the lane names — which the whole picture is read against — can pin
+   themselves to the top of the part that moves. */
+#msg-view {
+  flex: 1; min-height: 0; padding: 18px 26px 0;
+  display: flex; flex-direction: column;
+}
+.seq-tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.seq-tab {
+  cursor: pointer; border: 1px solid #30363d; background: #1b1e24;
+  color: #9da5b0; border-radius: 6px; padding: 4px 10px; font-size: 12px;
+}
+.seq-tab:hover { border-color: #4d5566; color: #d8dbe0; }
+.seq-tab.on { background: #172947; border-color: #58a6ff; color: #cfe2ff; cursor: default; }
+.seq-legend { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-top: 10px; }
+.seq-legend-swatch {
+  width: 16px; height: 0; border-top: 2px solid #58a6ff; display: inline-block;
+}
+.seq-legend-swatch.faint { border-top-style: dashed; border-top-color: #3a4150; }
+.seq-legend-swatch.waiting { border-top-style: dashed; border-top-color: #8fa1b3; }
+.seq-legend-swatch.owed { border-top: none; height: 9px; width: 9px;
+  border-radius: 50%; background: #4d3800; box-shadow: inset 0 0 0 1.5px #d29922; }
+.seq-legend-swatch.flow { border-top: none; height: 8px; width: 8px;
+  background: #3fb950; transform: rotate(45deg); }
+
+/* The scroller: both axes, because a wide mesh has more lanes than a screen
+   and the clock down the left has to travel with them. */
+.seq-scroll {
+  flex: 1; min-height: 0; overflow: auto; margin-top: 10px;
+  overscroll-behavior: contain;
+}
+/* The ledger keeps the top of the page, above the sideways-scrolling
+   diagram — but never more than a third of it, however much is owed. */
+.seq-owed-strip { max-height: 34vh; overflow-y: auto; flex: none; }
+.seq-head {
+  position: sticky; top: 0; z-index: 2; background: #14161a;
+  border-bottom: 1px solid #2a2e36;
+}
+.seq-head-svg, .seq-row-svg { display: block; }
+.seq-rows { padding-bottom: 40px; }
+
+.seq-lane { stroke: #262b33; stroke-width: 1; }
+.seq-lane.self { stroke: #2f4a70; stroke-width: 1.5; }
+.seq-lane.outside { stroke-dasharray: 3 3; }
+.seq-lane-name { fill: #9da5b0; font-size: 12px; text-anchor: middle; }
+.seq-lane-role { fill: #6e7681; font-size: 10px; text-anchor: middle; }
+.seq-lane-head.self .seq-lane-name { fill: #cfe2ff; font-weight: 600; }
+.seq-lane-head.outside .seq-lane-name { fill: #8fa1b3; font-style: italic; }
+
+.seq-time { fill: #5b636e; font-size: 10px; font-family: Cascadia Mono, Consolas, monospace; }
+.seq-arrow { stroke: #58a6ff; stroke-width: 1.6; }
+.seq-arrow.waiting { stroke: #8fa1b3; stroke-dasharray: 5 3; }
+.seq-arrowhead { fill: #58a6ff; }
+.seq-arrowhead.open { fill: #14161a; stroke: #8fa1b3; stroke-width: 1.4; }
+.seq-label { fill: #c6cdd5; font-size: 11px; text-anchor: middle; }
+.seq-body {
+  fill: #9da5b0; font-size: 11.5px;
+  font-family: Cascadia Mono, Consolas, monospace;
+}
+.seq-drop { fill: #58a6ff; }
+.seq-drop.out { fill: #14161a; stroke: #8fa1b3; stroke-width: 1.4; }
+.seq-drop.remote { fill: #14161a; stroke: #8a6d3b; stroke-width: 1.4; }
+.seq-nowhere { fill: #ff7b72; font-size: 11px; }
+
+/* Between others: still legible, but never mistaken for this session's own
+   traffic at a glance. */
+.seq-msg.faint { opacity: 0.42; }
+.seq-msg.faint .seq-arrow { stroke: #8fa1b3; }
+.seq-msg.faint .seq-arrowhead { fill: #8fa1b3; }
+.seq-msg.faint .seq-drop { fill: #8fa1b3; }
+.seq-msg.openable { cursor: pointer; }
+.seq-msg.openable:hover .seq-label { fill: #fff; }
+
+.seq-owed text { fill: #d29922; font-size: 10.5px; }
+.seq-flow-mark { fill: #3fb950; }
+.seq-flow-label { fill: #6ea77f; font-size: 11px; }
+.seq-join line { stroke: #4d5566; stroke-width: 1.6; }
+.seq-join-label { fill: #6e7681; font-size: 10.5px; }
+.seq-gap line { stroke: #2a2e36; stroke-dasharray: 2 4; }
+.seq-gap text { fill: #5b636e; font-size: 10px; text-anchor: middle; }
+
+/* ------------------------------------------------------------------ */
 /* mobile: one screen at a time — the session, or the menu             */
 /* ------------------------------------------------------------------ */
 /* A 260px sidebar next to a terminal has nowhere to go on a phone: both end
@@ -1049,10 +1152,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   #wf-view, #mesh-view, #flow-view, #sess-view, #ws-view {
     padding: 14px 12px; overscroll-behavior: contain;
   }
+  /* The trace keeps its own scroller (the lane heads pin to it), so only the
+     padding gives way here. */
+  #msg-view { padding: 14px 12px 0; }
   .flow-waiting, .flow-detail,
   .mesh-members, .mesh-send, .mesh-fed, .mesh-policy, .mesh-links,
   .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo,
-  .sess-meta, .sess-meshes, .sess-wf, .wf-pending,
+  .sess-meta, .sess-meshes, .sess-wf, .sess-send, .wf-pending,
   .ws-add, .ws-list, #ws-view > .wf-note { max-width: none; }
   /* The add row is three controls on one line at desk width; on a phone the
      path alone needs the whole line. */
@@ -1063,7 +1169,14 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   .wf-diagram { flex: 1 1 auto; }
   .pol-row { flex-wrap: wrap; margin-left: 0; }
   .pol-label { min-width: 0; }
-  .mesh-send-row { flex-wrap: wrap; }
+  .mesh-send-row, .sess-send-row { flex-wrap: wrap; }
+  /* Handle, count, age, and the two buttons that act on the debt: five things
+     on one line at desk width, and off the side of a phone. The buttons are
+     the point of the row, so the row wraps rather than losing them. */
+  .mesh-owed-head { flex-wrap: wrap; }
+  .mesh-owed-head .mesh-session { margin-left: 0; }
+  /* ...and on a phone the ledger gives the diagram more of the screen. */
+  .seq-owed-strip { max-height: 26vh; }
   /* a <select> is as wide as its longest option — a session name or a full
      path is enough to push the panel off the side of the screen */
   #mesh-view select, #wf-view select, #sess-view select { max-width: 100%; }

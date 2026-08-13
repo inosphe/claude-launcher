@@ -743,6 +743,79 @@ def test_owed_report_and_route(home, tmp_path):
     asyncio.run(run())
 
 
+def test_history_says_where_each_message_got_to(home, tmp_path):
+    """The log stores the address; the sequence view needs the arrival.
+
+    Three facts the raw log cannot give a reader, all re-derived the way
+    delivery itself derives them: who a ``"*"`` actually reached, that a cut
+    edge takes someone off a message already accepted, and which recipients
+    have had it typed in rather than merely queued for them.
+    """
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            mesh = mm.create("trace")
+            for name in ("a1", "b1", "c1"):
+                mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+            await mm.join("trace", "a1", handle="leader")
+            await mm.join("trace", "b1", handle="w1")
+            await mm.join("trace", "c1", handle="w2")
+            # A member on another daemon: its cursor lives over there, so this
+            # daemon can name it a recipient but must not claim it was reached.
+            mesh.members["far"] = mesh_mod.Member(
+                "far", "s9", machine="pcB", role="worker"
+            )
+            # wired, as a real join would leave it: the leader was wired on
+            # arrival, and for a wired member an unrecorded pair is closed
+            mesh.member_edges[mesh.member_key("leader", "far")] = True
+
+            await mm.send("trace", "a1", "*", "all hands")
+            await mm.send("trace", "a1", "w1", "just you", type="ask")
+
+            async def history():
+                resp = await client.get("/api/mesh/trace/messages", headers=bearer)
+                assert resp.status == 200
+                return (await resp.json())["messages"]
+
+            bcast, direct = await history()
+            # '*' resolved: everyone but the sender, the remote member included
+            assert set(bcast["recipients"]) == {"w1", "w2", "far"}
+            assert bcast["delivered"] == []          # queued, not yet injected
+            assert bcast["remote"] == ["far"]        # unknowable here, said so
+            assert direct["recipients"] == ["w1"]
+
+            mesh.cursors["w1"] = len(mesh.messages)  # what the worker does
+            bcast, direct = await history()
+            assert bcast["delivered"] == ["w1"] and direct["delivered"] == ["w1"]
+            assert "w2" not in bcast["delivered"]
+            # the remote one is never delivered from here, cursor or not
+            assert bcast["remote"] == ["far"]
+
+            # Cutting an edge takes w2 off a broadcast already in the log —
+            # the same direction delivery re-resolves in, so the picture and
+            # the daemon cannot disagree about who is being spoken to.
+            await mm.set_member_link("trace", "leader", "w2", enabled=False)
+            bcast, _ = await history()
+            assert "w2" not in bcast["recipients"]
+
+            # the fields are additive: what the log was written with survives
+            assert bcast["from"] == "leader" and bcast["to"] == "*"
+            assert bcast["seq"] == 0 and bcast["body"] == "all hands"
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_dismiss_writes_off_unanswered_mail(home, tmp_path):
     """The operator's closure: the one that is not a reply.
 

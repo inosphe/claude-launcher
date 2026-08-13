@@ -171,7 +171,14 @@ All under the existing auth (Bearer token / web cookie):
 - `DELETE /api/mesh/{mesh}/members/{handle}` — leave
 - `POST /api/mesh/{mesh}/messages` `{from, to, body}` — send (`from` is a
   handle or a session name; the CLI passes `$CLAUNCH_SESSION`)
-- `GET  /api/mesh/{mesh}/messages?limit=N` — history
+- `GET  /api/mesh/{mesh}/messages?limit=N` — history. Each message is
+  annotated with where it *got to*: `recipients` (the address re-resolved
+  against the member graph now, so a `"*"` is named and a since-cut edge is
+  gone), `delivered` (those recipients whose terminals it has been typed
+  into) and `remote` (recipients on another daemon, whose consumption is that
+  daemon's to know). The log itself stores none of this — it stores the
+  address — and a reader drawing the traffic needs the difference between a
+  message that has landed and one that is still queued.
 
 Plus a prerequisite: `POST /api/sessions/{name}/keys` accepts
 `{"paste": "multi\nline text", "enter": true}` — bracketed-paste injection, so

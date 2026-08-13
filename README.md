@@ -1708,6 +1708,29 @@ than pasted blind into the terminal beside it. A session in no mesh has
 nothing to carry a message, and the box says so instead of offering a dead
 form.
 
+Beside the memberships sits **Message trace**, which opens the third reading
+of a session (`#/msg/<name>`, one tab per mesh it is in): not what it is doing
+and not how far its run has got, but who it has been working *with*, drawn as
+a sequence — a lane per party, the operator's lane beside the members rather
+than among them, and time down the page. It is the whole room, not this
+session's mailbox: a question from `lead` to `reviewer` is often why the next
+message arrived here, so traffic this session is not a party to is faded
+rather than dropped. Each arrow says where it got to — a filled head and a
+filled mark per recipient for a message typed into that terminal, a dashed
+line and hollow marks for one still queued, and a distinct mark for a
+recipient on another daemon, whose consumption only that daemon can report. An
+`ask` nobody answered carries a **⚠ n unanswered** chip in the right-hand
+margin, and the same **Unanswered** box the mesh page shows sits above the
+diagram with its nudge and dismiss buttons — but only while something is
+owed. Runs of silence longer than five minutes fold into
+one `⋯ 14m quiet ⋯` marker, each member's arrival opens its lane (with who
+spawned it), and this session's own [cflow](#cflow-declarative-agent-workflows)
+steps and reports are marked on its lane, so "it answered and then moved on to
+review" is one thing to read rather than two pages. Click a message to unfold
+its whole body. Only what travelled *through* the mesh is there — words typed
+straight into a terminal leave no record, and the page says so rather than
+implying it has everything.
+
 The sidebar also shows a **Workflows** panel monitoring every
 [cflow](#cflow-declarative-agent-workflows) run started on this machine
 (each `start` registers its directory; managed sessions running in that

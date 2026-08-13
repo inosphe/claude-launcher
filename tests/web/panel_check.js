@@ -89,7 +89,7 @@ const terminalOnScreen = () => termUp;
    walking into the terminal an open panel already describes lights it. */
 const stubs = `
 let currentPage = "terminal", currentName = "coder2";
-let sessName = null, sessPollTimer = null, sessStartBox = null;
+let sessName = null, sessPollTimer = null, sessStartBox = null, sessSendBox = null;
 let sessRunFold = null, sessRunStops = 0;
 function stopSessRun() { sessRunStops++; }
 let detailWasUp = false;
@@ -108,6 +108,8 @@ function attach(name) {
   currentName = name; term = {}; showView("terminal"); markDetailRow();
 }
 function stopWfPoll() {}
+function stopMsgPoll() {}
+function openTrace() {}
 function stopMeshPoll() {}
 function stopFlowPoll() {}
 function closeWorkspaces() {}

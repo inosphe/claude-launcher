@@ -51,6 +51,11 @@ let alerted = [];
 let refreshed = 0;
 const refreshMeshView = () => { refreshed += 1; };
 const refreshMeshList = () => {};
+// This box is drawn on the message trace too, where the same buttons act; the
+// trace is not open here, so its refresh must not be reached.
+let traceSession = null;
+let tracedRefreshes = 0;
+const refreshTrace = () => { tracedRefreshes += 1; };
 
 /* Every request the panel makes, in order, plus what the daemon replied. */
 let calls = [];
@@ -64,10 +69,10 @@ const api = async (p, opts = {}) => {
 const ctx = {};
 new Function(
   "exports", "document", "el", "location", "meshDotClass", "confirm", "alert",
-  "api", "refreshMeshView", "refreshMeshList",
+  "api", "refreshMeshView", "refreshMeshList", "traceSession", "refreshTrace",
   code + "\nObject.assign(exports, {renderMeshOwed, fmtAge});"
 )(ctx, document, el, location, meshDotClass, confirm, alert, api,
-  refreshMeshView, refreshMeshList);
+  refreshMeshView, refreshMeshList, traceSession, refreshTrace);
 
 /* ---- helpers ----------------------------------------------------------- */
 function all(root, pred, out = []) {

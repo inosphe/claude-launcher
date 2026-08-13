@@ -13,8 +13,13 @@ DOM, ``lineage_check`` on the session list's tree ordering, ``owed_check`` on
 the Unanswered box and the requests its nudge/dismiss buttons send,
 ``panel_check`` on where the session detail docks (the rail beside the
 terminal, or the page slot on a phone) and what closing it leaves behind,
-``sessrun_check`` on the run that panel can fold open in place of a trip to
-the run page, and the two ``flow*_check`` harnesses on the flow view — one on
+``sesssend_check`` on the message that panel can put into the mesh — whose
+handle it lands on and what it does with a refusal — ``sessrun_check`` on the
+run it can fold open in place of a trip to the run page, ``seq_check`` on the
+message trace's event list — the order a mesh's traffic is read in, and what
+the picture is allowed to claim about where each message got to —
+``seqrender_check`` on the sequence that list is drawn into, and the two
+``flow*_check`` harnesses on the flow view — one on
 the track a workflow becomes, one on the page those tracks are drawn into.
 This wrapper is what makes them run with everything else.
 
@@ -41,7 +46,10 @@ WEB = Path(__file__).resolve().parent / "web"
         "lineage_check.js",
         "owed_check.js",
         "panel_check.js",
+        "sesssend_check.js",
         "sessrun_check.js",
+        "seq_check.js",
+        "seqrender_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
     ],

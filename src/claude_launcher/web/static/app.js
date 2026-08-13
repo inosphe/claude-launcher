@@ -1006,6 +1006,7 @@ function mobileTitle() {
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     case "wf": return `workflow · ${shortenPath(wfCwd || "")}`;
+    case "msg": return `messages · ${traceSession}`;
     case "session": return `session · ${sessName}`;
     default: return currentName || "no session";
   }
@@ -1111,6 +1112,7 @@ const VIEWS = {
   meshes: "meshes-view",
   flows: "flows-view",
   wf: "wf-view",
+  msg: "msg-view",
   mesh: "mesh-view",
   flow: "flow-view",
   ws: "ws-view",
@@ -1192,6 +1194,8 @@ function selectWfStep(step) {
  *   #/mesh/<name>/flows ...and where each of its agents is in its workflow
  *   #/flows             cflow runs
  *   #/wf/<scope|cwd>    one run
+ *   #/msg/<name>        what that session has said and been told
+ *   #/msg/<name>/<mesh> ...in the mesh named, rather than its first
  *   #/workspaces        the workspace registry
  */
 function parseHash(h) {
@@ -1210,6 +1214,13 @@ function parseHash(h) {
     return sep >= 0
       ? { page: "wf", cwd: token.slice(sep + 1), scope: token.slice(0, sep) }
       : { page: "wf", cwd: token, scope: "default" };  // pre-scope links
+  }
+  // The session's traffic, not the session — a third reading of it, beside
+  // the terminal (what it is doing) and the run page (where it has got to).
+  // The mesh is in the URL because a session is a different handle in each
+  // one, so which room this is says which name it is being called by.
+  if (parts[0] === "msg" && parts[1]) {
+    return { page: "msg", name: parts[1], mesh: parts[2] || "" };
   }
   if (parts[0] === "mesh") {
     if (!parts[1]) return { page: "meshes" };
@@ -1230,6 +1241,7 @@ function route() {
   // Leaving a page stops what it was polling. Done centrally so a page's
   // open function never has to know which other pages exist.
   if (r.page !== "wf") stopWfPoll();
+  if (r.page !== "msg") stopMsgPoll();
   if (r.page !== "mesh") stopMeshPoll();
   if (r.page !== "flow") stopFlowPoll();
   if (r.page !== "ws") closeWorkspaces();
@@ -1249,6 +1261,7 @@ function route() {
       if (sessName && sessName !== r.name) repointDetail(r.name);
       break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
+    case "msg": openTrace(r.name, r.mesh); break;
     case "mesh": openMesh(r.name); break;
     case "flow": openFlowTopology(r.name); break;
     case "meshes": showView("meshes"); refreshMeshList(); break;
@@ -2491,6 +2504,21 @@ function renderSession(data) {
     chip.href = "#/mesh/" + encodeURIComponent(m.mesh);
     chip.title = `${m.members} member(s); joined ${(m.joined_at || "").replace("T", " ")}`;
     meshBox.appendChild(chip);
+  }
+  // The chips above say which rooms this session is in; this reads what was
+  // actually said in them, as a sequence. Only offered when there is a room:
+  // a session in no mesh has no traffic to draw, and the note above already
+  // says why. Not a chip, because it is not another membership — it is the
+  // way out of this panel into a page, like the run's button below.
+  if (meshes.length) {
+    const trace = el("button", "wf-btn option", "Message trace");
+    trace.title =
+      "who this session has spoken to, and been asked by, in order — " +
+      "with what has not been answered";
+    trace.addEventListener(
+      "click", () => go("#/msg/" + encodeURIComponent(s.name))
+    );
+    meshBox.appendChild(trace);
   }
   view.appendChild(meshBox);
 
@@ -4395,6 +4423,9 @@ async function owedAct(btn, call) {
   }
   refreshMeshView(true);
   refreshMeshList();
+  // The same ledger is drawn into the trace's margin, and these buttons are
+  // reachable from there too (that page shows this very box).
+  if (traceSession) refreshTrace();
 }
 
 /* Unanswered mail: the mesh's silence detector.
@@ -5401,6 +5432,768 @@ async function refreshFlowView() {
   }
   flowLast = { info, data };
   renderFlowTopo(info, data);
+}
+
+/* ------------------------------------------------------------------ */
+/* message trace (#/msg/<name>) — what a session said, and was told    */
+/* ------------------------------------------------------------------ */
+/* The third reading of a session. The terminal says what it is doing now;
+   the run page says how far through its workflow it is; this says who it has
+   been working WITH — read as a sequence, top to bottom, so an afternoon's
+   collaboration is a story rather than a scroll of chat lines.
+
+   The mesh page already lists the same messages. What it cannot show is the
+   shape: which of them crossed which pair, what was asked and never answered,
+   and what the session was doing between them. That shape is the whole point
+   of drawing it as lanes.
+
+   Deliberately not the focus session's mailbox alone. A message from lead to
+   reviewer is the reason the next one arrived here, and reading this session's
+   half of it explains nothing — so the whole room is drawn, and everything the
+   focus session is not part of is faded rather than dropped. */
+let traceSession = null;   // the session the trace is about (null = closed)
+let traceMesh = "";        // the mesh tab on screen ("" = not chosen yet)
+let tracePollTimer = null;
+let traceLast = null;      // last payload, for an instant redraw on expand
+let traceOpen = new Set(); // message ids expanded to their full body
+
+/* Slower than the terminal's rail and the mesh page (2s): this is a page you
+   read, not a monitor you watch, and every tick costs four calls. */
+const TRACE_POLL_MS = 5000;
+
+/* A run of silence longer than this is folded into one marker. Long enough
+   that a working exchange never breaks up, short enough that "they went
+   quiet" is visible as itself rather than as a scrollbar. */
+const TRACE_GAP_MS = 5 * 60 * 1000;
+
+function stopMsgPoll() {
+  if (tracePollTimer) { clearInterval(tracePollTimer); tracePollTimer = null; }
+  traceSession = null;
+  traceLast = null;
+}
+
+function openTrace(name, mesh) {
+  if (tracePollTimer) clearInterval(tracePollTimer);
+  // Re-entering the same session keeps what is expanded; arriving at another
+  // one starts clean, because those ids belong to a different conversation.
+  if (traceSession !== name) traceOpen = new Set();
+  traceSession = name;
+  traceMesh = mesh || "";
+  traceLast = null;
+  showView("msg");
+  $("msg-view").innerHTML = "<p class='wf-note'>loading…</p>";
+  refreshTrace();
+  tracePollTimer = setInterval(refreshTrace, TRACE_POLL_MS);
+}
+
+/* Move to another mesh's tab. Through the URL, so the tab you are reading is
+   the one a link or a reload lands on. */
+function traceGoMesh(mesh) {
+  location.hash =
+    `#/msg/${encodeURIComponent(traceSession)}/${encodeURIComponent(mesh)}`;
+}
+
+function traceFail(msg) {
+  $("msg-view").innerHTML = "";
+  $("msg-view").appendChild(traceHead(null));
+  $("msg-view").appendChild(el("p", "wf-warning", msg));
+}
+
+async function refreshTrace() {
+  if (!traceSession) return;
+  const want = traceSession;
+  let meta;
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(want)}/meta`);
+    meta = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      traceFail(meta.error || `cannot load this session (HTTP ${resp.status})`);
+      return;
+    }
+  } catch {
+    return;
+  }
+  if (traceSession !== want) return;      // navigated away mid-flight
+
+  const meshes = meta.meshes || [];
+  if (!meshes.length) {
+    traceLast = null;
+    renderTrace({ meta, meshes, mesh: null });
+    return;
+  }
+  // The tab: the one the URL names while it is still a membership, else the
+  // first. A session leaving a mesh must not leave the page on a dead tab.
+  const seat = meshes.find((m) => m.mesh === traceMesh) || meshes[0];
+
+  const cwd = (meta.session || {}).cwd || "";
+  let info, history, owed, flow;
+  try {
+    const calls = [
+      api(`/api/mesh/${encodeURIComponent(seat.mesh)}`),
+      api(`/api/mesh/${encodeURIComponent(seat.mesh)}/messages?limit=200`),
+      api(`/api/mesh/${encodeURIComponent(seat.mesh)}/owed`),
+    ];
+    // The focus lane's workflow, and only its: a run is keyed by (directory,
+    // scope) and the scope IS the session name, so this is one call. Every
+    // other member's run would be one call each, per poll, to annotate a lane
+    // nobody came here to read.
+    if (cwd) {
+      calls.push(api(
+        `/api/cflow/run?cwd=${encodeURIComponent(cwd)}` +
+        `&scope=${encodeURIComponent(want)}`
+      ));
+    }
+    const [r1, r2, r3, r4] = await Promise.all(calls);
+    if (!r1.ok) {
+      const doc = await r1.json().catch(() => ({}));
+      traceFail(doc.error || `cannot load mesh '${seat.mesh}'`);
+      return;
+    }
+    info = await r1.json();
+    history = r2.ok ? (await r2.json()).messages || [] : [];
+    owed = r3.ok ? await r3.json() : null;
+    flow = r4 && r4.ok ? await r4.json() : null;
+  } catch {
+    return;
+  }
+  if (traceSession !== want) return;
+  traceLast = { meta, meshes, mesh: seat, info, history, owed, flow };
+  renderTrace(traceLast);
+}
+
+/* ---- the event list ------------------------------------------------
+   Pure, and the one piece worth testing on its own (tests/web/seq_check.js):
+   everything the page shows is a drawing of what this returns. */
+function traceMs(at) {
+  const t = Date.parse(at || "");
+  return Number.isNaN(t) ? 0 : t;
+}
+
+/* (epoch, seq) is the mesh's own order and the only authoritative one — a
+   clock is a machine's opinion, and a federated mesh has several. Epoch moves
+   only on an authority handover, so a forced takeover cannot interleave with
+   the old authority's late traffic. Timestamps decide only where a message
+   has no sequence at all (one parked by the fast path, or a log written
+   before sequencing). */
+function traceCmp(a, b) {
+  const ae = a.epoch || 0, be = b.epoch || 0;
+  if (ae !== be) return ae - be;
+  const as = a.seq, bs = b.seq;
+  if (as !== undefined && as !== null && bs !== undefined && bs !== null) {
+    if (as !== bs) return as - bs;
+  }
+  return traceMs(a.ts) - traceMs(b.ts);
+}
+
+/* Which journal entries are worth a mark on the lane. The engine writes a
+   great deal that is bookkeeping (locks, cursors, superseded requests); what
+   belongs beside a conversation is where the run GOT to, and what it said
+   about it. Anything unlisted is left out rather than drawn as a mystery. */
+function traceFlowLabel(e) {
+  const step = e.step || e.current || e.id || "";
+  switch (e.event) {
+    case "started": return `run started · ${e.workflow || ""}`.trim();
+    case "step_completed": return `done: ${step}`;
+    case "step_report": return `report: ${e.summary || step}`;
+    case "select_presented": return `choosing: ${step}`;
+    case "select_confirmed": return `chose: ${e.option || step}`;
+    case "gate_wait": return `gate: ${step}`;
+    case "approved": return `approved: ${step}`;
+    case "loop_limit": return `loop limit: ${step}`;
+    case "loop_extended": return `loop limit raised: ${step}`;
+    case "state_forced": return `forced to: ${step}`;
+    case "done": return "run finished";
+    case "aborted": return "run aborted";
+    case "archived": return "run archived";
+    default: return "";
+  }
+}
+
+function msgEvents(input) {
+  const focus = input.handle || "";
+  const gapMs = input.gapMs === undefined ? TRACE_GAP_MS : input.gapMs;
+  const members = input.members || [];
+  const known = new Set(members.map((m) => m.handle));
+
+  // Who is owed what, by message. One message can be owed by several
+  // recipients — a batch asks each of them separately.
+  const debts = {};
+  for (const r of (input.owed || {}).members || []) {
+    for (const m of r.messages || []) {
+      if (!m.id) continue;
+      (debts[m.id] = debts[m.id] || []).push({ handle: r.handle, age: m.age });
+    }
+  }
+
+  // Everything that is not a message carries a wall clock and nothing else,
+  // so it is merged by time against the sequenced messages. That is an
+  // approximation and the only one available: the run's journal and the
+  // roster are written by other hands than the mesh's sequencer.
+  const side = [];
+  for (const m of members) {
+    if (!m.joined_at) continue;
+    side.push({
+      kind: "join", at: m.joined_at, handle: m.handle,
+      role: m.role, parent: m.parent, machine: m.machine,
+    });
+  }
+  for (const e of (input.journal || [])) {
+    const label = traceFlowLabel(e);
+    if (label) side.push({ kind: "flow", at: e.at, handle: focus, label, entry: e });
+  }
+  side.sort((a, b) => traceMs(a.at) - traceMs(b.at));
+
+  const msgs = [...(input.messages || [])].sort(traceCmp);
+  const merged = [];
+  let i = 0;
+  for (const msg of msgs) {
+    const ts = traceMs(msg.ts);
+    while (i < side.length && traceMs(side[i].at) <= ts) merged.push(side[i++]);
+    // A daemon older than these assets serves the files from disk but runs
+    // the Python it started with, so the annotation can be missing. Then the
+    // address is all there is: a handle list still names its recipients, but
+    // a '*' names nobody we may invent — that resolution is the member
+    // graph's, and guessing it here would draw arrows to people it never
+    // reached. The row says so rather than pretending either way.
+    const resolved = Array.isArray(msg.recipients);
+    const to = resolved
+      ? msg.recipients
+      : (msg.to === "*" ? [] : Array.isArray(msg.to) ? msg.to : [msg.to]);
+    merged.push({
+      kind: "msg",
+      at: msg.ts,
+      msg,
+      from: msg.from,
+      to,
+      resolved,
+      // The focus session is a party to this if it sent it or is being sent
+      // it. Everything else is the room's business, drawn faded.
+      mine: msg.from === focus || to.includes(focus),
+      external: !known.has(msg.from),
+      delivered: msg.delivered || [],
+      remote: msg.remote || [],
+      debts: debts[msg.id] || [],
+    });
+  }
+  while (i < side.length) merged.push(side[i++]);
+
+  if (!gapMs) return merged;
+  const out = [];
+  let prev = null;
+  for (const ev of merged) {
+    const at = traceMs(ev.at);
+    if (prev && at && at - prev >= gapMs) {
+      out.push({ kind: "gap", ms: at - prev });
+    }
+    if (at) prev = at;
+    out.push(ev);
+  }
+  return out;
+}
+
+/* The columns, left to right. Outsiders first — the operator is not a member
+   and speaks from beside the mesh, not inside it — then members in the order
+   the trace first mentions them, which for a room that grew by spawning is
+   the order it grew in. */
+function msgLanes(events, focus) {
+  const lanes = [];
+  const seen = new Map();
+  const add = (key, extra) => {
+    if (!key || seen.has(key)) return seen.get(key);
+    const lane = { key, label: key, self: key === focus, ...extra };
+    seen.set(key, lane);
+    lanes.push(lane);
+    return lane;
+  };
+  for (const ev of events) {
+    if (ev.kind === "msg" && ev.external) add(ev.from, { outside: true });
+  }
+  for (const ev of events) {
+    if (ev.kind === "join") add(ev.handle, { role: ev.role, machine: ev.machine });
+    else if (ev.kind === "msg") {
+      add(ev.from, ev.external ? { outside: true } : {});
+      for (const h of ev.to) add(h, {});
+    }
+  }
+  add(focus, {});   // silent, but it is what the page is about
+  return lanes;
+}
+
+/* ---- geometry ----------------------------------------------------- */
+const SEQ = {
+  gutter: 74,   // the clock down the left, inside the same SVG as the lanes
+  lane: 132,    // lane pitch — the minimum; widened to fit the page (seqFit)
+  right: 124,   // room past the last lane for an "unanswered" chip
+  row: 34,      // a collapsed row
+  head: 52,     // the sticky lane heads
+  line: 15,     // one wrapped line of an expanded body
+};
+const SEQ_LANE_MIN = 132;   // a handle and a role, side by side
+const SEQ_LANE_MAX = 240;   // past this the arrows are more travel than picture
+
+/* Spread the lanes across the page when there are few of them: the label a
+   message gets to show is the width between its endpoints, and three agents
+   on a wide screen would otherwise be read through a keyhole with the rest of
+   the row left blank. Narrower than the minimum is never worth it — that way
+   the diagram scrolls sideways instead of becoming unreadable. */
+function seqFit(count, available) {
+  if (!available || count < 1) return SEQ_LANE_MIN;
+  const room = Math.floor((available - SEQ.gutter - SEQ.right) / count);
+  return Math.max(SEQ_LANE_MIN, Math.min(SEQ_LANE_MAX, room));
+}
+
+const seqX = (i) => SEQ.gutter + SEQ.lane / 2 + i * SEQ.lane;
+const seqW = (n) => SEQ.gutter + SEQ.lane * Math.max(n, 1) + SEQ.right;
+
+function seqSvg(width, height, cls) {
+  return svg("svg", {
+    width, height, viewBox: `0 0 ${width} ${height}`, class: cls,
+  });
+}
+
+/* The lane lines, drawn per row rather than once behind everything: a row
+   knows its own height, so nothing has to be measured, and a body folding
+   open cannot leave the lanes short. */
+function seqLanes(node, lanes, height, top = 0) {
+  lanes.forEach((lane, i) => {
+    node.appendChild(svg("line", {
+      x1: seqX(i), y1: top, x2: seqX(i), y2: height,
+      class: "seq-lane" + (lane.self ? " self" : "") + (lane.outside ? " outside" : ""),
+    }));
+  });
+}
+
+function seqClock(at) {
+  const t = String(at || "");
+  const time = t.includes("T") ? t.split("T")[1] : t;
+  return (time || "").replace("Z", "").split(".")[0].split("+")[0];
+}
+
+/* Fit a label to the width it has. Characters, not pixels: the stylesheet
+   owns the font, and this is the same approximation the topology's cluster
+   names use. */
+function seqClip(text, width) {
+  const room = Math.max(8, Math.floor(width / 6.3));
+  const flat = String(text || "").replace(/\s+/g, " ").trim();
+  return flat.length > room ? `${flat.slice(0, room - 1)}…` : flat;
+}
+
+function seqWrap(text, width) {
+  const room = Math.max(20, Math.floor(width / 6.3));
+  const out = [];
+  for (const para of String(text || "").split("\n")) {
+    let line = "";
+    for (let word of para.split(/\s+/)) {
+      // A path, a URL or a hash has nowhere to break and is exactly what gets
+      // pasted into these messages — cut it rather than let it run off the
+      // side of a row whose width is the lanes', not the text's.
+      while (word.length > room) {
+        if (line) { out.push(line); line = ""; }
+        out.push(word.slice(0, room));
+        word = word.slice(room);
+        if (out.length >= 24) return [...out, "…"];
+      }
+      if (!line) line = word;
+      else if ((line + " " + word).length <= room) line += " " + word;
+      else { out.push(line); line = word; }
+      if (out.length >= 24) return [...out, "…"];   // a long report is not the page
+    }
+    out.push(line);
+  }
+  return out;
+}
+
+/* ---- the rows ----------------------------------------------------- */
+/* The lane heads, and the only part of the drawing that stays put: pinned to
+   the top of the scroller, because a name you have scrolled past is a lane
+   you can no longer read. */
+function seqHeadSvg(lanes) {
+  const width = seqW(lanes.length);
+  const node = seqSvg(width, SEQ.head, "seq-head-svg");
+  lanes.forEach((lane, i) => {
+    const g = svg("g", {
+      class: "seq-lane-head"
+        + (lane.self ? " self" : "") + (lane.outside ? " outside" : ""),
+    });
+    g.appendChild(svg(
+      "text", { x: seqX(i), y: 20, class: "seq-lane-name" },
+      seqClip(lane.key, SEQ.lane - 10)
+    ));
+    const under = lane.outside
+      ? "not a member"
+      : (lane.machine ? `${lane.role || "member"} · ${lane.machine}` : (lane.role || ""));
+    if (under) {
+      g.appendChild(svg(
+        "text", { x: seqX(i), y: 34, class: "seq-lane-role" },
+        seqClip(under, SEQ.lane - 10)
+      ));
+    }
+    g.appendChild(svg("title", {}, lane.outside
+      ? `${lane.key} — speaking from outside the mesh`
+      : `${lane.key}${lane.role ? ` (${lane.role})` : ""}` +
+        (lane.machine ? ` on ${lane.machine}` : "")));
+    node.appendChild(g);
+  });
+  // The lanes start under the names rather than through them: this block is
+  // where each line comes FROM.
+  seqLanes(node, lanes, SEQ.head, 40);
+  return node;
+}
+
+/* An arrowhead at (x, y) pointing along `dir` (+1 right, -1 left). Hollow
+   when the message has left but has not been typed in anywhere yet — the
+   difference between "they have not answered" and "they have not been asked
+   yet", which is the whole diagnosis. */
+function seqArrowHead(x, y, dir, open) {
+  return svg("path", {
+    d: `M ${x} ${y} L ${x - dir * 8} ${y - 4.5} L ${x - dir * 8} ${y + 4.5} Z`,
+    class: "seq-arrowhead" + (open ? " open" : ""),
+  });
+}
+
+function seqMsgRow(ev, lanes, width) {
+  const m = ev.msg;
+  const body = m.body || "";
+  const open = traceOpen.has(m.id);
+  const lines = open ? seqWrap(body, width - SEQ.gutter - 40) : [];
+  const height = SEQ.row + (lines.length ? lines.length * SEQ.line + 6 : 0);
+  const cy = 20;
+  const node = seqSvg(width, height, "seq-row-svg");
+  seqLanes(node, lanes, height);
+
+  const at = lanes.findIndex((l) => l.key === ev.from);
+  const to = ev.to.map((h) => lanes.findIndex((l) => l.key === h)).filter((i) => i >= 0);
+  const g = svg("g", {
+    class: "seq-msg" + (ev.mine ? "" : " faint")
+      + (traceExpandable(m) ? " openable" : ""),
+  });
+
+  if (at < 0 || !to.length) {
+    // Two different silences, and they must not be drawn as one. Either the
+    // daemon resolved this and the answer was nobody — an edge cut since it
+    // was sent — or it is too old to have been asked, and we know nothing.
+    const stale = !ev.resolved;
+    g.appendChild(svg(
+      "text", { x: seqX(Math.max(at, 0)), y: cy + 4, class: "seq-nowhere" },
+      stale ? "→ recipients not reported" : "⊘ reaches nobody"
+    ));
+    g.appendChild(svg("title", {}, stale
+      ? `${m.from} → ${fmtTo(m.to)}: this daemon does not say who a message ` +
+        "reached — 'claunch daemon restart' to pick up this version"
+      : `${m.from} → ${fmtTo(m.to)}: nobody this message is addressed to is ` +
+        "still connected to the sender"));
+  } else {
+    let far = to[0];
+    for (const i of to) if (Math.abs(i - at) > Math.abs(far - at)) far = i;
+    const dir = far >= at ? 1 : -1;
+    const x0 = seqX(at), x1 = seqX(far);
+    const localTo = ev.to.filter((h) => !ev.remote.includes(h));
+    const waiting = localTo.some((h) => !ev.delivered.includes(h));
+    g.appendChild(svg("line", {
+      x1: x0, y1: cy, x2: x1 - dir * 7, y2: cy,
+      class: "seq-arrow" + (waiting ? " waiting" : ""),
+    }));
+    g.appendChild(seqArrowHead(x1, cy, dir, waiting));
+    // One mark per recipient, so a broadcast says who it actually reached.
+    for (const i of to) {
+      const handle = lanes[i].key;
+      const remote = ev.remote.includes(handle);
+      const got = ev.delivered.includes(handle);
+      const mark = svg("circle", {
+        cx: seqX(i), cy, r: 3.4,
+        class: "seq-drop" + (remote ? " remote" : got ? " in" : " out"),
+      });
+      mark.appendChild(svg("title", {}, remote
+        ? `${handle} is on another daemon — whether it has been typed in is ` +
+          "that daemon's to know"
+        : got
+          ? `typed into ${handle}'s terminal`
+          : `queued for ${handle} — not typed in yet`));
+      g.appendChild(mark);
+    }
+    const span = Math.abs(x1 - x0);
+    const label = (m.type && m.type !== "say" ? `${m.type} · ` : "")
+      + (m.reply_to ? "re · " : "") + body;
+    g.appendChild(svg(
+      "text",
+      { x: (x0 + x1) / 2, y: cy - 8, class: "seq-label" },
+      seqClip(label, Math.max(span, SEQ.lane) - 8)
+    ));
+  }
+
+  g.appendChild(svg("title", {}, [
+    `${m.from} → ${fmtTo(m.to)}`,
+    m.type && m.type !== "say" ? `(${m.type})` : "",
+    m.reply_to ? `in reply to ${m.reply_to}` : "",
+    "", body,
+  ].filter((s) => s !== "").join("\n")));
+  if (traceExpandable(m)) {
+    g.addEventListener("click", () => {
+      if (traceOpen.has(m.id)) traceOpen.delete(m.id);
+      else traceOpen.add(m.id);
+      if (traceLast) renderTrace(traceLast);
+    });
+  }
+  node.appendChild(g);
+
+  // Unanswered, in the right-hand margin: always the same column, so a
+  // reader's eye finds the silences without following each arrow to its end.
+  if (ev.debts.length) {
+    const oldest = ev.debts.reduce(
+      (a, d) => (d.age !== null && d.age !== undefined && d.age > a ? d.age : a), 0
+    );
+    const chip = svg("g", { class: "seq-owed" });
+    chip.appendChild(svg(
+      "text", { x: width - SEQ.right + 10, y: cy + 4 },
+      `⚠ ${fmtAge(oldest)} unanswered`
+    ));
+    chip.appendChild(svg("title", {}, ev.debts
+      .map((d) => `${d.handle} has not answered this (${fmtAge(d.age)} ago)`)
+      .join("\n") + "\n\nnudge or dismiss it in Unanswered, above"));
+    node.appendChild(chip);
+  }
+
+  lines.forEach((line, i) => {
+    node.appendChild(svg(
+      "text",
+      { x: SEQ.gutter + 8, y: SEQ.row + i * SEQ.line, class: "seq-body" },
+      line
+    ));
+  });
+  node.appendChild(svg(
+    "text", { x: 8, y: cy + 4, class: "seq-time" }, seqClock(ev.at)
+  ));
+  return node;
+}
+
+/* Worth a fold: a body the one-line label cannot hold. */
+function traceExpandable(m) {
+  const body = m.body || "";
+  return body.length > 40 || body.includes("\n");
+}
+
+function fmtTo(to) {
+  if (to === "*") return "everyone";
+  return Array.isArray(to) ? to.join(", ") : String(to || "");
+}
+
+function seqFlowRow(ev, lanes, width) {
+  const node = seqSvg(width, SEQ.row, "seq-row-svg");
+  seqLanes(node, lanes, SEQ.row);
+  const i = lanes.findIndex((l) => l.key === ev.handle);
+  const cy = 18;
+  if (i >= 0) {
+    const g = svg("g", { class: "seq-flow" });
+    const x = seqX(i);
+    g.appendChild(svg("path", {
+      d: `M ${x} ${cy - 5} L ${x + 5} ${cy} L ${x} ${cy + 5} L ${x - 5} ${cy} Z`,
+      class: "seq-flow-mark",
+    }));
+    // Free to run into the right-hand margin: that column is the unanswered
+    // chips', and a message row is the only kind that has one.
+    g.appendChild(svg(
+      "text", { x: x + 11, y: cy + 4, class: "seq-flow-label" },
+      seqClip(ev.label, width - x - 24)
+    ));
+    const e = ev.entry || {};
+    g.appendChild(svg("title", {}, [
+      ev.label, e.details || "", e.by ? `by ${e.by}` : "",
+    ].filter(Boolean).join("\n\n")));
+    node.appendChild(g);
+  }
+  node.appendChild(svg(
+    "text", { x: 8, y: cy + 4, class: "seq-time" }, seqClock(ev.at)
+  ));
+  return node;
+}
+
+function seqJoinRow(ev, lanes, width) {
+  const node = seqSvg(width, SEQ.row, "seq-row-svg");
+  seqLanes(node, lanes, SEQ.row);
+  const i = lanes.findIndex((l) => l.key === ev.handle);
+  const cy = 18;
+  if (i >= 0) {
+    const g = svg("g", { class: "seq-join" });
+    const x = seqX(i);
+    g.appendChild(svg("line", { x1: x - 11, y1: cy, x2: x + 11, y2: cy }));
+    g.appendChild(svg(
+      "text", { x: x + 16, y: cy + 4, class: "seq-join-label" },
+      seqClip(
+        `joined${ev.role ? ` as ${ev.role}` : ""}` +
+        (ev.parent ? ` · spawned by ${ev.parent}` : ""),
+        width - x - 24
+      )
+    ));
+    g.appendChild(svg("title", {}, `${ev.handle} joined this mesh` +
+      (ev.role ? ` as ${ev.role}` : "") +
+      (ev.parent ? `, spawned by ${ev.parent}` : "") +
+      (ev.machine ? `, on ${ev.machine}` : "")));
+    node.appendChild(g);
+  }
+  node.appendChild(svg(
+    "text", { x: 8, y: cy + 4, class: "seq-time" }, seqClock(ev.at)
+  ));
+  return node;
+}
+
+function seqGapRow(ev, lanes, width) {
+  const h = 26;
+  const node = seqSvg(width, h, "seq-row-svg");
+  seqLanes(node, lanes, h);
+  const g = svg("g", { class: "seq-gap" });
+  g.appendChild(svg("line", {
+    x1: SEQ.gutter, y1: h / 2, x2: width - SEQ.right, y2: h / 2,
+  }));
+  g.appendChild(svg(
+    "text", { x: (SEQ.gutter + width - SEQ.right) / 2, y: h / 2 + 4 },
+    `⋯ ${fmtAge(ev.ms / 1000)} quiet ⋯`
+  ));
+  node.appendChild(g);
+  return node;
+}
+
+function seqRow(ev, lanes, width) {
+  if (ev.kind === "msg") return seqMsgRow(ev, lanes, width);
+  if (ev.kind === "flow") return seqFlowRow(ev, lanes, width);
+  if (ev.kind === "join") return seqJoinRow(ev, lanes, width);
+  return seqGapRow(ev, lanes, width);
+}
+
+/* ---- the page ----------------------------------------------------- */
+function traceHead(data) {
+  const head = el("div", "wf-head");
+  head.appendChild(el("h2", null, `messages: ${traceSession}`));
+  const seat = data && data.mesh;
+  if (seat) {
+    const who = el("span", "badge", `${seat.handle} in ${seat.mesh}`);
+    who.title =
+      "the name this session answers to in this mesh — it is a different " +
+      "handle in each one";
+    head.appendChild(who);
+  }
+  const term = el("button", "wf-btn option", "terminal");
+  term.title = "watch this session work";
+  term.addEventListener("click", () => go("#/s/" + encodeURIComponent(traceSession)));
+  head.appendChild(term);
+  if (seat) {
+    const room = el("a", "wf-btn option", "mesh view");
+    room.href = "#/mesh/" + encodeURIComponent(seat.mesh);
+    room.title = "the same room as a roster and a topology";
+    head.appendChild(room);
+  }
+  return head;
+}
+
+function traceTabs(data) {
+  const bar = el("div", "seq-tabs");
+  for (const m of data.meshes) {
+    const on = data.mesh && m.mesh === data.mesh.mesh;
+    const tab = el("button", "seq-tab" + (on ? " on" : ""), `${m.mesh} · ${m.handle}`);
+    tab.title = `${m.members} member(s) — this session is '${m.handle}' here`;
+    if (!on) tab.addEventListener("click", () => traceGoMesh(m.mesh));
+    bar.appendChild(tab);
+  }
+  return bar;
+}
+
+function traceLegend() {
+  const box = el("div", "seq-legend");
+  for (const [cls, label] of [
+    ["mine", "this session is a party to it"],
+    ["faint", "between others, for context"],
+    ["waiting", "sent, not typed in yet"],
+    ["owed", "asked, never answered"],
+    ["flow", "its workflow moved"],
+  ]) {
+    const item = el("span", "mesh-legend-item");
+    item.appendChild(el("i", `seq-legend-swatch ${cls}`));
+    item.appendChild(el("span", null, label));
+    box.appendChild(item);
+  }
+  return box;
+}
+
+function renderTrace(data) {
+  const view = $("msg-view");
+  const old = view.querySelector(".seq-scroll");
+  const keep = old && {
+    top: old.scrollTop,
+    left: old.scrollLeft,
+    // Following the story down as it happens is the one reason to move the
+    // scroll under the reader; anywhere else, a poll must leave it alone.
+    end: old.scrollHeight - old.scrollTop - old.clientHeight < 8,
+  };
+  view.innerHTML = "";
+  view.appendChild(traceHead(data));
+
+  if (!data.meshes.length) {
+    view.appendChild(el(
+      "p", "wf-note",
+      "messages travel through a mesh and this session is in none — there is " +
+      "nothing to trace. Join it to one from its details panel."
+    ));
+    return;
+  }
+  view.appendChild(traceTabs(data));
+
+  const focus = data.mesh.handle;
+  const events = msgEvents({
+    handle: focus,
+    members: (data.info || {}).members || [],
+    messages: data.history || [],
+    owed: data.owed,
+    journal: (data.flow || {}).journal || [],
+  });
+  const lanes = msgLanes(events, focus);
+  // Settled once per draw, before anything is measured against it: every row
+  // is laid out from SEQ.lane, so they all have to agree on it.
+  // clientWidth carries this page's own padding; the diagram gets what is
+  // left of it.
+  SEQ.lane = seqFit(lanes.length, Math.max(0, (view.clientWidth || 0) - 56));
+  const width = seqW(lanes.length);
+
+  view.appendChild(traceLegend());
+  view.appendChild(el(
+    "p", "wf-desc",
+    "the last " + (data.history || []).length + " message(s) in this mesh, in " +
+    "the order the mesh sequenced them. Only what travelled THROUGH the mesh " +
+    "is here — words typed straight into a terminal leave no record. Click a " +
+    "message to read all of it."
+  ));
+
+  // Above the scroller, not inside it: the diagram scrolls sideways, and a
+  // block of prose and buttons dragged along by that is unreadable on a
+  // narrow screen — its buttons end up past the right-hand edge. It keeps its
+  // own height instead, and its own scrollbar when the list is long.
+  // Only when there is a debt. On the mesh page an empty ledger saying so is
+  // worth its line; here it would take a third of the screen off the picture
+  // it annotates, to report the ordinary case — which the picture already
+  // reports, by carrying no chips.
+  if (data.owed && (data.owed.owed || 0) > 0) {
+    const strip = el("div", "seq-owed-strip");
+    strip.appendChild(renderMeshOwed(data.info, data.owed));
+    view.appendChild(strip);
+  }
+
+  const scroll = el("div", "seq-scroll");
+  const headBox = el("div", "seq-head");
+  headBox.appendChild(seqHeadSvg(lanes));
+  scroll.appendChild(headBox);
+
+  const rows = el("div", "seq-rows");
+  if (!events.length) {
+    rows.appendChild(el("p", "wf-note", "nothing has been said in this mesh yet"));
+  }
+  for (const ev of events) rows.appendChild(seqRow(ev, lanes, width));
+  scroll.appendChild(rows);
+  view.appendChild(scroll);
+
+  if (keep) {
+    scroll.scrollLeft = keep.left;
+    scroll.scrollTop = keep.end ? scroll.scrollHeight : keep.top;
+  } else {
+    scroll.scrollTop = scroll.scrollHeight;   // the latest, like a chat
+  }
 }
 
 /* ------------------------------------------------------------------ */

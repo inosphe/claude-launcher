@@ -675,6 +675,42 @@ class Mesh:
         )
         return out
 
+    def delivery_of(self, msg: dict, index: Optional[int] = None) -> dict:
+        """Where this message actually got to: who it resolves to now, and
+        which of them have already had it typed in.
+
+        The log stores the *address* rather than the recipients it resolved to
+        (see :meth:`addressed_to`), so a reader of the history cannot tell who
+        a ``"*"`` reached, nor that a since-cut edge has taken someone off it.
+        This answers both, by the same re-derivation delivery itself uses — so
+        a picture drawn from it cannot disagree with what the daemon is doing.
+
+        ``delivered`` is claimed only for LOCAL members, because it is only
+        known for them: a remote member is injected by its own daemon and
+        consumes from its own cursor. Calling that "not delivered" would read
+        as a stuck delivery, which is the state this annotation exists to make
+        visible — so they are listed apart, under ``remote``, and the reader is
+        told the difference instead of being guessed at.
+
+        ``index`` is the message's position in :attr:`messages`; omit it for a
+        provisional one (parked by the fast path, not yet sequenced), whose
+        only evidence of delivery is ``delivered_ids``.
+        """
+        recipients = [h for h in self.members if self.addressed_to(msg, h)]
+        mid = msg.get("id")
+        delivered: List[str] = []
+        remote: List[str] = []
+        for handle in recipients:
+            if not self.members[handle].local:
+                remote.append(handle)
+                continue
+            done = self.delivered_ids.get(handle) or frozenset()
+            if mid in done or (
+                index is not None and index < self.cursors.get(handle, 0)
+            ):
+                delivered.append(handle)
+        return {"recipients": recipients, "delivered": delivered, "remote": remote}
+
     def owed(self, handle: str) -> List[dict]:
         """Reply-expecting messages already DELIVERED to ``handle`` that it
         has not answered — the per-message form of the policy engine's
@@ -1820,6 +1856,21 @@ class MeshManager:
     def history(self, name: str, limit: int = 50) -> List[dict]:
         mesh = self.get(name)
         return mesh.messages[-limit:] if limit > 0 else list(mesh.messages)
+
+    def history_annotated(self, name: str, limit: int = 50) -> List[dict]:
+        """:meth:`history`, with every message told where it got to.
+
+        Apart from ``history`` rather than folded into it: the annotation
+        re-resolves every recipient against the member graph, per message, and
+        the readers that only want the log as it was written (the CLI, the
+        wire format a peer syncs) should not pay for a view's question.
+        """
+        mesh = self.get(name)
+        start = max(0, len(mesh.messages) - limit) if limit > 0 else 0
+        return [
+            {**m, **mesh.delivery_of(m, start + i)}
+            for i, m in enumerate(mesh.messages[start:])
+        ]
 
     # ------------------------------------------------------------------ #
     # policy config
