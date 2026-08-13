@@ -213,7 +213,8 @@ def check(
 
     ``parent`` is the parent session's definition (``SessionDef.to_dict()``),
     ``depth`` its own depth in the session tree and ``children`` how many
-    direct children it already has. The return value is the subset of a
+    direct children it has **running** — the cap is on agents alive at once,
+    so an ended one does not hold its slot. The return value is the subset of a
     :class:`SessionDef` the child should be built from — inherited values,
     with any *permitted* override applied.
 
@@ -233,9 +234,9 @@ def check(
         )
     if children >= policy.max_children:
         raise SpawnDenied(
-            f"this session already has {children} direct child(ren), the "
-            f"limit is {policy.max_children} (spawn.max_children) — reuse one "
-            "of them, or kill one first"
+            f"this session already has {children} direct child(ren) running, "
+            f"the limit is {policy.max_children} (spawn.max_children) — reuse "
+            "one of them, or end one first ('kill'), which frees its slot"
         )
 
     child = {
@@ -313,7 +314,8 @@ def capabilities(policy: SpawnPolicy, *, depth: int, children: int) -> dict:
         "max_depth": policy.max_depth,
         # ``children_used``, not ``children``: this report is merged into a
         # payload that also carries the actual child list, and a count under
-        # that name would quietly replace it.
+        # that name would quietly replace it. It counts the RUNNING ones, so
+        # it can read lower than that list — which also carries the exited.
         "children_used": children,
         "children_remaining": remaining,
         "may_choose": sorted(

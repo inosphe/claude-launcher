@@ -204,7 +204,7 @@ class SessionManager:
             request,
             parent=session.sdef.to_dict(),
             depth=self.depth(parent),
-            children=len(self.children(parent)),
+            children=len(self.live_children(parent)),
         )
         return self.stage(
             SessionDef.from_dict(
@@ -257,7 +257,7 @@ class SessionManager:
         return spawn_mod.capabilities(
             spawn_mod.SpawnPolicy.load(),
             depth=self.depth(parent),
-            children=len(self.children(parent)),
+            children=len(self.live_children(parent)),
         )
 
     def _auto_name(self) -> str:
@@ -302,6 +302,31 @@ class SessionManager:
         """Direct children of ``name``, live or exited, in name order."""
         return sorted(
             n for n, s in self._sessions.items() if s.sdef.parent == name and n != name
+        )
+
+    def live_children(self, name: str) -> List[str]:
+        """Direct children of ``name`` that are still running.
+
+        What the spawn budget counts, and the only place the distinction is
+        drawn: the tree, :meth:`descendants` and :meth:`commands` all need the
+        exited record, or an agent could neither see what it built nor drop
+        the record of a child it had just ended.
+
+        A budget that counted the exited would make ``kill`` half a tool —
+        the terminal is gone, the slot is not, and the agent has to end the
+        same child twice to spawn again. It is a cap on how many agents are
+        running at once, so it counts the ones that are.
+
+        The trade is that ``claunch respawn`` can now put a parent one over
+        the cap, since the slot it left is gone by the time it comes back.
+        That is a human's explicit call on a session that already existed,
+        and the plain create path has never been budget-checked either; the
+        report clamps ``children_remaining`` at zero and says the limit is
+        reached, which is true.
+        """
+        return sorted(
+            n for n, s in self._sessions.items()
+            if s.sdef.parent == name and n != name and not s.exited
         )
 
     def ancestors(self, name: str) -> List[str]:

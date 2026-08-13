@@ -993,6 +993,15 @@ different worker — name, handle, role, opening task. Each inherited field
 has its own unlock (`allow_profile`, `allow_cwd`, `allow_args`,
 `allow_env`, `allow_harness`), plus `max_children` and `max_depth`.
 
+`max_children` counts the children that are **running**. It is a cap on how
+many agents are alive at once, so a child that has been ended does not hold
+its slot — otherwise `kill` would free the terminal and keep the budget, and
+the refusal that says to end one first would be wrong. The exited record
+stays in the tree (that is what `respawn` reads, and what `descendants` and
+`commands` walk), so `children_used` can read lower than the child list is
+long. The trade: a human's `respawn` can put a parent one over the cap, the
+same way the plain create path has always been able to.
+
 The working directory has **two** unlocks, because it has two spellings.
 `allow_cwd` takes a raw path; `allow_workspace` takes a name from the
 registry (`claude_launcher/workspaces.py`) and resolves it in the policy, so
