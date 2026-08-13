@@ -941,8 +941,16 @@ def test_mcp_initialize_and_tools():
     assert resp["result"]["serverInfo"]["name"] == "cflow"
     resp = _rpc("tools/list")
     names = {t["name"] for t in resp["result"]["tools"]}
-    # no approve, by design
-    assert names == {"start", "report", "next", "select", "status"}
+    assert names == {
+        # this session's own run
+        "start", "report", "next", "select", "status",
+        # decisions other sessions' runs are waiting on it for
+        "asks", "answer",
+    }
+    # still no approve, by design: `answer` decides somebody ELSE's run, and
+    # a tool that could unblock this one would put the gate back in the hands
+    # of the agent it is a gate on.
+    assert "approve" not in names
 
 
 def test_mcp_tool_call_flow(flow_dir):
@@ -1533,6 +1541,67 @@ def test_the_driver_cannot_take_a_delegated_branch(flow_dir, monkeypatch):
     with pytest.raises(CflowError, match="not yours to make"):
         engine.select("ready", "looks fine to me", by="agent")
     assert engine.status()["status"] == "waiting_answer"
+
+
+def test_a_responder_finds_and_answers_by_id_alone(flow_dir, monkeypatch):
+    """The responder never learns the asking run's directory or scope."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow")
+    ask_id = _advance("implemented")["ask"]["id"]
+
+    waiting = engine.open_asks("boss")
+    assert [e["ask"] for e in waiting] == [ask_id]
+    assert waiting[0]["from_session"] == "driver"
+    assert waiting[0]["prompt"] == "ship it?"
+    assert [o["name"] for o in waiting[0]["options"]] == ["approve", "decline"]
+
+    assert engine.open_asks("bystander") == []
+    with pytest.raises(CflowError, match="no open request"):
+        engine.answer_ask(ask_id, "approve", by_session="bystander")
+
+    engine.answer_ask(ask_id, "approve", "checked it", by_session="boss")
+    assert engine.open_asks("boss") == []
+    assert engine.next_step()["status"] == "step"
+
+
+def test_answering_does_not_fence_the_responders_own_run(flow_dir, monkeypatch):
+    """`answer` names somebody else's run; adopting that id would wedge ours."""
+    _driving_session(monkeypatch, "boss")
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "linear", LINEAR)
+    _write(flow_dir, "askflow", ASK_FLOW)
+
+    # the responder is driving its own run in another scope
+    engine.start("linear", scope="boss")
+    mcp.call_tool("status", {})
+    own = mcp._seen_run
+
+    engine.start("askflow", scope="driver")
+    engine.report("implemented", scope="driver")
+    ask_id = engine.next_step(scope="driver")["ask"]["id"]
+
+    payload = mcp.call_tool("answer", {"ask": ask_id, "decision": "approve"})
+    assert payload["status"] == "answered"
+    assert mcp._seen_run == own  # still fenced to our own run, not theirs
+    assert mcp.call_tool("report", {"summary": "did one"})["status"] == "reported"
+
+
+def test_asks_is_scoped_to_the_calling_session(flow_dir, monkeypatch):
+    _driving_session(monkeypatch, "boss")
+    _mesh(monkeypatch, ("leader", "boss", 1))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow", scope="driver")
+    engine.report("implemented", scope="driver")
+    engine.next_step(scope="driver")
+
+    payload = mcp.call_tool("asks", {})
+    assert [e["step"] for e in payload["waiting_on_you"]] == ["ship"]
+    assert "abstain" in payload["note"]
+
+    monkeypatch.setenv(state_mod.SESSION_ENV, "nobody")
+    assert mcp.call_tool("asks", {})["waiting_on_you"] == []
 
 
 def test_a_human_can_settle_a_delegated_branch(flow_dir, monkeypatch):

@@ -6,10 +6,17 @@ one ``claunch mcp`` process (see :mod:`claude_launcher.mcp_server`); the
 standalone ``claunch cflow mcp`` entry point remains for installs written
 before the servers were merged.
 
-Exposed tools: ``start``, ``report``, ``next``, ``select``, ``status``. There
-is deliberately **no approve tool** and no user-side select confirmation here:
-human gates are only operable via the CLI (``claunch cflow approve|select``),
-outside the agent's reach.
+Exposed tools: ``start``, ``report``, ``next``, ``select``, ``status`` for the
+run this session drives, plus ``asks`` and ``answer`` for decisions *other*
+sessions' runs are waiting on it for.
+
+There is deliberately **no approve tool** and no user-side select confirmation
+here: human gates are only operable via the CLI (``claunch cflow
+approve|select``), outside the agent's reach. ``answer`` is not a way around
+that — it decides somebody else's run, never this one, and refuses both a
+request that was not put to this session and one from its own run. Which
+session is answering is read from the environment, not from the arguments, so
+it identifies the process rather than the claim.
 
 This process is one of two writers of a run (the daemon is the other), so it
 also carries a **fence**: the run id it last handed to the agent. If the slot
@@ -20,6 +27,7 @@ refused rather than silently applied to a run this agent has never read.
 
 from __future__ import annotations
 
+import os
 from typing import Optional
 
 from .. import mcp_rpc
@@ -55,6 +63,14 @@ TOOLS = [
                         "abort the active run, archive it (journal included), "
                         "and start fresh — pass only with the user's explicit "
                         "go-ahead, never on your own initiative"
+                    ),
+                },
+                "mesh": {
+                    "type": "string",
+                    "description": (
+                        "which mesh a delegated decision looks for its "
+                        "responders in. Only needed when this session belongs "
+                        "to more than one — otherwise the run finds it"
                     ),
                 },
             },
@@ -124,10 +140,59 @@ TOOLS = [
         ),
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "asks",
+        "description": (
+            "Decisions OTHER sessions' runs are waiting on YOU for (read-only, "
+            "any directory). A workflow below you in the spawn tree reached a "
+            "step it does not get to decide — an approval, or which branch to "
+            "take — and named your role. Each entry carries the question, the "
+            "options you may answer with, and its deadline. Call this when a "
+            "message says a run needs a decision, and after any nudge."
+        ),
+        "inputSchema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "answer",
+        "description": (
+            "Decide one of the requests from 'asks'. The decision must be one "
+            "of that request's declared options, or 'abstain' if you have no "
+            "basis to decide — abstaining passes it to whoever is next, which "
+            "is the right move when guessing is the alternative. Judge it "
+            "yourself against the code, docs and tests; you were asked "
+            "precisely because the run does not get to decide it. You cannot "
+            "answer a request that was not put to you, nor one from your own "
+            "run, and you never receive the asking step's instructions — the "
+            "work stays theirs."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "ask": {"type": "string", "description": "the request id from 'asks'"},
+                "decision": {
+                    "type": "string",
+                    "description": "one of the request's options, or 'abstain'",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "why — journaled, and the only part of your answer "
+                        "that is free text. Cite what you checked"
+                    ),
+                },
+            },
+            "required": ["ask", "decision"],
+        },
+    },
 ]
 
 #: Tools that write to the run, and so must be fenced against a replacement.
 _MUTATING = ("report", "next", "select")
+
+#: Tools that act on ANOTHER session's run. They are outside the fence in
+#: both directions: they are not refused when this slot was replaced (they
+#: were never about this slot), and their payloads never re-arm it.
+_FOREIGN = ("asks", "answer")
 
 #: The run id last handed to this agent. ``None`` = nothing read yet, so the
 #: next call adopts whatever is on disk.
@@ -159,6 +224,17 @@ def _check_fence(name: str) -> None:
     )
 
 
+def _session() -> str:
+    """This agent's session name, as the daemon exported it.
+
+    The single source of "who is answering". It is read from the process
+    environment rather than taken as a tool argument on purpose: an answer
+    attributable to whoever claimed it would not be an answer at all (see
+    :func:`engine.answer`).
+    """
+    return str(os.environ.get(state_mod.SESSION_ENV) or "").strip()
+
+
 def call_tool(name: str, args: dict) -> dict:
     global _seen_run
     _check_fence(name)
@@ -167,6 +243,7 @@ def call_tool(name: str, args: dict) -> dict:
             str(args.get("workflow") or ""),
             context=args.get("context") or None,
             force=bool(args.get("force")),
+            mesh=args.get("mesh") or None,
         )
     elif name == "report":
         payload = engine.report(
@@ -180,11 +257,35 @@ def call_tool(name: str, args: dict) -> dict:
         )
     elif name == "status":
         payload = engine.status()
+    elif name == "asks":
+        waiting = engine.open_asks(_session())
+        payload = {
+            "status": "asks",
+            "waiting_on_you": waiting,
+            "note": (
+                "decide each with the 'answer' tool. Check the actual code, "
+                "docs or tests before you do — and 'abstain' rather than guess"
+            )
+            if waiting
+            else "nothing is waiting on your decision",
+        }
+    elif name == "answer":
+        payload = engine.answer_ask(
+            str(args.get("ask") or ""),
+            str(args.get("decision") or ""),
+            args.get("reason") or None,
+            by_session=_session(),
+        )
     else:
         raise engine.CflowError(f"unknown tool {name!r}")
     # Every payload that names a run re-arms the fence; 'status' on an idle
     # slot disarms it (there is nothing to be superseded).
-    if payload.get("run"):
+    #
+    # `answer` is excluded because the run it names is somebody ELSE's — the
+    # one that asked. Adopting that id would fence this agent's own tools
+    # against a run it never drove, and the next 'report' here would be
+    # refused for a replacement that never happened.
+    if name not in _FOREIGN and payload.get("run"):
         _seen_run = str(payload["run"])
     elif name == "status" and payload.get("status") == "idle":
         _seen_run = None

@@ -1193,6 +1193,93 @@ def select(
     }
 
 
+def _ask_addresses(ask: Optional[dict], session: str) -> bool:
+    return bool(ask) and any(
+        e.get("kind") == "member" and e.get("session") == session
+        for e in (ask or {}).get("asked") or []
+    )
+
+
+def open_asks(session: str) -> List[dict]:
+    """Every open request waiting on ``session``, across this machine's runs.
+
+    A responder has no idea which directory or scope the run asking it lives
+    in — nor should it, since the whole transaction is "somebody above you
+    needs a decision". So the ask id is the only handle it ever holds, and
+    this is what turns one into a run: a scan of the same registry the
+    dashboard lists runs from.
+
+    Read-only and lock-free. A listing that raced a state write is stale by
+    one transition, and :func:`answer` re-checks everything under the lock —
+    taking every run's lock to render a list would be the expensive way to be
+    exactly as correct.
+    """
+    session = str(session or "").strip()
+    if not session:
+        return []
+    out: List[dict] = []
+    for cwd, scope in state_mod.known_runs():
+        token = state_mod.push_scope(scope)
+        try:
+            if not state_mod.has_run(cwd):
+                continue
+            state = state_mod.load_state(cwd)
+            ask = state.get("ask")
+            if not _ask_addresses(ask, session):
+                continue
+            if state.get("status") in ("done", "aborted"):
+                continue
+            out.append(
+                {
+                    "ask": ask["id"],
+                    "kind": ask["kind"],
+                    "prompt": ask["prompt"],
+                    "options": ask["options"],
+                    "deadline": ask.get("deadline"),
+                    "opened_at": ask.get("opened_at"),
+                    "from_session": scope,
+                    "workflow": state.get("workflow"),
+                    "step": ask["step"],
+                    "context": state.get("context") or "",
+                    "cwd": cwd,
+                }
+            )
+        except (state_mod.StateError, KeyError, TypeError):
+            continue  # a half-written or foreign run is not this list's problem
+        finally:
+            state_mod.pop_scope(token)
+    return out
+
+
+def answer_ask(
+    ask_id: str,
+    decision: str,
+    reason: Optional[str] = None,
+    *,
+    by_session: str = "",
+) -> dict:
+    """Answer by id alone: find the run it belongs to, then :func:`answer` it.
+
+    The lookup is deliberately restricted to asks addressed to this session,
+    so an id learned some other way is not a way into a run that never asked.
+    """
+    for entry in open_asks(by_session):
+        if entry["ask"] == ask_id:
+            return answer(
+                ask_id,
+                decision,
+                reason,
+                by_session=by_session,
+                cwd=entry["cwd"],
+                scope=entry["from_session"],
+            )
+    raise CflowError(
+        f"no open request {ask_id!r} is waiting on you — it was answered, it "
+        f"escalated past you, or its run moved on. Call 'asks' for what is "
+        f"actually open"
+    )
+
+
 def _asked_handle(ask: dict, session: str) -> str:
     """The handle the asked list recorded for ``session`` (else the session)."""
     for entry in ask.get("asked") or []:
