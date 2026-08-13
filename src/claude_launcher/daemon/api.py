@@ -509,6 +509,7 @@ def _serialize_workflow(wf) -> dict:
             "title": s.title,
             "instructions": s.instructions,
             "gate": s.gate,
+            "ask": _serialize_ask(s.ask),
             "verify": s.verify.command if s.verify else None,
             "next": s.next,
             "select": None,
@@ -517,6 +518,7 @@ def _serialize_workflow(wf) -> dict:
             entry["select"] = {
                 "prompt": s.select.prompt,
                 "chooser": s.select.chooser,
+                "from": _serialize_from(s.select.delegate),
                 "options": [
                     {"name": o.name, "description": o.description, "next": o.next}
                     for o in s.select.options.values()
@@ -529,7 +531,30 @@ def _serialize_workflow(wf) -> dict:
         "start": wf.start,
         "max_visits": wf.max_visits,
         "warnings": wf.warnings,
+        # `deprecations` deliberately NOT served here. This feeds the run
+        # pages, and advice about how a file is written does not belong in
+        # front of somebody watching it execute — it would be on screen for
+        # every run of every workflow that still spells a gate the old way.
+        # `claunch cflow show` is where its author reads it.
         "steps": steps,
+    }
+
+
+def _serialize_from(delegate) -> list:
+    """A delegation's preference list as lines a reader can scan."""
+    if delegate is None:
+        return []
+    return [c.describe() for c in delegate.candidates]
+
+
+def _serialize_ask(ask) -> dict | None:
+    if ask is None:
+        return None
+    return {
+        "prompt": ask.prompt,
+        "from": _serialize_from(ask.delegate),
+        "timeout": ask.delegate.timeout,
+        "on_decline": ask.on_decline,
     }
 
 

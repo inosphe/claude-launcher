@@ -157,6 +157,9 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 .dot.wf-running { background: #58a6ff; }
 .dot.wf-waiting { background: #d29922; }
+/* Delegated: stopped, but on a peer rather than on the operator — so it is
+   deliberately NOT the amber that means "your move". */
+.dot.wf-delegated { background: #a371f7; }
 .dot.wf-done { background: #3fb950; }
 .dot.wf-error { background: #ff7b72; }
 
@@ -445,6 +448,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .wf-head h2 { font-size: 20px; }
 .badge.wf-running { background: #172947; color: #58a6ff; }
 .badge.wf-waiting { background: #4d3800; color: #d29922; }
+.badge.wf-delegated { background: #2b1d47; color: #a371f7; }
 .badge.wf-done { background: #1f4428; color: #3fb950; }
 .badge.wf-error { background: #442022; color: #ff7b72; }
 .wf-desc { color: #9da5b0; font-size: 13px; margin-top: 4px; }

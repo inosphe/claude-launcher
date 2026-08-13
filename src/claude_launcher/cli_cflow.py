@@ -95,6 +95,36 @@ def _print_payload(payload: dict) -> None:
     print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
+def _cmd_asks(args: argparse.Namespace) -> int:
+    """Decisions other sessions' runs are waiting on someone for.
+
+    Deliberately not a way to answer one: the CLI is the HUMAN channel, and a
+    human settles a delegated question through the approval and selection
+    doors that already exist (which is also how an override gets recorded as
+    an override). This is the read — most useful for seeing why a run has
+    gone quiet, and for checking that a responder was actually asked.
+    """
+    session = args.session or state_mod.current_scope()
+    waiting = engine.open_asks(session)
+    if args.json:
+        _print_payload({"session": session, "waiting_on": waiting})
+        return 0
+    if not waiting:
+        print(f"nothing is waiting on {session!r}")
+        return 0
+    for entry in waiting:
+        options = "|".join(o["name"] for o in entry.get("options") or [])
+        print(
+            f"{entry['ask']}  {entry['workflow']}/{entry['step']}  "
+            f"from {entry['from_session']}  [{options}|abstain]"
+        )
+        print(f"  {(entry.get('prompt') or '').strip().splitlines()[0]}")
+        if entry.get("deadline"):
+            print(f"  moves on after {entry['deadline']}")
+        print(f"  {entry['cwd']}")
+    return 0
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     scope = _resolve_scope(args)
     payload = engine.status(scope=scope)
@@ -356,6 +386,17 @@ def register(sub) -> None:
     q.add_argument("step")
     q.add_argument("--reason", help="recorded in the journal")
     q.set_defaults(func=_cmd_goto)
+
+    q = csub.add_parser(
+        "asks",
+        help="decisions other runs are waiting on a session for (read-only)",
+    )
+    q.add_argument(
+        "--session",
+        help="whose decisions to list (default: this session)",
+    )
+    q.add_argument("--json", action="store_true", help="print raw JSON")
+    q.set_defaults(func=_cmd_asks)
 
     q = _scoped(csub.add_parser("abort", help="abort the active run"))
     q.set_defaults(func=_cmd_abort)

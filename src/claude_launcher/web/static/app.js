@@ -249,10 +249,21 @@ async function refreshSessions() {
 /* ------------------------------------------------------------------ */
 function wfDotClass(status) {
   if (status === "step" || status === "select" || status === "reported") return "wf-running";
+  // Delegated: stopped, but not on anything the operator has to do. Its own
+  // colour, because painting it the same amber as a gate would grow a queue
+  // of things that look like work and are not.
+  if (status === "waiting_answer") return "wf-delegated";
   if (status === "waiting_approval" || status === "waiting_selection" || status === "report_required") return "wf-waiting";
   if (status === "done") return "wf-done";
   if (status === "error" || status === "aborted") return "wf-error";
   return "wf-running";
+}
+
+/* Who an open ask is with, in a few words. */
+function askWho(ask) {
+  const asked = (ask && ask.asked) || [];
+  if (!asked.length) return "nobody — it fell to you";
+  return asked.map((e) => e.handle || e.kind).join(", ");
 }
 
 function shortenPath(p) {
@@ -314,7 +325,12 @@ async function refreshCflow() {
     st.className = "meta";
     st.textContent =
       r.status === "waiting_approval" && r.reason === "loop_limit"
-        ? "loop limit" : r.status;
+        ? "loop limit"
+        : r.status === "waiting_approval" && r.reason === "declined"
+        ? "declined"
+        : r.status === "waiting_answer"
+        ? `with ${askWho(r.ask)}`
+        : r.status;
     head.append(dot, name, st);
     li.appendChild(head);
 
@@ -368,7 +384,17 @@ async function refreshCflow() {
       li.appendChild(sess);
     }
 
-    if (r.status === "waiting_approval") {
+    if (r.status === "waiting_answer") {
+      li.appendChild(cflowLine(`waiting on ${askWho(r.ask)} to decide`));
+      if (r.ask && r.ask.deadline) {
+        li.appendChild(cflowLine(`moves on after ${r.ask.deadline}`));
+      }
+    } else if (r.status === "waiting_approval") {
+      if (r.reason === "declined" && r.declined) {
+        li.appendChild(cflowLine(
+          `${r.declined.by} declined — ${r.declined.reason || "no reason given"}`
+        ));
+      }
       li.appendChild(cflowHint("claunch cflow approve"));
     } else if (r.status === "waiting_selection" || r.status === "select") {
       if (r.proposal) {
@@ -2136,10 +2162,51 @@ function wfActions(data, opts = {}) {
         : "this run belongs to no managed session — nudge the agent wherever it runs"
     ));
   }
-  if (run.status === "waiting_approval") {
+  // Who a delegated decision went to, and why it did not go further. Shown
+  // for every ask, answered by an agent or fallen to us: "no leader above
+  // this run" is the whole explanation for why a question is on this screen.
+  if (run.ask) {
+    box.appendChild(el("p", "wf-note", `asked: ${askWho(run.ask)}`));
+    for (const s of run.ask.skipped || []) {
+      box.appendChild(el("p", "wf-note", `skipped ${s.candidate} — ${s.reason}`));
+    }
+    if (run.ask.deadline) {
+      box.appendChild(el("p", "wf-note", `moves on after ${run.ask.deadline}`));
+    }
+    if (run.ask.undelivered) {
+      box.appendChild(el("p", "wf-warning",
+        `recorded, but not announced: ${run.ask.undelivered}`));
+    }
+  }
+  if (run.status === "waiting_answer") {
+    box.appendChild(el("p", "wf-gate", run.ask ? run.ask.prompt : "waiting for a decision"));
+    box.appendChild(el("p", "wf-note",
+      "this is with another agent; you do not have to do anything. Take it " +
+      "over only if it is stuck."));
+    const btn = el("button", "wf-btn", "Decide it myself");
+    btn.addEventListener("click", () => {
+      if (!confirm(
+        `Take '${run.step_id}' away from ${askWho(run.ask)} and decide it yourself?`
+      )) return;
+      if (run.ask && run.ask.kind === "branch") {
+        // A branch needs an option, so send them back to the buttons the
+        // human-facing path already draws rather than inventing a second one.
+        alert("Use 'claunch cflow select <option>' to pick the branch.");
+        return;
+      }
+      cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
+    });
+    box.appendChild(btn);
+  } else if (run.status === "waiting_approval") {
     const isLoop = run.reason === "loop_limit";
+    if (run.reason === "declined" && run.declined) {
+      box.appendChild(el("p", "wf-warning",
+        `${run.declined.by} declined: ${run.declined.reason || "no reason given"}`));
+    }
     box.appendChild(el("p", "wf-gate", run.gate || "waiting for approval"));
-    const btn = el("button", "wf-btn approve", isLoop ? "Extend loop limit" : "Approve gate");
+    const btn = el("button", "wf-btn approve",
+      isLoop ? "Extend loop limit"
+        : run.reason === "declined" ? "Override the refusal" : "Approve gate");
     btn.addEventListener("click", () => {
       const q = isLoop
         ? `Extend the loop limit at step '${run.step_id}'?`
@@ -5301,6 +5368,9 @@ function flowState(f) {
   // prevent, so it outranks everything below.
   if (f.stopped) return "stopped";
   if (flowNeedsHuman(f)) return "blocked";
+  // Waiting, but on a peer rather than on us — a distinct word, or the card
+  // reads as "running" while nothing is happening.
+  if (f.status === "waiting_answer") return "delegated";
   if (f.status === "select") return "deciding";
   if (!f.status || f.status === "idle" ||
       f.status === "no_session" || f.status === "no_cwd") return "none";
@@ -5309,6 +5379,7 @@ function flowState(f) {
 
 const FLOW_WORDS = {
   blocked: "waiting on you", running: "running", deciding: "agent deciding",
+  delegated: "waiting on a peer",
   done: "done", aborted: "aborted", error: "error",
   stopped: "session stopped", none: "no run",
   unknown: "run lives on its own daemon",
@@ -5939,6 +6010,13 @@ function traceFlowLabel(e) {
     case "select_confirmed": return `chose: ${e.option || step}`;
     case "gate_wait": return `gate: ${step}`;
     case "approved": return `approved: ${step}`;
+    case "ask_opened": return `asked ${(e.asked || []).join(", ") || "nobody"}: ${step}`;
+    case "ask_unresolved": return `nobody to ask: ${step}`;
+    case "ask_escalated": return `escalated: ${step}`;
+    case "ask_abstained": return `${e.by || "a peer"} abstained: ${step}`;
+    case "ask_answered": return `${e.by || "a peer"} decided ${e.decision || ""}: ${step}`.trim();
+    case "ask_declined": return `${e.by || "a peer"} declined: ${step}`;
+    case "ask_discarded": return `question dropped: ${step}`;
     case "loop_limit": return `loop limit: ${step}`;
     case "loop_extended": return `loop limit raised: ${step}`;
     case "state_forced": return `forced to: ${step}`;

@@ -204,6 +204,26 @@ const DATA = {
         all(rows[0], (n) => n.text === "ready?").length === 1);
 }
 
+/* A run waiting on a PEER is stopped, but not on us. It must not join the
+   strip: that strip is the operator's queue, and padding it with work
+   somebody else owes turns "nothing needs you" into a thing to re-read. */
+{
+  ctx.pick(null);
+  const delegated = { ...DATA, flows: { ...DATA.flows, w1: { ...DATA.flows.w1,
+    status: "waiting_answer", gate: undefined,
+    ask: { id: "ask-1", kind: "approval", prompt: "ship it?",
+           asked: [{ kind: "member", handle: "lead1", session: "lead1" }] } } } };
+  ctx.renderFlowTopo(INFO, delegated);
+  const view = $("flow-view");
+  check("nothing lands in the operator's queue",
+        withClass(view, "flow-waiting-row").length === 0);
+  const cards = withClass(view, "flow-card");
+  check("...but the card says it is waiting, not running",
+        cards.filter((c) => hasClass(c, "delegated")).length === 1 &&
+        cards.filter((c) => hasClass(c, "running")).length === 1,
+        cards.map((c) => [...c.classes].join(".")));
+}
+
 /* A mesh where nothing is blocked still shows the strip — an empty one is an
    answer ("nothing needs you"), an absent one is a question. */
 {
