@@ -1015,14 +1015,22 @@ def test_an_agent_ends_the_child_it_spawned(home, tmp_path):
             # the child list still shows it: the record is what respawn needs
             assert [c["name"] for c in caps["children"]] == ["w1"]
 
-            # calling again on the exited child drops the record instead
+            # calling again changes nothing, and says so. This used to drop
+            # the record, which put the destructive step exactly where a
+            # caller reaches when the first call looked like it had not
+            # worked — and the first real use did look like that, because of
+            # the budget bug asserted just above. The retry deleted a record
+            # that was supposed to stay respawnable, and stranded the mesh
+            # row naming it. A retry an agent can be induced into must be safe.
             resp = await client.delete(
                 "/api/sessions/lead/children/w1", headers=BEARER
             )
             assert resp.status == 200
+            assert (await resp.json())["already_exited"] is True
             resp = await client.get("/api/sessions", headers=BEARER)
             names = [s["name"] for s in (await resp.json())["sessions"]]
-            assert names == ["lead"]
+            assert names == ["lead", "w1"]
+            assert "w1" in mm.get(mm.list()[0].name).members
         finally:
             await mgr.shutdown_all()
             await client.close()
@@ -1120,6 +1128,76 @@ def test_a_grandchild_is_reachable_but_a_stranger_is_not(home, tmp_path):
             assert resp.status == 200
             await _wait_for(lambda: mgr.get("gc").exited, "gc to exit")
             assert not mgr.get("w1").exited
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_record_a_mesh_still_names_is_not_dropped(home, tmp_path):
+    """The row and the record are one fact kept in two files.
+
+    Dropping the record alone leaves a member that reads ``missing``, cannot
+    be respawned (respawn reads the record that was just deleted) and — since
+    a member's lineage is derived from the live session tree rather than
+    stored — loses the spawn edge saying who it worked for, so the topology
+    redraws itself with the child promoted to a root. Nothing in the mesh can
+    undo that; only an operator's ``×``. This is the state that actually
+    happened once, and the guard that makes it unreachable.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            resp = await client.post(
+                "/api/sessions/lead/children", json={"name": "w1"}, headers=BEARER
+            )
+            assert resp.status == 201
+            name = mm.list()[0].name
+            assert "w1" in mm.get(name).members
+
+            # end it: allowed, and the row is *meant* to outlive the terminal
+            resp = await client.delete("/api/sessions/w1", headers=BEARER)
+            assert resp.status == 200
+            await _wait_for(lambda: mgr.get("w1").exited, "w1 to exit")
+            assert "w1" in mm.get(name).members
+
+            # forget it: refused while the roster still names it
+            resp = await client.delete("/api/sessions/w1", headers=BEARER)
+            assert resp.status == 409
+            error = (await resp.json())["error"]
+            assert "still a mesh member" in error and name in error
+            assert "w1" in [s.sdef.name for s in mgr.list()]
+            # and the lineage the topology draws is intact
+            assert mgr.ancestors("w1") == ["lead"]
+
+            # the bulk call skips it rather than refusing outright, and says
+            # which — an omission that looked like a no-op would read as the
+            # clear not having taken
+            mgr.create(SessionDef(name="loose", harness="py", cwd=str(tmp_path)))
+            await client.delete("/api/sessions/loose", headers=BEARER)
+            await _wait_for(lambda: mgr.get("loose").exited, "loose to exit")
+            resp = await client.delete("/api/sessions", headers=BEARER)
+            body = await resp.json()
+            assert body["removed"] == ["loose"]
+            assert [k["name"] for k in body["kept"]] == ["w1"]
+            assert body["kept"][0]["meshes"][0]["mesh"] == name
+            assert "w1" in [s.sdef.name for s in mgr.list()]
+
+            # leaving the mesh releases it — the two steps in the order the
+            # refusal asks for
+            resp = await client.delete(
+                f"/api/mesh/{name}/members/w1", headers=BEARER
+            )
+            assert resp.status == 200
+            resp = await client.delete("/api/sessions/w1", headers=BEARER)
+            assert resp.status == 200
+            assert [s.sdef.name for s in mgr.list()] == ["lead"]
         finally:
             await mgr.shutdown_all()
             await client.close()

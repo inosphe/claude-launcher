@@ -18,7 +18,7 @@ import json
 import re
 import shutil
 from dataclasses import replace
-from typing import Dict, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Union
 
 from .. import spawn as spawn_mod
 from . import harness as harness_mod
@@ -384,7 +384,16 @@ class SessionManager:
             )
 
     def kill(self, name: str, *, force: bool = False) -> AnySession:
-        """Kill a running session; deregister an already-exited one."""
+        """Kill a running session; deregister an already-exited one.
+
+        The deregistering half is the operator's alone, and its callers guard
+        it: a record a mesh row still names must not be dropped, or the row is
+        left naming a session that cannot be respawned or reached. The check
+        lives at the route (``_mesh_holds``) because it needs the mesh service
+        and this class deliberately does not know about it. The agent-facing
+        route does not reach this half at all — its second call is a no-op, so
+        a retry cannot destroy anything.
+        """
         session = self.get(name)
         if session.exited:
             del self._sessions[name]
@@ -393,7 +402,9 @@ class SessionManager:
         self.persist()
         return session
 
-    def clear(self, *, logs: bool = False) -> List[str]:
+    def clear(
+        self, *, logs: bool = False, keep: Iterable[str] = ()
+    ) -> List[str]:
         """Drop the record of every session that is no longer running.
 
         Running sessions are untouched. This is the *only* thing that makes a
@@ -401,8 +412,18 @@ class SessionManager:
         it happens when a human asks (``claunch clear-sessions``, or the web
         UI's clear button). ``logs`` also deletes their captured output,
         freeing their auto-generated names for reuse.
+
+        ``keep`` spares named records. The caller decides what goes in it: the
+        manager knows nothing of meshes, and a record a mesh row still names is
+        one whose deletion strands that row (see ``_mesh_holds`` in the API,
+        the only caller that passes this).
         """
-        names = [name for name, s in self._sessions.items() if s.exited]
+        spared = set(keep)
+        names = [
+            name
+            for name, s in self._sessions.items()
+            if s.exited and name not in spared
+        ]
         for name in names:
             del self._sessions[name]
             if logs:

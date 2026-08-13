@@ -706,7 +706,21 @@ $("clear-exited").addEventListener("click", async () => {
     `Drop the records of ${dead.length} exited session(s)?\n\n${dead.join(", ")}\n\n` +
     `They can no longer be resumed. Running sessions are untouched.`
   )) return;
-  await api("/api/sessions", { method: "DELETE" });
+  const resp = await api("/api/sessions", { method: "DELETE" });
+  const result = resp.ok ? await resp.json() : null;
+  // A record a mesh row still names is kept, not dropped — the two are one
+  // fact, and half of it left behind is a member nobody can respawn or reach.
+  // Said out loud: an omission the button does not mention reads as the clear
+  // having failed, and the next click is someone trying harder.
+  const kept = result?.kept || [];
+  if (kept.length) {
+    alert(
+      `Kept ${kept.length} record(s) still named by a mesh:\n\n` +
+      kept.map((k) => `${k.name} — ${k.meshes.map((m) => m.mesh).join(", ")}`)
+        .join("\n") +
+      `\n\nRemove them from the mesh first (the roster's ×), then clear again.`
+    );
+  }
   if (currentName && dead.includes(currentName)) {
     detach();
     currentName = null;

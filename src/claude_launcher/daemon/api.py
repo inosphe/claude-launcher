@@ -13,7 +13,7 @@ import asyncio
 import secrets
 import time
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from aiohttp import web
 
@@ -1586,11 +1586,27 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
     The daemon keeps exited sessions around indefinitely so they stay
     respawnable, so this is the explicit cleanup — nothing else discards them
     in bulk.
+
+    A session a mesh still names is **kept** and reported rather than dropped
+    (see :func:`_mesh_holds`) — skipped, not refused, because this is the bulk
+    call and one held record should not stop the other nine. ``kept`` says
+    which and why, so the omission is visible instead of looking like the
+    clear did not take.
     """
     manager: SessionManager = request.app["manager"]
+    mesh = request.app["mesh"]
     logs = request.query.get("logs") in ("1", "true")
-    removed = manager.clear(logs=logs)
-    return web.json_response({"removed": removed, "logs": logs})
+    kept = [
+        {"name": name, "meshes": held}
+        for name, held in (
+            (s.sdef.name, mesh.meshes_for_session(s.sdef.name))
+            for s in manager.list()
+            if s.exited
+        )
+        if held
+    ]
+    removed = manager.clear(logs=logs, keep=[k["name"] for k in kept])
+    return web.json_response({"removed": removed, "kept": kept, "logs": logs})
 
 
 def _session(request: web.Request):
@@ -1654,10 +1670,51 @@ def _same_dir(a: str, b: str) -> bool:
         return False
 
 
+def _mesh_holds(request: web.Request, name: str) -> List[dict]:
+    """The local mesh rows that still name session ``name``.
+
+    Dropping a record one of these names leaves a member pointing at nothing:
+    it reads ``missing`` in the roster, it cannot be respawned because respawn
+    reads the record that was just deleted, and — because a member's lineage is
+    derived from the live session tree rather than stored — the spawn edge that
+    said who it worked for silently disappears from the topology. The mesh has
+    no way back from that state on its own; only an operator's ``×`` clears it.
+
+    So the record and the row are kept together, and this is the test that
+    keeps them so. It is asked here rather than in :class:`SessionManager`
+    because the manager knows nothing of meshes, and locally rather than of the
+    authority because it must always be answerable — on a mirror, removing a
+    member is a call to another daemon that may be unreachable, and a guard
+    that can time out is a guard that gets skipped.
+    """
+    return request.app["mesh"].meshes_for_session(name)
+
+
+def _mesh_holds_error(name: str, held: List[dict]) -> str:
+    where = ", ".join(f"{h['mesh']} (as {h['handle']})" for h in held)
+    return (
+        f"{name!r} is still a mesh member — {where}. Dropping its record now "
+        "would leave that row naming a session nobody can respawn or reach. "
+        "Remove it from the mesh first (the roster's ×, or claunch mesh "
+        "leave), then clear the record."
+    )
+
+
 async def h_session_delete(request: web.Request) -> web.Response:
+    """Kill a running session; drop the record of an exited one (operator).
+
+    The second half is guarded: see :func:`_mesh_holds`. Killing is not — a
+    member row is *meant* to outlive the terminal, reading ``exited``.
+    """
     manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
     force = request.query.get("force") in ("1", "true")
-    session = manager.kill(request.match_info["name"], force=force)
+    session = manager.get(name)  # ManagerError -> 400, as it always did
+    if session.exited:
+        held = _mesh_holds(request, name)
+        if held:
+            return json_error(409, _mesh_holds_error(name, held))
+    session = manager.kill(name, force=force)
     return web.json_response(session.info())
 
 
@@ -1671,17 +1728,26 @@ async def h_session_child_kill(request: web.Request) -> web.Response:
     ends what it created and nothing else — not a sibling, and not itself,
     which would leave the caller answering from a terminal it just closed.
 
-    An already-exited child is deregistered rather than signalled, which is
-    what makes this the tidy-up call too. What it does not do is touch the
-    mesh: the member row stays, reading ``exited``, because that is what it
-    is, and because a killed child is respawnable until somebody clears it.
+    On an already-exited child this does **nothing** and says so — the call is
+    idempotent. It used to deregister instead, which made the second call the
+    destructive one, and a caller reaches for a second call precisely when the
+    first *looked* like it had not worked. That is not hypothetical: the first
+    real use hit a since-fixed budget bug (the slot did not come back), the
+    agent retried the way anyone would, and the retry deleted a record that was
+    supposed to stay respawnable. A retry an agent can be induced into must be
+    safe, so ending and forgetting are now separate verbs with separate callers
+    — forgetting stays the operator's (``clear``), where the mesh guard is.
+
+    What it does not touch either way is the mesh: the member row stays,
+    reading ``exited``, because that is what it is, and because a killed child
+    is respawnable until somebody clears it.
     """
     manager: SessionManager = request.app["manager"]
     parent = request.match_info["name"]
     child = request.match_info["child"]
     try:
         manager.get(parent)
-        manager.get(child)
+        target = manager.get(child)
     except ManagerError as exc:
         return json_error(404, str(exc))
     if parent == child:
@@ -1697,6 +1763,11 @@ async def h_session_child_kill(request: web.Request) -> web.Response:
             "spawned (or a descendant of one), not a peer. Ask the session "
             "that spawned it, or an operator (claunch kill-session).",
         )
+    if target.exited:
+        # Already done, so the answer is the same one the first call gave.
+        # Reported rather than silent: an agent that asks twice deserves to
+        # know the second ask changed nothing, or it will keep asking.
+        return web.json_response({**target.info(), "already_exited": True})
     force = request.query.get("force") in ("1", "true")
     session = manager.kill(child, force=force)
     return web.json_response(session.info())

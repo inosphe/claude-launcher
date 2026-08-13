@@ -223,8 +223,9 @@ TOOLS = [
             "reading — a child you never message is cost either way, but "
             "ending one mid-task loses whatever it had not reported. Its "
             "mesh row stays, reading 'exited', and it can be respawned by an "
-            "operator until somebody clears it; calling this on an "
-            "already-exited child drops the record instead."
+            "operator until somebody clears it. Calling it again on a child "
+            "that has already exited changes nothing and says so, so a retry "
+            "is safe; dropping the record is the operator's."
         ),
         "inputSchema": {
             "type": "object",

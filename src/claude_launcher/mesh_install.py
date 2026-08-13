@@ -145,9 +145,12 @@ peer and never yourself. Use it when a child's work is done and you have its
 report, not to quiet one you stopped reading: ending a session mid-task loses
 whatever it had not sent you, and if you are unsure whether it is still
 working, ask it first. Its mesh row stays, reading `exited`, so the roster
-still shows who did the work; calling `kill` again on an exited child drops
-the record. Killing is yours to do, but clearing and respawning are the
-user's (`claunch clear-sessions`, `claunch respawn`).
+still shows who did the work. Calling `kill` again on a child that has
+already exited changes nothing and tells you so — if the slot did not come
+back, a second `kill` is not the fix, `children` is where to look. Killing is
+yours to do, but clearing and respawning are the user's (`claunch
+clear-sessions`, `claunch respawn`), and a session your mesh still lists
+cannot be cleared until it leaves the roster.
 
 **Your children start connected to YOU and to nobody else** (unless the mesh
 declares extra wiring — some meshes connect, say, every worker to a reviewer).

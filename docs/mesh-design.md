@@ -1179,8 +1179,32 @@ the rule that also decides which edges an agent may rewire. So an agent gives
 back a slot it took and nothing else: a sibling is refused, and so is itself,
 which would have it answering from a terminal it just closed. The member row
 survives, reading `exited`, because the child is respawnable and a roster that
-forgot it would forget the work; a second call on an exited child deregisters
-it. Clearing and respawning stay the human's.
+forgot it would forget the work. Clearing and respawning stay the human's.
+
+A second call on an already-exited child is a **no-op**, and the first cut of
+this was wrong about that: it deregistered instead, which put the destructive
+step exactly where a caller reaches when the first call *looked* like it had
+not worked. It did not stay hypothetical. The first real use ran against the
+budget bug above — the slot did not come back — so the agent called `kill`
+again, the way anyone would, and the retry deleted a record that was supposed
+to remain respawnable. The lesson is not "fix the budget bug" (that is fixed);
+it is that a retry an agent can be *induced* into must be safe. Ending and
+forgetting are separate verbs with separate callers.
+
+Forgetting is guarded too, on both of its routes (`DELETE
+/api/sessions/{name}` on an exited record, and `DELETE /api/sessions` in
+bulk): **a record a local mesh row still names cannot be dropped.** The row
+and the record are one fact stored in two files, and deleting half of it
+leaves a member that reads `missing`, cannot be respawned — respawn reads the
+record that was just deleted — and, because a member's lineage is *derived*
+from the live session tree rather than stored, loses the spawn edge that said
+who it worked for. The topology quietly redraws itself, and the mesh has no
+way back on its own; only an operator's `×` clears the row. The single delete
+refuses (409, naming the mesh and the handle); the bulk clear skips and
+reports `kept`, because one held record should not stop the other nine. The
+test is asked of the *local* roster, never of the authority: on a mirror,
+removing a member is a call to another daemon that may be unreachable, and a
+guard that can time out is a guard that gets skipped.
 
 `PATCH /api/mesh/{mesh}/members/{a}/links/{b}` rewires a pair (`actor` names
 the session asking; omitted = a human). MCP gains `spawn`, `children`,

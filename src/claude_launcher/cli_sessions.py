@@ -386,13 +386,24 @@ def _cmd_clear_sessions(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     doc = client.delete("/api/sessions" + ("?logs=1" if args.logs else ""))
     removed = doc.get("removed") or []
+    # Kept, not failed: a record a mesh row still names stays, because the row
+    # and the record are one fact and half of it left behind is a member
+    # nobody can respawn or reach. Printed either way — an omission this
+    # command does not mention reads as the clear not having taken.
+    kept = doc.get("kept") or []
     if not removed:
-        print("no exited sessions to clear")
-        return 0
-    print(
-        f"cleared {len(removed)} exited session record(s): {', '.join(removed)}"
-        + (" (output logs deleted too)" if args.logs else "")
-    )
+        print("no exited sessions to clear" if not kept else "nothing cleared")
+    else:
+        print(
+            f"cleared {len(removed)} exited session record(s): {', '.join(removed)}"
+            + (" (output logs deleted too)" if args.logs else "")
+        )
+    for k in kept:
+        meshes = ", ".join(m["mesh"] for m in k.get("meshes") or [])
+        print(
+            f"kept {k['name']!r} — still a member of {meshes}. "
+            f"'claunch mesh leave' it first, then clear again."
+        )
     return 0
 
 
