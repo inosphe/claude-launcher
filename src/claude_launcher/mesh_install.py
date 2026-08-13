@@ -158,9 +158,10 @@ its parent and given the exact `mesh send` that reaches you, so expect reports
   silently skips them. There is no routing: if a peer must be reached and is
   not connected, ask whoever spawned you, or the user.
 
-Children are not restored when the daemon restarts — the arrangement is
-yours to rebuild, and a subtree that came back with no one briefing it would
-be a room full of agents with no reason to be there.
+Children come back when the daemon restarts, on their parent's terms — same
+conversation, same handle, same role. What does not come back is the drive:
+a restored session is resumed but sitting idle, so re-brief the ones you are
+waiting on rather than assuming they carried on where they stopped.
 
 ## Your role
 

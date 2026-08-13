@@ -1553,8 +1553,9 @@ mesh and decide who they may talk to — via the `spawn`, `children`,
 - **Sessions form a tree.** `claunch sessions` and the web sidebar both
   indent children under the session that spawned them. Authority runs *down*
   the tree only: a session may act on its descendants, never its parent and
-  never its siblings. Children are not restored on daemon restart — the
-  arrangement is the parent's to rebuild.
+  never its siblings. Children are restored on daemon restart like any other
+  session, inheriting their parent's `restore` — so `--no-restore` on a root
+  marks its whole subtree ephemeral.
 - **A child lands in its parent's mesh without being asked to.** Naming no
   `mesh` on a spawn means *the parent's own*; a parent that is in none gets
   one opened for the pair, named after it, so the whole subtree ends up in
@@ -1695,6 +1696,17 @@ idle, the picker that starts one. See
 [Who starts a run](#who-starts-a-run--two-paths-one-writer) for why the
 picker offers *Ask the agent to start* and *Start directly* as two different
 buttons.
+
+Above the memberships the same panel carries a **Send message** box: the
+[mesh](#mesh-session-to-session-messaging) send with the recipient already
+answered, since the panel knows which session it is about. Pick the mesh (a
+session is called something different in each one it joined) and the intent —
+`say`, `ask` (which puts the answer on the sender's ledger), `fyi`, `ack` —
+and it goes in as a message from you, the operator: sequenced into that mesh's
+log and typed into the agent's terminal by the daemon between turns, rather
+than pasted blind into the terminal beside it. A session in no mesh has
+nothing to carry a message, and the box says so instead of offering a dead
+form.
 
 The sidebar also shows a **Workflows** panel monitoring every
 [cflow](#cflow-declarative-agent-workflows) run started on this machine

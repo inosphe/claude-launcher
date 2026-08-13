@@ -946,10 +946,14 @@ never its parent and never its siblings. Two workers spawned by the same
 lead are peers, and a peer that could kill its peer turns a coordination bug
 into a lost session.
 
-Children are never restored on daemon restart. A restored parent would
-replay its whole subtree, and those children would come back with no agent
-left to brief them — the arrangement is a runtime one, rebuilt by the
-parent, not by the daemon.
+Children are restored on daemon restart, inheriting their parent's
+`restore`. A child's lifetime belongs to the work it was spawned for, not to
+the daemon process: its pinned conversation, its mesh membership and the
+cflow run keyed by its session name all outlive the process, and only a
+session of that same name can pick them up again. A child that stayed dead
+would strand all three, silently. `--no-restore` on a root still marks the
+whole subtree ephemeral. What a restore does *not* bring back is the drive —
+every session returns resumed and idle, waiting to be told to go on.
 
 **2. The spawn policy** (`spawn:` in `~/.claunch.yaml`, see
 `claude_launcher/spawn.py`). A child **inherits** its parent's harness,

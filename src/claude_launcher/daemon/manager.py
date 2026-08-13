@@ -182,10 +182,15 @@ class SessionManager:
         which callers map to 403 rather than 400 — the request was well
         formed, it was simply not allowed.
 
-        A child never inherits ``restore``. A restored parent would replay its
-        whole subtree on every daemon restart, and those children would come
-        back with no agent left to brief them — the tree is a runtime
-        arrangement, so it is rebuilt by the parent, not by the daemon.
+        A child inherits its parent's ``restore``, because its lifetime is
+        bound to the work it was spawned for and not to the daemon process.
+        The state a child accumulates outlives the process holding it — its
+        pinned conversation, its mesh membership, the cflow run keyed by its
+        session name — and only a session of that same name can ever pick
+        that up again. A child that stayed dead across a restart therefore
+        strands every one of them, silently and for as long as nobody looks.
+        ``--no-restore`` on a root still marks the whole subtree ephemeral,
+        which is how a throwaway worker says so.
         """
         session = self.get(parent)
         if session.exited:
@@ -212,7 +217,11 @@ class SessionManager:
                         request.get("role"), child.get("harness") or ""
                     ),
                     "parent": parent,
-                    "restore": False,
+                    # Set explicitly: spawn.check() hands back the inherited
+                    # subset and ``restore`` is not in it, so leaving it out
+                    # would take from_dict's default and ignore a parent
+                    # created --no-restore.
+                    "restore": session.sdef.restore,
                     # Who the child IS. Optional here: a caller that needs the
                     # child's resolved cwd to work it out can stage first and
                     # :meth:`assign_identity` before launching.

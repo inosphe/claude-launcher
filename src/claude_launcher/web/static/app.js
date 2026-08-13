@@ -2290,6 +2290,7 @@ function wfDiagramSvg(wf, run, selected) {
 let sessName = null;      // the session whose detail is open (null = closed)
 let sessPollTimer = null;
 let sessStartBox = null;  // reused across polls: it holds the user's typing
+let sessSendBox = null;   // and so does the message box — same reason
 let sessRunFold = null;   // reused across polls too: it holds open/shut
 let sessRunTimer = null;  // the fold's own poll, alive only while it is open
 
@@ -2300,6 +2301,7 @@ function dropDetail() {
   stopSessRun();
   sessName = null;
   sessStartBox = null;
+  sessSendBox = null;
   sessRunFold = null;
   $("sess-view").innerHTML = "";
   markDetailRow();
@@ -2327,6 +2329,7 @@ function repointDetail(name) {
   stopSessRun();
   sessName = name;
   sessStartBox = null;
+  sessSendBox = null;
   sessRunFold = null;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
@@ -2425,6 +2428,13 @@ function sessHead(s) {
 function renderSession(data) {
   const view = $("sess-view");
   const s = data.session || {};
+  // The 2s poll rebuilds this panel from scratch, and a rebuild detaches
+  // whatever the user is typing in — which takes the caret with it. Keeping
+  // the live node across polls (sessSendBox, sessStartBox) saves the text but
+  // not the focus, so while a field in here has it, the poll waits. Same rule
+  // the mesh page keeps, and for the same reason: a message being written is
+  // worth more than a two-second-fresher 'last output'.
+  if (formInUse(view)) return;
   view.innerHTML = "";
 
   view.appendChild(sessHead(s));
@@ -2466,6 +2476,10 @@ function renderSession(data) {
   }
   view.appendChild(dl);
 
+  // Above the memberships, because it is what they are FOR: the list says
+  // which rooms this session can be spoken to in, this says something in one.
+  view.appendChild(sessSend(data));
+
   const meshes = data.meshes || [];
   const meshBox = el("div", "sess-meshes");
   meshBox.appendChild(el("h3", null, `Meshes (${meshes.length})`));
@@ -2481,6 +2495,151 @@ function renderSession(data) {
   view.appendChild(meshBox);
 
   view.appendChild(sessWorkflow(data));
+}
+
+/* ---- say something to this session, from the panel that names it ----
+   The mesh page's "Send message" box can already reach any member, but it is
+   a page away and it asks you to pick the recipient out of a roster — while
+   the panel you are already reading knows exactly which session it is about.
+   So the same send, with the recipient answered: from you, the operator, to
+   this session's handle in the mesh you pick.
+
+   Delivery is the mesh's, not the terminal's: the message is sequenced into
+   the log, counts against the sender's reply ledger when it asks for one, and
+   is typed in by the daemon when the agent is between turns. Typing the same
+   words into the terminal beside this does none of that.
+
+   A message is carried BY a mesh, so a session in none has nothing to send
+   through — hence the note rather than a dead form. */
+function sessSend(data) {
+  const box = el("div", "sess-send");
+  box.appendChild(el("h3", null, "Send message"));
+  const s = data.session || {};
+  const meshes = data.meshes || [];
+  if (!meshes.length) {
+    sessSendBox = null;
+    box.appendChild(el(
+      "p", "wf-note",
+      "messages travel through a mesh and this session is in none — " +
+      "join it to one to write to it"
+    ));
+    return box;
+  }
+
+  // Rebuilt only when the memberships it can speak through change: the 2s
+  // poll must not wipe a half-typed message. Member counts are deliberately
+  // out of the key — someone else joining is no reason to lose your sentence.
+  const key = `${s.name}|` + meshes.map((m) => `${m.mesh}>${m.handle}`).join(",");
+  if (sessSendBox && sessSendBox.dataset.slot === key) {
+    box.appendChild(sessSendBox);   // appending moves the live node here
+    return box;
+  }
+  sessSendBox = el("div", "sess-send-form");
+  sessSendBox.dataset.slot = key;
+  box.appendChild(sessSendBox);
+
+  const row = el("div", "sess-send-row");
+  // One option is still a select: it says which mesh carries this, which is
+  // not obvious from a rail that lists the memberships underneath.
+  const mesh = document.createElement("select");
+  for (const m of meshes) {
+    const opt = document.createElement("option");
+    opt.value = m.mesh;
+    opt.textContent = `via ${m.mesh}`;
+    opt.title = `delivered to ${m.handle} (${m.role})`;
+    mesh.appendChild(opt);
+  }
+  const intent = document.createElement("select");
+  for (const [v, label] of [
+    ["say", "say"], ["ask", "ask (expects reply)"],
+    ["fyi", "fyi (no reply)"], ["ack", "ack (no reply)"],
+  ]) {
+    const opt = document.createElement("option");
+    opt.value = v;
+    opt.textContent = label;
+    intent.appendChild(opt);
+  }
+  row.append(mesh, intent);
+
+  const text = document.createElement("textarea");
+  text.rows = 3;
+  const status = el("p", "wf-note hidden");
+  const sendBtn = el("button", "wf-btn approve", "Send");
+
+  // Which handle this lands on is the mesh's answer, not the session name's:
+  // the same session is 'reviewer' in one mesh and 'coder4' in another.
+  const target = () => meshes.find((m) => m.mesh === mesh.value) || meshes[0];
+  const retarget = () => {
+    text.placeholder =
+      `message to ${target().handle} (Ctrl+Enter to send) — typed into ` +
+      "this session's terminal by the daemon";
+  };
+  retarget();
+  mesh.addEventListener("change", retarget);
+
+  // One class, not both: .wf-note is declared after .wf-warning and would
+  // take the amber back off a line that is there to warn.
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  const submitMsg = async () => {
+    const body = text.value.trim();
+    if (!body || sendBtn.disabled) return;
+    const to = target();
+    sendBtn.disabled = true;
+    say("sending…");
+    let doc = {};
+    let resp;
+    try {
+      resp = await api(`/api/mesh/${encodeURIComponent(to.mesh)}/messages`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          // The operator is nobody's member, which is exactly what 'external'
+          // admits — the same way the mesh page speaks as you.
+          from: "operator",
+          to: to.handle,
+          body,
+          external: true,
+          type: intent.value,
+        }),
+      });
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      sendBtn.disabled = false;
+      say("could not reach the daemon — nothing was sent", "wf-warning");
+      return;
+    }
+    sendBtn.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    text.value = "";
+    if (doc.queued) {
+      // a mirror whose primary is unreachable: durable, but not delivered yet
+      say(`queued ${doc.id} — the mesh's primary daemon is unreachable; it ` +
+          "will be forwarded, in order, on reconnect", "wf-warning");
+    } else {
+      say(`sent to ${to.handle}` + (doc.notice ? ` · ${doc.notice}` : ""));
+    }
+    // The panel does not show the log, but the mesh page and the owed ledger
+    // do — and an 'ask' from here is a debt from now on.
+    refreshSession();
+  };
+
+  sendBtn.addEventListener("click", submitMsg);
+  text.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
+      e.preventDefault();
+      submitMsg();
+    }
+  });
+
+  sessSendBox.append(row, text, sendBtn, status);
+  return box;
 }
 
 /* The session's cflow slot: a run is keyed by (directory, scope) and the

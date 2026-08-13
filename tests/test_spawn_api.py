@@ -96,8 +96,9 @@ def test_spawn_creates_a_child_that_inherits_and_joins(home, tmp_path):
             assert child["cwd"] == str(tmp_path)
             assert child["args"] == ["-x"]
             assert child["parent"] == "lead"
-            # never restored: the tree is a runtime arrangement (see spawn())
-            assert child["restore"] is False
+            # restored like its parent: a child outlives the daemon process,
+            # because the state keyed by its name does (see stage_child())
+            assert child["restore"] is True
 
             # ... and it is in the mesh, reaching its parent only
             assert body["mesh"]["ok"] is True
