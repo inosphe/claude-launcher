@@ -1160,11 +1160,22 @@ call because the steps are not independently useful: a child spawned but not
 enrolled is a terminal nobody is listening to, and one enrolled but not
 briefed is an agent that does not know why it exists. Each optional step
 reports separately, so a partial success is legible. `GET` on the same path
-answers "what may I spawn" before a refusal has to be provoked.
+answers "what may I spawn" before a refusal has to be provoked, and
+`DELETE /api/sessions/{name}/children/{child}` ends one.
+
+That `DELETE` is scoped by its route rather than by a flag: plain
+`DELETE /api/sessions/{child}` is the operator's, who may end anything, while
+this one reaches only into `{name}`'s own subtree — `SessionManager.commands`,
+the rule that also decides which edges an agent may rewire. So an agent gives
+back a slot it took and nothing else: a sibling is refused, and so is itself,
+which would have it answering from a terminal it just closed. The member row
+survives, reading `exited`, because the child is respawnable and a roster that
+forgot it would forget the work; a second call on an exited child deregisters
+it. Clearing and respawning stay the human's.
 
 `PATCH /api/mesh/{mesh}/members/{a}/links/{b}` rewires a pair (`actor` names
 the session asking; omitted = a human). MCP gains `spawn`, `children`,
-`connect`, `disconnect`; `members` now also answers `reachable` — who *you*
+`kill`, `connect`, `disconnect`; `members` now also answers `reachable` — who *you*
 can message — because an agent left to derive its own reachability from an
 edge list will eventually address a peer it cannot reach and read the
 refusal as a bug. CLI: `claunch spawn`, `claunch mesh connect|disconnect`,
