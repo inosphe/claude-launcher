@@ -1943,9 +1943,8 @@ steps:
   review:
     ask:                          # approval to ENTER; re-required per visit
       prompt: the diff is up — allow the review pass?
-      from: [human]               # who may answer, in preference order
     instructions: Relay the review feedback into follow-ups.
-    next: verdict
+    next: verdict                 # no 'from' = nobody is asked: a human gate
 
   verdict:
     select:
@@ -1958,10 +1957,11 @@ steps:
   ship:
     ask:
       prompt: approve committing and opening a PR?
-      from:
-        - {role: leader, up: 1}   # the session that spawned this one, if it leads
-        - human                   # else a person
-      timeout: 900                # per group; then it moves up the list
+      from:                       # WHO is asked, in preference order
+        - {role: reviewer}        # anyone reachable holding that role
+        - {role: leader, scope: ancestor}   # ...else up the chain of command
+      otherwise: human            # ...and if none of them answers: a person
+      timeout: 900                # per group; then it moves down the list
       on_decline: impl            # where a refusal goes
     instructions: Commit and draft the PR from the run journal.
     next: end                     # explicit termination ('end' is reserved)
@@ -2001,35 +2001,52 @@ running position.
 | `select` (`chooser: agent`) | the agent | picks an option with a journaled reason |
 | `select` (`chooser: user`) | a human | the agent's pick is only a *proposal*; the run blocks until `claunch cflow select <option>` (or a dashboard option button) confirms — any option |
 | `select` (`chooser: {from: …}`) | another agent, else a human | the run blocks until a responder calls `answer {ask, decision, reason}` with one of the declared options; the driving agent may not `select` at all |
-| `ask:` | another agent, else a human | the step's instructions are withheld until an approval is recorded — by a responder's `answer`, or by `claunch cflow approve` |
-| `gate:` | a human | **deprecated** spelling of `ask: {prompt: …, from: [human]}`; still works, and `cflow show` says where you still use it |
+| `ask:` | another agent, else whatever `otherwise` says | the step's instructions are withheld until an approval is recorded — by a responder's `answer`, or by `claunch cflow approve` |
+| `gate:` | a human | **deprecated** spelling of `ask: {prompt: …}`; still works, and `cflow show` says where you still use it |
 | `verify:` | a machine | the server runs the command on `next`; non-zero exit refuses to advance and returns the output |
 | `report` | the agent | required before `next`; journaled, shown live on the web dashboard, discarded by a failed `verify` |
 
-**Delegated decisions.** `from` is an ordered list of candidate groups, read
-one at a time: `human` is the reserved token for a person at the CLI or the
-dashboard, and `{role: leader, up: 1}` names an agent by role and by how far
-**up the spawn lineage** to look (`up: {min: 2, max: 4}` for a range). A
-group that matches nobody is skipped with its reason; a group that matches
-several is asked at once and the first valid answer wins; a group that runs
-out of `timeout`, or whose members all answer `abstain`, hands on to the
-next. The responder answers with `answer {ask, decision, reason}` from its
-own session — never receiving the asking step's instructions — and which
-session that is comes from the environment the daemon set, not from the
-call's arguments.
+**Delegated decisions** have two independent axes. `from` is **who is
+asked**: an ordered list of roles, read one group at a time. A group that
+matches nobody is skipped with its reason; a group that matches several is
+asked at once and the first valid answer wins; a group that runs out of
+`timeout`, or whose members all answer `abstain`, hands on to the next.
+`otherwise` is **what happens when that list is exhausted** — `human` (the
+default: the run holds for `claunch cflow approve|select`) or `self` (the
+driving agent carries on alone, journaled as *unanswered*, never as an
+approval). A human is never an entry in `from`: nothing resolves them,
+nothing notifies them, and they answer through a different door — so `ask:`
+with no `from` at all is exactly a human gate, which is what `gate:`
+deprecates into.
+
+The responder answers with `answer {ask, decision, reason}` from its own
+session — never receiving the asking step's instructions — and which session
+that is comes from the environment the daemon set, not from the call's
+arguments. The question itself arrives as a `decide` message on the mesh,
+which is only a doorbell: it is recorded and answerable via `asks` whether or
+not the message landed.
 
 Three things make this an approval rather than a formality:
 
-- **`up` is mandatory.** An agent can spawn children with any handle, so a
-  candidate with no direction could be a session the run created to approve
-  itself. Candidates are always ancestors.
+- **A candidate is never something the run made.** The pool is what the
+  asking session can reach over the mesh, *minus itself and everything below
+  it in the spawn tree*. It can spawn a child and wire itself to it; it can
+  neither spawn a sibling nor wire itself to one (`connect` requires
+  authority *over* both ends), so a sibling reviewer is as trustworthy as an
+  ancestor — and is the common shape. `scope: ancestor` narrows to the chain
+  of command when a workflow wants only that.
 - **The answer set is closed** — the declared options plus `abstain` — so
   nothing is parsed out of an LLM's prose.
 - **Nothing fails open.** No daemon, no mesh membership, an ambiguous mesh, a
-  candidate on another machine, a decline with no declared route: each ends
-  with the question in front of a human, never with the run proceeding.
+  candidate on another machine, a member nobody wired you to, a decline with
+  no declared route: each ends with the question in front of a human. The one
+  exception is explicit, per-workflow and journaled as unanswered:
+  `otherwise: self`.
 
-Which mesh to resolve responders in is a property of the *run*, not the
+`start` and `claunch cflow request` both report a `delegation_check` — what
+each delegated step resolves to *right now* — without blocking on it: a
+leader that has not spawned yet is legitimate, and the step may be an hour
+away. Which mesh to resolve responders in is a property of the *run*, not the
 workflow (`start {workflow, context, mesh}`), and is only needed when the
 driving session belongs to more than one.
 

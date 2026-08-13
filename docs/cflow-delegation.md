@@ -15,23 +15,25 @@ could have created), and the role a member was admitted under.
 
 ## Status
 
-Eight commits are on the branch and the tree is green (634 passed, 1 skipped;
-`uv run pytest -q --basetemp=.pytest-tmp` — the shared temp dir is
-permission-denied on this machine, hence the flag).
+Implemented and green (`uv run pytest -q --basetemp=.pytest-tmp` — the shared
+temp dir is permission-denied on this machine, hence the flag).
 
 | commit | what |
 | --- | --- |
 | `457898a` | schema + state machine: open/escalate/answer/decline/abstain, per-visit keying, `goto` invalidation, human fallbacks |
-| `a328c5b` | `up: {min,max}`, receipt echoes the question |
+| `a328c5b` | receipt echoes the question |
 | `a9ebbd5` | responder resolution against the mesh roster, one read per ask, delivery |
 | `415cc15` | MCP `asks`/`answer`, fence isolation, `/cflow` skill responder protocol |
 | `686000a` | the answer nudges the waiting run; shared nudge helper |
 | `475c48f` | daemon `AskClock` — timeout expiry |
 | `12ae367` | dashboard `waiting_answer` state + `claunch cflow asks` |
 | `5f6ad80` | README / cookbook / mesh-design |
+| `73ab0d0` | this document |
+| `65ee57f` | the two axes: `from`/`otherwise`, the member-graph pool, mesh `decide` |
+| `554db73` | tests against the real pool; `otherwise: self` both kinds |
+| `55ec8bf` | CLI / API / skill / example workflow |
 
-The design then changed in three ways that are **not yet implemented** (§7).
-Everything below describes the target, not the current code.
+Sections 1–6 describe the code as it stands. §7 is what is left.
 
 ## 1. Schema
 
@@ -210,12 +212,22 @@ legitimate, and the step may be an hour away.
 
 ```
 delegation_check:
-  verdict: {from: "reviewer", resolves: ["sib1"]}
-  ship:    {from: "leader (ancestor)", resolves: [],
-            reason: "no reachable member holds 'leader'",
-            otherwise: human}
-note: 2 delegated steps; 1 has no agent responder and will reach a human
+  steps:
+    - {step: verdict, decision: branch, from: "reviewer",
+       resolves: ["sib1"], otherwise: human}
+    - {step: ship, decision: approval, from: "leader (ancestor)",
+       resolves: [], reason: "no session above dev1 ... holds that role",
+       otherwise: human}
+  note: "2 delegated decision(s); 1 resolve(s) to no agent right now and
+         would reach a human"
 ```
+
+A list rather than a mapping by step, because one step can carry both an
+entry approval and a delegated select, and because declared order is what a
+reader is checking against.
+
+A step with no `from` is not reported: it names nobody, so there is nothing
+to resolve and nothing a person could fix.
 
 `request_start` matters most: the person asking for the run is right there and
 can fix the wiring before it starts.
@@ -234,47 +246,18 @@ arrangement of tool calls unblocks a step gated on the agent making them.
 
 ## 7. Remaining work
 
-Everything below is a change to code already on the branch.
+**H. End-to-end** — a real daemon, a parent session and a child, both in a
+mesh; the child starts a workflow with a delegated step; assert the question
+is delivered as `decide`, that the parent's `answer` is refused from the wrong
+session and accepted from the right one, that the child's run advances, and
+that the child cannot answer its own ask.
 
-**A. `cflow/model.py`** — drop `HUMAN`, `MAX_UP`, `_parse_up`, `_hops`, and
-`Candidate.up`/`.human`. `Candidate` becomes `{role: str, scope: str}` with
-`role` required. `Delegate` gains `otherwise` and allows an empty
-`candidates`. `_parse_delegate` accepts `from` optional. Deprecation text for
-`gate:` becomes `ask: {prompt: ...}`.
+**Merge** — deferred to agreement, per the branch's terms.
 
-**B. `cflow/responders.py`** — replace `Ancestry`/`ancestry()` (a lineage walk
-with hop ranges) with a candidate-pool read: from `GET /api/mesh`, take the
-asking session's handle, its neighbours (`member_links`), each member's
-`parent` for the descendant/ancestor tests, `role`, `local`, and session
-liveness. `deliver()` sends `type: decide` with `ref`. Keep `nudge()`.
-
-**C. `daemon/mesh.py`** — add `decide` to `REPLY_OPTIONAL_TYPES` and
-`INTENT_TYPES`; let a send carry `ref` through to the log and the delivery
-block. `daemon/api.py` `h_mesh_send` passes it.
-
-**D. `cflow/engine.py`** — `_open_ask` uses the new pool; exhaustion applies
-`otherwise` instead of always holding; add the `self` path for both kinds
-(journal `ask_unanswered_proceeded`); `_awaits_human` becomes "exhausted and
-`otherwise: human`". Add the start-time check to `start`/`request_start`.
-
-**E. `cflow/mcp.py`** — `start` keeps `mesh`; surface `delegation_check` in the
-`start` payload.
-
-**F. Tests** — `tests/test_cflow.py`: replace the `up`-range cases with
-`scope`/`otherwise` cases; `_mesh` helper becomes a member-pool stub;
-add sibling-reachable, descendant-excluded, not-connected, and
-`otherwise: self` cases. Keep every existing safety test.
-
-**G. Docs** — README control-point table, `docs4users/cflow-cookbook.md`
-recipes 4–5, `docs/mesh-design.md` §"Delegated decisions ride the lineage",
-and this file.
-
-**H. End-to-end** — `tests/test_daemon_e2e.py` (or a sibling): a real daemon,
-a parent session and a child, both in a mesh; the child starts a workflow with
-a delegated step; assert the question is delivered as `decide`, that the
-parent's `answer` is refused from the wrong session and accepted from the
-right one, that the child's run advances, and that the child cannot answer its
-own ask.
+Done: A (`model.py`, the two axes), B (`responders.py`, the member-graph
+pool), C (`daemon/mesh.py`, `decide` + `ref`), D (`engine.py`, `otherwise`
+and the start-time check), E (`mcp.py`, which needed nothing — the payload
+carries it), F (tests, against the real pool), G (docs).
 
 ## 8. Decided against
 

@@ -191,9 +191,10 @@ it. It withholds the step's instructions until approved, so the agent cannot
 even see "publish" work early. Use several small approvals rather than one
 big one — each then means exactly one thing.
 
-`from` is who may answer, in preference order. `human` is the reserved token
-for a person at the CLI or the dashboard; everything else names an agent by
-role and by how far **up the spawn lineage** to look.
+An `ask` with no `from` asks no agent, so it is exactly a human gate: the run
+holds until somebody runs `claunch cflow approve` or presses the dashboard
+button. Recipe 5 adds the `from` that puts the same question to another
+session.
 
 ```yaml
 name: release
@@ -210,7 +211,6 @@ steps:
     title: Tag
     ask:
       prompt: version and changelog look right — allow tagging?
-      from: [human]
     instructions: Create the release tag and push it.
     next: publish
 
@@ -218,7 +218,6 @@ steps:
     title: Publish
     ask:
       prompt: tag pushed and CI green — allow publishing to the index?
-      from: [human]
     instructions: Publish the built package.
     next: announce
 
@@ -227,19 +226,22 @@ steps:
     instructions: Draft the release notes from the journal; do not send.
 ```
 
-> `gate: <message>` is the old spelling of `ask: {prompt: <message>, from:
-> [human]}`. It still works — `claunch cflow show` will tell you where you
-> are still using it — but only `ask` can name an agent as the approver.
+> `gate: <message>` is the old spelling of `ask: {prompt: <message>}`. It
+> still works — `claunch cflow show` will tell you where you are still using
+> it — but only `ask` can name an agent as the approver.
 
 ---
 
 ## Recipe 5 — let another agent decide
 
-A run driven by one agent can put a decision to a *different* one: the
-reviewer that spawned it, or the leader above that. This is not the asking
-agent consulting a peer and acting on the reply — it cannot see or record
-the answer at all. The responder writes the decision into the run itself,
-which is what makes the approval worth having.
+A run driven by one agent can put a decision to a *different* one: a reviewer
+alongside it, or the leader above it. This is not the asking agent consulting
+a peer and acting on the reply — it cannot see or record the answer at all.
+The responder writes the decision into the run itself, which is what makes
+the approval worth having.
+
+A delegation says two separate things. **`from`** is who is asked. **`otherwise`**
+is what happens when none of them answers.
 
 ```yaml
 name: delegated-dev
@@ -256,9 +258,8 @@ steps:
         another pass? Answer against the code, not the description of it.
       chooser:
         from:
-          - {role: reviewer, up: 1}                 # whoever spawned this run
-          - {role: reviewer, up: {min: 2, max: 4}}  # else further up
-          - human                                   # else a person
+          - {role: reviewer}    # anyone reachable holding that role
+        otherwise: human        # nobody there? a person decides
         timeout: 1800
       options:
         ready:  {description: satisfied, next: ship}
@@ -269,8 +270,7 @@ steps:
     ask:
       prompt: Reviewer passed this. Approve the commit and push?
       from:
-        - {role: leader, up: {min: 1, max: 4}}
-        - human
+        - {role: leader, scope: ancestor}   # the chain of command only
       timeout: 900
       on_decline: impl        # a refusal has somewhere to go
     instructions: Commit and draft the PR description from the journal.
@@ -280,16 +280,28 @@ steps:
 nobody is skipped — with its reason — and the next is tried. A group that
 matches several people is asked all at once; the first valid answer wins.
 When a group runs out of `timeout`, or everyone in it answers `abstain`, the
-question moves up the same way. Nothing at the end of the list means the
-question waits for a human, which is why `human` belongs at the bottom of
-most of them.
+question moves along the same way. When the list is exhausted, `otherwise`
+decides: `human` (the default) holds the run for a person, and `self` lets
+the driving agent carry on alone — recorded in the journal as *unanswered*,
+never as an approval.
 
-**`up` is mandatory, and it is a safety property.** An agent can spawn
-children with any handle it likes, so a candidate with no direction —
-`{role: reviewer}` — could be satisfied by a session the run created for the
-purpose. Candidates are therefore always *ancestors*: `up: 1` is the direct
-parent, `up: {min: 2, max: 4}` reaches further, and neither can ever point
-downward.
+**Who can be a candidate, and why that is the safety property.** The pool is
+everyone the asking session can message over the mesh, *minus itself and
+everything it spawned*. That exclusion is the whole thing: an agent can spawn
+a child and wire itself to it, so a child holding the right role would let a
+run manufacture its own approver. It cannot spawn a sibling, and it cannot
+wire itself to one — `connect` needs authority over both ends, which runs
+strictly down the tree — so a sibling reviewer is exactly as trustworthy as a
+parent, and is the shape most of these take. Add `scope: ancestor` when only
+the chain of command will do.
+
+**Reach is deliberate.** A spawned session is wired to its parent and nobody
+else, so by default the direct parent is the only candidate. Making a sibling
+reviewer reachable is somebody's decision: `claunch mesh connect dev1 rev1`,
+the `connect` tool from a session above them, or an `auto_link` rule. When a
+role matches but is not wired, the skip reason names the command that fixes
+it — and `claunch cflow request` reports the whole picture before the run
+even starts.
 
 **What a responder does.** It sees the question through `asks`, investigates,
 and calls `answer {ask, decision, reason}`. The decision must be one of the
@@ -298,11 +310,12 @@ so no wording can widen the answer set. It never receives the asking step's
 instructions: it decides, says why, and stops.
 
 **What can go wrong, and what happens.** No daemon, no mesh membership, an
-ambiguous mesh, or a candidate that only exists on another machine — all of
-them skip the group with a stated reason and the question ends up in front of
-a human. There is no setting that turns "nobody answered" into "proceed"; an
-approval that fell back to the run approving itself would be worse than no
-approval at all.
+ambiguous mesh, a role nobody holds, a match nobody wired you to, or a
+candidate that only exists on another machine — all of them skip the group
+with a stated reason, and the question ends up wherever `otherwise` says.
+There is no setting that turns "nobody answered" into "approved": even
+`otherwise: self` is journaled as unanswered, so a run that proceeded alone
+never reads as one that was approved.
 
 If the driving session belongs to more than one mesh, say which to look in
 when the run starts — the workflow stays portable, and which mesh a leader
