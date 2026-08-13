@@ -64,11 +64,16 @@ workflow to be started here), that is the answer; otherwise list candidates
      `ask.skipped` is), and tell the user to approve with `! claunch cflow
      approve` or the web dashboard's Approve button. You cannot approve and
      must not simulate approval.
-   - `waiting_answer` — the workflow delegated this decision to somebody
-     ABOVE you, and `ask.asked` says who. STOP your turn: present what you
+   - `waiting_answer` — the workflow delegated this decision to another
+     session, and `ask.asked` says who. STOP your turn: present what you
      have so far and say who is deciding. You cannot answer it — not with
      `select`, not with `answer`, not by asking them over the mesh and
      acting on the reply. They record it themselves; you will be nudged.
+   - `status: step` or `select` where the payload says the decision was
+     meant to be somebody else's — the workflow declared `otherwise: self`
+     and nobody could be reached, so it is yours by default. Say so plainly
+     when you report: nobody approved this, and reporting it as approved
+     would be false.
    - `waiting_approval` with `reason: declined` — a responder refused, and
      the workflow declared nowhere for a refusal to go. Relay the refusal
      and its reason (`declined.by`, `declined.reason`) to the user and stop:
@@ -89,8 +94,10 @@ workflow to be started here), that is the answer; otherwise list candidates
 
 ## Answering for someone else
 
-Runs BELOW you in the spawn tree may delegate a decision to your role. This
-is independent of whether you are running a workflow yourself.
+Other sessions' runs may delegate a decision to your role — anything you are
+wired to in the mesh except your own descendants. That is independent of
+whether you are running a workflow yourself. A `decide` message on the mesh
+is the doorbell; `asks` is where the question actually lives.
 
 1. Call `asks {}` when a mesh message says a run needs a decision, whenever
    you are nudged, and before going idle. It lists what is waiting on you:
@@ -202,7 +209,10 @@ steps:
 
   review:
     title: Review
-    gate: present the diff summary and wait for human review
+    ask:
+      # No 'from', so nobody is asked and this is a plain human gate. Name a
+      # role there (from: [{role: reviewer}]) to put it to another session.
+      prompt: present the diff summary and wait for human review
     instructions: |
       Relay the review feedback you received into concrete follow-ups.
     next: verdict

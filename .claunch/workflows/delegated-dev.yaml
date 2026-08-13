@@ -30,12 +30,12 @@ steps:
         ship, or does it need another implement/test pass? Answer against the
         code, not the description of it.
       chooser:
-        # The reviewer that spawned this run decides. If there is none, look
-        # further up the lineage; if nobody is there, it lands on the human.
+        # Any reviewer this session can reach — the one that spawned it, or a
+        # sibling wired to it. Never one it spawned itself. If no reviewer is
+        # reachable the question lands on the human, which is the default.
         from:
-          - {role: reviewer, up: 1}
-          - {role: reviewer, up: {min: 2, max: 4}}
-          - human
+          - {role: reviewer}
+        otherwise: human
         timeout: 1800
       options:
         ready:
@@ -51,10 +51,9 @@ steps:
       prompt: |
         Reviewer passed this. Approve the commit and push?
       from:
-        # The leader is rarely the direct parent — it is whoever is above the
-        # reviewer that spawned this run — so reach up the chain, not at 1.
-        - {role: leader, up: {min: 1, max: 4}}
-        - human
+        # Shipping is a chain-of-command decision, so a leader off to one side
+        # will not do: scope it to this run's own ancestors.
+        - {role: leader, scope: ancestor}
       timeout: 900
       on_decline: impl
     instructions: |

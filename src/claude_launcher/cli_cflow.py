@@ -63,8 +63,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         if s.gate:
             flags.append("gate")
         if s.ask:
-            who = " > ".join(c.describe() for c in s.ask.delegate.candidates)
-            flags.append(f"ask: {who}")
+            flags.append(f"ask: {s.ask.delegate.describe()}")
             if s.ask.on_decline:
                 flags.append(f"decline -> {s.ask.on_decline}")
         if s.verify:
@@ -73,9 +72,7 @@ def _cmd_show(args: argparse.Namespace) -> int:
         if s.select:
             chooser = s.select.chooser
             if s.select.delegate:
-                chooser = " > ".join(
-                    c.describe() for c in s.select.delegate.candidates
-                )
+                chooser = s.select.delegate.describe()
             print(f"- {s.id} [select, chooser={chooser}]{suffix}")
             for name, opt in s.select.options.items():
                 print(f"    {name}: {opt.description}  -> {opt.next or 'end'}")

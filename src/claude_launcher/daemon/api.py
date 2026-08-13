@@ -519,6 +519,9 @@ def _serialize_workflow(wf) -> dict:
                 "prompt": s.select.prompt,
                 "chooser": s.select.chooser,
                 "from": _serialize_from(s.select.delegate),
+                "otherwise": (
+                    s.select.delegate.otherwise if s.select.delegate else None
+                ),
                 "options": [
                     {"name": o.name, "description": o.description, "next": o.next}
                     for o in s.select.options.values()
@@ -541,7 +544,12 @@ def _serialize_workflow(wf) -> dict:
 
 
 def _serialize_from(delegate) -> list:
-    """A delegation's preference list as lines a reader can scan."""
+    """A delegation's preference list as lines a reader can scan.
+
+    The fallback is served separately (``otherwise``) rather than appended
+    here: the list is who gets *asked*, and a reader that draws it as a chain
+    of responders must not end up drawing the human as one of them.
+    """
     if delegate is None:
         return []
     return [c.describe() for c in delegate.candidates]
@@ -553,6 +561,7 @@ def _serialize_ask(ask) -> dict | None:
     return {
         "prompt": ask.prompt,
         "from": _serialize_from(ask.delegate),
+        "otherwise": ask.delegate.otherwise,
         "timeout": ask.delegate.timeout,
         "on_decline": ask.on_decline,
     }
