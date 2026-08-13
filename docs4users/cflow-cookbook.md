@@ -16,6 +16,13 @@ Setup, once per profile or project:
 claunch install --profile work          # or: claunch install --project
 ```
 
+That install also writes the **`/cflow-author` skill**, which is the same
+material as this cookbook aimed at an agent rather than at you: ask a session
+to write or review a workflow and it will apply those rules. This document is
+the worked examples; the skill is the judgement — which control point to
+reach for, and which decisions the driving agent must never be the one to
+answer.
+
 ---
 
 ## Recipe 1 — linear bugfix (instructions + verify)

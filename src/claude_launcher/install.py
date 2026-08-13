@@ -2,17 +2,20 @@
 
 ``claunch install`` registers a single MCP server — ``claunch mcp``, serving
 the cflow and mesh tools together (see :mod:`claude_launcher.mcp_server`) — and
-writes the two skills that teach their protocols.
+writes the three skills that teach their protocols.
 
-Two skills, one server, on purpose. A skill's body is loaded whole when it
-triggers, so folding the workflow protocol and the mesh protocol into one file
-would make every session that runs a workflow carry the messaging rules it
-will never use, and vice versa; keeping them apart also keeps each
-``description`` narrow enough to trigger on the right thing. The *server* has
-no such cost — its tool schemas are in context either way — so there was
-nothing to buy by splitting it, and a real price: installing one feature and
-not the other used to leave an agent holding half a toolkit, most visibly when
-``spawn`` (which rides with mesh) was missing from a cflow-only install.
+Separate skills, one server, on purpose. A skill's body is loaded whole when
+it triggers, so folding the workflow protocol and the mesh protocol into one
+file would make every session that runs a workflow carry the messaging rules
+it will never use, and vice versa; keeping them apart also keeps each
+``description`` narrow enough to trigger on the right thing. Authoring a
+workflow splits from running one along the same seam: the rules for choosing
+a control point are dead weight while executing a step, and the execution
+protocol is dead weight while writing YAML. The *server* has no such cost —
+its tool schemas are in context either way — so there was nothing to buy by
+splitting it, and a real price: installing one feature and not the other used
+to leave an agent holding half a toolkit, most visibly when ``spawn`` (which
+rides with mesh) was missing from a cflow-only install.
 
 Installs written before the merge registered ``cflow`` and ``mesh`` as
 separate servers. Both are superseded here rather than left running, since two
@@ -27,7 +30,7 @@ from pathlib import Path
 from typing import List
 
 from . import mesh_install, settings
-from .cflow import install as cflow_install
+from .cflow import authoring as cflow_authoring, install as cflow_install
 from .profile import Profile
 
 #: The server's key in ``.claude.json`` / ``.mcp.json`` — the name the agent
@@ -51,7 +54,7 @@ def mcp_server_def() -> dict:
 
 
 def install_into_profile(profile: Profile) -> List[str]:
-    """Register the MCP server + both skills inside a profile's config dir."""
+    """Register the MCP server + every skill inside a profile's config dir."""
     settings.merge_mcp_servers(
         profile, {MCP_NAME: mcp_server_def()}, remove=LEGACY_MCP_NAMES
     )
@@ -59,12 +62,13 @@ def install_into_profile(profile: Profile) -> List[str]:
     return [
         f"mcp server {MCP_NAME!r} -> {profile.config_dir / settings.CLAUDE_JSON}",
         f"skill -> {cflow_install.write_skill(skills)}",
+        f"skill -> {cflow_authoring.write_skill(skills)}",
         f"skill -> {mesh_install.write_skill(skills)}",
     ]
 
 
 def install_into_project(project_dir: Path) -> List[str]:
-    """Register the MCP server (.mcp.json) + both skills (.claude/skills)."""
+    """Register the MCP server (.mcp.json) + every skill (.claude/skills)."""
     project_dir.mkdir(parents=True, exist_ok=True)
     mcp_path = project_dir / ".mcp.json"
     try:
@@ -83,5 +87,6 @@ def install_into_project(project_dir: Path) -> List[str]:
     return [
         f"mcp server {MCP_NAME!r} -> {mcp_path}",
         f"skill -> {cflow_install.write_skill(skills)}",
+        f"skill -> {cflow_authoring.write_skill(skills)}",
         f"skill -> {mesh_install.write_skill(skills)}",
     ]
