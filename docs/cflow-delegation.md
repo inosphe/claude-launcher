@@ -246,18 +246,21 @@ arrangement of tool calls unblocks a step gated on the agent making them.
 
 ## 7. Remaining work
 
-**H. End-to-end** — a real daemon, a parent session and a child, both in a
-mesh; the child starts a workflow with a delegated step; assert the question
-is delivered as `decide`, that the parent's `answer` is refused from the wrong
-session and accepted from the right one, that the child's run advances, and
-that the child cannot answer its own ask.
+Only the **merge**, which is deferred to agreement per the branch's terms.
 
-**Merge** — deferred to agreement, per the branch's terms.
+A (`model.py`, the two axes), B (`responders.py`, the member-graph pool),
+C (`daemon/mesh.py`, `decide` + `ref`), D (`engine.py`, `otherwise` and the
+start-time check), E (`mcp.py` — nothing needed; the payload carries it),
+F (tests against the real pool), G (docs) and H (`tests/test_cflow_delegation_e2e.py`)
+are done.
 
-Done: A (`model.py`, the two axes), B (`responders.py`, the member-graph
-pool), C (`daemon/mesh.py`, `decide` + `ref`), D (`engine.py`, `otherwise`
-and the start-time check), E (`mcp.py`, which needed nothing — the payload
-carries it), F (tests, against the real pool), G (docs).
+The e2e was worth its cost twice over: it caught that the mesh's delivery
+workers are started by the daemon's `main()` and not by `build_app`, which no
+stub could have shown, and it recorded that the tool path refuses an impostor
+*before* the self-approval check ever runs — `answer` locates a run by
+scanning for questions put to the calling session, so a run that wants to
+approve itself cannot even find its own ask. The named-run check behind it is
+asserted separately, by calling the engine directly.
 
 ## 8. Decided against
 
