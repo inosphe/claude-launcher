@@ -1265,7 +1265,7 @@ def answer_ask(
     """
     for entry in open_asks(by_session):
         if entry["ask"] == ask_id:
-            return answer(
+            receipt = answer(
                 ask_id,
                 decision,
                 reason,
@@ -1273,6 +1273,20 @@ def answer_ask(
                 cwd=entry["cwd"],
                 scope=entry["from_session"],
             )
+            # Outside the lock deliberately: the asking session is stopped
+            # waiting for this, and waking it is a message to a third process
+            # that has no business being inside the run's state transition.
+            woken = responders.nudge(
+                entry["from_session"], NUDGE_ANSWERED, cwd=entry["cwd"]
+            )
+            receipt["nudged"] = woken or None
+            if not woken:
+                receipt["note"] = (
+                    f"{receipt['note']} — but {entry['from_session']!r} could "
+                    f"not be nudged (no daemon, or the session is gone), so it "
+                    f"may not notice until someone prompts it"
+                )
+            return receipt
     raise CflowError(
         f"no open request {ask_id!r} is waiting on you — it was answered, it "
         f"escalated past you, or its run moved on. Call 'asks' for what is "

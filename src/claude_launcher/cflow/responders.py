@@ -273,6 +273,54 @@ def deliver(
     return None
 
 
+def nudge(session: str, message: str, *, cwd: str) -> List[str]:
+    """Type a resume nudge into the run's own session. Returns who was nudged.
+
+    A run identifies its session by scope, but a scope is only unique within
+    a directory, so both must match — the same pair that identifies the run
+    itself. Best-effort: without a daemon there is nobody to type into, and a
+    missed nudge costs a delay rather than correctness, since the protocol
+    already makes an agent re-read ``status`` on any message.
+
+    Goes through the daemon's ``/deliver`` — the same door in-process senders
+    use — rather than typing keys, so how a message gets submitted stays one
+    decision made in one place.
+    """
+    from . import state as state_mod  # local: state imports model, not us
+
+    target = str(session or "").strip()
+    if not target or target == state_mod.DEFAULT_SCOPE:
+        return []
+    client = daemon_client.connect()
+    if client is None:
+        return []
+    try:
+        sessions = (client.get("/api/sessions", timeout=CALL_TIMEOUT) or {}).get(
+            "sessions"
+        ) or []
+    except daemon_client.DaemonClientError:
+        return []
+    want = state_mod.resolve_cwd(cwd)
+    for s in sessions:
+        if s.get("name") != target or s.get("status") == "exited":
+            continue
+        try:
+            if state_mod.resolve_cwd(str(s.get("cwd") or "")) != want:
+                continue
+        except OSError:
+            continue
+        try:
+            client.post(
+                f"/api/sessions/{s['name']}/deliver",
+                {"text": message},
+                timeout=CALL_TIMEOUT,
+            )
+        except daemon_client.DaemonClientError:
+            return []
+        return [target]
+    return []
+
+
 def _question(ask: dict, *, workflow: str, sender: str) -> str:
     """The message a responder receives. The question — never the answer form.
 

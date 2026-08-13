@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from . import daemon_client
-from .cflow import engine, install, model, state as state_mod
+from .cflow import engine, install, model, responders, state as state_mod
 
 
 def _resolve_scope(args: argparse.Namespace):
@@ -186,40 +186,17 @@ def _cmd_request(args: argparse.Namespace) -> int:
 
 
 def _nudge_via_daemon(message: str, scope) -> list:
-    """Best-effort: type a resume nudge into the run's own session (scope ==
-    session name, 1:1). Needs the daemon; silently a no-op without it, and
-    default-scope runs belong to no session.
+    """Type a resume nudge into the run's own session (scope == session name).
 
-    Goes through the daemon's ``/deliver`` — the same door in-process senders
-    use — rather than typing keys, so how a message gets submitted stays a
-    single decision made in one place."""
-    target = scope or state_mod.current_scope()
-    if target == state_mod.DEFAULT_SCOPE:
-        return []
+    The run being unblocked is always the one in THIS directory, so that is
+    the cwd half of the pair; see :func:`responders.nudge` for the rest.
+    """
     try:
-        client = daemon_client.connect()
+        return responders.nudge(
+            scope or state_mod.current_scope(), message, cwd=str(Path.cwd())
+        )
     except Exception:
-        return []
-    if client is None:
-        return []
-    here = Path.cwd().resolve()
-    try:
-        sessions = (client.get("/api/sessions") or {}).get("sessions") or []
-    except daemon_client.DaemonClientError:
-        return []
-    for s in sessions:
-        try:
-            same = Path(str(s.get("cwd") or "")).resolve() == here
-        except OSError:
-            same = False
-        if s.get("name") != target or not same or s.get("status") == "exited":
-            continue
-        try:
-            client.post(f"/api/sessions/{s['name']}/deliver", {"text": message})
-        except daemon_client.DaemonClientError:
-            return []
-        return [target]
-    return []
+        return []  # a nudge is a convenience; never fail a CLI action on it
 
 
 def _report_unblock(action: str, message: str, scope) -> None:
