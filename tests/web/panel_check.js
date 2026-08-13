@@ -107,6 +107,9 @@ function go(hash) { gone = hash; }
 function attach(name) {
   currentName = name; term = {}; showView("terminal"); markDetailRow();
 }
+// Walking back into a terminal nudges its socket, which is the link's affair
+// and reconnect_check's to test; here it only has to exist.
+function reconnectNow() {}
 function stopWfPoll() {}
 function stopMsgPoll() {}
 function openTrace() {}

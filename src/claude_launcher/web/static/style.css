@@ -29,6 +29,9 @@ body {
 }
 #sidebar h1 { font-size: 16px; letter-spacing: 0.5px; }
 #daemon-info { font-size: 11px; color: #7d8590; }
+/* Where the version normally sits, because it answers the same question — who
+   are we talking to — and when the answer is "nobody", that is the version. */
+#daemon-info.off { color: #ff7b72; }
 
 /* The list polls itself, so this is only ever "don't wait for the next tick"
    — a spawn that happened elsewhere lands here the moment you ask. */
@@ -282,6 +285,16 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .badge.idle { background: #1f4428; color: #3fb950; }
 .badge.busy { background: #4d3800; color: #d29922; }
 .badge.exited { background: #30363d; color: #8b949e; }
+/* The link chip: what this browser's socket is doing, as against the badge
+   before it, which is what the session is doing. Filled rather than outlined
+   like its neighbours because it is only ever up when something is wrong —
+   and it is up next to a badge that will happily go on saying `busy`. */
+.link-chip { border: none; color: #fff; font-variant-numeric: tabular-nums; }
+.link-chip.reconnecting { background: #4d3800; color: #d29922; }
+/* Given up: the same red the relay wears when its tunnel is down, since it
+   means the same thing — this end is on its own until someone acts. */
+.link-chip.lost { background: #442022; color: #ff7b72; }
+.link-chip:hover { color: #fff; }
 #terminal { flex: 1; padding: 6px; min-height: 0; }
 #terminal .xterm { height: 100%; }
 /* xterm's viewport is the session's scrollback. Keep a flick that runs off

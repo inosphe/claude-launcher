@@ -85,8 +85,13 @@ async function api(path, opts = {}) {
 }
 
 function showAuth() {
-  $("auth-overlay").classList.remove("hidden");
-  $("auth-token").focus();
+  const overlay = $("auth-overlay");
+  // Focus only as it opens. The poll can raise this repeatedly (every tick
+  // while a rotated token goes unfixed), and a caret yanked back to the start
+  // of the box every two seconds makes the token unpasteable.
+  const opening = overlay.classList.contains("hidden");
+  overlay.classList.remove("hidden");
+  if (opening) $("auth-token").focus();
 }
 
 $("auth-submit").addEventListener("click", doAuth);
@@ -215,15 +220,20 @@ async function refreshSessions() {
   clear.textContent = `clear ${dead.length} exited`;
 
   const cur = currentName && sessionsCache.find((s) => s.name === currentName);
-  if (cur && attachedPid && cur.pid !== attachedPid) {
+  if (cur && attachedPid && cur.pid !== attachedPid && linkState === "live") {
     // Someone else (a `claunch respawn`, another tab) resumed this session:
     // our socket is bound to the replaced, now-dead child, so follow the new
     // one instead of showing its frozen last screen. Only while the terminal
     // is the visible view — reattaching must not yank the user off a
     // workflow page, or out of the mobile menu (it stays pending until they
     // come back, since the stale pid keeps failing this test).
+    //
+    // Only from a live link, too. This used to be the *only* way a dropped
+    // socket ever came back, which it was bad at; now the link repairs itself
+    // and this is once more about the child being replaced under a working
+    // socket — a question a broken one has no opinion on.
     if (terminalOnScreen()) attach(currentName);
-  } else if (cur && !(ws && ws.readyState === WebSocket.OPEN)) {
+  } else if (cur && linkState !== "live") {
     // Otherwise an open socket stays authoritative: it sees this session's
     // every state change first-hand (an exit reaches it seconds before the
     // next poll), so a stale entry can't flicker the resume/kill controls.
@@ -756,11 +766,314 @@ function setStatusBadge(status) {
   syncMobileBars();  // the mobile bars mirror this header
 }
 
-function detach() {
-  if (ws) { ws.onclose = null; ws.close(); ws = null; }
-  if (term) { term.dispose(); term = null; fitAddon = null; }
-  attachedPid = null; // re-learned from the next socket's init frame
+/* ---- the link ----
+
+   The terminal is the one thing on this page that is not a poll. Everything
+   else asks again every two seconds and so repairs itself by accident; the
+   terminal holds a socket, and a socket that closes stays closed. A daemon
+   restart, a laptop waking up, a relay dropping its tunnel — each of those
+   used to end as `[disconnected]` painted into the buffer with nothing behind
+   it. What recovery there was came from the session poll noticing the child's
+   pid had changed, which is a different question: a restart that relaunches a
+   session gives it a new pid, but one that retires it hands back the pid it
+   died with, and either way a viewer that never got an init frame has no pid
+   to compare against and is stuck for good. Hence a reload being the cure.
+
+   So the link is its own small state machine, and the only thing that opens
+   sockets:
+
+     idle          nothing is attached, or the session itself has ended
+     opening       a socket is being established
+     live          frames are flowing
+     reconnecting  it closed under us, and a retry is scheduled
+     lost          the retries ran out; it waits for a person or an event
+
+   Retries only ever run from `reconnecting`. A live socket is never re-opened
+   underneath the user, and a session that sent `exit` is not a broken link
+   but a finished program — `resume` is the answer to that one, not a retry.
+
+   And they are bounded. An unbounded backoff against a daemon that is not
+   coming back is a tab that quietly wakes a phone every ten seconds until the
+   battery is gone; when LINK_BACKOFF is spent the chip in the header says so
+   and offers the retry. Nothing is lost by stopping: the health poll below
+   kicks the link once more if a daemon actually turns up, so giving up costs
+   a person nothing except in the case where nobody is watching anyway. */
+const LINK_BACKOFF = [500, 1000, 2000, 4000, 6000, 8000, 10000, 10000];
+// Two viewers of the same session — a phone and a laptop, or every tunnel
+// behind one relay — come back from the same outage at the same moment.
+const LINK_JITTER = 0.25;
+// Alt-tabbing must not turn "retry when the user looks at it" into a retry
+// loop wearing a different hat. A press of the chip is exempt: that is a
+// person asking, and asking twice is their business.
+const LINK_KICK_MS = 3000;
+// Held keystrokes. Small on purpose — this covers a restart, not a walk.
+const LINK_QUEUE_MAX = 4096;
+
+let linkState = "idle";
+let linkName = null;      // the session this link is for
+let linkTry = 0;          // retries spent in the current outage
+let linkTimer = null;     // the scheduled retry
+let linkTicket = 0;       // bumped whenever a socket stops being the current one
+let linkKickAt = 0;       // last event-driven retry, for the throttle above
+let linkQueue = [];       // keystrokes typed while it was down
+let sessionEnded = false; // an `exit` frame arrived: the program, not the link
+let attachedBoot = null;  // daemon incarnation the socket's pid belongs to
+const linkEncoder = new TextEncoder();
+
+function setLink(state) {
+  linkState = state;
+  syncLinkChip();
 }
+
+/* The header (and its mirror on a phone) say what the socket is doing, because
+   the status badge beside them cannot: that one reports the *session*, which
+   goes on running perfectly well while this browser cannot see it. A tab that
+   says `idle` next to a terminal that has been frozen for a minute is the
+   worst of the states this page can be in. */
+function syncLinkChip() {
+  const down = linkState === "reconnecting" || linkState === "lost";
+  const text = linkState === "lost"
+    ? "disconnected ⟳"
+    : `reconnecting… ${linkTry}/${LINK_BACKOFF.length}`;
+  const title = linkState === "lost"
+    ? "the daemon never answered — press to try again now"
+    : "this terminal's socket dropped; press to retry without waiting";
+  for (const [id, cls] of [["term-link", "term-btn"], ["m-link", "m-act"]]) {
+    const chip = $(id);
+    chip.textContent = text;
+    chip.title = title;
+    chip.className = `${cls} link-chip ${linkState}${down ? "" : " hidden"}`;
+  }
+}
+
+/* Is the daemon answering? Unauthenticated (api.py keeps /api/health open),
+   which is the whole reason to ask it rather than /api/daemon: the login
+   cookie lives in the daemon's memory and therefore died in the restart we
+   are recovering from, so an authenticated probe cannot tell "not back yet"
+   from "back, and it does not know me any more". A refused WebSocket upgrade
+   cannot tell them apart either — the browser reports a 401 upgrade as a
+   plain close with no status at all. */
+async function daemonHealth() {
+  try {
+    const resp = await fetch(url("/api/health"), { cache: "no-store" });
+    if (!resp.ok) return null;
+    return await resp.json();
+  } catch {
+    return null;
+  }
+}
+
+/* Open (or re-open) the socket for `name`. The terminal object is deliberately
+   not touched: a reconnect is a new pipe to the same screen, and the daemon's
+   first act on a fresh socket is to repaint it (ws.py), so the grid comes back
+   as it now is and the scrollback above it survives. */
+function openSocket(name) {
+  const ticket = ++linkTicket;   // any older socket's events are noise from here
+  linkName = name;
+  setLink("opening");
+
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const sock = new WebSocket(
+    `${proto}://${location.host}${url(`/api/sessions/${encodeURIComponent(name)}/ws`)}`
+  );
+  sock.binaryType = "arraybuffer";
+  ws = sock;
+
+  sock.onopen = () => {
+    if (ticket !== linkTicket) return;
+    linkTry = 0;   // this outage is over; the next one starts with a full budget
+    setLink("live");
+  };
+
+  sock.onmessage = (ev) => {
+    if (ticket !== linkTicket) return;
+    if (typeof ev.data === "string") {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      handleFrame(msg);
+    } else if (term) {
+      term.write(new Uint8Array(ev.data));
+    }
+  };
+
+  sock.onclose = () => {
+    // A socket we have already replaced closing late is not an outage — it is
+    // the tail of one we have dealt with. Without this, the losing half of a
+    // race schedules retries against a link that is already live.
+    if (ticket !== linkTicket) return;
+    ws = null;
+    if (linkState === "idle" || sessionEnded) { setLink("idle"); return; }
+    linkDown();
+  };
+}
+
+function handleFrame(msg) {
+  if (msg.type === "init") {
+    // Seed the grid with the session's current size without echoing it back;
+    // the fit below sends this viewer's own size as the single resize.
+    applyingRemoteResize = true;
+    try { term.resize(msg.cols, msg.rows); }
+    finally { applyingRemoteResize = false; }
+    // Is this the same program we were talking to before the link dropped? A
+    // respawn — or a daemon restart that relaunched the session — keeps the
+    // name and replaces the child, and the pid alone cannot say so across a
+    // restart, since a retired record keeps the pid it last had.
+    const same = attachedPid !== null
+      && msg.pid === attachedPid
+      && (!msg.boot_id || !attachedBoot || msg.boot_id === attachedBoot);
+    attachedPid = msg.pid || null;
+    attachedBoot = msg.boot_id || null;
+    setStatusBadge(msg.status);
+    flushInput(same);
+    // Adopt the viewer's size once attached.
+    refitSoon(50);
+  } else if (msg.type === "state") {
+    setStatusBadge(msg.status);
+  } else if (msg.type === "resize") {
+    // Only a background viewer adopts another viewer's size; a visible
+    // viewer's own fit stays authoritative. Otherwise a stale echo arriving
+    // late over the relay fights the local fit and the grid churns. On focus
+    // regain, resyncTerminal() re-asserts this viewer's size.
+    if (document.hidden && (term.cols !== msg.cols || term.rows !== msg.rows)) {
+      applyingRemoteResize = true;
+      try { term.resize(msg.cols, msg.rows); }
+      finally { applyingRemoteResize = false; }
+    }
+  } else if (msg.type === "exit") {
+    // Not a broken link: the program finished. There is nothing to reconnect
+    // to, so the machine goes idle and stays there until `resume` builds a
+    // new session under the name.
+    sessionEnded = true;
+    linkQueue = [];
+    setLink("idle");
+    setStatusBadge("exited");
+    term.write(
+      `\r\n\x1b[90m[session exited (code ${msg.code})] ` +
+      `- press "resume" above to relaunch it\x1b[0m\r\n`
+    );
+  }
+}
+
+/* Everything typed into the terminal goes through here. While the link is down
+   the keystrokes are held rather than dropped on the floor: dropping them
+   silently is how a phone user — who has no local echo to tell them otherwise
+   — comes to believe the keyboard missed the line they just wrote. Held only
+   while a retry is actually coming, though; once the link is `lost` there is
+   nothing to hold them for, and a buffer that fills over a lunch break and
+   then fires into a live shell is far worse than a lost keystroke. */
+function sendInput(data) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(linkEncoder.encode(data));
+    return;
+  }
+  if (linkState !== "opening" && linkState !== "reconnecting") return;
+  const held = linkQueue.reduce((n, s) => n + s.length, 0);
+  if (held + data.length > LINK_QUEUE_MAX) return;
+  linkQueue.push(data);
+}
+
+/* And they are only replayed into the child they were meant for. Typing into
+   a session that has since been replaced is how a half-written command ends
+   up executed by whatever came next. */
+function flushInput(sameChild) {
+  const held = linkQueue;
+  linkQueue = [];
+  if (!held.length) return;
+  if (!sameChild) {
+    term.write(
+      "\r\n\x1b[90m[reconnected to a new process — what you typed while it " +
+      "was down was discarded]\x1b[0m\r\n"
+    );
+    return;
+  }
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(linkEncoder.encode(held.join("")));
+  }
+}
+
+function linkDown() {
+  if (term) term.write("\r\n\x1b[90m[disconnected — reconnecting…]\x1b[0m\r\n");
+  scheduleReconnect();
+}
+
+function scheduleReconnect() {
+  clearTimeout(linkTimer);
+  linkTimer = null;
+  if (linkTry >= LINK_BACKOFF.length) {
+    setLink("lost");
+    if (term) {
+      term.write(
+        "\r\n\x1b[90m[still nothing — press reconnect in the header, or " +
+        "reload]\x1b[0m\r\n"
+      );
+    }
+    return;
+  }
+  const wait = Math.round(LINK_BACKOFF[linkTry++] * (1 + LINK_JITTER * Math.random()));
+  setLink("reconnecting");
+  linkTimer = setTimeout(tryReconnect, wait);
+}
+
+async function tryReconnect() {
+  if (linkState !== "reconnecting" || !linkName) return;  // the only state it runs from
+  const ticket = linkTicket;
+  if (!(await daemonHealth())) { scheduleReconnect(); return; }
+  if (ticket !== linkTicket || linkState !== "reconnecting") return;
+  // The daemon is up, so the remaining reason an upgrade would be refused is
+  // the cookie the old one minted. api() renews it from the remembered token
+  // on 401, which is why this goes through api() and not fetch().
+  try { await api("/api/daemon"); }
+  catch { scheduleReconnect(); return; }   // still unauthorised: the overlay is up
+  if (ticket !== linkTicket || linkState !== "reconnecting") return;
+  openSocket(linkName);
+}
+
+/* A retry that does not wait out the backoff: the chip was pressed, the tab
+   came back to the foreground, the network came back, or the poll saw a
+   different daemon answering. Only ever from a link that is down — a live
+   socket is never disturbed, which is what keeps this whole machine out of
+   the way of ordinary use. */
+function reconnectNow(byUser) {
+  if (linkState !== "reconnecting" && linkState !== "lost") return;
+  if (!linkName || sessionEnded) return;
+  const now = Date.now();
+  if (!byUser && now - linkKickAt < LINK_KICK_MS) return;
+  linkKickAt = now;
+  clearTimeout(linkTimer);
+  linkTimer = null;
+  linkTry = 0;   // a new circumstance, not another blind retry
+  setLink("reconnecting");
+  tryReconnect();
+}
+
+/* Take the link down deliberately. Nothing here is an outage, so no retry is
+   scheduled, and the ticket bump means neither the socket being dropped nor a
+   retry already in flight can speak for the link again. */
+function closeLink() {
+  linkTicket += 1;
+  clearTimeout(linkTimer);
+  linkTimer = null;
+  linkTry = 0;
+  linkName = null;
+  linkQueue = [];
+  sessionEnded = false;
+  setLink("idle");
+  if (ws) { ws.onclose = null; ws.close(); ws = null; }
+  attachedPid = null;   // re-learned from the next socket's init frame
+  attachedBoot = null;
+}
+
+function detach() {
+  closeLink();
+  if (term) { term.dispose(); term = null; fitAddon = null; }
+}
+
+$("term-link").addEventListener("click", () => reconnectNow(true));
+$("m-link").addEventListener("click", () => $("term-link").click());
+// The network coming back is the one event that says "try now" without a
+// person having to be there. Guarded like the rest: it does nothing unless
+// the link is down.
+window.addEventListener("online", () => reconnectNow());
 
 /* ---- text size ----
    Scaling the glyphs scales the session: the grid is however many cells fit
@@ -857,16 +1170,9 @@ function attach(name) {
   term.open($("terminal"));
   fitAddon.fit();
 
-  const proto = location.protocol === "https:" ? "wss" : "ws";
-  ws = new WebSocket(
-    `${proto}://${location.host}${url(`/api/sessions/${encodeURIComponent(name)}/ws`)}`
-  );
-  ws.binaryType = "arraybuffer";
-
-  const encoder = new TextEncoder();
-  term.onData((data) => {
-    if (ws && ws.readyState === WebSocket.OPEN) ws.send(encoder.encode(data));
-  });
+  // Wired once, for the life of this terminal object: the link swaps sockets
+  // underneath these, and a reconnect must not leave a second pair behind.
+  term.onData(sendInput);
   term.onResize(({ cols, rows }) => {
     // A resize we applied from a server broadcast must not be echoed back, or
     // two viewers (or a stale echo over a high-latency relay) ping-pong forever.
@@ -876,46 +1182,7 @@ function attach(name) {
     }
   });
 
-  ws.onmessage = (ev) => {
-    if (typeof ev.data === "string") {
-      let msg;
-      try { msg = JSON.parse(ev.data); } catch { return; }
-      if (msg.type === "init") {
-        // Seed the grid with the session's current size without echoing it back;
-        // the fit() below sends this viewer's own size as the single resize.
-        applyingRemoteResize = true;
-        try { term.resize(msg.cols, msg.rows); }
-        finally { applyingRemoteResize = false; }
-        attachedPid = msg.pid || null;
-        setStatusBadge(msg.status);
-        // Adopt the viewer's size once attached.
-        refitSoon(50);
-      } else if (msg.type === "state") {
-        setStatusBadge(msg.status);
-      } else if (msg.type === "resize") {
-        // Only a background viewer adopts another viewer's size; a visible
-        // viewer's own fit stays authoritative. Otherwise a stale echo arriving
-        // late over the relay fights the local fit and the grid churns. On focus
-        // regain, resyncTerminal() re-asserts this viewer's size.
-        if (document.hidden && (term.cols !== msg.cols || term.rows !== msg.rows)) {
-          applyingRemoteResize = true;
-          try { term.resize(msg.cols, msg.rows); }
-          finally { applyingRemoteResize = false; }
-        }
-      } else if (msg.type === "exit") {
-        setStatusBadge("exited");
-        term.write(
-          `\r\n\x1b[90m[session exited (code ${msg.code})] ` +
-          `- press "resume" above to relaunch it\x1b[0m\r\n`
-        );
-      }
-    } else {
-      term.write(new Uint8Array(ev.data));
-    }
-  };
-  ws.onclose = () => {
-    if (term) term.write("\r\n\x1b[90m[disconnected]\x1b[0m\r\n");
-  };
+  openSocket(name);
 }
 
 /* Not merely "the terminal isn't hidden": on mobile the rail takes the whole
@@ -945,6 +1212,10 @@ window.addEventListener("resize", () => refitSoon());
    re-assert this viewer's size and ask the daemon for a fresh repaint —
    event-driven only, no polling. */
 function resyncTerminal() {
+  // A tab returning to the foreground is the cheapest moment to notice that
+  // the link died while nobody was looking — and the likeliest, since a phone
+  // suspends its sockets the moment the screen goes off.
+  if (linkState === "reconnecting" || linkState === "lost") { reconnectNow(); return; }
   if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
   if (canFit()) fitAddon.fit(); // fires term.onResize -> server resize when dims changed
   ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
@@ -1313,8 +1584,15 @@ function route() {
       // Re-entering the route we are already attached to must not tear the
       // socket down and build it again — coming back from another page is
       // the common case, and it would cost the scrollback every time.
-      if (currentName === r.name && term) showView("terminal");
-      else attach(r.name);
+      if (currentName === r.name && term) {
+        showView("terminal");
+        // Walking back into a terminal is someone coming to look at it, which
+        // is as good a moment as any to try the socket again. It does nothing
+        // unless the link is down (and not twice within the throttle), so
+        // this is not the reattach-on-navigation the old code accidentally
+        // relied on — that is the link's job now.
+        reconnectNow();
+      } else attach(r.name);
       // An open rail follows the terminal. Never *opened* here — a panel
       // moving to the session the user just went to is one thing, one
       // springing up because they changed terminals is another. On a phone
@@ -6261,16 +6539,55 @@ function renderTrace(data) {
 /* ------------------------------------------------------------------ */
 /* boot                                                               */
 /* ------------------------------------------------------------------ */
+/* The poll is installed here rather than at the end of boot(), and is never
+   taken down: a page opened while the daemon was down and a page whose daemon
+   went down under it are the same predicament, and in both something has to
+   keep asking. It used to be boot()'s last act, so the first predicament left
+   a permanently dead page — the one thing a user cannot tell apart from a
+   broken app.
+
+   Each tick leads with /api/health, which needs no cookie. That keeps "the
+   daemon is gone" and "the daemon is back and my login died with the old one"
+   separable, and it means a restart is *noticed* — by its boot id — rather
+   than inferred from things going quiet. */
 let pollTimer = null;
+let booted = false;        // boot() has seeded the page and routed once
+let daemonOnline = true;   // last verdict; only the transitions do any work
+let daemonBoot = null;     // which daemon that verdict was about
+
+function authOpen() {
+  return !$("auth-overlay").classList.contains("hidden");
+}
+
+function setDaemonOnline(up) {
+  if (daemonOnline === up) return;
+  daemonOnline = up;
+  const info = $("daemon-info");
+  info.classList.toggle("off", !up);
+  if (!up) {
+    info.textContent = "daemon offline";
+    // The lists stay on screen, so they have to be labelled: a rail full of
+    // sessions is otherwise indistinguishable from a rail full of *current*
+    // sessions, and this one is a photograph.
+    info.title = "nothing is answering — the lists below are the last thing it said";
+  }
+  // Coming back is boot()'s job: it re-reads the version and the relay state.
+}
+
 async function boot() {
+  let info;
   try {
     const resp = await api("/api/daemon");
-    const info = await resp.json();
-    $("daemon-info").textContent = `v${info.version}`;
-    renderRelayBadge(info.relay);
+    info = await resp.json();
   } catch {
-    return; // auth overlay is up
+    return;   // down, or the auth overlay is up — the poll comes back to this
   }
+  const badge = $("daemon-info");
+  badge.textContent = `v${info.version}`;
+  badge.title = "";
+  badge.classList.remove("off");
+  if (info.boot_id) daemonBoot = info.boot_id;
+  renderRelayBadge(info.relay);
   refreshProfiles();
   refreshHarnesses();
   refreshRoles();
@@ -6278,19 +6595,49 @@ async function boot() {
   refreshSessions();
   refreshMeshList();
   refreshCflow();
-  // Last, so the page it lands on renders against caches the refreshes
-  // above have already filled. A #/s/<name> link attaches here — which is
-  // why a reload puts you back in the session instead of at an empty slot.
-  route();
-  if (pollTimer) clearInterval(pollTimer);
-  pollTimer = setInterval(() => {
-    refreshSessions();
-    refreshMeshList();
-    refreshCflow();
-    // Polled because the registry is edited from the CLI, in another window;
-    // it redraws only when the list really changed (see refreshWorkspaces).
-    refreshWorkspaces();
-  }, 2000);
+  // Last, and once. A #/s/<name> link attaches here — which is why a reload
+  // puts you back in the session instead of at an empty slot — and it renders
+  // against caches the refreshes above have already filled. Re-running it on
+  // every recovery would re-enter whatever page the user has since walked to.
+  if (!booted) { booted = true; route(); }
 }
 
+let polling = false;
+
+async function pollTick() {
+  // While the token prompt is up there is nobody to poll for, and every
+  // request would only raise it again under the fingers typing into it.
+  if (authOpen()) return;
+  // A tick that is still waiting on a dead host must not have another stacked
+  // on top of it every two seconds: connect attempts to a machine that has
+  // gone away hang for a good while, and that is exactly when this runs.
+  if (polling) return;
+  polling = true;
+  try { await pollOnce(); } finally { polling = false; }
+}
+
+async function pollOnce() {
+  const health = await daemonHealth();
+  if (!health) { setDaemonOnline(false); return; }
+  // A boot id we have not seen means the daemon we were talking to is gone:
+  // new cookies, new pids, and every socket we hold bound to nothing.
+  const restarted = !!(health.boot_id && daemonBoot && health.boot_id !== daemonBoot);
+  const returned = !daemonOnline || !booted;
+  setDaemonOnline(true);
+  if (restarted || returned) {
+    daemonBoot = health.boot_id || null;
+    await boot();     // re-read everything this daemon publishes, from scratch
+    reconnectNow();   // and give the attached terminal its socket back
+    return;
+  }
+  if (health.boot_id) daemonBoot = health.boot_id;
+  refreshSessions();
+  refreshMeshList();
+  refreshCflow();
+  // Polled because the registry is edited from the CLI, in another window;
+  // it redraws only when the list really changed (see refreshWorkspaces).
+  refreshWorkspaces();
+}
+
+pollTimer = setInterval(pollTick, 2000);
 boot();

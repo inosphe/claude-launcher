@@ -4,8 +4,11 @@ Protocol (matches the SPA's app.js and any non-browser client):
 
 - server -> client, binary: raw PTY output bytes (feed straight to xterm.js).
   On connect the server first sends a JSON ``init`` text frame
-  (``{"type":"init","cols":..,"rows":..,"status":..,"pid":..}``), then one
-  binary frame repainting the current screen so a fresh viewer sees live state.
+  (``{"type":"init","cols":..,"rows":..,"status":..,"pid":..,"boot_id":..}``),
+  then one binary frame repainting the current screen so a fresh viewer sees
+  live state. Because the repaint comes with every socket, a client that lost
+  one may simply open another against the same terminal: ``pid`` and
+  ``boot_id`` together say whether it is the same program it was talking to.
 - client -> server, binary: keystrokes/paste, written verbatim to the PTY.
 - text frames are JSON control messages:
   client: ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"repaint"}``
@@ -53,6 +56,12 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                     # but spawns a new child, so a viewer can tell its socket
                     # is bound to a session that has since been replaced.
                     "pid": session.pid,
+                    # And which daemon that incarnation belongs to. A restart
+                    # relaunches restored sessions but retires the rest with
+                    # the pid they last had, so a pid on its own can repeat
+                    # across daemons; a reconnecting viewer that is about to
+                    # replay keystrokes needs both to be sure of its child.
+                    "boot_id": request.app["boot_id"],
                 }
             )
         )
