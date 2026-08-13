@@ -103,7 +103,7 @@ steps:
   ship:
     ask:
       prompt: ship it?
-      from: [{role: leader, up: 1}, human]
+      from: [{role: leader}]
       on_decline: impl
     instructions: ship it
 """
@@ -113,7 +113,7 @@ steps:
   ship:
     ask:
       prompt: ship it?
-      from: [{role: leader, up: 1}]
+      from: [{role: leader}]
     instructions: ship it
 """
 
@@ -122,7 +122,17 @@ steps:
   ship:
     ask:
       prompt: ship it?
-      from: [{role: leader, up: 1}, {role: leader, up: {min: 2, max: 3}}, human]
+      from: [{role: reviewer}, {role: leader}]
+    instructions: ship it
+"""
+
+ASK_SELF = """
+steps:
+  ship:
+    ask:
+      prompt: ship it?
+      from: [{role: leader}]
+      otherwise: self
     instructions: ship it
 """
 
@@ -131,7 +141,7 @@ steps:
   ship:
     ask:
       prompt: ship it?
-      from: [{role: leader, up: 1}]
+      from: [{role: leader}]
     instructions: ship it
     next: again
   again:
@@ -149,7 +159,7 @@ steps:
     select:
       prompt: ready?
       chooser:
-        from: [{role: reviewer, up: 1}, human]
+        from: [{role: reviewer}]
       options:
         ready:  {description: ship it, next: end}
         rework: {description: another pass, next: impl}
@@ -157,6 +167,10 @@ steps:
     instructions: rework
     next: verdict
 """
+
+BRANCH_SELF = DELEGATED_BRANCH.replace(
+    "from: [{role: reviewer}]", "from: [{role: reviewer}]\n        otherwise: self"
+)
 
 
 @pytest.fixture
@@ -189,25 +203,43 @@ def _driving_session(monkeypatch, name="driver"):
     monkeypatch.setenv(state_mod.SESSION_ENV, name)
 
 
-def _mesh(monkeypatch, *members, problem="", local=True):
-    """Stand in for the daemon roster read: ``members`` are (role, session, up).
+def _mesh(monkeypatch, *members, parent=None, cut=(), local=True):
+    """Stand in for the daemon roster read. ``members`` are (role, session).
 
-    Only the lookup is faked; the matching (ranges, roles, locality) is the
-    real :class:`responders.Ancestry`, so these tests exercise the code that
-    decides who gets asked rather than a re-implementation of it.
+    The driving session is handle ``dev1``; each member becomes the handle
+    ``role-session``, wired to ``dev1`` unless its handle is in ``cut``. Pass
+    ``parent`` to put a handle above the driver, and a third tuple element to
+    give a member its own parent (that is how a descendant is built).
+
+    Only the daemon read is faked: the pool, the reach and the matching are the
+    real :func:`responders.pool`, so these tests exercise the code that decides
+    who may be asked rather than a re-implementation of it.
     """
-    chain = [
-        responders.Responder(
-            session=s, handle=f"{role}-{s}", role=role, up=up, local=local
+    roster = [_member("dev1", "driver", "worker", parent=parent)]
+    for role, session, *rest in members:
+        roster.append(
+            _member(
+                f"{role}-{session}", session, role,
+                parent=(rest[0] if rest else None), local=local,
+            )
         )
-        for (role, s, up) in sorted(members, key=lambda m: m[2])
-    ]
-    found = responders.Ancestry(
-        mesh="team", me="dev1", chain=chain, problem=problem
+    known = {m["handle"] for m in roster}
+    for handle in [parent] + [m["parent"] for m in roster]:
+        # A parent named but not enrolled is a hole in the fixture, not a case:
+        # the daemon publishes the nearest *enrolled* ancestor.
+        assert handle is None or handle in known, f"unknown parent {handle!r}"
+    _roster(
+        monkeypatch,
+        {
+            "name": "team",
+            "members": roster,
+            "member_links": [
+                {"a": "dev1", "b": m["handle"], "enabled": m["handle"] not in cut}
+                for m in roster[1:]
+            ],
+        },
     )
-    monkeypatch.setattr(responders, "ancestry", lambda **kw: found)
     monkeypatch.setattr(responders, "deliver", lambda ask, **kw: None)
-    return found
 
 
 # --------------------------------------------------------------------------- #
@@ -1017,12 +1049,12 @@ def test_mcp_errors_are_soft(flow_dir):
 
 
 # --------------------------------------------------------------------------- #
-# responders: reading the lineage out of the mesh
+# responders: reading the candidate pool out of the mesh
 # --------------------------------------------------------------------------- #
 def _member(handle, session, role, parent=None, local=True):
     return {
         "handle": handle, "session": session, "role": role,
-        "parent": parent, "local": local,
+        "parent": parent, "local": local, "reachability": "idle",
     }
 
 
@@ -1031,45 +1063,136 @@ def _roster(monkeypatch, *meshes, fail=None):
 
     class FakeClient:
         def get(self, path, **kw):
-            assert path == "/api/mesh"
             if fail:
                 raise daemon_client.DaemonClientError(fail)
-            return {"meshes": list(meshes)}
+            if path == "/api/mesh":
+                return {"meshes": list(meshes)}
+            # The nudge asks for the session list on its way to typing into
+            # the waiting run. Nobody is running here, which is the honest
+            # answer and the one a best-effort nudge has to survive.
+            assert path == "/api/sessions", path
+            return {"sessions": []}
+
+        def post(self, path, body, **kw):
+            return {}
 
     monkeypatch.setattr(daemon_client, "connect", lambda: FakeClient())
 
 
+def _links(*pairs):
+    return [{"a": a, "b": b, "enabled": on} for (a, b, on) in pairs]
+
+
+#: lead1 spawned rev1, which spawned dev1; dev1 also spawned a helper of its
+#: own, and is wired to everybody. The awkward shape on purpose: a reviewer
+#: that is NOT an ancestor, and a member that dev1 made itself.
 TEAM = {
     "name": "team",
     "members": [
         _member("dev1", "dev1", "worker", parent="rev1"),
         _member("rev1", "rev1", "reviewer", parent="lead1"),
         _member("lead1", "lead1", "leader"),
+        _member("sib1", "sib1", "reviewer", parent="rev1"),
+        _member("kid1", "kid1", "leader", parent="dev1"),
     ],
+    "member_links": _links(
+        ("dev1", "rev1", True),
+        ("dev1", "lead1", True),
+        ("dev1", "sib1", True),
+        ("dev1", "kid1", True),
+    ),
 }
 
 
-def test_ancestry_walks_the_enrolled_parent_chain(monkeypatch):
+def _candidate(role, scope=model.SCOPE_ANY):
+    return model.Candidate(role=role, scope=scope)
+
+
+def test_the_pool_is_the_member_graph_minus_what_this_run_made(monkeypatch):
     _roster(monkeypatch, TEAM)
-    found = responders.ancestry(session="dev1")
+    found = responders.pool(session="dev1")
     assert found.problem == ""
     assert found.mesh == "team" and found.me == "dev1"
-    assert [(a.handle, a.role, a.up) for a in found.chain] == [
-        ("rev1", "reviewer", 1),
-        ("lead1", "leader", 2),
-    ]
+    assert found.ancestors == ["rev1", "lead1"]
+    assert found.descendants == {"kid1"}
+
+    # a sibling reviewer answers — it is not an ancestor, and does not have to
+    # be: dev1 could not have spawned it, and cannot wire itself to it either
+    hit, reason = found.match(_candidate("reviewer"))
+    assert reason is None and sorted(r.handle for r in hit) == ["rev1", "sib1"]
+
+    # ...but its own child does not, however the roles line up
+    hit, reason = found.match(_candidate("leader"))
+    assert [r.handle for r in hit] == ["lead1"]
+    assert "kid1" not in [r.handle for r in hit]
 
 
-def test_ancestry_needs_an_unambiguous_mesh(monkeypatch):
+def test_a_descendant_is_never_a_candidate(monkeypatch):
+    """The one exclusion the whole feature rests on: what a run could make."""
+    made_it_all = {
+        "name": "team",
+        "members": [
+            _member("dev1", "dev1", "worker"),
+            _member("kid1", "kid1", "leader", parent="dev1"),
+            _member("grandkid", "gk", "leader", parent="kid1"),
+        ],
+        "member_links": _links(("dev1", "kid1", True), ("dev1", "grandkid", True)),
+    }
+    _roster(monkeypatch, made_it_all)
+    found = responders.pool(session="dev1")
+    assert found.descendants == {"kid1", "grandkid"}
+    hit, reason = found.match(_candidate("leader"))
+    assert hit == []
+    assert "no member of mesh 'team' holds that role" in reason
+    assert "spawned itself are never candidates" in reason
+
+
+def test_scope_ancestor_narrows_to_the_chain_of_command(monkeypatch):
+    _roster(monkeypatch, TEAM)
+    found = responders.pool(session="dev1")
+    hit, reason = found.match(_candidate("reviewer", model.SCOPE_ANCESTOR))
+    assert reason is None and [r.handle for r in hit] == ["rev1"]  # not sib1
+
+    _, reason = found.match(_candidate("worker", model.SCOPE_ANCESTOR))
+    assert "no session above dev1" in reason
+    assert "rev1 (reviewer), lead1 (leader)" in reason
+
+
+def test_an_unwired_member_is_named_with_the_command_that_fixes_it(monkeypatch):
+    """A spawned member is wired to its parent alone — that is the default."""
+    _roster(
+        monkeypatch,
+        {
+            **TEAM,
+            "member_links": _links(
+                ("dev1", "rev1", True),
+                ("dev1", "lead1", False),
+                ("dev1", "sib1", False),
+                ("dev1", "kid1", True),
+            ),
+        },
+    )
+    found = responders.pool(session="dev1")
+    assert found.reachable == {"rev1", "kid1"}
+    hit, reason = found.match(_candidate("leader"))
+    assert hit == []
+    assert "lead1 holds it but dev1 is not wired to them" in reason
+    assert "claunch mesh connect dev1 lead1" in reason
+    # the reviewer above is still reachable, so that group still resolves
+    hit, _ = found.match(_candidate("reviewer"))
+    assert [r.handle for r in hit] == ["rev1"]
+
+
+def test_the_pool_needs_an_unambiguous_mesh(monkeypatch):
     other = {"name": "other", "members": [_member("dev1", "dev1", "worker")]}
     _roster(monkeypatch, TEAM, other)
-    assert "several meshes (other, team)" in responders.ancestry(session="dev1").problem
+    assert "several meshes (other, team)" in responders.pool(session="dev1").problem
     # naming one settles it
-    picked = responders.ancestry(session="dev1", mesh="team")
-    assert picked.problem == "" and len(picked.chain) == 2
+    picked = responders.pool(session="dev1", mesh="team")
+    assert picked.problem == "" and picked.ancestors == ["rev1", "lead1"]
 
 
-def test_ancestry_will_not_mistake_a_remote_namesake_for_us(monkeypatch):
+def test_the_pool_will_not_mistake_a_remote_namesake_for_us(monkeypatch):
     """Session names are unique per machine, so a roster match is not identity."""
     mirrored = {
         "name": "team",
@@ -1079,26 +1202,26 @@ def test_ancestry_will_not_mistake_a_remote_namesake_for_us(monkeypatch):
         ],
     }
     _roster(monkeypatch, mirrored)
-    assert "not a member of any mesh" in responders.ancestry(session="dev1").problem
+    assert "not a member of any mesh" in responders.pool(session="dev1").problem
 
 
 @pytest.mark.parametrize(
     "kwargs, expected",
     [
-        ({"session": ""}, "not driven by a managed session"),
+        ({"session": ""}, "no mesh identity"),
         ({"session": "dev1", "mesh": "nope"}, "not a member of mesh 'nope'"),
     ],
 )
-def test_ancestry_reports_rather_than_raises(monkeypatch, kwargs, expected):
+def test_the_pool_reports_rather_than_raises(monkeypatch, kwargs, expected):
     _roster(monkeypatch, TEAM)
-    assert expected in responders.ancestry(**kwargs).problem
+    assert expected in responders.pool(**kwargs).problem
 
 
 def test_a_dead_daemon_is_a_reason_not_a_crash(monkeypatch):
     monkeypatch.setattr(daemon_client, "connect", lambda: None)
-    assert "daemon is not running" in responders.ancestry(session="dev1").problem
+    assert "daemon is not running" in responders.pool(session="dev1").problem
     _roster(monkeypatch, TEAM, fail="connection refused")
-    assert "could not be read" in responders.ancestry(session="dev1").problem
+    assert "could not be read" in responders.pool(session="dev1").problem
 
 
 def test_a_cycle_in_the_lineage_terminates(monkeypatch):
@@ -1108,29 +1231,15 @@ def test_a_cycle_in_the_lineage_terminates(monkeypatch):
             _member("dev1", "dev1", "worker", parent="rev1"),
             _member("rev1", "rev1", "reviewer", parent="dev1"),
         ],
+        "member_links": _links(("dev1", "rev1", True)),
     }
     _roster(monkeypatch, looped)
-    assert [a.handle for a in responders.ancestry(session="dev1").chain] == ["rev1"]
-
-
-def _candidate(role, up):
-    return model.Candidate(role=role, up=up)
-
-
-def test_match_names_the_specific_miss(monkeypatch):
-    _roster(monkeypatch, TEAM)
-    found = responders.ancestry(session="dev1")
-
-    hit, reason = found.match(_candidate("leader", (2, 4)))
-    assert reason is None and [r.handle for r in hit] == ["lead1"]
-
-    _, reason = found.match(_candidate("leader", (5, 6)))
-    assert "is 2 deep" in reason
-    _, reason = found.match(_candidate("leader", (1, 1)))
-    assert "nobody in range holds that role" in reason and "rev1 (reviewer)" in reason
-    # a role-less candidate takes whoever is at that distance
-    hit, reason = found.match(_candidate(None, (1, 1)))
-    assert reason is None and [r.handle for r in hit] == ["rev1"]
+    found = responders.pool(session="dev1")
+    assert found.ancestors == ["rev1"]
+    # rev1 is both above and below in this (impossible) roster; the descendant
+    # test wins, because it is the one that is load-bearing
+    assert found.descendants == {"rev1"}
+    assert found.match(_candidate("reviewer"))[0] == []
 
 
 def test_a_remote_match_is_skipped_with_that_reason(monkeypatch):
@@ -1142,92 +1251,107 @@ def test_a_remote_match_is_skipped_with_that_reason(monkeypatch):
                 _member("dev1", "dev1", "worker", parent="lead1"),
                 _member("lead1", "lead1", "leader", local=False),
             ],
+            "member_links": _links(("dev1", "lead1", True)),
         },
     )
-    found = responders.ancestry(session="dev1")
-    hit, reason = found.match(_candidate("leader", (1, 4)))
+    found = responders.pool(session="dev1")
+    hit, reason = found.match(_candidate("leader"))
     assert hit == []
     assert "another daemon has no access to this run's state" in reason
+
+
+def test_an_exited_match_is_skipped_as_exited(monkeypatch):
+    gone = {
+        "name": "team",
+        "members": [
+            _member("dev1", "dev1", "worker", parent="lead1"),
+            {**_member("lead1", "lead1", "leader"), "reachability": "exited"},
+        ],
+        "member_links": _links(("dev1", "lead1", True)),
+    }
+    _roster(monkeypatch, gone)
+    hit, reason = responders.pool(session="dev1").match(_candidate("leader"))
+    assert hit == [] and "the session has exited" in reason
 
 
 # --------------------------------------------------------------------------- #
 # model: delegated decisions
 # --------------------------------------------------------------------------- #
 def test_ask_parses_a_preference_list():
-    wf = model.parse(ASK_FLOW)
+    wf = model.parse(ASK_TWO_GROUPS)
     ask = wf.steps["ship"].ask
-    assert [c.describe() for c in ask.delegate.candidates] == ["leader 1 up", "human"]
-    assert ask.on_decline == "impl"
+    assert [c.describe() for c in ask.delegate.candidates] == ["reviewer", "leader"]
+    assert ask.delegate.otherwise == "human"  # the default, and the safe one
     assert wf.steps["ship"].entry_prompt == "ship it?"
+    assert model.parse(ASK_FLOW).steps["ship"].ask.on_decline == "impl"
 
 
-def test_member_candidate_must_declare_a_direction():
+def test_a_candidate_must_name_a_role():
+    """'whoever I happen to be wired to' is not a delegation."""
     bad = """
 steps:
   ship:
     ask:
       prompt: ok?
-      from: [{role: leader}]
+      from: [{scope: ancestor}]
     instructions: ship
 """
-    with pytest.raises(WorkflowError, match="spawned"):
+    with pytest.raises(WorkflowError, match="needs a 'role'"):
         model.parse(bad)
 
 
 @pytest.mark.parametrize(
-    "up",
+    "entry, match",
     [
-        "0",                        # would name the asking session itself
-        "-1",
-        "{min: 3, max: 1}",         # empty range
-        "{min: x}",
-        "{}",                       # the same omission, spelled longer
-        "{depth: 2}",               # not a key we have
-        "'2..4'",                   # the range is a mapping, not a string
-        "true",
-        "999",                      # past the lineage cap
+        ("boss", "must be a mapping"),              # the bare token is gone
+        ("{role: leader, up: 1}", "unknown key"),    # so is the hop range
+        ("{role: leader, scope: sideways}", "scope"),
+        ("{role: '', scope: any}", "needs a 'role'"),
     ],
 )
-def test_bad_up_values_are_rejected(up):
+def test_bad_candidates_are_rejected(entry, match):
     bad = f"""
 steps:
   ship:
     ask:
       prompt: ok?
-      from: [{{role: leader, up: {up}}}]
+      from: [{entry}]
     instructions: ship
 """
-    with pytest.raises(WorkflowError, match="up"):
+    with pytest.raises(WorkflowError, match=match):
         model.parse(bad)
 
 
-def test_up_range_ends_are_each_optional():
+def test_the_two_axes_are_independent():
+    """`from` says who is asked; `otherwise` says what happens if none do."""
     text = """
 steps:
   ship:
     ask:
       prompt: ok?
-      from:
-        - {role: leader, up: {min: 2}}
-        - {role: leader, up: {max: 3}}
+      from: [{role: leader, scope: ancestor}]
+      otherwise: self
     instructions: ship
 """
-    lo, hi = model.parse(text).steps["ship"].ask.delegate.candidates
-    assert lo.up == (2, model.MAX_UP)   # the grandparent or anywhere above
-    assert hi.up == (1, 3)              # never below the parent, whatever else
+    delegate = model.parse(text).steps["ship"].ask.delegate
+    assert delegate.describe() == "leader (ancestor) -> self"
+    # and a human is not something you can be asked
+    with pytest.raises(WorkflowError, match="must be a mapping"):
+        model.parse(text.replace("{role: leader, scope: ancestor}", "human"))
+    with pytest.raises(WorkflowError, match="'otherwise' must be one of"):
+        model.parse(text.replace("otherwise: self", "otherwise: nobody"))
 
 
-def test_only_human_is_a_bare_candidate():
-    bad = """
+def test_from_is_optional_and_that_is_a_human_gate():
+    text = """
 steps:
   ship:
     ask:
       prompt: ok?
-      from: [boss]
     instructions: ship
 """
-    with pytest.raises(WorkflowError, match="human"):
-        model.parse(bad)
+    delegate = model.parse(text).steps["ship"].ask.delegate
+    assert delegate.candidates == [] and delegate.otherwise == "human"
 
 
 def test_gate_and_ask_cannot_both_guard_a_step():
@@ -1237,7 +1361,6 @@ steps:
     gate: approve
     ask:
       prompt: ok?
-      from: [human]
     instructions: ship
 """
     with pytest.raises(WorkflowError, match="both entry approvals"):
@@ -1250,7 +1373,6 @@ steps:
   ship:
     ask:
       prompt: ok?
-      from: [human]
       on_decline: nowhere
     instructions: ship
 """
@@ -1265,7 +1387,6 @@ steps:
   work:
     ask:
       prompt: again?
-      from: [human]
       on_decline: end
     instructions: work
     next: work
@@ -1279,17 +1400,15 @@ def test_gate_is_deprecated_without_becoming_a_run_warning():
     assert wf.warnings == []
     assert len(wf.deprecations) == 1
     assert "'gate:' is deprecated" in wf.deprecations[0]
-    assert "from: [human]" in wf.deprecations[0]
+    assert "ask: {prompt: <the gate message>}" in wf.deprecations[0]
     assert model.parse(ASK_FLOW).deprecations == []
 
 
 def test_select_chooser_accepts_a_delegation():
     select = model.parse(DELEGATED_BRANCH).steps["verdict"].select
     assert select.chooser == "delegate"
-    assert [c.describe() for c in select.delegate.candidates] == [
-        "reviewer 1 up",
-        "human",
-    ]
+    assert select.delegate.describe() == "reviewer -> human"
+    assert model.parse(BRANCH_SELF).steps["verdict"].select.delegate.otherwise == "self"
 
 
 def test_unknown_chooser_names_the_delegation_form():
@@ -1311,7 +1430,7 @@ steps:
 # --------------------------------------------------------------------------- #
 def test_ask_withholds_the_step_until_a_responder_answers(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askflow", ASK_FLOW)
     engine.start("askflow")
 
@@ -1338,7 +1457,7 @@ def test_ask_withholds_the_step_until_a_responder_answers(flow_dir, monkeypatch)
 
 def test_a_run_cannot_answer_its_own_ask(flow_dir, monkeypatch):
     _driving_session(monkeypatch, "driver")
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askflow", ASK_FLOW)
     engine.start("askflow")
     ask_id = _advance("implemented")["ask"]["id"]
@@ -1350,7 +1469,7 @@ def test_a_run_cannot_answer_its_own_ask(flow_dir, monkeypatch):
 
 def test_a_session_that_was_not_asked_is_refused(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askflow", ASK_FLOW)
     engine.start("askflow")
     ask_id = _advance("implemented")["ask"]["id"]
@@ -1364,7 +1483,7 @@ def test_a_session_that_was_not_asked_is_refused(flow_dir, monkeypatch):
 
 def test_the_decision_set_is_closed(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askflow", ASK_FLOW)
     engine.start("askflow")
     ask_id = _advance("implemented")["ask"]["id"]
@@ -1377,7 +1496,7 @@ def test_the_decision_set_is_closed(flow_dir, monkeypatch):
 
 def test_an_answer_lands_once(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askflow", ASK_FLOW)
     engine.start("askflow")
     ask_id = _advance("implemented")["ask"]["id"]
@@ -1389,7 +1508,7 @@ def test_an_answer_lands_once(flow_dir, monkeypatch):
 
 def test_decline_routes_where_the_workflow_declared(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askflow", ASK_FLOW)
     engine.start("askflow")
     ask_id = _advance("implemented")["ask"]["id"]
@@ -1404,7 +1523,7 @@ def test_decline_routes_where_the_workflow_declared(flow_dir, monkeypatch):
 
 def test_decline_without_a_route_holds_for_a_human(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "hold", ASK_HOLD)
     engine.start("hold")
     ask_id = engine.status()["ask"]["id"]
@@ -1424,48 +1543,50 @@ def test_decline_without_a_route_holds_for_a_human(flow_dir, monkeypatch):
 
 def test_abstain_escalates_to_the_next_group(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1), ("leader", "bigboss", 2))
+    _mesh(monkeypatch, ("reviewer", "peer"), ("leader", "boss"))
     _write(flow_dir, "two", ASK_TWO_GROUPS)
     engine.start("two")
     payload = engine.status()
     ask_id = payload["ask"]["id"]
-    assert [e["handle"] for e in payload["ask"]["asked"]] == ["leader-boss"]
+    assert [e["handle"] for e in payload["ask"]["asked"]] == ["reviewer-peer"]
 
-    receipt = engine.answer(ask_id, "abstain", "not my call", by_session="boss")
+    receipt = engine.answer(ask_id, "abstain", "not my call", by_session="peer")
     assert receipt["prompt"] == "ship it?"  # the question comes back with it
     assert receipt["reason"] == "not my call"
     payload = engine.status()
     assert payload["status"] == "waiting_answer"
-    assert [e["handle"] for e in payload["ask"]["asked"]] == ["leader-bigboss"]
-    assert payload["ask"]["id"] == ask_id  # the same decision, further up
+    assert [e["handle"] for e in payload["ask"]["asked"]] == ["leader-boss"]
+    assert payload["ask"]["id"] == ask_id  # the same decision, further along
     assert "not my call" in payload["ask"]["skipped"][-1]["reason"]
 
     # the group that already passed cannot answer any more
     with pytest.raises(CflowError, match="no longer yours"):
-        engine.answer(ask_id, "approve", by_session="boss")
-    engine.answer(ask_id, "approve", by_session="bigboss")
+        engine.answer(ask_id, "approve", by_session="peer")
+    engine.answer(ask_id, "approve", by_session="boss")
     assert engine.next_step()["status"] == "step"
 
 
 def test_an_unreachable_group_falls_through_to_the_human(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch)  # nobody is up there
+    _mesh(monkeypatch)  # nobody to ask at all
     _write(flow_dir, "two", ASK_TWO_GROUPS)
     engine.start("two")
     payload = engine.status()
     assert payload["status"] == "waiting_approval"
     assert payload["reason"] == "ask"
-    assert payload["ask"]["asked"] == [{"kind": "human"}]
+    # nobody is IN the group: `otherwise: human` is the default, so the run
+    # holds rather than proceeding, and the CLI settles it as it always has
+    assert payload["ask"]["asked"] == []
     assert [s["candidate"] for s in payload["ask"]["skipped"]] == [
-        "leader 1 up",
-        "leader 2..3 up",
+        "reviewer",
+        "leader",
     ]
     engine.approve(by="user")
     assert engine.next_step()["status"] == "step"
 
 
 def test_nobody_at_all_still_reaches_a_human(flow_dir, monkeypatch):
-    """A list with no human token, and nothing resolvable, must not self-approve."""
+    """Nothing resolvable, and no configuration that turns that into approval."""
     _driving_session(monkeypatch)
     _mesh(monkeypatch)
     _write(flow_dir, "hold", ASK_HOLD)
@@ -1480,9 +1601,129 @@ def test_nobody_at_all_still_reaches_a_human(flow_dir, monkeypatch):
     assert engine.next_step()["status"] == "step"
 
 
+def test_a_sibling_reviewer_can_approve(flow_dir, monkeypatch):
+    """The common shape: two children of one parent, one reviewing the other."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss"), ("reviewer", "sib", "leader-boss"),
+          parent="leader-boss")
+    _write(flow_dir, "two", ASK_TWO_GROUPS)
+    engine.start("two")
+    payload = engine.status()
+    assert [e["handle"] for e in payload["ask"]["asked"]] == ["reviewer-sib"]
+
+    engine.answer(payload["ask"]["id"], "approve", "read the diff", by_session="sib")
+    assert engine.next_step()["status"] == "step"
+
+
+def test_a_run_cannot_approve_itself_through_a_session_it_spawned(
+    flow_dir, monkeypatch
+):
+    """The invariant, end to end: a child holding the role is not a candidate."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "mine", "dev1"))  # spawned by the driver
+    _write(flow_dir, "hold", ASK_HOLD)
+    engine.start("hold")
+    payload = engine.status()
+    assert payload["status"] == "waiting_approval"  # a human, not the child
+    assert payload["ask"]["asked"] == []
+    assert "spawned itself are never candidates" in payload["ask"]["skipped"][0]["reason"]
+    with pytest.raises(CflowError, match="was not asked this"):
+        engine.answer(payload["ask"]["id"], "approve", by_session="mine")
+
+
+def test_otherwise_self_proceeds_unapproved_and_says_so(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)  # no leader to ask
+    _write(flow_dir, "solo", ASK_SELF)
+    engine.start("solo")
+    payload = engine.status()
+    assert payload["status"] == "step"  # the run carries on
+    assert payload["instructions"].strip() == "ship it"
+
+    events = [e["event"] for e in state_mod.read_journal()]
+    assert "ask_unanswered_proceeded" in events
+    # ...and NOT as an approval: nothing in the record says anybody approved
+    assert "ask_answered" not in events
+    entry = next(
+        e for e in state_mod.read_journal() if e["event"] == "ask_unanswered_proceeded"
+    )
+    assert entry["kind"] == "approval"
+    assert "no member of mesh" in entry["skipped"][0]
+
+
+def test_otherwise_self_still_asks_when_there_is_somebody(flow_dir, monkeypatch):
+    """`self` is the fallback, not a shortcut past a responder who exists."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss"))
+    _write(flow_dir, "solo", ASK_SELF)
+    engine.start("solo")
+    assert engine.status()["status"] == "waiting_answer"
+
+
+def test_otherwise_self_hands_a_branch_back_to_the_driver(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)  # no reviewer
+    _write(flow_dir, "branch", BRANCH_SELF)
+    engine.start("branch")
+    payload = engine.status()
+    assert payload["status"] == "select"
+    assert payload["chooser"] == "agent"
+    assert "meant to be somebody else's decision" in payload["note"]
+
+    # and the driver may now take it, where a delegated select refuses it
+    engine.select("rework", "I judged it myself", by="agent")
+    assert engine.status()["step_id"] == "impl"
+
+
+def test_a_delegated_branch_falls_through_once_per_visit(flow_dir, monkeypatch):
+    """The fall-through is keyed to the visit, so a loop asks again."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)
+    _write(flow_dir, "branch", BRANCH_SELF)
+    engine.start("branch")
+    engine.select("rework", "nobody about", by="agent")
+
+    # a reviewer has appeared in the meantime; the next pass asks them
+    _mesh(monkeypatch, ("reviewer", "peer"))
+    payload = _advance("reworked")  # back to verdict, second visit
+    assert payload["status"] == "waiting_answer"
+    assert [e["handle"] for e in payload["ask"]["asked"]] == ["reviewer-peer"]
+
+
+def test_start_reports_what_the_delegations_resolve_to(flow_dir, monkeypatch):
+    """Never blocking: a leader that has not spawned yet is legitimate."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("reviewer", "peer"))
+    _write(flow_dir, "two", ASK_TWO_GROUPS)
+
+    check = engine.request_start("two", by="user")["delegation_check"]
+    assert check["steps"] == [
+        {
+            "step": "ship",
+            "decision": "approval",
+            "from": "reviewer -> leader",
+            "resolves": ["reviewer-peer"],
+            "otherwise": "human",
+        }
+    ]
+
+    _mesh(monkeypatch)  # everybody has gone home
+    check = engine.start("two")["delegation_check"]
+    assert check["steps"][0]["resolves"] == []
+    assert "no member of mesh 'team' holds that role" in check["steps"][0]["reason"]
+    assert "would reach a human" in check["note"]
+
+
+def test_a_workflow_that_delegates_nothing_gets_no_check(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)
+    _write(flow_dir, "linear", LINEAR)
+    assert "delegation_check" not in engine.start("linear")
+
+
 def test_an_ask_closes_again_on_every_visit(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askloop", ASK_LOOP)
     engine.start("askloop")
     first = engine.status()["ask"]["id"]
@@ -1500,7 +1741,7 @@ def test_an_ask_closes_again_on_every_visit(flow_dir, monkeypatch):
 
 def test_goto_discards_an_open_ask(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askflow", ASK_FLOW)
     engine.start("askflow")
     ask_id = _advance("implemented")["ask"]["id"]
@@ -1516,7 +1757,7 @@ def test_goto_discards_an_open_ask(flow_dir, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_a_responder_picks_the_branch(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("reviewer", "peer", 1))
+    _mesh(monkeypatch, ("reviewer", "peer"))
     _write(flow_dir, "branch", DELEGATED_BRANCH)
     engine.start("branch")
     payload = engine.status()
@@ -1536,7 +1777,7 @@ def test_a_responder_picks_the_branch(flow_dir, monkeypatch):
 
 def test_the_driver_cannot_take_a_delegated_branch(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("reviewer", "peer", 1))
+    _mesh(monkeypatch, ("reviewer", "peer"))
     _write(flow_dir, "branch", DELEGATED_BRANCH)
     engine.start("branch")
     with pytest.raises(CflowError, match="not yours to make"):
@@ -1546,7 +1787,7 @@ def test_the_driver_cannot_take_a_delegated_branch(flow_dir, monkeypatch):
 
 def test_a_deadline_moves_the_question_up(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1), ("leader", "bigboss", 2))
+    _mesh(monkeypatch, ("reviewer", "peer"), ("leader", "boss"))
     _write(flow_dir, "two", ASK_TWO_GROUPS.replace("from:", "timeout: 600\n      from:"))
     engine.start("two")
     payload = engine.status()
@@ -1555,24 +1796,24 @@ def test_a_deadline_moves_the_question_up(flow_dir, monkeypatch):
 
     # not due yet: the clock is not a nudge to hurry up
     assert engine.expire_ask() is None
-    assert [e["handle"] for e in engine.status()["ask"]["asked"]] == ["leader-boss"]
+    assert [e["handle"] for e in engine.status()["ask"]["asked"]] == ["reviewer-peer"]
 
     later = datetime.now(timezone.utc) + timedelta(seconds=601)
     moved = engine.expire_ask(now=later)
-    assert moved["expired"] == "leader-boss"
-    assert moved["now_with"] == ["leader-bigboss"]
+    assert moved["expired"] == "reviewer-peer"
+    assert moved["now_with"] == ["leader-boss"]
     payload = engine.status()
-    assert payload["ask"]["id"] == ask_id  # the same decision, further up
+    assert payload["ask"]["id"] == ask_id  # the same decision, further along
     assert "did not answer by" in payload["ask"]["skipped"][-1]["reason"]
 
     # the group that lapsed cannot answer late
     with pytest.raises(CflowError, match="no longer yours"):
-        engine.answer(ask_id, "approve", by_session="boss")
+        engine.answer(ask_id, "approve", by_session="peer")
 
 
 def test_expiry_walks_off_the_end_to_a_human(flow_dir, monkeypatch):
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "hold", ASK_HOLD.replace("from:", "timeout: 60\n      from:"))
     engine.start("hold")
     later = datetime.now(timezone.utc) + timedelta(seconds=61)
@@ -1588,7 +1829,7 @@ def test_expiry_walks_off_the_end_to_a_human(flow_dir, monkeypatch):
 def test_an_unclocked_ask_waits_forever(flow_dir, monkeypatch):
     """No timeout means no timeout — it must not lapse into proceeding."""
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askflow", ASK_FLOW)
     engine.start("askflow")
     _advance("implemented")
@@ -1600,7 +1841,7 @@ def test_an_unclocked_ask_waits_forever(flow_dir, monkeypatch):
 def test_a_responder_finds_and_answers_by_id_alone(flow_dir, monkeypatch):
     """The responder never learns the asking run's directory or scope."""
     _driving_session(monkeypatch)
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askflow", ASK_FLOW)
     engine.start("askflow")
     ask_id = _advance("implemented")["ask"]["id"]
@@ -1623,7 +1864,7 @@ def test_a_responder_finds_and_answers_by_id_alone(flow_dir, monkeypatch):
 def test_answering_does_not_fence_the_responders_own_run(flow_dir, monkeypatch):
     """`answer` names somebody else's run; adopting that id would wedge ours."""
     _driving_session(monkeypatch, "boss")
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "linear", LINEAR)
     _write(flow_dir, "askflow", ASK_FLOW)
 
@@ -1644,7 +1885,7 @@ def test_answering_does_not_fence_the_responders_own_run(flow_dir, monkeypatch):
 
 def test_asks_is_scoped_to_the_calling_session(flow_dir, monkeypatch):
     _driving_session(monkeypatch, "boss")
-    _mesh(monkeypatch, ("leader", "boss", 1))
+    _mesh(monkeypatch, ("leader", "boss"))
     _write(flow_dir, "askflow", ASK_FLOW)
     engine.start("askflow", scope="driver")
     engine.report("implemented", scope="driver")
