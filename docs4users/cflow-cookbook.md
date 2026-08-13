@@ -184,16 +184,20 @@ in YAML — quote them (`"yes":`) or pick other names (`accept`/`rework`).
 
 ---
 
-## Recipe 4 — gates before irreversible actions
+## Recipe 4 — approvals before irreversible actions
 
-Put a `gate` on the step that *performs* an irreversible action, not after
-it. The gate withholds the step's instructions until approved, so the agent
-cannot even see "publish" work early. Use several small gates rather than
-one big one — each approval then means exactly one thing.
+Put an `ask` on the step that *performs* an irreversible action, not after
+it. It withholds the step's instructions until approved, so the agent cannot
+even see "publish" work early. Use several small approvals rather than one
+big one — each then means exactly one thing.
+
+`from` is who may answer, in preference order. `human` is the reserved token
+for a person at the CLI or the dashboard; everything else names an agent by
+role and by how far **up the spawn lineage** to look.
 
 ```yaml
 name: release
-description: prep -> human checks -> tag -> publish, each irreversible step gated
+description: prep -> checks -> tag -> publish, each irreversible step approved
 steps:
   prep:
     title: Prepare
@@ -204,13 +208,17 @@ steps:
 
   tag:
     title: Tag
-    gate: version and changelog look right — allow tagging
+    ask:
+      prompt: version and changelog look right — allow tagging?
+      from: [human]
     instructions: Create the release tag and push it.
     next: publish
 
   publish:
     title: Publish
-    gate: tag pushed and CI green — allow publishing to the index
+    ask:
+      prompt: tag pushed and CI green — allow publishing to the index?
+      from: [human]
     instructions: Publish the built package.
     next: announce
 
@@ -218,6 +226,87 @@ steps:
     title: Announce
     instructions: Draft the release notes from the journal; do not send.
 ```
+
+> `gate: <message>` is the old spelling of `ask: {prompt: <message>, from:
+> [human]}`. It still works — `claunch cflow show` will tell you where you
+> are still using it — but only `ask` can name an agent as the approver.
+
+---
+
+## Recipe 5 — let another agent decide
+
+A run driven by one agent can put a decision to a *different* one: the
+reviewer that spawned it, or the leader above that. This is not the asking
+agent consulting a peer and acting on the reply — it cannot see or record
+the answer at all. The responder writes the decision into the run itself,
+which is what makes the approval worth having.
+
+```yaml
+name: delegated-dev
+steps:
+  impl:
+    instructions: Implement the design, or address the latest feedback.
+    next: verdict
+
+  verdict:
+    title: Review verdict
+    select:
+      prompt: |
+        The diff is on the branch and the suite is green. Ready to ship, or
+        another pass? Answer against the code, not the description of it.
+      chooser:
+        from:
+          - {role: reviewer, up: 1}                 # whoever spawned this run
+          - {role: reviewer, up: {min: 2, max: 4}}  # else further up
+          - human                                   # else a person
+        timeout: 1800
+      options:
+        ready:  {description: satisfied, next: ship}
+        rework: {description: another pass, next: impl}
+
+  ship:
+    title: Ship
+    ask:
+      prompt: Reviewer passed this. Approve the commit and push?
+      from:
+        - {role: leader, up: {min: 1, max: 4}}
+        - human
+      timeout: 900
+      on_decline: impl        # a refusal has somewhere to go
+    instructions: Commit and draft the PR description from the journal.
+```
+
+**How the list is read.** One group at a time, top down. A group that matches
+nobody is skipped — with its reason — and the next is tried. A group that
+matches several people is asked all at once; the first valid answer wins.
+When a group runs out of `timeout`, or everyone in it answers `abstain`, the
+question moves up the same way. Nothing at the end of the list means the
+question waits for a human, which is why `human` belongs at the bottom of
+most of them.
+
+**`up` is mandatory, and it is a safety property.** An agent can spawn
+children with any handle it likes, so a candidate with no direction —
+`{role: reviewer}` — could be satisfied by a session the run created for the
+purpose. Candidates are therefore always *ancestors*: `up: 1` is the direct
+parent, `up: {min: 2, max: 4}` reaches further, and neither can ever point
+downward.
+
+**What a responder does.** It sees the question through `asks`, investigates,
+and calls `answer {ask, decision, reason}`. The decision must be one of the
+options the workflow declared, or `abstain` — nothing is parsed out of prose,
+so no wording can widen the answer set. It never receives the asking step's
+instructions: it decides, says why, and stops.
+
+**What can go wrong, and what happens.** No daemon, no mesh membership, an
+ambiguous mesh, or a candidate that only exists on another machine — all of
+them skip the group with a stated reason and the question ends up in front of
+a human. There is no setting that turns "nobody answered" into "proceed"; an
+approval that fell back to the run approving itself would be worse than no
+approval at all.
+
+If the driving session belongs to more than one mesh, say which to look in
+when the run starts — the workflow stays portable, and which mesh a leader
+lives in is a fact about the deployment rather than about the process.
 
 ---
 
@@ -254,17 +343,25 @@ while true; do
       exit 2 ;;                       # ... or approve here if policy allows
     waiting_selection)
       claunch cflow status -t worker; exit 3 ;;
+    waiting_answer)                   # with another agent; not ours to clear
+      sleep 60 ;;
     *) claunch send-keys -t worker 'continue per /cflow protocol' Enter ;;
   esac
 done
 claunch cflow journal -t worker
 ```
 
-Exiting on `waiting_approval` (rather than auto-approving) keeps the gate
-meaningful: the script escalates to a person, who runs `claunch cflow
-approve` and restarts the loop. Auto-approving in the script would make the
-gate decorative — if a pause point never needs a human, it should not be a
-gate in the first place.
+Exiting on `waiting_approval` (rather than auto-approving) keeps the
+approval meaningful: the script escalates to a person, who runs `claunch
+cflow approve` and restarts the loop. Auto-approving in the script would
+make it decorative — if a pause point never needs a human, it should not be
+an approval in the first place.
+
+`waiting_answer` is the one pause the script should simply *wait out*: the
+question is with another agent, and its own `timeout` will move it along (to
+the next candidate group, and eventually to a human) without the script's
+help. `claunch cflow asks --session <who>` shows what is sitting with whom
+if a run has been quiet for a while.
 
 ---
 
@@ -288,6 +385,17 @@ type checks, linters, builds — belongs in `verify`, not in instructions like
 run; that is the normal way to finish. `next: end` exists for when you want
 the termination visible — and once your graph has a cycle, at least one
 termination must be *reachable from start* or the file is rejected outright.
+
+**Delegate the decision, never the judgement.** An `ask` is worth having only
+because the answer comes from somewhere the run cannot reach. So point it at
+a role that will actually look — and write the `prompt` as a question about
+the artifact ("does the test cover the classification path?"), not about the
+run's own account of it ("the agent says it is done — ok?"). A responder that
+can only read your prompt has nothing to check against.
+
+**Give a refusal somewhere to go.** Without `on_decline`, a decline parks the
+run for a human, which is safe but is a dead end at 3am. `on_decline: impl`
+turns a refusal into another pass, which is usually what it means.
 
 **Read the warnings.** `cflow show <name>` prints three kinds:
 `cycle detected` (fine if the exit is real — recipe 3), `once entered, these

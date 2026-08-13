@@ -1393,3 +1393,51 @@ protocol to carry run state, which is a bigger change than this view earns.
     does the roster/run join server-side. Tests in
     `tests/test_mesh_flows_api.py`, `tests/web/flowtrack_check.js` and
     `tests/web/flowrender_check.js`. See "The flow view" above.
+12. **Delegated decisions** (done): a cflow run puts an approval, or the
+    choice of branch, to a *different* session — declared as an ordered list
+    of `{role, up}` candidates ending in `human`, resolved against the
+    lineage this phase's predecessors built. The mesh contributes three
+    things and no new machinery: the roster read (`GET /api/mesh`), the
+    `parent` chain phase 9 publishes, and an `ask`-typed message so an
+    unanswered question also lands in the owed ledger. Everything else lives
+    in cflow. See "Delegated decisions ride the lineage" below.
+
+## Delegated decisions ride the lineage
+
+The spawn tree was built so a fleet could be *drawn* and so a child knew who
+was waiting on it. cflow now reads it for a second purpose: deciding who is
+allowed to approve a step of somebody else's workflow (see the README's cflow
+section for the workflow-side rules).
+
+The whole coupling is three things, and it is worth naming what is NOT among
+them.
+
+**What the mesh supplies.** The roster read that says which mesh a session
+belongs to and who its members are; the `parent` handle per member that
+phase 9 added, walked upward to turn `{role: leader, up: 2}` into a session
+name; and the `ask` message intent, so a question that goes unanswered shows
+up in the same owed ledger the nudger and the dashboard already chase.
+
+**What it does not supply: the answer.** The question is delivered as a
+message, but the *answer* is a cflow tool call against a closed option set,
+not a reply to parse. That is deliberate. A reply is prose typed into a
+terminal by a language model; a workflow branching on it would be branching
+on wording. So the message is a doorbell with the question attached, and it
+is explicitly not load-bearing — a send that fails is journaled and the
+question stays answerable through `asks`.
+
+**Why the direction matters.** Candidates are always *ancestors*, because a
+session can `spawn` children with any handle it likes and a role is inferred
+from a handle's leading word. A candidate that could match downward would let
+a run conjure its own approver — `spawn` a session called `reviewer1`, have
+it approve, and the journal reads "a reviewer approved it". The lineage is
+therefore not a convenience here; it is the thing that makes the approval
+mean something, which is why cflow's schema refuses a candidate that does not
+say how far up to look.
+
+**Locality is a real boundary.** Answering means writing the asking run's
+state, and a run's files live on the machine that hosts its session. A member
+on another daemon cannot do that, so a remote match is skipped *as remote* —
+a different problem, with a different fix, from "nobody holds that role". The
+federation carries messages, not run state, and this phase did not change
+that.

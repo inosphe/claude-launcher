@@ -116,7 +116,7 @@ daemon-owned PTYs instead of the current terminal, the
 **[mesh commands](#mesh-session-to-session-messaging)** (`claunch mesh ...`)
 for session-to-session (and cross-machine) agent messaging, and the
 **[cflow commands](#cflow-declarative-agent-workflows)** (`claunch cflow ...`)
-for declarative agent workflows with human gates.
+for declarative agent workflows with human — and delegated — approvals.
 
 ### Passing arguments to claude
 
@@ -1778,7 +1778,9 @@ loudest thing on the page, and those cards are repeated in a **Waiting on
 you** strip above the canvas with the Approve and option buttons that clear
 them, so the answer is in the same place as the question. An agent-chooser
 select is deliberately not in that strip — that branch is the agent's own
-call. Clicking a card opens the full state machine underneath it, unchanged
+call — and neither is a **delegated** decision, which is stopped but on a
+peer rather than on you: it gets its own colour and its own word, so the
+strip stays a list of things you actually have to do. Clicking a card opens the full state machine underneath it, unchanged
 from the run page, alongside who spawned it, who it may message and a link to
 the run. Members with no run say so rather than showing an empty track, and
 members on another daemon say that their state lives over there.
@@ -1843,7 +1845,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/cflow/request`           | `{cwd, scope, workflow, context?}` — **ask** the scope's agent to start a workflow (records the request + nudges; the agent runs the start) |
 | POST   | `/api/cflow/request/cancel`    | `{cwd, scope}` — withdraw a pending start request |
 | POST   | `/api/cflow/start`             | `{cwd, scope, workflow, context?}` — start a run **directly** (the fallback: no live session to ask) |
-| POST   | `/api/cflow/approve`           | `{cwd, scope}` — approve the gate / extend the loop limit |
+| POST   | `/api/cflow/approve`           | `{cwd, scope}` — approve the entry approval / extend the loop limit / override a decline |
 | POST   | `/api/cflow/select`            | `{cwd, scope, option, reason?}` — confirm a user-chooser branch |
 | POST   | `/api/cflow/nudge`             | `{cwd, scope}` — re-type the resume line into the run's own session |
 | POST   | `/api/cflow/goto`              | `{cwd, scope, step, reason?}` — force the current step (`end` finishes) + nudge |
@@ -1939,20 +1941,28 @@ steps:
     next: review
 
   review:
-    gate: present the diff and wait for human review   # re-required per visit
+    ask:                          # approval to ENTER; re-required per visit
+      prompt: the diff is up — allow the review pass?
+      from: [human]               # who may answer, in preference order
     instructions: Relay the review feedback into follow-ups.
     next: verdict
 
   verdict:
     select:
       prompt: Ready, or another pass?
-      chooser: user
+      chooser: user               # agent | user | a delegation (see below)
       options:
         ready:  {description: ship it,           next: ship}
         rework: {description: loop back,         next: impl}   # a cycle
 
   ship:
-    gate: approve committing and opening a PR
+    ask:
+      prompt: approve committing and opening a PR?
+      from:
+        - {role: leader, up: 1}   # the session that spawned this one, if it leads
+        - human                   # else a person
+      timeout: 900                # per group; then it moves up the list
+      on_decline: impl            # where a refusal goes
     instructions: Commit and draft the PR from the run journal.
     next: end                     # explicit termination ('end' is reserved)
 ```
@@ -1965,11 +1975,12 @@ are legal but **warned** (shown by `cflow show` and in the `start` payload),
 as are steps trapped in never-ending regions and unreachable steps.
 
 **Loops at runtime.** Every step's visit count is tracked (`cflow status`
-shows `loops: impl x3`). Gates and user-selections apply **per visit** — a
-review gate inside a loop closes again on every pass. Arriving at a step
-beyond `max_visits` (default 25) pauses the run like a gate until a human
-extends it with `claunch cflow approve`, so an agent-driven loop cannot spin
-forever.
+shows `loops: impl x3`). Approvals and non-agent selections apply **per
+visit** — a review approval inside a loop closes again on every pass, and a
+delegated one is asked again (the second answer may differ from the first).
+Arriving at a step beyond `max_visits` (default 25) pauses the run the same
+way until a human extends it with `claunch cflow approve`, so an agent-driven
+loop cannot spin forever.
 
 Files live in `.claunch/workflows/*.yaml` (project) or
 `~/.claude-launcher/workflows/` (global). Runs are keyed by **(directory,
@@ -1989,9 +2000,38 @@ running position.
 | --------- | --- | ------------ |
 | `select` (`chooser: agent`) | the agent | picks an option with a journaled reason |
 | `select` (`chooser: user`) | a human | the agent's pick is only a *proposal*; the run blocks until `claunch cflow select <option>` (or a dashboard option button) confirms — any option |
-| `gate:` | a human | the step's instructions are withheld until `claunch cflow approve` (or the dashboard's Approve button) |
+| `select` (`chooser: {from: …}`) | another agent, else a human | the run blocks until a responder calls `answer {ask, decision, reason}` with one of the declared options; the driving agent may not `select` at all |
+| `ask:` | another agent, else a human | the step's instructions are withheld until an approval is recorded — by a responder's `answer`, or by `claunch cflow approve` |
+| `gate:` | a human | **deprecated** spelling of `ask: {prompt: …, from: [human]}`; still works, and `cflow show` says where you still use it |
 | `verify:` | a machine | the server runs the command on `next`; non-zero exit refuses to advance and returns the output |
 | `report` | the agent | required before `next`; journaled, shown live on the web dashboard, discarded by a failed `verify` |
+
+**Delegated decisions.** `from` is an ordered list of candidate groups, read
+one at a time: `human` is the reserved token for a person at the CLI or the
+dashboard, and `{role: leader, up: 1}` names an agent by role and by how far
+**up the spawn lineage** to look (`up: {min: 2, max: 4}` for a range). A
+group that matches nobody is skipped with its reason; a group that matches
+several is asked at once and the first valid answer wins; a group that runs
+out of `timeout`, or whose members all answer `abstain`, hands on to the
+next. The responder answers with `answer {ask, decision, reason}` from its
+own session — never receiving the asking step's instructions — and which
+session that is comes from the environment the daemon set, not from the
+call's arguments.
+
+Three things make this an approval rather than a formality:
+
+- **`up` is mandatory.** An agent can spawn children with any handle, so a
+  candidate with no direction could be a session the run created to approve
+  itself. Candidates are always ancestors.
+- **The answer set is closed** — the declared options plus `abstain` — so
+  nothing is parsed out of an LLM's prose.
+- **Nothing fails open.** No daemon, no mesh membership, an ambiguous mesh, a
+  candidate on another machine, a decline with no declared route: each ends
+  with the question in front of a human, never with the run proceeding.
+
+Which mesh to resolve responders in is a property of the *run*, not the
+workflow (`start {workflow, context, mesh}`), and is only needed when the
+driving session belongs to more than one.
 
 ### Who starts a run — two paths, one writer
 
@@ -2027,11 +2067,16 @@ and the daemon — from corrupting each other:
 | a `verify` command (minutes to an hour) committing into a run a human moved meanwhile | verify runs **outside** the lock and commits only if run id / step / visit are unchanged — otherwise the result is discarded and journaled as `verify_discarded` |
 | an agent writing into a run that was archived and replaced under it | the MCP server fences on the run id it last handed out: the call is refused, nothing is applied, and the agent is told to re-read `status` |
 
-**Approvals are not agent-callable, by design.** The MCP surface is only
-`start` / `report` / `next` / `select` / `status` — there is no approve tool,
-so a gate cannot be talked past. Humans approve through the CLI or the
-token-authenticated web dashboard; both are outside the agent's reach. While blocked, the agent stops its turn and tells you
-how to unblock; inside a chat session you can approve without leaving:
+**A run never approves itself, by design.** For the run it drives, the MCP
+surface is only `start` / `report` / `next` / `select` / `status` — there is
+no approve tool, so an approval cannot be talked past. `asks` and `answer`
+exist alongside them, but they act on *other* sessions' runs and refuse both
+a request that was not put to this session and one from its own run: there is
+no arrangement of tool calls that unblocks a step gated on the agent making
+them. Humans approve through the CLI or the token-authenticated web
+dashboard; both are outside the agent's reach. While blocked, the agent stops
+its turn and tells you how to unblock; inside a chat session you can approve
+without leaving:
 
 ```text
 ! claunch cflow approve
@@ -2056,8 +2101,9 @@ outside — a supervising script or another agent can watch
 | `cflow ls` / `show <wf>` | List workflows / print a workflow's step tree. |
 | `cflow status [--json]`  | Active run: current step, state, how to unblock (plus any pending start request). |
 | `cflow request <wf> [-c CTX]` / `--cancel` | Ask this session's agent to start a workflow / withdraw the request. The agent runs the `start` itself. On the dashboard: the session page's start picker. |
-| `cflow approve`          | Approve the current human gate (human-only: CLI or web dashboard). |
-| `cflow select <opt> [--reason]` | Confirm (or override) a user-chooser branch. |
+| `cflow approve`          | Approve the current entry approval or loop guard — including overriding a responder's decline, or taking a delegated question away from an agent that is stuck (human-only: CLI or web dashboard). |
+| `cflow select <opt> [--reason]` | Confirm (or override) a user-chooser branch, or settle a delegated one. |
+| `cflow asks [--session S]` | What decisions other runs are waiting on a session for (read-only; humans answer via `approve`/`select`, so an override is recorded as one). |
 | `cflow goto <step> [--reason]` | Force the current step (`end` finishes; journaled, re-gates, auto-nudges). On the dashboard: click a diagram node. |
 | `cflow journal [-n N]`   | Print the run journal (JSONL). |
 | `cflow archive`          | Retire the run (finished or not) into `.cflow/.../archive/`, freeing the slot for a new start. Active runs are aborted first; a new `start` auto-archives finished runs. On the dashboard: the Archive button + start picker. |
