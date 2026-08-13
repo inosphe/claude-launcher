@@ -18,9 +18,10 @@ handle it lands on and what it does with a refusal — ``sessrun_check`` on the
 run it can fold open in place of a trip to the run page, ``seq_check`` on the
 message trace's event list — the order a mesh's traffic is read in, and what
 the picture is allowed to claim about where each message got to —
-``seqrender_check`` on the sequence that list is drawn into, and the two
-``flow*_check`` harnesses on the flow view — one on
-the track a workflow becomes, one on the page those tracks are drawn into.
+``seqrender_check`` on the sequence that list is drawn into, ``zoom_check`` on
+the header's text-size knob — which sizes the session's grid and not merely
+this tab's view — and the two ``flow*_check`` harnesses on the flow view — one
+on the track a workflow becomes, one on the page those tracks are drawn into.
 This wrapper is what makes them run with everything else.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
@@ -50,6 +51,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "sessrun_check.js",
         "seq_check.js",
         "seqrender_check.js",
+        "zoom_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
     ],

@@ -247,6 +247,30 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-kill { color: #d98b8b; border-color: #56292b; }
 #term-kill:hover { background: #341c1e; color: #ff9c9c; border-color: #8b2e2e; }
 
+/* ---- text size ----
+   One knob, so one pill: the three share borders instead of taking the gap
+   the action buttons use, and only the outer corners are round. Grey, and
+   quieter than its neighbours at rest — it is the control you reach for once
+   and then forget, not one the eye should keep landing on. */
+.term-zoom { display: flex; align-items: center; }
+.term-zoom .term-btn { position: relative; border-radius: 0; }
+.term-zoom .term-btn + .term-btn { margin-left: -1px; }
+.term-zoom .term-btn:first-child { border-radius: 5px 0 0 5px; }
+.term-zoom .term-btn:last-child { border-radius: 0 5px 5px 0; }
+/* lift the lit border out from under the neighbour it shares an edge with */
+.term-zoom .term-btn:hover:not(:disabled) {
+  z-index: 1; color: #c6cdd5; border-color: #3c444d;
+}
+/* at a limit there is nothing left to press, and saying so is kinder than a
+   button that swallows the click */
+.term-zoom .term-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+/* a readout first and a reset second: tabular figures so stepping through the
+   sizes doesn't jog the two buttons it sits between */
+#term-zoom-level {
+  min-width: 44px; padding-inline: 4px; text-align: center;
+  font-variant-numeric: tabular-nums; color: #6e7681;
+}
+
 #main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
 #term-header {
   padding: 8px 14px; display: flex; align-items: center; gap: 10px;
@@ -1092,6 +1116,17 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
     color: #fff; border: none; border-radius: 6px; background: #8b2e2e;
   }
   #mobile-top #m-resume { background: #1f6feb; }
+  /* The size knob down here is a pair of taps, not a decision about the
+     session: it wears the ☰ button's neutral grey so the only filled colours
+     on the bar stay the two that change something. Square and thumb-sized,
+     because a glyph this small is otherwise a miss waiting to happen. */
+  #m-zoom { display: flex; flex: none; gap: 6px; }
+  #mobile-top #m-zoom .m-act {
+    min-width: 34px; padding: 6px 0; font-size: 15px; line-height: 1;
+    background: #2b313b; color: #d8dbe0; border: 1px solid #3a414d;
+  }
+  #mobile-top #m-zoom .m-act:active { background: #363d49; }
+  #mobile-top #m-zoom .m-act:disabled { opacity: 0.4; }
   /* Stacked, #main's automatic minimum size is its content's height, and a
      terminal full of rows is content: without this it refuses to shrink when
      the keyboard takes half the screen, and the prompt ends up behind the

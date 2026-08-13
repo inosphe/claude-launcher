@@ -28,6 +28,16 @@
     <span id="m-dot" class="dot"></span>
     <span id="m-title">no session</span>
     <span id="m-status" class="badge"></span>
+    <!-- The header's text-size knob goes down with the header on a phone, and
+         it is the control a small screen needs most. Two of its three parts
+         come along: the readout that doubles as a reset is what a bar this
+         narrow can afford to lose. -->
+    <span id="m-zoom" class="hidden">
+      <button id="m-zoom-out" class="m-act" type="button"
+              aria-label="smaller text">&minus;</button>
+      <button id="m-zoom-in" class="m-act" type="button"
+              aria-label="larger text">+</button>
+    </span>
     <button id="m-resume" class="m-act hidden" type="button">resume</button>
     <button id="m-kill" class="m-act hidden" type="button">kill</button>
   </div>
@@ -75,6 +85,18 @@
       <span class="term-actions">
         <button id="term-resume" class="term-btn hidden">resume</button>
         <button id="term-kill" class="term-btn">kill</button>
+      </span>
+      <!-- Text size, and with it the session's grid: bigger glyphs mean fewer
+           columns and rows, and that new size is sent to the program. Three
+           parts of one knob, so they are welded into a single pill rather
+           than spaced like the decisions to their left. -->
+      <span class="term-zoom" role="group" aria-label="terminal text size">
+        <button id="term-zoom-out" class="term-btn" type="button"
+                title="smaller text — more columns and rows in this session">&minus;</button>
+        <button id="term-zoom-level" class="term-btn" type="button"
+                title="back to the default text size"></button>
+        <button id="term-zoom-in" class="term-btn" type="button"
+                title="larger text — fewer columns and rows in this session">+</button>
       </span>
       <button id="term-details" class="term-btn" type="button" aria-pressed="false"
               title="this session's metadata and workflow">ⓘ details</button>

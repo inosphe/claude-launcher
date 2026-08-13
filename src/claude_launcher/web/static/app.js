@@ -762,6 +762,66 @@ function detach() {
   attachedPid = null; // re-learned from the next socket's init frame
 }
 
+/* ---- text size ----
+   Scaling the glyphs scales the session: the grid is however many cells fit
+   the box, so a step here ends in a fit(), which tells the daemon the program
+   now has fewer (or more) columns and rows to draw into. It is therefore not
+   a private zoom — the size travels to the child and to every other viewer
+   that is currently in the background.
+
+   Remembered per browser rather than per session, because it answers a
+   question about the reader and not about the session, and scoped by BASE for
+   the same reason the token is: several daemons can reach one origin through
+   the relay and share its localStorage. */
+const FONT_KEY = `claunch_fontsize:${BASE}`;
+const FONT_DEFAULT = 13;
+const FONT_MIN = 8;    // below this xterm's cell metrics stop being legible
+const FONT_MAX = 28;   // above it a laptop is down to a shell 40 columns wide
+const FONT_STEP = 1;
+
+function clampFont(px) {
+  if (!Number.isFinite(px)) return FONT_DEFAULT;
+  return Math.min(FONT_MAX, Math.max(FONT_MIN, Math.round(px)));
+}
+
+let fontSize = clampFont(Number(localStorage.getItem(FONT_KEY)) || FONT_DEFAULT);
+
+function setFontSize(px) {
+  fontSize = clampFont(px);
+  localStorage.setItem(FONT_KEY, String(fontSize));
+  if (term) {
+    term.options.fontSize = fontSize;
+    // The cell got bigger or smaller, so the grid the box holds did too —
+    // refit rather than leave the session sized for the old glyph. Straight
+    // away, not debounced: this one came from a deliberate press.
+    if (canFit()) fitAddon.fit();
+  }
+  syncZoomControls();
+}
+
+function syncZoomControls() {
+  $("term-zoom-level").textContent = `${fontSize}px`;
+  const atMin = fontSize <= FONT_MIN;
+  const atMax = fontSize >= FONT_MAX;
+  $("term-zoom-out").disabled = atMin;
+  $("term-zoom-in").disabled = atMax;
+  // The phone's bar carries the same two buttons — see the mirrors below.
+  $("m-zoom-out").disabled = atMin;
+  $("m-zoom-in").disabled = atMax;
+}
+
+$("term-zoom-out").addEventListener("click", () => setFontSize(fontSize - FONT_STEP));
+$("term-zoom-in").addEventListener("click", () => setFontSize(fontSize + FONT_STEP));
+// The readout is the way back: a size you stepped into and can't remember
+// leaving shouldn't need a click-count to undo.
+$("term-zoom-level").addEventListener("click", () => setFontSize(FONT_DEFAULT));
+// Mirrors on the phone's bar, which stands in for the header it hides. They
+// reach the header's buttons rather than call setFontSize themselves, so a
+// step means one thing wherever it is pressed.
+$("m-zoom-out").addEventListener("click", () => $("term-zoom-out").click());
+$("m-zoom-in").addEventListener("click", () => $("term-zoom-in").click());
+syncZoomControls();
+
 /* Bind the terminal to a session. Called only by the #/s/<name> route, so
    the attached session is in the URL: a reload, a bookmark or a shared link
    lands back on the same terminal instead of on an empty slot. */
@@ -788,7 +848,7 @@ function attach(name) {
 
   term = new Terminal({
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
-    fontSize: 13,
+    fontSize: fontSize,
     theme: { background: "#14161a" },
     scrollback: 5000,
   });
@@ -1028,6 +1088,8 @@ function syncMobileBars() {
   badge.classList.toggle("hidden", !has);
   // Mirrors of the hidden header's buttons — see the click handlers below.
   $("m-resume").classList.toggle("hidden", status !== "exited");
+  // Nothing to size without a terminal under the bar.
+  $("m-zoom").classList.toggle("hidden", !has);
   const kill = $("m-kill");
   kill.classList.toggle("hidden", !has);
   kill.textContent = status === "exited" ? "remove" : "kill";
