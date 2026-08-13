@@ -379,6 +379,49 @@ def test_the_policy_refuses_with_403_not_400(home, tmp_path):
     asyncio.run(run())
 
 
+def test_ending_a_child_at_the_cap_makes_room_for_the_next(home, tmp_path):
+    """What the refusal above tells the agent to do, actually working.
+
+    The message says to end one first, so ending one has to be enough — with
+    the exited record counted the agent would follow that advice, be refused
+    again, and have no way left to tell a full daemon from a stuck one.
+    """
+    _register_py_harness()
+    store.update(lambda doc: doc.update({"spawn": {"max_children": 1}}))
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            resp = await client.post(
+                "/api/sessions/lead/children", json={"name": "w1"}, headers=BEARER
+            )
+            assert resp.status == 201
+
+            resp = await client.delete(
+                "/api/sessions/lead/children/w1", headers=BEARER
+            )
+            assert resp.status == 200
+            await _wait_for(lambda: mgr.get("w1").exited, "w1 to exit")
+
+            # the replacement the refusal invited — one call, not two
+            resp = await client.post(
+                "/api/sessions/lead/children", json={"name": "w2"}, headers=BEARER
+            )
+            assert resp.status == 201
+            # and w1's record is still there to respawn from
+            assert mgr.children("lead") == ["w1", "w2"]
+            assert mgr.live_children("lead") == ["w2"]
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_children_reports_the_subtree_and_the_remaining_budget(home, tmp_path):
     _register_py_harness()
     store.update(lambda doc: doc.update({"spawn": {"max_children": 3}}))
@@ -933,11 +976,19 @@ def test_an_agent_ends_the_child_it_spawned(home, tmp_path):
         client = await _serve(mgr, mm)
         try:
             mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            caps = await (await client.get(
+                "/api/sessions/lead/children", headers=BEARER)).json()
+            before = (caps["children_used"], caps["children_remaining"])
+            assert before[0] == 0
+
             resp = await client.post(
                 "/api/sessions/lead/children", json={"name": "w1"}, headers=BEARER
             )
             assert resp.status == 201
             assert mgr.children("lead") == ["w1"]
+            caps = await (await client.get(
+                "/api/sessions/lead/children", headers=BEARER)).json()
+            assert caps["children_used"] == 1
 
             resp = await client.delete(
                 "/api/sessions/lead/children/w1", headers=BEARER
@@ -952,6 +1003,17 @@ def test_an_agent_ends_the_child_it_spawned(home, tmp_path):
             mesh = mm.get(mm.list()[0].name)
             assert "w1" in mesh.members
             assert mm.mesh_info(mesh)["members"][-1]["reachability"] == "exited"
+
+            # and the slot came back on THAT call, not on a second one. The
+            # first cut of this counted exited children against the cap, so
+            # `kill` freed the terminal and kept the budget — which reads as
+            # working right up until someone tries to spawn a replacement.
+            caps = await (await client.get(
+                "/api/sessions/lead/children", headers=BEARER)).json()
+            assert (caps["children_used"], caps["children_remaining"]) == before
+            assert caps["can_spawn"] is True
+            # the child list still shows it: the record is what respawn needs
+            assert [c["name"] for c in caps["children"]] == ["w1"]
 
             # calling again on the exited child drops the record instead
             resp = await client.delete(
