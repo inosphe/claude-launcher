@@ -44,6 +44,13 @@ E. Policy (primary-only engine)
       by the guest daemon
    E4 stall warnings reach remote leaders as ordinary fyi messages
    E5 tick() on a mirror is a guarded no-op
+
+F. Self-identification ("which member am I?")
+   F1 the roster states each row's locality instead of implying it
+   F2 a mirror's own member resolves — the blank test never could
+   F3 an authority member still resolves after a stamping pass
+   F4 a session name colliding with the authority's does not steal its row
+   F5 'nobody asked' stays distinct from 'you are nobody'
 """
 
 from __future__ import annotations
@@ -975,6 +982,143 @@ def test_unfederated_mesh_keeps_its_members_blank_and_local(home, tmp_path):
         assert mesh.peers == [] and mesh.members["alice"].machine == ""
         assert mm.is_local_member(mesh, mesh.members["alice"]) is True
         assert mm.mesh_info(mesh)["peers"] == []
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# F. self-identification ("which member am I?")
+# --------------------------------------------------------------------------- #
+def test_mesh_info_states_locality_per_member(home, tmp_path):
+    """F1 the roster says whether a row is ours instead of implying it.
+
+    ``mesh_info`` computed locality already — to pick pending/owed/parent —
+    and dropped it on the way out, so every reader re-derived it from
+    ``machine``. That is the one derivation ``is_local_member`` exists to
+    stop anyone writing, and both callers who wrote it anyway got the mirror
+    case backwards. ``owed_report`` has always said it outright.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path)
+
+        # each side owns exactly one row, and says so in the payload
+        for mm, mine, theirs in ((mm_a, "alice", "bob"), (mm_b, "bob", "alice")):
+            mesh = mm.get("m")
+            rows = {r["handle"]: r for r in mm.mesh_info(mesh)["members"]}
+            assert rows[mine]["local"] is True
+            assert rows[theirs]["local"] is False
+            # the same answer owed_report gives, from the same rule
+            owed = {r["handle"]: r for r in mm.owed_report(mesh)["members"]}
+            assert owed[mine]["local"] == rows[mine]["local"]
+            assert owed[theirs]["local"] == rows[theirs]["local"]
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_mirrors_own_member_identifies_itself(home, tmp_path):
+    """F2 a guest-daemon session resolves to its handle.
+
+    The blank-machine test could never find it: on a mirror our own members
+    are stamped with our machine, so nothing is blank and the caller was told
+    it was not a member of a mesh it was demonstrably in.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path)
+        mesh_b = mm_b.get("m")
+
+        # the shape that defeated the old predicate
+        assert mesh_b.members["bob"].machine == "pcB"
+        assert mm_b.member_for_session(mesh_b, "sb").handle == "bob"
+        assert mm_b.mesh_info(mesh_b, session="sb")["you"] == "bob"
+
+        # the authority's member is not ours to answer as
+        assert mm_b.member_for_session(mesh_b, "sa") is None
+        assert mm_b.mesh_info(mesh_b, session="sa")["you"] is None
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_stamped_authority_member_still_identifies_itself(home, tmp_path):
+    """F3 stamping the authority's own rows does not unseat them.
+
+    On the authority the blank test worked by accident, and only until a
+    stamping pass ran — federation, a handover or a migration — after which
+    the same session stopped recognising itself. Which sessions could run
+    ``stance`` depended on who had joined before which event.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, _ = await _linked_pair(mgr, tmp_path)
+        mesh_a = mm_a.get("m")
+
+        mesh_a.members["alice"].machine = ""  # the pre-stamp shape
+        assert mm_a.mesh_info(mesh_a, session="sa")["you"] == "alice"
+        mm_a._stamp_own_members(mesh_a)  # federation / handover / migration
+        assert mesh_a.members["alice"].machine == "pcA"
+        assert mm_a.mesh_info(mesh_a, session="sa")["you"] == "alice"
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_blank_row_is_never_answered_as_ours_on_a_mirror(home, tmp_path):
+    """F4 a session name colliding with the authority's does not steal it.
+
+    Session names are per-daemon and sequential, so two daemons of the same
+    user collide by default rather than by accident. Resolving blank as
+    "ours" handed such a caller the authority's handle — which ``leave``
+    would then have aimed a DELETE at.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path)
+        mesh_b = mm_b.get("m")
+        mesh_b.members["alice"].machine = ""  # legacy blank: the authority's
+        # our own session bears the same name as the authority's member's
+        mesh_b.members["bob"].session = "sa"
+
+        assert mm_b.member_for_session(mesh_b, "sa").handle == "bob"
+        assert mm_b.mesh_info(mesh_b, session="sa")["you"] == "bob"
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_you_is_absent_until_a_session_asks(home, tmp_path):
+    """F5 'nobody asked' and 'you are nobody' stay distinguishable.
+
+    The dashboard polls this document as no session at all; answering that
+    with some member would be worse than answering with nothing.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm_a, mm_b = await _linked_pair(mgr, tmp_path)
+        mesh_b = mm_b.get("m")
+
+        assert mm_b.mesh_info(mesh_b)["you"] is None
+        assert mm_b.mesh_info(mesh_b, session="")["you"] is None
+        assert mm_b.mesh_info(mesh_b, session="nosuch")["you"] is None
+        assert mm_b.mesh_info(mesh_b, session="sb")["you"] == "bob"
 
         await mgr.shutdown_all()
 

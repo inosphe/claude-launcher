@@ -797,8 +797,12 @@ async def h_mesh_create(request: web.Request) -> web.Response:
 async def h_mesh_get(request: web.Request) -> web.Response:
     mm = _mesh_mgr(request)
     mesh = mm.get(request.match_info["mesh"])
+    # `?session=` asks "which member am I?" — answered as `you`. Optional, so
+    # the dashboard poll (which is nobody's session) is unchanged.
+    session = str(request.query.get("session") or "")
     return web.json_response(
-        {**mm.mesh_info(mesh), "relay": request.app["relay_state"]()}
+        {**mm.mesh_info(mesh, session=session),
+         "relay": request.app["relay_state"]()}
     )
 
 

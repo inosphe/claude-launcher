@@ -1499,6 +1499,28 @@ class MeshManager:
                 return m
         return None
 
+    def member_for_session(self, mesh: Mesh, session: str) -> Optional[Member]:
+        """The member THIS daemon's ``session`` wears in ``mesh``.
+
+        "Which member am I?" is the daemon's question to answer, because the
+        rule is :meth:`_is_local` and a blank ``machine`` means opposite
+        things either side of ``primary``. A caller matching on blankness
+        finds nobody on a mirror — our own members are always stamped there —
+        and on the authority finds only the rows no stamping pass has reached
+        yet, so the same command works or fails by who joined when.
+
+        Deliberately not :meth:`resolve_sender`, which tries ``sender`` as a
+        handle first: that is right for a peer the caller named and wrong
+        here, where a session whose name matches somebody else's handle would
+        be told it is that member.
+        """
+        if not session:
+            return None
+        for m in mesh.members.values():
+            if self._is_local(mesh, m) and m.session == session:
+                return m
+        return None
+
     # ------------------------------------------------------------------ #
     # messaging
     # ------------------------------------------------------------------ #
@@ -4322,7 +4344,7 @@ class MeshManager:
             if h in mesh.members and p in mesh.members
         }
 
-    def mesh_info(self, mesh: Mesh) -> dict:
+    def mesh_info(self, mesh: Mesh, *, session: str = "") -> dict:
         members = []
         lineage = self._local_lineage(mesh)
         for handle in sorted(mesh.members):
@@ -4349,6 +4371,11 @@ class MeshManager:
             members.append(
                 {
                     **m.to_dict(),
+                    # Stated, not left to be re-derived from `machine`: the
+                    # blank-machine test a reader would reach for is the one
+                    # `is_local_member` exists to stop them writing. Same key
+                    # `owed_report` already ships, for the same reason.
+                    "local": local,
                     "pending": len(mesh.pending(handle)) if local else None,
                     "owed": owed,
                     "reachability": self._reachability(mesh, m),
@@ -4410,6 +4437,11 @@ class MeshManager:
                                   "requested_at")
                     }
                 )
+        # Who the asking session is, resolved here rather than guessed by the
+        # reader. `None` is a real answer — "this daemon has no member for
+        # that session" — and is what a caller must report; it is not the
+        # same as not having asked, which is what an absent `session` gets.
+        you = self.member_for_session(mesh, session) if session else None
         return {
             "name": mesh.name,
             "created_at": mesh.created_at,
@@ -4417,6 +4449,7 @@ class MeshManager:
             "authority": mesh.authority or None,
             "self": mesh.me or None,
             "epoch": mesh.authority_epoch,
+            "you": you.handle if you else None,
             "members": members,
             "messages": len(mesh.messages),
             "provisional": len(mesh.provisional),
