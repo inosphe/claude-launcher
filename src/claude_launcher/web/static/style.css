@@ -632,12 +632,12 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 /* mesh detail view */
 #mesh-view, #flow-view { flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0; }
 .mesh-members, .mesh-send, .mesh-fed, .mesh-policy, .mesh-links, .mesh-roles,
-.mesh-owed {
+.mesh-owed, .mesh-wiring {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
 }
 .mesh-members h3, .mesh-send h3, .mesh-log h3, .mesh-fed h3, .mesh-policy h3,
-.mesh-links h3, .mesh-roles h3, .mesh-owed h3 {
+.mesh-links h3, .mesh-roles h3, .mesh-owed h3, .mesh-wiring h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
 }
 /* Role set. A chip is a role in the vocabulary and how many members hold it;
@@ -682,6 +682,10 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   display: flex; align-items: center; gap: 10px; padding: 6px 0;
   border-bottom: 1px solid #22262d; font-size: 13px;
 }
+/* The .dot colours are shared page-wide but the size is per list, and this
+   list never claimed one — so its reachability dot has been drawing at zero
+   pixels. Both the Members table and the Connections rows read it. */
+.mesh-member .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
 .mesh-member:last-of-type { border-bottom: none; }
 .mesh-handle { font-weight: 600; }
 .mesh-role {
@@ -795,10 +799,12 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .mesh-edge.queued { stroke: #d29922; stroke-dasharray: 5 4; }
 .mesh-edge.down { stroke: #ff7b72; stroke-dasharray: 2 5; }
 .mesh-edge.cut { stroke: #4a5058; stroke-dasharray: 1 6; }
+/* The fat transparent line under each hairline: it used to make the edge
+   clickable, and now only makes it hoverable — the tooltip is the whole
+   interaction, since these edges are not edited from the diagram. */
 .mesh-edge-hit { stroke: transparent; stroke-width: 12; }
-.mesh-edge-group { pointer-events: none; }
-.mesh-edge-group.editable { pointer-events: stroke; cursor: pointer; }
-.mesh-edge-group.editable:hover .mesh-edge { stroke-width: 3.4; opacity: 1; }
+.mesh-edge-group { pointer-events: stroke; }
+.mesh-edge-group:hover .mesh-edge { stroke-width: 3; opacity: 1; }
 /* one daemon and the agents it hosts */
 .mesh-cluster-box {
   fill: #202429; stroke: #2f343d; stroke-width: 1.5; stroke-dasharray: 4 3;
@@ -836,8 +842,33 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .mesh-agent:hover .mesh-agent-disc { stroke-width: 2.6; }
 .mesh-agent.focus .mesh-agent-disc { fill: #17324f; stroke: #58a6ff; stroke-width: 2.6; }
 /* Dimmed rather than hidden: a member you cannot reach is the answer to the
-   question, so it has to stay on the page to be read. */
-.mesh-agent.dim { opacity: 0.28; }
+   question, so it has to stay on the page to be read. The dimming is on the
+   disc and the name and not on the group, because the group also carries the
+   connect switch — and an agent the selected one cannot reach is precisely
+   the one somebody is about to connect it to. */
+.mesh-agent.dim .mesh-agent-disc, .mesh-agent.dim .mesh-agent-name { opacity: 0.28; }
+/* the diagram's end of the Connections list's hover */
+.mesh-agent.hot .mesh-agent-disc { stroke: #58a6ff; stroke-width: 3; opacity: 1; }
+.mesh-agent.hot .mesh-agent-name { fill: #58a6ff; opacity: 1; }
+
+/* The connect/disconnect switch that rides on an agent's disc while another
+   agent is selected. Violet for '+' because that is the member graph's hue
+   throughout (the peer graph is green, the spawn forest grey); red only on
+   hovering an '×', so the destructive half announces itself under the
+   cursor rather than shouting from every connected agent at once. */
+.mesh-wire { cursor: pointer; }
+.mesh-wire-disc { fill: #22262d; stroke: #6e7681; stroke-width: 1.5; }
+.mesh-wire-glyph {
+  font-size: 13px; font-weight: 700; fill: #8b949e;
+  font-family: Cascadia Mono, Consolas, Menlo, monospace;
+}
+.mesh-wire.off .mesh-wire-disc { stroke: #a371f7; }
+.mesh-wire.off .mesh-wire-glyph { fill: #a371f7; }
+.mesh-wire:hover .mesh-wire-disc { fill: #2b3140; stroke-width: 2.4; }
+.mesh-wire.on:hover .mesh-wire-disc { stroke: #ff7b72; }
+.mesh-wire.on:hover .mesh-wire-glyph { fill: #ff7b72; }
+.mesh-wire:focus { outline: none; }
+.mesh-wire:focus-visible .mesh-wire-disc { stroke: #58a6ff; stroke-width: 2.6; }
 .mesh-agent-name {
   font-size: 10px; fill: #c6cdd5; font-weight: 600;
   font-family: Cascadia Mono, Consolas, Menlo, monospace;
@@ -960,7 +991,39 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .mesh-missing-actions .wf-btn { margin-right: 0; margin-top: 0; }
 #mesh-view > .wf-note { max-width: 760px; line-height: 1.5; }
 
-/* the same edges as a list, for edges that are awkward to click */
+/* Connections: the member graph as an editing surface. One agent is picked
+   (here or in the diagram — one selection, two panels) and every other
+   member is a row with the switch on it. */
+.mesh-wiring-head { display: flex; align-items: baseline; gap: 12px; }
+.mesh-wiring-head h3 { margin-bottom: 0; }
+.mesh-wire-pick {
+  margin-left: auto; background: #14161a; color: #c6cdd5; font-size: 12px;
+  border: 1px solid #2a2e36; border-radius: 5px; padding: 3px 8px; max-width: 55%;
+}
+.mesh-wiring > .wf-note, .mesh-wiring > .wf-warning { margin: 8px 0 10px; }
+.mesh-wire-bulk { display: flex; gap: 8px; margin: 0 0 8px; }
+.mesh-wire-bulk .wf-btn { margin: 0; padding: 3px 12px; }
+.mesh-wiring .mesh-member .wf-btn { margin-left: auto; padding: 3px 12px; }
+/* a connected row is the lit one: the panel is read for what IS wired */
+.mesh-wiring .mesh-member.linked .mesh-handle { color: #e6edf3; }
+.mesh-wiring .mesh-member:not(.linked) .mesh-handle { color: #8b949e; }
+.mesh-wiring .mesh-member:hover { background: #1f232b; }
+.mesh-wiring .mesh-member .meta { margin-left: 0; }
+.mesh-kin {
+  font-size: 10px; padding: 1px 7px; border-radius: 9px;
+  background: #241d33; color: #a371f7; border: 1px solid #3a2d52;
+}
+.mesh-link-swatch.mlink { border-top-color: #a371f7; }
+
+/* What the last graph edit did, said where the diagram is rather than in a
+   modal over the top of it. */
+.mesh-notice {
+  font-size: 12px; margin-top: 8px; padding: 5px 10px; cursor: pointer;
+  border-radius: 5px; background: #16261a; color: #3fb950; border: 1px solid #1f4227;
+}
+.mesh-notice.bad { background: #2b1a1c; color: #ff7b72; border-color: #4d2b2e; }
+
+/* the peer edges as a list: a status board, plus the repair button */
 .mesh-links .mesh-member .wf-note { margin-left: auto; font-size: 11px; }
 .mesh-links .mesh-member .meta { color: #7d8590; }
 .mesh-links .mesh-member .wf-btn { margin-left: auto; padding: 3px 12px; }

@@ -1465,16 +1465,21 @@ claunch install --project .       # MCP tools + the /mesh and /cflow skills
   up — so an outage stops the record, not the conversation. Move the
   authority with `claunch mesh rank dev <machine> 0`; cut a single edge with
   `claunch mesh cut` (its traffic falls back to the authority's fanout).
-  An edge belongs to both its ends, so **either end may cut or restore it** —
-  from its own CLI or its own dashboard — while an edge between two other
-  daemons stays the authority's call. The mesh page leads with an editable
-  diagram of all of this, backed by a Links list that does the same edits
-  without having to hit a hairline. Each daemon on that ring is drawn as a
-  **cluster holding its agents**, arranged as the tree of who spawned whom,
-  so one picture answers all three questions a mesh raises: which daemons
-  are linked, who reports to whom, and who may message whom. That last one
-  is complete by default, so only the exceptions are drawn — a cut pair gets
-  a line, and clicking an agent lights up everyone it can currently reach.
+  An edge belongs to both its ends, so **either end may cut or restore it**
+  from its own CLI, while an edge between two other daemons stays the
+  authority's call. The dashboard does not cut them at all: the peer graph is
+  meant to be a full interconnect, so the mesh page shows it as a status
+  board — linked, queued, unreachable — with a Restore button on any edge
+  somebody cut, and spends its editing on the graph that *is* somebody's
+  decision, the member one. Each daemon on that ring is drawn as a **cluster
+  holding its agents**, arranged as the tree of who spawned whom, so one
+  picture answers all three questions a mesh raises: which daemons are
+  linked, who reports to whom, and who may message whom. The last of those
+  is drawn as the pairs that **can** talk (a join wires a member to its
+  parent and to whatever the mesh's rules match, and leaves the rest shut),
+  clicking an agent lights up everyone it can currently reach — and, with
+  one selected, every other agent wears a ⊕/⊗ that connects or disconnects
+  the pair, mirrored row by row in a **Connections** list below.
 - **Joining is asking to be admitted**: the first join from a machine is a
   *request* the mesh's owner sees in `claunch mesh requests` (and in the web
   UI) and answers with `approve`/`deny`; the grant is delivered back over
