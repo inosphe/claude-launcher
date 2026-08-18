@@ -206,6 +206,9 @@ class SessionManager:
             depth=self.depth(parent),
             children=len(self.live_children(parent)),
         )
+        # After the policy and before the record: a checkout is a thing on
+        # disk, so it is made only once nothing left can refuse the request.
+        child = spawn_mod.make_worktree(child, request)
         return self.stage(
             SessionDef.from_dict(
                 {

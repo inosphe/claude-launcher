@@ -837,3 +837,116 @@ def test_attach_outside_herdr_clears_nothing(repo, attachable, monkeypatch):
         herdr, "clear_pane_label", lambda **kw: pytest.fail("nothing was set")
     )
     assert attachable.attach(AttachClient(str(repo)), "api") == 0
+
+
+# --------------------------------------------------------------------------- #
+# reusing a checkout, and catching it up
+# --------------------------------------------------------------------------- #
+def base_branch(repo) -> str:
+    """Whatever this machine's git calls the first branch (master/main)."""
+    return worktree.current_branch(repo)
+
+
+def commit(path, name, text="x\n"):
+    (path / name).write_text(text, encoding="utf-8")
+    git("add", "-A", cwd=path)
+    git("commit", "-qm", name, cwd=path)
+
+
+def test_info_reads_the_repository_in_one_answer(repo):
+    worktree.resolve(str(repo), "review")
+    info = worktree.info(str(repo))
+    assert info["repo"] is True
+    assert info["branch"] == base_branch(repo)
+    assert set(info["branches"]) >= {base_branch(repo), "review"}
+    assert info["worktrees"] == ["review"]
+    # a directory that is no repository says so rather than half-answering
+    assert worktree.info(str(repo.parent))["repo"] is False
+
+
+def test_a_reused_worktree_is_brought_up_to_date(repo):
+    """The point of the option: a checkout you come back to is as far behind
+    as the day you left it."""
+    wt = worktree.resolve(str(repo), "review")
+    commit(wt.path, "side.txt")
+    commit(repo, "moved-on.txt")
+
+    again = worktree.resolve(str(repo), "review", rebase_onto=base_branch(repo))
+    assert again.created is False
+    assert again.rebased == base_branch(repo)
+    # master's commit is now under the worktree's own, and its file is there
+    assert (again.path / "moved-on.txt").exists()
+    assert (again.path / "side.txt").exists()
+    log = git("log", "--oneline", cwd=again.path).stdout
+    assert log.index("side.txt") < log.index("moved-on.txt")
+
+
+def test_a_fresh_worktree_is_never_rebased(repo):
+    """It was cut from the repository as it stands, so there is nothing to
+    catch up on -- and a rebase of an empty branch is a chance to fail for
+    no reason."""
+    wt = worktree.resolve(str(repo), "brand-new", rebase_onto=base_branch(repo))
+    assert wt.created is True
+    assert wt.rebased == ""
+
+
+def test_uncommitted_work_refuses_the_launch_before_touching_anything(repo):
+    """There is no safe automatic answer to somebody's uncommitted work, so
+    it is refused rather than stashed, moved or committed for them."""
+    wt = worktree.resolve(str(repo), "review")
+    (wt.path / "a.txt").write_text("mine, uncommitted\n", encoding="utf-8")
+
+    with pytest.raises(worktree.WorktreeError) as exc:
+        worktree.resolve(str(repo), "review", rebase_onto=base_branch(repo))
+    assert "uncommitted changes" in str(exc.value)
+    # untouched: still theirs, still there
+    assert (wt.path / "a.txt").read_text(encoding="utf-8") == "mine, uncommitted\n"
+
+
+def test_an_untracked_file_is_not_uncommitted_work(repo):
+    """A build artefact must not refuse a launch: a rebase does not care
+    about untracked files, so neither does this."""
+    wt = worktree.resolve(str(repo), "review")
+    (wt.path / "build.log").write_text("noise\n", encoding="utf-8")
+    commit(repo, "moved-on.txt")
+
+    again = worktree.resolve(str(repo), "review", rebase_onto=base_branch(repo))
+    assert again.rebased == base_branch(repo)
+    assert (again.path / "build.log").exists()
+
+
+def test_a_conflicting_rebase_refuses_and_leaves_nothing_half_done(repo):
+    """An agent started in a half-rebased checkout would spend its first turn
+    on a mess it did not make, so the rebase is aborted and the launch dies."""
+    wt = worktree.resolve(str(repo), "review")
+    (wt.path / "a.txt").write_text("theirs\n", encoding="utf-8")
+    git("add", "-A", cwd=wt.path)
+    git("commit", "-qm", "theirs", cwd=wt.path)
+    (repo / "a.txt").write_text("ours\n", encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-qm", "ours", cwd=repo)
+
+    with pytest.raises(worktree.WorktreeError) as exc:
+        worktree.resolve(str(repo), "review", rebase_onto=base_branch(repo))
+    assert "was aborted" in str(exc.value)
+    # the checkout is exactly as it was found: on its branch, not mid-rebase
+    assert worktree.current_branch(wt.path) == "review"
+    assert (wt.path / "a.txt").read_text(encoding="utf-8") == "theirs\n"
+    assert git("status", "--porcelain", cwd=wt.path).stdout.strip() == ""
+
+
+def test_a_base_that_is_not_a_branch_is_refused_by_name(repo):
+    worktree.resolve(str(repo), "review")
+    with pytest.raises(worktree.WorktreeError) as exc:
+        worktree.resolve(str(repo), "review", rebase_onto="nosuch")
+    assert "no branch 'nosuch'" in str(exc.value)
+
+
+def test_the_announcement_says_the_update_happened(repo, capsys):
+    """It is the step that could have failed and did not, so it is said out
+    loud rather than left to be inferred from the branch."""
+    worktree.resolve(str(repo), "review")
+    commit(repo, "moved-on.txt")
+    wt = worktree.resolve(str(repo), "review", rebase_onto=base_branch(repo))
+    worktree.announce(wt)
+    assert f"rebased onto {base_branch(repo)}" in capsys.readouterr().err

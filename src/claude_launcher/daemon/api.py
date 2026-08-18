@@ -19,6 +19,7 @@ from aiohttp import web
 
 from .. import __version__, harnesses as harness_registry
 from .. import profile as profile_mod, spawn as spawn_mod, workspaces
+from .. import worktree as worktree_mod
 from . import onboard
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
@@ -160,6 +161,7 @@ def build_app(
     r.add_get("/api/profiles", h_profiles)
     r.add_get("/api/roles", h_roles)
     r.add_get("/api/workspaces", h_workspaces)
+    r.add_get("/api/git", h_git)
     r.add_post("/api/workspaces", h_workspace_add)
     r.add_delete("/api/workspaces/{name}", h_workspace_remove)
     r.add_get("/api/harnesses", h_harnesses)
@@ -342,6 +344,21 @@ async def h_workspaces(request: web.Request) -> web.Response:
     return web.json_response(
         {"workspaces": [w.to_dict() for w in workspaces.list_all()]}
     )
+
+
+async def h_git(request: web.Request) -> web.Response:
+    """What a directory looks like to git: is it a repository, on what, and
+    what checkouts are beside it.
+
+    The pickers that offer a worktree need three facts about a directory, and
+    all three are read where the directory *is* -- the ``spawn`` form is
+    describing the parent's directory, which is the daemon's filesystem and
+    not necessarily the asker's, and the same is true of every workspace in
+    the create form. One endpoint rather than three, so a picker cannot show
+    branches from one reading and worktrees from another.
+    """
+    cwd = cflow_state.resolve_cwd(request.query.get("cwd") or None)
+    return web.json_response({"cwd": cwd, **worktree_mod.info(cwd)})
 
 
 async def h_workspace_add(request: web.Request) -> web.Response:
@@ -1569,6 +1586,12 @@ async def h_session_spawn(request: web.Request) -> web.Response:
         session = manager.stage_child(parent, body)
     except spawn_mod.SpawnDenied as exc:
         return json_error(403, str(exc))
+    except worktree_mod.WorktreeError as exc:
+        # A checkout that was asked for and could not be cut (or could not be
+        # brought up to date) fails the spawn, exactly as it fails a launch:
+        # an agent started in a directory that is not the one it was promised
+        # is worse than one that was never started.
+        return json_error(400, str(exc))
     except (HarnessError, ValueError, TypeError) as exc:
         return json_error(400, f"bad spawn request: {exc}")
     except ManagerError as exc:

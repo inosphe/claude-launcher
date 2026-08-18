@@ -79,6 +79,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         cwd,
         args.worktree,
         resuming=args.resume is not None or harness_def.steers_conversation(extra),
+        rebase_onto=getattr(args, "rebase_onto", "") or "",
     )
     worktree.announce(tree)
     if tree is not None:
@@ -230,12 +231,18 @@ def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
             "parent's profile"
         )
     if args.worktree is not worktree.ASK and args.worktree is not worktree.NEVER:
-        notes.append(
-            "--worktree is dropped: a child inherits its parent's working "
-            "directory, so it is already in whatever worktree you are in. To "
-            "give one its own checkout, make the worktree and register it "
-            "('claunch workspace add <path>'), then pass --workspace"
+        # `spawn` grew a worktree of its own, so this is a translation now
+        # rather than a refusal -- but only a named one travels: the child is
+        # cut by the daemon, which has no pane to name a checkout after.
+        out.append(
+            f"--worktree {args.worktree}" if args.worktree
+            else "--worktree <name>"
         )
+        if not args.worktree:
+            notes.append(
+                "name the worktree: a child's is cut by the daemon, which has "
+                "no Herdr pane to name one after"
+            )
     if not args.mesh:
         notes.append(
             "no --mesh needed: the child joins yours, and starts connected "
@@ -308,6 +315,12 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("task", args.task),
             ("harness", args.harness),
             ("workspace", args.workspace),
+            # Cut by the daemon, from the parent's own repository: the child
+            # is on the daemon's filesystem and this CLI may not be, and a
+            # path travelling in `cwd` is the door `spawn.allow_cwd` keeps
+            # shut. See spawn.make_worktree.
+            ("worktree", args.worktree),
+            ("rebase_onto", args.rebase_onto),
         )
         if v
     }
@@ -318,6 +331,20 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         return 1
     child = result.get("session") or {}
     print(f"spawned {child.get('name')} (child of {parent})")
+    if args.worktree:
+        landed = os.path.basename(str(child.get("cwd") or "").rstrip("/\\"))
+        if landed != os.path.basename(str(args.worktree).rstrip("/")):
+            # A daemon older than this reads no 'worktree' key and ignores it
+            # silently, which would leave the child in the shared checkout the
+            # flag was used to escape -- the one failure worth being loud about.
+            print(
+                f"  warning: asked for worktree {args.worktree!r} but the child "
+                f"is in {child.get('cwd')} -- this daemon may predate worktree "
+                "spawning ('claunch daemon restart')",
+                file=sys.stderr,
+            )
+        else:
+            print(f"  in {child['cwd']}")
     if args.workspace and child.get("cwd"):
         # The one field that was asked for by name and answered by path:
         # printing it is how the caller sees the registry resolved.
@@ -817,6 +844,13 @@ def register(sub) -> None:
         const=worktree.NEVER,
         help="use the directory as it stands, and do not ask",
     )
+    p_new.add_argument(
+        "--rebase-onto", dest="rebase_onto", metavar="BRANCH",
+        help="with a REUSED --worktree, rebase it onto BRANCH before the "
+        "agent is let in -- a checkout you come back to is as far behind as "
+        "the day you left it. Local only (no fetch); a rebase that cannot be "
+        "done cleanly refuses the launch rather than half-doing it",
+    )
     p_new.add_argument("--cols", type=int, default=120)
     p_new.add_argument("--rows", type=int, default=30)
     p_new.add_argument("--env", action="append", metavar="KEY=VALUE", help="extra env override")
@@ -911,6 +945,18 @@ def register(sub) -> None:
     p_spawn.add_argument("--task", help="opening instruction typed into the child")
     p_spawn.add_argument(
         "--harness", help="a different harness (needs spawn.allow_harness)"
+    )
+    p_spawn.add_argument(
+        "--worktree", metavar="NAME",
+        help="run the child in a git worktree of its parent's repository "
+        "(named, always -- the daemon cuts it and has no pane to name one "
+        "after). Needs spawn.allow_worktree, which is on by default",
+    )
+    p_spawn.add_argument(
+        "--rebase-onto", dest="rebase_onto", metavar="BRANCH",
+        help="with a REUSED --worktree, rebase it onto BRANCH first (usually "
+        "the parent's own branch); a rebase that cannot be done cleanly "
+        "refuses the spawn",
     )
     p_spawn.add_argument(
         "--workspace", "-w", metavar="NAME",

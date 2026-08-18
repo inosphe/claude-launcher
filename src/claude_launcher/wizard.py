@@ -40,9 +40,11 @@ form down with it. The raw-terminal and keyboard-read layers are borrowed from
 from __future__ import annotations
 
 import os
+import re
 import shlex
 import sys
 import unicodedata
+from datetime import datetime
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Dict, List, Optional
 
@@ -355,12 +357,15 @@ class Sources:
     def workflows(self, cwd: str) -> List[str]:
         return []
 
-    def worktrees(self, cwd: str) -> List[str]:
-        """Names of worktrees this launch could move into, already on disk."""
-        return []
+    def git(self, cwd: str) -> dict:
+        """What ``cwd`` looks like to git: ``repo``, ``branch``, ``branches``,
+        ``worktrees``.
 
-    def is_repo(self, cwd: str) -> bool:
-        return False
+        One question, because the worktree rows need all four and they have
+        to agree: offering a branch list read from one directory beside a
+        worktree list read from another is how a picker starts lying.
+        """
+        return {"repo": False, "branch": "", "branches": [], "worktrees": []}
 
 
 class DaemonSources(Sources):
@@ -466,50 +471,165 @@ class DaemonSources(Sources):
         self._cache[key] = [n for n in names if n]
         return self._cache[key]
 
-    def worktrees(self, cwd: str) -> List[str]:
-        key = "wt:" + cwd
-        if key not in self._cache:
-            self._cache[key] = worktree_names(cwd)
-        return self._cache[key]
+    def git(self, cwd: str) -> dict:
+        key = "git:" + cwd
+        if key in self._cache:
+            return self._cache[key]
+        from urllib.parse import quote
 
-    def is_repo(self, cwd: str) -> bool:
-        key = "repo:" + cwd
-        if key not in self._cache:
-            self._cache[key] = worktree.repo_root(cwd) is not None
-        return self._cache[key]
-
-
-def worktree_names(cwd: str) -> List[str]:
-    """Launcher worktrees of ``cwd``'s repository, newest git order kept.
-
-    Offered as choices because reuse is the common case a name exists for:
-    ``--worktree=review`` twice returns to that checkout with its branch and
-    its uncommitted work intact, and remembering which names are taken is
-    exactly what a picker is for.
-    """
-    root = worktree.repo_root(cwd)
-    if root is None:
-        return []
-    base = worktree.worktrees_dir(root)
-    done = worktree._git(["worktree", "list", "--porcelain"], cwd=str(root))
-    if done.returncode != 0:
-        return []
-    names: List[str] = []
-    for line in (done.stdout or "").splitlines():
-        if not line.startswith("worktree "):
-            continue
-        path = os.path.abspath(line[len("worktree "):].strip())
         try:
-            rel = os.path.relpath(path, str(base))
-        except ValueError:  # different drive on Windows
-            continue
-        if rel.startswith(".."):
-            continue
-        name = rel.replace(os.sep, "/")
-        if name and name != ".":
-            names.append(name)
-    return names
+            doc = self.client.get(f"/api/git?cwd={quote(cwd)}")
+        except Exception:
+            # Asked of the daemon rather than of git directly, because the
+            # directory being described is the daemon's -- a parent's cwd, a
+            # registered workspace -- and only the same-machine case makes
+            # the two readings identical. A daemon too old to answer leaves
+            # that case working.
+            doc = worktree.info(cwd)
+        self._cache[key] = doc
+        return doc
 
+
+
+
+# --------------------------------------------------------------------------- #
+# the worktree rows, which both forms ask exactly the same way
+# --------------------------------------------------------------------------- #
+def worktree_fields(auto_detail: str, section: str = "") -> List[Field]:
+    """The four rows that put a launch in a checkout of its own.
+
+    Four and not one because they are four different questions and three of
+    them only exist once the one above has been answered: *which* checkout,
+    *called* what, brought up to date or not, and up to date with *what*.
+
+    They are built here rather than in each form because a child asks them
+    identically to a parent -- the directory being branched differs, and
+    nothing else does.
+    """
+    return [
+        ChoiceField(
+            key="worktree", label="Worktree", section=section,
+            hint="a checkout of its own, so this agent cannot collide with "
+                 "another working in the same repository",
+            options=[],
+        ),
+        TextField(
+            key="worktree_name", label="Worktree name",
+            placeholder="(auto)",
+            hint="also the branch name; an existing one is returned to, not rebuilt",
+        ),
+        ChoiceField(
+            key="update", label="Update",
+            hint="a checkout you come back to is as far behind as the day you "
+                 "left it",
+            options=[
+                Option("(no) - open it exactly as you left it", False),
+                Option("yes - rebase it onto a branch first", True),
+            ],
+        ),
+        ChoiceField(
+            key="rebase_onto", label="Rebase onto",
+            hint="the branch to catch up with; a rebase that cannot be done "
+                 "cleanly refuses the launch rather than half-doing it",
+            options=[],
+        ),
+    ]
+
+
+def sync_worktree(form: "Form", cwd: str, *, allowed: bool = True, note: str = "") -> None:
+    """Rebuild the worktree rows for ``cwd``, and hide the ones that do not
+    apply yet.
+
+    ``allowed`` is the policy's answer (``spawn.allow_worktree``); a locked
+    row is greyed with the key that opens it rather than removed, while a
+    directory that is no repository at all takes the rows away entirely --
+    there is nothing there to be wrong about.
+    """
+    wt = form.field("worktree")
+    signature = (cwd, allowed)
+    if getattr(form, "_worktrees_for", None) != signature:
+        form._worktrees_for = signature
+        keep = wt.value
+        info = form.sources.git(cwd) if cwd else {}
+        if not allowed:
+            wt.options, wt.hidden, wt.disabled = [], False, True
+            wt.disabled_note = note
+        elif info.get("repo"):
+            wt.options = [
+                Option("(none) - work in the directory as it stands", False),
+                Option("new worktree", "", auto_detail(form)),
+                Option("new worktree, named...", NAME_IT),
+            ] + [
+                Option(n, n, "existing") for n in (info.get("worktrees") or [])
+            ]
+            wt.index = 0
+            wt.select(keep)
+            wt.hidden, wt.disabled = False, False
+        else:
+            wt.options, wt.hidden, wt.disabled = [], True, False
+
+        # The branch this checkout is cut from is the one worth catching up
+        # with, so it leads the list: `master` for a launch from the main
+        # checkout, the parent's own branch for a child.
+        base = form.field("rebase_onto")
+        here = info.get("branch") or ""
+        base.options = (
+            [Option(here, here, "the branch this one is cut from")] if here else []
+        ) + [Option(b, b) for b in (info.get("branches") or []) if b != here]
+        base.index = 0
+
+    # Re-read every pass, not only when the list is rebuilt: a child's
+    # auto-name is made of answers given further down the form, and a picker
+    # showing the name it *would* have had is worse than showing none.
+    for opt in wt.options:
+        if opt.value == "":
+            opt.detail = auto_detail(form)
+
+    reusing = isinstance(wt.value, str) and wt.value not in ("", NAME_IT)
+    form.field("worktree_name").hidden = not wt.selectable or wt.value != NAME_IT
+    # Only a *reused* checkout can be behind: a new one is cut from the
+    # repository as it stands, so there is nothing for it to catch up on.
+    form.field("update").hidden = not wt.selectable or not reusing
+    form.field("rebase_onto").hidden = (
+        form.field("update").hidden or not form.value("update")
+    )
+
+
+def auto_detail(form: "Form") -> str:
+    """What "new worktree" would call itself, spelled out in the picker."""
+    name = form.auto_worktree_name()
+    return f"auto-named: {name}" if name else "auto-named"
+
+
+def check_worktree(form: "Form") -> List[tuple]:
+    """``(field, why)`` for a worktree answer the launch could not carry out."""
+    out: List[tuple] = []
+    if form.field("worktree_name").selectable and form.value("worktree_name"):
+        try:
+            worktree.validate_name(form.value("worktree_name"))
+        except worktree.WorktreeError as exc:
+            out.append(("worktree_name", str(exc)))
+    if form.value("update") and not form.value("rebase_onto"):
+        out.append((
+            "rebase_onto",
+            "nothing to rebase onto: this repository reports no branches, so "
+            "pick 'no' under Update",
+        ))
+    return out
+
+
+def worktree_answer(form: "Form") -> tuple:
+    """``(worktree choice, rebase base)`` in the spelling the flags use."""
+    wt = form.field("worktree")
+    choice = wt.value
+    if not wt.selectable or choice is False or choice is None:
+        # Answered, and answered "no": leaving it as ASK would put the old
+        # y/N prompt on the screen straight after a form that just asked.
+        return worktree.NEVER, ""
+    if choice == NAME_IT:
+        choice = form.value("worktree_name") or form.auto_worktree_name()
+    base = str(form.value("rebase_onto") or "") if form.value("update") else ""
+    return choice, base
 
 # --------------------------------------------------------------------------- #
 # the form
@@ -582,6 +702,16 @@ class Form:
     def summary(self) -> str:
         """One line naming what is about to be built, as the form closes."""
         return "creating a session"
+
+    def auto_worktree_name(self) -> str:
+        """What "new worktree" is called when nobody names it.
+
+        Empty means "whoever cuts it decides" -- which for ``new-session`` is
+        :func:`worktree.default_name`, the pane plus the second. A child has
+        no pane and is cut by the daemon, so :class:`SpawnWizard` answers
+        with a name of its own rather than letting the daemon invent one.
+        """
+        return ""
 
     # -- lookups --------------------------------------------------------- #
     def field(self, key: str) -> Field:
@@ -948,17 +1078,6 @@ class Wizard(Form):
         )
         directory.select(os.path.abspath(get("cwd")) if get("cwd") else self.cwd)
 
-        wt = ChoiceField(
-            key="worktree", label="Worktree",
-            hint="a private checkout, so this agent cannot collide with another "
-                 "working in the same repository",
-            options=[],
-        )
-        wt_name = TextField(
-            key="worktree_name", label="Worktree name",
-            placeholder="(auto: pane + timestamp)",
-            hint="also the branch name; an existing one is returned to, not rebuilt",
-        )
 
         roles = self.sources.roles() or []
         role = ChoiceField(
@@ -1073,7 +1192,8 @@ class Wizard(Form):
         )
 
         return [
-            name, harness, profile, directory, wt, wt_name, role, resume, fork,
+            name, harness, profile, directory, *worktree_fields(""), role,
+            resume, fork,
             args_field, mesh, handle, connect, workflow, context, task,
             restore, attach,
             ActionField(key="create", label="Create session"),
@@ -1130,23 +1250,7 @@ class Wizard(Form):
             fork.select(False)
 
         cwd = self.value("cwd") or self.cwd
-        wt = self.field("worktree")
-        if self._worktrees_for != cwd:
-            self._worktrees_for = cwd
-            keep = wt.value
-            if self.sources.is_repo(cwd):
-                wt.options = [
-                    Option("(none) - work in the directory as it stands", False),
-                    Option("new worktree", "", "auto-named: pane + timestamp"),
-                    Option("new worktree, named...", NAME_IT),
-                ] + [Option(n, n, "existing") for n in self.sources.worktrees(cwd)]
-                wt.index = 0
-                wt.select(keep)
-                wt.hidden = False
-            else:
-                wt.options = []
-                wt.hidden = True
-        self.field("worktree_name").hidden = wt.hidden or wt.value != NAME_IT
+        sync_worktree(self, cwd)
 
         mesh = self.value("mesh") or ""
         self.field("handle").hidden = not mesh
@@ -1189,11 +1293,7 @@ class Wizard(Form):
                 "the claude harness needs a profile - pick one, or make one "
                 "first with 'claunch add <name>'",
             ))
-        if self.value("worktree") == NAME_IT and self.value("worktree_name"):
-            try:
-                worktree.validate_name(self.value("worktree_name"))
-            except worktree.WorktreeError as exc:
-                out.append(("worktree_name", str(exc)))
+        out.extend(check_worktree(self))
         return out
 
     # -- the answers ----------------------------------------------------- #
@@ -1210,15 +1310,7 @@ class Wizard(Form):
         args.profile = self.value("profile") or None
         args.cwd = self.value("cwd") or self.cwd
 
-        choice = self.value("worktree")
-        if self.field("worktree").hidden or choice is False or choice is None:
-            # Answered, and answered "no": leaving it as ASK would put the old
-            # y/N prompt on the screen straight after a form that just asked.
-            args.worktree = worktree.NEVER
-        elif choice == NAME_IT:
-            args.worktree = self.value("worktree_name") or ""
-        else:
-            args.worktree = choice
+        args.worktree, args.rebase_onto = worktree_answer(self)
 
         args.role = self.value("role") or None
         resume = self.value("resume")
@@ -1252,12 +1344,11 @@ class Wizard(Form):
             "profile " + str(self.value("profile") or "(none)"),
             "in " + str(self.value("cwd")),
         ]
-        wt = self.value("worktree")
-        if not self.field("worktree").hidden and wt is not False:
-            parts.append(
-                "worktree " + (self.value("worktree_name") or "(auto)")
-                if wt == NAME_IT else "worktree " + (wt or "(auto)")
-            )
+        wt, base = worktree_answer(self)
+        if wt is not worktree.NEVER:
+            parts.append("worktree " + (wt or "(auto)"))
+            if base:
+                parts.append("rebased onto " + base)
         for label, key in (("mesh", "mesh"), ("workflow", "workflow"),
                            ("role", "role")):
             if self.value(key):
@@ -1301,6 +1392,11 @@ class SpawnWizard(Form):
         self._parent_for: Optional[str] = None
         self._mesh_for: Optional[str] = None
         self._workflows_for: Optional[str] = None
+        self._worktrees_for: Optional[tuple] = None
+        # Fixed once, not per render: a name that ticked over between the
+        # picker showing it and Create sending it would cut a worktree under
+        # a name nobody read.
+        self._stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         self._report: dict = {}
         #: workspace name -> path, so the workflow list can follow a pick that
         #: travels to the daemon as a name.
@@ -1394,10 +1490,23 @@ class SpawnWizard(Form):
             text=get("task") or "",
         )
         return [
-            parent, name, harness, workspace,
+            parent, name, harness, workspace, *worktree_fields(""),
             mesh, handle, role, connect, workflow, context, task,
             ActionField(key="create", label="Spawn child"),
         ]
+
+    def auto_worktree_name(self) -> str:
+        """A child's own name, or its parent's, plus the second.
+
+        `new-session` names an unnamed worktree after the Herdr pane, which a
+        child does not have -- and the daemon, which cuts this one, has no
+        pane either and would fall back to a bare constant. The session it is
+        *for* is the honest answer, and it makes `git worktree list` afterwards
+        say which agent each checkout belongs to.
+        """
+        who = self.value("name") or self.value("parent") or "child"
+        who = re.sub(r"[^A-Za-z0-9._-]+", "-", str(who)).strip("-") or "child"
+        return f"{who}-{self._stamp}"
 
     # -- lookups against the parent -------------------------------------- #
     def _session(self, name: str) -> dict:
@@ -1453,6 +1562,13 @@ class SpawnWizard(Form):
         connect.hidden = no_mesh or not connect.options
 
         cwd = self._child_cwd()
+        # Cut from where the child will actually run: a worktree of the
+        # workspace it was sent to, or of the parent's own checkout.
+        sync_worktree(
+            self, cwd,
+            allowed="worktree" in (self._report.get("may_choose") or []),
+            note="a child inherits its parent's directory (spawn.allow_worktree)",
+        )
         wf = self.field("workflow")
         if self._workflows_for != cwd:
             self._workflows_for = cwd
@@ -1556,6 +1672,7 @@ class SpawnWizard(Form):
                 "; ".join(blocked) + " - pick another parent, or free a slot "
                 "('claunch kill-session <child>')",
             ))
+        out.extend(check_worktree(self))
         return out
 
     # -- the answers ----------------------------------------------------- #
@@ -1573,6 +1690,16 @@ class SpawnWizard(Form):
         # the API resolves -- a path would be the free-text directory that
         # spawn.allow_cwd exists to keep an agent away from.
         args.workspace = self.value("workspace") or None
+        # A child's worktree is cut by the daemon, from the parent's own
+        # repository -- so it travels as a NAME, never a path, and never as
+        # `cwd`. An auto-named one is named here rather than there: the
+        # daemon has no pane and no session of its own to name it after.
+        choice, base = worktree_answer(self)
+        args.worktree = (
+            None if choice is worktree.NEVER
+            else (choice or self.auto_worktree_name())
+        )
+        args.rebase_onto = base or None
         mesh = self.value("mesh") or ""
         args.mesh = mesh or None
         args.handle = (self.value("handle") or None) if mesh != self.NO_MESH else None
@@ -1593,6 +1720,11 @@ class SpawnWizard(Form):
         ):
             if self.value(key):
                 parts.append(label + " " + str(self.value(key)))
+        choice, base = worktree_answer(self)
+        if choice is not worktree.NEVER:
+            parts.append("worktree " + (choice or self.auto_worktree_name()))
+            if base:
+                parts.append("rebased onto " + base)
         mesh = self.value("mesh") or ""
         parts.append(
             "no mesh" if mesh == self.NO_MESH

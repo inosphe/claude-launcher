@@ -199,6 +199,28 @@ TOOLS = [
                         "and yours is inherited"
                     ),
                 },
+                "worktree": {
+                    "type": "string",
+                    "description": (
+                        "give the child a git worktree of ITS OWN, named: a "
+                        "second checkout of the repository you are in, on its "
+                        "own branch. Use it whenever you spawn more than one "
+                        "child that will edit code — two agents in one "
+                        "checkout overwrite each other's edits mid-edit. "
+                        "Naming one that already exists returns to that "
+                        "checkout with its branch and work intact"
+                    ),
+                },
+                "rebase_onto": {
+                    "type": "string",
+                    "description": (
+                        "with a REUSED 'worktree', rebase it onto this branch "
+                        "before the child starts — usually the branch you are "
+                        "on. If the rebase cannot be done cleanly the spawn is "
+                        "refused and nothing is created, so the child never "
+                        "wakes up in a conflicted checkout"
+                    ),
+                },
             },
             "required": [],
         },

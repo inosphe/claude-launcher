@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from pathlib import Path
 
 from claude_launcher import store, workspaces
 from claude_launcher.cflow import state as cflow_state
@@ -1200,6 +1201,264 @@ def test_a_record_a_mesh_still_names_is_not_dropped(home, tmp_path):
             assert [s.sdef.name for s in mgr.list()] == ["lead"]
         finally:
             await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# a checkout of the child's own
+# --------------------------------------------------------------------------- #
+def _git(*args, cwd):
+    import subprocess
+
+    return subprocess.run(
+        ["git", *args], cwd=str(cwd), capture_output=True, text=True, check=True
+    )
+
+
+def _repo(path):
+    """A one-commit repository for a parent session to be standing in."""
+    path.mkdir(parents=True, exist_ok=True)
+    _git("init", "-q", cwd=path)
+    _git("config", "user.email", "t@example.com", cwd=path)
+    _git("config", "user.name", "t", cwd=path)
+    (path / "a.txt").write_text("one\n", encoding="utf-8")
+    _git("add", "-A", cwd=path)
+    _git("commit", "-qm", "one", cwd=path)
+    return path
+
+
+def test_a_child_runs_in_a_worktree_of_its_parents_repository(home, tmp_path):
+    """The thing a fleet needs and a shared checkout cannot give: two children
+    of one parent editing the same repository without editing each other's
+    files."""
+    _register_py_harness()
+    repo = _repo(tmp_path / "repo")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
+
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "worktree": "helper"},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            cwd = (await resp.json())["session"]["cwd"]
+            assert cwd == str(repo / ".claude" / "worktrees" / "helper")
+            # a real worktree on a branch of its own, not just a directory
+            assert (repo / ".claude" / "worktrees" / "helper" / "a.txt").exists()
+            assert "helper" in _git("worktree", "list", cwd=repo).stdout
+
+            # the parent stayed in the checkout it was launched in
+            assert mgr.get("lead").sdef.cwd == str(repo)
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_worktree_is_cut_from_the_workspace_a_child_was_sent_to(home, tmp_path):
+    """'A worktree of the workspace I sent it to' has to mean what it says, so
+    the checkout is cut from whatever directory the other fields settled on."""
+    _register_py_harness()
+    elsewhere = _repo(tmp_path / "hq")
+    workspaces.add(str(elsewhere), name="hq")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "workspace": "hq", "worktree": "helper"},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            cwd = (await resp.json())["session"]["cwd"]
+            assert cwd == str(elsewhere.resolve() / ".claude" / "worktrees" / "helper")
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_policy_can_keep_a_child_out_of_its_own_checkout(home, tmp_path):
+    _register_py_harness()
+    repo = _repo(tmp_path / "repo")
+    store.update(lambda doc: doc.update({"spawn": {"allow_worktree": False}}))
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
+
+            report = await (
+                await client.get("/api/sessions/lead/children", headers=BEARER)
+            ).json()
+            assert "worktree" not in report["may_choose"]
+
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "worktree": "helper"},
+                headers=BEARER,
+            )
+            assert resp.status == 403
+            assert "allow_worktree" in (await resp.json())["error"]
+            assert "w1" not in [s.sdef.name for s in mgr.list()]
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_by_default_a_child_may_cut_one(home, tmp_path):
+    """On by default, for the same reason allow_workspace is: the checkout is
+    derived from the repository the parent is already in, not a path an agent
+    named."""
+    _register_py_harness()
+    repo = _repo(tmp_path / "repo")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
+            report = await (
+                await client.get("/api/sessions/lead/children", headers=BEARER)
+            ).json()
+            assert "worktree" in report["may_choose"]
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_reused_child_worktree_is_brought_up_to_date_first(home, tmp_path):
+    _register_py_harness()
+    repo = _repo(tmp_path / "repo")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
+            base = (
+                _git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo).stdout.strip()
+            )
+
+            first = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "worktree": "helper"},
+                headers=BEARER,
+            )
+            assert first.status == 201
+            # the parent's branch moves on while the child works
+            (repo / "moved-on.txt").write_text("later\n", encoding="utf-8")
+            _git("add", "-A", cwd=repo)
+            _git("commit", "-qm", "later", cwd=repo)
+
+            second = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w2", "worktree": "helper", "rebase_onto": base},
+                headers=BEARER,
+            )
+            assert second.status == 201
+            cwd = (await second.json())["session"]["cwd"]
+            assert (Path(cwd) / "moved-on.txt").exists()
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_rebase_that_cannot_be_done_refuses_the_spawn(home, tmp_path):
+    """Nothing is created: a child that woke up in a conflicted checkout would
+    spend its first turn on a mess it did not make."""
+    _register_py_harness()
+    repo = _repo(tmp_path / "repo")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
+            base = (
+                _git("rev-parse", "--abbrev-ref", "HEAD", cwd=repo).stdout.strip()
+            )
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "worktree": "helper"},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            tree = repo / ".claude" / "worktrees" / "helper"
+            (tree / "a.txt").write_text("theirs\n", encoding="utf-8")
+            _git("add", "-A", cwd=tree)
+            _git("commit", "-qm", "theirs", cwd=tree)
+            (repo / "a.txt").write_text("ours\n", encoding="utf-8")
+            _git("add", "-A", cwd=repo)
+            _git("commit", "-qm", "ours", cwd=repo)
+
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w2", "worktree": "helper", "rebase_onto": base},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            assert "aborted" in (await resp.json())["error"]
+            assert "w2" not in [s.sdef.name for s in mgr.list()]
+            # and the checkout is as it was left, not mid-rebase
+            assert (tree / "a.txt").read_text(encoding="utf-8") == "theirs\n"
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_worktree_of_a_directory_that_is_no_repository_is_refused(home, tmp_path):
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "worktree": "helper"},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            assert "not inside a git repository" in (await resp.json())["error"]
+            assert "w1" not in [s.sdef.name for s in mgr.list()]
+            await mgr.shutdown_all()
+        finally:
             await client.close()
 
     asyncio.run(run())

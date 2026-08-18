@@ -79,6 +79,10 @@ class Worktree:
     branch: str
     #: False when an existing worktree of that name was reused.
     created: bool
+    #: The branch it was rebased onto on the way in, if it was asked for.
+    #: Only ever set for a *reused* checkout: a fresh one is cut from the
+    #: base and has nothing to catch up on.
+    rebased: str = ""
 
 
 # --------------------------------------------------------------------------- #
@@ -268,6 +272,142 @@ def create(root: Path, name: str) -> Worktree:
     )
 
 
+
+# --------------------------------------------------------------------------- #
+# reading a repository
+# --------------------------------------------------------------------------- #
+def branches(cwd: str) -> List[str]:
+    """Local branch names of ``cwd``'s repository, most recently committed first.
+
+    The order is the useful one for a picker: whatever the person has been
+    working on is near the top, and ``master`` stays findable by typing 'm'.
+    """
+    root = repo_root(cwd)
+    if root is None:
+        return []
+    done = _git(
+        ["for-each-ref", "--format=%(refname:short)", "--sort=-committerdate",
+         "refs/heads"],
+        cwd=str(root),
+    )
+    if done.returncode != 0:
+        return []
+    return [line.strip() for line in (done.stdout or "").splitlines() if line.strip()]
+
+
+def existing(cwd: str) -> List[str]:
+    """Launcher worktrees of ``cwd``'s repository, by name.
+
+    What the pickers offer beside "make a new one", because reuse is the
+    common case a *name* exists for: naming the same worktree twice returns
+    to that checkout with its branch and its work intact, and remembering
+    which names are taken is exactly what a list is for.
+    """
+    root = repo_root(cwd)
+    if root is None:
+        return []
+    base = worktrees_dir(root)
+    done = _git(["worktree", "list", "--porcelain"], cwd=str(root))
+    if done.returncode != 0:
+        return []
+    names: List[str] = []
+    for line in (done.stdout or "").splitlines():
+        if not line.startswith("worktree "):
+            continue
+        path = os.path.abspath(line[len("worktree "):].strip())
+        try:
+            rel = os.path.relpath(path, str(base))
+        except ValueError:  # a different drive on Windows
+            continue
+        if rel.startswith("..") or rel == ".":
+            continue
+        names.append(rel.replace(os.sep, "/"))
+    return names
+
+
+def info(cwd: str) -> dict:
+    """Everything a worktree picker needs about ``cwd``, in one answer.
+
+    One call because it is one round trip when the asker is not on this
+    machine: the web UI and the ``spawn`` form are describing the *daemon's*
+    filesystem, and three endpoints for "is it a repo, what is it on, what is
+    beside it" would be three chances to answer from three different states.
+    """
+    root = repo_root(cwd)
+    if root is None:
+        return {"repo": False, "root": "", "branch": "", "branches": [], "worktrees": []}
+    return {
+        "repo": True,
+        "root": str(root),
+        "branch": current_branch(Path(cwd)),
+        "branches": branches(cwd),
+        "worktrees": existing(cwd),
+    }
+
+
+def is_dirty(path: Path) -> bool:
+    """Whether ``path`` has uncommitted changes to *tracked* files.
+
+    Untracked files are not counted, because a rebase does not care about
+    them -- and refusing a launch over a stray build artefact would be a
+    refusal nobody could act on.
+    """
+    done = _git(["status", "--porcelain", "--untracked-files=no"], cwd=str(path))
+    if done.returncode != 0:
+        return False
+    return bool((done.stdout or "").strip())
+
+
+def rebase(wt: "Worktree", base: str) -> "Worktree":
+    """Bring a reused checkout up to date with ``base``, or refuse the launch.
+
+    Reuse is the whole point of naming a worktree, and a checkout you come
+    back to a day later is a day behind whatever it was cut from. So the
+    reused case gets the offer the fresh case does not need: rebase onto the
+    branch this one is a branch *of* -- ``master`` for a launch from the main
+    checkout, the parent's own branch for a child.
+
+    **A failure here fails the launch, and leaves nothing behind.** An agent
+    started in a half-rebased checkout is worse than one that never started:
+    the conflict is not its work, the branch is not in a state it can commit
+    from, and it would spend its first turn on a mess it did not make and
+    cannot explain. Uncommitted work is refused *before* anything is run
+    (there is no safe automatic answer to it), and a conflict aborts the
+    rebase before it raises, so "nothing happened" is literally true and the
+    checkout is exactly as it was found.
+
+    Local by design: no fetch, no pull. The base is a branch of this
+    repository as it stands on this machine, which is what "rebase onto
+    master" means when you type it yourself.
+    """
+    if not base:
+        return wt
+    if is_dirty(wt.path):
+        raise WorktreeError(
+            f"worktree {wt.name!r} has uncommitted changes, so it cannot be "
+            f"rebased onto {base!r} -- commit or stash them in {wt.path} and "
+            "launch again (or launch without the update)"
+        )
+    if _git(["rev-parse", "--verify", "--quiet", base], cwd=str(wt.path)).returncode != 0:
+        raise WorktreeError(
+            f"no branch {base!r} in this repository to rebase {wt.name!r} onto"
+        )
+    done = _git(["rebase", base], cwd=str(wt.path))
+    if done.returncode != 0:
+        # Back out of the rebase git left half-applied, so the refusal really
+        # does leave the checkout untouched.
+        _git(["rebase", "--abort"], cwd=str(wt.path))
+        detail = (done.stderr or done.stdout or "").strip().splitlines()
+        raise WorktreeError(
+            f"rebasing worktree {wt.name!r} onto {base!r} failed, so nothing "
+            f"was started (the rebase was aborted and {wt.path} is as it was): "
+            + (detail[-1] if detail else "git rebase reported no reason")
+        )
+    return Worktree(
+        path=wt.path, name=wt.name, branch=current_branch(wt.path) or wt.branch,
+        created=wt.created, rebased=base,
+    )
+
 # --------------------------------------------------------------------------- #
 # deciding
 # --------------------------------------------------------------------------- #
@@ -316,12 +456,24 @@ def _ask(root: Path) -> Optional[str]:
             print(f"  {exc}", file=sys.stderr)
 
 
-def resolve(cwd: str, choice: Choice, *, resuming: bool = False) -> Optional[Worktree]:
+def resolve(
+    cwd: str,
+    choice: Choice,
+    *,
+    resuming: bool = False,
+    rebase_onto: str = "",
+) -> Optional[Worktree]:
     """Turn a ``--worktree`` answer -- and maybe a question -- into a checkout.
 
     Returns the worktree to launch in, or ``None`` to stay in ``cwd``. Raises
     only when a worktree was *asked for* and could not be made: an unanswered
     question never fails a launch.
+
+    ``rebase_onto`` brings a *reused* checkout up to date before the agent is
+    let into it (see :func:`rebase`); it is ignored for one just created,
+    which was cut from the repository as it stands and has nothing to catch
+    up on. A rebase that cannot be done cleanly fails the launch, which is
+    the same rule a worktree that cannot be made already follows.
 
     ``resuming`` says the launch opens an existing conversation
     (``--resume``, ``--continue``, ``--session-id``). Claude Code keeps
@@ -357,14 +509,19 @@ def resolve(cwd: str, choice: Choice, *, resuming: bool = False) -> Optional[Wor
                 "none to resume. Name a worktree that already exists, or drop "
                 "the resume and start a conversation there"
             )
-        return create(root, name)
+        return _updated(create(root, name), rebase_onto)
     if resuming:
         # Nothing to ask: the answer that a resume implies is "here".
         return None
     if not interactive():
         return None
     chosen = _ask(root)
-    return create(root, chosen) if chosen else None
+    return _updated(create(root, chosen), rebase_onto) if chosen else None
+
+
+def _updated(wt: Worktree, base: str) -> Worktree:
+    """Rebase a reused checkout onto ``base``; a fresh one is already there."""
+    return wt if wt.created or not base else rebase(wt, base)
 
 
 def announce(wt: Optional[Worktree], stream=None) -> None:
@@ -372,6 +529,8 @@ def announce(wt: Optional[Worktree], stream=None) -> None:
     if wt is None:
         return
     verb = "created" if wt.created else "reusing"
+    if wt.rebased:
+        verb = f"reusing (rebased onto {wt.rebased})"
     print(
         f"{verb} worktree {wt.name!r} on branch {wt.branch!r}: {wt.path}",
         file=stream or sys.stderr,

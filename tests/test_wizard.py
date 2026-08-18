@@ -56,11 +56,17 @@ class FakeSources(wizard.Sources):
         self.workflow_calls.append(cwd)
         return self._workflows.get(cwd, [])
 
-    def worktrees(self, cwd):
-        return ["review"] if self._repo else []
-
-    def is_repo(self, cwd):
-        return self._repo
+    def git(self, cwd):
+        if not self._repo:
+            return {"repo": False, "branch": "", "branches": [], "worktrees": []}
+        # A branch per directory, so a test can tell "the branch this checkout
+        # is cut from" apart from any other.
+        branch = {"/srv/api": "api-main"}.get(cwd, "master")
+        return {
+            "repo": True, "branch": branch,
+            "branches": [branch, "topic", "old-thing"],
+            "worktrees": ["review"],
+        }
 
 
 def form(**kw) -> wizard.Wizard:
@@ -497,7 +503,9 @@ class FakeSpawnSources(FakeSources):
         self._report = report if report is not None else {
             "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
             "children_used": 1, "children_remaining": 3,
-            "may_choose": ["workspace"], "spawnable_harnesses": [],
+            # what the shipped policy allows: a workspace from the vouched
+            # list, and a checkout of the repository the parent is already in
+            "may_choose": ["workspace", "worktree"], "spawnable_harnesses": [],
             "workspaces": [{"name": "api", "path": "/srv/api", "exists": True}],
         }
         self._sessions = sessions if sessions is not None else [
@@ -530,13 +538,14 @@ def spawn_form(**kw) -> wizard.SpawnWizard:
 
 
 def test_the_spawn_form_asks_only_what_a_child_may_be_asked():
-    """No profile, no directory, no worktree: a child is a copy of its parent,
-    and the isolation a worktree buys was bought upstream."""
+    """No profile and no directory: a child runs under its parent's login, in
+    its parent's directory. A worktree OF that directory is the exception, and
+    the only way two children of one parent stop editing each other's files."""
     wiz = spawn_form()
     keys = [f.key for f in wiz.fields]
     assert "parent" in keys
-    for absent in ("profile", "cwd", "worktree", "worktree_name", "resume",
-                   "fork_session", "restore"):
+    assert "worktree" in keys
+    for absent in ("profile", "cwd", "resume", "fork_session", "restore"):
         assert absent not in keys, absent
 
 
@@ -727,3 +736,141 @@ def test_the_spawn_form_is_for_the_person_the_parent_picker_exists_for(monkeypat
     monkeypatch.setenv("CLAUNCH_SESSION", "lead")
     with pytest.raises(wizard.WizardUnavailable):
         cli_sessions._run_wizard(argparse.Namespace(), spawn=True)
+
+
+# --------------------------------------------------------------------------- #
+# reusing a checkout, from either form
+# --------------------------------------------------------------------------- #
+def test_only_a_reused_worktree_can_be_out_of_date():
+    """A fresh one is cut from the repository as it stands, so asking whether
+    to update it would be asking about nothing."""
+    wiz = form()
+    assert wiz.field("update").hidden
+    pick(wiz, "worktree", "new worktree")
+    assert wiz.field("update").hidden
+    pick(wiz, "worktree", "review")
+    assert not wiz.field("update").hidden
+
+
+def test_saying_yes_to_the_update_lands_on_the_branch_to_catch_up_with():
+    wiz = form()
+    pick(wiz, "worktree", "review")
+    pick(wiz, "update", "yes")
+    assert wiz.current.key == "rebase_onto"
+    assert not wiz.field("rebase_onto").hidden
+    # the branch this checkout is cut from leads the list
+    assert wiz.field("rebase_onto").options[0].value == "master"
+    assert "cut from" in wiz.field("rebase_onto").options[0].detail
+    assert [o.value for o in wiz.field("rebase_onto").options] == [
+        "master", "topic", "old-thing"
+    ]
+
+
+def test_the_base_is_a_picker_not_a_fixed_branch():
+    wiz = form()
+    pick(wiz, "worktree", "review")
+    pick(wiz, "update", "yes")
+    pick(wiz, "rebase_onto", "topic")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.worktree == "review"
+    assert args.rebase_onto == "topic"
+
+
+def test_no_update_sends_no_base_at_all():
+    wiz = form()
+    pick(wiz, "worktree", "review")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.worktree == "review"
+    assert args.rebase_onto == ""
+    assert "rebased" not in wiz.summary()
+
+
+def test_the_summary_names_the_branch_it_will_catch_up_with():
+    wiz = form()
+    pick(wiz, "worktree", "review")
+    pick(wiz, "update", "yes")
+    assert "worktree review" in wiz.summary()
+    assert "rebased onto master" in wiz.summary()
+
+
+# --------------------------------------------------------------------------- #
+# a child's own checkout
+# --------------------------------------------------------------------------- #
+def test_a_child_can_be_given_a_checkout_of_its_own():
+    wiz = spawn_form()
+    wt = wiz.field("worktree")
+    assert wt.selectable
+    labels = [o.label for o in wt.options]
+    assert labels[0].startswith("(none)")
+    assert "new worktree" in labels
+    assert "review" in labels  # already on disk beside the parent's
+
+
+def test_the_childs_worktree_is_named_here_not_by_the_daemon():
+    """`new-session` names an unnamed worktree after the Herdr pane; the
+    daemon that cuts a child's has no pane, so the form answers instead."""
+    wiz = spawn_form()
+    focus_on(wiz, "name")
+    for ch in "helper":
+        wiz.handle(ch)
+    wiz.handle("enter")
+    auto = wiz.auto_worktree_name()
+    assert auto.startswith("helper-")
+    assert "auto-named: helper-" in [
+        o.detail for o in wiz.field("worktree").options if o.value == ""
+    ][0]
+    pick(wiz, "worktree", "new worktree")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.worktree == auto          # a NAME, never a path
+    assert "\\" not in args.worktree and "/" not in args.worktree
+
+
+def test_without_a_name_the_childs_worktree_is_named_after_its_parent():
+    wiz = spawn_form()
+    assert wiz.auto_worktree_name().startswith("lead-")
+
+
+def test_the_policy_can_grey_out_the_childs_worktree():
+    wiz = spawn_form(report={
+        "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
+        "children_used": 0, "children_remaining": 4,
+        "may_choose": [], "spawnable_harnesses": [],
+    })
+    wt = wiz.field("worktree")
+    assert not wt.selectable
+    assert "spawn.allow_worktree" in wt.disabled_note
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.worktree is None
+
+
+def test_a_childs_update_catches_up_with_its_parents_branch():
+    """'rebase onto the parent's branch' is the same rule as new-session's
+    'the branch you came from' -- the one the checkout is cut from."""
+    wiz = spawn_form()
+    pick(wiz, "worktree", "review")
+    pick(wiz, "update", "yes")
+    assert wiz.field("rebase_onto").options[0].value == "master"
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.rebase_onto == "master"
+
+
+def test_a_childs_worktree_follows_the_workspace_it_was_sent_to():
+    """Cut from where the child will actually run, so the branch to catch up
+    with is that repository's, not the parent's."""
+    wiz = spawn_form()
+    pick(wiz, "workspace", "api")
+    pick(wiz, "worktree", "review")
+    pick(wiz, "update", "yes")
+    assert wiz.field("rebase_onto").options[0].value == "api-main"
+
+
+def test_a_parent_outside_a_repository_is_offered_no_worktree():
+    wiz = spawn_form(repo=False)
+    assert wiz.field("worktree").hidden
+    assert wiz.field("update").hidden
+    assert wiz.field("rebase_onto").hidden

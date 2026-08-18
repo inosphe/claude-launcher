@@ -998,7 +998,14 @@ questions the flags can barely ask:
   one* (auto-named after the pane and the time), *a new one you name*, and
   every launcher worktree already on disk, since returning to one is the
   common case a name exists for. It replaces the `[y/N]` prompt that would
-  otherwise fire *after* the command line was already committed.
+  otherwise fire *after* the command line was already committed. Picking an
+  existing one reveals **Update** — a checkout you come back to is as far
+  behind as the day you left it — which rebases it onto a branch you pick
+  (defaulting to the one the checkout was cut from, usually `master`; local
+  only, no fetch). Uncommitted work, or a rebase that conflicts, **refuses the
+  launch**: the rebase is aborted, nothing is created, and the checkout stays
+  exactly as you left it — an agent must never wake up mid-conflict in a mess
+  it did not make. By flag: `--worktree=NAME --rebase-onto BRANCH`.
 - **Attach** — whether to take this terminal over the moment it starts
   (`Ctrl+]` detaches, and the session lives on either way).
 
@@ -1040,10 +1047,22 @@ claunch spawn
   up/down move   left/right change   Enter open   Ctrl+S create   Esc cancel
 ```
 
-No profile row (a child runs under its parent's), no directory row (it
-inherits one — a registered **workspace** is the vouched-for exception), and
-no worktree row: the parent is already standing in whatever checkout it was
-launched into, so the isolation was bought upstream.
+No profile row (a child runs under its parent's) and no directory row (it
+inherits one — a registered **workspace** is the vouched-for exception). But
+there *is* a **Worktree** row, and it is the row a fleet needs: two children
+of one parent in the parent's checkout edit each other's files mid-edit, and a
+worktree of that repository is the only directory a child may have that is
+nobody's workspace — allowed because it is derived from where the parent
+already stands, not a path anybody typed (`spawn.allow_worktree`, on by
+default; the same reasoning as `allow_workspace`). The daemon cuts it from the
+parent's repository — or from the workspace the child was sent to — so it
+works with a remote daemon, and agents get the same field on their `spawn`
+tool. An unnamed one is auto-named after the child (`helper-20260818-2048`),
+since the daemon has no Herdr pane to name a checkout after. Reusing one
+offers the same **Update** rebase as `new-session`'s form, defaulting to the
+parent's own branch — and a rebase that cannot be done cleanly refuses the
+spawn with nothing created. By flag: `claunch spawn --worktree NAME
+--rebase-onto BRANCH`.
 
 **Parent** is the field that has no equivalent in the other form, and it is
 why this one exists. `spawn` normally reads its parent from
@@ -1072,8 +1091,8 @@ and a form painted into its PTY would hang the session it was creating.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn a harness in a managed PTY. `--wizard` picks every field from a form in this terminal instead (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
-| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` picks the parent (and everything its policy allows) from a form; by flag: (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`). `--mesh` defaults to the parent's own. See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
+| `new-session` (`new`) | Spawn a harness in a managed PTY. `--wizard` picks every field from a form in this terminal instead (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH` to update a reused worktree first, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
+| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` picks the parent (and everything its policy allows) from a form; by flag: (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`, `--worktree NAME --rebase-onto BRANCH` for a checkout of the child's own). `--mesh` defaults to the parent's own. See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |

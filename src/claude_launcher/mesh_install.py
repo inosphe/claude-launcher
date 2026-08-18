@@ -120,6 +120,13 @@ yours to carry out, with `spawn`.
   what it runs. Give it a `role` from this mesh's vocabulary (`claunch mesh
   roles MESH`) and a `task` that says what it is for; a child that has to ask
   what it exists for has already cost you a turn.
+- **Spawning more than one child that edits code? Give each a `worktree`.**
+  Two agents in one checkout overwrite each other's edits mid-edit; a named
+  `worktree` gives the child a second checkout of your repository on its own
+  branch (`worktree: helper-auth`, or `--worktree helper-auth`). Naming one
+  that already exists returns to that checkout — add `rebase_onto` with your
+  branch to bring it up to date first; if the rebase cannot apply cleanly the
+  spawn is refused with nothing created, so say so instead of retrying.
 - **A different directory is a `workspace`, not a path**: `workspace: NAME`
   (`-w NAME`), one of the names `children` lists. A bare path is refused by
   policy, and reaching for `new-session -c DIR` because of that is exactly the

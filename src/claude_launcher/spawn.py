@@ -58,7 +58,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from . import store, workspaces
+from . import store, workspaces, worktree as worktree_mod
 
 #: Policy defaults. Permissive enough that spawning works out of the box,
 #: restrictive enough that a child is always recognisably a copy of its
@@ -75,6 +75,11 @@ DEFAULTS = {
     # is a pick from a list the user vouched for, not a value an agent
     # invents, so an unregistered directory stays unreachable either way.
     "allow_workspace": True,
+    # Same exception, same reason: a worktree is not a directory an agent
+    # invented, it is a second checkout of the repository the parent is
+    # already standing in -- derived from what the child would have inherited
+    # anyway, and the one way a child gets a checkout it cannot collide in.
+    "allow_worktree": True,
     "allow_args": False,
     "allow_env": False,
 }
@@ -88,6 +93,10 @@ _GATED_FIELDS = (
     ("workspace", "allow_workspace"),
     ("args", "allow_args"),
     ("env", "allow_env"),
+    # Last on purpose: it is cut from whatever directory the fields above
+    # settled on, so a worktree of a workspace is a worktree of that
+    # workspace and not of the parent's own checkout.
+    ("worktree", "allow_worktree"),
 )
 
 #: Refusals for keys that do not name a field of the child's definition.
@@ -98,6 +107,12 @@ _DENIALS = {
         "a spawned session inherits its parent's working directory — set "
         "'spawn.allow_workspace: true' in ~/.claunch.yaml to let an agent "
         "move a child to a directory you registered with 'claunch workspace add'"
+    ),
+    "worktree": (
+        "a spawned session inherits its parent's working directory, and may "
+        "not cut a checkout of its own — set 'spawn.allow_worktree: true' in "
+        "~/.claunch.yaml to let a child have a git worktree of the repository "
+        "its parent is in"
     ),
 }
 
@@ -121,6 +136,7 @@ class SpawnPolicy:
     allow_profile: bool = False
     allow_cwd: bool = False
     allow_workspace: bool = True
+    allow_worktree: bool = True
     allow_args: bool = False
     allow_env: bool = False
 
@@ -150,6 +166,7 @@ class SpawnPolicy:
             allow_profile=bool(block["allow_profile"]),
             allow_cwd=bool(block["allow_cwd"]),
             allow_workspace=bool(block["allow_workspace"]),
+            allow_worktree=bool(block["allow_worktree"]),
             allow_args=bool(block["allow_args"]),
             allow_env=bool(block["allow_env"]),
         )
@@ -163,6 +180,7 @@ class SpawnPolicy:
             "allow_profile": self.allow_profile,
             "allow_cwd": self.allow_cwd,
             "allow_workspace": self.allow_workspace,
+            "allow_worktree": self.allow_worktree,
             "allow_args": self.allow_args,
             "allow_env": self.allow_env,
         }
@@ -287,11 +305,53 @@ def check(
             child["env"] = {**child["env"], **{str(k): str(v) for k, v in value.items()}}
         elif key == "workspace":
             child["cwd"] = resolve_workspace(str(value))
+        elif key == "worktree":
+            # Recorded, not cut. `check` decides what a child may be; making
+            # a directory is not deciding, and a request that is refused
+            # further down must not leave a checkout on disk behind it. See
+            # `make_worktree`, which the manager calls once staging is sure.
+            child["worktree"] = worktree_mod.validate_name(str(value))
         else:
             child[key] = str(value)
 
     return child
 
+
+
+def make_worktree(child: dict, request: dict) -> dict:
+    """Cut the checkout ``check`` recorded, and point the child at it.
+
+    Split from :func:`check` because they answer different questions and fail
+    at different costs. ``check`` decides what a child *may* be, and a
+    decision leaves nothing on disk; this makes a directory, so it runs once
+    the request has already passed everything that could refuse it -- a
+    worktree left behind by a spawn that was denied afterwards would be
+    litter nobody asked for and nobody would find.
+
+    It is cut from ``child["cwd"]``, which is the parent's directory or the
+    workspace that replaced it, so "a worktree of the workspace I sent it to"
+    means what it says. ``rebase_onto`` brings a *reused* checkout up to date
+    first (see :func:`claude_launcher.worktree.rebase`) -- a fresh one is cut
+    from the repository as it stands and has nothing to catch up on.
+
+    **This is the one place a child gets a directory that is nobody's
+    workspace**, and it is allowed for the same reason ``allow_workspace`` is:
+    the checkout is derived from the repository the parent is already in, not
+    a path an agent named. What it buys is the thing a fleet needs and a
+    shared checkout cannot give -- two children of one parent editing the
+    same repository without editing each other's files.
+    """
+    name = child.pop("worktree", "")
+    if not name:
+        return child
+    tree = worktree_mod.resolve(
+        child.get("cwd") or "",
+        name,
+        rebase_onto=str(request.get("rebase_onto") or ""),
+    )
+    if tree is not None:
+        child["cwd"] = str(tree.path)
+    return child
 
 def capabilities(policy: SpawnPolicy, *, depth: int, children: int) -> dict:
     """What this session may spawn right now — the report the MCP tool shows.
