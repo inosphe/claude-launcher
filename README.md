@@ -899,11 +899,82 @@ That `send-keys → wait-for → capture-pane` triple closes the automation loop
 external scripts (or another agent) can drive interactive claude sessions
 without a human at the keyboard.
 
+### Building one from a form (`--wizard`)
+
+`new-session` spells every field out as a flag, which is what makes it
+scriptable and what makes it hard to type — the harness, profile, directory,
+role, mesh, workflow and worktree are all **closed sets the daemon already
+publishes**, and typing them from memory is guessing at names a picker could
+show. `--wizard` opens exactly that picker in the terminal you are standing
+in: the web dashboard's create form, minus the browser.
+
+```bash
+claunch new-session --wizard          # every field, from its list
+claunch new -s api --wizard           # flags typed alongside pre-fill the form
+```
+
+```
+claunch new-session
+
+   Name            api
+   Harness         claude  Claude Code
+ > Profile         work
+   Directory       this directory  F:\works\claude-launcher
+   Worktree        (none) - work in the directory as it stands
+   Role            (no role)
+   Resume          (new conversation)
+   Fork            needs a conversation to fork
+   Args            (extra harness flags)
+
+  START IT WORKING
+   Mesh            (none)
+   Workflow        (none)
+   Opening task    typed in once it has booted - what it is for
+
+  AFTERWARDS
+   Restore         (daemon default)
+   Attach          no - leave it running in the daemon
+   [ Create session ]
+
+  which login and config the harness runs under ('claunch list')
+  up/down move   left/right change   Enter open   Ctrl+S create   Esc cancel
+```
+
+`↑`/`↓` move, `←`/`→` change an answer in place, `Enter` opens the full list
+for the field under the cursor (type a letter to jump inside it), `Ctrl+S`
+creates, `Esc` backs out having created nothing. The form paints on the
+alternate screen, so it leaves your scrollback as it found it.
+
+**Everything with an answer set is multiple choice**, including the two
+questions the flags can barely ask:
+
+- **Worktree** — offered only inside a repository, with *no worktree*, *a new
+  one* (auto-named after the pane and the time), *a new one you name*, and
+  every launcher worktree already on disk, since returning to one is the
+  common case a name exists for. It replaces the `[y/N]` prompt that would
+  otherwise fire *after* the command line was already committed.
+- **Attach** — whether to take this terminal over the moment it starts
+  (`Ctrl+]` detaches, and the session lives on either way).
+
+The rest is the same list the daemon would have checked afterwards, so a mesh
+that does not exist or a workflow not declared in that directory is never
+offered rather than refused once the session is half arranged. Fields that do
+not apply grey out rather than vanish: `Fork` says *needs a conversation to
+fork* until you pick one under `Resume`, and `Role`/`Resume` say *the claude
+harness only* under any other harness.
+
+Flags the form does not show — `--env KEY=VALUE`, `--cols/--rows`,
+`--detached` — are left exactly as you typed them.
+
+It is a form, so it needs somebody to fill it in: `--wizard` is refused
+outside an interactive terminal (and, like `new-session` itself, from inside a
+managed session — an agent building a session uses `spawn`).
+
 ### Session commands
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
+| `new-session` (`new`) | Spawn a harness in a managed PTY. `--wizard` picks every field from a form in this terminal instead (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
 | `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`). `--mesh` defaults to the parent's own. See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |

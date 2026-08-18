@@ -53,6 +53,7 @@ from .prompt_input import PromptInputError
 from .providers import ProviderError
 from .sync import SyncError
 from .syncserver.docs import SyncServerError
+from .wizard import WizardUnavailable
 
 
 # --------------------------------------------------------------------------- #
@@ -943,6 +944,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         CflowStateError,
         workspaces.WorkspaceError,
         worktree.WorktreeError,
+        WizardUnavailable,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

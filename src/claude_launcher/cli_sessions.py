@@ -51,6 +51,8 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     if inside and not args.detached:
         print(_use_spawn_instead(args, inside), file=sys.stderr)
         return 2
+    if getattr(args, "wizard", False) and not _run_wizard(args):
+        return 1
     env = {}
     for item in args.env or []:
         if "=" not in item:
@@ -130,6 +132,33 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     )
     _print_relay_status(client)
     return 0
+
+
+def _run_wizard(args: argparse.Namespace) -> bool:
+    """Fill ``args`` in from the terminal form. False when the user backed out.
+
+    Deliberately *before* everything else in :func:`_cmd_new_session` and
+    deliberately writing back onto the same namespace: the wizard is a second
+    way to answer ``new-session``, not a second way to create a session. The
+    refusal from inside a managed session is checked first (an agent must not
+    get a form either), and the worktree, the onboarding payload and the
+    attach that follow are the code that has always run.
+
+    The daemon is started here rather than at create time because the form's
+    lists -- harnesses, profiles, workspaces, roles, meshes, workflows,
+    resumable conversations -- are all things only it knows. Whether there is
+    anyone to show a form to is settled first, so a scripted ``--wizard``
+    fails having started nothing.
+    """
+    from . import wizard as wizard_mod
+
+    wizard_mod.require_terminal()
+    client = daemon_client.ensure_running()
+    return wizard_mod.run(
+        args,
+        sources=wizard_mod.DaemonSources(client),
+        cwd=os.path.abspath(args.cwd) if args.cwd else os.getcwd(),
+    )
 
 
 def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
@@ -732,6 +761,14 @@ def register(sub) -> None:
         aliases=["new"],
         help="spawn a harness (claude, ...) in a daemon-managed PTY session "
              "-- the human's command; from inside a session use 'claunch spawn'",
+    )
+    p_new.add_argument(
+        "--wizard", action="store_true",
+        help="pick every field from a form in this terminal instead of "
+        "spelling them out as flags -- harness, profile, directory, worktree, "
+        "role, resume, mesh, workflow and whether to attach, each from the "
+        "list the daemon publishes. Any flag given alongside it pre-fills its "
+        "field",
     )
     p_new.add_argument("-s", "--name", help="session name (auto-generated if omitted)")
     p_new.add_argument("--profile", help="claunch profile (required for the claude harness)")
