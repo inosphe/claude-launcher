@@ -986,16 +986,68 @@ harness only* under any other harness.
 Flags the form does not show — `--env KEY=VALUE`, `--cols/--rows`,
 `--detached` — are left exactly as you typed them.
 
-It is a form, so it needs somebody to fill it in: `--wizard` is refused
-outside an interactive terminal (and, like `new-session` itself, from inside a
-managed session — an agent building a session uses `spawn`).
+**`spawn` has one too**, and it is deliberately shorter — a child is a copy of
+its parent, so the form only asks what a child may be asked:
+
+```bash
+claunch spawn --wizard
+```
+
+```
+claunch spawn
+
+ > Parent          lead  idle, work, /work/repo
+   Name            (auto)
+   Harness         the child runs what its parent runs (spawn.allow_harness)
+   Workspace       (the parent's directory: /work/repo)
+
+  START IT WORKING
+   Mesh            (the parent's: team)
+   Handle          (the session name)
+   Role            (no role)
+   Connect         (the whole mesh)
+   Workflow        (none)
+   Opening task    typed into the child once it has booted - what it is for
+   [ Spawn child ]
+
+  child of this one: 1 running, 3 left (depth 0/3)
+  up/down move   left/right change   Enter open   Ctrl+S create   Esc cancel
+```
+
+No profile row (a child runs under its parent's), no directory row (it
+inherits one — a registered **workspace** is the vouched-for exception), and
+no worktree row: the parent is already standing in whatever checkout it was
+launched into, so the isolation was bought upstream.
+
+**Parent** is the field that has no equivalent in the other form, and it is
+why this one exists. `spawn` normally reads its parent from
+`$CLAUNCH_SESSION`, which is set for agents and for nobody else — a person at
+a terminal has to name one. The form also reads that parent's
+[spawn budget](#agents-that-build-their-own-team-spawn--hierarchy--member-graph)
+and prints it under the cursor, so a session with no slots left says so on its
+own row instead of refusing a filled-in form. What
+[`spawn.allow_harness` / `allow_workspace`](#agents-that-build-their-own-team-spawn--hierarchy--member-graph)
+leave locked is greyed out with the config key that would open it, rather than
+hidden.
+
+**Mesh** defaults to *the parent's own* (opening one for the pair if it is in
+none) — that is what `spawn` means by leaving it out, so it is the first
+entry, not an empty box. `- no mesh at all` is a deliberate answer beside it,
+and picking it takes the handle and the roster with it. **Connect** lists that
+mesh's members minus the parent, since a child can always reach its parent
+anyway.
+
+It is a form, so it needs somebody to fill it in: both are refused outside an
+interactive terminal, and both are refused from inside a managed session —
+an agent has its parent in `$CLAUNCH_SESSION` and needs no list to pick from,
+and a form painted into its PTY would hang the session it was creating.
 
 ### Session commands
 
 | Command | Description |
 | ------- | ----------- |
 | `new-session` (`new`) | Spawn a harness in a managed PTY. `--wizard` picks every field from a form in this terminal instead (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
-| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`). `--mesh` defaults to the parent's own. See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
+| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` picks the parent (and everything its policy allows) from a form; by flag: (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`). `--mesh` defaults to the parent's own. See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |

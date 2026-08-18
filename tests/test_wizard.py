@@ -484,3 +484,246 @@ def test_an_agent_is_sent_to_spawn_before_the_form_opens(monkeypatch, capsys):
     args = cli.build_parser().parse_args(["new-session", "--wizard"])
     assert cli_sessions._cmd_new_session(args) == 2
     assert "claunch spawn" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# spawn: a child, and only what a child may be asked
+# --------------------------------------------------------------------------- #
+class FakeSpawnSources(FakeSources):
+    """A daemon with one parent session and a policy the test decides."""
+
+    def __init__(self, *, report=None, sessions=None, **kw):
+        super().__init__(**kw)
+        self._report = report if report is not None else {
+            "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
+            "children_used": 1, "children_remaining": 3,
+            "may_choose": ["workspace"], "spawnable_harnesses": [],
+            "workspaces": [{"name": "api", "path": "/srv/api", "exists": True}],
+        }
+        self._sessions = sessions if sessions is not None else [
+            {"name": "lead", "status": "idle", "harness": "claude",
+             "profile": "work", "cwd": "/work/repo"},
+            {"name": "old", "status": "exited", "harness": "claude",
+             "profile": "work", "cwd": "/work/other", "conversation_id": "u1"},
+        ]
+        self.report_calls = []
+
+    def sessions(self):
+        return self._sessions
+
+    def spawn_report(self, parent):
+        self.report_calls.append(parent)
+        return self._report
+
+    def mesh_of(self, session):
+        return "team" if session == "lead" else ""
+
+    def members(self, mesh):
+        return ["lead", "api", "docs"] if mesh == "team" else []
+
+
+def spawn_form(**kw) -> wizard.SpawnWizard:
+    sources = kw.pop("sources", None) or FakeSpawnSources(**kw)
+    wiz = wizard.SpawnWizard(sources, cwd="/work/repo")
+    wiz.color = False
+    return wiz
+
+
+def test_the_spawn_form_asks_only_what_a_child_may_be_asked():
+    """No profile, no directory, no worktree: a child is a copy of its parent,
+    and the isolation a worktree buys was bought upstream."""
+    wiz = spawn_form()
+    keys = [f.key for f in wiz.fields]
+    assert "parent" in keys
+    for absent in ("profile", "cwd", "worktree", "worktree_name", "resume",
+                   "fork_session", "restore"):
+        assert absent not in keys, absent
+
+
+def test_the_parent_is_a_picker_of_the_sessions_that_exist():
+    wiz = spawn_form()
+    assert [o.value for o in wiz.field("parent").options] == ["lead", "old"]
+    assert wiz.value("parent") == "lead"
+    assert "idle" in wiz.field("parent").options[0].detail
+
+
+def test_with_no_sessions_there_is_nothing_to_be_a_child_of():
+    wiz = spawn_form(sessions=[])
+    assert wiz.value("parent") is None
+    assert wiz.handle("submit") is None
+    assert "no parent to spawn from" in wiz.error
+
+
+def test_the_parent_row_says_what_it_has_left_to_spend():
+    wiz = spawn_form()
+    assert "1 running, 3 left" in wiz.field("parent").hint
+    assert "depth 0/3" in wiz.field("parent").hint
+
+
+def test_a_parent_with_no_slots_is_refused_before_anything_is_arranged():
+    """The whole reason the form reads the spawn report: a full parent says so
+    on its own row, instead of the daemon refusing a filled-in form."""
+    wiz = spawn_form(report={
+        "can_spawn": False,
+        "blocked_by": ["child limit reached (4/4)"],
+        "depth": 1, "max_depth": 3, "children_used": 4, "children_remaining": 0,
+        "may_choose": [], "spawnable_harnesses": [],
+    })
+    assert wiz.handle("submit") is None
+    assert "child limit reached (4/4)" in wiz.error
+    assert wiz.current.key == "parent"
+
+
+def test_the_policy_decides_which_rows_are_open():
+    wiz = spawn_form()
+    # allow_harness is empty in the default report: the child runs what its
+    # parent runs, and the row says so rather than disappearing.
+    assert not wiz.field("harness").selectable
+    assert "spawn.allow_harness" in wiz.field("harness").disabled_note
+    # allow_workspace is on, so the registry it published is pickable
+    assert wiz.field("workspace").selectable
+    assert [o.value for o in wiz.field("workspace").options] == ["", "api"]
+
+
+def test_an_unlocked_harness_becomes_pickable():
+    wiz = spawn_form(report={
+        "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
+        "children_used": 0, "children_remaining": 4,
+        "may_choose": [], "spawnable_harnesses": ["codex"],
+    })
+    harness = wiz.field("harness")
+    assert harness.selectable
+    assert [o.value for o in harness.options] == ["", "codex"]
+    assert "the parent's" in harness.options[0].label
+    # allow_workspace off means the report carries no workspace list at all
+    assert not wiz.field("workspace").selectable
+
+
+def test_the_form_is_rebuilt_when_the_parent_changes():
+    wiz = spawn_form()
+    assert "F:" not in wiz.field("workspace").options[0].label
+    assert "/work/repo" in wiz.field("workspace").options[0].label
+    pick(wiz, "parent", "old")
+    assert "/work/other" in wiz.field("workspace").options[0].label
+    assert wiz.sources.report_calls == ["lead", "old"]
+
+
+def test_the_mesh_defaults_to_the_parents_own():
+    wiz = spawn_form()
+    mesh = wiz.field("mesh")
+    assert mesh.options[0].label == "(the parent's: team)"
+    assert mesh.value == ""            # "" = inherit, which is what spawn means
+    assert mesh.options[1].value == wizard.SpawnWizard.NO_MESH
+
+
+def test_a_parent_in_no_mesh_says_one_will_be_opened():
+    wiz = spawn_form()
+    pick(wiz, "parent", "old")
+    assert "opened for the pair" in wiz.field("mesh").options[0].label
+
+
+def test_no_mesh_at_all_takes_the_handle_and_the_roster_with_it():
+    wiz = spawn_form()
+    assert not wiz.field("handle").hidden
+    pick(wiz, "mesh", "- no mesh")
+    assert wiz.field("handle").hidden
+    assert wiz.field("connect").hidden
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.mesh == "-"
+    assert args.handle is None and args.connect == []
+
+
+def test_the_roster_is_the_parents_mesh_minus_the_parent():
+    """It can always reach its parent, so offering that as a connection would
+    be offering something that is already true."""
+    wiz = spawn_form()
+    connect = wiz.field("connect")
+    assert [o.value for o in connect.options] == ["api", "docs"]
+
+
+def test_workflows_follow_the_directory_the_child_will_run_in():
+    sources = FakeSpawnSources(workflows={"/srv/api": ["ship-it"]})
+    wiz = wizard.SpawnWizard(sources, cwd="/work/repo")
+    assert [o.value for o in wiz.field("workflow").options] == [""]
+    pick(wiz, "workspace", "api")
+    assert "ship-it" in [o.value for o in wiz.field("workflow").options]
+
+
+def test_spawn_apply_writes_the_flags_spawn_reads():
+    wiz = spawn_form()
+    focus_on(wiz, "name")
+    for ch in "helper":
+        wiz.handle(ch)
+    wiz.handle("enter")
+    pick(wiz, "workspace", "api")
+    pick(wiz, "role", "worker")
+    focus_on(wiz, "handle")
+    for ch in "hand":
+        wiz.handle(ch)
+    wiz.handle("enter")
+    focus_on(wiz, "connect")
+    wiz.handle("enter")
+    wiz.handle("enter")          # the first member, and done
+    focus_on(wiz, "task")
+    for ch in "ship it":
+        wiz.handle(ch)
+    wiz.handle("enter")
+
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.parent == "lead"
+    assert args.name == "helper"
+    assert args.harness is None          # inherited, and not ours to send
+    assert args.workspace == "api"       # the NAME, which is what -w means
+    assert args.role == "worker"
+    assert args.mesh is None             # "" = the parent's, sent as nothing
+    assert args.handle == "hand"
+    assert args.connect == ["api"]
+    assert args.task == "ship it"
+    assert wiz.handle("submit") == "create"
+
+
+def test_the_spawn_form_says_whose_child_it_is_making():
+    wiz = spawn_form()
+    assert wiz.summary().startswith("spawning: child of lead")
+    assert "mesh team" in wiz.summary()
+
+
+def test_the_spawn_form_reads_like_the_command():
+    wiz = spawn_form()
+    screen = "\n".join(wiz.render(90, 30))
+    assert "claunch spawn" in screen
+    for label in ("Parent", "Name", "Harness", "Workspace", "Mesh", "Role",
+                  "Workflow", "Opening task", "Spawn child"):
+        assert label in screen
+
+
+def test_spawn_runs_the_wizard_before_it_asks_the_daemon_for_anything(monkeypatch):
+    monkeypatch.setattr(
+        cli_sessions.daemon_client, "ensure_running",
+        lambda *a, **k: (_ for _ in ()).throw(
+            AssertionError("the daemon must not be asked to spawn anything")
+        ),
+    )
+    seen = {}
+
+    def fake(args, *, spawn=False):
+        seen["spawn"] = spawn
+        return False
+
+    monkeypatch.setattr(cli_sessions, "_run_wizard", fake)
+    from claude_launcher import cli
+
+    args = cli.build_parser().parse_args(["spawn", "--wizard"])
+    assert args.wizard is True
+    assert cli_sessions._cmd_spawn(args) == 1
+    assert seen["spawn"] is True
+
+
+def test_the_spawn_form_is_for_the_person_the_parent_picker_exists_for(monkeypatch):
+    """An agent has its parent in $CLAUNCH_SESSION and needs no list; a form
+    painted into its PTY would hang the child it was creating."""
+    monkeypatch.setenv("CLAUNCH_SESSION", "lead")
+    with pytest.raises(wizard.WizardUnavailable):
+        cli_sessions._run_wizard(argparse.Namespace(), spawn=True)

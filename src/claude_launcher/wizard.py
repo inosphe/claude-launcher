@@ -1,13 +1,21 @@
-"""``claunch new-session --wizard``: the same session, chosen from lists.
+"""``--wizard``: the same session, chosen from lists instead of typed.
 
-``new-session`` spells everything out as flags, which is what makes it
-scriptable and what makes it hard to type: a session's harness, profile,
-directory, role, mesh, workflow and worktree are all *closed sets* the daemon
-already publishes, and a human typing them from memory is guessing at names a
-picker could simply show. The web dashboard has had that form for a while
-(harness/profile/directory/role/resume, then the "start it working" block);
-this is the same form for a terminal, so a session can be built where the
-person already is instead of in a browser.
+``new-session`` and ``spawn`` spell everything out as flags, which is what
+makes them scriptable and what makes them hard to type: a session's harness,
+profile, directory, role, mesh, workflow and worktree -- and a child's parent,
+workspace and mesh -- are all *closed sets* the daemon already publishes, and
+a human typing them from memory is guessing at names a picker could simply
+show. The web dashboard has had that form for a while (harness/profile/
+directory/role/resume, then the "start it working" block); this is the same
+form for a terminal, so a session can be built where the person already is
+instead of in a browser.
+
+Two commands, two forms, one engine: :class:`Form` knows about rows, pickers
+and eighty columns and nothing about sessions, while :class:`Wizard`
+(``new-session``) and :class:`SpawnWizard` (``spawn``) each answer their own
+command. Neither posts anything -- both fill in the namespace argparse would
+have built and hand it back, so the policy, the refusals and the onboarding
+are the daemon's, unchanged.
 
 **Every field that has an answer set is multiple choice.** A mistyped mesh, a
 workflow that is not declared in this directory, a workspace that no longer
@@ -318,11 +326,28 @@ class Sources:
     def roles(self) -> List[dict]:
         return []
 
+    def sessions(self) -> List[dict]:
+        return []
+
     def resumable(self) -> List[dict]:
         return []
 
+    def spawn_report(self, parent: str) -> dict:
+        """What ``parent`` may spawn right now: the policy, and its budget.
+
+        The daemon answers this per session rather than per machine, and the
+        spawn form is built out of it -- which fields are unlockable, which
+        workspaces a child may be sent to, and whether there is a slot left at
+        all. Empty when it cannot be asked, which reads as "nothing unlocked".
+        """
+        return {}
+
     def meshes(self) -> List[dict]:
         return []
+
+    def mesh_of(self, session: str) -> str:
+        """The mesh ``session`` is a member of, or "" -- the child's default."""
+        return ""
 
     def members(self, mesh: str) -> List[str]:
         return []
@@ -379,14 +404,39 @@ class DaemonSources(Sources):
     def roles(self) -> List[dict]:
         return self._get("roles", "/api/roles", "roles", [])
 
+    def sessions(self) -> List[dict]:
+        return self._get("sessions", "/api/sessions", "sessions", [])
+
     def resumable(self) -> List[dict]:
-        sessions = self._get("sessions", "/api/sessions", "sessions", [])
         # A session with no pinned conversation has nothing to resume; an
         # exited one does, and picking that up elsewhere is the whole point.
-        return [s for s in sessions if s.get("conversation_id")]
+        return [s for s in self.sessions() if s.get("conversation_id")]
+
+    def spawn_report(self, parent: str) -> dict:
+        key = "spawn:" + parent
+        if key not in self._cache:
+            from urllib.parse import quote
+
+            try:
+                self._cache[key] = self.client.get(
+                    f"/api/sessions/{quote(parent)}/children"
+                )
+            except Exception:
+                # An unknown parent, or a daemon too old to report: the form
+                # falls back to "nothing unlocked", which is the policy's own
+                # default and refuses nothing the daemon would have allowed.
+                self._cache[key] = {}
+        return self._cache[key]
 
     def meshes(self) -> List[dict]:
         return self._get("meshes", "/api/mesh", "meshes", [])
+
+    def mesh_of(self, session: str) -> str:
+        for m in self.meshes():
+            for x in m.get("members") or []:
+                if x.get("session") == session:
+                    return str(m.get("name") or "")
+        return ""
 
     def members(self, mesh: str) -> List[str]:
         for m in self.meshes():
@@ -480,14 +530,23 @@ _HELP = {
 _HELP_MULTI = "up/down move   Space toggle   Enter done   Esc back"
 
 
-class Wizard:
-    """The form's whole state: fields, cursor, mode, and what it says.
+class Form:
+    """A form's whole state: fields, cursor, mode, and what it says.
 
     Kept free of terminal I/O on purpose -- :meth:`handle` takes a key name
     and :meth:`render` returns lines. The loop that reads a keyboard and
     paints a console is :func:`run`, and everything worth testing is on this
     side of that line.
+
+    Two commands build a session and neither is the other (see
+    :mod:`cli_sessions`): ``new-session`` is the human's, ``spawn`` is a
+    session's. They ask for different things, so they are two subclasses --
+    what they share is the part with no opinion about sessions at all: rows,
+    pickers, a text cursor, and how any of it looks in eighty columns.
     """
+
+    #: Shown top left, and in front of a picker's own title.
+    title = "claunch"
 
     def __init__(self, sources: Sources, *, cwd: str = "", defaults: Any = None) -> None:
         self.sources = sources
@@ -500,17 +559,353 @@ class Wizard:
         #: Text editor state while mode is EDIT.
         self.buffer = ""
         self.cursor = 0
-        self._workflows_for: Optional[str] = None
-        self._members_for: Optional[str] = None
-        self._worktrees_for: Optional[str] = None
         self.fields: List[Field] = self._build(defaults)
         self._sync()
         self.focus = self._next_selectable(-1, +1)
+
+    # -- what a subclass fills in ---------------------------------------- #
+    def _build(self, defaults: Any) -> List[Field]:
+        """The rows, in the order they are read."""
+        raise NotImplementedError
+
+    def _sync(self) -> None:
+        """Re-derive what is offered and what is greyed out, after any change."""
+
+    def _check(self) -> List[tuple]:
+        """``(field, why)`` for everything that would be refused downstream."""
+        return []
+
+    def apply(self, args: Any) -> Any:
+        """Write every answer onto the namespace the command would have built."""
+        raise NotImplementedError
+
+    def summary(self) -> str:
+        """One line naming what is about to be built, as the form closes."""
+        return "creating a session"
+
+    # -- lookups --------------------------------------------------------- #
+    def field(self, key: str) -> Field:
+        for f in self.fields:
+            if f.key == key:
+                return f
+        raise KeyError(key)
+
+    def value(self, key: str) -> Any:
+        return getattr(self.field(key), "value", None)
+
+    @property
+    def current(self) -> Field:
+        return self.fields[self.focus]
+
+    def problems(self) -> List[str]:
+        """What would make the daemon refuse -- checked before anything is built."""
+        return [why for _, why in self._check()]
+
+    # -- keys ------------------------------------------------------------ #
+    def handle(self, key: str) -> Optional[str]:
+        """Apply one key. Returns "create", "cancel", or None to keep going."""
+        if self.mode == PICK:
+            return self._handle_pick(key)
+        if self.mode == EDIT:
+            return self._handle_edit(key)
+        return self._handle_form(key)
+
+    def _next_selectable(self, start: int, step: int) -> int:
+        i = start
+        for _ in range(len(self.fields)):
+            i += step
+            if not 0 <= i < len(self.fields):
+                return max(0, min(len(self.fields) - 1, start))
+            if self.fields[i].selectable:
+                return i
+        return max(0, start)
+
+    def _handle_form(self, key: str) -> Optional[str]:
+        f = self.current
+        if key in ("cancel", "escape"):
+            return "cancel"
+        if key == "submit":
+            return self._submit()
+        if key in ("up", "backtab"):
+            self.focus = self._next_selectable(self.focus, -1)
+        elif key in ("down", "tab"):
+            self.focus = self._next_selectable(self.focus, +1)
+        elif key in ("left", "right") and isinstance(f, ChoiceField) \
+                and not isinstance(f, MultiField):
+            f.cycle(+1 if key == "right" else -1)
+            self.error = ""
+            self._sync()
+        elif key in ("enter", "space"):
+            if isinstance(f, ActionField):
+                return self._submit()
+            if isinstance(f, ChoiceField):
+                self.mode = PICK
+                self.pick = f.index
+            elif isinstance(f, TextField):
+                self._start_edit(f)
+        elif isinstance(f, TextField) and key == "backspace":
+            self._start_edit(f)
+            self._handle_edit("backspace")
+        elif isinstance(f, TextField) and len(key) == 1 and key >= " ":
+            self._start_edit(f)
+            self._insert(key)
+        return None
+
+    def _submit(self) -> Optional[str]:
+        found = self._check()
+        if not found:
+            return "create"
+        key, self.error = found[0]
+        field = self.field(key)
+        if field.selectable:
+            self.focus = self.fields.index(field)
+        return None
+
+    def _handle_pick(self, key: str) -> Optional[str]:
+        f = self.current
+        n = len(f.options)
+        if key in ("escape", "cancel"):
+            self.mode = FORM
+        elif key == "up":
+            self.pick = max(0, self.pick - 1)
+        elif key == "down":
+            self.pick = min(n - 1, self.pick + 1)
+        elif key == "home":
+            self.pick = 0
+        elif key == "end":
+            self.pick = max(0, n - 1)
+        elif key == "pageup":
+            self.pick = max(0, self.pick - 10)
+        elif key == "pagedown":
+            self.pick = min(max(0, n - 1), self.pick + 10)
+        elif key == "space" and isinstance(f, MultiField):
+            f.toggle(self.pick)
+        elif key == "enter":
+            if isinstance(f, MultiField):
+                f.toggle(self.pick)
+                self.mode = FORM
+            elif 0 <= self.pick < n and not f.options[self.pick].disabled:
+                f.index = self.pick
+                self.mode = FORM
+                self.error = ""
+            elif 0 <= self.pick < n:
+                # An unpickable entry that silently ignores Enter reads as a
+                # broken key, so it says why it is there instead.
+                self.error = (
+                    f.options[self.pick].label + " "
+                    + (f.options[self.pick].detail or "cannot be chosen")
+                )
+            hidden_before = [x.hidden for x in self.fields]
+            self._sync()
+            nxt = self.fields.index(f) + 1
+            if (self.mode == FORM and nxt < len(self.fields)
+                    and hidden_before[nxt] and self.fields[nxt].selectable):
+                # A choice that reveals the field under it gave half an
+                # answer: "named..." wants the name, a mesh wants a handle.
+                # Landing there beats leaving the new row to be noticed.
+                self.focus = nxt
+        elif len(key) == 1 and key.isprintable():
+            # Type-to-jump: the one thing a long list (resume, workspaces)
+            # needs that arrows alone make tedious.
+            lowered = key.lower()
+            order = list(range(self.pick + 1, n)) + list(range(0, self.pick + 1))
+            for i in order:
+                if f.options[i].label.lower().startswith(lowered):
+                    self.pick = i
+                    break
+        return None
+
+    # -- text editing ---------------------------------------------------- #
+    def _start_edit(self, f: TextField) -> None:
+        self.mode = EDIT
+        self.buffer = f.text
+        self.cursor = len(self.buffer)
+        self.error = ""
+
+    def _insert(self, ch: str) -> None:
+        self.buffer = self.buffer[: self.cursor] + ch + self.buffer[self.cursor:]
+        self.cursor += len(ch)
+
+    def _handle_edit(self, key: str) -> Optional[str]:
+        f = self.current
+        if key == "enter":
+            f.text = self.buffer
+            self.mode = FORM
+            self._sync()
+        elif key in ("escape", "cancel"):
+            self.mode = FORM
+        elif key == "backspace":
+            if self.cursor:
+                self.buffer = self.buffer[: self.cursor - 1] + self.buffer[self.cursor:]
+                self.cursor -= 1
+        elif key == "delete":
+            self.buffer = self.buffer[: self.cursor] + self.buffer[self.cursor + 1:]
+        elif key == "left":
+            self.cursor = max(0, self.cursor - 1)
+        elif key == "right":
+            self.cursor = min(len(self.buffer), self.cursor + 1)
+        elif key == "home":
+            self.cursor = 0
+        elif key == "end":
+            self.cursor = len(self.buffer)
+        elif key == "killline":
+            self.buffer, self.cursor = "", 0
+        elif key == "space":
+            self._insert(" ")
+        elif len(key) == 1 and key >= " ":
+            self._insert(key)
+        return None
+
+    # -- rendering ------------------------------------------------------- #
+    #: ANSI on. Turned off for tests and for a terminal that cannot colour.
+    color = True
+
+    def _sgr(self, text: str, code: str) -> str:
+        return text if not self.color else "\x1b[" + code + "m" + text + "\x1b[0m"
+
+    def render(self, cols: int, rows: int) -> List[str]:
+        """The whole screen, as at most ``rows`` lines of at most ``cols`` columns.
+
+        A list rather than a blob so a test can read the form the way a person
+        would, and so the caller owns how lines are terminated (raw mode wants
+        CRLF, a file does not).
+        """
+        cols = max(24, cols)
+        rows = max(8, rows)
+        head = self._head(cols)
+        foot = self._foot(cols)
+        body_rows = rows - len(head) - len(foot)
+        body, cursor = (
+            self._picker_body(cols) if self.mode == PICK else self._form_body(cols)
+        )
+        return head + self._window(body, cursor, body_rows) + foot
+
+    def _head(self, cols: int) -> List[str]:
+        title = self.title
+        if self.mode == PICK:
+            title += "  /  " + self.current.label
+        # Truncated before it is styled: `fit` measures characters, and an
+        # escape sequence measured as text would eat the title it decorates.
+        return [self._sgr(fit(title, cols), "1"), ""]
+
+    def _foot(self, cols: int) -> List[str]:
+        f = self.current
+        if self.mode == PICK and isinstance(f, MultiField):
+            help_line = _HELP_MULTI
+        else:
+            help_line = _HELP[self.mode]
+        styled = (
+            self._sgr(fit("! " + self.error, cols), "31")
+            if self.error
+            else self._sgr(fit("  " + f.hint, cols), "2")
+        )
+        return ["", styled, self._sgr(fit("  " + help_line, cols), "2")]
+
+    def _window(self, body: List[str], cursor: int, height: int) -> List[str]:
+        """``height`` lines of ``body`` that keep line ``cursor`` in view."""
+        if height <= 0:
+            return []
+        if len(body) <= height:
+            return body + [""] * (height - len(body))
+        top = max(0, min(cursor - height // 2, len(body) - height))
+        window = body[top:top + height]
+        # Say so when there is more above or below: a form that silently ends
+        # at the bottom of a short terminal reads as a form with fewer fields.
+        if top > 0:
+            window[0] = self._sgr("  ^ more above", "2")
+        if top + height < len(body):
+            window[-1] = self._sgr("  v more below", "2")
+        return window
+
+    def _form_body(self, cols: int) -> "tuple":
+        lines: List[str] = []
+        cursor = 0
+        section = ""
+        for i, f in enumerate(self.fields):
+            if f.hidden:
+                continue
+            if f.section and f.section != section:
+                section = f.section
+                lines.append("")
+                lines.append(self._sgr("  " + f.section, "2"))
+            focused = i == self.focus
+            if focused:
+                cursor = len(lines)
+            lines.append(self._row(f, focused, cols))
+        return lines, cursor
+
+    def _row(self, f: Field, focused: bool, cols: int) -> str:
+        mark = self._sgr(">", "1;32") if focused else " "
+        if isinstance(f, ActionField):
+            body = "[ " + f.label + " ]"
+            return " " + mark + " " + (
+                self._sgr(body, "7") if focused else self._sgr(body, "1")
+            )
+        label = pad(f.label, LABEL_W)
+        if f.disabled:
+            return self._sgr(fit("   " + label + (f.disabled_note or "-"), cols), "2")
+        if focused and self.mode == EDIT and isinstance(f, TextField):
+            value = self._editing(cols - LABEL_W - 4)
+        else:
+            shown = f.display()
+            value = fit(shown, max(4, cols - LABEL_W - 4))
+            if isinstance(f, TextField) and not f.text:
+                value = self._sgr(value, "2")
+        return " " + mark + " " + (self._sgr(label, "1") if focused else label) + value
+
+    def _editing(self, cols: int) -> str:
+        """The buffer with a visible caret, scrolled to keep the caret in view."""
+        text = self.buffer
+        start = 0
+        if self.cursor > cols - 1:
+            start = self.cursor - (cols - 1)
+        shown = text[start:start + cols]
+        at = self.cursor - start
+        head, ch, tail = shown[:at], shown[at:at + 1] or " ", shown[at + 1:]
+        return head + (self._sgr(ch, "7") if self.color else "|" + ch) + tail
+
+    def _picker_body(self, cols: int) -> "tuple":
+        f = self.current
+        lines: List[str] = []
+        for i, opt in enumerate(f.options):
+            chosen = isinstance(f, MultiField) and opt.value in f.chosen
+            box = ("[x] " if chosen else "[ ] ") if isinstance(f, MultiField) else ""
+            here = i == self.pick
+            mark = self._sgr(">", "1;32") if here else " "
+            label = box + opt.label
+            if not isinstance(f, MultiField) and i == f.index:
+                label += " *"
+            text = fit((pad(label, 34) + (opt.detail or "")).rstrip(), cols - 4)
+            if opt.disabled:
+                text = self._sgr(text, "2")
+            elif here:
+                text = self._sgr(text, "1")
+            lines.append(" " + mark + " " + text)
+        if not lines:
+            lines.append(self._sgr("   " + f.empty, "2"))
+        return lines, self.pick
+
+
+
+class Wizard(Form):
+    """``new-session``: the human's door, with every field spelled out.
+
+    Nothing is inherited here -- there is no parent to inherit from -- so the
+    form is long, and its length is the honest shape of the command.
+    """
+
+    title = "claunch new-session"
 
     # -- construction ---------------------------------------------------- #
     def _build(self, d: Any) -> List[Field]:
         def get(name, fallback=None):
             return getattr(d, name, fallback) if d is not None else fallback
+
+        # What each conditional list was last built for, so `_sync` refetches
+        # only when the answer it follows has actually changed.
+        self._workflows_for: Optional[str] = None
+        self._members_for: Optional[str] = None
+        self._worktrees_for: Optional[str] = None
 
         harnesses = self.sources.harnesses() or []
         harness = ChoiceField(
@@ -712,20 +1107,6 @@ class Wizard:
                 options.append(Option(full, full, ""))
         return options
 
-    # -- lookups --------------------------------------------------------- #
-    def field(self, key: str) -> Field:
-        for f in self.fields:
-            if f.key == key:
-                return f
-        raise KeyError(key)
-
-    def value(self, key: str) -> Any:
-        return getattr(self.field(key), "value", None)
-
-    @property
-    def current(self) -> Field:
-        return self.fields[self.focus]
-
     # -- dependencies between fields ------------------------------------- #
     def _sync(self) -> None:
         """Re-derive what is offered and what is greyed out.
@@ -815,291 +1196,6 @@ class Wizard:
                 out.append(("worktree_name", str(exc)))
         return out
 
-    def problems(self) -> List[str]:
-        """What would make the daemon refuse -- checked before anything is built."""
-        return [why for _, why in self._check()]
-
-    # -- keys ------------------------------------------------------------ #
-    def handle(self, key: str) -> Optional[str]:
-        """Apply one key. Returns "create", "cancel", or None to keep going."""
-        if self.mode == PICK:
-            return self._handle_pick(key)
-        if self.mode == EDIT:
-            return self._handle_edit(key)
-        return self._handle_form(key)
-
-    def _next_selectable(self, start: int, step: int) -> int:
-        i = start
-        for _ in range(len(self.fields)):
-            i += step
-            if not 0 <= i < len(self.fields):
-                return max(0, min(len(self.fields) - 1, start))
-            if self.fields[i].selectable:
-                return i
-        return max(0, start)
-
-    def _handle_form(self, key: str) -> Optional[str]:
-        f = self.current
-        if key in ("cancel", "escape"):
-            return "cancel"
-        if key == "submit":
-            return self._submit()
-        if key in ("up", "backtab"):
-            self.focus = self._next_selectable(self.focus, -1)
-        elif key in ("down", "tab"):
-            self.focus = self._next_selectable(self.focus, +1)
-        elif key in ("left", "right") and isinstance(f, ChoiceField) \
-                and not isinstance(f, MultiField):
-            f.cycle(+1 if key == "right" else -1)
-            self.error = ""
-            self._sync()
-        elif key in ("enter", "space"):
-            if isinstance(f, ActionField):
-                return self._submit()
-            if isinstance(f, ChoiceField):
-                self.mode = PICK
-                self.pick = f.index
-            elif isinstance(f, TextField):
-                self._start_edit(f)
-        elif isinstance(f, TextField) and key == "backspace":
-            self._start_edit(f)
-            self._handle_edit("backspace")
-        elif isinstance(f, TextField) and len(key) == 1 and key >= " ":
-            self._start_edit(f)
-            self._insert(key)
-        return None
-
-    def _submit(self) -> Optional[str]:
-        found = self._check()
-        if not found:
-            return "create"
-        key, self.error = found[0]
-        field = self.field(key)
-        if field.selectable:
-            self.focus = self.fields.index(field)
-        return None
-
-    def _handle_pick(self, key: str) -> Optional[str]:
-        f = self.current
-        n = len(f.options)
-        if key in ("escape", "cancel"):
-            self.mode = FORM
-        elif key == "up":
-            self.pick = max(0, self.pick - 1)
-        elif key == "down":
-            self.pick = min(n - 1, self.pick + 1)
-        elif key == "home":
-            self.pick = 0
-        elif key == "end":
-            self.pick = max(0, n - 1)
-        elif key == "pageup":
-            self.pick = max(0, self.pick - 10)
-        elif key == "pagedown":
-            self.pick = min(max(0, n - 1), self.pick + 10)
-        elif key == "space" and isinstance(f, MultiField):
-            f.toggle(self.pick)
-        elif key == "enter":
-            if isinstance(f, MultiField):
-                f.toggle(self.pick)
-                self.mode = FORM
-            elif 0 <= self.pick < n and not f.options[self.pick].disabled:
-                f.index = self.pick
-                self.mode = FORM
-                self.error = ""
-            elif 0 <= self.pick < n:
-                # An unpickable entry that silently ignores Enter reads as a
-                # broken key, so it says why it is there instead.
-                self.error = (
-                    f.options[self.pick].label + " "
-                    + (f.options[self.pick].detail or "cannot be chosen")
-                )
-            self._sync()
-            if self.mode == FORM and f.key == "worktree" and f.value == NAME_IT:
-                # "named..." is only half an answer; land on the name itself.
-                nxt = self.fields.index(f) + 1
-                if self.fields[nxt].selectable:
-                    self.focus = nxt
-        elif len(key) == 1 and key.isprintable():
-            # Type-to-jump: the one thing a long list (resume, workspaces)
-            # needs that arrows alone make tedious.
-            lowered = key.lower()
-            order = list(range(self.pick + 1, n)) + list(range(0, self.pick + 1))
-            for i in order:
-                if f.options[i].label.lower().startswith(lowered):
-                    self.pick = i
-                    break
-        return None
-
-    # -- text editing ---------------------------------------------------- #
-    def _start_edit(self, f: TextField) -> None:
-        self.mode = EDIT
-        self.buffer = f.text
-        self.cursor = len(self.buffer)
-        self.error = ""
-
-    def _insert(self, ch: str) -> None:
-        self.buffer = self.buffer[: self.cursor] + ch + self.buffer[self.cursor:]
-        self.cursor += len(ch)
-
-    def _handle_edit(self, key: str) -> Optional[str]:
-        f = self.current
-        if key == "enter":
-            f.text = self.buffer
-            self.mode = FORM
-            self._sync()
-        elif key in ("escape", "cancel"):
-            self.mode = FORM
-        elif key == "backspace":
-            if self.cursor:
-                self.buffer = self.buffer[: self.cursor - 1] + self.buffer[self.cursor:]
-                self.cursor -= 1
-        elif key == "delete":
-            self.buffer = self.buffer[: self.cursor] + self.buffer[self.cursor + 1:]
-        elif key == "left":
-            self.cursor = max(0, self.cursor - 1)
-        elif key == "right":
-            self.cursor = min(len(self.buffer), self.cursor + 1)
-        elif key == "home":
-            self.cursor = 0
-        elif key == "end":
-            self.cursor = len(self.buffer)
-        elif key == "killline":
-            self.buffer, self.cursor = "", 0
-        elif key == "space":
-            self._insert(" ")
-        elif len(key) == 1 and key >= " ":
-            self._insert(key)
-        return None
-
-    # -- rendering ------------------------------------------------------- #
-    #: ANSI on. Turned off for tests and for a terminal that cannot colour.
-    color = True
-
-    def _sgr(self, text: str, code: str) -> str:
-        return text if not self.color else "\x1b[" + code + "m" + text + "\x1b[0m"
-
-    def render(self, cols: int, rows: int) -> List[str]:
-        """The whole screen, as at most ``rows`` lines of at most ``cols`` columns.
-
-        A list rather than a blob so a test can read the form the way a person
-        would, and so the caller owns how lines are terminated (raw mode wants
-        CRLF, a file does not).
-        """
-        cols = max(24, cols)
-        rows = max(8, rows)
-        head = self._head(cols)
-        foot = self._foot(cols)
-        body_rows = rows - len(head) - len(foot)
-        body, cursor = (
-            self._picker_body(cols) if self.mode == PICK else self._form_body(cols)
-        )
-        return head + self._window(body, cursor, body_rows) + foot
-
-    def _head(self, cols: int) -> List[str]:
-        title = "claunch new-session"
-        if self.mode == PICK:
-            title += "  /  " + self.current.label
-        # Truncated before it is styled: `fit` measures characters, and an
-        # escape sequence measured as text would eat the title it decorates.
-        return [self._sgr(fit(title, cols), "1"), ""]
-
-    def _foot(self, cols: int) -> List[str]:
-        f = self.current
-        if self.mode == PICK and isinstance(f, MultiField):
-            help_line = _HELP_MULTI
-        else:
-            help_line = _HELP[self.mode]
-        styled = (
-            self._sgr(fit("! " + self.error, cols), "31")
-            if self.error
-            else self._sgr(fit("  " + f.hint, cols), "2")
-        )
-        return ["", styled, self._sgr(fit("  " + help_line, cols), "2")]
-
-    def _window(self, body: List[str], cursor: int, height: int) -> List[str]:
-        """``height`` lines of ``body`` that keep line ``cursor`` in view."""
-        if height <= 0:
-            return []
-        if len(body) <= height:
-            return body + [""] * (height - len(body))
-        top = max(0, min(cursor - height // 2, len(body) - height))
-        window = body[top:top + height]
-        # Say so when there is more above or below: a form that silently ends
-        # at the bottom of a short terminal reads as a form with fewer fields.
-        if top > 0:
-            window[0] = self._sgr("  ^ more above", "2")
-        if top + height < len(body):
-            window[-1] = self._sgr("  v more below", "2")
-        return window
-
-    def _form_body(self, cols: int) -> "tuple":
-        lines: List[str] = []
-        cursor = 0
-        section = ""
-        for i, f in enumerate(self.fields):
-            if f.hidden:
-                continue
-            if f.section and f.section != section:
-                section = f.section
-                lines.append("")
-                lines.append(self._sgr("  " + f.section, "2"))
-            focused = i == self.focus
-            if focused:
-                cursor = len(lines)
-            lines.append(self._row(f, focused, cols))
-        return lines, cursor
-
-    def _row(self, f: Field, focused: bool, cols: int) -> str:
-        mark = self._sgr(">", "1;32") if focused else " "
-        if isinstance(f, ActionField):
-            body = "[ " + f.label + " ]"
-            return " " + mark + " " + (
-                self._sgr(body, "7") if focused else self._sgr(body, "1")
-            )
-        label = pad(f.label, LABEL_W)
-        if f.disabled:
-            return self._sgr(fit("   " + label + (f.disabled_note or "-"), cols), "2")
-        if focused and self.mode == EDIT and isinstance(f, TextField):
-            value = self._editing(cols - LABEL_W - 4)
-        else:
-            shown = f.display()
-            value = fit(shown, max(4, cols - LABEL_W - 4))
-            if isinstance(f, TextField) and not f.text:
-                value = self._sgr(value, "2")
-        return " " + mark + " " + (self._sgr(label, "1") if focused else label) + value
-
-    def _editing(self, cols: int) -> str:
-        """The buffer with a visible caret, scrolled to keep the caret in view."""
-        text = self.buffer
-        start = 0
-        if self.cursor > cols - 1:
-            start = self.cursor - (cols - 1)
-        shown = text[start:start + cols]
-        at = self.cursor - start
-        head, ch, tail = shown[:at], shown[at:at + 1] or " ", shown[at + 1:]
-        return head + (self._sgr(ch, "7") if self.color else "|" + ch) + tail
-
-    def _picker_body(self, cols: int) -> "tuple":
-        f = self.current
-        lines: List[str] = []
-        for i, opt in enumerate(f.options):
-            chosen = isinstance(f, MultiField) and opt.value in f.chosen
-            box = ("[x] " if chosen else "[ ] ") if isinstance(f, MultiField) else ""
-            here = i == self.pick
-            mark = self._sgr(">", "1;32") if here else " "
-            label = box + opt.label
-            if not isinstance(f, MultiField) and i == f.index:
-                label += " *"
-            text = fit((pad(label, 34) + (opt.detail or "")).rstrip(), cols - 4)
-            if opt.disabled:
-                text = self._sgr(text, "2")
-            elif here:
-                text = self._sgr(text, "1")
-            lines.append(" " + mark + " " + text)
-        if not lines:
-            lines.append(self._sgr("   " + f.empty, "2"))
-        return lines, self.pick
-
     # -- the answers ----------------------------------------------------- #
     def apply(self, args: Any) -> Any:
         """Write every answer onto ``args``, in ``new-session``'s own spelling.
@@ -1171,6 +1267,339 @@ class Wizard:
         return "creating: " + ", ".join(parts)
 
 
+
+class SpawnWizard(Form):
+    """``spawn``: a CHILD of a session, and only what a child may be asked.
+
+    The shorter form, and shorter for a reason. A child is a copy of its
+    parent -- same harness, same profile, same directory -- and every field
+    here is either an override the ``spawn`` policy has unlocked or part of
+    the arrangement the child is born into. There is no profile row because a
+    child runs under its parent's, no directory row because it inherits one
+    (a registered *workspace* is the vouched-for exception), and no worktree
+    row because the isolation was bought upstream: the parent is already
+    standing in whatever checkout it was launched into.
+
+    The parent picker is the field that has no equivalent in the other form,
+    and it is the reason this one exists. ``spawn`` normally reads its parent
+    from ``$CLAUNCH_SESSION``, which is set for agents and for nobody else --
+    a person at a terminal has to name one, and naming one from memory is
+    guessing at a session list the daemon can simply show.
+    """
+
+    title = "claunch spawn"
+
+    #: The mesh picker's "none at all" entry. The API spells it exactly so.
+    NO_MESH = "-"
+
+    def _build(self, d: Any) -> List[Field]:
+        def get(name, fallback=None):
+            return getattr(d, name, fallback) if d is not None else fallback
+
+        # Everything below the parent is rebuilt when the parent changes; this
+        # remembers which one it was last built for.
+        self._parent_for: Optional[str] = None
+        self._mesh_for: Optional[str] = None
+        self._workflows_for: Optional[str] = None
+        self._report: dict = {}
+        #: workspace name -> path, so the workflow list can follow a pick that
+        #: travels to the daemon as a name.
+        self._paths: Dict[str, str] = {}
+
+        sessions = self.sources.sessions() or []
+        parent = ChoiceField(
+            key="parent", label="Parent",
+            hint="the session this one becomes a child of",
+            options=[
+                Option(
+                    s.get("name", ""), s.get("name", ""),
+                    ", ".join(
+                        x for x in (
+                            s.get("status", ""),
+                            s.get("profile") or s.get("harness") or "",
+                            s.get("cwd") or "",
+                        ) if x
+                    ),
+                )
+                for s in sessions
+            ],
+            empty="(no sessions yet - 'claunch new-session' makes the first)",
+        )
+        parent.select(get("parent") or os.environ.get("CLAUNCH_SESSION") or "")
+
+        name = TextField(
+            key="name", label="Name", placeholder="(auto)",
+            hint="the child's session name, how every other command refers to it",
+            text=get("name") or "",
+        )
+        harness = ChoiceField(
+            key="harness", label="Harness",
+            hint="a different program for the child (spawn.allow_harness "
+                 "decides whether it may be one)",
+            options=[],
+        )
+        workspace = ChoiceField(
+            key="workspace", label="Workspace",
+            hint="a registered directory to run the child in instead of its "
+                 "parent's -- the only way a child changes directory",
+            options=[],
+        )
+
+        mesh = ChoiceField(
+            key="mesh", label="Mesh", section="START IT WORKING",
+            hint="the mesh the child is enrolled in, so parent and child can "
+                 "talk at all",
+            options=[],
+        )
+        handle = TextField(
+            key="handle", label="Handle", placeholder="(the session name)",
+            hint="what the child is called inside that mesh",
+            text=get("handle") or "",
+        )
+        role = ChoiceField(
+            key="role", label="Role",
+            hint="the child's stance, injected into its system prompt",
+            options=[Option("(no role)", "")]
+            + [
+                Option(
+                    r.get("name", ""), r.get("name", ""),
+                    ", ".join(r.get("aliases") or []),
+                )
+                for r in (self.sources.roles() or [])
+            ],
+        )
+        role.select(get("role") or "")
+        connect = MultiField(
+            key="connect", label="Connect",
+            hint="other members the child may message; it can always reach "
+                 "its parent",
+            options=[], chosen=list(get("connect") or []),
+        )
+        workflow = ChoiceField(
+            key="workflow", label="Workflow",
+            hint="a cflow workflow started for the child, from those declared "
+                 "in the directory it will run in",
+            options=[],
+        )
+        context = TextField(
+            key="context", label="Context",
+            placeholder="(what this run is about)",
+            hint="the context string that workflow run carries",
+            text=get("context") or "",
+        )
+        task = TextField(
+            key="task", label="Opening task",
+            placeholder="typed into the child once it has booted - what it is for",
+            hint="why this child exists; without it, it boots knowing nothing",
+            text=get("task") or "",
+        )
+        return [
+            parent, name, harness, workspace,
+            mesh, handle, role, connect, workflow, context, task,
+            ActionField(key="create", label="Spawn child"),
+        ]
+
+    # -- lookups against the parent -------------------------------------- #
+    def _session(self, name: str) -> dict:
+        for s in self.sources.sessions() or []:
+            if s.get("name") == name:
+                return s
+        return {}
+
+    def _child_cwd(self) -> str:
+        """Where the child will actually run -- a workspace, or the parent's."""
+        chosen = self.value("workspace") or ""
+        if chosen:
+            return self._paths.get(chosen, "")
+        return self._session(self.value("parent") or "").get("cwd") or ""
+
+    def _mesh_now(self) -> str:
+        """The mesh the child lands in: the one picked, or the parent's own."""
+        picked = self.value("mesh") or ""
+        if picked == self.NO_MESH:
+            return ""
+        return picked or self.sources.mesh_of(self.value("parent") or "")
+
+    # -- dependencies between fields ------------------------------------- #
+    def _sync(self) -> None:
+        """Re-derive the form from the parent, then from what was picked.
+
+        The parent decides most of this form -- what the child would inherit,
+        and what the policy lets it override -- so the daemon's spawn report
+        is read once per parent and the rows are rebuilt from it. Reading it
+        here rather than provoking a refusal is the point of the whole form:
+        a session with no slots left says so on the Parent row, before
+        anything else has been filled in.
+        """
+        parent = self.value("parent") or ""
+        if self._parent_for != parent:
+            self._parent_for = parent
+            self._report = self.sources.spawn_report(parent) if parent else {}
+            self._rebuild_for_parent(parent)
+
+        mesh_field = self.field("mesh")
+        no_mesh = mesh_field.value == self.NO_MESH
+        self.field("handle").hidden = no_mesh
+        connect = self.field("connect")
+        mesh = self._mesh_now()
+        if self._mesh_for != mesh:
+            self._mesh_for = mesh
+            members = [
+                h for h in (self.sources.members(mesh) if mesh else [])
+                if h != parent
+            ]
+            connect.options = [Option(h, h) for h in members]
+            connect.chosen = [c for c in connect.chosen if c in members]
+        connect.hidden = no_mesh or not connect.options
+
+        cwd = self._child_cwd()
+        wf = self.field("workflow")
+        if self._workflows_for != cwd:
+            self._workflows_for = cwd
+            keep = wf.value
+            names = self.sources.workflows(cwd) if cwd else []
+            wf.options = [Option("(none)", "")] + [Option(n, n) for n in names]
+            wf.index = 0
+            if keep:
+                wf.select(keep)
+        self.field("context").hidden = not self.value("workflow")
+
+    def _rebuild_for_parent(self, parent: str) -> None:
+        """The three rows whose *options* are the parent's, plus its budget."""
+        info = self._session(parent)
+        report = self._report
+
+        used = report.get("children_used")
+        left = report.get("children_remaining")
+        self.field("parent").hint = (
+            "the session this one becomes a child of"
+            if used is None else
+            f"child of this one: {used} running, {left} left "
+            f"(depth {report.get('depth')}/{report.get('max_depth')})"
+        )
+
+        harness = self.field("harness")
+        keep = harness.value
+        allowed = report.get("spawnable_harnesses") or []
+        harness.options = [
+            Option("(the parent's" + (f": {info['harness']}" if info.get("harness") else "") + ")", "")
+        ] + [Option(h, h) for h in allowed]
+        harness.index = 0
+        harness.select(keep)
+        harness.disabled = not allowed
+        harness.disabled_note = (
+            "the child runs what its parent runs (spawn.allow_harness)"
+        )
+
+        workspace = self.field("workspace")
+        keep = workspace.value
+        spaces = report.get("workspaces")
+        # Absent, not empty, when the policy has it locked: the report only
+        # lists workspaces when a child may be sent to one.
+        self._paths = {
+            (w.get("name") or ""): (w.get("path") or "") for w in (spaces or [])
+        }
+        workspace.options = [
+            Option(
+                "(the parent's directory"
+                + (f": {info['cwd']}" if info.get("cwd") else "") + ")",
+                "",
+            )
+        ] + [
+            Option(
+                w.get("name") or "", w.get("name") or "",
+                (w.get("path") or "") + ("" if w.get("exists", True) else " (missing)"),
+                disabled=not w.get("exists", True),
+            )
+            for w in (spaces or [])
+        ]
+        workspace.index = 0
+        workspace.select(keep)
+        workspace.disabled = spaces is None
+        workspace.disabled_note = (
+            "the child inherits its parent's directory (spawn.allow_workspace)"
+        )
+
+        mesh = self.field("mesh")
+        keep = mesh.value
+        theirs = self.sources.mesh_of(parent)
+        inherited = (
+            f"(the parent's: {theirs})" if theirs
+            else "(the parent's - it is in none, so one is opened for the pair)"
+        )
+        mesh.options = [
+            Option(inherited, ""),
+            Option("- no mesh at all", self.NO_MESH,
+                   "the child cannot be messaged, and cannot report back"),
+        ] + [
+            Option(m.get("name", ""), m.get("name", ""))
+            for m in (self.sources.meshes() or [])
+            if m.get("name") and m.get("name") != theirs
+        ]
+        mesh.index = 0
+        mesh.select(keep)
+
+    # -- validation ------------------------------------------------------ #
+    def _check(self) -> List[tuple]:
+        out: List[tuple] = []
+        if not self.value("parent"):
+            out.append((
+                "parent",
+                "no parent to spawn from: 'spawn' makes a session's child, "
+                "and there is no session here yet",
+            ))
+            return out
+        blocked = self._report.get("blocked_by") or []
+        if blocked:
+            out.append((
+                "parent",
+                "; ".join(blocked) + " - pick another parent, or free a slot "
+                "('claunch kill-session <child>')",
+            ))
+        return out
+
+    # -- the answers ----------------------------------------------------- #
+    def apply(self, args: Any) -> Any:
+        """Write the answers onto ``spawn``'s own namespace.
+
+        Same reasoning as the other form: this fills in the flags rather than
+        posting anything, so the policy, the refusal and the onboarding report
+        are the daemon's, unchanged.
+        """
+        args.parent = self.value("parent")
+        args.name = self.value("name")
+        args.harness = self.value("harness") or None
+        # The workspace travels as a NAME, which is what `-w` means and what
+        # the API resolves -- a path would be the free-text directory that
+        # spawn.allow_cwd exists to keep an agent away from.
+        args.workspace = self.value("workspace") or None
+        mesh = self.value("mesh") or ""
+        args.mesh = mesh or None
+        args.handle = (self.value("handle") or None) if mesh != self.NO_MESH else None
+        args.role = self.value("role") or None
+        args.connect = (
+            list(self.value("connect") or []) if mesh != self.NO_MESH else []
+        )
+        args.workflow = self.value("workflow") or None
+        args.context = (self.value("context") or None) if args.workflow else None
+        args.task = self.value("task") or None
+        return args
+
+    def summary(self) -> str:
+        parts = ["child of " + str(self.value("parent"))]
+        for label, key in (
+            ("harness", "harness"), ("workspace", "workspace"),
+            ("role", "role"), ("workflow", "workflow"),
+        ):
+            if self.value(key):
+                parts.append(label + " " + str(self.value(key)))
+        mesh = self.value("mesh") or ""
+        parts.append(
+            "no mesh" if mesh == self.NO_MESH
+            else "mesh " + (mesh or self._mesh_now() or "(a new one for the pair)")
+        )
+        return "spawning: " + ", ".join(parts)
+
 # --------------------------------------------------------------------------- #
 # the loop
 # --------------------------------------------------------------------------- #
@@ -1206,7 +1635,7 @@ def require_terminal() -> None:
         raise WizardUnavailable(
             "--wizard needs an interactive terminal -- it is a form, and there "
             "is nobody here to fill it in. Pass the fields as flags instead "
-            "('claunch new-session --help')"
+            "(the command's --help lists them)"
         )
 
 
@@ -1226,7 +1655,7 @@ def _write(text: str, stream=None) -> None:
     out.flush()
 
 
-def _paint(wiz: Wizard, stream=None) -> None:
+def _paint(wiz: Form, stream=None) -> None:
     import shutil
 
     size = shutil.get_terminal_size((100, 30))
@@ -1237,17 +1666,25 @@ def _paint(wiz: Wizard, stream=None) -> None:
     _write(frame, stream)
 
 
-def run(args: Any, *, sources: Optional[Sources] = None, cwd: str = "") -> bool:
+def run(
+    args: Any,
+    *,
+    sources: Optional[Sources] = None,
+    cwd: str = "",
+    form: type = None,
+) -> bool:
     """Fill ``args`` in from the form. False when the user backed out.
 
-    ``args`` is ``new-session``'s own namespace, so flags typed before
+    ``args`` is the command's own namespace, so flags typed before
     ``--wizard`` arrive as the form's starting values -- ``claunch new -s api
-    --wizard`` opens with the name already filled in.
+    --wizard`` opens with the name already filled in. ``form`` picks which
+    command is being answered (:class:`Wizard` for ``new-session``,
+    :class:`SpawnWizard` for ``spawn``).
     """
     from . import attach as attach_mod
 
     require_terminal()
-    wiz = Wizard(sources or Sources(), cwd=cwd, defaults=args)
+    wiz = (form or Wizard)(sources or Sources(), cwd=cwd, defaults=args)
     import codecs
 
     decoder = codecs.getincrementaldecoder("utf-8")("replace")

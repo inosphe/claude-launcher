@@ -142,21 +142,22 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     return 0
 
 
-def _run_wizard(args: argparse.Namespace) -> bool:
+def _run_wizard(args: argparse.Namespace, *, spawn: bool = False) -> bool:
     """Fill ``args`` in from the terminal form. False when the user backed out.
 
     Deliberately *before* everything else in :func:`_cmd_new_session` and
-    deliberately writing back onto the same namespace: the wizard is a second
-    way to answer ``new-session``, not a second way to create a session. The
-    refusal from inside a managed session is checked first (an agent must not
-    get a form either), and the worktree, the onboarding payload and the
-    attach that follow are the code that has always run.
+    :func:`_cmd_spawn`, and deliberately writing back onto the same namespace:
+    the wizard is a second way to answer these commands, not a second way to
+    create a session. ``new-session``'s refusal from inside a managed session
+    is checked first (an agent must not get a form either), and the worktree,
+    the spawn policy, the onboarding payload and the attach that follow are
+    the code that has always run.
 
     The daemon is started here rather than at create time because the form's
     lists -- harnesses, profiles, workspaces, roles, meshes, workflows,
-    resumable conversations -- are all things only it knows. Whether there is
-    anyone to show a form to is settled first, so a scripted ``--wizard``
-    fails having started nothing.
+    resumable conversations, and for ``spawn`` the parent's own budget -- are
+    all things only it knows. Whether there is anyone to show a form to is
+    settled first, so a scripted ``--wizard`` fails having started nothing.
     """
     from . import wizard as wizard_mod
 
@@ -165,7 +166,10 @@ def _run_wizard(args: argparse.Namespace) -> bool:
     return wizard_mod.run(
         args,
         sources=wizard_mod.DaemonSources(client),
-        cwd=os.path.abspath(args.cwd) if args.cwd else os.getcwd(),
+        cwd=(
+            os.path.abspath(args.cwd) if getattr(args, "cwd", None) else os.getcwd()
+        ),
+        form=wizard_mod.SpawnWizard if spawn else wizard_mod.Wizard,
     )
 
 
@@ -270,7 +274,14 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     question buys was bought once, upstream. A child that needs a checkout of
     its *own* gets it the way every other spawn directory is chosen: the user
     registers one with ``claunch workspace add`` and it is picked by name.
+
+    ``--wizard`` does not change who this command is for. It is refused from
+    inside a session like every other form, so the only caller who ever sees
+    it is the person the parent picker exists for -- an agent has its parent
+    in ``$CLAUNCH_SESSION`` and needs no list to pick from.
     """
+    if getattr(args, "wizard", False) and not _run_wizard(args, spawn=True):
+        return 1
     client = daemon_client.ensure_running()
     parent = args.parent or os.environ.get("CLAUNCH_SESSION")
     if not parent:
@@ -865,6 +876,14 @@ def register(sub) -> None:
         help="spawn a CHILD of a session (inherits its harness/profile/cwd), "
              "optionally enrolling it in a mesh -- what an agent's 'spawn' "
              "tool does",
+    )
+    p_spawn.add_argument(
+        "--wizard", action="store_true",
+        help="pick the child from a form in this terminal: which session it "
+        "is a child of (with what that parent may still spawn), and its "
+        "harness, workspace, mesh, role, workflow and opening task -- each "
+        "from the list the daemon publishes. Any flag given alongside it "
+        "pre-fills its field",
     )
     p_spawn.add_argument(
         "--parent", help="parent session (default: $CLAUNCH_SESSION)"
