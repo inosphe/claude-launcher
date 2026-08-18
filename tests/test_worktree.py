@@ -481,3 +481,127 @@ def test_a_failed_worktree_creates_no_session(repo, fake_daemon, monkeypatch, ca
     assert cli.main(["new-session", "--profile", "work", "--worktree=taken"]) == 1
     assert fake_daemon.posted is None
     assert "error:" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# resume: the conversation decides the directory
+# --------------------------------------------------------------------------- #
+def test_a_resume_is_not_asked_the_question(repo, monkeypatch):
+    """`claunch run nc --resume` means "carry on where I was", and where it
+    was is this directory -- claude keeps transcripts per cwd."""
+    monkeypatch.setattr(worktree, "interactive", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input", lambda *a: pytest.fail("a resume must not be asked")
+    )
+    assert worktree.resolve(str(repo), worktree.ASK, resuming=True) is None
+
+
+def test_a_resume_refuses_a_new_worktree(repo):
+    with pytest.raises(worktree.WorktreeError, match="cannot be opened in a new one"):
+        worktree.resolve(str(repo), "fresh", resuming=True)
+    # ...and nothing was left behind by the refusal.
+    assert not (repo / ".claude" / "worktrees" / "fresh").exists()
+
+
+def test_a_resume_refuses_a_generated_name(repo):
+    """Bare --worktree names a checkout after the second, so by definition it
+    is new -- and a new one has no conversation to resume."""
+    with pytest.raises(worktree.WorktreeError):
+        worktree.resolve(str(repo), "", resuming=True)
+
+
+def test_a_resume_into_an_existing_worktree_is_allowed(repo):
+    """The useful case: go back to that checkout and carry on the work there."""
+    made = worktree.resolve(str(repo), "review")
+    again = worktree.resolve(str(repo), "review", resuming=True)
+    assert again.path == made.path and not again.created
+
+
+def test_no_worktree_with_a_resume_is_still_just_no(repo):
+    assert worktree.resolve(str(repo), worktree.NEVER, resuming=True) is None
+
+
+@pytest.mark.parametrize(
+    "flags", [["--resume"], ["-r"], ["--continue"], ["-c"], ["--resume=abc"],
+              ["--session-id", "x"], ["-p", "hi", "--continue"]]
+)
+def test_run_reads_every_conversation_flag_as_a_resume(repo, monkeypatch, flags):
+    from claude_launcher import runner
+
+    cli.main(["create", "work", "--no-seed"])
+    seen = {}
+    monkeypatch.setattr(runner.subprocess, "run", fake_launch(seen))
+    monkeypatch.setattr(worktree, "interactive", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input", lambda *a: pytest.fail("a resume must not be asked")
+    )
+    monkeypatch.chdir(repo)
+    assert cli.main(["run", "work", *flags]) == 0
+    assert seen["cwd"] is None  # stayed in the checkout the conversation is in
+
+
+def test_run_refuses_a_new_worktree_with_a_resume(repo, monkeypatch, capsys):
+    from claude_launcher import runner
+
+    cli.main(["create", "work", "--no-seed"])
+    capsys.readouterr()
+
+    def no_launch(cmd, **kwargs):
+        if cmd and cmd[0] == "git":
+            return REAL_RUN(cmd, **kwargs)
+        pytest.fail(f"must not launch: {cmd}")
+
+    monkeypatch.setattr(runner.subprocess, "run", no_launch)
+    monkeypatch.chdir(repo)
+    assert cli.main(["run", "work", "--worktree=fresh", "--resume"]) == 1
+    assert "cannot be opened in a new one" in capsys.readouterr().err
+
+
+def test_run_allows_a_resume_into_an_existing_worktree(repo, monkeypatch, capsys):
+    from claude_launcher import runner
+
+    cli.main(["create", "work", "--no-seed"])
+    capsys.readouterr()
+    worktree.resolve(str(repo), "review")
+    seen = {}
+    monkeypatch.setattr(runner.subprocess, "run", fake_launch(seen))
+    monkeypatch.chdir(repo)
+    assert cli.main(["run", "work", "--worktree=review", "--resume"]) == 0
+    assert seen["cwd"] == str(repo / ".claude" / "worktrees" / "review")
+    assert seen["cmd"][1:] == ["--resume"]
+
+
+def test_new_session_resume_is_not_asked_the_question(repo, fake_daemon, monkeypatch):
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(worktree, "interactive", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input", lambda *a: pytest.fail("a resume must not be asked")
+    )
+    assert cli.main(["new-session", "--profile", "work", "--resume"]) == 0
+    _, body = fake_daemon.posted
+    assert body["cwd"] == str(repo)
+
+
+def test_new_session_reads_a_harness_side_conversation_flag_too(
+    repo, fake_daemon, monkeypatch
+):
+    """--resume is claunch's spelling; `-- --continue` is the harness's."""
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(worktree, "interactive", lambda: True)
+    monkeypatch.setattr(
+        "builtins.input", lambda *a: pytest.fail("a resume must not be asked")
+    )
+    assert cli.main(["new-session", "--profile", "work", "--", "--continue"]) == 0
+    _, body = fake_daemon.posted
+    assert body["cwd"] == str(repo)
+
+
+def test_new_session_refuses_a_new_worktree_with_a_resume(
+    repo, fake_daemon, monkeypatch, capsys
+):
+    monkeypatch.chdir(repo)
+    assert cli.main(
+        ["new-session", "--profile", "work", "--worktree=fresh", "--resume"]
+    ) == 1
+    assert fake_daemon.posted is None
+    assert "cannot be opened in a new one" in capsys.readouterr().err

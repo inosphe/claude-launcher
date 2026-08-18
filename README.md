@@ -213,6 +213,26 @@ ones Claude Code makes itself, so one `git worktree list` shows every checkout
 an agent is working in, whoever made it. Point them elsewhere with
 `CLAUNCH_WORKTREE_DIR` (absolute, or relative to the repository root).
 
+**A resume decides the directory by itself.** Claude Code keeps transcripts
+**per working directory**, so a conversation resumed in a checkout that has
+never been worked in resolves to nothing — bare `--resume` opens an empty
+picker, and `--resume <uuid>` finds no such conversation. So a launch carrying
+`--resume`, `--continue`, `-r`, `-c` or `--session-id` is not asked the
+question at all: `claunch run nc --resume` means *carry on where I was*, and
+where it was is this directory.
+
+Pairing one with a **new** worktree is refused rather than silently obeyed:
+
+```bash
+claunch run nc --resume                       # stays put, no question
+claunch run nc --worktree=fresh --resume      # error: nothing there to resume
+claunch run nc --worktree=review --resume     # fine — that checkout has a history
+```
+
+The last one is the useful case, and the reason this is a rule about *new*
+worktrees only: go back to a checkout you worked in before and carry on the
+conversation you had there.
+
 **Who gets asked.** Only a human at an interactive terminal. A managed session
 runs on a PTY, so an agent's stdin passes every `isatty()` test there is — a
 prompt printed into one is not answered, it hangs the launch. `$CLAUNCH_SESSION`

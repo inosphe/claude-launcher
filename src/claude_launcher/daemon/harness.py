@@ -151,12 +151,20 @@ def _resume_field(raw) -> Optional[str]:
 
 #: Args that already steer which conversation claude opens; when the caller
 #: passes any of these, the daemon must not pin or restore an id of its own.
-_CONVERSATION_FLAGS = ("--continue", "-c", "--resume", "-r", "--session-id")
+CONVERSATION_FLAGS = ("--continue", "-c", "--resume", "-r", "--session-id")
 
 
-def _steers_conversation(args: Iterable[str]) -> bool:
+def steers_conversation(args: Iterable[str]) -> bool:
+    """Whether these args open an *existing* conversation rather than a new one.
+
+    Public because two questions turn on it and they must not answer it from
+    two different lists. The daemon's is "may I pin an id of my own"; the
+    CLI's is "may this launch move to a fresh directory" -- claude keeps
+    transcripts per working directory, so a conversation resumed in a checkout
+    that has never been worked in resolves to nothing at all.
+    """
     return any(
-        a in _CONVERSATION_FLAGS or a.startswith(("--resume=", "--session-id="))
+        a in CONVERSATION_FLAGS or a.startswith(("--resume=", "--session-id="))
         for a in args
     )
 
@@ -183,7 +191,7 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
         if (
             not restoring
             and not sdef.conversation_id
-            and not _steers_conversation(sdef.args)
+            and not steers_conversation(sdef.args)
         ):
             # A resume without a fork *continues* the conversation it opened,
             # so that id is this session's own: pin it and a later restore
@@ -260,7 +268,7 @@ def _normalize_resume(sdef: SessionDef) -> SessionDef:
             "--fork-session needs a conversation to fork: pick one to resume "
             "(claude's own flag is 'use with --resume or --continue')"
         )
-    if sdef.resume is not None and _steers_conversation(sdef.args):
+    if sdef.resume is not None and steers_conversation(sdef.args):
         raise HarnessError(
             "the extra args already steer the conversation "
             f"({' '.join(sdef.args)}) — drop them, or drop the resume choice"
@@ -310,7 +318,7 @@ def build_command(
         }
         env = runner.child_env(prof, with_token=True, base_env=base)
         argv = [launcher_config.claude_bin()]
-        if not _steers_conversation(sdef.args):
+        if not steers_conversation(sdef.args):
             if restoring:
                 if sdef.conversation_id:
                     argv.extend(["--resume", sdef.conversation_id])

@@ -28,6 +28,7 @@ import webbrowser
 from typing import List
 
 from . import cli_mesh, daemon_client, herdr, store, worktree
+from .daemon import harness as harness_def
 from .daemon import paths as daemon_paths
 from .daemon import runtime_state
 from .daemon_client import DaemonClientError
@@ -71,7 +72,14 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     # the recorded directory, not invent a second one every boot. The CLI is
     # the only door with a human behind it, so the question is asked here and
     # the daemon is handed a plain, already-decided cwd.
-    tree = worktree.resolve(cwd, args.worktree)
+    # A resumed conversation belongs to the directory it was held in (claude
+    # stores transcripts per cwd), so it pins the launch there -- from the
+    # flag, or from a conversation flag handed straight to the harness.
+    tree = worktree.resolve(
+        cwd,
+        args.worktree,
+        resuming=args.resume is not None or harness_def.steers_conversation(extra),
+    )
     worktree.announce(tree)
     if tree is not None:
         cwd = str(tree.path)
@@ -785,7 +793,8 @@ def register(sub) -> None:
         "the directory itself, so it cannot collide with agents working in "
         "the same checkout; bare, the worktree is named after this Herdr pane "
         "and the current time. Asked interactively when neither this nor "
-        "--no-worktree is given",
+        "--no-worktree is given -- except with --resume, which pins the "
+        "launch to the directory holding that conversation",
     )
     wt.add_argument(
         "--no-worktree", dest="worktree", action="store_const",

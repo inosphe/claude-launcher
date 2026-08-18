@@ -44,6 +44,7 @@ from . import (
 from .cflow.engine import CflowError
 from .cflow.model import WorkflowError
 from .cflow.state import StateError as CflowStateError
+from .daemon import harness as harness_def
 from .daemon import paths as daemon_paths
 from .daemon_client import DaemonClientError
 from .credentials import CredentialsError
@@ -343,7 +344,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # worktree?" after writing a system prompt is the wrong order to be asked
     # in. A failure here is fatal on purpose -- a worktree that was asked for
     # and could not be made must not silently launch in the shared checkout.
-    tree = worktree.resolve(os.getcwd(), wt_choice)
+    #
+    # `--resume` (and its siblings) settles the question on its own: claude's
+    # transcripts are per-directory, so the conversation being resumed lives
+    # in *this* one. Read from the whole forwarded list, since everything in
+    # it reaches claude.
+    tree = worktree.resolve(
+        os.getcwd(),
+        wt_choice,
+        resuming=harness_def.steers_conversation(passthrough),
+    )
     worktree.announce(tree)
     if tree is not None:
         herdr.rename_pane(tree.label)

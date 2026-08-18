@@ -307,12 +307,25 @@ def _ask(root: Path) -> Optional[str]:
             print(f"  {exc}", file=sys.stderr)
 
 
-def resolve(cwd: str, choice: Choice) -> Optional[Worktree]:
+def resolve(cwd: str, choice: Choice, *, resuming: bool = False) -> Optional[Worktree]:
     """Turn a ``--worktree`` answer -- and maybe a question -- into a checkout.
 
     Returns the worktree to launch in, or ``None`` to stay in ``cwd``. Raises
     only when a worktree was *asked for* and could not be made: an unanswered
     question never fails a launch.
+
+    ``resuming`` says the launch opens an existing conversation
+    (``--resume``, ``--continue``, ``--session-id``). Claude Code keeps
+    transcripts **per working directory**, so a conversation resumed in a
+    checkout that has never been worked in resolves to nothing -- bare
+    ``--resume`` opens an empty picker and ``--resume <uuid>`` finds no such
+    conversation. A *new* worktree and a resume are therefore contradictory,
+    and the question is not even worth asking: ``claunch run nc --resume``
+    means "carry on where I was", which is this directory.
+
+    An *existing* worktree is a different matter and stays allowed. It has a
+    history of its own, so ``--worktree=review --resume`` is the useful thing
+    it looks like: go back to that checkout and carry on the work done there.
     """
     if choice is NEVER or choice is False:
         return None
@@ -326,7 +339,19 @@ def resolve(cwd: str, choice: Choice) -> Optional[Worktree]:
             )
         return None
     if explicit:
-        return create(root, str(choice) or default_name())
+        name = validate_name(str(choice)) if choice else default_name()
+        if resuming and not (worktrees_dir(root) / name).exists():
+            raise WorktreeError(
+                f"worktree {name!r} does not exist yet, and a resumed "
+                "conversation cannot be opened in a new one: claude keeps "
+                "transcripts per working directory, so a fresh checkout has "
+                "none to resume. Name a worktree that already exists, or drop "
+                "the resume and start a conversation there"
+            )
+        return create(root, name)
+    if resuming:
+        # Nothing to ask: the answer that a resume implies is "here".
+        return None
     if not interactive():
         return None
     chosen = _ask(root)
