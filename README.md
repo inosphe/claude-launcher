@@ -1783,8 +1783,22 @@ back under its own name, claude with `--resume` of its pinned conversation, and
 the tab reattaches to the new terminal (a resume done elsewhere, from the CLI
 or another tab, is followed automatically). There `kill` becomes **remove**,
 which only drops the daemon's record — it asks first, since that is what makes
-the session unresumable. Since exited sessions are kept across daemon restarts,
-the sidebar also offers **clear N exited** to drop them all at once.
+the session unresumable.
+
+The same four verbs are available for the *whole* rail at once, under the
+session list: **■ stop N**, **▶ resume N**, **clear N exited** and
+**✕ delete all N**. Each is labelled with what it would touch and is hidden
+when that is nothing, so the bar reads as a summary of the rail rather than a
+fixed row of controls. They differ in what survives, which is why there are
+four and not two: `stop` ends the programs and keeps every record respawnable
+(the whole fleet comes back with `resume`), while `clear` and `delete` are the
+ones that make a session unresumable — those two ask first, and a record a
+mesh row still names is kept back and reported rather than dropped. `delete`
+stops the running sessions and *waits them out* before forgetting anything,
+which is why it is one call (`DELETE /api/sessions?running=1`) and not a stop
+followed by a clear: a session that has just been signalled is not yet
+`exited`, and a clear sent straight after would skip exactly the sessions it
+was meant to remove.
 
 Every session row carries an **ⓘ** (and the terminal header a **details**
 button) that opens the session's own page (`#/s/<name>`) — what the session
@@ -1890,7 +1904,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/daemon`                  | version/`boot_id`/uptime/session count |
 | POST   | `/api/daemon/shutdown`         | graceful stop |
 | GET/POST | `/api/sessions`              | list / create (`{name?, harness?, profile?, cwd?, args?, env?, role?, resume?, fork_session?}`; `resume` = session name, conversation uuid, or `""`/`true` for claude's picker). Onboarding is optional and composed in the same call: `{mesh?, handle?, connect?, workflow?, context?, task?}` — checked before anything is built, and reported per leg beside the session's own fields |
-| DELETE | `/api/sessions`                | clear all exited records (`?logs=1` deletes their logs) |
+| DELETE | `/api/sessions`                | clear all exited records (`?logs=1` deletes their logs; `?running=1` first shuts down and waits out every running session, so this drops *all* of them — `stopped` names what it ended). Records a mesh still names are kept back and reported in `kept` |
+| POST   | `/api/sessions/kill`           | stop every running session (`?force=1`). Records stay, so all of them are still respawnable; `killed`/`failed` name both halves |
+| POST   | `/api/sessions/respawn`        | relaunch every exited session under its own name, in creation order; `respawned`/`failed` |
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |

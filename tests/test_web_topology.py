@@ -9,7 +9,9 @@ the sidebar's own forest, which orders the session list by lineage.
 So the harnesses in ``tests/web`` slice the real functions out of the shipped
 ``app.js`` — not a copy of them — and exercise them: ``layout_check`` on the
 maths, ``render_check`` on the SVG the drawing code assembles against a stub
-DOM, ``lineage_check`` on the session list's tree ordering, ``owed_check`` on
+DOM, ``lineage_check`` on the session list's tree ordering, ``bulk_check`` on the
+rail's bulk bar — which of stop/resume/clear/delete is offered on a given
+rail, and what each claims it would touch — ``owed_check`` on
 the Unanswered box and the requests its nudge/dismiss buttons send,
 ``panel_check`` on where the session detail docks (the rail beside the
 terminal, or the page slot on a phone) and what closing it leaves behind,
@@ -47,6 +49,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "layout_check.js",
         "render_check.js",
         "lineage_check.js",
+        "bulk_check.js",
         "owed_check.js",
         "panel_check.js",
         "sesssend_check.js",

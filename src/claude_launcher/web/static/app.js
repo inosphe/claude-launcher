@@ -187,6 +187,10 @@ function syncBulkActions(sessions) {
       + "resumed here. Running sessions are untouched");
   set("delete-all", sessions.length, `✕ delete all ${sessions.length}`,
       "stop every running session and forget every record");
+  // The bar's own border would otherwise sit above the nav as a stray rule on
+  // a rail with nothing on it.
+  const bar = $("bulk-actions");
+  if (bar) bar.classList.toggle("hidden", sessions.length === 0);
 }
 
 /* A bulk call answers with what it did *and* with what it did not: a record
@@ -201,27 +205,19 @@ function reportBulk(result, verb) {
   const parts = [];
   if (kept.length) {
     parts.push(
-      `Kept ${kept.length} record(s) still named by a mesh:
-` +
+      `Kept ${kept.length} record(s) still named by a mesh:\n` +
       kept.map((k) => `  ${k.name} — ${k.meshes.map((m) => m.mesh).join(", ")}`)
-        .join("
-") +
-      `
-
-Remove them from the mesh first (the roster's ×), then ${verb} again.`
+        .join("\n") +
+      `\n\nRemove them from the mesh first (the roster's ×), then ${verb} again.`
     );
   }
   if (failed.length) {
     parts.push(
-      `${failed.length} session(s) could not ${verb}:
-` +
-      failed.map((f) => `  ${f.name} — ${f.error}`).join("
-")
+      `${failed.length} session(s) could not ${verb}:\n` +
+      failed.map((f) => `  ${f.name} — ${f.error}`).join("\n")
     );
   }
-  if (parts.length) alert(parts.join("
-
-"));
+  if (parts.length) alert(parts.join("\n\n"));
 }
 
 /* Send one, keeping its button pressed-out for the duration: these are slow
@@ -783,6 +779,46 @@ $("term-kill").addEventListener("click", async () => {
   refreshSessions();
 });
 
+/* Stop everything. The records stay and every one of them is resumable after,
+   which is what makes this the one bulk verb that needs no mesh guard: a
+   member row is *meant* to outlive its terminal, reading `exited`. */
+$("stop-all").addEventListener("click", async () => {
+  const live = sessionsCache
+    .filter((s) => s.status !== "exited").map((s) => s.name);
+  if (!live.length) return;
+  if (!confirm(
+    `Stop ${live.length} running session(s)?\n\n${live.join(", ")}\n\n` +
+    `The program in each one is terminated. Their records stay, so all of ` +
+    `them can be resumed from here afterwards.`
+  )) return;
+  await bulkAction($("stop-all"), "/api/sessions/kill", { method: "POST" }, "stop");
+  // The open terminal's own socket sees its child go before the next poll
+  // does, so there is nothing to reattach here — only the rail to redraw.
+  refreshSessions();
+});
+
+/* Bring everything back. Each respawn replaces its session's child, so the one
+   this tab is watching has to be picked up again by hand: the poll only
+   notices a swapped pid from a socket that is still live, and ours died with
+   the child it was bound to. */
+$("resume-all").addEventListener("click", async () => {
+  const dead = sessionsCache
+    .filter((s) => s.status === "exited").map((s) => s.name);
+  if (!dead.length) return;
+  if (!confirm(
+    `Resume ${dead.length} exited session(s)?\n\n${dead.join(", ")}\n\n` +
+    `Each comes back under its own name — the claude harness with --resume of ` +
+    `the conversation it was pinned to.`
+  )) return;
+  const result = await bulkAction(
+    $("resume-all"), "/api/sessions/respawn", { method: "POST" }, "resume"
+  );
+  const back = (result && result.respawned) || [];
+  detach();
+  await refreshSessions();
+  if (currentName && back.includes(currentName)) attach(currentName);
+});
+
 $("clear-exited").addEventListener("click", async () => {
   const dead = sessionsCache.filter((s) => s.status === "exited").map((s) => s.name);
   if (!dead.length) return;
@@ -790,28 +826,48 @@ $("clear-exited").addEventListener("click", async () => {
     `Drop the records of ${dead.length} exited session(s)?\n\n${dead.join(", ")}\n\n` +
     `They can no longer be resumed. Running sessions are untouched.`
   )) return;
-  const resp = await api("/api/sessions", { method: "DELETE" });
-  const result = resp.ok ? await resp.json() : null;
   // A record a mesh row still names is kept, not dropped — the two are one
   // fact, and half of it left behind is a member nobody can respawn or reach.
-  // Said out loud: an omission the button does not mention reads as the clear
-  // having failed, and the next click is someone trying harder.
-  const kept = result?.kept || [];
-  if (kept.length) {
-    alert(
-      `Kept ${kept.length} record(s) still named by a mesh:\n\n` +
-      kept.map((k) => `${k.name} — ${k.meshes.map((m) => m.mesh).join(", ")}`)
-        .join("\n") +
-      `\n\nRemove them from the mesh first (the roster's ×), then clear again.`
-    );
-  }
-  if (currentName && dead.includes(currentName)) {
-    detach();
-    currentName = null;
-    location.hash = "#/";
-  }
+  // reportBulk() is what says so, for this button and for delete alike.
+  const result = await bulkAction(
+    $("clear-exited"), "/api/sessions", { method: "DELETE" }, "clear"
+  );
+  dropIfGone(result, dead);
   refreshSessions();
 });
+
+/* The whole rail, gone: running sessions stopped and waited out, then every
+   record forgotten. One call rather than stop-all followed by clear, because
+   a session that has just been signalled is not yet `exited` — a clear sent
+   straight after it would skip exactly the sessions it was meant to remove. */
+$("delete-all").addEventListener("click", async () => {
+  const all = sessionsCache.map((s) => s.name);
+  if (!all.length) return;
+  const live = sessionsCache.filter((s) => s.status !== "exited").length;
+  if (!confirm(
+    `Delete all ${all.length} session(s)?\n\n${all.join(", ")}\n\n` +
+    (live ? `${live} of them are still running and are stopped first. ` : "") +
+    `The daemon then forgets every record, so none of them can be resumed.`
+  )) return;
+  const result = await bulkAction(
+    $("delete-all"), "/api/sessions?running=1", { method: "DELETE" }, "delete"
+  );
+  dropIfGone(result, all);
+  refreshSessions();
+});
+
+/* Was the session this tab is attached to among the records just dropped? Then
+   there is nothing left to watch — not even an exited screen — so let the
+   terminal go and fall back to home. A record the mesh guard kept is still
+   there, and stays open. */
+function dropIfGone(result, candidates) {
+  if (!result || !currentName || !candidates.includes(currentName)) return;
+  const kept = (result.kept || []).map((k) => k.name);
+  if (kept.includes(currentName)) return;
+  detach();
+  currentName = null;
+  location.hash = "#/";
+}
 
 /* The rail polls, but a poll is a tick behind at best: a session spawned from
    somewhere else — another agent's `spawn`, a `claunch new` in a terminal, a

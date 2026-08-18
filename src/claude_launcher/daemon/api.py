@@ -232,6 +232,11 @@ def build_app(
     r.add_get("/api/sessions", h_sessions_list)
     r.add_post("/api/sessions", h_sessions_create)
     r.add_delete("/api/sessions", h_sessions_clear)
+    # The bulk verbs, one segment deep so they cannot be read as a session
+    # name: nothing else routes POST /api/sessions/<something>, and the two
+    # routes that do take {name} there are a GET and a DELETE.
+    r.add_post("/api/sessions/kill", h_sessions_kill_all)
+    r.add_post("/api/sessions/respawn", h_sessions_respawn_all)
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_get("/api/sessions/{name}/children", h_session_children)
@@ -1592,10 +1597,27 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
     call and one held record should not stop the other nine. ``kept`` says
     which and why, so the omission is visible instead of looking like the
     clear did not take.
+
+    ``?running=1`` widens it from "the exited ones" to "all of them": every
+    running session is shut down first — terminated, waited out, force-killed
+    if it will not go — and only then are the records dropped. That wait is
+    the reason this is one call and not two. :func:`h_sessions_kill_all`
+    returns as soon as the signal is sent, and a session that has been sent a
+    signal is not yet ``exited``; a clear issued straight after it would skip
+    exactly the sessions it was asked to remove, and look like it had done
+    nothing. ``stopped`` names what was shut down on the way through.
     """
     manager: SessionManager = request.app["manager"]
     mesh = request.app["mesh"]
     logs = request.query.get("logs") in ("1", "true")
+    stopped: List[str] = []
+    if request.query.get("running") in ("1", "true"):
+        live = [s for s in manager.list() if not s.exited]
+        if live:
+            # Concurrently: the grace period is per session, and waiting out
+            # ten of them in a row is ten graces long for no reason.
+            await asyncio.gather(*(s.shutdown() for s in live))
+        stopped = [s.sdef.name for s in live]
     kept = [
         {"name": name, "meshes": held}
         for name, held in (
@@ -1606,7 +1628,72 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
         if held
     ]
     removed = manager.clear(logs=logs, keep=[k["name"] for k in kept])
-    return web.json_response({"removed": removed, "kept": kept, "logs": logs})
+    return web.json_response(
+        {"removed": removed, "kept": kept, "logs": logs, "stopped": stopped}
+    )
+
+
+async def h_sessions_kill_all(request: web.Request) -> web.Response:
+    """Kill every running session at once (``?force=1`` to go straight to
+    SIGKILL). Exited ones are left alone.
+
+    Records are untouched, which is the whole difference between this and the
+    clear above: a killed session reads ``exited`` and stays respawnable,
+    exactly as if each terminal's kill button had been pressed in turn. So
+    does its mesh row, so there is nothing here for :func:`_mesh_holds` to
+    guard — stopping a member is what a member is for.
+
+    One refusal does not stop the rest. This is the bulk call, and a loop that
+    gives up on the third of ten leaves an operator with seven sessions they
+    asked to stop and no way to tell which; ``failed`` names them instead.
+    """
+    manager: SessionManager = request.app["manager"]
+    force = request.query.get("force") in ("1", "true")
+    killed: List[str] = []
+    failed: List[dict] = []
+    for session in list(manager.list()):
+        if session.exited:
+            continue
+        name = session.sdef.name
+        try:
+            manager.kill(name, force=force)
+        except Exception as exc:  # one refusal must not strand the other nine
+            failed.append({"name": name, "error": str(exc)})
+        else:
+            killed.append(name)
+    return web.json_response({"killed": killed, "failed": failed})
+
+
+async def h_sessions_respawn_all(request: web.Request) -> web.Response:
+    """Relaunch every exited session under its own name and definition.
+
+    :func:`h_session_respawn` applied to the whole rail, which is what a rail
+    full of exited sessions usually wants: the claude harness comes back with
+    ``--resume`` of the conversation pinned at creation, so a laptop that slept
+    through a daemon restart comes back as the work that was there rather than
+    as a set of fresh, empty terminals.
+
+    In creation order, so a session is back before the ones it spawned — the
+    children's records name it, and respawn reads the record.
+
+    Partial results are reported rather than raised, for the same reason as
+    the kill above: a name that will not come back is worth knowing, and it is
+    no reason to abandon the ones that would have.
+    """
+    manager: SessionManager = request.app["manager"]
+    respawned: List[str] = []
+    failed: List[dict] = []
+    for session in list(manager.list()):
+        if not session.exited:
+            continue
+        name = session.sdef.name
+        try:
+            manager.respawn(name)
+        except Exception as exc:
+            failed.append({"name": name, "error": str(exc)})
+        else:
+            respawned.append(name)
+    return web.json_response({"respawned": respawned, "failed": failed})
 
 
 def _session(request: web.Request):

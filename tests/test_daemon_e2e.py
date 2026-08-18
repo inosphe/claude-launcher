@@ -269,6 +269,74 @@ def test_clear_drops_only_exited_records(home, tmp_path):
     asyncio.run(run())
 
 
+def test_bulk_stop_resume_delete(home, tmp_path):
+    """The rail's bulk verbs, on a rail of three.
+
+    Their whole point is that they differ in what survives: stopping ends the
+    programs and keeps every record respawnable, resuming brings the lot back
+    under their own names, and only the delete forgets anything. Checked in
+    that order on the same three sessions, because each one is the setup for
+    the next and a verb that quietly did a neighbour's job would pass on its
+    own.
+    """
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            names = ["b0", "b1", "b2"]
+            for name in names:
+                s = mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+                await _wait_screen(s, "READY")
+
+            # --- stop: programs end, records stay ---------------------------
+            resp = await client.post("/api/sessions/kill", headers=bearer)
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["killed"] == names and doc["failed"] == []
+            for name in names:
+                await mgr.get(name).wait_for("exited", timeout=10.0, threshold=0.5)
+            assert sorted(s.sdef.name for s in mgr.list()) == names
+
+            # a second stop has nothing to stop, and says so rather than failing
+            doc = await (await client.post("/api/sessions/kill", headers=bearer)).json()
+            assert doc["killed"] == [] and doc["failed"] == []
+
+            # --- resume: all three come back under their own names ----------
+            resp = await client.post("/api/sessions/respawn", headers=bearer)
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["respawned"] == names and doc["failed"] == []
+            for name in names:
+                revived = mgr.get(name)
+                assert not revived.exited
+                await _wait_screen(revived, "READY")
+
+            # --- delete: running ones are stopped first, then forgotten -----
+            # Without ?running=1 there is nothing exited to drop, which is the
+            # distinction the flag exists for.
+            doc = await (await client.delete("/api/sessions", headers=bearer)).json()
+            assert doc["removed"] == [] and doc["stopped"] == []
+            assert sorted(s.sdef.name for s in mgr.list()) == names
+
+            resp = await client.delete("/api/sessions?running=1", headers=bearer)
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["stopped"] == names
+            assert sorted(doc["removed"]) == names and doc["kept"] == []
+            assert mgr.list() == []
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_api_cflow_monitoring(home, tmp_path, monkeypatch):
     """The dashboard endpoint surfaces runs (and their step reports) keyed
     by (cwd, scope); a run maps 1:1 to the session named like its scope."""

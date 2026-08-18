@@ -63,7 +63,15 @@
       <span id="relay-badge" class="badge hidden"></span>
     </header>
     <ul id="session-list"></ul>
-    <button id="clear-exited" class="hidden"></button>
+    <!-- The whole rail at once. Each button hides itself when it would act on
+         nothing, so what is up is a count of what it would do — the bar is
+         empty on an empty rail rather than four dead controls. -->
+    <div id="bulk-actions">
+      <button id="stop-all" class="bulk hidden" type="button"></button>
+      <button id="resume-all" class="bulk hidden" type="button"></button>
+      <button id="clear-exited" class="bulk hidden" type="button"></button>
+      <button id="delete-all" class="bulk danger hidden" type="button"></button>
+    </div>
     <nav id="rail-nav">
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
