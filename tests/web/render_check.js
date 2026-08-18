@@ -45,7 +45,14 @@ function el(tag, cls, text) {
 }
 const refreshMeshView = () => {};
 const refreshMeshList = () => {};
-const api = async () => ({ ok: true, json: async () => ({}) });
+/* The requests the panel sends are half of what it does, so they are
+   recorded rather than swallowed: a switch that draws correctly and PATCHes
+   the wrong pair is the failure worth catching. */
+const sent = [];
+const api = async (path, opts) => {
+  sent.push({ path, ...(opts || {}) });
+  return { ok: true, json: async () => ({}) };
+};
 const confirm = () => true;
 const alert = () => {};
 function meshDotClass(r) {
@@ -60,8 +67,8 @@ new Function(
   "exports", "document", "window", "el", "refreshMeshView", "refreshMeshList",
   "api", "confirm", "alert", "meshDotClass",
   code +
-  "\nObject.assign(exports, {renderTopology, setFocus: (v) => { meshFocus = v; }," +
-  " getFocus: () => meshFocus});"
+  "\nObject.assign(exports, {renderTopology, renderWiring," +
+  " setFocus: (v) => { meshFocus = v; }, getFocus: () => meshFocus});"
 )(ctx, document, window, el, refreshMeshView, refreshMeshList, api, confirm,
   alert, meshDotClass);
 
@@ -147,8 +154,13 @@ const info = {
         withClass(canvas, "mesh-mlink").length === 2,
         withClass(canvas, "mesh-mlink").length);
   check("one peer edge", withClass(canvas, "mesh-edge-group").length === 1);
-  check("the peer edge is clickable",
-        hasClass(withClass(canvas, "mesh-edge-group")[0], "editable"));
+  // Peer edges are drawn, hovered and read — not cut. The graph is a full
+  // interconnect by design, so the diagram offers no gesture that could take
+  // a link out of it by accident.
+  check("the peer edge is not a click target",
+        !(withClass(canvas, "mesh-edge-group")[0].handlers.click || []).length);
+  check("no wiring switches without a selection",
+        withClass(canvas, "mesh-wire").length === 0);
   check("nothing dimmed without a selection",
         withClass(canvas, "dim").length === 0);
   check("no reach lines without a selection",
@@ -186,6 +198,79 @@ const info = {
         withClass(canvas, "mesh-reach").length === 2,
         withClass(canvas, "mesh-reach").length);
   check("the focused agent is marked", withClass(canvas, "focus").length === 1);
+  // Every other agent wears the switch for its pair with the selected one,
+  // and which way the switch points is the pair's current state: '×' on the
+  // two w-api can already message, '+' on the two it cannot.
+  const wires = withClass(canvas, "mesh-wire");
+  check("a switch on every other agent", wires.length === 4, wires.length);
+  check("the connected pairs offer a disconnect",
+        wires.filter((n) => hasClass(n, "on")).length === 2);
+  check("the closed pairs offer a connect",
+        wires.filter((n) => hasClass(n, "off")).length === 2);
+  check("the selected agent carries no switch of its own",
+        withClass(canvas, "focus").every((n) => !withClass(n, "mesh-wire").length));
+  check("a switch is reachable by keyboard",
+        wires.every((n) => n.attrs.tabindex === "0" && n.handlers.keydown));
+
+  // ...and the switch must PATCH the pair it is drawn on, in the direction
+  // it is drawn in. A '+' beside w-web connects w-api to w-web.
+  sent.length = 0;
+  const stray = { stopPropagation() {}, preventDefault() {} };
+  wires.find((n) => hasClass(n, "off")).handlers.click[0](stray);
+  check("the switch PATCHes one member edge", sent.length === 1, sent);
+  check("...at the member-link route",
+        /\/api\/mesh\/team\/members\/w-api\/links\/(w-web|probe)$/.test(sent[0].path),
+        sent[0] && sent[0].path);
+  check("...asking for the state the glyph offered",
+        sent[0].method === "PATCH" && sent[0].body === '{"enabled":true}', sent[0]);
+  sent.length = 0;
+  wires.find((n) => hasClass(n, "on")).handlers.click[0](stray);
+  check("an '×' asks for the other direction",
+        sent.length === 1 && sent[0].body === '{"enabled":false}', sent);
+}
+
+/* ---- the Connections panel: the same edit as a list -------------------- */
+{
+  ctx.setFocus(null);
+  const box = ctx.renderWiring(info);
+  const opts = byTag(box, "option");
+  check("the picker offers every member", opts.length === 6, opts.length);
+  // With nobody selected the panel is the wiring as it stands: the open
+  // pairs, which is the short list and the one somebody chose.
+  const rows = withClass(box, "mesh-member");
+  check("a row per connected pair", rows.length === 5, rows.length);
+  check("each pair can be disconnected",
+        byTag(box, "button").every((b) => b.text === "Disconnect"));
+}
+{
+  ctx.setFocus("w-api");
+  const box = ctx.renderWiring(info);
+  const rows = withClass(box, "mesh-member");
+  check("a row per other member", rows.length === 4, rows.length);
+  const labels = byTag(box, "button").map((b) => b.text);
+  check("connected rows disconnect, closed rows connect",
+        labels.filter((t) => t === "Disconnect").length === 2
+          && labels.filter((t) => t === "Connect").length === 2, labels);
+  check("the bulk edits are offered",
+        labels.includes("connect to all") && labels.includes("isolate"), labels);
+  // Lineage is called out on the row, because cutting along a spawn edge is
+  // the one disconnect that also stops a child reporting.
+  const kin = withClass(box, "mesh-kin");
+  check("the parent row says so", kin.length === 1 && kin[0].text === "parent",
+        kin.map((k) => k.text));
+  check("the picker keeps the selection",
+        byTag(box, "option").some((o) => o.value === "w-api" && o.selected));
+}
+{
+  // One member is nobody to talk to, and the panel says that rather than
+  // drawing an empty list under a picker with one name in it.
+  ctx.setFocus(null);
+  const box = ctx.renderWiring({
+    name: "solo", members: [info.members[0]], member_links: [],
+  });
+  check("a one-member mesh has nothing to wire",
+        withClass(box, "mesh-member").length === 0
+          && byTag(box, "select").length === 0);
 }
 {
   // A selection whose member has left must not survive the redraw.

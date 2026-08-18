@@ -591,22 +591,68 @@ vendored library, no external fetch.
   radius derived from the ring's contents — the smallest that still separates
   neighbours — so the panel stays small and does not stretch.
 - **Edges** are links, styled by state: solid = ok, dashed = queued, red =
-  unreachable, grey = cut. A transparent fat line under each hairline does
-  the hit-testing, or they would be unclickable.
+  unreachable, grey = cut. A transparent fat line under each hairline carries
+  the tooltip, or a hairline would be impossible to hover.
 - **Editing**: drag a daemon onto another rank slot to reorder (authority
-  handover is confirmed explicitly), click an edge to cut or restore it.
-  Peers are revoked from the *Peer daemons* box below, since removing a
-  daemon is not an edge operation.
-- **Links list**: the same edges as text under the diagram, each with its
-  state and a Cut/Restore button. Aiming at a hairline is a poor way to run
-  a network — and an edge passing behind a node is barely clickable at all —
-  so the list, not the diagram, is the surface that is always usable. Rows
-  the viewing daemon may not edit say *which* rule blocked them and where
-  the edit can be made instead.
+  handover is confirmed explicitly). Peers are revoked from the *Peer
+  daemons* box below, since removing a daemon is not an edge operation.
+- **Peer links list**: the same edges as text under the diagram, each with
+  its state. A status board, not an editor — see below.
 
-Both editing surfaces are driven by the edge table's `editable` flag, so a
-peer's dashboard can cut its own links without the operator having to go find
-the authority's browser.
+**The peer graph is not edited from the web any more**, and that is a
+decision rather than an omission. Its intended shape is the complete one:
+every daemon linked to every other, with the authority's fanout as the
+fallback for a link that is down rather than as somewhere to route traffic
+on purpose. Nothing on that graph is a judgement call an operator makes from
+a diagram, so the click-to-cut on a hairline was a gesture that could only
+lose a link by accident — a hazard with no matching payoff. What is left is
+the repair: a cut edge (`claunch mesh cut`, or an older dashboard) shows as
+one in the list with a **Restore** button, gated by the edge table's
+`editable` flag so a peer can put its own link back without going to find
+the authority's browser. Cutting one, which stays a real operation, is the
+CLI's.
+
+### Wiring the member graph (web)
+
+What the mesh page edits instead is the layer that *is* somebody's decision:
+who may message whom. Two surfaces, one call (`setMemberLink`), so they
+cannot drift apart:
+
+- **In the diagram**: select an agent — the existing click, which already
+  lights its reachable set — and every *other* agent grows a switch on its
+  disc: `+` to connect the pair, `×` to disconnect it. On the agent, because
+  that is where the reader's eye already is; beside the disc rather than on
+  it, so the disc keeps meaning "select this one instead". The switch is a
+  group of its own with its own hit ring, tooltip and `tabindex`, since the
+  glyph itself is a few pixels. An unreachable agent is still dimmed, but the
+  dimming moved off the group and onto the disc and label: the agent the
+  selected one *cannot* reach is precisely the one somebody is about to
+  connect it to.
+- **In the Connections list**: the same selection, spent on a row per other
+  member — state, lineage (`parent`/`child`), and the Connect/Disconnect
+  button — plus *connect to all* and *isolate* for the two edits worth having
+  as one gesture, and a picker for choosing the agent without hunting for its
+  dot. Hovering a row lights that agent in the diagram above. With nothing
+  selected the panel lists the connected pairs, which is the short list and
+  the one somebody chose. This is the surface that is always usable, the way
+  the links list was for the peer graph: a badge inside a dense forest is a
+  small target.
+
+Asymmetric confirmation, following what the edits actually cost: connecting
+applies on the click (a grant made in error is one click back), while
+disconnecting asks first — members are never routed around a cut, so the
+pair simply stops being able to speak, and mail already owed between them
+stops being chased on the spot. The bulk edits ask once for the run rather
+than once per pair, and issue one PATCH per pair anyway: the daemon has no
+bulk route, and inventing one in the browser would be a second way for the
+graph to change.
+
+Outcomes are a **line under the diagram**, not an `alert()`: a modal for
+"connected a ↔ b" interrupts the very reading the edit was made to change,
+and a modal for a refusal takes the words away while the graph they are
+about is still on screen. It stands until the next edit replaces it (or a
+click dismisses it), because a refusal that vanished on a timer is a refusal
+nobody read.
 
 ## Hierarchy in the diagram (phase 9 — implemented)
 

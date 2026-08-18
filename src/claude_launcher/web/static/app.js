@@ -3912,6 +3912,11 @@ let meshBusy = false;  // an edit is in flight; suppress the poll's redraw
    state, so the 2s poll rebuilding the whole panel does not drop the
    selection out from under whoever is reading it. */
 let meshFocus = null;
+/* The last edit's outcome, shown as a line under the diagram rather than as
+   an alert(): a modal for "connected a <-> b" interrupts the very reading
+   the edit was made to change, and a modal for a refusal takes the words
+   away while the graph they are about is still on screen. */
+let meshNotice = null;   // {text, bad} | null
 
 /* A drag released anywhere but on a node is a cancel. Registered once, at
    the window, because the node handlers only see drops that land on them —
@@ -3964,6 +3969,9 @@ function edgeClass(edge, byName) {
   return "ok";
 }
 
+/* `what` is the sentence to show when it works — the edits here are small
+   and their effect is a line or a dot moving somewhere in a diagram, which
+   is easy to miss, so each one says what it just did. */
 async function meshEdit(path, options, what) {
   meshBusy = true;
   try {
@@ -3972,10 +3980,16 @@ async function meshEdit(path, options, what) {
     });
     if (!resp.ok) {
       const doc = await resp.json().catch(() => ({}));
-      alert(doc.error || `HTTP ${resp.status}`);
+      meshNotice = { text: doc.error || `HTTP ${resp.status}`, bad: true };
       return false;
     }
+    if (what) meshNotice = { text: what, bad: false };
     return true;
+  } catch (err) {
+    // Includes the 401 api() throws after putting the login overlay up: the
+    // panel behind it should not also claim the edit went through.
+    meshNotice = { text: String((err && err.message) || err), bad: true };
+    return false;
   } finally {
     meshBusy = false;
     await refreshMeshView(true);
@@ -3983,34 +3997,127 @@ async function meshEdit(path, options, what) {
   }
 }
 
-/* One place decides what cutting an edge means, so the diagram and the list
-   below it cannot drift apart. */
-function toggleEdge(info, edge) {
+/* Putting a cut peer edge back.
+
+   Cutting one is no longer offered here, and that is the point of this being
+   half a toggle: the peer graph is meant to be a full interconnect — every
+   daemon linked to every other, with the authority's fanout as the fallback
+   rather than the plan — so there is no routine edit to make on it, and a
+   clickable hairline that could take a link away by accident was a hazard
+   with nothing on the other side of it. A cut edge is an anomaly against
+   that shape (somebody used `claunch mesh cut`, or an older dashboard), so
+   the one action left is the repair. What this page edits instead is the
+   member graph one layer up, where a cut IS a decision somebody makes. */
+function restoreEdge(info, edge, btn) {
   const { a, b } = edge;
-  const enable = !edge.enabled;
-  if (!confirm(
-    enable
-      ? `Restore the direct link ${a} <-> ${b}?`
-      : `Cut the direct link ${a} <-> ${b}? Their traffic will go through ` +
-        `${info.authority} instead — slower, but nothing is lost.`
-  )) return;
+  if (btn) { btn.disabled = true; btn.textContent = "restoring…"; }
   return meshEdit(
     `/api/mesh/${encodeURIComponent(info.name)}/links/` +
     `${encodeURIComponent(a)}/${encodeURIComponent(b)}`,
-    { method: "PATCH", body: JSON.stringify({ enabled: enable }) }
+    { method: "PATCH", body: JSON.stringify({ enabled: true }) },
+    `restored the direct link ${a} ↔ ${b}`
   );
 }
 
-/* Aiming at a hairline is a poor way to run a network, and edges that pass
-   behind a node are barely clickable at all. So the same edits are also a
-   plain list: every pair, its state, and the button that changes it. */
-function renderLinkEditor(info) {
+/* One place decides what connecting or disconnecting two members means, so
+   the diagram's switches and the list's buttons cannot drift apart.
+
+   Connecting applies on the click: it grants, and a grant made in error is
+   one click back. Disconnecting asks first, because it is not the peer
+   graph's "take the slow road" — members are never routed around a cut, so
+   the pair simply stops being able to speak, and mail already owed between
+   them stops being chased on the spot. */
+function setMemberLink(info, a, b, enabled, btn) {
+  if (!enabled && !confirm(
+    `Disconnect ${a} <-> ${b}?\n\n` +
+    "They can no longer message each other: sends between them are refused, " +
+    "and a '*' from either one skips the other."
+  )) return Promise.resolve(false);
+  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+  return meshEdit(
+    `/api/mesh/${encodeURIComponent(info.name)}/members/` +
+    `${encodeURIComponent(a)}/links/${encodeURIComponent(b)}`,
+    { method: "PATCH", body: JSON.stringify({ enabled: !!enabled }) },
+    `${enabled ? "connected" : "disconnected"} ${a} ↔ ${b}`
+  );
+}
+
+/* The bulk edits behind 'connect to all' and 'isolate'. One PATCH per pair,
+   because the daemon has no bulk route and inventing one in the browser
+   would be a second way for the graph to change — but one confirmation and
+   one redraw for the run, because n dialogs is a dialog nobody reads by the
+   third and n redraws is a panel that flickers under the reader's cursor. */
+async function wireEvery(info, from, handles, enabled, btn) {
+  if (!handles.length) return;
+  if (!enabled && !confirm(
+    `Disconnect ${from} from ${handles.length} member` +
+    `${handles.length === 1 ? "" : "s"}?\n\n` +
+    `${from} can then message nobody, and nobody it, until something is ` +
+    "connected again."
+  )) return;
+  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+  meshBusy = true;
+  let done = 0, failed = "";
+  try {
+    for (const to of handles) {
+      const resp = await api(
+        `/api/mesh/${encodeURIComponent(info.name)}/members/` +
+        `${encodeURIComponent(from)}/links/${encodeURIComponent(to)}`,
+        {
+          method: "PATCH", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ enabled: !!enabled }),
+        }
+      );
+      if (!resp.ok) {
+        const doc = await resp.json().catch(() => ({}));
+        failed = doc.error || `HTTP ${resp.status}`;
+        break;
+      }
+      done += 1;
+    }
+  } catch (err) {
+    failed = String((err && err.message) || err);
+  } finally {
+    meshBusy = false;
+    // How far it got, either way: a run that stopped halfway left a graph
+    // that neither the request nor the refusal describes on its own.
+    const verb = enabled ? "connected" : "disconnected";
+    meshNotice = failed
+      ? { text: `${verb} ${done} of ${handles.length}, then: ${failed}`, bad: true }
+      : {
+        text: `${verb} ${from} ${enabled ? "to" : "from"} ${done} member` +
+              `${done === 1 ? "" : "s"}`,
+        bad: false,
+      };
+    await refreshMeshView(true);
+    refreshMeshList();
+  }
+}
+
+/* The peer edges as text: what each daemon-to-daemon link is doing.
+
+   Read-only, and that is a change of mind rather than an omission. This list
+   used to be the reliable half of an editing surface whose other half was a
+   clickable hairline — but the peer graph is not a shape an operator
+   draws: every peer is linked to every other, and a link that is down or
+   slow is covered by the authority's fanout rather than by somebody
+   rewiring it. So what is left is a status board, plus one button for the
+   one state that should not persist: an edge somebody cut. */
+function renderPeerLinks(info) {
   const edges = info.links || [];
   const box = el("div", "mesh-links");
-  box.appendChild(el("h3", null, "Links"));
+  box.appendChild(el("h3", null, "Peer links"));
   if (!edges.length) return box;
-  const self = (info.peers || []).find((p) => p.self);
-  const me = self ? self.machine : "";
+  const cutCount = edges.filter((e) => !e.enabled).length;
+  box.appendChild(el(
+    "p", cutCount ? "wf-warning" : "wf-note",
+    cutCount
+      ? `${cutCount} of ${edges.length} links ${cutCount === 1 ? "is" : "are"} `
+        + `cut — that traffic goes through ${info.authority}, which still `
+        + "delivers it, only slower. Restore them for a full interconnect."
+      : "every daemon is linked to every other — nothing to edit here; the "
+        + "authority's fanout carries whatever a link cannot"
+  ));
   for (const edge of edges) {
     const row = el("div", "mesh-member");
     const cls = edgeClass(edge, Object.fromEntries(
@@ -4025,26 +4132,22 @@ function renderLinkEditor(info) {
       ok: "linked", queued: "linked · traffic queued",
       down: "linked · peer unreachable", cut: "cut — routed via the authority",
     }[cls]));
+    if (edge.enabled) {
+      box.appendChild(row);
+      continue;   // a healthy link needs no button pretending otherwise
+    }
     if (edge.editable) {
-      const btn = el("button", "wf-btn option", edge.enabled ? "Cut" : "Restore");
-      btn.addEventListener("click", () => toggleEdge(info, edge));
+      const btn = el("button", "wf-btn option", "Restore");
+      btn.title = `put the direct link ${edge.a} ↔ ${edge.b} back`;
+      btn.addEventListener("click", () => restoreEdge(info, edge, btn));
       row.appendChild(btn);
     } else {
-      // Say which of the two rules blocked it, and where the operator can
-      // act instead — "disabled" alone is a dead end for whoever is trying
-      // to change something.
-      const far = edge.a === info.authority ? edge.b : edge.a;
+      // Where the operator can act instead: a row that reads "cut" and
+      // offers nothing is a dead end for whoever came to fix it.
       row.appendChild(el(
         "span", "wf-note",
-        !edge.cuttable
-          ? (far === me
-            ? "carries the log — leave with Remove mesh, or be unlinked "
-              + `from ${info.authority}`
-            : info.primary === null
-              ? `carries the log — unlink ${far} to remove it`
-              : `carries the log — ${info.authority} unlinks ${far}`)
-          : `not this daemon's edge — edit it on ${info.authority}, `
-            + `${edge.a} or ${edge.b}`
+        `not this daemon's edge — restore it on ${info.authority}, `
+        + `${edge.a} or ${edge.b}`
       ));
     }
     box.appendChild(row);
@@ -4183,17 +4286,54 @@ function boxExit(box, tx, ty) {
 
 function topoHint(info, clusters) {
   const focus = meshFocus
-    ? ` · showing what ${meshFocus} can reach — click it again to clear`
-    : " · click an agent to see who it can reach";
+    ? ` · wiring ${meshFocus}: lit agents are the ones it can message, and `
+      + "the ⊕ / ⊗ on each other agent connects or disconnects the pair "
+      + `· click ${meshFocus} again to stop`
+    : " · click an agent to see who it can message, and to wire it up";
   if (clusters.length < 2) {
     return "one daemon — clusters appear as others join" + focus;
   }
-  // Only the authority can edit the graph, so only it is told how.
+  // Reordering is the authority's, so only it is told about the drag. The
+  // peer links themselves are no longer edited from here at all: they are a
+  // full interconnect, and the mesh's own wiring is the member graph.
   return (info.primary === null
-    ? "rank 0 holds the authority · drag a cluster onto another to reorder · "
-      + "click a link to cut or restore it"
-    : `rank 0 holds the authority — edit the graph on ${info.authority}`
+    ? "rank 0 holds the authority · drag a cluster onto another to reorder"
+    : `rank 0 holds the authority — reorder on ${info.authority}`
   ) + focus;
+}
+
+/* The connect/disconnect switch that rides on an agent's disc while another
+   agent is selected. A group of its own so it can carry its own hit area,
+   its own tooltip and its own keyboard stop: the glyph is a few pixels and
+   the ring around it is the target. Beside the disc rather than on it, so
+   the disc keeps meaning what it always meant — select this one instead. */
+function wireBadge(info, from, to, on) {
+  const g = svg("g", {
+    class: "mesh-wire " + (on ? "on" : "off"),
+    transform: `translate(${RING.node - 2} ${-RING.node + 2})`,
+    tabindex: "0", role: "button",
+    "aria-label": `${on ? "disconnect" : "connect"} ${from} and ${to}`,
+  });
+  g.appendChild(svg("circle", { r: 9, class: "mesh-wire-disc" }));
+  g.appendChild(svg(
+    "text", { class: "mesh-wire-glyph", y: 4 }, on ? "×" : "+"
+  ));
+  g.appendChild(svg("title", {}, on
+    ? `disconnect ${from} ↔ ${to} — they stop being able to message `
+      + "each other"
+    : `connect ${from} ↔ ${to} — let them message each other`));
+  const act = (ev) => {
+    // The badge sits inside the agent group, whose own click moves the
+    // selection. Wiring a pair is not a change of selection.
+    if (ev && ev.stopPropagation) ev.stopPropagation();
+    if (ev && ev.preventDefault) ev.preventDefault();
+    setMemberLink(info, from, to, !on);
+  };
+  g.addEventListener("click", act);
+  g.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") act(ev);
+  });
+  return g;
 }
 
 function renderTopology(info) {
@@ -4209,6 +4349,20 @@ function renderTopology(info) {
   head.appendChild(el("h3", null, "Topology"));
   head.appendChild(el("span", "wf-note", topoHint(info, clusters)));
   box.appendChild(head);
+  // What the last edit did, where the reader's eyes already are. Click to
+  // dismiss; otherwise it stands until the next edit replaces it, because a
+  // refusal that vanished on a timer would be a refusal nobody read.
+  if (meshNotice) {
+    const line = el(
+      "p", "mesh-notice" + (meshNotice.bad ? " bad" : ""), meshNotice.text
+    );
+    line.title = "dismiss";
+    line.addEventListener("click", () => {
+      meshNotice = null;
+      refreshMeshView(true);
+    });
+    box.appendChild(line);
+  }
 
   // Cluster centres on the rank ring. The cell is the widest box rather than
   // a label, since that is what has to clear now; two clusters sit on a
@@ -4247,7 +4401,7 @@ function renderTopology(info) {
   // the gesture people try first, and the cluster boxes cover most of the
   // panel, so waiting for a click on bare canvas would rarely fire.
   canvas.addEventListener("click", (ev) => {
-    if (!meshFocus || ev.target.closest(".mesh-agent, .mesh-edge-group")) return;
+    if (!meshFocus || ev.target.closest(".mesh-agent")) return;
     meshFocus = null;
     refreshMeshView(true);
   });
@@ -4328,16 +4482,14 @@ function renderTopology(info) {
     const ea = boxExit(a, b.cx, b.cy), eb = boxExit(b, a.cx, a.cy);
     const ends = { x1: ea.x, y1: ea.y, x2: eb.x, y2: eb.y };
     const group = svg("g", { class: `mesh-edge-group ${cls}` });
-    // A 1.6px stroke is far too thin to aim at (and a horizontal one has a
-    // zero-height box), so a transparent fat line underneath does the
-    // hit-testing while the visible one stays hairline.
+    // A 1.6px stroke is far too thin to hover (and a horizontal one has a
+    // zero-height box), so a transparent fat line underneath carries the
+    // tooltip while the visible one stays hairline. It is no longer a click
+    // target: these edges are not edited from the diagram, and a hairline
+    // that could sever a link on a stray click was the wrong thing to aim at.
     group.appendChild(svg("line", { ...ends, class: "mesh-edge-hit" }));
     group.appendChild(svg("line", { ...ends, class: `mesh-edge ${cls}` }));
     group.appendChild(svg("title", {}, `${edge.a} <-> ${edge.b} — ${cls}`));
-    if (edge.editable) {
-      group.classList.add("editable");
-      group.addEventListener("click", () => toggleEdge(info, edge));
-    }
     canvas.appendChild(group);
   }
 
@@ -4405,6 +4557,10 @@ function renderTopology(info) {
         + (m.handle === meshFocus ? " focus" : "")
         + (lit ? "" : " dim"),
       transform: `translate(${p.x} ${p.y})`,
+      // What the Connections list points at when a row is hovered: the two
+      // panels show one graph, and a handle in a list is a poor way to find
+      // a dot in a forest.
+      "data-handle": m.handle,
     });
     g.appendChild(svg("circle", { r: RING.node, class: "mesh-agent-disc" }));
     g.appendChild(svg(
@@ -4421,6 +4577,12 @@ function renderTopology(info) {
       meshFocus = meshFocus === m.handle ? null : m.handle;
       refreshMeshView(true);
     });
+    // While an agent is selected, every OTHER agent wears the switch for the
+    // pair. On the agent, because that is where the reader already is: the
+    // alternative is finding one pair in a list of n² of them.
+    if (meshFocus && m.handle !== meshFocus) {
+      g.appendChild(wireBadge(info, meshFocus, m.handle, reachable.has(m.handle)));
+    }
     canvas.appendChild(g);
   }
   box.appendChild(canvas);
@@ -4438,6 +4600,168 @@ function renderTopology(info) {
   }
   box.appendChild(legend);
   return box;
+}
+
+/* ---- the member graph, as something you can edit ------------------------ */
+/* Who may message whom, one agent at a time.
+
+   Per agent and not per pair, because the pairs are n² and nobody arrives
+   holding a question about the set of them: they arrive with "who can this
+   worker reach?" or "why is the reviewer hearing nothing?". So the panel
+   borrows the diagram's selection — the same click, the same highlight — and
+   spends it on a row per other member with the switch on the row.
+
+   Two surfaces for one edit, which is the arrangement the peer graph always
+   had and the half of it worth keeping: the diagram is the quick one, and a
+   badge inside a dense forest is a small target, so the list is the one that
+   is always usable. Both call setMemberLink, so they cannot drift apart. */
+function renderWiring(info) {
+  const members = (info.members || []).slice()
+    .sort((x, y) => (x.handle < y.handle ? -1 : x.handle > y.handle ? 1 : 0));
+  const box = el("div", "mesh-wiring");
+  const head = el("div", "mesh-wiring-head");
+  head.appendChild(el("h3", null, "Connections"));
+  box.appendChild(head);
+  if (members.length < 2) {
+    box.appendChild(el(
+      "p", "wf-note",
+      "a mesh needs two members before there is anything to wire — enrol "
+      + "one below"
+    ));
+    return box;
+  }
+
+  // The diagram's selection, reachable without the diagram: a long roster is
+  // easier to pick from a list than to find in a ring, and somebody who came
+  // here to fix one agent should not have to hunt for its dot first.
+  const pick = el("select", "mesh-wire-pick");
+  const blank = el("option", null, "pick an agent…");
+  blank.value = "";
+  pick.appendChild(blank);
+  for (const m of members) {
+    const opt = el("option", null, `${m.handle} (${m.role})`);
+    opt.value = m.handle;
+    if (m.handle === meshFocus) opt.selected = true;
+    pick.appendChild(opt);
+  }
+  pick.addEventListener("change", () => {
+    meshFocus = pick.value || null;
+    refreshMeshView(true);
+  });
+  head.appendChild(pick);
+
+  if (!meshFocus) {
+    // Nothing selected: show the wiring as it stands. The open pairs, not the
+    // closed ones — a join wires a member to its parent and to whatever the
+    // rules match and leaves the rest shut, so the open set is the short one
+    // and the one somebody chose. (The diagram and the CLI agree on this.)
+    const open = (info.member_links || []).filter((e) => e.enabled);
+    box.appendChild(el(
+      "p", "wf-note",
+      open.length
+        ? `${open.length} connected pair${open.length === 1 ? "" : "s"}. Pick an `
+          + "agent above, or click one in the diagram, to change what it reaches"
+        : "no pair is connected — nobody here can message anybody. Pick an "
+          + "agent above to wire it up"
+    ));
+    for (const e of open) {
+      const row = el("div", "mesh-member");
+      row.appendChild(el("span", "mesh-link-swatch mlink"));
+      row.appendChild(el("span", "mesh-handle mono", `${e.a} ↔ ${e.b}`));
+      const btn = el("button", "wf-btn clear", "Disconnect");
+      btn.title = "they stop being able to message each other";
+      btn.addEventListener("click", () => setMemberLink(info, e.a, e.b, false, btn));
+      row.appendChild(btn);
+      box.appendChild(row);
+    }
+    return box;
+  }
+
+  const me = members.find((m) => m.handle === meshFocus);
+  const others = members.filter((m) => m.handle !== meshFocus);
+  const reach = meshReachable(info, meshFocus);
+  const on = others.filter((m) => reach.has(m.handle));
+  box.appendChild(el(
+    "p", "wf-note",
+    `${meshFocus} can message ${on.length} of ${others.length}. A disconnected `
+    + "pair is not sent the long way round like a cut peer link — members are "
+    + "not routed at all, so the send is simply refused"
+  ));
+
+  // The two edits worth having as one gesture: wire this agent to everybody,
+  // or take it out of the conversation entirely.
+  const bulk = el("div", "mesh-wire-bulk");
+  const off = others.filter((m) => !reach.has(m.handle));
+  if (off.length) {
+    const all = el("button", "wf-btn option", "connect to all");
+    all.title = `let ${meshFocus} message every other member (${off.length} to add)`;
+    all.addEventListener("click", () => wireEvery(
+      info, meshFocus, off.map((m) => m.handle), true, all
+    ));
+    bulk.appendChild(all);
+  }
+  if (on.length) {
+    const iso = el("button", "wf-btn archive", "isolate");
+    iso.title = `disconnect ${meshFocus} from every other member`;
+    iso.addEventListener("click", () => wireEvery(
+      info, meshFocus, on.map((m) => m.handle), false, iso
+    ));
+    bulk.appendChild(iso);
+  }
+  const done = el("button", "wf-btn clear", "done");
+  done.title = "clear the selection";
+  done.addEventListener("click", () => { meshFocus = null; refreshMeshView(true); });
+  bulk.appendChild(done);
+  box.appendChild(bulk);
+
+  for (const m of others) {
+    const linked = reach.has(m.handle);
+    const row = el("div", "mesh-member" + (linked ? " linked" : ""));
+    row.appendChild(el("span", `dot ${meshDotClass(m.reachability)}`));
+    row.appendChild(el("span", "mesh-handle", m.handle));
+    row.appendChild(el("span", "mesh-role", m.role));
+    // Lineage, where there is any. Cutting the edge along a spawn is the one
+    // disconnect with a second consequence: the briefing a child was given
+    // tells it to report to its parent, and a report it cannot send is a run
+    // that stalls with nobody told why.
+    const kin = m.parent === meshFocus ? "child"
+      : (me && me.parent === m.handle ? "parent" : "");
+    if (kin) row.appendChild(el("span", "mesh-kin", kin));
+    row.appendChild(el("span", "meta", linked ? "connected" : "not connected"));
+    const btn = el(
+      "button", linked ? "wf-btn clear" : "wf-btn option",
+      linked ? "Disconnect" : "Connect"
+    );
+    btn.title = linked
+      ? `${meshFocus} and ${m.handle} stop being able to message each other`
+        + (kin === "child" ? ` — and ${m.handle} reports to ${meshFocus}` : "")
+        + (kin === "parent" ? ` — and ${meshFocus} reports to ${m.handle}` : "")
+      : `let ${meshFocus} and ${m.handle} message each other`;
+    btn.addEventListener(
+      "click", () => setMemberLink(info, meshFocus, m.handle, !linked, btn)
+    );
+    row.appendChild(btn);
+    hoverLink(row, m.handle);
+    box.appendChild(row);
+  }
+  return box;
+}
+
+/* Hovering a row lights the agent it names in the diagram above.
+
+   Looked up at hover time rather than held as a reference, because the 2s
+   poll rebuilds both panels and a node captured at render time would soon be
+   lighting something that is no longer on the page. Guarded, because the
+   test harness's stub DOM has no query engine and this is decoration. */
+function hoverLink(row, handle) {
+  if (!document.querySelectorAll) return;
+  const mark = (lit) => {
+    for (const n of document.querySelectorAll(".mesh-agent")) {
+      if (n.getAttribute("data-handle") === handle) n.classList.toggle("hot", lit);
+    }
+  };
+  row.addEventListener("mouseenter", () => mark(true));
+  row.addEventListener("mouseleave", () => mark(false));
 }
 
 /* The send/add forms must survive the 2s poll: rebuild everything except a
@@ -4490,7 +4814,11 @@ function renderMesh(info, history, force, owed) {
 
   // the graph leads; the boxes below own the text-level detail and the forms
   view.appendChild(renderTopology(info));
-  if ((info.links || []).length) view.appendChild(renderLinkEditor(info));
+  // Who may message whom is the mesh's own shape and the thing an operator
+  // actually rewires, so it sits directly under the picture of it. The peer
+  // links are transport, and follow as a status board.
+  view.appendChild(renderWiring(info));
+  if ((info.links || []).length) view.appendChild(renderPeerLinks(info));
 
   // members table
   const members = info.members || [];
