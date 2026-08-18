@@ -1636,9 +1636,13 @@ async def h_session_meta(request: web.Request) -> web.Response:
     cwd = _session_cwd(session)
 
     harness = harness_registry.registry().get(info.get("harness") or "")
-    workspace = next(
-        (w for w in workspaces.list_all() if _same_dir(w.path, cwd)), None
-    )
+    # Containment, not equality: a session launched with `--worktree` sits in
+    # `<repo>/.claude/worktrees/<name>`, which is the workspace the user
+    # vouched for with another branch checked out -- not a directory nobody
+    # approved. Matching only the exact path reported those as workspace-less,
+    # which is the one thing the registry exists to make impossible.
+    workspace = workspaces.owning(cwd) if cwd else None
+    within = workspaces.subpath(workspace, cwd) if workspace else ""
     role = None
     if info.get("role"):
         roleset = mesh_roles.resolve()
@@ -1650,6 +1654,9 @@ async def h_session_meta(request: web.Request) -> web.Response:
         "session": info,
         "harness": harness.to_dict() if harness else None,
         "workspace": workspace.to_dict() if workspace else None,
+        # Empty when the session is at the workspace root, which is the usual
+        # case; the worktree's own directory name when it is not.
+        "workspace_subpath": within,
         "role": role,
         "meshes": request.app["mesh"].meshes_for_session(name),
         "cflow": None,
@@ -1659,15 +1666,6 @@ async def h_session_meta(request: web.Request) -> web.Response:
         body["cflow"] = _cflow_entry(manager, cwd, name)
         body["workflows"] = _startable_workflows(cwd)
     return web.json_response(body)
-
-
-def _same_dir(a: str, b: str) -> bool:
-    if not a or not b:
-        return False
-    try:
-        return Path(a).resolve() == Path(b).resolve()
-    except OSError:
-        return False
 
 
 def _mesh_holds(request: web.Request, name: str) -> List[dict]:

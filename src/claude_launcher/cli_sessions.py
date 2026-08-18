@@ -27,7 +27,7 @@ import time
 import webbrowser
 from typing import List
 
-from . import cli_mesh, daemon_client, store
+from . import cli_mesh, daemon_client, herdr, store, worktree
 from .daemon import paths as daemon_paths
 from .daemon import runtime_state
 from .daemon_client import DaemonClientError
@@ -61,11 +61,24 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     extra = list(args.args or [])
     if extra and extra[0] == "--":
         extra = extra[1:]
+    cwd = os.path.abspath(args.cwd) if args.cwd else os.getcwd()
+    # Resolved here and not in the daemon, on purpose. The daemon builds
+    # sessions for three other callers too -- the web UI, a restore after a
+    # restart, an agent's spawn -- and none of them has a terminal to ask in
+    # or a repository in front of them; a restore in particular must reopen
+    # the recorded directory, not invent a second one every boot. The CLI is
+    # the only door with a human behind it, so the question is asked here and
+    # the daemon is handed a plain, already-decided cwd.
+    tree = worktree.resolve(cwd, args.worktree)
+    worktree.announce(tree)
+    if tree is not None:
+        cwd = str(tree.path)
+        herdr.rename_pane(tree.label)
     body = {
         "name": args.name or "",
         "harness": args.harness,
         "profile": args.profile,
-        "cwd": os.path.abspath(args.cwd) if args.cwd else os.getcwd(),
+        "cwd": cwd,
         "args": extra,
         "env": env,
         "cols": args.cols,
@@ -170,6 +183,13 @@ def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
             f"--profile {args.profile} is dropped: a child runs under its "
             "parent's profile"
         )
+    if args.worktree is not worktree.ASK and args.worktree is not worktree.NEVER:
+        notes.append(
+            "--worktree is dropped: a child inherits its parent's working "
+            "directory, so it is already in whatever worktree you are in. To "
+            "give one its own checkout, make the worktree and register it "
+            "('claunch workspace add <path>'), then pass --workspace"
+        )
     if not args.mesh:
         notes.append(
             "no --mesh needed: the child joins yours, and starts connected "
@@ -204,6 +224,15 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     The same endpoint and the same policy — this is here so the arrangement
     can be built and inspected by hand, and so a refusal can be reproduced
     without an agent in the loop.
+
+    **No worktree question is asked here, and none can be.** ``spawn`` is the
+    agent's door: the caller is a session, not a person, so there is nobody to
+    answer and a prompt would hang the child that was being created. A child
+    inherits its parent's working directory, which means it is already in
+    whatever worktree the parent was launched into — the isolation the
+    question buys was bought once, upstream. A child that needs a checkout of
+    its *own* gets it the way every other spawn directory is chosen: the user
+    registers one with ``claunch workspace add`` and it is picked by name.
     """
     client = daemon_client.ensure_running()
     parent = args.parent or os.environ.get("CLAUNCH_SESSION")
@@ -712,6 +741,20 @@ def register(sub) -> None:
         "under 'harnesses:' — see 'claunch harnesses'",
     )
     p_new.add_argument("-c", "--cwd", help="working directory (default: current dir)")
+    wt = p_new.add_mutually_exclusive_group()
+    wt.add_argument(
+        "--worktree", nargs="?", const="", default=worktree.ASK, metavar="NAME",
+        help="run the session in a git worktree of that directory instead of "
+        "the directory itself, so it cannot collide with agents working in "
+        "the same checkout; bare, the worktree is named after this Herdr pane "
+        "and the current time. Asked interactively when neither this nor "
+        "--no-worktree is given",
+    )
+    wt.add_argument(
+        "--no-worktree", dest="worktree", action="store_const",
+        const=worktree.NEVER,
+        help="use the directory as it stands, and do not ask",
+    )
     p_new.add_argument("--cols", type=int, default=120)
     p_new.add_argument("--rows", type=int, default=30)
     p_new.add_argument("--env", action="append", metavar="KEY=VALUE", help="extra env override")

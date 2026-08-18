@@ -118,11 +118,13 @@ def _spawn(
     with_token: bool,
     borrow: Optional[Profile] = None,
     provider_override: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> int:
     cmd = [config.claude_bin(), *args]
     try:
         completed = subprocess.run(
             cmd,
+            cwd=cwd,
             env=child_env(
                 profile,
                 with_token=with_token,
@@ -176,11 +178,14 @@ def run(
     *,
     borrow: Optional[Profile] = None,
     provider: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> int:
     """Launch ``claude`` for the profile, optionally borrowing another's token.
 
     ``provider`` (from ``run --provider``) overrides the config-file provider
-    resolution for this run only.
+    resolution for this run only. ``cwd`` (from ``run --worktree``) starts
+    claude in another directory; ``None`` inherits this process's, which is
+    what every run that did not ask for a worktree wants.
     """
     auth_source = borrow if borrow is not None else profile
     if provider:
@@ -211,7 +216,12 @@ def run(
                 file=sys.stderr,
             )
     return _spawn(
-        profile, list(args), with_token=True, borrow=borrow, provider_override=provider
+        profile,
+        list(args),
+        with_token=True,
+        borrow=borrow,
+        provider_override=provider,
+        cwd=cwd,
     )
 
 

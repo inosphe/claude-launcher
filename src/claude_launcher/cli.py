@@ -25,6 +25,7 @@ from . import (
     config,
     credentials,
     harnesses,
+    herdr,
     lineage,
     migrate as migrate_mod,
     profile,
@@ -38,6 +39,7 @@ from . import (
     template,
     usage,
     workspaces,
+    worktree,
 )
 from .cflow.engine import CflowError
 from .cflow.model import WorkflowError
@@ -333,8 +335,17 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # here, then drop a leading `--` separator before forwarding the rest.
     borrow_name, rest = _extract_borrow(args.args)
     provider_name, rest = _extract_value_flag(rest, "--provider")
+    wt_choice, rest = _extract_worktree(rest)
     add_prompt, rest = _extract_add_prompt(rest)
     passthrough = _strip_separator(rest)
+    # Before --add-prompt: that one opens an editor, and answering "which
+    # worktree?" after writing a system prompt is the wrong order to be asked
+    # in. A failure here is fatal on purpose -- a worktree that was asked for
+    # and could not be made must not silently launch in the shared checkout.
+    tree = worktree.resolve(os.getcwd(), wt_choice)
+    worktree.announce(tree)
+    if tree is not None:
+        herdr.rename_pane(tree.label)
     if add_prompt:
         text = prompt_input.collect()
         if text:
@@ -354,7 +365,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         prov = provider_name or providers.resolve_name(borrow)
         what = "token" if prov == providers.DEFAULT_PROVIDER else "auth"
         print(f"borrowing {borrow.name!r} {what} for this run", file=sys.stderr)
-    return runner.run(p, passthrough, borrow=borrow, provider=provider_name)
+    return runner.run(
+        p,
+        passthrough,
+        borrow=borrow,
+        provider=provider_name,
+        cwd=str(tree.path) if tree is not None else None,
+    )
 
 
 def _cmd_set_provider(args: argparse.Namespace) -> int:
@@ -528,6 +545,39 @@ def _extract_borrow(args: List[str]) -> "tuple[Optional[str], List[str]]":
     return _extract_value_flag(args, "--borrow")
 
 
+def _extract_worktree(args: List[str]) -> "tuple[worktree.Choice, List[str]]":
+    """Pull the ``--worktree`` / ``--no-worktree`` answer out of run passthrough.
+
+    Three outcomes, matching :data:`claude_launcher.worktree.Choice`: a name
+    from ``--worktree=NAME``, ``""`` from a bare ``--worktree`` (name it for
+    me), :data:`~claude_launcher.worktree.NEVER` from ``--no-worktree``, and
+    :data:`~claude_launcher.worktree.ASK` when neither appears.
+
+    Unlike ``--borrow``, a bare ``--worktree`` does **not** consume the next
+    token: ``run`` forwards everything it does not recognise to claude, and
+    ``claunch run nc --worktree "fix the parser"`` must send that prompt to
+    claude rather than try to name a branch after it. The value form needs the
+    ``=``. Stops at ``--``, like its siblings.
+    """
+    choice: worktree.Choice = worktree.ASK
+    rest: List[str] = []
+    for i, token in enumerate(args):
+        if token == "--":
+            rest.extend(args[i:])
+            break
+        if token == "--worktree":
+            choice = ""
+            continue
+        if token.startswith("--worktree="):
+            choice = token.split("=", 1)[1]
+            continue
+        if token == "--no-worktree":
+            choice = worktree.NEVER
+            continue
+        rest.append(token)
+    return choice, rest
+
+
 def _extract_add_prompt(args: List[str]) -> "tuple[bool, List[str]]":
     """Pull a boolean ``--add-prompt`` flag out of run passthrough.
 
@@ -665,14 +715,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="launch claude with the profile (extra args pass through; "
         "--borrow NAME uses another profile's token for this run only; "
         "--provider NAME overrides the API provider for this run only; "
-        "--add-prompt opens an editor to append text to the system prompt)",
+        "--add-prompt opens an editor to append text to the system prompt; "
+        "--worktree[=NAME] / --no-worktree answer the git-worktree question "
+        "this run would otherwise ask)",
     )
     p_run.add_argument("name")
     p_run.add_argument(
         "args",
         nargs=argparse.REMAINDER,
-        help="--borrow NAME, --provider NAME, --add-prompt, and/or arguments "
-        "forwarded to claude",
+        help="--borrow NAME, --provider NAME, --add-prompt, "
+        "--worktree[=NAME] (bare = name it after this pane and the time; the "
+        "value form needs the '='), --no-worktree, and/or arguments forwarded "
+        "to claude",
     )
     p_run.set_defaults(func=_cmd_run)
 
@@ -888,6 +942,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         WorkflowError,
         CflowStateError,
         workspaces.WorkspaceError,
+        worktree.WorktreeError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

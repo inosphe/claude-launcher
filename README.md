@@ -92,7 +92,7 @@ claunch usage work      # show this profile's subscription usage
 | ------- | ----------- |
 | `create <name>`        | Create a profile (`--parent` to inherit), seed config, apply template. |
 | `login <name>`         | Run `claude setup-token` for the profile. |
-| `run <name> [args...]` | Launch `claude` for the profile (`--borrow NAME`, `--provider NAME`, `--add-prompt`; extra args pass through). |
+| `run <name> [args...]` | Launch `claude` for the profile (`--borrow NAME`, `--provider NAME`, `--add-prompt`, `--worktree[=NAME]`/`--no-worktree`; extra args pass through). |
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
@@ -168,6 +168,67 @@ inherited). To forward a literal `--borrow` to claude, put it after `--`.
 if `company2` is configured to use a third-party backend, `--borrow company2`
 adopts that backend (base URL, model overrides and its auth) for the run — so a
 borrowed provider profile needs no Anthropic OAuth token of its own.
+
+### Running in a git worktree
+
+Two agents in the **same checkout** is the failure mode this exists for: they
+edit each other's files mid-edit, one's build races the other's, and a branch
+switch by either silently rewrites what the other is looking at. A git
+worktree is the cheap fix — a second checkout of the same repository on its
+own branch, sharing one object store.
+
+So `run` and `new-session` ask, at the one moment the answer is free:
+
+```
+$ claunch run work
+create a git worktree for this launch, so it does not share claude-launcher
+with other agents? [y/N]: y
+worktree name [w4-p4-20260818-173005]:
+created worktree 'w4-p4-20260818-173005' on branch 'w4-p4-20260818-173005':
+  F:\works\claude-launcher\.claude\worktrees\w4-p4-20260818-173005
+```
+
+The suggested name is **the Herdr pane you are in plus the time**, so it is
+unique per pane per second and `git worktree list` afterwards says which pane
+made which checkout, and when. Outside Herdr the
+managed session's name is used instead, and outside both, `wt`.
+
+Answer ahead of time — or from a script — with either flag:
+
+```bash
+claunch run work --worktree=review      # name it yourself
+claunch run work --worktree             # name it after this pane and the time
+claunch run work --no-worktree          # this checkout, and do not ask
+claunch new-session --profile work --worktree=review -a
+```
+
+Naming the **same worktree twice** returns to it, branch and uncommitted work
+intact — `--worktree=review` is a place you go back to, not a new checkout
+each time. An existing *branch* of that name is checked out rather than recut.
+Launching from *inside* a worktree makes the next one a **sibling**, not a
+nested checkout inside the one an agent is editing.
+
+Worktrees are created under `<repo>/.claude/worktrees/<name>` — beside the
+ones Claude Code makes itself, so one `git worktree list` shows every checkout
+an agent is working in, whoever made it. Point them elsewhere with
+`CLAUNCH_WORKTREE_DIR` (absolute, or relative to the repository root).
+
+**Who gets asked.** Only a human at an interactive terminal. A managed session
+runs on a PTY, so an agent's stdin passes every `isatty()` test there is — a
+prompt printed into one is not answered, it hangs the launch. `$CLAUNCH_SESSION`
+is what tells them apart, so an agent, the daemon, the web UI, a restore after
+a restart and any script all skip the question and stay put unless a flag says
+otherwise. `claunch spawn` never asks at all: a **child inherits its parent's
+directory**, so it is already in whatever worktree the parent was launched
+into.
+
+If the launch is inside Herdr, the pane is relabelled with the worktree and
+its branch (`review`, or `review [other]` when they differ), so a wall of
+panes says which branch each agent is on.
+
+A worktree that was *asked for* and could not be made fails the launch rather
+than quietly falling back to the shared checkout — that fallback is the exact
+collision the flag was used to avoid.
 
 ## Login & tokens
 
@@ -842,7 +903,7 @@ without a human at the keyboard.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
+| `new-session` (`new`) | Spawn a harness in a managed PTY (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
 | `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`). `--mesh` defaults to the parent's own. See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
@@ -1103,6 +1164,20 @@ so it gets the picker too, and registering a directory is what puts it within
 reach of one — see
 [`spawn.allow_workspace`](#agents-that-build-their-own-team-spawn--hierarchy--member-graph),
 which is on unless you turn it off.
+
+**A [worktree](#running-in-a-git-worktree) is not a second workspace.** A
+session launched with `--worktree` sits in `<repo>/.claude/worktrees/<name>`,
+which is the repository you already vouched for with another branch checked
+out — so it is *attributed* to the enclosing workspace and shown as `in
+workspace hq / .claude/worktrees/review`, not as a directory nobody approved.
+Containment is how a directory is described, never how one is chosen: what the
+browser offers and what an agent may name stays exactly the list you
+registered. To make a worktree itself pickable — so a child can be spawned
+straight into it — register it like any other directory:
+
+```bash
+claunch workspace add .claude/worktrees/review --name review
+```
 
 ### Spawning with a role, or from another session's conversation
 

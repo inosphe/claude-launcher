@@ -156,6 +156,95 @@ function byLineage(sessions) {
   return out;
 }
 
+/* The rail's bulk bar. Four verbs that act on every session at once, each
+   labelled with the number it would touch and hidden when that number is
+   zero — so the bar is a reading of the rail rather than a fixed row of
+   controls, half of which would do nothing on any given rail.
+
+   They are four and not two because the pairs differ in what survives. Stop
+   ends the programs and keeps the records, so the rail comes back with
+   `resume`; clear and delete are the ones that make a session unresumable,
+   which is why they are the ones that ask, and why they are coloured like it.
+   Exited sessions are kept indefinitely for exactly that reason: dropping
+   them is the user's call, in bulk, from here. */
+function syncBulkActions(sessions) {
+  const live = sessions.filter((s) => s.status !== "exited").length;
+  const dead = sessions.length - live;
+  const set = (id, n, label, title) => {
+    const btn = $(id);
+    if (!btn) return;  // an older index.html served by a newer daemon
+    btn.classList.toggle("hidden", n === 0);
+    btn.textContent = label;
+    btn.title = title;
+  };
+  set("stop-all", live, `■ stop ${live}`,
+      "kill the program in every running session — the records stay, so each "
+      + "one can be resumed afterwards");
+  set("resume-all", dead, `▶ resume ${dead}`,
+      "relaunch every exited session under its own name and conversation");
+  set("clear-exited", dead, `clear ${dead} exited`,
+      "forget the records of the exited sessions — they can no longer be "
+      + "resumed here. Running sessions are untouched");
+  set("delete-all", sessions.length, `✕ delete all ${sessions.length}`,
+      "stop every running session and forget every record");
+}
+
+/* A bulk call answers with what it did *and* with what it did not: a record
+   held back because a mesh row still names it, a session that would not come
+   back. Either one is why the rail a second later does not match the count on
+   the button, and an omission the button never mentions reads as the button
+   not having worked — the next click is someone trying harder. So both are
+   said out loud, once, here. */
+function reportBulk(result, verb) {
+  const kept = (result && result.kept) || [];
+  const failed = (result && result.failed) || [];
+  const parts = [];
+  if (kept.length) {
+    parts.push(
+      `Kept ${kept.length} record(s) still named by a mesh:
+` +
+      kept.map((k) => `  ${k.name} — ${k.meshes.map((m) => m.mesh).join(", ")}`)
+        .join("
+") +
+      `
+
+Remove them from the mesh first (the roster's ×), then ${verb} again.`
+    );
+  }
+  if (failed.length) {
+    parts.push(
+      `${failed.length} session(s) could not ${verb}:
+` +
+      failed.map((f) => `  ${f.name} — ${f.error}`).join("
+")
+    );
+  }
+  if (parts.length) alert(parts.join("
+
+"));
+}
+
+/* Send one, keeping its button pressed-out for the duration: these are slow
+   (delete waits every running child out) and they are not idempotent, so a
+   second click while the first is in flight is the one thing to prevent. */
+async function bulkAction(btn, path, opts, verb) {
+  btn.disabled = true;
+  try {
+    const resp = await api(path, opts);
+    const result = await resp.json().catch(() => null);
+    if (!resp.ok) {
+      alert((result && result.error) || `HTTP ${resp.status}`);
+      return null;
+    }
+    reportBulk(result, verb);
+    return result;
+  } catch {
+    return null;  // the auth overlay is up; api() has already raised it
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function refreshSessions() {
   let data;
   try {
@@ -212,12 +301,7 @@ async function refreshSessions() {
   }
   refreshResumeChoices();  // the spawn form offers these same conversations
   if (currentPage === "home") renderHome();
-  // Exited sessions are kept indefinitely so they stay resumable; dropping
-  // them is the user's call, in bulk, from here.
-  const dead = sessionsCache.filter((s) => s.status === "exited");
-  const clear = $("clear-exited");
-  clear.classList.toggle("hidden", dead.length === 0);
-  clear.textContent = `clear ${dead.length} exited`;
+  syncBulkActions(sessionsCache);
 
   const cur = currentName && sessionsCache.find((s) => s.name === currentName);
   if (cur && attachedPid && cur.pid !== attachedPid && linkState === "live") {
@@ -2919,9 +3003,17 @@ function renderSession(data) {
     dl, "role", data.role ? data.role.name : s.role,
     data.role ? data.role.stance : ""
   );
+  // A `--worktree` session sits inside its workspace rather than at its root,
+  // so say which of the two it is: "workspace X" and "in X / wt-name" are
+  // different facts, and reading the second as the first would have the
+  // operator looking for their branch in the wrong checkout.
   metaRow(
     dl, "directory",
-    data.workspace ? `${s.cwd}  (workspace ${data.workspace.name})` : s.cwd,
+    data.workspace
+      ? data.workspace_subpath
+        ? `${s.cwd}  (in workspace ${data.workspace.name} / ${data.workspace_subpath})`
+        : `${s.cwd}  (workspace ${data.workspace.name})`
+      : s.cwd,
     s.cwd
   );
   metaRow(dl, "conversation", s.conversation_id, "claude --session-id");

@@ -117,3 +117,47 @@ def test_workspaces_are_machine_local_by_default(home):
     from claude_launcher import sync
 
     assert "workspaces" not in sync.DEFAULT_SECTIONS
+
+
+def test_a_worktree_is_owned_by_the_workspace_it_sits_in(home, tmp_path):
+    """`claunch run --worktree` puts a session in <repo>/.claude/worktrees/x.
+
+    That is the repository the user already vouched for with another branch
+    checked out, so it must be accounted for as that workspace -- reporting it
+    as belonging to nothing is what the registry exists to prevent.
+    """
+    repo = tmp_path / "proj"
+    tree = repo / ".claude" / "worktrees" / "solo"
+    tree.mkdir(parents=True)
+    workspaces.add(str(repo))
+
+    # `find` still answers the question it always answered: is this one?
+    assert workspaces.find(str(tree)) is None
+    owner = workspaces.owning(str(tree))
+    assert owner is not None and owner.name == "proj"
+    assert workspaces.subpath(owner, str(tree)) == ".claude/worktrees/solo"
+    # At the root there is no subpath to report.
+    assert workspaces.subpath(owner, str(repo)) == ""
+
+
+def test_owning_prefers_the_nearest_workspace(home, tmp_path):
+    """A subproject registered inside a monorepo keeps its own sessions."""
+    outer = tmp_path / "mono"
+    inner = outer / "packages" / "api"
+    inner.mkdir(parents=True)
+    workspaces.add(str(outer), name="mono")
+    workspaces.add(str(inner), name="api")
+    assert workspaces.owning(str(inner / "sub")).name == "api"
+
+
+def test_owning_finds_nothing_outside_every_workspace(home, tmp_path):
+    registered = tmp_path / "proj"
+    registered.mkdir()
+    workspaces.add(str(registered))
+    stray = tmp_path / "elsewhere"
+    stray.mkdir()
+    assert workspaces.owning(str(stray)) is None
+    # A sibling whose name merely starts the same must not match either.
+    sibling = tmp_path / "proj-2"
+    sibling.mkdir()
+    assert workspaces.owning(str(sibling)) is None

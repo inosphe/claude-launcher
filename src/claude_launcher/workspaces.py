@@ -127,6 +127,78 @@ def find(name_or_path: str, doc: Optional[dict] = None) -> Optional[Workspace]:
     return None
 
 
+def owning(path: str, doc: Optional[dict] = None) -> Optional[Workspace]:
+    """The registered workspace ``path`` *lives in*, or ``None``.
+
+    :func:`find` answers "is this directory registered", which is the right
+    question when someone is choosing one. This answers "whose is it", which
+    is the right question when a directory already exists and has to be
+    accounted for -- and the two stopped being the same question when
+    ``claunch run --worktree`` started putting sessions in
+    ``<repo>/.claude/worktrees/<name>``.
+
+    A worktree is not a second workspace: it is the same repository the user
+    already vouched for, checked out again on another branch, at a path
+    claunch chose *inside* that workspace. Attributing it to the enclosing
+    entry is what keeps it from reading as a stray directory nobody approved.
+
+    Deliberately read-only, and deliberately not wired into
+    :func:`claude_launcher.spawn.resolve_workspace`: containment is how a
+    directory is *described*, never how one is *chosen*. What an agent may
+    name stays exactly the list the user registered, or ``--workspace`` would
+    quietly become the free-text path that ``spawn.allow_cwd`` exists to gate.
+
+    The longest match wins, so a workspace registered inside another one (a
+    subproject of a monorepo) still claims its own sessions.
+    """
+    exact = find(path, doc)
+    if exact is not None:
+        return exact
+    try:
+        wanted = Path(normalize_path(path))
+    except WorkspaceError:
+        return None
+    best: Optional[Workspace] = None
+    for name, raw in sorted(_section(doc).items()):
+        try:
+            root = Path(normalize_path(raw))
+        except WorkspaceError:
+            continue
+        if not _contains(root, wanted):
+            continue
+        if best is None or len(str(root)) > len(best.path):
+            best = Workspace(name=name, path=str(root))
+    return best
+
+
+def _contains(root: Path, child: Path) -> bool:
+    """Whether ``child`` is ``root`` or sits underneath it."""
+    try:
+        parts_root = [os.path.normcase(p) for p in root.parts]
+        parts_child = [os.path.normcase(p) for p in child.parts]
+    except (TypeError, ValueError):
+        return False
+    return (
+        len(parts_child) >= len(parts_root)
+        and parts_child[: len(parts_root)] == parts_root
+    )
+
+
+def subpath(workspace: Workspace, path: str) -> str:
+    """``path`` relative to its workspace root; ``""`` when it is the root.
+
+    What a session listing needs in order to say *where inside* a workspace a
+    session is sitting -- the worktree's name, in the case this exists for --
+    without printing the whole absolute path twice.
+    """
+    try:
+        rel = Path(normalize_path(path)).relative_to(Path(normalize_path(workspace.path)))
+    except (ValueError, WorkspaceError):
+        return ""
+    text = str(rel)
+    return "" if text == "." else text.replace(os.sep, "/")
+
+
 def derive_name(path: str, taken: Optional[Dict[str, str]] = None) -> str:
     """A name for ``path``: its directory name, made safe and made unique.
 
