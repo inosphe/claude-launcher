@@ -376,10 +376,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         print(f"borrowing {borrow.name!r} {what} for this run", file=sys.stderr)
     # `run` occupies the pane for as long as claude lives, so the pane says so
     # for exactly that long: the profile (run's nearest thing to a session
-    # name) and the worktree, whether it was made just now or entered earlier.
-    # Cleared afterwards, because a label for an agent that has exited still
-    # reads as true.
-    where = tree if tree is not None else worktree.inspect(os.getcwd())
+    # name), the branch, and the directory it is all happening in. Cleared
+    # afterwards, because a label for an agent that has exited still reads as
+    # true.
+    where = str(tree.path) if tree is not None else os.getcwd()
     labelled = herdr.rename_pane(worktree.pane_label(p.name, where))
     try:
         return runner.run(

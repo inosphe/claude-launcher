@@ -80,11 +80,6 @@ class Worktree:
     #: False when an existing worktree of that name was reused.
     created: bool
 
-    @property
-    def label(self) -> str:
-        """This checkout on its own -- the place half of a pane label."""
-        return herdr.launch_label("", self.name, self.branch)
-
 
 # --------------------------------------------------------------------------- #
 # git
@@ -159,50 +154,18 @@ def _registered(root: Path, path: Path) -> bool:
     return False
 
 
-def inspect(cwd: str) -> Optional["Worktree"]:
-    """The linked worktree ``cwd`` *is*, or ``None`` for anywhere else.
+def pane_label(identity: str, cwd: str) -> str:
+    """What a launch is called on a pane: who, on which branch, in which
+    directory.
 
-    :func:`resolve` knows about a worktree because it just made one. This
-    answers the same question for a directory that was already there -- a
-    session being attached to, a ``run`` started from inside a checkout made
-    last week -- so a pane label says where the agent is working rather than
-    only where one was moved to.
-
-    ``None`` covers the main checkout and a plain directory alike: neither is
-    a place worth naming beside the session in a label, and the caller treats
-    them the same way.
+    Read from the directory the launch actually lands in rather than from a
+    worktree that was just made, so the three facts are the same three
+    whether the checkout was cut a moment ago, entered from an earlier run,
+    or never a worktree at all. The path is what separates two checkouts of
+    one branch, which is the case a fleet runs into first.
     """
-    if not cwd or not os.path.isdir(cwd):
-        return None
-    done = _git(
-        ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
-         "--show-toplevel"],
-        cwd=cwd,
-    )
-    if done.returncode != 0:
-        return None
-    lines = [ln.strip() for ln in (done.stdout or "").splitlines() if ln.strip()]
-    if len(lines) != 3:
-        return None
-    git_dir, common, top = lines
-    # A linked worktree keeps its own git dir under the main one's
-    # `worktrees/`; in the main checkout the two paths are the same.
-    if _same_path(Path(git_dir), Path(common)):
-        return None
-    root = Path(top)
-    return Worktree(
-        path=root, name=root.name, branch=current_branch(root) or root.name,
-        created=False,
-    )
-
-
-def pane_label(identity: str, tree: Optional["Worktree"]) -> str:
-    """What a launch is called on a pane: who it is, and where it is working."""
-    return herdr.launch_label(
-        identity,
-        tree.name if tree is not None else "",
-        tree.branch if tree is not None else "",
-    )
+    branch = current_branch(Path(cwd)) if cwd and os.path.isdir(cwd) else ""
+    return herdr.launch_label(identity, branch, cwd)
 
 
 def current_branch(cwd: Path) -> str:

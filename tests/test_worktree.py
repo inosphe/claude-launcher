@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -161,14 +163,16 @@ def test_worktree_dir_env_relocates_them(repo, tmp_path, monkeypatch):
     assert wt.path == elsewhere / "moved"
 
 
-def test_label_names_both_when_branch_diverges(repo):
+def test_a_reused_worktree_reports_the_branch_it_is_actually_on(repo):
     wt = worktree.resolve(str(repo), "review")
+    assert wt.branch == "review"
     git("checkout", "-q", "-b", "other", cwd=wt.path)
     again = worktree.resolve(str(repo), "review")
     assert again.branch == "other"
-    assert again.label == "review [other]"
-    # ...and only once when they agree, which is the usual case.
-    assert wt.label == "review"
+    # The label follows the checkout, not the name it was cut under.
+    assert worktree.pane_label("api", str(again.path)) == (
+        f"api · other · {again.path}"
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -346,8 +350,10 @@ def test_run_relabels_the_herdr_pane_with_profile_and_worktree(
     monkeypatch.setattr(runner.subprocess, "run", fake_launch({}))
     monkeypatch.chdir(repo)
     assert cli.main(["run", "work", "--worktree=solo"]) == 0
-    # The profile is run's nearest thing to a session name.
-    assert labels == ["work · solo"]
+    # The profile is run's nearest thing to a session name; the branch and the
+    # directory are what tell two checkouts of it apart.
+    solo = repo / ".claude" / "worktrees" / "solo"
+    assert labels == [f"work · solo · {solo}"]
     # And the pane goes back to Herdr's own label when claude exits.
     assert cleared == [True]
 
@@ -621,34 +627,63 @@ def test_new_session_refuses_a_new_worktree_with_a_resume(
 @pytest.mark.parametrize(
     "args, expected",
     [
-        (("api", "review", "review"), "api · review"),
-        (("api", "review", "other"), "api · review [other]"),
-        # No worktree: a session in the main checkout is just itself, and the
-        # repository is the one fact every pane would repeat.
+        (("api", "review", "/w/repo"), "api · review · /w/repo"),
+        (("api", "", "/w/repo"), "api · /w/repo"),
+        (("api", "master", ""), "api · master"),
+        (("", "master", "/w/repo"), "master · /w/repo"),
         (("api", "", ""), "api"),
-        (("", "review", "review"), "review"),
-        (("api", "review", ""), "api · review"),
     ],
 )
 def test_launch_label_composition(args, expected):
     assert herdr.launch_label(*args) == expected
 
 
-def test_inspect_names_the_worktree_a_directory_is(repo):
+def test_launch_label_writes_home_as_tilde(monkeypatch, tmp_path):
+    monkeypatch.setattr(herdr.Path, "home", classmethod(lambda cls: tmp_path))
+    label = herdr.launch_label("api", "main", str(tmp_path / "works" / "repo"))
+    assert label == "api · main · " + str(Path("~/works/repo")).replace("\\", os.sep)
+
+
+def test_launch_label_drops_leading_path_segments_when_too_long():
+    """The tail tells two worktrees of one repository apart; the road to the
+    workspace is the same on every pane."""
+    deep = "/w/" + "/".join(f"level{i}" for i in range(20)) + "/worktrees/review"
+    label = herdr.launch_label("api", "review", deep, limit=60)
+    assert len(label) <= 60
+    assert label.startswith("api · review · …")
+    assert label.endswith("worktrees/review")
+    # The ellipsis lands on a segment boundary, not mid-word.
+    assert "…level" in label or "…worktrees" in label
+
+
+def test_launch_label_never_truncates_the_identity():
+    label = herdr.launch_label("api", "review", "/w/repo", limit=12)
+    assert label.startswith("api · review")
+
+
+def test_pane_label_reads_branch_and_directory_from_a_worktree(repo):
     made = worktree.resolve(str(repo), "review")
-    seen = worktree.inspect(str(made.path))
-    assert seen is not None
-    assert (seen.name, seen.branch) == ("review", "review")
-    assert not seen.created
+    assert worktree.pane_label("api", str(made.path)) == (
+        f"api · review · {made.path}"
+    )
 
 
-def test_inspect_ignores_the_main_checkout(repo):
-    """The main checkout is not a place worth naming beside the session."""
-    assert worktree.inspect(str(repo)) is None
+def test_pane_label_reads_the_main_checkout_too(repo):
+    """No worktree is not "nowhere": the directory is still the answer to
+    "which of the four agents in this repo is this"."""
+    branch = worktree.current_branch(repo)
+    assert worktree.pane_label("api", str(repo)) == f"api · {branch} · {repo}"
 
 
-def test_inspect_ignores_a_plain_directory(outside_a_repo):
-    assert worktree.inspect(str(outside_a_repo)) is None
+def test_pane_label_outside_a_repo_is_identity_and_directory(outside_a_repo):
+    assert worktree.pane_label("api", str(outside_a_repo)) == (
+        f"api · {outside_a_repo}"
+    )
+
+
+def test_pane_label_survives_a_directory_that_is_not_there(tmp_path):
+    gone = tmp_path / "gone"
+    assert worktree.pane_label("api", str(gone)) == f"api · {gone}"
 
 
 def test_run_from_inside_a_worktree_is_labelled_by_where_it_already_is(
@@ -668,13 +703,16 @@ def test_run_from_inside_a_worktree_is_labelled_by_where_it_already_is(
     monkeypatch.setattr(runner.subprocess, "run", fake_launch({}))
     monkeypatch.setattr(worktree, "interactive", lambda: False)
     monkeypatch.chdir(made.path)
+    here = os.getcwd()
     assert cli.main(["run", "work"]) == 0
-    assert labels == ["work · review"]
+    assert labels == [f"work · review · {here}"]
 
 
-def test_run_in_a_plain_checkout_is_labelled_by_the_profile_alone(
+def test_run_in_the_main_checkout_still_names_branch_and_directory(
     repo, monkeypatch, capsys
 ):
+    """No worktree is not "nowhere" -- the directory is still the answer to
+    "which of the agents in this repo is this one"."""
     from claude_launcher import runner
 
     cli.main(["create", "work", "--no-seed"])
@@ -687,8 +725,10 @@ def test_run_in_a_plain_checkout_is_labelled_by_the_profile_alone(
     monkeypatch.setattr(runner.subprocess, "run", fake_launch({}))
     monkeypatch.setattr(worktree, "interactive", lambda: False)
     monkeypatch.chdir(repo)
+    here = os.getcwd()
+    branch = worktree.current_branch(repo)
     assert cli.main(["run", "work"]) == 0
-    assert labels == ["work"]
+    assert labels == [f"work · {branch} · {here}"]
 
 
 def test_run_clears_the_label_even_when_claude_fails(repo, monkeypatch, capsys):
@@ -770,13 +810,13 @@ def test_attach_labels_the_pane_for_as_long_as_it_lasts(repo, attachable, monkey
     )
     monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: cleared.append(True))
     assert attachable.attach(AttachClient(str(made.path)), "api") == 0
-    assert labels == ["api · review"]
+    assert labels == [f"api · review · {made.path}"]
     # Detaching hands the pane back: a label for a session you are no longer
     # watching still reads as true.
     assert cleared == [True]
 
 
-def test_attach_to_the_main_checkout_is_labelled_by_the_session_alone(
+def test_attach_to_the_main_checkout_names_its_branch_and_directory(
     repo, attachable, monkeypatch
 ):
     labels = []
@@ -784,8 +824,9 @@ def test_attach_to_the_main_checkout_is_labelled_by_the_session_alone(
         herdr, "rename_pane", lambda label, **kw: labels.append(label) or True
     )
     monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: True)
+    branch = worktree.current_branch(repo)
     assert attachable.attach(AttachClient(str(repo)), "api") == 0
-    assert labels == ["api"]
+    assert labels == [f"api · {branch} · {repo}"]
 
 
 def test_attach_outside_herdr_clears_nothing(repo, attachable, monkeypatch):

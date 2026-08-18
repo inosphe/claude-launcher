@@ -18,6 +18,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+from pathlib import Path
 from typing import Optional
 
 #: Set to "1" inside a Herdr-managed pane; the gate on everything below.
@@ -29,6 +30,9 @@ PANE_ID_ENV = "HERDR_PANE_ID"
 #: Seconds to wait on the CLI. It talks to a local socket, so this is a
 #: deadlock guard, not a budget.
 _TIMEOUT = 5.0
+
+#: How long a composed label may get before its path starts losing segments.
+LABEL_LIMIT = 120
 
 
 def in_herdr() -> bool:
@@ -67,7 +71,7 @@ def rename_pane(label: str, *, pane: Optional[str] = None) -> bool:
     target = pane or pane_id()
     if not target:
         return False
-    label = " ".join(label.split())[:60]
+    label = " ".join(label.split())[:LABEL_LIMIT]
     if not label:
         return False
     return _run(["pane", "rename", target, label])
@@ -87,24 +91,62 @@ def clear_pane_label(pane: Optional[str] = None) -> bool:
     return _run(["pane", "rename", target, "--clear"])
 
 
-def launch_label(identity: str, place: str = "", branch: str = "") -> str:
-    """The pane label for a launch: who is running here, and where.
+def launch_label(
+    identity: str, branch: str = "", path: str = "", limit: int = LABEL_LIMIT
+) -> str:
+    """The pane label for a launch: who is running here, on what, and where.
 
-    ``identity`` is the session's name, or for ``claunch run`` the profile's
-    -- the thing an operator scanning a wall of panes is looking for. ``place``
-    is the worktree, and it is omitted when there is none: a session in the
-    main checkout is just itself, and repeating the repository on every pane
-    would spend the label on the one fact they all share.
+    Three facts in the order they answer "which pane is this": ``identity``
+    (the session's name, or for ``claunch run`` the profile's) is what an
+    operator scans for; ``branch`` is the state they are about to judge; and
+    the directory is what tells two checkouts of the same branch apart.
 
-    A worktree and its branch are usually the same word (a fresh one is cut
-    with a branch of its own name) and printing it twice would waste the only
-    line a human reads at a glance. They diverge when an existing checkout is
-    reused, and then both matter.
+    The directory is the only part that can run long, so it is the only part
+    that is shortened -- home collapses to ``~``, and an overlong label drops
+    *leading* path segments. The tail is the half that distinguishes one
+    worktree of a repository from another; the drive and the road to the
+    workspace are the same on every pane.
     """
-    identity, place, branch = identity.strip(), place.strip(), branch.strip()
-    if place and branch and branch != place:
-        place = f"{place} [{branch}]"
-    return " · ".join(part for part in (identity, place) if part)
+    identity, branch = identity.strip(), branch.strip()
+    shown = _display_path(path)
+    fixed = len(" · ".join(p for p in (identity, branch) if p))
+    if shown and fixed:
+        shown = _fit(shown, limit - fixed - len(" · "))
+    elif shown:
+        shown = _fit(shown, limit)
+    return " · ".join(part for part in (identity, branch, shown) if part)
+
+
+def _display_path(path: str) -> str:
+    """An absolute directory as a label reads it: home written as ``~``."""
+    text = str(path or "").strip()
+    if not text:
+        return ""
+    try:
+        home = str(Path.home())
+    except (OSError, RuntimeError):
+        return text
+    if home and os.path.normcase(text).startswith(os.path.normcase(home)):
+        rest = text[len(home):]
+        if not rest or rest[0] in "/\\":
+            return "~" + rest
+    return text
+
+
+def _fit(path: str, budget: int) -> str:
+    """``path`` shortened to ``budget`` characters, keeping the tail."""
+    if budget <= 1:
+        return ""
+    if len(path) <= budget:
+        return path
+    tail = path[-(budget - 1):]
+    # Start the visible part at a segment boundary when one is near, so the
+    # first thing after the ellipsis is a directory name and not half of one.
+    window = max(1, budget // 3)
+    near = [at for sep in ("/", "\\") if 0 <= (at := tail.find(sep)) <= window]
+    if near:
+        tail = tail[min(near) + 1:]
+    return "…" + tail
 
 
 def sanitize_fragment(text: str, limit: int = 40) -> str:
