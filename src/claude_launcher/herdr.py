@@ -73,19 +73,38 @@ def rename_pane(label: str, *, pane: Optional[str] = None) -> bool:
     return _run(["pane", "rename", target, label])
 
 
-def launch_label(worktree: str, branch: str) -> str:
-    """The pane label for a launch: which worktree, on which branch.
+def clear_pane_label(pane: Optional[str] = None) -> bool:
+    """Drop a label this process set, handing the pane back to Herdr's own.
 
-    They are usually the same word -- a fresh worktree is cut with a branch of
-    its own name -- and printing it twice would waste the only line a human
-    reads at a glance. They diverge when an existing checkout is reused, and
-    then both matter.
+    The counterpart to :func:`rename_pane`, and the reason labelling is tied
+    to occupancy rather than to creation: a pane labelled for an agent that
+    has since exited is worse than an unlabelled one, because it still reads
+    as true.
     """
-    worktree = worktree.strip()
-    branch = branch.strip()
-    if not branch or branch == worktree:
-        return worktree
-    return f"{worktree} [{branch}]"
+    target = pane or pane_id()
+    if not target:
+        return False
+    return _run(["pane", "rename", target, "--clear"])
+
+
+def launch_label(identity: str, place: str = "", branch: str = "") -> str:
+    """The pane label for a launch: who is running here, and where.
+
+    ``identity`` is the session's name, or for ``claunch run`` the profile's
+    -- the thing an operator scanning a wall of panes is looking for. ``place``
+    is the worktree, and it is omitted when there is none: a session in the
+    main checkout is just itself, and repeating the repository on every pane
+    would spend the label on the one fact they all share.
+
+    A worktree and its branch are usually the same word (a fresh one is cut
+    with a branch of its own name) and printing it twice would waste the only
+    line a human reads at a glance. They diverge when an existing checkout is
+    reused, and then both matter.
+    """
+    identity, place, branch = identity.strip(), place.strip(), branch.strip()
+    if place and branch and branch != place:
+        place = f"{place} [{branch}]"
+    return " · ".join(part for part in (identity, place) if part)
 
 
 def sanitize_fragment(text: str, limit: int = 40) -> str:

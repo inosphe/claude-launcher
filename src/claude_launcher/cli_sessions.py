@@ -27,7 +27,7 @@ import time
 import webbrowser
 from typing import List
 
-from . import cli_mesh, daemon_client, herdr, store, worktree
+from . import cli_mesh, daemon_client, store, worktree
 from .daemon import harness as harness_def
 from .daemon import paths as daemon_paths
 from .daemon import runtime_state
@@ -83,7 +83,12 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     worktree.announce(tree)
     if tree is not None:
         cwd = str(tree.path)
-        herdr.rename_pane(tree.label)
+    # No pane label here, deliberately. A created session runs in the daemon's
+    # PTY, not in this pane; labelling the shell that launched it would claim
+    # the pane is showing an agent that is somewhere else, and nothing would
+    # ever take the label off again. `attach` is where a pane really does
+    # become a session's terminal, so that is where the label is set -- which
+    # covers `-a` below and a later `claunch attach` with the same code.
     body = {
         "name": args.name or "",
         "harness": args.harness,

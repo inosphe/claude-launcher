@@ -355,8 +355,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
         resuming=harness_def.steers_conversation(passthrough),
     )
     worktree.announce(tree)
-    if tree is not None:
-        herdr.rename_pane(tree.label)
     if add_prompt:
         text = prompt_input.collect()
         if text:
@@ -376,13 +374,24 @@ def _cmd_run(args: argparse.Namespace) -> int:
         prov = provider_name or providers.resolve_name(borrow)
         what = "token" if prov == providers.DEFAULT_PROVIDER else "auth"
         print(f"borrowing {borrow.name!r} {what} for this run", file=sys.stderr)
-    return runner.run(
-        p,
-        passthrough,
-        borrow=borrow,
-        provider=provider_name,
-        cwd=str(tree.path) if tree is not None else None,
-    )
+    # `run` occupies the pane for as long as claude lives, so the pane says so
+    # for exactly that long: the profile (run's nearest thing to a session
+    # name) and the worktree, whether it was made just now or entered earlier.
+    # Cleared afterwards, because a label for an agent that has exited still
+    # reads as true.
+    where = tree if tree is not None else worktree.inspect(os.getcwd())
+    labelled = herdr.rename_pane(worktree.pane_label(p.name, where))
+    try:
+        return runner.run(
+            p,
+            passthrough,
+            borrow=borrow,
+            provider=provider_name,
+            cwd=str(tree.path) if tree is not None else None,
+        )
+    finally:
+        if labelled:
+            herdr.clear_pane_label()
 
 
 def _cmd_set_provider(args: argparse.Namespace) -> int:

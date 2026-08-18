@@ -20,6 +20,8 @@ import sys
 import threading
 from typing import Optional, Tuple
 
+from . import herdr, worktree
+
 #: Ctrl+] — telnet's escape key; no common TUI binds it, so it is safe to
 #: reserve as the detach key (anything typed after it in the same chunk is
 #: dropped, like tmux's prefix).
@@ -310,6 +312,16 @@ def attach(client, name: str) -> int:
         return 1
     print(f"[claunch] attached to {name!r} — detach: {DETACH_LABEL}", file=sys.stderr)
 
+    # For as long as this attach lasts, the pane IS that session's terminal --
+    # so if it is a Herdr pane, it says which session and which worktree. This
+    # is the only place a pane and a session genuinely coincide: a created but
+    # unattached session runs in the daemon, and a label for one of those
+    # would outlive it and still read as true. Cleared on the way out for the
+    # same reason.
+    labelled = herdr.rename_pane(
+        worktree.pane_label(name, worktree.inspect(info.get("cwd") or ""))
+    )
+
     outcome = {"reason": "closed"}
     with _RawTerminal():
         _write_text(FOCUS_ON)
@@ -321,6 +333,8 @@ def attach(client, name: str) -> int:
             outcome = {"reason": "error", "detail": str(exc)}
         finally:
             _write_text(FOCUS_OFF)
+    if labelled:
+        herdr.clear_pane_label()
 
     reason = outcome.get("reason")
     if reason == "exit":

@@ -331,17 +331,25 @@ def test_run_without_the_flag_stays_where_it_was(repo, monkeypatch, capsys):
     assert seen["cwd"] is None
 
 
-def test_run_relabels_the_herdr_pane(repo, monkeypatch, capsys):
+def test_run_relabels_the_herdr_pane_with_profile_and_worktree(
+    repo, monkeypatch, capsys
+):
     from claude_launcher import runner
 
     cli.main(["create", "work", "--no-seed"])
     capsys.readouterr()
-    labels = []
-    monkeypatch.setattr(herdr, "rename_pane", lambda label, **kw: labels.append(label))
+    labels, cleared = [], []
+    monkeypatch.setattr(
+        herdr, "rename_pane", lambda label, **kw: labels.append(label) or True
+    )
+    monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: cleared.append(True))
     monkeypatch.setattr(runner.subprocess, "run", fake_launch({}))
     monkeypatch.chdir(repo)
     assert cli.main(["run", "work", "--worktree=solo"]) == 0
-    assert labels == ["solo"]
+    # The profile is run's nearest thing to a session name.
+    assert labels == ["work · solo"]
+    # And the pane goes back to Herdr's own label when claude exits.
+    assert cleared == [True]
 
 
 def test_a_failed_worktree_aborts_the_run(repo, monkeypatch, capsys):
@@ -605,3 +613,186 @@ def test_new_session_refuses_a_new_worktree_with_a_resume(
     ) == 1
     assert fake_daemon.posted is None
     assert "cannot be opened in a new one" in capsys.readouterr().err
+
+
+# --------------------------------------------------------------------------- #
+# the pane label: who is running here, and where
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "args, expected",
+    [
+        (("api", "review", "review"), "api · review"),
+        (("api", "review", "other"), "api · review [other]"),
+        # No worktree: a session in the main checkout is just itself, and the
+        # repository is the one fact every pane would repeat.
+        (("api", "", ""), "api"),
+        (("", "review", "review"), "review"),
+        (("api", "review", ""), "api · review"),
+    ],
+)
+def test_launch_label_composition(args, expected):
+    assert herdr.launch_label(*args) == expected
+
+
+def test_inspect_names_the_worktree_a_directory_is(repo):
+    made = worktree.resolve(str(repo), "review")
+    seen = worktree.inspect(str(made.path))
+    assert seen is not None
+    assert (seen.name, seen.branch) == ("review", "review")
+    assert not seen.created
+
+
+def test_inspect_ignores_the_main_checkout(repo):
+    """The main checkout is not a place worth naming beside the session."""
+    assert worktree.inspect(str(repo)) is None
+
+
+def test_inspect_ignores_a_plain_directory(outside_a_repo):
+    assert worktree.inspect(str(outside_a_repo)) is None
+
+
+def test_run_from_inside_a_worktree_is_labelled_by_where_it_already_is(
+    repo, monkeypatch, capsys
+):
+    """The label says where the agent works, not only where one was moved to."""
+    from claude_launcher import runner
+
+    made = worktree.resolve(str(repo), "review")
+    cli.main(["create", "work", "--no-seed"])
+    capsys.readouterr()
+    labels = []
+    monkeypatch.setattr(
+        herdr, "rename_pane", lambda label, **kw: labels.append(label) or True
+    )
+    monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: True)
+    monkeypatch.setattr(runner.subprocess, "run", fake_launch({}))
+    monkeypatch.setattr(worktree, "interactive", lambda: False)
+    monkeypatch.chdir(made.path)
+    assert cli.main(["run", "work"]) == 0
+    assert labels == ["work · review"]
+
+
+def test_run_in_a_plain_checkout_is_labelled_by_the_profile_alone(
+    repo, monkeypatch, capsys
+):
+    from claude_launcher import runner
+
+    cli.main(["create", "work", "--no-seed"])
+    capsys.readouterr()
+    labels = []
+    monkeypatch.setattr(
+        herdr, "rename_pane", lambda label, **kw: labels.append(label) or True
+    )
+    monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: True)
+    monkeypatch.setattr(runner.subprocess, "run", fake_launch({}))
+    monkeypatch.setattr(worktree, "interactive", lambda: False)
+    monkeypatch.chdir(repo)
+    assert cli.main(["run", "work"]) == 0
+    assert labels == ["work"]
+
+
+def test_run_clears_the_label_even_when_claude_fails(repo, monkeypatch, capsys):
+    from claude_launcher import runner
+
+    cli.main(["create", "work", "--no-seed"])
+    capsys.readouterr()
+    cleared = []
+    monkeypatch.setattr(herdr, "rename_pane", lambda label, **kw: True)
+    monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: cleared.append(True))
+
+    def boom(cmd, **kwargs):
+        if cmd and cmd[0] == "git":
+            return REAL_RUN(cmd, **kwargs)
+        raise OSError("no claude here")
+
+    monkeypatch.setattr(runner.subprocess, "run", boom)
+    monkeypatch.setattr(worktree, "interactive", lambda: False)
+    monkeypatch.chdir(repo)
+    assert cli.main(["run", "work"]) == 1
+    assert cleared == [True]
+
+
+def test_an_unattached_new_session_leaves_the_pane_alone(
+    repo, fake_daemon, monkeypatch
+):
+    """It runs in the daemon's PTY, not in this pane -- and nothing would ever
+    take the label back off."""
+    monkeypatch.setattr(
+        herdr, "rename_pane", lambda *a, **k: pytest.fail("not this pane's session")
+    )
+    monkeypatch.chdir(repo)
+    assert cli.main(["new-session", "--profile", "work", "--worktree=solo"]) == 0
+    assert fake_daemon.posted[1]["cwd"].endswith("solo")
+
+
+class _NoRawTerminal:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+@pytest.fixture
+def attachable(monkeypatch):
+    """Stub out everything an attach touches except the labelling."""
+    from claude_launcher import attach as attach_mod
+
+    monkeypatch.setattr("sys.stdin.isatty", lambda: True, raising=False)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True, raising=False)
+    monkeypatch.setattr(attach_mod, "_RawTerminal", _NoRawTerminal)
+    monkeypatch.setattr(attach_mod, "_write_text", lambda text: None)
+
+    async def detached(*a, **k):
+        return {"reason": "detach"}
+
+    monkeypatch.setattr(attach_mod, "_attach_async", detached)
+    return attach_mod
+
+
+class AttachClient:
+    base_url = "http://127.0.0.1:0"
+    token = "t"
+
+    def __init__(self, cwd):
+        self._cwd = cwd
+
+    def get(self, path):
+        return {"name": "api", "status": "idle", "cwd": self._cwd}
+
+
+def test_attach_labels_the_pane_for_as_long_as_it_lasts(repo, attachable, monkeypatch):
+    """The one place a pane and a session genuinely coincide."""
+    made = worktree.resolve(str(repo), "review")
+    labels, cleared = [], []
+    monkeypatch.setattr(
+        herdr, "rename_pane", lambda label, **kw: labels.append(label) or True
+    )
+    monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: cleared.append(True))
+    assert attachable.attach(AttachClient(str(made.path)), "api") == 0
+    assert labels == ["api · review"]
+    # Detaching hands the pane back: a label for a session you are no longer
+    # watching still reads as true.
+    assert cleared == [True]
+
+
+def test_attach_to_the_main_checkout_is_labelled_by_the_session_alone(
+    repo, attachable, monkeypatch
+):
+    labels = []
+    monkeypatch.setattr(
+        herdr, "rename_pane", lambda label, **kw: labels.append(label) or True
+    )
+    monkeypatch.setattr(herdr, "clear_pane_label", lambda **kw: True)
+    assert attachable.attach(AttachClient(str(repo)), "api") == 0
+    assert labels == ["api"]
+
+
+def test_attach_outside_herdr_clears_nothing(repo, attachable, monkeypatch):
+    """rename_pane says False off-Herdr, and a clear that was never set would
+    take away a label somebody else put there."""
+    monkeypatch.setattr(herdr, "rename_pane", lambda *a, **k: False)
+    monkeypatch.setattr(
+        herdr, "clear_pane_label", lambda **kw: pytest.fail("nothing was set")
+    )
+    assert attachable.attach(AttachClient(str(repo)), "api") == 0

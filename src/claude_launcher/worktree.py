@@ -82,8 +82,8 @@ class Worktree:
 
     @property
     def label(self) -> str:
-        """How this launch reads on a pane label or a status line."""
-        return herdr.launch_label(self.name, self.branch)
+        """This checkout on its own -- the place half of a pane label."""
+        return herdr.launch_label("", self.name, self.branch)
 
 
 # --------------------------------------------------------------------------- #
@@ -157,6 +157,52 @@ def _registered(root: Path, path: Path) -> bool:
         ):
             return True
     return False
+
+
+def inspect(cwd: str) -> Optional["Worktree"]:
+    """The linked worktree ``cwd`` *is*, or ``None`` for anywhere else.
+
+    :func:`resolve` knows about a worktree because it just made one. This
+    answers the same question for a directory that was already there -- a
+    session being attached to, a ``run`` started from inside a checkout made
+    last week -- so a pane label says where the agent is working rather than
+    only where one was moved to.
+
+    ``None`` covers the main checkout and a plain directory alike: neither is
+    a place worth naming beside the session in a label, and the caller treats
+    them the same way.
+    """
+    if not cwd or not os.path.isdir(cwd):
+        return None
+    done = _git(
+        ["rev-parse", "--path-format=absolute", "--git-dir", "--git-common-dir",
+         "--show-toplevel"],
+        cwd=cwd,
+    )
+    if done.returncode != 0:
+        return None
+    lines = [ln.strip() for ln in (done.stdout or "").splitlines() if ln.strip()]
+    if len(lines) != 3:
+        return None
+    git_dir, common, top = lines
+    # A linked worktree keeps its own git dir under the main one's
+    # `worktrees/`; in the main checkout the two paths are the same.
+    if _same_path(Path(git_dir), Path(common)):
+        return None
+    root = Path(top)
+    return Worktree(
+        path=root, name=root.name, branch=current_branch(root) or root.name,
+        created=False,
+    )
+
+
+def pane_label(identity: str, tree: Optional["Worktree"]) -> str:
+    """What a launch is called on a pane: who it is, and where it is working."""
+    return herdr.launch_label(
+        identity,
+        tree.name if tree is not None else "",
+        tree.branch if tree is not None else "",
+    )
 
 
 def current_branch(cwd: Path) -> str:

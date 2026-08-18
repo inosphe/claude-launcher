@@ -242,9 +242,33 @@ otherwise. `claunch spawn` never asks at all: a **child inherits its parent's
 directory**, so it is already in whatever worktree the parent was launched
 into.
 
-If the launch is inside Herdr, the pane is relabelled with the worktree and
-its branch (`review`, or `review [other]` when they differ), so a wall of
-panes says which branch each agent is on.
+**Herdr pane labels.** When the pane a launch runs in is a Herdr pane, it is
+relabelled with *who is running there and where*:
+
+| Launch | Pane label |
+| ------ | ---------- |
+| `claunch run nc --worktree=review` | `nc · review` |
+| `claunch run nc` (already inside the `review` worktree) | `nc · review` |
+| `claunch run nc` (main checkout) | `nc` |
+| `claunch attach api` (session in `review`, branch `other`) | `api · review [other]` |
+| `claunch new-session -s api --worktree=review -a` | `api · review` |
+
+`run` uses the profile, which is its nearest thing to a session name; a
+session uses its own. The worktree is dropped when there is none — a session
+in the main checkout is just itself, and repeating the repository on every
+pane would spend the label on the one fact they all share. Worktree and branch
+are usually the same word (a fresh worktree is cut with a branch of its own
+name) and are printed together only when they diverge.
+
+The label is tied to **occupancy, not creation**: it is set while this pane
+really is the agent's terminal, and cleared when that ends — when claude
+exits, or when you detach. A `new-session` *without* `-a` leaves the pane
+alone entirely: that session runs in the daemon's PTY, not here, and a label
+for an agent that is somewhere else (or has since exited) is worse than no
+label, because it still reads as true.
+
+None of this is required. Outside Herdr every call is a silent no-op, and a
+failed one never touches the launch.
 
 A worktree that was *asked for* and could not be made fails the launch rather
 than quietly falling back to the shared checkout — that fallback is the exact
