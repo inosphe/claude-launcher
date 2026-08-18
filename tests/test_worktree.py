@@ -77,6 +77,30 @@ def no_herdr(monkeypatch):
     monkeypatch.setattr(herdr, "_run", lambda args: False)
 
 
+@pytest.fixture(autouse=True)
+def labels_are_machine_independent(monkeypatch, tmp_path):
+    """The machine must not leak into labels asserted literally.
+
+    A label collapses home to ``~`` and drops leading segments past
+    ``LABEL_LIMIT`` -- and on Windows ``tmp_path`` lives *inside* home
+    (``C:\\Users\\<u>\\AppData\\Local\\Temp``) and is long enough to
+    truncate, so every test asserting a literal repo path would watch its
+    expected value be rewritten on some machines and not others. Home is
+    pointed where no test path can be under it and the default limit is
+    lifted; each behaviour keeps its own test, which patches home back or
+    passes an explicit ``limit`` over this.
+    """
+    monkeypatch.setattr(
+        herdr.Path, "home", classmethod(lambda cls: tmp_path / ".elsewhere")
+    )
+    real = herdr.launch_label
+    monkeypatch.setattr(
+        herdr, "launch_label",
+        lambda identity, branch="", path="", limit=10_000:
+            real(identity, branch, path, limit),
+    )
+
+
 # --------------------------------------------------------------------------- #
 # naming
 # --------------------------------------------------------------------------- #
