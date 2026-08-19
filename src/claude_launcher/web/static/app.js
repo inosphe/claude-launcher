@@ -506,6 +506,18 @@ async function refreshProfiles() {
       opt.textContent = name;
       select.appendChild(opt);
     }
+    // The same closed set feeds --borrow: another profile whose token (and
+    // backend) this session runs with, its own config left in place.
+    const borrow = document.querySelector("#new-session select[name=borrow]");
+    const previous = borrow.value;
+    borrow.innerHTML = "";
+    borrow.appendChild(new Option("(this profile's own token)", ""));
+    for (const name of data.profiles || []) {
+      borrow.appendChild(new Option(name, name));
+    }
+    if ([...borrow.options].some((o) => o.value === previous)) {
+      borrow.value = previous;
+    }
   } catch { /* ignore */ }
 }
 
@@ -686,9 +698,16 @@ function syncForkAvailability() {
   if (f.fork.disabled) f.fork.checked = false;
   f.role.disabled = !claude;
   f.resume.disabled = !claude;
+  // Auth arrangements are the profile machinery's, which only claude has —
+  // and --null with --borrow is a pair the daemon refuses, so ticking null
+  // locks the borrow picker instead of provoking that refusal.
+  f.null_token.disabled = !claude;
+  f.borrow.disabled = !claude || f.null_token.checked;
+  if (f.borrow.disabled) f.borrow.value = "";
   if (!claude) {
     f.role.value = "";
     f.resume.value = "";
+    f.null_token.checked = false;
     renderRoleStance();
   }
 }
@@ -698,6 +717,7 @@ document
   .addEventListener("change", renderRoleStance);
 $("new-session").resume.addEventListener("change", syncForkAvailability);
 $("new-session").harness.addEventListener("change", syncForkAvailability);
+$("new-session").null_token.addEventListener("change", syncForkAvailability);
 
 $("new-session").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -710,6 +730,8 @@ $("new-session").addEventListener("submit", async (e) => {
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
   if (f.role.value) body.role = f.role.value;
+  if (f.borrow.value) body.borrow = f.borrow.value;
+  if (f.null_token.checked) body.null_token = true;
   // Onboarding: only sent when chosen. The daemon checks each before it
   // builds anything, so a stale mesh or workflow is refused with nothing
   // left behind.
@@ -3051,6 +3073,10 @@ function renderSession(data) {
   const dl = el("dl", "sess-meta");
   metaRow(dl, "harness", s.harness, (data.harness || {}).description);
   metaRow(dl, "profile", s.profile);
+  // Whose token it actually runs on, when that is not the profile's own —
+  // invisible from the terminal, and reapplied on every restore.
+  metaRow(dl, "borrow", s.borrow, "another profile's token; the config stays this profile's");
+  if (s.null_token) metaRow(dl, "auth", "--null (no OAuth token injected)");
   // Whose this session is. Near the top because it changes how everything
   // below it reads: an inherited mesh and a scoped run are the parent's
   // arrangement, not choices this session made.
