@@ -6,7 +6,7 @@ import sys
 
 import pytest
 
-from claude_launcher import profile, store
+from claude_launcher import credentials, profile, store
 from claude_launcher.daemon import harness
 from claude_launcher.daemon.harness import HarnessError, SessionDef
 
@@ -27,9 +27,11 @@ def test_sessiondef_roundtrip():
         name="work", harness="claude", profile="p", cwd="/tmp",
         args=("--resume",), env={"A": "1"}, restore=False, cols=80, rows=24,
         conversation_id="11111111-2222-3333-4444-555555555555",
-        role="worker", resume="", fork_session=True,
+        role="worker", resume="", fork_session=True, borrow="lender",
     )
     assert SessionDef.from_dict(sdef.to_dict()) == sdef
+    nulled = SessionDef(name="bare", profile="p", null_token=True)
+    assert SessionDef.from_dict(nulled.to_dict()) == nulled
 
 
 def test_resume_field_keeps_the_picker_distinct_from_no_resume():
@@ -268,6 +270,57 @@ def test_role_and_resume_rejected_on_a_non_claude_harness(home, tmp_path):
         harness.normalize(
             SessionDef(name="x", harness="h", cwd=str(tmp_path), resume="")
         )
+
+
+def test_borrow_and_null_rejected_on_a_non_claude_harness(home, tmp_path):
+    """Auth arrangements are the profile machinery's, which only claude has."""
+    _declare_harness("h")
+    with pytest.raises(HarnessError, match="claude harness"):
+        harness.normalize(
+            SessionDef(name="x", harness="h", cwd=str(tmp_path), borrow="lender")
+        )
+    with pytest.raises(HarnessError, match="claude harness"):
+        harness.normalize(
+            SessionDef(name="x", harness="h", cwd=str(tmp_path), null_token=True)
+        )
+
+
+def test_null_cannot_be_combined_with_borrow(home, tmp_path):
+    """The same refusal `run --null --borrow` gives: the two flags answer
+    "whose token" with opposite answers."""
+    profile.create("work")
+    with pytest.raises(HarnessError, match="cannot be combined"):
+        harness.normalize(
+            SessionDef(
+                name="x", profile="work", cwd=str(tmp_path),
+                borrow="lender", null_token=True,
+            )
+        )
+
+
+def test_a_borrowing_session_launches_with_the_lenders_token(home, tmp_path):
+    p = profile.create("work")
+    credentials.save_token(p, "sk-ant-oat01-own")
+    lender = profile.create("lender")
+    credentials.save_token(lender, "sk-ant-oat01-lender")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work", cwd=str(tmp_path), borrow="lender")
+    )
+    _, env, _ = harness.build_command(sdef)
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-lender"
+    # config stays the session's own: borrow swaps auth, not identity
+    assert env["CLAUDE_CONFIG_DIR"] == str(p.config_dir)
+
+
+def test_a_null_session_launches_with_no_token_at_all(home, tmp_path, monkeypatch):
+    p = profile.create("work")
+    credentials.save_token(p, "sk-ant-oat01-own")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "stale-shell-token")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work", cwd=str(tmp_path), null_token=True)
+    )
+    _, env, _ = harness.build_command(sdef)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 
 def test_generic_harness_from_config(home, tmp_path):

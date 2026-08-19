@@ -104,6 +104,10 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["restore"] = args.restore
     if args.role:
         body["role"] = args.role
+    if args.borrow:
+        body["borrow"] = args.borrow
+    if args.null_token:
+        body["null_token"] = True
     # Decided at creation because they are what the session is FOR: a mesh it
     # is not in and a run it does not drive have to be arranged afterwards,
     # with the agent already sitting at a prompt not knowing either.
@@ -816,13 +820,26 @@ def register(sub) -> None:
     p_new.add_argument(
         "--wizard", action="store_true",
         help="pick every field from a form in this terminal instead of "
-        "spelling them out as flags -- harness, profile, directory, worktree, "
-        "role, resume, mesh, workflow and whether to attach, each from the "
-        "list the daemon publishes. Any flag given alongside it pre-fills its "
-        "field",
+        "spelling them out as flags -- harness, profile, borrow/null, "
+        "directory, worktree, role, resume, mesh, workflow and whether to "
+        "attach, each from the list the daemon publishes. Any flag given "
+        "alongside it pre-fills its field",
     )
     p_new.add_argument("-s", "--name", help="session name (auto-generated if omitted)")
     p_new.add_argument("--profile", help="claunch profile (required for the claude harness)")
+    auth = p_new.add_mutually_exclusive_group()
+    auth.add_argument(
+        "--borrow", metavar="NAME",
+        help="use profile NAME's token (and backend) for this session, "
+        "keeping --profile's config, env and skills -- what 'claunch run "
+        "--borrow' does, for a managed session; reapplied on every restore",
+    )
+    auth.add_argument(
+        "--null", dest="null_token", action="store_true",
+        help="launch with no OAuth token at all: nothing is injected and any "
+        "inherited CLAUDE_CODE_OAUTH_TOKEN is cleared, so claude starts "
+        "unauthenticated (log in with /login inside)",
+    )
     p_new.add_argument(
         "--harness", default="claude",
         help="harness to run: claude (default), codex, pi, or one you declared "
