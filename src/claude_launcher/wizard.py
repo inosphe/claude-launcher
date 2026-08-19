@@ -1071,6 +1071,27 @@ class Wizard(Form):
         if get("profile"):
             profile.select(get("profile"))
 
+        borrow = ChoiceField(
+            key="borrow", label="Borrow",
+            hint="run with ANOTHER profile's token and backend; this "
+                 "profile's config, env and skills stay put",
+            options=[Option("(this profile's own token)", "")]
+            + [Option(p, p) for p in profiles],
+        )
+        borrow.select(get("borrow") or "")
+
+        null = ChoiceField(
+            key="null_token", label="Null token",
+            hint="launch with no OAuth token at all -- even an inherited one "
+                 "is cleared, so claude starts at /login",
+            options=[
+                Option("no - inject the profile's token", False),
+                Option("yes - launch unauthenticated", True),
+            ],
+        )
+        if get("null_token"):
+            null.select(True)
+
         directory = ChoiceField(
             key="cwd", label="Directory",
             hint="where the session runs; register more with 'claunch workspace add'",
@@ -1192,7 +1213,8 @@ class Wizard(Form):
         )
 
         return [
-            name, harness, profile, directory, *worktree_fields(""), role,
+            name, harness, profile, borrow, null, directory,
+            *worktree_fields(""), role,
             resume, fork,
             args_field, mesh, handle, connect, workflow, context, task,
             restore, attach,
@@ -1238,10 +1260,18 @@ class Wizard(Form):
         currently picked.
         """
         claude = self.value("harness") == "claude"
-        for key in ("role", "resume"):
+        for key in ("role", "resume", "borrow", "null_token"):
             f = self.field(key)
             f.disabled = not claude
             f.disabled_note = "the claude harness only"
+        if claude and self.value("null_token"):
+            # `run` refuses the pair outright ("--null launches without any
+            # OAuth token"); the form's way of never provoking that refusal
+            # is to never offer it.
+            borrow = self.field("borrow")
+            borrow.disabled = True
+            borrow.disabled_note = "--null launches without any token"
+            borrow.select("")
         fork = self.field("fork_session")
         resuming = self.value("resume") is not None
         fork.disabled = not (claude and resuming)
@@ -1308,6 +1338,9 @@ class Wizard(Form):
         args.name = self.value("name")
         args.harness = self.value("harness")
         args.profile = self.value("profile") or None
+        claude = args.harness == "claude"
+        args.borrow = (self.value("borrow") or None) if claude else None
+        args.null_token = bool(self.value("null_token")) if claude else False
         args.cwd = self.value("cwd") or self.cwd
 
         args.worktree, args.rebase_onto = worktree_answer(self)
@@ -1344,6 +1377,11 @@ class Wizard(Form):
             "profile " + str(self.value("profile") or "(none)"),
             "in " + str(self.value("cwd")),
         ]
+        if self.value("harness") == "claude":
+            if self.value("borrow"):
+                parts.append("borrowing " + str(self.value("borrow")))
+            if self.value("null_token"):
+                parts.append("no oauth token")
         wt, base = worktree_answer(self)
         if wt is not worktree.NEVER:
             parts.append("worktree " + (wt or "(auto)"))

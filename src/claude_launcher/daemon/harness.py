@@ -94,6 +94,16 @@ class SessionDef:
     #: peers it cannot reach and reading the refusal as a bug. That half stays
     #: in the mesh briefing, which is re-derived every time it is sent.
     identity: Optional[str] = None
+    #: Run with another profile's auth (``--borrow``): this session keeps its
+    #: own profile's config dir, env and skills, but the token — and the
+    #: backend it talks to — comes from the named profile. Applied on every
+    #: spawn, restores included: the arrangement is the session's, not the
+    #: first launch's. claude harness only.
+    borrow: Optional[str] = None
+    #: Launch with no OAuth token at all (``--null``): nothing is injected and
+    #: any inherited ``CLAUDE_CODE_OAUTH_TOKEN`` is cleared, so claude starts
+    #: unauthenticated (log in with /login). claude harness only.
+    null_token: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -112,6 +122,8 @@ class SessionDef:
             "fork_session": self.fork_session,
             "parent": self.parent,
             "identity": self.identity,
+            "borrow": self.borrow,
+            "null_token": self.null_token,
         }
 
     @classmethod
@@ -132,6 +144,8 @@ class SessionDef:
             fork_session=bool(data.get("fork_session")),
             parent=str(data.get("parent") or "").strip() or None,
             identity=str(data.get("identity") or "").strip() or None,
+            borrow=str(data.get("borrow") or "").strip() or None,
+            null_token=bool(data.get("null_token")),
         )
 
 
@@ -184,6 +198,13 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
             raise HarnessError(
                 "the claude harness needs a profile (pass --profile NAME)"
             )
+        if sdef.null_token and sdef.borrow:
+            # The same refusal `run` gives, for the same reason: the two flags
+            # answer the one question "whose token" with opposite answers.
+            raise HarnessError(
+                "--null launches without any OAuth token; "
+                f"it cannot be combined with --borrow {sdef.borrow}"
+            )
         sdef = _normalize_role(sdef)
         sdef = _normalize_resume(sdef)
         # Pin a fresh conversation id at creation only — an id invented while
@@ -233,6 +254,8 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
                 ("role", sdef.role),
                 ("resume", sdef.resume is not None),
                 ("fork_session", sdef.fork_session),
+                ("borrow", sdef.borrow),
+                ("null", sdef.null_token),
             )
             if given
         ]
@@ -313,10 +336,17 @@ def build_command(
     """
     if sdef.harness == CLAUDE_HARNESS:
         prof = profile_mod.require(sdef.profile)
+        # Resolved at spawn time like the profile itself, so a lender deleted
+        # between restarts fails the restore loudly instead of silently
+        # falling back to the session's own token.
+        borrow_prof = profile_mod.require(sdef.borrow) if sdef.borrow else None
         base = {
             k: v for k, v in os.environ.items() if k not in _NESTED_SESSION_MARKERS
         }
-        env = runner.child_env(prof, with_token=True, base_env=base)
+        env = runner.child_env(
+            prof, with_token=True, base_env=base,
+            borrow=borrow_prof, null_token=sdef.null_token,
+        )
         argv = [launcher_config.claude_bin()]
         if not steers_conversation(sdef.args):
             if restoring:

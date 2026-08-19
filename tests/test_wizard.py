@@ -183,6 +183,31 @@ def test_role_and_resume_belong_to_claude_only():
     assert not wiz.field("role").selectable
     assert not wiz.field("resume").selectable
     assert not wiz.field("fork_session").selectable
+    assert not wiz.field("borrow").selectable
+    assert not wiz.field("null_token").selectable
+
+
+def test_the_borrow_picker_offers_the_profiles():
+    """--borrow names a profile, and profiles are a closed set the daemon
+    publishes -- so it is a picker, never typed."""
+    wiz = form()
+    labels = [o.label for o in wiz.field("borrow").options]
+    assert labels[0].startswith("(this profile's own token)")
+    assert "work" in labels and "ds4" in labels
+    assert wiz.value("borrow") == ""  # borrowing is an answer somebody gives
+
+
+def test_null_takes_the_borrow_with_it():
+    """`run` refuses --null --borrow outright; the form never offers the
+    pair -- saying yes to null greys the borrow row and resets it."""
+    wiz = form()
+    pick(wiz, "borrow", "ds4")
+    assert wiz.value("borrow") == "ds4"
+    pick(wiz, "null_token", "yes")
+    assert not wiz.field("borrow").selectable
+    assert wiz.value("borrow") == ""
+    pick(wiz, "null_token", "no")
+    assert wiz.field("borrow").selectable
 
 
 def test_fork_needs_a_conversation_to_fork():
@@ -279,6 +304,7 @@ def test_apply_writes_new_sessions_own_spelling():
         wiz.handle(ch)
     wiz.handle("enter")
     pick(wiz, "profile", "ds4")
+    pick(wiz, "borrow", "work")
     pick(wiz, "worktree", "review")
     pick(wiz, "role", "worker")
     pick(wiz, "resume", "old")
@@ -295,6 +321,8 @@ def test_apply_writes_new_sessions_own_spelling():
     assert args.name == "api"
     assert args.harness == "claude"
     assert args.profile == "ds4"
+    assert args.borrow == "work"
+    assert args.null_token is False
     assert args.worktree == "review"
     assert args.role == "worker"
     assert args.resume == "old"
@@ -302,6 +330,15 @@ def test_apply_writes_new_sessions_own_spelling():
     assert args.mesh == "team"
     assert args.attach is True
     assert args.args == ["--verbose"]
+
+
+def test_a_null_launch_travels_as_null_token():
+    wiz = form()
+    pick(wiz, "null_token", "yes")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.null_token is True
+    assert args.borrow is None
 
 
 def test_a_new_conversation_leaves_resume_unset():
@@ -331,6 +368,7 @@ def test_answering_no_to_the_worktree_is_not_the_same_as_not_answering():
 def test_flags_typed_before_the_wizard_prefill_it():
     defaults = argparse.Namespace(
         name="api", harness="claude", profile="ds4", cwd="/srv/api",
+        borrow="work", null_token=False,
         role="worker", resume="old", fork_session=True, mesh="team",
         handle="apibot", task="ship it", args=["--", "--verbose"],
         connect=["lead"], attach=True, restore=True, workflow=None,
@@ -339,6 +377,7 @@ def test_flags_typed_before_the_wizard_prefill_it():
     wiz = wizard.Wizard(FakeSources(), cwd="/work/repo", defaults=defaults)
     assert wiz.value("name") == "api"
     assert wiz.value("profile") == "ds4"
+    assert wiz.value("borrow") == "work"
     assert wiz.value("cwd") == wizard.os.path.abspath("/srv/api")
     assert wiz.value("role") == "worker"
     assert wiz.value("resume") == "old"
