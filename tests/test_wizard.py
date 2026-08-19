@@ -609,12 +609,15 @@ def test_an_unlocked_harness_becomes_pickable():
 
 
 def test_the_form_is_rebuilt_when_the_parent_changes():
-    wiz = spawn_form()
+    wiz = spawn_form(sessions=[
+        {"name": "lead", "status": "idle", "profile": "work", "cwd": "/work/repo"},
+        {"name": "solo", "status": "idle", "profile": "work", "cwd": "/work/other"},
+    ])
     assert "F:" not in wiz.field("workspace").options[0].label
     assert "/work/repo" in wiz.field("workspace").options[0].label
-    pick(wiz, "parent", "old")
+    pick(wiz, "parent", "solo")
     assert "/work/other" in wiz.field("workspace").options[0].label
-    assert wiz.sources.report_calls == ["lead", "old"]
+    assert wiz.sources.report_calls == ["lead", "solo"]
 
 
 def test_the_mesh_defaults_to_the_parents_own():
@@ -626,8 +629,11 @@ def test_the_mesh_defaults_to_the_parents_own():
 
 
 def test_a_parent_in_no_mesh_says_one_will_be_opened():
-    wiz = spawn_form()
-    pick(wiz, "parent", "old")
+    wiz = spawn_form(sessions=[
+        {"name": "lead", "status": "idle", "profile": "work", "cwd": "/work/repo"},
+        {"name": "solo", "status": "idle", "profile": "work", "cwd": "/work/other"},
+    ])
+    pick(wiz, "parent", "solo")
     assert "opened for the pair" in wiz.field("mesh").options[0].label
 
 
@@ -874,3 +880,97 @@ def test_a_parent_outside_a_repository_is_offered_no_worktree():
     assert wiz.field("worktree").hidden
     assert wiz.field("update").hidden
     assert wiz.field("rebase_onto").hidden
+
+
+# --------------------------------------------------------------------------- #
+# who the Parent picker offers, and in what order
+# --------------------------------------------------------------------------- #
+FLEET = [
+    {"name": "s10", "status": "exited", "profile": "nc", "cwd": "F:/works/gds5"},
+    {"name": "s11", "status": "idle", "profile": "nc", "cwd": "F:/works/gds5"},
+    {"name": "s9", "status": "busy", "profile": "nc", "cwd": "F:/works/gds5"},
+]
+
+
+def test_a_session_that_cannot_spawn_does_not_lead_the_picker():
+    """The daemon refuses a child of an exited session outright, so offering
+    one as the default is offering a launch that is already lost."""
+    wiz = spawn_form(sessions=FLEET)
+    values = [o.value for o in wiz.field("parent").options]
+    assert values == ["s9", "s11", "s10"]
+    assert wiz.value("parent") == "s9"
+
+
+def test_names_are_ordered_as_numbers_not_as_strings():
+    """Past nine sessions a string sort puts the tenth between the first and
+    the second, which reads as no order at all."""
+    fleet = [
+        {"name": f"s{n}", "status": "idle", "cwd": "/w"} for n in (9, 10, 11, 2)
+    ]
+    wiz = spawn_form(sessions=fleet)
+    assert [o.value for o in wiz.field("parent").options] == \
+        ["s2", "s9", "s10", "s11"]
+
+
+def test_an_exited_session_is_shown_and_unpickable_with_the_way_out():
+    wiz = spawn_form(sessions=FLEET)
+    exited = [o for o in wiz.field("parent").options if o.value == "s10"][0]
+    assert exited.disabled
+    # Shown, not hidden: it is a respawn away from being a usable parent, and
+    # a session missing from the list reads as gone.
+    assert "respawn" in exited.detail
+
+
+def test_the_picker_skips_past_a_session_that_cannot_spawn():
+    wiz = spawn_form(sessions=FLEET)
+    focus_on(wiz, "parent")
+    wiz.handle("right")
+    assert wiz.value("parent") == "s11"
+    wiz.handle("right")          # s10 is next, and unpickable
+    assert wiz.value("parent") == "s11"
+
+
+def test_your_own_session_leads_and_says_so(monkeypatch):
+    """`spawn` inside a session means *this* session, so the form opens on the
+    answer the bare command would have given."""
+    monkeypatch.setenv("CLAUNCH_SESSION", "s11")
+    wiz = spawn_form(sessions=FLEET)
+    assert [o.value for o in wiz.field("parent").options][0] == "s11"
+    assert wiz.value("parent") == "s11"
+    assert wiz.field("parent").options[0].label == "s11 (you)"
+
+
+def test_your_own_session_does_not_lead_when_it_cannot_spawn(monkeypatch):
+    """An exited caller is still refused, so the form must not open on it."""
+    monkeypatch.setenv("CLAUNCH_SESSION", "s10")
+    wiz = spawn_form(sessions=FLEET)
+    assert wiz.value("parent") == "s9"
+    assert wiz.field("parent").options[0].value == "s10"  # still first, greyed
+    assert wiz.field("parent").options[0].disabled
+
+
+def test_an_all_exited_fleet_offers_nothing_pickable():
+    wiz = spawn_form(sessions=[
+        {"name": "s1", "status": "exited", "cwd": "/w"},
+        {"name": "s2", "status": "exited", "cwd": "/w"},
+    ])
+    assert all(o.disabled for o in wiz.field("parent").options)
+
+
+def test_an_explicit_parent_still_wins_over_the_ordering():
+    wiz = spawn_form(sessions=FLEET)
+    assert wiz.field("parent").select("s11")
+    assert wiz.value("parent") == "s11"
+
+
+@pytest.mark.parametrize(
+    "names, expected",
+    [
+        (["s10", "s9"], ["s9", "s10"]),
+        (["b", "a"], ["a", "b"]),
+        (["w2p10", "w2p9"], ["w2p9", "w2p10"]),
+        (["x", "x1"], ["x", "x1"]),
+    ],
+)
+def test_natural_sort_key(names, expected):
+    assert sorted(names, key=wizard._natural) == expected

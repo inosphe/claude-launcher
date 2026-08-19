@@ -1359,6 +1359,62 @@ class Wizard(Form):
 
 
 
+def _natural(name: str) -> tuple:
+    """Sort key that reads digit runs as numbers, so ``s9`` precedes ``s10``.
+
+    Session names are auto-generated with a counter, so a plain string sort
+    puts the tenth session between the first and the second -- which reads as
+    no order at all once a fleet passes nine.
+    """
+    return tuple(
+        (1, int(part), "") if part.isdigit() else (0, 0, part)
+        for part in re.split(r"(\d+)", name) if part
+    )
+
+
+def _can_parent(session: dict) -> bool:
+    """Whether ``session`` can take a child at all.
+
+    The daemon refuses a child of an exited session outright (its record is
+    what a respawn would revive, not something to hang more work off), so this
+    is the one fact about a parent the form can be sure of without asking.
+    Slots and depth it cannot: those are one request per session, and the
+    picker would spend a round trip on every row to grey out one of them.
+    """
+    return session.get("status") != "exited"
+
+
+def _parent_rank(session: dict, here: str) -> tuple:
+    """Order the Parent picker by what a caller is most likely to want.
+
+    Their own session first -- ``spawn`` run inside one means *this* one, and
+    the form should open on the answer the bare command would have given.
+    Then the sessions that can take a child, then the ones that cannot, so the
+    default is never a row the daemon will reject. Names break the tie, read
+    as numbers.
+    """
+    name = session.get("name", "")
+    return (name != here, not _can_parent(session), _natural(name))
+
+
+def _parent_option(session: dict, here: str) -> Option:
+    """One row of the Parent picker: the session, and why it can or cannot."""
+    name = session.get("name", "")
+    live = _can_parent(session)
+    # Shown rather than hidden, like every other unpickable row: a session
+    # missing from the list reads as gone, and this one is a respawn away.
+    status = session.get("status", "") if live else "exited - respawn it first"
+    detail = ", ".join(
+        x for x in (
+            status,
+            session.get("profile") or session.get("harness") or "",
+            session.get("cwd") or "",
+        ) if x
+    )
+    label = f"{name} (you)" if name and name == here else name
+    return Option(label, name, detail, disabled=not live)
+
+
 class SpawnWizard(Form):
     """``spawn``: a CHILD of a session, and only what a child may be asked.
 
@@ -1403,25 +1459,22 @@ class SpawnWizard(Form):
         self._paths: Dict[str, str] = {}
 
         sessions = self.sources.sessions() or []
+        here = os.environ.get("CLAUNCH_SESSION") or ""
         parent = ChoiceField(
             key="parent", label="Parent",
             hint="the session this one becomes a child of",
             options=[
-                Option(
-                    s.get("name", ""), s.get("name", ""),
-                    ", ".join(
-                        x for x in (
-                            s.get("status", ""),
-                            s.get("profile") or s.get("harness") or "",
-                            s.get("cwd") or "",
-                        ) if x
-                    ),
-                )
-                for s in sessions
+                _parent_option(s, here)
+                for s in sorted(sessions, key=lambda s: _parent_rank(s, here))
             ],
             empty="(no sessions yet - 'claunch new-session' makes the first)",
         )
-        parent.select(get("parent") or os.environ.get("CLAUNCH_SESSION") or "")
+        # Land on something that can actually take a child: an exited session
+        # is offered but refused, so it must not be what the form defaults to.
+        parent.index = next(
+            (i for i, o in enumerate(parent.options) if not o.disabled), 0
+        )
+        parent.select(get("parent") or here or "")
 
         name = TextField(
             key="name", label="Name", placeholder="(auto)",

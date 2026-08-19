@@ -1075,6 +1075,14 @@ own row instead of refusing a filled-in form. What
 leave locked is greyed out with the config key that would open it, rather than
 hidden.
 
+The list is ordered by what can actually take a child. Your own session leads
+when you have one (`spawn` inside a session means *this* session, so the form
+opens on the answer the bare command would have given); then the sessions that
+can spawn; then the ones that cannot. An **exited** session is greyed out with
+`respawn it first` — the daemon refuses a child of one outright, and offering
+it as the default is offering a launch that is already lost. Names break the
+tie and are read as numbers, so `s9` comes before `s10` instead of after it.
+
 **Mesh** defaults to *the parent's own* (opening one for the pair if it is in
 none) — that is what `spawn` means by leaving it out, so it is the first
 entry, not an empty box. `- no mesh at all` is a deliberate answer beside it,
