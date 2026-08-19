@@ -49,11 +49,22 @@ def proj(home, tmp_path, monkeypatch):
     return d
 
 
+class _FakeTracker:
+    """last_meaningful_change() the tests can move by hand."""
+
+    def __init__(self) -> None:
+        self.last = time.monotonic()
+
+    def last_meaningful_change(self):
+        return self.last
+
+
 class _FakeSession:
     def __init__(self, name: str, cwd: str) -> None:
         self.exited = False
         self.sdef = SessionDef(name=name, cwd=cwd)
         self.delivered: list = []
+        self.tracker = _FakeTracker()
 
     async def deliver(self, text: str) -> bool:
         self.delivered.append(text)
@@ -190,6 +201,33 @@ def test_delivery_goes_to_the_scope_session_in_the_same_cwd(proj):
     assert clock2._session_for(cwd, "w1") is None
     elsewhere.exited = True
     assert clock2._session_for(str(proj.parent), "w1") is None
+
+
+def test_a_suspended_session_holds_one_reminder(proj):
+    """No activity since the last reminder means nobody is reading: the next
+    one is held — not dropped — and goes out the moment the screen moves."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+    due = clock.scan(t + 181)
+    asyncio.run(clock._deliver(*due[0]))
+    assert len(sess.delivered) == 1
+    delivered_at = clock._seen[(cwd, "w1")]["delivered_at"]
+
+    # the only screen change since is the paste's own echo (inside the grace)
+    sess.tracker.last = delivered_at + 1.0
+    due = clock.scan(time.monotonic() + 400)
+    assert due                                   # the debt stays due...
+    asyncio.run(clock._deliver(*due[0]))
+    assert len(sess.delivered) == 1              # ...but nothing is typed
+
+    # the session shows life -> the held reminder goes out at once
+    sess.tracker.last = delivered_at + 60.0
+    asyncio.run(clock._deliver(*due[0]))
+    assert len(sess.delivered) == 2
 
 
 # --------------------------------------------------------------------------- #

@@ -2209,7 +2209,11 @@ therefore watches every run: when one has held the same agent-actionable
 position (`step` or `select`) for its reminder interval, the current step's
 own instructions are re-typed into the driving session (idle-gated, like
 every delivery), and again every interval until the run moves. Progress
-resets the timer, so an agent that is advancing hears nothing. Defaults:
+resets the timer, so an agent that is advancing hears nothing — and a repeat
+is only sent to a session that has shown screen activity since the previous
+one landed, so an effectively suspended session (process stopped, machine
+asleep, TUI wedged) holds exactly one reminder instead of an interval-paced
+pile, and picks the cadence back up the moment it shows life. Defaults:
 `claunch daemon config cflow_reminder true|false` /
 `cflow_reminder_interval 180` — these two keys are read live, no restart —
 with a per-run override on the run's web page (or the POST above).
