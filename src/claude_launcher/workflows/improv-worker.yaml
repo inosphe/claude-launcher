@@ -1,13 +1,21 @@
 name: improv-worker
 description: >
   자유 진행 워커 — 터미널 사용자(또는 리더 브리핑)가 주는 목표 하나가 한
-  회차다: 목표 수립 -> 작업 -> 테스트(verify) -> 커밋·보고 -> (사용자가
-  결정) 착지: 리더에게 master 통합 요청 또는 브랜치 동결 -> 정리 -> 종료.
-  master 머지는 리더 전권이다 — 워커는 어떤 경로로도 master를 직접 머지하지
-  않는다. recur가 끝난 회차마다 다음 회차를 요청하므로 목표마다 저널이
+  회차다: 목표 수립 -> 작업 -> 테스트(간소화 스위트, verify) -> 커밋·보고
+  -> (사용자가 결정) 착지: 리더에게 master 통합 요청 또는 브랜치 동결 ->
+  정리 -> 종료. master 머지는 리더 전권이다 — 워커는 어떤 경로로도 master를
+  직접 머지하지 않는다. 전체 스윕 테스트(build+typecheck 포함)도 워커 몫이
+  아니다 — 리더가 통합 시점에 모아서 한 번에 돌린다. recur가 끝난 회차마다 다음 회차를 요청하므로 목표마다 저널이
   분리된다. 반복을 멈추는 것은 사용자다(claunch cflow request --cancel).
 start: intake
 recur: true
+
+# 이 런의 드라이버는 worker 역할 세션이다 — 리더가 실수로 워커 런을 몰지
+# 못하게 막는다. 메시 밖 단독 세션은 역할이 없어 필터가 성립하지 않으므로
+# 그대로 시작되고, 그 사실이 저널에 남는다.
+filter_roles:
+  type: whitelist
+  roles: [worker]
 
 steps:
   intake:
@@ -39,13 +47,16 @@ steps:
     next: review
 
   review:
-    title: 테스트
+    title: 테스트 (간소화)
     instructions: |
-      바꾼 영역을 덮는 유닛테스트를 추가·확장하고 전체 스위트를 돌린다.
-      verify가 같은 명령을 서버에서 재실행하므로, 보고에는 수치(전체 N/N,
-      신규 K)와 커버한 시나리오를 남긴다. 실제 화면·CLI 동작 확인이 의미
-      있는 변경이면 그 증거(방법과 결과)도 함께 남긴다.
-    verify: "npm --prefix design-notebook run build && npm --prefix design-notebook test"
+      바꾼 영역을 덮는 유닛테스트를 추가·확장하고 간소화 스위트(유닛
+      테스트만, npm test)를 돌린다. 전체 스윕(build+typecheck 포함)은
+      여기서 돌리지 않는다 — 시간이 길어 회차를 막고, 리더가 통합 시점에
+      배치로 한 번만 돌리는 것이 이 편성의 규칙이다. verify가 같은 명령을
+      서버에서 재실행하므로, 보고에는 수치(전체 N/N, 신규 K)와 커버한
+      시나리오를 남기고 "간소화 스위트 기준"임을 명시한다. 실제 화면·CLI
+      동작 확인이 의미 있는 변경이면 그 증거(방법과 결과)도 함께 남긴다.
+    verify: "npm --prefix design-notebook test"
     next: commit
 
   commit:
@@ -94,6 +105,8 @@ steps:
 
       요청은 리더가 심사할 수 있는 증거 묶음으로 만든다:
       - 목표·범위, 브랜치 이름, 기능 커밋·머지 커밋 해시, 테스트 수치
+        (간소화 스위트 기준임을 명시 — 전체 스윕은 리더의 통합 단계에서
+        배치로 한 번 돈다)
       - git log master..<branch> / <branch>..master 양방향 차이 —
         master가 분기 이후 움직였으면 그 사실과 예상 충돌 지점을 명시
       - 이 브랜치가 다른 세션의 브랜치를 포함하면(git branch --contains)
