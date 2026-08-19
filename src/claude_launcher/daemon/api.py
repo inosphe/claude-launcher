@@ -567,6 +567,11 @@ def _serialize_workflow(wf) -> dict:
         "description": wf.description,
         "start": wf.start,
         "max_visits": wf.max_visits,
+        "filter_roles": (
+            {"type": wf.filter_roles.type, "roles": list(wf.filter_roles.roles)}
+            if wf.filter_roles
+            else None
+        ),
         "warnings": wf.warnings,
         # `deprecations` deliberately NOT served here. This feeds the run
         # pages, and advice about how a file is written does not belong in

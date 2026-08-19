@@ -9,6 +9,9 @@ and loops need no duplicated content::
     start: design           # optional (defaults to the first step)
     max_visits: 25          # optional loop guard (per step, per run)
     recur: true             # optional: a finished round requests the next one
+    filter_roles:           # optional: which mesh roles may DRIVE this run
+      type: whitelist       # whitelist (only these) | blacklist (all but these)
+      roles: [worker]
     steps:
       design:
         instructions: |
@@ -79,6 +82,19 @@ them, and they answer through a different door. Keeping them on the other axis
 is what stops the two spellings from saying the same thing twice — and is why
 ``gate: <msg>`` deprecates into a ``from``-less ``ask: {prompt: <msg>}``.
 
+Role filter
+-----------
+``filter_roles`` names which mesh roles may *drive* a run of this workflow —
+the session that starts it, not the ones it delegates to. ``type: whitelist``
+admits only the listed roles; ``type: blacklist`` admits everything but them.
+Role names are not checked against a vocabulary here for the same reason a
+candidate's role is not: roles are defined per mesh and the parser runs with
+no daemon in reach. The filter is enforced at ``start`` against the driving
+session's recorded mesh role; a driver with no resolvable mesh identity (not
+a managed session, not enrolled, daemon down) is admitted with the fact
+journaled — the filter is a guardrail on the fleet's division of labour, and
+a standalone run has no labour to divide.
+
 A candidate needs a ``role`` — a delegation is to a *function*, and "whoever
 happens to be connected" is not one. ``scope`` narrows further: ``any``
 (default) is anything the asking session can reach over the mesh that is not
@@ -94,7 +110,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Dict, List, Optional, Set, Tuple
 
 import yaml
 
@@ -117,6 +133,12 @@ SCOPE_ANY = "any"
 #: ...or its own chain of command only.
 SCOPE_ANCESTOR = "ancestor"
 SCOPES = (SCOPE_ANY, SCOPE_ANCESTOR)
+
+#: ``filter_roles.type``: admit only the listed roles...
+FILTER_WHITELIST = "whitelist"
+#: ...or admit every role except the listed ones.
+FILTER_BLACKLIST = "blacklist"
+FILTER_TYPES = (FILTER_WHITELIST, FILTER_BLACKLIST)
 
 
 class WorkflowError(Exception):
@@ -172,6 +194,29 @@ class Delegate:
     def describe(self) -> str:
         """The preference list as one line, ending in the fallback."""
         return " -> ".join([c.describe() for c in self.candidates] + [self.otherwise])
+
+
+@dataclass(frozen=True)
+class RoleFilter:
+    """Which mesh roles may drive a run of this workflow.
+
+    A statement about the *driver* — the session that starts the run — not
+    about who it may delegate to (that is each decision's ``from``). Roles are
+    stored lower-cased, matching how the mesh stores a member's resolved role.
+    """
+
+    type: str  # FILTER_WHITELIST | FILTER_BLACKLIST
+    roles: Tuple[str, ...]
+
+    def allows(self, role: str) -> bool:
+        held = str(role or "").strip().lower()
+        if self.type == FILTER_WHITELIST:
+            return held in self.roles
+        return held not in self.roles
+
+    def describe(self) -> str:
+        """One line for `show`, a payload or an error — never parsed."""
+        return f"{self.type}({', '.join(self.roles)})"
 
 
 @dataclass(frozen=True)
@@ -252,6 +297,8 @@ class Workflow:
     #: act (withdraw the request, or abort/archive mid-round), never the
     #: driving agent's decision.
     recur: bool = False
+    #: Which mesh roles may drive a run of this workflow; ``None`` = any.
+    filter_roles: Optional[RoleFilter] = None
     warnings: List[str] = field(default_factory=list)
     #: Superseded spellings this file still uses. Kept apart from
     #: :attr:`warnings` on purpose: a warning describes a graph that may
@@ -302,6 +349,7 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
     recur = doc.get("recur", False)
     if not isinstance(recur, bool):
         raise WorkflowError("'recur' must be true or false")
+    filter_roles = _parse_role_filter(doc.get("filter_roles"))
 
     workflow = Workflow(
         name=str(doc.get("name") or default_name),
@@ -310,6 +358,7 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         steps=steps,
         max_visits=max_visits,
         recur=recur,
+        filter_roles=filter_roles,
         warnings=[],
     )
     _validate_graph(workflow)
@@ -320,6 +369,7 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         steps=workflow.steps,
         max_visits=workflow.max_visits,
         recur=workflow.recur,
+        filter_roles=workflow.filter_roles,
         warnings=_graph_warnings(workflow),
         deprecations=_deprecations(workflow),
     )
@@ -342,6 +392,47 @@ def load(path: Path) -> Workflow:
     except OSError as exc:
         raise WorkflowError(f"cannot read workflow {path}: {exc}") from exc
     return parse(text, default_name=path.stem)
+
+
+def _parse_role_filter(raw) -> Optional[RoleFilter]:
+    if raw is None:
+        return None
+    where = "'filter_roles'"
+    if not isinstance(raw, dict):
+        raise WorkflowError(
+            f"{where} must be a mapping like "
+            f"{{type: {FILTER_WHITELIST}, roles: [worker]}}"
+        )
+    unknown = sorted(set(raw) - {"type", "roles"})
+    if unknown:
+        raise WorkflowError(
+            f"{where} has unknown key(s): {', '.join(unknown)} "
+            "(allowed: type, roles)"
+        )
+    kind = str(raw.get("type") or "").strip().lower()
+    if kind not in FILTER_TYPES:
+        raise WorkflowError(
+            f"{where}: 'type' must be one of {', '.join(FILTER_TYPES)}, got "
+            f"{raw.get('type')!r} ({FILTER_WHITELIST} = only these roles may "
+            f"drive a run, {FILTER_BLACKLIST} = every role but these may)"
+        )
+    raw_roles = raw.get("roles")
+    if not isinstance(raw_roles, list) or not raw_roles:
+        raise WorkflowError(
+            f"{where}: 'roles' must be a non-empty list of role names, "
+            f"e.g. roles: [worker, specialist]"
+        )
+    roles: List[str] = []
+    for entry in raw_roles:
+        name = str(entry or "").strip().lower()
+        if not name:
+            raise WorkflowError(f"{where}: a role name must be non-empty")
+        if name not in roles:
+            roles.append(name)
+        # Not checked against a vocabulary: roles are defined per mesh and
+        # this parser runs with no daemon in reach (same rule as a
+        # delegation candidate's role).
+    return RoleFilter(type=kind, roles=tuple(roles))
 
 
 # --------------------------------------------------------------------------- #

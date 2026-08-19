@@ -128,6 +128,11 @@ def _cmd_show(args: argparse.Namespace) -> int:
     print(f"{wf.name} — {wf.description}  [{path}]")
     recur = "    recur: yes (each finished round requests the next)" if wf.recur else ""
     print(f"start: {wf.start}    max_visits: {wf.max_visits}{recur}")
+    if wf.filter_roles:
+        print(
+            f"filter_roles: {wf.filter_roles.describe()} — which mesh roles "
+            f"may drive a run"
+        )
     for s in wf.steps.values():
         flags = []
         if s.gate:

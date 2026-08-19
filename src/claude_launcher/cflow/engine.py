@@ -971,6 +971,41 @@ def _archive_current(state: dict, by: str, cwd: Optional[str]) -> str:
     return str(state_mod.archive_run(cwd))
 
 
+def _enforce_role_filter(
+    workflow: Workflow, *, mesh: str, cwd: Optional[str]
+) -> Optional[str]:
+    """Hold the workflow's ``filter_roles`` against the driving session.
+
+    Raises :class:`CflowError` when the driver's mesh role is resolvable and
+    the filter turns it away. Returns a note for the payload/journal when the
+    filter could not be enforced (no managed session, no membership, no
+    daemon) — the run proceeds, but the fact is recorded rather than silently
+    passed: the filter is a guardrail on a fleet's division of labour, and a
+    standalone run has no fleet to divide.
+    """
+    role_filter = workflow.filter_roles
+    if role_filter is None:
+        return None
+    session = state_mod.current_scope()
+    if session == state_mod.DEFAULT_SCOPE:
+        session = ""  # not a managed session: it has no mesh identity
+    reach = responders.pool(session=session, mesh=mesh, cwd=cwd)
+    if reach.problem or not reach.me:
+        return (
+            f"filter_roles {role_filter.describe()} could not be enforced: "
+            f"{reach.problem or 'the driving session has no mesh identity'}"
+        )
+    if role_filter.allows(reach.me_role):
+        return None
+    raise CflowError(
+        f"workflow {workflow.name!r} declares filter_roles "
+        f"{role_filter.describe()}, and {reach.me} holds role "
+        f"{reach.me_role!r} in mesh {reach.mesh!r} — this session may not "
+        f"drive it. Start it from a session whose role the filter admits, "
+        f"or change the workflow's 'filter_roles'"
+    )
+
+
 @_locked_op
 def start(
     workflow_ref: str,
@@ -1009,6 +1044,9 @@ def start(
     path = located.path
     text = path.read_text(encoding="utf-8")
     workflow = model.parse(text, default_name=path.stem)
+    role_filter_note = _enforce_role_filter(
+        workflow, mesh=(mesh or "").strip(), cwd=cwd
+    )
 
     fulfilled = bool(pending) and (
         pending.get("workflow") == workflow_ref
@@ -1065,6 +1103,7 @@ def start(
             "total_steps": workflow.step_count(),
             "warnings": workflow.warnings,
             **({"round": round_no} if round_no > 1 else {}),
+            **({"role_filter": role_filter_note} if role_filter_note else {}),
         },
         cwd,
     )
@@ -1092,6 +1131,8 @@ def start(
         payload["mesh"] = state["mesh"]
     if workflow.warnings:
         payload["workflow_warnings"] = workflow.warnings
+    if role_filter_note:
+        payload["role_filter"] = role_filter_note
     check = delegation_check(workflow, mesh=state["mesh"], cwd=cwd)
     if check:
         payload["delegation_check"] = check
@@ -1128,6 +1169,9 @@ def request_start(
     # human who asked, not silently inside the agent's turn later.
     path = state_mod.find_workflow(workflow_ref, cwd)
     workflow = model.parse(path.read_text(encoding="utf-8"), default_name=path.stem)
+    # The filter too: a request this scope's agent could never start should
+    # be refused in front of whoever filed it, not inside the agent's turn.
+    role_filter_note = _enforce_role_filter(workflow, mesh="", cwd=cwd)
     request = {
         "id": f"req-{secrets.token_hex(3)}",
         "workflow": workflow_ref,
@@ -1154,6 +1198,8 @@ def request_start(
     check = delegation_check(workflow, cwd=cwd)
     if check:
         result["delegation_check"] = check
+    if role_filter_note:
+        result["role_filter"] = role_filter_note
     return result
 
 

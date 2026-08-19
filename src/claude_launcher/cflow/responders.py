@@ -98,6 +98,9 @@ class Pool:
     mesh: str = ""
     #: The asking session's own handle.
     me: str = ""
+    #: The asking session's own mesh role, as resolved and stored at its join.
+    #: Read for the workflow's ``filter_roles`` check; empty when ``me`` is.
+    me_role: str = ""
     #: Every member of the mesh except the asking session itself, by handle.
     members: Dict[str, Responder] = field(default_factory=dict)
     #: Handles the asking session may message (its side of the member graph).
@@ -232,6 +235,7 @@ def _pool_from(info: dict, session: str) -> Pool:
     return Pool(
         mesh=str(info.get("name") or ""),
         me=me,
+        me_role=str((raw.get(me) or {}).get("role") or ""),
         members={
             handle: Responder(
                 session=str(m.get("session") or ""),

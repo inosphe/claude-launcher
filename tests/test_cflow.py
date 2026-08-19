@@ -2057,6 +2057,105 @@ def test_a_human_can_settle_a_delegated_branch(flow_dir, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# filter_roles: which mesh roles may drive a run
+# --------------------------------------------------------------------------- #
+WORKER_ONLY = """
+name: worker-only
+filter_roles:
+  type: whitelist
+  roles: [Worker]
+steps:
+  one:
+    instructions: do one
+"""
+
+
+def test_role_filter_parses_and_normalizes():
+    wf = model.parse(WORKER_ONLY)
+    assert wf.filter_roles.type == "whitelist"
+    assert wf.filter_roles.roles == ("worker",)  # lower-cased, like the mesh
+    assert wf.filter_roles.allows("worker")
+    assert not wf.filter_roles.allows("leader")
+
+
+def test_role_filter_blacklist_admits_everything_else():
+    wf = model.parse(WORKER_ONLY.replace("whitelist", "blacklist"))
+    assert not wf.filter_roles.allows("worker")
+    assert wf.filter_roles.allows("leader")
+    assert wf.filter_roles.allows("")  # no role held = not the listed one
+
+
+def test_role_filter_rejects_a_made_up_type():
+    with pytest.raises(WorkflowError, match="whitelist, blacklist"):
+        model.parse(WORKER_ONLY.replace("whitelist", "allowlist"))
+
+
+def test_role_filter_needs_roles():
+    bad = "filter_roles:\n  type: whitelist\nsteps:\n  a:\n    instructions: x\n"
+    with pytest.raises(WorkflowError, match="non-empty list"):
+        model.parse(bad)
+    with pytest.raises(WorkflowError, match="non-empty list"):
+        model.parse(bad.replace("type: whitelist", "type: whitelist\n  roles: []"))
+
+
+def test_role_filter_rejects_unknown_keys():
+    bad = (
+        "filter_roles:\n  type: whitelist\n  roles: [worker]\n  scope: any\n"
+        "steps:\n  a:\n    instructions: x\n"
+    )
+    with pytest.raises(WorkflowError, match="unknown key"):
+        model.parse(bad)
+
+
+def test_start_admits_a_whitelisted_driver(flow_dir, monkeypatch):
+    _write(flow_dir, "worker-only", WORKER_ONLY)
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)  # dev1, the driver, holds role 'worker'
+    payload = engine.start("worker-only")
+    assert "role_filter" not in payload  # enforced and passed: nothing to say
+    assert engine.status()["status"] != "idle"  # the run was written
+
+
+def test_start_refuses_a_driver_outside_the_whitelist(flow_dir, monkeypatch):
+    _write(flow_dir, "leader-only", WORKER_ONLY.replace("Worker", "leader"))
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)
+    with pytest.raises(CflowError, match="holds role 'worker'"):
+        engine.start("leader-only")
+    assert engine.status()["status"] == "idle"  # nothing was written
+
+
+def test_start_refuses_a_blacklisted_driver(flow_dir, monkeypatch):
+    _write(
+        flow_dir, "no-workers", WORKER_ONLY.replace("whitelist", "blacklist")
+    )
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)
+    with pytest.raises(CflowError, match="may not drive"):
+        engine.start("no-workers")
+
+
+def test_start_without_a_mesh_identity_proceeds_and_says_so(flow_dir, monkeypatch):
+    """The filter guards a fleet's division of labour; a standalone run has no
+    fleet, so it starts — with the unenforced filter on the record."""
+    _write(flow_dir, "worker-only", WORKER_ONLY)
+    payload = engine.start("worker-only")  # no managed session, no mesh
+    assert "could not be enforced" in payload["role_filter"]
+    assert engine.status()["status"] != "idle"  # the run was written
+    started = [e for e in state_mod.read_journal() if e["event"] == "started"]
+    assert "could not be enforced" in started[0]["role_filter"]
+
+
+def test_request_start_refuses_in_front_of_the_requester(flow_dir, monkeypatch):
+    """A request the scope's agent could never start fails at the request."""
+    _write(flow_dir, "leader-only", WORKER_ONLY.replace("Worker", "leader"))
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)
+    with pytest.raises(CflowError, match="may not drive"):
+        engine.request_start("leader-only", by="web")
+
+
+# --------------------------------------------------------------------------- #
 # the authoring skill
 # --------------------------------------------------------------------------- #
 def test_the_authoring_skill_only_shows_yaml_the_parser_accepts(tmp_path):

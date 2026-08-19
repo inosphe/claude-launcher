@@ -206,6 +206,25 @@ keep shadowing it. Never write the same workflow into both layers "to be
 safe": that is two files to keep in step, and nothing warns you when they
 diverge except the shadow note in `claunch cflow ls`.
 
+## Who may drive it
+
+A workflow written for one function in a fleet can say so, instead of hoping
+the right session picks it up:
+
+    filter_roles:
+      type: whitelist        # whitelist = only these; blacklist = all but these
+      roles: [worker]
+
+The filter is about the DRIVER — the session that starts the run — never
+about who it delegates to (that stays each decision's `from`). It is enforced
+at `start`, against the driver's mesh role: a leader cannot start a
+`whitelist [worker]` workflow by accident, and the refusal names the role it
+holds. A driver with no resolvable mesh identity (standalone shell, no
+membership, daemon down) is admitted with the fact journaled — the filter
+guards a fleet's division of labour, and a standalone run has no fleet.
+Role names are matched against the mesh's vocabulary at start time, not at
+parse time, for the same reason a delegation's `role` is.
+
 ## Before you hand it over
 
 - `claunch cflow show <workflow>` — prints the graph, each step's control
