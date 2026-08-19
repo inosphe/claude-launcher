@@ -166,6 +166,15 @@ Cycles are legal and are warned about (`cflow show` prints them). Two rules:
 - **A loop needs a reachable end.** A start that can never reach a termination
   is a load error, not a warning. `max_visits` (default 25) is a backstop that
   parks the run for a human, not an exit.
+- **A service loop is not a cycle.** A session that must run its rounds
+  indefinitely (a leader's standing A -> B -> C -> A ...) declares top-level
+  `recur: true` instead of a back edge: each round still reaches a real
+  `end`, and the finished run files the start request for the next one — so
+  the graph stays honest, each round gets its own journal, and `max_visits`
+  keeps meaning the rework budget *within* a round. The driver cannot end
+  the loop; a human stops it (`claunch cflow request --cancel`, or archive/
+  abort mid-round). Use a back-edge cycle for work that must *converge*;
+  use `recur` for work that must *keep happening*.
 
 ## Shape
 

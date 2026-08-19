@@ -2281,6 +2281,19 @@ Arriving at a step beyond `max_visits` (default 25) pauses the run the same
 way until a human extends it with `claunch cflow approve`, so an agent-driven
 loop cannot spin forever.
 
+**Service loops (`recur: true`).** A cycle models work that must *converge*;
+a session whose rounds must **keep happening** (a leader's standing
+A → B → C, again and again) declares top-level `recur: true` instead of a
+back edge. Every round still reaches a real `end` — the reachability rule is
+untouched — and a run that finishes normally files the start request for its
+next round through the same channel a human's `claunch cflow request` uses:
+the driving agent starts round N+1 itself, each round is its own run with its
+own visit counters and journal (so `max_visits` keeps meaning the rework
+budget *within* a round), and payloads carry `round: N` from the second pass
+on. The agent cannot end the loop. A human stops it between rounds
+(`claunch cflow request --cancel`, or the dashboard) or mid-round
+(abort/archive) — an aborted run never recurs.
+
 **Where workflows live.** Two layers, nearest first:
 
 | | | |

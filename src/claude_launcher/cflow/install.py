@@ -90,18 +90,25 @@ workflow to be started here), that is the answer; otherwise list candidates
      and its reason (`declined.by`, `declined.reason`) to the user and stop:
      a human decides whether to override (`! claunch cflow approve`) or send
      the run elsewhere (`! claunch cflow goto <step>`).
-   - `done` — report the run using the returned journal and finish.
+   - `done` — report the run using the returned journal and finish. If the
+     payload carries a `pending_start` filed `by: "recur"`, this workflow is
+     a service loop: report this round's journal, then immediately start the
+     next round (`start` with exactly the requested workflow and context).
+     Never decide to stop the loop yourself — only a human ends it
+     (`! claunch cflow request --cancel`, or archiving the run).
 4. Resuming after a stop: when nudged (any user message), call `status`
    first to see whether the gate/selection was granted, then continue with
    `next`.
-5. `pending_start` in a `status` payload = a human asked for a workflow to
-   be started in this session (from the dashboard or `claunch cflow
-   request`). You perform the start: check it makes sense for what you are
-   doing, tell the user you are starting it, then call `start {workflow,
-   context}` with exactly that workflow (its `context` is the requester's
-   own words — carry it through, adding anything relevant from the chat).
-   If it is clearly wrong, do NOT start it: say why and stop. The request
-   clears once you start.
+5. `pending_start` in a `status` payload = a request for a workflow to be
+   started in this session — filed by a human (from the dashboard or
+   `claunch cflow request`), or `by: "recur"` when a recurring workflow's
+   previous round finished. You perform the start: check it makes sense for
+   what you are doing, tell the user you are starting it, then call `start
+   {workflow, context}` with exactly that workflow (its `context` is the
+   requester's own words — carry it through, adding anything relevant from
+   the chat). If a human request is clearly wrong, do NOT start it: say why
+   and stop. A recur request is never wrong to fulfil — it is the loop the
+   workflow declared. The request clears once you start.
 
 ## Answering for someone else
 

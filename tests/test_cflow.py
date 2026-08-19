@@ -78,6 +78,17 @@ steps:
         done:  {description: finish, next: end}
 """
 
+RECUR = """
+name: heartbeat
+recur: true
+steps:
+  a:
+    instructions: do a
+    next: b
+  b:
+    instructions: do b
+"""
+
 GATED_LOOP = """
 steps:
   fix:
@@ -884,6 +895,92 @@ def test_starting_something_else_supersedes_the_request(flow_dir):
     assert "request_superseded" in events
     # consumed either way: it cannot be "fulfilled" a second time
     assert engine.status().get("pending_start") is None
+
+
+# --------------------------------------------------------------------------- #
+# recurrence: service loops that end each round and request the next
+# --------------------------------------------------------------------------- #
+def test_recur_is_parsed_and_defaults_off():
+    assert model.parse(RECUR).recur is True
+    assert model.parse(LINEAR).recur is False
+    with pytest.raises(WorkflowError, match="'recur' must be true or false"):
+        model.parse("recur: always\nsteps:\n  a:\n    instructions: x\n")
+
+
+def test_recur_still_requires_a_reachable_end():
+    bad = """
+recur: true
+steps:
+  a:
+    instructions: x
+    next: b
+  b:
+    instructions: y
+    next: a
+"""
+    with pytest.raises(WorkflowError, match="no termination is reachable"):
+        model.parse(bad)
+
+
+def test_recur_round_finishes_and_requests_the_next(flow_dir):
+    _write(flow_dir, "heartbeat", RECUR)
+    payload = engine.start("heartbeat", "serve the queue")
+    assert "round" not in payload  # round 1 reads like any other run
+    _advance("a done")
+    payload = _advance("b done")
+
+    # the round really ended, and the loop is a pending start, not a cycle
+    assert payload["status"] == "done"
+    pending = payload["pending_start"]
+    assert pending["by"] == "recur"
+    assert pending["round"] == 2
+    assert pending["context"] == "serve the queue"
+    assert "recurs" in payload["note"]
+    events = [e["event"] for e in state_mod.read_journal()]
+    assert "recur_requested" in events
+
+    # the agent fulfils it exactly like a human's request; the finished round
+    # is auto-archived and the new run knows which pass it is
+    payload = engine.start(pending["workflow"], pending["context"])
+    assert (payload["step_id"], payload["round"]) == ("a", 2)
+    assert engine.status()["round"] == 2
+    events = [e["event"] for e in state_mod.read_journal()]
+    assert "request_fulfilled" in events
+
+    # every finished round files the next one: round 3 follows round 2
+    _advance("a again")
+    payload = _advance("b again")
+    assert payload["pending_start"]["round"] == 3
+
+
+def test_recur_abort_does_not_request_another_round(flow_dir):
+    _write(flow_dir, "heartbeat", RECUR)
+    engine.start("heartbeat")
+    payload = engine.abort(by="user")
+    assert payload["status"] == "aborted"
+    assert "pending_start" not in payload
+    assert engine.status().get("pending_start") is None
+
+
+def test_recur_loop_is_stopped_by_withdrawing_the_request(flow_dir):
+    _write(flow_dir, "heartbeat", RECUR)
+    engine.start("heartbeat")
+    _advance("a done")
+    _advance("b done")
+    engine.cancel_request(by="user")
+    assert engine.status().get("pending_start") is None  # the loop is over
+
+
+def test_recur_never_overwrites_a_pending_request(flow_dir):
+    """A person's declared intent outranks the loop's own next round."""
+    _write(flow_dir, "heartbeat", RECUR)
+    engine.start("heartbeat")
+    _advance("a done")
+    theirs = {"id": "req-human", "workflow": "linear", "by": "web",
+              "at": state_mod.utcnow()}
+    state_mod.write_request(theirs)  # filed while the round was finishing
+    payload = _advance("b done")
+    assert payload["pending_start"]["id"] == "req-human"
 
 
 def test_slot_lock_is_exclusive_and_reclaims_a_dead_holder(flow_dir):
