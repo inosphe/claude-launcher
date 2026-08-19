@@ -10,6 +10,11 @@ import pytest
 
 from claude_launcher import cli, herdr, worktree
 
+#: Every test here ends up making real worktrees (or real git repos to make
+#: them in), which is the expensive part of the whole suite on this machine.
+#: `-m "not worktree"` is the fast path for work that cannot touch this code.
+pytestmark = pytest.mark.worktree
+
 
 #: Captured before any test patches it. The launcher shells out to both git
 #: and claude through this one function, so a test that fakes "the launch"
