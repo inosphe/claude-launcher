@@ -13,9 +13,11 @@ def home(tmp_path, monkeypatch):
     directory so seeding copies nothing (tests never touch the real ~/.claude).
 
     Autouse, because forgetting it is not a test failure — it is a write into
-    the developer's real ``~/.claude-launcher``. ``claunch install`` seeds the
-    shared workflow layer there, so a test that installs without this fixture
-    quietly edits the machine it is running on, and then passes.
+    the developer's real ``~/.claude-launcher``. ``claunch install --global``
+    seeds the global workflow layer there, so a test that installs without
+    this fixture quietly edits the machine it is running on, and then passes.
+    ``CLAUDE_CONFIG_DIR`` is pointed away for the same reason: the global
+    install writes skills and the user-scope ``.claude.json`` under it.
     """
     h = tmp_path / ".home"
     h.mkdir()
@@ -27,6 +29,7 @@ def home(tmp_path, monkeypatch):
     monkeypatch.setenv("CLAUDE_LAUNCHER_HOME", str(h))
     monkeypatch.setenv("CLAUDE_LAUNCHER_SYNC_FILE", str(h / ".claunch.yaml"))
     monkeypatch.setenv("CLAUDE_LAUNCHER_SEED", str(seed))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / ".claude-config"))
     return h
 
 

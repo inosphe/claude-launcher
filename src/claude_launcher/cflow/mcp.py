@@ -39,10 +39,10 @@ TOOLS = [
         "description": (
             "Start a claunch workflow in the current directory. Returns the "
             "first step, and the file it came from ('source'/'origin' — the "
-            "project's copy of a name shadows the shared one, and the payload "
+            "project's copy of a name shadows the global one, and the payload "
             "names what it shadowed). Workflows are YAML files in "
             ".claunch/workflows/ (project) or ~/.claude-launcher/workflows/ "
-            "(shared across every directory). Errors if a run is "
+            "(global, every directory). Errors if a run is "
             "still active here — resume it instead, or have it archived "
             "first; finished (done/aborted) runs are archived automatically. "
             "Also the way a human's 'pending_start' request (see 'status') is "

@@ -59,7 +59,7 @@ from . import model
 PROJECT_WORKFLOWS = Path(".claunch") / "workflows"
 
 #: The layers a name is searched in, nearest first. A project's own
-#: declarations override the shared ones; nothing overrides a project.
+#: declarations override the global ones; nothing overrides a project.
 LAYER_PROJECT = "project"
 LAYER_GLOBAL = "global"
 

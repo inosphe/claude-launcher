@@ -16,6 +16,7 @@ user`` writes), so that is where it merges.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Dict, Iterable, Mapping
 
 from . import store
@@ -96,7 +97,22 @@ def merge_mcp_servers(
     superseded copies are not stale config, they are a working server that has
     to be switched off deliberately.
     """
-    path = profile.config_dir / CLAUDE_JSON
+    existing = merge_mcp_servers_into(profile.config_dir / CLAUDE_JSON, servers, remove)
+    _drop_stale_settings_servers(profile, [*servers, *remove])
+    return existing
+
+
+def merge_mcp_servers_into(
+    path: Path,
+    servers: Mapping[str, dict],
+    remove: Iterable[str] = (),
+) -> Dict[str, dict]:
+    """Merge MCP servers into one ``.claude.json``-shaped file.
+
+    The path-level half of :func:`merge_mcp_servers`, shared with the global
+    (user-scope) install, whose target is not a profile at all — the default
+    setup keeps it at ``~/.claude.json``, a sibling of ``~/.claude``.
+    """
     try:
         doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
     except (OSError, json.JSONDecodeError):
@@ -110,8 +126,8 @@ def merge_mcp_servers(
         existing.pop(name, None)
     existing.update(servers)
     doc["mcpServers"] = existing
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    _drop_stale_settings_servers(profile, [*servers, *remove])
     return existing
 
 

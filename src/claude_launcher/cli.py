@@ -481,7 +481,36 @@ def _cmd_harnesses(_args: argparse.Namespace) -> int:
     return 0
 
 
-def run_install(profile_name: Optional[str], project: Optional[str]) -> int:
+def add_install_scope_args(parser: argparse.ArgumentParser) -> None:
+    """The one scope vocabulary every install-ish command shares.
+
+    Used by ``claunch install`` and its ``cflow install`` / ``mesh install``
+    aliases, so the three cannot drift apart. The scopes are mutually
+    exclusive by construction; project is the default.
+    """
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument(
+        "--project",
+        nargs="?",
+        const=".",
+        default=None,
+        metavar="DIR",
+        help="install into a project (.mcp.json + .claude/skills; "
+        "DIR defaults to the current directory) — the default scope",
+    )
+    scope.add_argument(
+        "--global",
+        dest="global_",
+        action="store_true",
+        help="install for the user globally (~/.claude/skills + user-scope "
+        "MCP config) and seed the global workflow layer",
+    )
+    scope.add_argument("--profile", help="install into this profile's config dir")
+
+
+def run_install(
+    profile_name: Optional[str], project: Optional[str], global_: bool = False
+) -> int:
     """Register the MCP server and every skill — the body of ``claunch install``.
 
     Shared with the ``cflow install`` / ``mesh install`` aliases, which now
@@ -489,22 +518,30 @@ def run_install(profile_name: Optional[str], project: Optional[str]) -> int:
     it to register on its own.
     """
     from . import install as install_mod
+    from .cflow import state as cflow_state
 
-    if profile_name and project is not None:
-        print("error: choose --profile or --project, not both", file=sys.stderr)
-        return 1
-    if profile_name:
+    if global_:
+        done = install_mod.install_into_user()
+    elif profile_name:
         done = install_mod.install_into_profile(profile.require(profile_name))
     else:
         done = install_mod.install_into_project(Path(project or ".").resolve())
     for line in done:
         print(f"installed: {line}")
+    if not global_ and not profile_name:
+        # A project install stays inside its project; if nothing has seeded
+        # the machine's workflow layer yet, say where that happens.
+        if not any(cflow_state.global_workflows_dir().glob("*.y*ml")):
+            print(
+                "note: the global workflow layer is empty; "
+                "'claunch install --global' seeds the bundled workflows"
+            )
     print("note: restart claude for the MCP server to be picked up")
     return 0
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
-    return run_install(args.profile, args.project)
+    return run_install(args.profile, args.project, args.global_)
 
 
 def _cmd_mcp(_args: argparse.Namespace) -> int:
@@ -909,18 +946,9 @@ def build_parser() -> argparse.ArgumentParser:
         "install",
         help="give an agent the claunch toolkit: register the MCP server "
         "(workflow + mesh + team-building tools) and write the /cflow and "
-        "/mesh skills",
+        "/mesh skills (--project, --global, or --profile)",
     )
-    p_install.add_argument("--profile", help="install into this profile's config dir")
-    p_install.add_argument(
-        "--project",
-        nargs="?",
-        const=".",
-        default=None,
-        metavar="DIR",
-        help="install into a project (.mcp.json + .claude/skills; "
-        "default: current directory)",
-    )
+    add_install_scope_args(p_install)
     p_install.set_defaults(func=_cmd_install)
 
     p_mcp = sub.add_parser(

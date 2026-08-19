@@ -681,7 +681,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
 
     print("note: 'mesh install' is now 'claunch install'; installing every "
           "skill and the merged MCP server")
-    return run_install(args.profile, args.project)
+    return run_install(args.profile, args.project, args.global_)
 
 
 def _cmd_history(args: argparse.Namespace) -> int:
@@ -1001,9 +1001,7 @@ def register(sub) -> None:
         "install",
         help="alias for 'claunch install' (one MCP server + every skill)",
     )
-    p.add_argument("--profile", help="install into this profile's config dir")
-    p.add_argument("--project", nargs="?", const=".", default=None,
-                   metavar="DIR",
-                   help="install into a project (.mcp.json + .claude/skills; "
-                        "default: current directory)")
+    from .cli import add_install_scope_args
+
+    add_install_scope_args(p)
     p.set_defaults(func=_cmd_install)

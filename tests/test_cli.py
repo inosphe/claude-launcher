@@ -3,12 +3,48 @@
 from __future__ import annotations
 
 import subprocess
+from pathlib import Path
 
 from claude_launcher import cli, config, runner, store
 
 
 def run(*argv):
     return cli.main(list(argv))
+
+
+def test_install_scopes_are_mutually_exclusive(home, capsys, tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(SystemExit):
+        run("install", "--global", "--project")
+    # ...on the aliases too, since they share the parser helper
+    with pytest.raises(SystemExit):
+        run("cflow", "install", "--global", "--profile", "work")
+    with pytest.raises(SystemExit):
+        run("mesh", "install", "--global", "--project")
+
+
+def test_install_global_through_the_cli(home, capsys, tmp_path, monkeypatch):
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    assert run("install", "--global") == 0
+    out = capsys.readouterr().out
+    assert "workflow ->" in out
+    cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    assert (cfg / "skills" / "cflow" / "SKILL.md").is_file()
+
+
+def test_a_project_install_hints_at_the_empty_global_layer(home, capsys, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert run("install") == 0
+    assert "claunch install --global" in capsys.readouterr().out
+    # once the layer is seeded, the hint goes away
+    run("install", "--global")
+    capsys.readouterr()
+    assert run("install") == 0
+    assert "claunch install --global" not in capsys.readouterr().out
 
 
 def test_create_registers_and_applies_template(home, capsys):

@@ -2577,7 +2577,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     sel.appendChild(opt);
   }
   /* A name is not a file: the same name can be declared in the project and in
-     the shared layer, and picking from a list of names hides which one runs.
+     the global layer, and picking from a list of names hides which one runs.
      The path goes under the select rather than into the option text — an
      option cannot wrap, and these are absolute paths. */
   const source = el("p", "wf-source mono");

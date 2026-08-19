@@ -76,6 +76,21 @@ def default_config_dir() -> Path:
     return Path(override).expanduser() if override else Path.home() / ".claude"
 
 
+def user_claude_json() -> Path:
+    """Claude Code's user-scope config file (where ``mcpServers`` live).
+
+    With ``CLAUDE_CONFIG_DIR`` set it sits inside that directory; without it,
+    Claude Code reads ``~/.claude.json`` — a *sibling* of ``~/.claude``, not a
+    file inside it. Writing ``~/.claude/.claude.json`` in the default setup
+    would be silently ignored, which is why this is not simply
+    ``default_config_dir() / ".claude.json"``.
+    """
+    override = os.environ.get(CLAUDE_CONFIG_DIR_ENV)
+    if override:
+        return Path(override).expanduser() / ".claude.json"
+    return Path.home() / ".claude.json"
+
+
 def seed_source_dir() -> Path:
     """Config dir a freshly created profile copies its global settings from."""
     override = os.environ.get(LAUNCHER_SEED_ENV)
