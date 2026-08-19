@@ -1174,9 +1174,9 @@ def test_mesh_install_project(tmp_path, home):
     from claude_launcher import install
 
     done = install.install_into_project(tmp_path)
-    # one server, three skills — and nothing outside the project: workflow
+    # one server, four skills — and nothing outside the project: workflow
     # seeding is the global/profile installs' business
-    assert len([line for line in done if line.startswith("skill ->")]) == 3
+    assert len([line for line in done if line.startswith("skill ->")]) == 4
     assert sum(1 for line in done if line.startswith("mcp server")) == 1
     assert not [line for line in done if line.startswith("workflow ->")]
     doc = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
@@ -1195,6 +1195,15 @@ def test_mesh_install_project(tmp_path, home):
     # the cflow skills land from the same install
     assert (tmp_path / ".claude" / "skills" / "cflow" / "SKILL.md").is_file()
     assert (tmp_path / ".claude" / "skills" / "cflow-author" / "SKILL.md").is_file()
+    # ...and so does commit-stamp, teaching an agent to sign its commits
+    stamp = (tmp_path / ".claude" / "skills" / "commit-stamp" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    assert stamp.startswith("---\nname: commit-stamp\n")
+    assert "Claunch-Session" in stamp          # the session trailer
+    assert "Claunch-Worktree" in stamp         # the worktree trailer
+    assert "CLAUNCH_SESSION" in stamp          # where the session name comes from
+    assert "--git-common-dir" in stamp         # how a linked worktree is detected
     # installing again is idempotent and keeps other servers
     doc["mcpServers"]["other"] = {"command": "x"}
     (tmp_path / ".mcp.json").write_text(json.dumps(doc), encoding="utf-8")
@@ -1215,7 +1224,7 @@ def test_global_install_targets_the_user_scope(tmp_path, home, monkeypatch):
 
     cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
     done = install.install_into_user()
-    assert len([line for line in done if line.startswith("skill ->")]) == 3
+    assert len([line for line in done if line.startswith("skill ->")]) == 4
     assert [line for line in done if line.startswith("workflow ->")]
     assert (cfg / "skills" / "mesh" / "SKILL.md").is_file()
     doc = json.loads((cfg / ".claude.json").read_text(encoding="utf-8"))

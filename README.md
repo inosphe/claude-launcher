@@ -1610,7 +1610,7 @@ claunch install --profile work     # or a profile's config dir
 
 | Command | Description |
 | ------- | ----------- |
-| `install [--project [DIR] \| --global \| --profile P]` | Register the MCP server and write the `/cflow`, `/cflow-author` and `/mesh` skills into one scope: a project (the default), the user globally, or a profile. `--global` and `--profile` also seed the global workflow layer. Supersedes the separate `cflow`/`mesh` server entries an earlier version registered — they are removed, not left running alongside. Restart claude afterwards. |
+| `install [--project [DIR] \| --global \| --profile P]` | Register the MCP server and write the `/cflow`, `/cflow-author`, `/mesh` and `commit-stamp` skills into one scope: a project (the default), the user globally, or a profile. `--global` and `--profile` also seed the global workflow layer. Supersedes the separate `cflow`/`mesh` server entries an earlier version registered — they are removed, not left running alongside. Restart claude afterwards. |
 | `mcp` | The stdio MCP server itself (spawned by claude, not by hand): `start`/`report`/`next`/`select`/`status` from cflow, `send`/`members`/`history` plus `spawn`/`children`/`connect`/`disconnect` from mesh. |
 
 | Skill | Triggers on | Teaches |
@@ -1618,6 +1618,7 @@ claunch install --profile work     # or a profile's config dir
 | `/cflow` | running or resuming a workflow | the execution protocol: one step at a time, report before advance, and every way a run can stop — including answering a decision put to *you* by somebody else's run |
 | `/cflow-author` | writing or revising a workflow file | how to choose control points: the weakest one that holds, and the decisions the driving agent must never be the one to answer |
 | `/mesh` | joining a mesh, or needing another agent | the member protocol, and the only correct way to create a session from inside one |
+| `commit-stamp` | being about to `git commit` inside a managed session | ending every commit message with `Claunch-Session:` / `Claunch-Worktree:` trailers, so `git log` says which agent made each commit and in which checkout |
 
 **One server, several skills** — the asymmetry is deliberate. A skill's body is
 loaded whole when it triggers, so merging them would make every session

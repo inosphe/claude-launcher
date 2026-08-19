@@ -2,7 +2,8 @@
 
 ``claunch install`` registers a single MCP server — ``claunch mcp``, serving
 the cflow and mesh tools together (see :mod:`claude_launcher.mcp_server`) —
-and writes the three skills that teach their protocols. It does so into one
+and writes the skills that teach their protocols (plus ``commit-stamp``,
+which teaches an agent to sign its commits). It does so into one
 of three scopes, and the rule is the same everywhere: an install writes only
 inside its own scope.
 
@@ -44,7 +45,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from . import config, mesh_install, settings
+from . import commit_stamp, config, mesh_install, settings
 from .cflow import authoring as cflow_authoring, install as cflow_install
 from .profile import Profile
 
@@ -74,6 +75,7 @@ def _skill_lines(skills_dir: Path) -> List[str]:
         f"skill -> {cflow_install.write_skill(skills_dir)}",
         f"skill -> {cflow_authoring.write_skill(skills_dir)}",
         f"skill -> {mesh_install.write_skill(skills_dir)}",
+        f"skill -> {commit_stamp.write_skill(skills_dir)}",
     ]
 
 
