@@ -31,3 +31,9 @@ packages = ["src/claude_launcher"]
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-p no:cacheprovider"
+markers = [
+    # Deselect with `-m "not worktree"` while iterating on unrelated code;
+    # the default run still includes everything, so CI and pre-commit runs
+    # lose nothing.
+    "worktree: creates real git worktrees on disk; the slow tail of the suite",
+]
