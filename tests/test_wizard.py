@@ -577,14 +577,18 @@ def spawn_form(**kw) -> wizard.SpawnWizard:
 
 
 def test_the_spawn_form_asks_only_what_a_child_may_be_asked():
-    """No profile and no directory: a child runs under its parent's login, in
-    its parent's directory. A worktree OF that directory is the exception, and
-    the only way two children of one parent stop editing each other's files."""
+    """No free-text directory and no resume: a child runs in its parent's
+    directory (a registered workspace, or a worktree cut of either, is the
+    vouched-for exception) and opens a conversation of its own. Profile and
+    the auth rows ARE here now — policy-gated — because the spawn policy can
+    unlock whose login a child holds."""
     wiz = spawn_form()
     keys = [f.key for f in wiz.fields]
     assert "parent" in keys
     assert "worktree" in keys
-    for absent in ("profile", "cwd", "resume", "fork_session", "restore"):
+    for present in ("profile", "borrow", "null_token", "args", "attach"):
+        assert present in keys, present
+    for absent in ("cwd", "resume", "fork_session", "restore"):
         assert absent not in keys, absent
 
 
@@ -631,6 +635,70 @@ def test_the_policy_decides_which_rows_are_open():
     # allow_workspace is on, so the registry it published is pickable
     assert wiz.field("workspace").selectable
     assert [o.value for o in wiz.field("workspace").options] == ["", "api"]
+
+
+def test_the_policy_keeps_profile_borrow_and_args_locked_by_default():
+    """Greyed with the key that opens them, not hidden: the form is also how
+    a person learns what the policy currently is."""
+    wiz = spawn_form()
+    assert not wiz.field("profile").selectable
+    assert "spawn.allow_profile" in wiz.field("profile").disabled_note
+    assert not wiz.field("borrow").selectable
+    assert "spawn.allow_profile" in wiz.field("borrow").disabled_note
+    assert not wiz.field("args").selectable
+    assert "spawn.allow_args" in wiz.field("args").disabled_note
+    # --null is never gated: it takes a credential away, not grants one
+    assert wiz.field("null_token").selectable
+
+
+def _open_report(**extra):
+    return {
+        "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
+        "children_used": 0, "children_remaining": 4,
+        "may_choose": ["args", "borrow", "null_token", "profile"],
+        "spawnable_harnesses": [],
+        "profiles": ["other", "work"],
+        **extra,
+    }
+
+
+def test_unlocked_profile_borrow_and_args_travel_on_apply():
+    wiz = spawn_form(report=_open_report())
+    pick(wiz, "profile", "other")
+    pick(wiz, "borrow", "other")
+    focus_on(wiz, "args")
+    for ch in "--verbose":
+        wiz.handle(ch)
+    wiz.handle("enter")
+    pick(wiz, "attach", "yes")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.profile == "other"
+    assert args.borrow == "other"
+    assert args.null_token is False
+    assert args.args == ["--verbose"]
+    assert args.attach is True
+
+
+def test_null_needs_no_unlock_and_takes_the_borrow_with_it():
+    """Same shape as the other form: saying yes to null greys the borrow row
+    instead of provoking the daemon's refusal of the pair — and null itself
+    stands open under the stock (all-locked) policy."""
+    wiz = spawn_form(report=_open_report())
+    pick(wiz, "borrow", "other")
+    pick(wiz, "null_token", "yes")
+    assert not wiz.field("borrow").selectable
+    assert wiz.value("borrow") == ""
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.null_token is True
+    assert args.borrow is None
+
+    locked = spawn_form()  # stock policy: profile/borrow/args all locked
+    pick(locked, "null_token", "yes")
+    locked.apply(args)
+    assert args.null_token is True
+    assert args.borrow is None and args.profile is None
 
 
 def test_an_unlocked_harness_becomes_pickable():

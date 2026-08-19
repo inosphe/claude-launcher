@@ -178,6 +178,13 @@ fresh):
 claunch run company --null
 ```
 
+Both flags exist on **managed sessions** too: `claunch new-session --borrow
+NAME` / `--null` (and `claunch spawn`, under the [spawn
+policy](#agents-that-build-their-own-team-spawn--hierarchy--member-graph)). There the choice
+is part of the session's *definition*, so it holds across daemon restarts and
+`respawn` — and the token is looked up fresh at every relaunch, so a restore
+borrows what the lender holds *then*, not a copy from creation day.
+
 ### Running in a git worktree
 
 Two agents in the **same checkout** is the failure mode this exists for: they
@@ -974,6 +981,8 @@ claunch new-session
    Name            api
    Harness         claude  Claude Code
  > Profile         work
+   Borrow          (this profile's own token)
+   Null token      no - inject the profile's token
    Directory       this directory  F:\works\claude-launcher
    Worktree        (none) - work in the directory as it stands
    Role            (no role)
@@ -1022,8 +1031,11 @@ The rest is the same list the daemon would have checked afterwards, so a mesh
 that does not exist or a workflow not declared in that directory is never
 offered rather than refused once the session is half arranged. Fields that do
 not apply grey out rather than vanish: `Fork` says *needs a conversation to
-fork* until you pick one under `Resume`, and `Role`/`Resume` say *the claude
-harness only* under any other harness.
+fork* until you pick one under `Resume`, and `Role`/`Resume`/`Borrow`/`Null
+token` say *the claude harness only* under any other harness. `Borrow` and
+`Null token` are `--borrow`/`--null` as rows — and since the daemon refuses
+the pair outright, saying yes to null greys the borrow row and resets it,
+so the form can never offer a combination the flags would error on.
 
 Flags the form does not show — `--env KEY=VALUE`, `--cols/--rows`,
 `--detached` — are left exactly as you typed them.
@@ -1041,7 +1053,11 @@ claunch spawn
  > Parent          lead  idle, work, /work/repo
    Name            (auto)
    Harness         the child runs what its parent runs (spawn.allow_harness)
+   Profile         the child runs under its parent's profile (spawn.allow_profile)
+   Borrow          the child authenticates as its parent does (spawn.allow_profile)
+   Null token      no - authenticate as the parent does
    Workspace       (the parent's directory: /work/repo)
+   Args            the child runs its parent's args (spawn.allow_args)
 
   START IT WORKING
    Mesh            (the parent's: team)
@@ -1050,15 +1066,26 @@ claunch spawn
    Connect         (the whole mesh)
    Workflow        (none)
    Opening task    typed into the child once it has booted - what it is for
+
+  AFTERWARDS
+   Attach          no - leave it running in the daemon
    [ Spawn child ]
 
   child of this one: 1 running, 3 left (depth 0/3)
   up/down move   left/right change   Enter open   Ctrl+S create   Esc cancel
 ```
 
-No profile row (a child runs under its parent's) and no directory row (it
-inherits one — a registered **workspace** is the vouched-for exception). But
-there *is* a **Worktree** row, and it is the row a fleet needs: two children
+Every inherited field the policy can unlock is a row here, and a locked one
+is **greyed out with the key that opens it** rather than hidden — the form is
+also how a person learns what the policy currently is. `Profile` and
+`Borrow` open together under `spawn.allow_profile` (both decide whose login
+the child holds); `Null token` (`--null`) is never gated, because it takes a
+credential away rather than granting one — and saying yes to it greys the
+borrow row, exactly as in the other form; `Args` opens under
+`spawn.allow_args` and **replaces** the inherited command line.
+There is still no free-text directory row (a registered **workspace** is the
+vouched-for exception). But there *is* a **Worktree** row, and it is the row
+a fleet needs: two children
 of one parent in the parent's checkout edit each other's files mid-edit, and a
 worktree of that repository is the only directory a child may have that is
 nobody's workspace — allowed because it is derived from where the parent
@@ -1818,6 +1845,15 @@ mesh and decide who they may talk to — via the `spawn`, `children`,
     allow_workspace: true    # ...the one that starts open (see below)
     allow_cwd: false         # ...allow_profile / allow_args / allow_env too
   ```
+
+  `allow_profile` unlocks both `--profile` and `--borrow` — the same
+  question, whose login does the child hold — and when it is open the
+  `children` report names the profiles, since an agent cannot read that
+  registry. `--null` (spawn a child logged out) is never gated: it takes a
+  credential away rather than granting one. A child otherwise
+  **authenticates the way its parent does**, a parent's borrow included; a
+  harness swap drops the inherited args *and* auth, since both are written
+  for the program the parent runs.
 - **A child may be sent to another directory — by name, not by path.**
   `allow_workspace` lets the agent pass a `workspace` from your
   [registry](#workspaces-where-a-session-may-be-spawned); `allow_cwd` lets it

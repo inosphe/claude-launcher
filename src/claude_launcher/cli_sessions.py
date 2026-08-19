@@ -108,6 +108,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["borrow"] = args.borrow
     if args.null_token:
         body["null_token"] = True
+    # (the daemon echoes both back; _warn_dropped_auth reads that echo)
     # Decided at creation because they are what the session is FOR: a mesh it
     # is not in and a run it does not drive have to be arranged afterwards,
     # with the agent already sitting at a prompt not knowing either.
@@ -139,6 +140,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         + (f", role: {info['role']}" if info.get("role") else "")
         + f", pid: {info.get('pid')})"
     )
+    _warn_dropped_auth(args, info)
     _print_onboarding(info)
     if args.attach:
         from . import attach as attach_mod
@@ -181,6 +183,25 @@ def _run_wizard(args: argparse.Namespace, *, spawn: bool = False) -> bool:
         ),
         form=wizard_mod.SpawnWizard if spawn else wizard_mod.Wizard,
     )
+
+
+def _warn_dropped_auth(args: argparse.Namespace, info: dict) -> None:
+    """Say so when the daemon ignored --borrow/--null instead of honouring it.
+
+    A daemon older than these flags reads no such key and builds the session
+    anyway — which for auth is the worst kind of silence: the session comes
+    up working, on the wrong login. The echo in the create/spawn response is
+    how the caller can tell.
+    """
+    if (getattr(args, "borrow", None) and not info.get("borrow")) or (
+        getattr(args, "null_token", False) and not info.get("null_token")
+    ):
+        print(
+            "  warning: this daemon ignored the auth choice (--borrow/--null) "
+            "and the session runs on the profile's own login -- the daemon "
+            "may predate these flags ('claunch daemon restart')",
+            file=sys.stderr,
+        )
 
 
 def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
@@ -230,10 +251,23 @@ def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
     for handle in args.connect or []:
         out.append(f"--connect {handle}")
     if args.profile:
+        out.append(f"--profile {args.profile}")
         notes.append(
-            f"--profile {args.profile} is dropped: a child runs under its "
-            "parent's profile"
+            "--profile needs spawn.allow_profile — without it the child "
+            "runs under its parent's profile"
         )
+    if args.borrow:
+        out.append(f"--borrow {args.borrow}")
+        notes.append(
+            "--borrow needs spawn.allow_profile — without it the child "
+            "authenticates the way its parent does"
+        )
+    if args.null_token:
+        out.append("--null")
+    for item in args.env or []:
+        out.append(f"--env {item!r}" if " " in item else f"--env {item}")
+    if args.env:
+        notes.append("--env needs spawn.allow_env")
     if args.worktree is not worktree.ASK and args.worktree is not worktree.NEVER:
         # `spawn` grew a worktree of its own, so this is a translation now
         # rather than a refusal -- but only a named one travels: the child is
@@ -247,6 +281,12 @@ def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
                 "name the worktree: a child's is cut by the daemon, which has "
                 "no Herdr pane to name one after"
             )
+    extra = [a for a in (args.args or []) if a != "--"]
+    if extra:
+        # Last, always: everything after `--` reaches the harness verbatim,
+        # so a flag appended behind it would be swallowed too.
+        out.append("-- " + " ".join(extra))
+        notes.append("extra harness args need spawn.allow_args")
     if not args.mesh:
         notes.append(
             "no --mesh needed: the child joins yours, and starts connected "
@@ -298,6 +338,16 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     """
     if getattr(args, "wizard", False) and not _run_wizard(args, spawn=True):
         return 1
+    env = {}
+    for item in args.env or []:
+        if "=" not in item:
+            print(f"error: --env expects KEY=VALUE, got {item!r}", file=sys.stderr)
+            return 1
+        key, _, value = item.partition("=")
+        env[key] = value
+    extra = list(args.args or [])
+    if extra and extra[0] == "--":
+        extra = extra[1:]
     client = daemon_client.ensure_running()
     parent = args.parent or os.environ.get("CLAUNCH_SESSION")
     if not parent:
@@ -318,6 +368,11 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("context", args.context),
             ("task", args.task),
             ("harness", args.harness),
+            ("profile", args.profile),
+            ("borrow", args.borrow),
+            ("null_token", args.null_token),
+            ("args", extra),
+            ("env", env),
             ("workspace", args.workspace),
             # Cut by the daemon, from the parent's own repository: the child
             # is on the daemon's filesystem and this CLI may not be, and a
@@ -353,7 +408,12 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         # The one field that was asked for by name and answered by path:
         # printing it is how the caller sees the registry resolved.
         print(f"  in {child['cwd']}")
+    _warn_dropped_auth(args, child)
     _print_onboarding(result)
+    if args.attach and child.get("name"):
+        from . import attach as attach_mod
+
+        return attach_mod.attach(client, child["name"])
     return 0
 
 
@@ -937,7 +997,8 @@ def register(sub) -> None:
         "--wizard", action="store_true",
         help="pick the child from a form in this terminal: which session it "
         "is a child of (with what that parent may still spawn), and its "
-        "harness, workspace, mesh, role, workflow and opening task -- each "
+        "harness, profile, borrow/null, workspace, mesh, role, workflow, "
+        "opening task, extra args and whether to attach -- each "
         "from the list the daemon publishes. Any flag given alongside it "
         "pre-fills its field",
     )
@@ -964,6 +1025,32 @@ def register(sub) -> None:
         "--harness", help="a different harness (needs spawn.allow_harness)"
     )
     p_spawn.add_argument(
+        "--profile",
+        help="a different profile for the child (needs spawn.allow_profile; "
+             "inherited from the parent otherwise)",
+    )
+    s_auth = p_spawn.add_mutually_exclusive_group()
+    s_auth.add_argument(
+        "--borrow", metavar="NAME",
+        help="authenticate the child with profile NAME's token (and backend) "
+        "while it keeps its own config -- needs spawn.allow_profile, the "
+        "same gate as --profile: both decide whose login the child holds",
+    )
+    s_auth.add_argument(
+        "--null", dest="null_token", action="store_true",
+        help="launch the child with no OAuth token at all -- it starts "
+        "logged out (/login inside). Never gated: this takes a credential "
+        "away rather than granting one",
+    )
+    p_spawn.add_argument(
+        "--env", action="append", metavar="KEY=VALUE",
+        help="extra env override for the child (needs spawn.allow_env)",
+    )
+    p_spawn.add_argument(
+        "-a", "--attach", action="store_true",
+        help="attach this terminal to the child right away (detach: Ctrl+])",
+    )
+    p_spawn.add_argument(
         "--worktree", metavar="NAME",
         help="run the child in a git worktree of its parent's repository "
         "(named, always -- the daemon cuts it and has no pane to name one "
@@ -980,6 +1067,12 @@ def register(sub) -> None:
         help="run the child in a registered workspace instead of the "
              "parent's directory ('claunch workspace ls' lists them; "
              "spawn.allow_workspace turns this off)",
+    )
+    p_spawn.add_argument(
+        "args", nargs=argparse.REMAINDER,
+        help="extra arguments passed to the harness, REPLACING the inherited "
+             "ones (prefix with -- if they start with -; needs "
+             "spawn.allow_args)",
     )
     p_spawn.set_defaults(func=_cmd_spawn)
 

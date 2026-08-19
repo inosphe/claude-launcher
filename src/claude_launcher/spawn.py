@@ -58,7 +58,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from . import store, workspaces, worktree as worktree_mod
+from . import profile as profile_mod, store, workspaces, worktree as worktree_mod
 
 #: Policy defaults. Permissive enough that spawning works out of the box,
 #: restrictive enough that a child is always recognisably a copy of its
@@ -89,6 +89,10 @@ DEFAULTS = {
 #: drift apart.
 _GATED_FIELDS = (
     ("profile", "allow_profile"),
+    # The same gate as profile because it is the same question — whose login
+    # does the child hold. A borrow keeps the inherited config dir and swaps
+    # only the auth, which is not a smaller grant than swapping the profile.
+    ("borrow", "allow_profile"),
     ("cwd", "allow_cwd"),
     ("workspace", "allow_workspace"),
     ("args", "allow_args"),
@@ -103,6 +107,11 @@ _GATED_FIELDS = (
 #: ``workspace`` resolves to ``cwd``, so the generic "inherits its parent's
 #: workspace" would name something the child does not have.
 _DENIALS = {
+    "borrow": (
+        "a spawned session authenticates the way its parent does — set "
+        "'spawn.allow_profile: true' in ~/.claunch.yaml to let an agent "
+        "choose whose login a child runs under (profile and borrow alike)"
+    ),
     "workspace": (
         "a spawned session inherits its parent's working directory — set "
         "'spawn.allow_workspace: true' in ~/.claunch.yaml to let an agent "
@@ -263,6 +272,11 @@ def check(
         "cwd": parent.get("cwd") or "",
         "args": list(parent.get("args") or ()),
         "env": dict(parent.get("env") or {}),
+        # Auth travels with the profile: a child of a session that borrows
+        # (or runs tokenless) authenticates the way its parent does, or it
+        # would not be recognisably a copy of it.
+        "borrow": parent.get("borrow") or None,
+        "null_token": bool(parent.get("null_token")),
     }
 
     harness = str(request.get("harness") or "").strip()
@@ -279,12 +293,27 @@ def check(
         # were written for a different program, and passing them on is a
         # spawn failure at best and a misread flag at worst.
         child["args"] = []
+        # ...and the inherited auth with it: borrow/null are claude-only
+        # machinery, and dragging them onto another harness would build a
+        # definition normalize() refuses — a spawn that fails over a field
+        # nobody in this request ever named.
+        child["borrow"] = None
+        child["null_token"] = False
 
     if request.get("workspace") and request.get("cwd"):
         raise SpawnDenied(
             "give 'workspace' or 'cwd', not both — they set the same thing, "
             "and which one won would be a coin toss"
         )
+
+    if request.get("null_token"):
+        # Ungated on purpose: --null takes a credential away rather than
+        # granting one — the child boots logged out. It replaces the auth the
+        # child would have inherited, a parent's borrow included; asked for
+        # *alongside* a borrow of its own, the definition is refused
+        # downstream, exactly as `run` refuses the pair.
+        child["null_token"] = True
+        child["borrow"] = None
 
     for key, gate in _GATED_FIELDS:
         value = request.get(key)
@@ -301,6 +330,13 @@ def check(
             )
         if key == "args":
             child["args"] = [str(a) for a in value]
+        elif key == "borrow":
+            child["borrow"] = str(value)
+            # An explicit borrow replaces inherited tokenlessness — unless
+            # this same request also said null, which is refused downstream
+            # rather than resolved by whichever key happened to win here.
+            if not request.get("null_token"):
+                child["null_token"] = False
         elif key == "env":
             child["env"] = {**child["env"], **{str(k): str(v) for k, v in value.items()}}
         elif key == "workspace":
@@ -381,9 +417,18 @@ def capabilities(policy: SpawnPolicy, *, depth: int, children: int) -> dict:
         "may_choose": sorted(
             [key for key, gate in _GATED_FIELDS if getattr(policy, gate)]
             + (["harness"] if policy.allow_harness else [])
+            # Always choosable: it removes a credential rather than granting
+            # one, so no unlock stands in front of it.
+            + ["null_token"]
         ),
         "spawnable_harnesses": list(policy.allow_harness),
     }
+    if policy.allow_profile:
+        # The values, not just the field names, same reason as workspaces
+        # below: profile names live in a registry the agent cannot see, and
+        # unlocking profile/borrow without naming the options would leave it
+        # guessing.
+        report["profiles"] = [p.name for p in profile_mod.list_all()]
     if policy.allow_workspace:
         # The values, not just the field name. Everything else in
         # ``may_choose`` is something the agent already knows how to spell;

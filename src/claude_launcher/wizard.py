@@ -1458,12 +1458,13 @@ class SpawnWizard(Form):
 
     The shorter form, and shorter for a reason. A child is a copy of its
     parent -- same harness, same profile, same directory -- and every field
-    here is either an override the ``spawn`` policy has unlocked or part of
-    the arrangement the child is born into. There is no profile row because a
-    child runs under its parent's, no directory row because it inherits one
-    (a registered *workspace* is the vouched-for exception), and no worktree
-    row because the isolation was bought upstream: the parent is already
-    standing in whatever checkout it was launched into.
+    here is either an override the ``spawn`` policy has unlocked (harness,
+    profile, a borrowed login, workspace, args) or part of the arrangement
+    the child is born into. A row the policy keeps locked is greyed out with
+    the key that opens it, not hidden: the form is also how a person learns
+    what the policy currently is. There is no free-text directory row -- a
+    registered *workspace* is the vouched-for exception, and a worktree is
+    cut from whatever directory that answer settles on.
 
     The parent picker is the field that has no equivalent in the other form,
     and it is the reason this one exists. ``spawn`` normally reads its parent
@@ -1525,6 +1526,41 @@ class SpawnWizard(Form):
                  "decides whether it may be one)",
             options=[],
         )
+        # Options for these two are the parent's to decide (they are rebuilt
+        # in _rebuild_for_parent), so a flag given alongside --wizard is
+        # remembered here and consumed on the first rebuild.
+        self._preset_profile: str = get("profile") or ""
+        self._preset_borrow: str = get("borrow") or ""
+        profile = ChoiceField(
+            key="profile", label="Profile",
+            hint="a different profile for the child (spawn.allow_profile "
+                 "decides whether it may be one)",
+            options=[],
+        )
+        borrow = ChoiceField(
+            key="borrow", label="Borrow",
+            hint="run the child with ANOTHER profile's token and backend; "
+                 "its config, env and skills stay put (spawn.allow_profile)",
+            options=[],
+        )
+        null = ChoiceField(
+            key="null_token", label="Null token",
+            hint="launch the child with no OAuth token at all -- never "
+                 "gated: this takes a credential away rather than granting one",
+            options=[
+                Option("no - authenticate as the parent does", False),
+                Option("yes - launch unauthenticated", True),
+            ],
+        )
+        if get("null_token"):
+            null.select(True)
+        extra = get("args") or []
+        args_field = TextField(
+            key="args", label="Args",
+            placeholder="(inherited from the parent)",
+            hint="passed to the harness INSTEAD of the parent's own args",
+            text=" ".join(x for x in extra if x != "--"),
+        )
         workspace = ChoiceField(
             key="workspace", label="Workspace",
             hint="a registered directory to run the child in instead of its "
@@ -1580,9 +1616,20 @@ class SpawnWizard(Form):
             hint="why this child exists; without it, it boots knowing nothing",
             text=get("task") or "",
         )
+        attach = ChoiceField(
+            key="attach", label="Attach", section="AFTERWARDS",
+            hint="take over this terminal right away (Ctrl+] detaches; the "
+                 "child lives on)",
+            options=[
+                Option("no - leave it running in the daemon", False),
+                Option("yes - attach this terminal now", True),
+            ],
+        )
+        attach.select(bool(get("attach")))
         return [
-            parent, name, harness, workspace, *worktree_fields(""),
-            mesh, handle, role, connect, workflow, context, task,
+            parent, name, harness, profile, borrow, null, workspace,
+            *worktree_fields(""), args_field,
+            mesh, handle, role, connect, workflow, context, task, attach,
             ActionField(key="create", label="Spawn child"),
         ]
 
@@ -1636,6 +1683,43 @@ class SpawnWizard(Form):
             self._parent_for = parent
             self._report = self.sources.spawn_report(parent) if parent else {}
             self._rebuild_for_parent(parent)
+
+        may = self._report.get("may_choose") or []
+        args_f = self.field("args")
+        args_f.disabled = "args" not in may
+        args_f.disabled_note = (
+            "the child runs its parent's args (spawn.allow_args)"
+        )
+        # Auth is claude's token machinery, so for a child that will run
+        # another harness both rows are moot however the policy is set — and
+        # like the other form, saying yes to null greys the borrow row
+        # rather than provoking the daemon's refusal of the pair. Re-derived
+        # every pass, because the answers follow the Harness and Null rows.
+        child_harness = (
+            self.value("harness")
+            or self._session(parent).get("harness") or ""
+        )
+        borrow_f = self.field("borrow")
+        null_f = self.field("null_token")
+        if child_harness and child_harness != "claude":
+            null_f.disabled, null_f.disabled_note = (
+                True, "the claude harness only",
+            )
+            borrow_f.disabled, borrow_f.disabled_note = (
+                True, "the claude harness only",
+            )
+        else:
+            null_f.disabled = False
+            if null_f.value:
+                borrow_f.disabled = True
+                borrow_f.disabled_note = "--null launches without any token"
+                borrow_f.select("")
+            else:
+                borrow_f.disabled = "borrow" not in may
+                borrow_f.disabled_note = (
+                    "the child authenticates as its parent does "
+                    "(spawn.allow_profile)"
+                )
 
         mesh_field = self.field("mesh")
         no_mesh = mesh_field.value == self.NO_MESH
@@ -1696,6 +1780,49 @@ class SpawnWizard(Form):
         harness.disabled = not allowed
         harness.disabled_note = (
             "the child runs what its parent runs (spawn.allow_harness)"
+        )
+
+        may = report.get("may_choose") or []
+        # The report carries the names when the field is unlocked (the same
+        # courtesy as workspaces); an older daemon that unlocked the field
+        # without naming the options falls back to asking for the list.
+        names = report.get("profiles") or self.sources.profiles() or []
+
+        profile = self.field("profile")
+        keep = profile.value
+        profile.options = [
+            Option(
+                "(the parent's"
+                + (f": {info['profile']}" if info.get("profile") else "") + ")",
+                "",
+            )
+        ] + [Option(p, p) for p in names]
+        profile.index = 0
+        profile.select(self._preset_profile or keep)
+        self._preset_profile = ""
+        profile.disabled = "profile" not in may
+        profile.disabled_note = (
+            "the child runs under its parent's profile (spawn.allow_profile)"
+        )
+
+        borrow = self.field("borrow")
+        keep = borrow.value
+        inherited = (
+            " - no token" if info.get("null_token")
+            else f" - borrows {info['borrow']}" if info.get("borrow")
+            else ""
+        )
+        borrow.options = [
+            Option(f"(as the parent authenticates{inherited})", "")
+        ] + [Option(p, p) for p in names]
+        borrow.index = 0
+        borrow.select(self._preset_borrow or keep)
+        self._preset_borrow = ""
+        # The base state; _sync layers the claude-only and --null greys on
+        # top of it every pass.
+        borrow.disabled = "borrow" not in may
+        borrow.disabled_note = (
+            "the child authenticates as its parent does (spawn.allow_profile)"
         )
 
         workspace = self.field("workspace")
@@ -1777,6 +1904,22 @@ class SpawnWizard(Form):
         args.parent = self.value("parent")
         args.name = self.value("name")
         args.harness = self.value("harness") or None
+        args.profile = self.value("profile") or None
+        # Read through the disable, like the other form: a borrow picked and
+        # then greyed out (harness flipped, null said yes) must not travel.
+        args.borrow = (
+            None if self.field("borrow").disabled
+            else self.value("borrow") or None
+        )
+        args.null_token = (
+            bool(self.value("null_token"))
+            if not self.field("null_token").disabled else False
+        )
+        text = "" if self.field("args").disabled else self.field("args").value
+        try:
+            args.args = shlex.split(text, posix=os.name != "nt") if text else []
+        except ValueError:
+            args.args = text.split()
         # The workspace travels as a NAME, which is what `-w` means and what
         # the API resolves -- a path would be the free-text directory that
         # spawn.allow_cwd exists to keep an agent away from.
@@ -1801,10 +1944,17 @@ class SpawnWizard(Form):
         args.workflow = self.value("workflow") or None
         args.context = (self.value("context") or None) if args.workflow else None
         args.task = self.value("task") or None
+        args.attach = bool(self.value("attach"))
         return args
 
     def summary(self) -> str:
         parts = ["child of " + str(self.value("parent"))]
+        if self.value("profile"):
+            parts.append("profile " + str(self.value("profile")))
+        if not self.field("borrow").disabled and self.value("borrow"):
+            parts.append("borrowing " + str(self.value("borrow")))
+        if not self.field("null_token").disabled and self.value("null_token"):
+            parts.append("no oauth token")
         for label, key in (
             ("harness", "harness"), ("workspace", "workspace"),
             ("role", "role"), ("workflow", "workflow"),
