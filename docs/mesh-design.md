@@ -64,7 +64,10 @@ Consequences:
   sender.
 - Delivery is idle-aware: the daemon already samples each session's screen for
   idleness, so messages are held until the recipient's turn is over, and
-  bursts are coalesced into one injection (interconnect's `settle`).
+  bursts are coalesced into one injection (interconnect's `settle`). It is
+  keyboard-aware too: a human typing in the recipient's terminal (attach, web)
+  parks the injection until their keyboard has been quiet for a moment, so a
+  delivery never types itself into a message being composed.
 
 ## Ownership: relay-optional federation
 
@@ -737,8 +740,15 @@ entries addressed to it:
 1. **settle** — wait for the burst to go quiet (default 2s) so several rapid
    messages become one injection;
 2. **idle-gate** — wait until the member's session is idle (screen quiet per
-   the daemon's idle tracker), up to `busy_hold` (default 60s); after that,
-   inject anyway (harnesses like claude queue typed input during a turn);
+   the daemon's idle tracker) *and* its keyboard quiet (no attach/web-terminal
+   keystrokes within `CLAUNCH_TYPING_GUARD`, default 5s — a human composing a
+   message pauses to think for longer than the idle threshold, and a paste
+   into that pause would submit their half-typed line with the block folded
+   in), up to `busy_hold` (default 60s); after that, inject anyway (harnesses
+   like claude queue typed input during a turn). `Session.deliver` re-checks
+   the keyboard right before pasting, bounded by `CLAUNCH_TYPING_HOLD_TIMEOUT`
+   (default 30s), so the guard also covers briefing/nudge/cflow injections
+   that never pass through this worker;
 3. **inject** — one fenced YAML block, control-characters stripped and bodies
    clipped, sent via bracketed paste + Enter:
 

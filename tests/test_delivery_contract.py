@@ -124,10 +124,14 @@ def _fake_session(*, bracketed: bool, ready: bool = True):
         sdef = SessionDef(name="s")
         screen = ScreenState(80, 24)
         idle_threshold = 0.0
+        _last_human_input = 0.0
         paste = session_mod.Session.paste
         deliver = session_mod.Session.deliver
         send_keys = session_mod.Session.send_keys
         _await_readable = session_mod.Session._await_readable
+        _await_keyboard_quiet = session_mod.Session._await_keyboard_quiet
+        note_human_input = session_mod.Session.note_human_input
+        keyboard_busy = session_mod.Session.keyboard_busy
 
         def status(self, threshold=None):
             return session_mod.STATUS_IDLE
@@ -268,3 +272,48 @@ def test_deliver_gives_up_waiting_once_the_session_is_no_longer_young():
     s._started_mono = time.monotonic() - session_mod.INPUT_READY_TIMEOUT - 1
     assert asyncio.run(s.deliver("cflow: go")) is True
     assert writes == [b"cflow: go", b"\r"]
+
+
+# --------------------------------------------------------------------------- #
+# ...and the program is not the only party reading the terminal: a HUMAN may be
+# mid-keystroke. Typing keeps the screen changing, but the thinking pauses
+# inside composing a message outlast the idle threshold — a paste-plus-Enter
+# injected into one submits the half-typed line with the delivery folded in.
+# --------------------------------------------------------------------------- #
+def test_deliver_holds_while_a_human_is_typing(monkeypatch):
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, writes = _fake_session(bracketed=True)
+    s.note_human_input()  # a keystroke just landed in this terminal
+
+    async def run():
+        sending = asyncio.ensure_future(s.deliver("mesh: hello"))
+        await asyncio.sleep(0.3)
+        assert writes == [], "pasted into a message a human was composing"
+        # the keyboard goes quiet: age the mark past the guard window
+        s._last_human_input = time.monotonic() - session_mod.TYPING_GUARD
+        assert await asyncio.wait_for(sending, timeout=5) is True
+
+    asyncio.run(run())
+    assert writes == [b"\x1b[200~mesh: hello\x1b[201~", b"\r"]
+
+
+def test_deliver_gives_up_the_typing_hold_rather_than_losing_the_message(
+    monkeypatch,
+):
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "TYPING_HOLD_TIMEOUT", 0.2)
+    s, writes = _fake_session(bracketed=True)
+    s.note_human_input()
+    assert asyncio.run(s.deliver("mesh: hello")) is True
+    assert writes == [b"\x1b[200~mesh: hello\x1b[201~", b"\r"]
+
+
+def test_send_keys_counts_as_human_typing(monkeypatch):
+    """The raw passthrough IS the human ('claunch send-keys'; attach and web
+    keystrokes are marked by the WebSocket handler): every keystroke restarts
+    the quiet window a delivery must see before it may type."""
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, _ = _fake_session(bracketed=False)
+    assert s.keyboard_busy() is False
+    asyncio.run(s.send_keys(["h"]))
+    assert s.keyboard_busy() is True

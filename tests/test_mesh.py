@@ -331,6 +331,41 @@ def test_delivery_injects_into_recipient_terminal(home, tmp_path):
     asyncio.run(run())
 
 
+def test_delivery_holds_while_a_human_is_typing(home, tmp_path):
+    """A recipient whose keyboard is live is mid-composition: the worker holds
+    the cursor exactly as it does for a busy turn, and delivers once the
+    keyboard has been quiet for the guard window."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.1, busy_hold=30.0)
+        mm.start()
+        mm.create("m4")
+        a = mgr.create(SessionDef(name="talker", harness="py", cwd=str(tmp_path)))
+        b = mgr.create(SessionDef(name="typist", harness="py", cwd=str(tmp_path)))
+        await _wait_screen(a, "READY")
+        await _wait_screen(b, "READY")
+        await mm.join("m4", "talker", handle="alice")
+        await mm.join("m4", "typist", handle="bob")
+
+        b.note_human_input()  # a human keystroke just landed in bob's pane
+        await mm.send("m4", "alice", "bob", "mid-typing message")
+        await asyncio.sleep(1.5)  # worker runs but must hold the cursor
+        assert mm.get("m4").pending("bob")
+        assert "mid-typing message" not in _screen_text(b)
+
+        # the keyboard goes quiet: age the mark past the guard window
+        b._last_human_input = time.monotonic() - session_mod.TYPING_GUARD
+        await _wait_screen(b, "mid-typing message")
+        await _wait_drained(mm.get("m4"), "bob")
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_delivery_waits_for_respawn(home, tmp_path):
     """Messages to an exited member stay queued and land after respawn."""
     _register_py_harness()

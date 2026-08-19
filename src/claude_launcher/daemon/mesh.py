@@ -4625,7 +4625,10 @@ class MeshManager:
             return  # session removed; hold the cursor, deliver on rejoin/respawn
         if session.exited:
             return  # hold until respawn (same name, same cursor)
-        if session.status() != STATUS_IDLE:
+        # A live keyboard is held exactly like a running turn: the human is
+        # mid-composition, and their thinking pauses outlast the idle
+        # threshold, so the screen alone would call this moment deliverable.
+        if session.status() != STATUS_IDLE or session.keyboard_busy():
             held = time.monotonic() - mesh._first_pending.get(
                 member.handle, time.monotonic()
             )

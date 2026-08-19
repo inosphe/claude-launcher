@@ -53,6 +53,22 @@ INPUT_READY_TIMEOUT = float(os.environ.get("CLAUNCH_INPUT_READY_TIMEOUT") or 30.
 #: before it finishes loading and starts accepting a submit.
 INPUT_SETTLE = float(os.environ.get("CLAUNCH_INPUT_SETTLE") or 3.0)
 
+#: How long the keyboard must have been quiet before an automated delivery may
+#: type into a terminal (seconds). A human composing a message pauses to think
+#: for a couple of seconds — long enough for the *screen* to read as idle —
+#: and a paste-plus-Enter landing in that pause submits their half-typed line
+#: with the delivery folded into it. Keystrokes are a signal the screen
+#: sampler cannot see, so they are tracked separately (see
+#: :meth:`Session.note_human_input`).
+TYPING_GUARD = float(os.environ.get("CLAUNCH_TYPING_GUARD") or 5.0)
+
+#: Bound on how long :meth:`Session.deliver` waits for the keyboard to go
+#: quiet. Someone typing continuously holds a message at most this long — a
+#: delayed delivery is recoverable, an interleaved one already went wrong, but
+#: the message itself must never be dropped (the INPUT_READY_TIMEOUT
+#: reasoning, applied to the reader's other half: the human).
+TYPING_HOLD_TIMEOUT = float(os.environ.get("CLAUNCH_TYPING_HOLD_TIMEOUT") or 30.0)
+
 log = logging.getLogger(__name__)
 
 STATUS_STARTING = "starting"
@@ -106,6 +122,9 @@ class Session:
         #: Latched once the harness has been seen ready to take a message; see
         #: :meth:`_await_readable`.
         self._input_ready = False
+        #: Monotonic time a human last typed here (attach/web keystrokes,
+        #: ``claunch send-keys``); 0.0 = never. See :meth:`keyboard_busy`.
+        self._last_human_input = 0.0
 
         session_dir = paths.session_dir(sdef.name)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -266,6 +285,7 @@ class Session:
         """
         try:
             await self._await_readable()
+            await self._await_keyboard_quiet()
             await self.paste(text, enter=True)
         except Exception as exc:  # noqa: BLE001 — SessionGone, PTY write, ...
             log.debug("deliver to %r failed: %s", self.sdef.name, exc)
@@ -317,6 +337,47 @@ class Session:
             await asyncio.sleep(0.2)
         self._input_ready = True
 
+    def note_human_input(self) -> None:
+        """Record a human keystroke aimed at this terminal.
+
+        Called by the raw keyboard passthroughs — the WebSocket bridge behind
+        the web terminal and ``claunch attach``, and :meth:`send_keys` — and
+        never by :meth:`deliver`: telling the two apart is the whole point.
+        """
+        self._last_human_input = time.monotonic()
+
+    def keyboard_busy(self, guard: Optional[float] = None) -> bool:
+        """Whether a human has typed here within the last ``guard`` seconds.
+
+        A composer mid-edit is invisible to the screen sampler — a thinking
+        pause reads exactly like idle — so anything about to type into this
+        terminal asks about the keyboard directly.
+        """
+        if guard is None:
+            guard = TYPING_GUARD
+        if self._last_human_input <= 0:
+            return False
+        return time.monotonic() - self._last_human_input < guard
+
+    async def _await_keyboard_quiet(self) -> None:
+        """Hold a delivery while a human is typing into this terminal.
+
+        The idle-gates upstream cannot catch this by watching the screen:
+        typing keeps it changing, but the pauses inside composing a message
+        outlast the idle threshold, and a paste-plus-Enter injected into one
+        submits the human's half-typed line with the delivery folded into it.
+        So the last thing before the paste is the question the screen cannot
+        answer — has the keyboard itself been quiet for a moment.
+
+        Bounded, like every wait here: a keyboard that never goes quiet
+        delays the message rather than losing it.
+        """
+        deadline = time.monotonic() + TYPING_HOLD_TIMEOUT
+        while not self.exited and time.monotonic() < deadline:
+            if not self.keyboard_busy():
+                return
+            await asyncio.sleep(0.2)
+
     async def send_keys(self, args: List[str], *, literal: bool = False) -> bytes:
         """Raw keystrokes — the passthrough for a human at a keyboard (the
         web terminal, ``claunch send-keys``). To hand an agent a *message*,
@@ -324,6 +385,7 @@ class Session:
         """
         if self.exited:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
+        self.note_human_input()
         data = keys_mod.encode_keys(
             args, literal=literal, app_cursor=self.screen.app_cursor_keys
         )
@@ -566,6 +628,12 @@ class DeadSession:
 
     def idle_since(self) -> Optional[float]:
         return None
+
+    def note_human_input(self) -> None:
+        return None  # nobody is typing at a terminal that no longer exists
+
+    def keyboard_busy(self, guard: Optional[float] = None) -> bool:
+        return False
 
     def capture(self, *, history: bool = False) -> List[str]:
         return self.screen.render_history() if history else self.screen.render_screen()

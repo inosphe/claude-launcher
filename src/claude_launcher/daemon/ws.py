@@ -71,6 +71,10 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
         try:
             async for msg in ws:
                 if msg.type == WSMsgType.BINARY:
+                    # A binary frame is a human at a keyboard (attach or the
+                    # web terminal); the mark parks automated deliveries so
+                    # they don't type into a message being composed.
+                    session.note_human_input()
                     try:
                         await session.write_bytes(msg.data)
                     except SessionGone:
