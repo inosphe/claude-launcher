@@ -1979,7 +1979,67 @@ def status(cwd: Optional[str] = None) -> dict:
         # Only reachable when the run finished after the request was filed
         # (an active run refuses one) — the next start will consume it.
         payload["pending_start"] = pending
+    if state.get("reminder"):
+        # The per-run override only — the machine defaults are the daemon's
+        # (store.daemon_config) and are reported by its API, not by a run.
+        payload["reminder"] = dict(state["reminder"])
     return payload
+
+
+#: The floor for a per-run reminder interval. Below this a reminder is not a
+#: reminder, it is the daemon talking over the agent's own typing.
+REMINDER_MIN_INTERVAL = 30.0
+
+
+@_locked_op
+def set_reminder(
+    enabled: Optional[bool] = None,
+    interval: Optional[float] = None,
+    *,
+    by: str = "user",
+    cwd: Optional[str] = None,
+) -> dict:
+    """Set (or clear) this run's reminder override.
+
+    The reminder itself is the daemon's clock (see
+    :class:`daemon.cflow_clock.ReminderClock`): while a run sits on an
+    agent-actionable position with no progress, the current step's
+    instructions are re-typed into the driving session every ``interval``
+    seconds. What is stored here is only this run's departure from the
+    machine defaults — ``enabled`` and/or ``interval``, each optional, merged
+    over whatever was set before. Both ``None`` clears the override, so the
+    run follows the defaults again.
+
+    Kept in run state rather than config because the setting is *this run's*:
+    it is archived with the run, and the next run in the slot starts back on
+    the defaults instead of inheriting a tuning nobody remembers making.
+    """
+    if not state_mod.has_run(cwd):
+        raise CflowError("no active cflow run here to set a reminder on")
+    _, state = _load(cwd)
+    if enabled is None and interval is None:
+        state.pop("reminder", None)
+    else:
+        override = dict(state.get("reminder") or {})
+        if enabled is not None:
+            override["enabled"] = bool(enabled)
+        if interval is not None:
+            interval = float(interval)
+            if interval < REMINDER_MIN_INTERVAL:
+                raise CflowError(
+                    f"reminder interval must be at least "
+                    f"{REMINDER_MIN_INTERVAL:.0f}s, got {interval:g}"
+                )
+            override["interval"] = interval
+        state["reminder"] = override
+    state_mod.save_state(state, cwd)
+    state_mod.journal(
+        "reminder_set",
+        {"run": state["run_id"], "by": by,
+         "reminder": state.get("reminder")},
+        cwd,
+    )
+    return {**_base(state), "reminder": state.get("reminder")}
 
 
 def current_run_id(

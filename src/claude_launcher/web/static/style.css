@@ -691,6 +691,25 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   border-radius: 5px; padding: 4px 8px; font-size: 12px; flex: 1;
 }
 .pol-row input.pol-num { flex: 0 0 90px; }
+/* The reminder clock's two surfaces: the machine defaults above the flows
+   list, and one run's override inside its actions box. Same widget kit as
+   the mesh policy editor (.pol-*), so the two settings read as kin. */
+.cflow-defaults {
+  margin: 0 0 14px; padding: 10px 16px; background: #1b1e24;
+  border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
+}
+.cflow-defaults:empty { display: none; }
+.cflow-defaults .pol-label { min-width: 0; }
+.wf-reminder { margin-top: 10px; padding-top: 8px; border-top: 1px solid #22262d; }
+.wf-reminder-head {
+  display: flex; gap: 8px; align-items: center; font-size: 13px;
+  font-weight: 600; cursor: pointer; margin-bottom: 6px;
+}
+.wf-reminder-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.wf-reminder-row input.pol-num {
+  background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
+  border-radius: 5px; padding: 4px 8px; font-size: 12px; flex: 0 0 90px;
+}
 .mesh-member {
   display: flex; align-items: center; gap: 10px; padding: 6px 0;
   border-bottom: 1px solid #22262d; font-size: 13px;

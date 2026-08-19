@@ -365,7 +365,70 @@ function cflowHint(cmd) {
   return el;
 }
 
+/* The reminder clock's machine defaults, editable in place. Rendered once
+   (guarded by dataset.ready) so the flows list's rebuild never wipes a
+   half-typed interval; the daemon re-reads these on every clock tick, so a
+   save applies without a restart. */
+async function renderReminderDefaults() {
+  const box = $("cflow-reminder-defaults");
+  if (!box || box.dataset.ready) return;
+  box.dataset.ready = "1";
+  let defs = null;
+  try {
+    const resp = await api("/api/cflow/reminder");
+    if (resp.ok) defs = ((await resp.json()) || {}).defaults;
+  } catch { /* auth overlay is up */ }
+  if (!defs) {
+    delete box.dataset.ready; // try again on the next visit
+    return;
+  }
+  box.innerHTML = "";
+  const head = el("label", "pol-head");
+  const on = document.createElement("input");
+  on.type = "checkbox";
+  on.checked = !!defs.enabled;
+  head.appendChild(on);
+  head.appendChild(el("span", null, "step reminders — machine default"));
+  head.title = "while a run sits on the same step, the daemon re-types that " +
+    "step's instructions into its session at this interval";
+  box.appendChild(head);
+  const row = el("div", "pol-row");
+  row.appendChild(el("span", "pol-label", "every"));
+  const iv = document.createElement("input");
+  iv.type = "number";
+  iv.min = "30";
+  iv.step = "10";
+  iv.className = "pol-num";
+  iv.value = String(Math.round(defs.interval || 180));
+  row.appendChild(iv);
+  row.appendChild(el("span", "pol-label", "s without progress"));
+  const save = el("button", "wf-btn", "Save defaults");
+  save.addEventListener("click", async () => {
+    try {
+      const resp = await api("/api/cflow/reminder", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ enabled: on.checked, interval: +iv.value }),
+      });
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        alert(doc.error || `HTTP ${resp.status}`);
+        return;
+      }
+      document.activeElement?.blur?.();
+    } catch { /* auth overlay is up */ }
+  });
+  row.appendChild(save);
+  box.appendChild(row);
+  box.appendChild(el(
+    "p", "wf-note",
+    "applies to every run without its own setting, within one daemon tick " +
+    "(~15s); each run page can override it"
+  ));
+}
+
 async function refreshCflow() {
+  renderReminderDefaults(); // once; guarded inside
   let data;
   try {
     const resp = await api("/api/cflow");
@@ -2491,6 +2554,7 @@ function wfActions(data, opts = {}) {
       btn.title = "nothing to nudge: this run has no live session of its own";
     }
     box.appendChild(btn);
+    box.appendChild(reminderControl(data, after));
   }
 
   if (opts.archive === false) return box;
@@ -2514,6 +2578,81 @@ function wfActions(data, opts = {}) {
     }
   });
   box.appendChild(arch);
+  return box;
+}
+
+/* This run's reminder: whether the daemon re-types the current step's
+   instructions into the driving session while the run does not move, and how
+   often. What is stored here is the RUN's override; runs without one follow
+   the machine defaults edited on the Workflows page. Rebuilt only when the
+   slot changes (the sess-send-box pattern): the 2s poll must not wipe a
+   half-typed interval — a save clears the cache so the server's answer is
+   what the next poll draws. */
+let wfReminderBox = null;
+function reminderControl(data, after) {
+  const run = data.run || {};
+  const key = `${data.scope}|${data.cwd}`;
+  if (wfReminderBox && wfReminderBox.dataset.slot === key) return wfReminderBox;
+  const box = el("div", "wf-reminder");
+  box.dataset.slot = key;
+
+  const override = run.reminder || null;
+  const defs = data.reminder_defaults || {};
+  const effOn = override && "enabled" in override
+    ? !!override.enabled : !!defs.enabled;
+  const effIv = override && "interval" in override
+    ? override.interval : (defs.interval || 180);
+
+  const head = el("label", "wf-reminder-head");
+  const on = document.createElement("input");
+  on.type = "checkbox";
+  on.checked = effOn;
+  head.appendChild(on);
+  head.appendChild(el("span", null, "remind the session of its step"));
+  head.title = "while the run sits on the same step, the daemon re-types " +
+    "that step's instructions into the session at this interval";
+  box.appendChild(head);
+
+  const row = el("div", "wf-reminder-row");
+  row.appendChild(el("span", "wf-note", "every"));
+  const iv = document.createElement("input");
+  iv.type = "number";
+  iv.min = "30";
+  iv.step = "10";
+  iv.className = "pol-num";
+  iv.value = String(Math.round(effIv));
+  row.appendChild(iv);
+  row.appendChild(el("span", "wf-note", "s without progress"));
+  const save = el("button", "wf-btn", "Set for this run");
+  save.title = "stored with this run only; the machine defaults stay untouched";
+  save.addEventListener("click", () => {
+    wfReminderBox = null;
+    cflowAction("/api/cflow/reminder", {
+      cwd: data.cwd, scope: data.scope,
+      enabled: on.checked, interval: +iv.value,
+    }, after);
+  });
+  row.appendChild(save);
+  const clear = el("button", "wf-btn clear", "Use defaults");
+  clear.disabled = !override;
+  clear.title = "drop this run's override and follow the machine defaults again";
+  clear.addEventListener("click", () => {
+    wfReminderBox = null;
+    cflowAction("/api/cflow/reminder", {
+      cwd: data.cwd, scope: data.scope, clear: true,
+    }, after);
+  });
+  row.appendChild(clear);
+  box.appendChild(row);
+
+  box.appendChild(el(
+    "p", "wf-note",
+    override
+      ? "this run overrides the machine defaults"
+      : `following the machine defaults (${defs.enabled ? "on" : "off"}, ` +
+        `${Math.round(defs.interval || 0)}s) — set on the Workflows page`
+  ));
+  wfReminderBox = box;
   return box;
 }
 

@@ -18,7 +18,7 @@ from typing import List, Optional
 from aiohttp import web
 
 from .. import __version__, harnesses as harness_registry
-from .. import profile as profile_mod, spawn as spawn_mod, workspaces
+from .. import profile as profile_mod, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import onboard, rebrief
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
@@ -176,6 +176,12 @@ def build_app(
     r.add_post("/api/cflow/select", h_cflow_select)
     r.add_post("/api/cflow/nudge", h_cflow_nudge)
     r.add_post("/api/cflow/goto", h_cflow_goto)
+    # One resource, three verbs: GET/PUT are the machine defaults (the config
+    # file, read live by the reminder clock, so a PUT applies by its next
+    # tick); POST is one run's override, stored in that run's state.
+    r.add_get("/api/cflow/reminder", h_cflow_reminder_defaults)
+    r.add_put("/api/cflow/reminder", h_cflow_reminder_defaults_set)
+    r.add_post("/api/cflow/reminder", h_cflow_reminder_run_set)
     r.add_get("/api/mesh", h_mesh_list)
     r.add_post("/api/mesh", h_mesh_create)
     r.add_delete("/api/mesh/outgoing/{rid}", h_mesh_outgoing_cancel)
@@ -620,6 +626,10 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
         )
     workflow = _serialize_workflow(cflow_state.load_snapshot(cwd, scope))
     journal = cflow_state.read_journal(cwd, scope, run_id=payload.get("run"))
+    try:
+        reminder_defaults = _reminder_defaults()
+    except store.StoreError:
+        reminder_defaults = None  # broken config must not hide the run page
     reports = [
         {
             "step": e.get("step"),
@@ -644,6 +654,9 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
             # exactly what the manual Nudge button would type — shown to the
             # user for confirmation before sending
             "nudge_message": cflow_engine.NUDGE_CONTINUE,
+            # so the run page's reminder control can show the effective
+            # values without a second fetch (the override rides in `run`)
+            "reminder_defaults": reminder_defaults,
         }
     )
 
@@ -858,6 +871,92 @@ async def h_cflow_goto(request: web.Request) -> web.Response:
     payload["nudged_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, cflow_engine.nudge_for_state(step)
     )
+    return web.json_response(payload)
+
+
+def _reminder_defaults() -> dict:
+    """The reminder clock's machine defaults, read live from the config file
+    — the same read the clock itself does each tick, so what this reports is
+    what the next tick will act on."""
+    cfg = store.daemon_config()
+    return {
+        "enabled": bool(cfg.get("cflow_reminder")),
+        "interval": float(cfg.get("cflow_reminder_interval") or 0),
+    }
+
+
+async def h_cflow_reminder_defaults(request: web.Request) -> web.Response:
+    try:
+        return web.json_response({"defaults": _reminder_defaults()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_cflow_reminder_defaults_set(request: web.Request) -> web.Response:
+    """Set the machine defaults for the reminder clock.
+
+    Written to the config file, which the clock re-reads on every tick — so
+    this applies within one poll, no daemon restart. The same keys answer to
+    ``claunch daemon config cflow_reminder`` / ``cflow_reminder_interval``.
+    """
+    body = await _json_body(request)
+    interval = body.get("interval")
+    if interval is not None:
+        try:
+            interval = float(interval)
+        except (TypeError, ValueError):
+            return json_error(400, "'interval' must be a number of seconds")
+        if interval < cflow_engine.REMINDER_MIN_INTERVAL:
+            return json_error(
+                400,
+                f"reminder interval must be at least "
+                f"{cflow_engine.REMINDER_MIN_INTERVAL:.0f}s",
+            )
+    try:
+        if "enabled" in body:
+            store.set_daemon_field("cflow_reminder", bool(body["enabled"]))
+        if interval is not None:
+            store.set_daemon_field("cflow_reminder_interval", interval)
+        return web.json_response({"defaults": _reminder_defaults()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_cflow_reminder_run_set(request: web.Request) -> web.Response:
+    """Set (or clear) one run's reminder override from the dashboard.
+
+    Stored in the run's own state, so it is archived with the run and the
+    next run in the slot starts back on the defaults. ``clear: true`` drops
+    the override; otherwise ``enabled`` and/or ``interval`` merge over
+    whatever override was set before.
+    """
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    if body.get("clear"):
+        payload = cflow_engine.set_reminder(None, None, by="web", cwd=cwd, scope=scope)
+    else:
+        enabled = body.get("enabled")
+        interval = body.get("interval")
+        if enabled is None and interval is None:
+            return json_error(
+                400, "nothing to set: pass 'enabled' and/or 'interval', "
+                "or 'clear': true"
+            )
+        if interval is not None:
+            try:
+                interval = float(interval)
+            except (TypeError, ValueError):
+                return json_error(400, "'interval' must be a number of seconds")
+        payload = cflow_engine.set_reminder(
+            None if enabled is None else bool(enabled),
+            interval, by="web", cwd=cwd, scope=scope,
+        )
+    try:
+        payload["defaults"] = _reminder_defaults()
+    except store.StoreError:
+        pass  # the override was set; broken config only hides the defaults
     return web.json_response(payload)
 
 

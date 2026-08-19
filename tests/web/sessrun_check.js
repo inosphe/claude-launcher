@@ -106,7 +106,7 @@ const clearInterval = () => { timers--; };
 
 /* Everything the sliced code leans on and this file is not testing. */
 const stubs = `
-let sessRunFold = null, sessRunTimer = null;
+let sessRunFold = null, sessRunTimer = null, wfReminderBox = null;
 let posted = [], nudged = [];
 function cflowAction(path, body, after) { posted.push({ path, body, after }); }
 function nudgeRun(cwd, scope) { nudged.push({ cwd, scope }); return Promise.resolve(); }
@@ -123,6 +123,7 @@ new Function(
   [slice("flowOrder"), slice("flowTrack"), slice("flowNeedsHuman"),
    slice("flowState"), slice("flowMetrics"), slice("flowPipShape"),
    slice("flowTrackSvg"), slice("svg"), slice("wfActions"),
+   slice("reminderControl"),
    slice("sessRunFoldFor"), slice("stopSessRun"), slice("refreshSessRun"),
    slice("renderSessRun"), slice("sessRunTrack")].join("\n") +
   `

@@ -800,6 +800,10 @@ def _cmd_daemon_token(args: argparse.Namespace) -> int:
 
 _CONFIG_KEYS = tuple(store.DAEMON_DEFAULTS)
 
+#: Keys the daemon re-reads from the config file at runtime (the cflow
+#: reminder clock reads them every tick), so an edit needs no restart.
+_LIVE_KEYS = ("cflow_reminder", "cflow_reminder_interval")
+
 
 def _cmd_daemon_config(args: argparse.Namespace) -> int:
     cfg = store.daemon_config()
@@ -820,7 +824,12 @@ def _cmd_daemon_config(args: argparse.Namespace) -> int:
     store.set_daemon_field(args.key, _parse_value(args.value))
     print(f"{args.key} = {args.value}")
     if daemon_client.connect() is not None:
-        print("(restart the daemon to apply: claunch daemon restart)", file=sys.stderr)
+        if args.key in _LIVE_KEYS:
+            print("(applies within one clock tick; no restart needed)",
+                  file=sys.stderr)
+        else:
+            print("(restart the daemon to apply: claunch daemon restart)",
+                  file=sys.stderr)
     return 0
 
 

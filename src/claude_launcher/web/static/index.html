@@ -195,6 +195,10 @@
 
     <div id="flows-view" class="hidden">
       <div class="page-head"><h2>Workflows</h2></div>
+      <!-- The reminder clock's machine defaults. Rendered once (not by the
+           list's rebuild) so a half-typed interval survives the poll; each
+           run's own override lives on its run page. -->
+      <div id="cflow-reminder-defaults" class="cflow-defaults"></div>
       <ul id="cflow-list"></ul>
     </div>
 

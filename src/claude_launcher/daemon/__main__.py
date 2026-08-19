@@ -111,6 +111,8 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     mesh_manager.start()
     ask_clock = cflow_clock.AskClock()
     ask_clock.start()
+    reminder_clock = cflow_clock.ReminderClock(manager)
+    reminder_clock.start()
 
     try:
         await app["shutdown_event"].wait()
@@ -126,6 +128,7 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
                 await uplink_task
             except (asyncio.CancelledError, Exception):
                 pass
+        await reminder_clock.shutdown()
         await ask_clock.shutdown()
         await mesh_manager.shutdown()
         runtime_state.remove_daemon_json()

@@ -178,6 +178,13 @@ DAEMON_DEFAULTS = {
     "idle_threshold": 2.0,
     "scrollback_lines": 5000,
     "restore": True,
+    # The cflow reminder clock's machine defaults: whether runs get their
+    # current step's instructions re-typed into the driving session, and
+    # after how many seconds without progress. Per-run overrides live in run
+    # state (engine.set_reminder). Read LIVE by the daemon on every clock
+    # tick — unlike the keys above, editing these needs no restart.
+    "cflow_reminder": True,
+    "cflow_reminder_interval": 180.0,
 }
 
 

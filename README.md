@@ -2199,9 +2199,24 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/cflow/select`            | `{cwd, scope, option, reason?}` — confirm a user-chooser branch |
 | POST   | `/api/cflow/nudge`             | `{cwd, scope}` — re-type the resume line into the run's own session |
 | POST   | `/api/cflow/goto`              | `{cwd, scope, step, reason?}` — force the current step (`end` finishes) + nudge |
+| GET    | `/api/cflow/reminder`          | the reminder clock's machine defaults (`{defaults: {enabled, interval}}`) |
+| PUT    | `/api/cflow/reminder`          | `{enabled?, interval?}` — set those defaults; the clock re-reads them every tick, so this applies without a restart |
+| POST   | `/api/cflow/reminder`          | `{cwd, scope, enabled?, interval?}` or `{cwd, scope, clear: true}` — one run's override, stored (and archived) with the run |
+
+**Step reminders.** Sessions forget the /cflow protocol the way they forget
+everything else, and a forgotten run does not fail — it just sits. The daemon
+therefore watches every run: when one has held the same agent-actionable
+position (`step` or `select`) for its reminder interval, the current step's
+own instructions are re-typed into the driving session (idle-gated, like
+every delivery), and again every interval until the run moves. Progress
+resets the timer, so an agent that is advancing hears nothing. Defaults:
+`claunch daemon config cflow_reminder true|false` /
+`cflow_reminder_interval 180` — these two keys are read live, no restart —
+with a per-run override on the run's web page (or the POST above).
 
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
-(`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`); runtime
+(`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`,
+`cflow_reminder`, `cflow_reminder_interval`); runtime
 state (pid/port file, auth token, session logs) stays machine-local under
 `~/.claude-launcher/daemon/`.
 
