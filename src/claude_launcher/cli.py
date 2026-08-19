@@ -336,6 +336,12 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # --borrow / --add-prompt that appear after the profile name; pull those out
     # here, then drop a leading `--` separator before forwarding the rest.
     borrow_name, rest = _extract_borrow(args.args)
+    null_token, rest = _extract_null(rest)
+    if null_token and borrow_name is not None:
+        raise profile.ProfileError(
+            "--null launches without any OAuth token; "
+            f"it cannot be combined with --borrow {borrow_name}"
+        )
     provider_name, rest = _extract_value_flag(rest, "--provider")
     wt_choice, rest = _extract_worktree(rest)
     add_prompt, rest = _extract_add_prompt(rest)
@@ -387,6 +393,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
             passthrough,
             borrow=borrow,
             provider=provider_name,
+            null_token=null_token,
             cwd=str(tree.path) if tree is not None else None,
         )
     finally:
@@ -598,11 +605,11 @@ def _extract_worktree(args: List[str]) -> "tuple[worktree.Choice, List[str]]":
     return choice, rest
 
 
-def _extract_add_prompt(args: List[str]) -> "tuple[bool, List[str]]":
-    """Pull a boolean ``--add-prompt`` flag out of run passthrough.
+def _extract_bool_flag(args: List[str], flag: str) -> "tuple[bool, List[str]]":
+    """Pull a boolean ``<flag>`` out of run passthrough.
 
     Like :func:`_extract_borrow`, it stops at a ``--`` separator so a literal
-    ``--add-prompt`` explicitly forwarded to claude is left untouched.
+    flag explicitly forwarded to claude is left untouched.
     """
     found = False
     rest: List[str] = []
@@ -610,11 +617,26 @@ def _extract_add_prompt(args: List[str]) -> "tuple[bool, List[str]]":
         if token == "--":
             rest.extend(args[i:])
             break
-        if token == "--add-prompt":
+        if token == flag:
             found = True
             continue
         rest.append(token)
     return found, rest
+
+
+def _extract_add_prompt(args: List[str]) -> "tuple[bool, List[str]]":
+    """Pull a boolean ``--add-prompt`` flag out of run passthrough."""
+    return _extract_bool_flag(args, "--add-prompt")
+
+
+def _extract_null(args: List[str]) -> "tuple[bool, List[str]]":
+    """Pull a boolean ``--null`` flag out of run passthrough.
+
+    ``--null`` launches with no OAuth token at all: nothing is injected and
+    any inherited ``CLAUDE_CODE_OAUTH_TOKEN`` is cleared, so claude starts
+    unauthenticated (e.g. to /login fresh inside claude).
+    """
+    return _extract_bool_flag(args, "--null")
 
 
 def _fmt_reset(resets_at: Optional[str]) -> str:
@@ -734,6 +756,7 @@ def build_parser() -> argparse.ArgumentParser:
         "run",
         help="launch claude with the profile (extra args pass through; "
         "--borrow NAME uses another profile's token for this run only; "
+        "--null clears CLAUDE_CODE_OAUTH_TOKEN and injects nothing; "
         "--provider NAME overrides the API provider for this run only; "
         "--add-prompt opens an editor to append text to the system prompt; "
         "--worktree[=NAME] / --no-worktree answer the git-worktree question "
@@ -743,7 +766,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "args",
         nargs=argparse.REMAINDER,
-        help="--borrow NAME, --provider NAME, --add-prompt, "
+        help="--borrow NAME, --null, --provider NAME, --add-prompt, "
         "--worktree[=NAME] (bare = name it after this pane and the time; the "
         "value form needs the '='), --no-worktree, and/or arguments forwarded "
         "to claude",

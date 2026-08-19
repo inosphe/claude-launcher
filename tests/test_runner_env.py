@@ -130,6 +130,17 @@ def test_child_inherits_provider_and_parent_stored_token(home):
     assert env["ANTHROPIC_AUTH_TOKEN"] == "backend-secret"
 
 
+def test_null_token_clears_oauth_everywhere(home, monkeypatch):
+    # `run --null`: no injection from the store, and even a token pinned by
+    # the profile's own env or left in the shell is cleared.
+    p = profile.create("work")
+    credentials.save_token(p, "sk-ant-oat01-X")
+    settings.set_env(p, {"CLAUDE_CODE_OAUTH_TOKEN": "pinned"})
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "stale-shell-token")
+    env = runner.child_env(p, with_token=True, null_token=True)
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+
+
 def test_borrow_uses_lenders_stored_token_and_backend(home):
     runner_p = profile.create("work")
     lender = profile.create("glmprof")

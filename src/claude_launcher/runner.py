@@ -45,6 +45,7 @@ def child_env(
     borrow: Optional[Profile] = None,
     base_env: Optional[dict] = None,
     provider_override: Optional[str] = None,
+    null_token: bool = False,
 ) -> dict:
     """The full environment for a ``claude`` child of ``profile``.
 
@@ -53,6 +54,10 @@ def child_env(
     environment (for the daemon that means sessions inherit the *daemon's* env,
     like tmux server semantics). ``provider_override`` (``run --provider``)
     replaces the config-file provider resolution for this call only.
+    ``null_token`` (``run --null``) launches with no OAuth token at all: the
+    profile's stored token is not injected, and any value inherited from the
+    shell or pinned by profile/provider env is dropped, so claude starts
+    unauthenticated (log in with /login).
     """
     env = dict(os.environ if base_env is None else base_env)
     env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
@@ -91,8 +96,11 @@ def child_env(
                 env.pop(OAUTH_TOKEN_ENV, None)
         else:
             # Plain Anthropic: inject the (own/inherited/borrowed) OAuth token.
+            # `--null` suppresses the lookup so the pop below clears the var.
             token = (
-                lineage.lookup_token(borrow)
+                None
+                if null_token
+                else lineage.lookup_token(borrow)
                 if borrow is not None
                 else lineage.injectable_token(profile)
             )
@@ -108,6 +116,10 @@ def child_env(
         # the fresh setup-token flow. Login always targets Anthropic, so no
         # provider override is applied here.
         env.pop(OAUTH_TOKEN_ENV, None)
+    if null_token:
+        # `--null` means *no* OAuth token, full stop — even one pinned by the
+        # profile's own env or a provider pattern loses to the explicit flag.
+        env.pop(OAUTH_TOKEN_ENV, None)
     return env
 
 
@@ -118,6 +130,7 @@ def _spawn(
     with_token: bool,
     borrow: Optional[Profile] = None,
     provider_override: Optional[str] = None,
+    null_token: bool = False,
     cwd: Optional[str] = None,
 ) -> int:
     cmd = [config.claude_bin(), *args]
@@ -130,6 +143,7 @@ def _spawn(
                 with_token=with_token,
                 borrow=borrow,
                 provider_override=provider_override,
+                null_token=null_token,
             ),
         )
     except FileNotFoundError as exc:
@@ -178,14 +192,16 @@ def run(
     *,
     borrow: Optional[Profile] = None,
     provider: Optional[str] = None,
+    null_token: bool = False,
     cwd: Optional[str] = None,
 ) -> int:
     """Launch ``claude`` for the profile, optionally borrowing another's token.
 
     ``provider`` (from ``run --provider``) overrides the config-file provider
-    resolution for this run only. ``cwd`` (from ``run --worktree``) starts
-    claude in another directory; ``None`` inherits this process's, which is
-    what every run that did not ask for a worktree wants.
+    resolution for this run only. ``null_token`` (from ``run --null``) launches
+    with no OAuth token at all (see :func:`child_env`). ``cwd`` (from ``run
+    --worktree``) starts claude in another directory; ``None`` inherits this
+    process's, which is what every run that did not ask for a worktree wants.
     """
     auth_source = borrow if borrow is not None else profile
     if provider:
@@ -206,6 +222,12 @@ def run(
             f"provider {name!r} active ({source}); {via}",
             file=sys.stderr,
         )
+    elif null_token:
+        print(
+            f"launching with no OAuth token ({OAUTH_TOKEN_ENV} cleared); "
+            "log in with /login",
+            file=sys.stderr,
+        )
     elif borrow is not None:
         if lineage.lookup_token(borrow) is None:
             # An empty token is allowed: launch anyway so the user can /login
@@ -221,6 +243,7 @@ def run(
         with_token=True,
         borrow=borrow,
         provider_override=provider,
+        null_token=null_token,
         cwd=cwd,
     )
 

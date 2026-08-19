@@ -57,7 +57,14 @@ def test_run_injects_append_system_prompt(home, monkeypatch, capsys):
     captured = {}
 
     def fake_spawn(
-        profile, args, *, with_token, borrow=None, provider_override=None, cwd=None
+        profile,
+        args,
+        *,
+        with_token,
+        borrow=None,
+        provider_override=None,
+        null_token=False,
+        cwd=None,
     ):
         captured["args"] = list(args)
         return 0
@@ -81,7 +88,14 @@ def test_run_empty_prompt_skips_injection(home, monkeypatch, capsys):
     captured = {}
 
     def fake_spawn(
-        profile, args, *, with_token, borrow=None, provider_override=None, cwd=None
+        profile,
+        args,
+        *,
+        with_token,
+        borrow=None,
+        provider_override=None,
+        null_token=False,
+        cwd=None,
     ):
         captured["args"] = list(args)
         return 0

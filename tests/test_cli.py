@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from claude_launcher import cli, config, store
+import subprocess
+
+from claude_launcher import cli, config, runner, store
 
 
 def run(*argv):
@@ -69,6 +71,62 @@ def test_prune_removes_orphan(home, capsys):
 
 def test_unknown_profile_errors(home, capsys):
     assert run("env", "ghost") == 1
+
+
+_REAL_RUN = subprocess.run
+
+
+def _capture_launch(monkeypatch):
+    """A ``subprocess.run`` that records the claude launch and really runs git."""
+    captured = {}
+
+    def fake_launch(cmd, **kwargs):
+        if cmd and cmd[0] == "git":
+            return _REAL_RUN(cmd, **kwargs)
+        if cmd and cmd[0] == config.claude_bin():
+            captured["args"] = list(cmd[1:])
+            captured["env"] = kwargs.get("env")
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_launch)
+    return captured
+
+
+def test_run_null_launches_without_oauth_token(home, monkeypatch, capsys):
+    run("create", "work", "--no-seed")
+    run("set-token", "work", "sk-ant-oat01-X")
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "stale-shell-token")
+    captured = _capture_launch(monkeypatch)
+    capsys.readouterr()
+    assert run("run", "work", "--null", "--no-worktree", "--resume") == 0
+    # Neither the stored token nor the shell leftover reaches claude.
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in captured["env"]
+    assert captured["args"] == ["--resume"]
+    assert "no OAuth token" in capsys.readouterr().err
+
+
+def test_run_without_null_still_injects_token(home, monkeypatch, capsys):
+    run("create", "work", "--no-seed")
+    run("set-token", "work", "sk-ant-oat01-X")
+    captured = _capture_launch(monkeypatch)
+    capsys.readouterr()
+    assert run("run", "work", "--no-worktree") == 0
+    assert captured["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-X"
+
+
+def test_run_null_conflicts_with_borrow(home, capsys):
+    run("create", "work", "--no-seed")
+    run("create", "other", "--no-seed")
+    capsys.readouterr()
+    assert run("run", "work", "--null", "--borrow", "other") == 1
+    assert "cannot be combined with --borrow" in capsys.readouterr().err
+
+
+def test_extract_null_stops_at_separator():
+    # A literal --null after `--` belongs to claude, not the launcher.
+    found, rest = cli._extract_null(["--", "--null"])
+    assert found is False
+    assert rest == ["--", "--null"]
 
 
 def test_set_provider_and_list(home, capsys):

@@ -92,7 +92,7 @@ claunch usage work      # show this profile's subscription usage
 | ------- | ----------- |
 | `create <name>`        | Create a profile (`--parent` to inherit), seed config, apply template. |
 | `login <name>`         | Run `claude setup-token` for the profile. |
-| `run <name> [args...]` | Launch `claude` for the profile (`--borrow NAME`, `--provider NAME`, `--add-prompt`, `--worktree[=NAME]`/`--no-worktree`; extra args pass through). |
+| `run <name> [args...]` | Launch `claude` for the profile (`--borrow NAME`, `--null`, `--provider NAME`, `--add-prompt`, `--worktree[=NAME]`/`--no-worktree`; extra args pass through). |
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
@@ -168,6 +168,15 @@ inherited). To forward a literal `--borrow` to claude, put it after `--`.
 if `company2` is configured to use a third-party backend, `--borrow company2`
 adopts that backend (base URL, model overrides and its auth) for the run — so a
 borrowed provider profile needs no Anthropic OAuth token of its own.
+
+`--null` launches with **no OAuth token at all**: the profile's stored token is
+not injected, and any `CLAUDE_CODE_OAUTH_TOKEN` inherited from the shell or set
+in profile env is cleared, so claude starts unauthenticated (e.g. to `/login`
+fresh):
+
+```bash
+claunch run company --null
+```
 
 ### Running in a git worktree
 
@@ -1645,6 +1654,10 @@ claunch install --project .       # MCP tools + the /mesh and /cflow skills
   `machine-generated, not typed by the user`) listing sender, body and how to
   reply. Undelivered messages persist (per-member cursors survive daemon
   restarts) and land after `respawn` if the member's session was down.
+  Delivery waits for the recipient's turn to end — and for its *keyboard* to
+  go quiet: a human typing in that terminal (attach, web) parks the injection
+  until no keystroke has landed for `CLAUNCH_TYPING_GUARD` seconds (default
+  5), so a delivery never submits a message someone was mid-composing.
 - The web UI has a **Mesh** panel. Sidebar: create a mesh, or type
   `mesh@machine` (or paste an invite code — it is decoded in place) to join
   a remote one with a session/handle picker; meshes carry a `mirror` badge
