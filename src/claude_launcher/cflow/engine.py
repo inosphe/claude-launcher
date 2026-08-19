@@ -1933,7 +1933,7 @@ def status(cwd: Optional[str] = None) -> dict:
     payload["started_at"] = state.get("started_at")
     # Which file this run is a snapshot of. The run itself reads the snapshot
     # from here on, so the source is history, not a live dependency — but it
-    # is the only thing that answers "the project one or the shared one?"
+    # is the only thing that answers "the project one or the global one?"
     # once two layers declare the same name.
     if state.get("source"):
         payload["source"] = state["source"]

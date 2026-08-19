@@ -195,7 +195,7 @@ Two layers answer a name, nearest first:
 | `<cwd>/.claunch/workflows/<name>.yaml` | this project only; **wins** |
 | `~/.claude-launcher/workflows/<name>.yaml` | every directory on the machine |
 
-Write to the project layer by default. Reach for the shared one only when the
+Write to the project layer by default. Reach for the global one only when the
 workflow is genuinely project-independent — a workflow that names this repo's
 build command, test framework or module layout belongs to this repo, and
 putting it where every project sees it is how one copy silently becomes two.

@@ -4,7 +4,8 @@ Registering the MCP server that backs it is :mod:`claude_launcher.install`'s
 job — the tools ship in one merged server, so there is no cflow-only
 registration to do here. This module owns the skill text (what ``/cflow
 <workflow> [context]`` primes the agent with) and the copy of the packaged
-workflows into the shared layer that ``claunch install`` performs.
+workflows into the global layer that ``claunch install --global`` (and the
+profile install) performs.
 
 The workflows themselves are files under ``claude_launcher/workflows/``, not
 strings in here. They were both once: an ``EXAMPLE_WORKFLOW`` literal that
@@ -183,7 +184,7 @@ def write_skill(skills_dir: Path) -> Path:
     return path
 
 
-#: Outcomes of seeding one packaged workflow into the shared layer.
+#: Outcomes of seeding one packaged workflow into the global layer.
 SEEDED = "seeded"  #: nothing was there; the packaged copy is now
 UNCHANGED = "unchanged"  #: what is there is byte-for-byte the packaged copy
 KEPT = "kept"  #: something different is there, and it was left alone
@@ -208,14 +209,14 @@ def install_workflow(src: Path, dest: Path, force: bool = False) -> str:
 
 
 def seed_global_workflows(force: bool = False) -> List[Tuple[str, Path, str]]:
-    """Copy the packaged workflows into the shared layer, for ``install``.
+    """Copy the packaged workflows into the global layer, for ``install``.
 
     A seeded file is an ordinary file from that moment on — a human edits it,
     a project overrides it, ``claunch cflow add`` joins more to it. So a
     re-install must not undo an edit: a destination that differs from the
     package is reported and left alone unless ``force``. That is the whole
     price of copying rather than reading the package at resolve time, and it
-    is the deliberate one: the shared layer is meant to be yours.
+    is the deliberate one: the global layer is meant to be yours.
     """
     dest_dir = state.global_workflows_dir()
     return [

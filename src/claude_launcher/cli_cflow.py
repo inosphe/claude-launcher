@@ -308,7 +308,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
 
     print("note: 'cflow install' is now 'claunch install'; installing every "
           "skill and the merged MCP server")
-    return run_install(args.profile, args.project)
+    return run_install(args.profile, args.project, args.global_)
 
 
 def _cmd_example(args: argparse.Namespace) -> int:
@@ -327,7 +327,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
 
     The reason this exists rather than a documented ``cp``: the destination
     layer is the one nobody looks at. A broken YAML copied into a project is
-    found the next time somebody runs it; copied into the shared layer it sits
+    found the next time somebody runs it; copied into the global layer it sits
     there until an unrelated project's picker breaks on it. So the file is
     parsed before it is installed, and a failure is refused here, once, where
     the person who can fix it is standing.
@@ -338,8 +338,8 @@ def _cmd_add(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
-    if args.project:
-        dest_dir = Path(".") / state_mod.PROJECT_WORKFLOWS
+    if args.project is not None:
+        dest_dir = Path(args.project) / state_mod.PROJECT_WORKFLOWS
         layer = state_mod.LAYER_PROJECT
     else:
         dest_dir = state_mod.global_workflows_dir()
@@ -348,7 +348,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
     failed = False
     for ref in args.workflow:
         # A name, not just a path: promoting a project's workflow to the
-        # shared layer is the common case, and it should not require knowing
+        # global layer is the common case, and it should not require knowing
         # where either layer keeps its files.
         try:
             src = state_mod.locate(ref).path
@@ -380,7 +380,7 @@ def _cmd_add(args: argparse.Namespace) -> int:
 def _report_shadowing(name: str, layer: str) -> None:
     """Say if what was just added is not what would run here.
 
-    Adding to the shared layer from inside a project that declares the same
+    Adding to the global layer from inside a project that declares the same
     name is a real thing to do (you are publishing it for *other* projects),
     so this is a note, not an error — but a silent one would look like the
     add had no effect.
@@ -492,13 +492,9 @@ def register(sub) -> None:
         "install",
         help="alias for 'claunch install' (one MCP server + every skill)",
     )
-    q.add_argument("--profile", help="install into this claunch profile")
-    q.add_argument(
-        "--project",
-        nargs="?",
-        const=".",
-        help="install into a project directory (default: current)",
-    )
+    from .cli import add_install_scope_args
+
+    add_install_scope_args(q)
     q.set_defaults(func=_cmd_install)
 
     q = csub.add_parser("example", help="scaffold an example workflow in this project")
@@ -507,21 +503,31 @@ def register(sub) -> None:
 
     q = csub.add_parser(
         "add",
-        help="install a workflow into the shared layer, so every project "
-        "can run it (--project to install into this one instead)",
+        help="install a workflow into the global layer, so every project "
+        "can run it (--project to install into one project instead)",
     )
     q.add_argument(
         "workflow",
         nargs="+",
         help="a .yaml path, or the name of a workflow findable from here "
-        "(which promotes this project's copy to the shared layer)",
+        "(which promotes this project's copy to the global layer)",
     )
     q.add_argument("--name", help="install under this name instead of the file's")
-    q.add_argument(
-        "--project",
+    layer = q.add_mutually_exclusive_group()
+    layer.add_argument(
+        "--global",
+        dest="global_",
         action="store_true",
-        help=f"install into ./{state_mod.PROJECT_WORKFLOWS.as_posix()}/ "
-        f"instead of the shared layer",
+        help="install into the global layer — the default",
+    )
+    layer.add_argument(
+        "--project",
+        nargs="?",
+        const=".",
+        default=None,
+        metavar="DIR",
+        help=f"install into DIR/{state_mod.PROJECT_WORKFLOWS.as_posix()}/ "
+        f"instead (DIR defaults to the current directory)",
     )
     q.add_argument(
         "--force", action="store_true", help="replace a different file already there"

@@ -2,11 +2,22 @@
 
 ``claunch install`` registers a single MCP server — ``claunch mcp``, serving
 the cflow and mesh tools together (see :mod:`claude_launcher.mcp_server`) —
-writes the three skills that teach their protocols, and seeds the shared
-workflow layer with the workflows that ship in the package. That last part is
-what makes ``~/.claude-launcher/workflows/`` a real layer rather than a
-documented empty directory: before it, a workflow was only ever findable from
-the one project directory somebody happened to write it in.
+and writes the three skills that teach their protocols. It does so into one
+of three scopes, and the rule is the same everywhere: an install writes only
+inside its own scope.
+
+- **project** (the default): ``.mcp.json`` and ``.claude/skills/`` in one
+  project directory.
+- **global** (``--global``): the user's own Claude Code setup —
+  ``~/.claude/skills/`` and the user-scope ``.claude.json`` (a *sibling* of
+  ``~/.claude`` in the default layout; see :func:`config.user_claude_json`).
+- **profile** (``--profile``): a claunch-managed isolated config dir.
+
+The global and profile installs additionally seed the machine-wide workflow
+layer (``~/.claude-launcher/workflows/``) with the workflows that ship in the
+package. That seeding is what makes the layer a real thing rather than a
+documented empty directory — but it is machine state, so it belongs to the
+machine-scoped installs; a project install never writes outside its project.
 
 Separate skills, one server, on purpose. A skill's body is loaded whole when
 it triggers, so folding the workflow protocol and the mesh protocol into one
@@ -33,7 +44,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from . import mesh_install, settings
+from . import config, mesh_install, settings
 from .cflow import authoring as cflow_authoring, install as cflow_install
 from .profile import Profile
 
@@ -57,14 +68,23 @@ def mcp_server_def() -> dict:
     return {"command": "claunch", "args": ["mcp"]}
 
 
-def _workflow_lines() -> List[str]:
-    """Report the shared-layer seeding, in the same voice as the rest.
+def _skill_lines(skills_dir: Path) -> List[str]:
+    """Write every skill into ``skills_dir``; report each in the shared voice."""
+    return [
+        f"skill -> {cflow_install.write_skill(skills_dir)}",
+        f"skill -> {cflow_authoring.write_skill(skills_dir)}",
+        f"skill -> {mesh_install.write_skill(skills_dir)}",
+    ]
 
-    Machine-local, not per-profile and not per-project: the shared workflow
-    layer is one directory under the launcher home, so every install writes
-    the same place. Saying so on every install is the point — that directory
-    is where a workflow goes to be available from every project, and nothing
-    else advertises it.
+
+def _workflow_lines() -> List[str]:
+    """Report the global-layer seeding, in the same voice as the rest.
+
+    Machine-local: the global workflow layer is one directory under the
+    launcher home, which is why only the machine-scoped installs (global,
+    profile) call this. Saying so on every such install is the point — that
+    directory is where a workflow goes to be available from every project,
+    and nothing else advertises it.
     """
     lines = []
     for _, dest, outcome in cflow_install.seed_global_workflows():
@@ -75,22 +95,44 @@ def _workflow_lines() -> List[str]:
     return lines
 
 
+def install_into_user() -> List[str]:
+    """Register the MCP server + every skill for the user, globally.
+
+    The user-scope targets of the default (profile-less) Claude Code setup:
+    skills under ``~/.claude/skills``, MCP servers in ``~/.claude.json``.
+    Both honour ``CLAUDE_CONFIG_DIR`` when it is set.
+    """
+    path = config.user_claude_json()
+    settings.merge_mcp_servers_into(
+        path, {MCP_NAME: mcp_server_def()}, remove=LEGACY_MCP_NAMES
+    )
+    skills = config.default_config_dir() / "skills"
+    return (
+        [f"mcp server {MCP_NAME!r} -> {path}"]
+        + _skill_lines(skills)
+        + _workflow_lines()
+    )
+
+
 def install_into_profile(profile: Profile) -> List[str]:
     """Register the MCP server + every skill inside a profile's config dir."""
     settings.merge_mcp_servers(
         profile, {MCP_NAME: mcp_server_def()}, remove=LEGACY_MCP_NAMES
     )
-    skills = profile.config_dir / "skills"
-    return [
-        f"mcp server {MCP_NAME!r} -> {profile.config_dir / settings.CLAUDE_JSON}",
-        f"skill -> {cflow_install.write_skill(skills)}",
-        f"skill -> {cflow_authoring.write_skill(skills)}",
-        f"skill -> {mesh_install.write_skill(skills)}",
-    ] + _workflow_lines()
+    return (
+        [f"mcp server {MCP_NAME!r} -> {profile.config_dir / settings.CLAUDE_JSON}"]
+        + _skill_lines(profile.config_dir / "skills")
+        + _workflow_lines()
+    )
 
 
 def install_into_project(project_dir: Path) -> List[str]:
-    """Register the MCP server (.mcp.json) + every skill (.claude/skills)."""
+    """Register the MCP server (.mcp.json) + every skill (.claude/skills).
+
+    Writes nothing outside ``project_dir`` — in particular it does not seed
+    the global workflow layer; that is the global/profile installs' job
+    (``claunch install`` prints a hint when the layer is empty).
+    """
     project_dir.mkdir(parents=True, exist_ok=True)
     mcp_path = project_dir / ".mcp.json"
     try:
@@ -105,10 +147,6 @@ def install_into_project(project_dir: Path) -> List[str]:
             servers.pop(name, None)
         servers[MCP_NAME] = mcp_server_def()
     mcp_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    skills = project_dir / ".claude" / "skills"
-    return [
-        f"mcp server {MCP_NAME!r} -> {mcp_path}",
-        f"skill -> {cflow_install.write_skill(skills)}",
-        f"skill -> {cflow_authoring.write_skill(skills)}",
-        f"skill -> {mesh_install.write_skill(skills)}",
-    ] + _workflow_lines()
+    return [f"mcp server {MCP_NAME!r} -> {mcp_path}"] + _skill_lines(
+        project_dir / ".claude" / "skills"
+    )

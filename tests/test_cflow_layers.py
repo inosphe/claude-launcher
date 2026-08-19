@@ -1,10 +1,10 @@
 """Where a workflow name resolves, and who gets told which file won.
 
 Two layers answer a name — the project's ``.claunch/workflows/`` and the
-shared ``~/.claude-launcher/workflows/`` — and the nearest one wins. That was
-always true and never tested; what is new is that the shared layer is
-actually populated (by ``claunch install``, and by ``cflow add``), so the
-same name really can exist twice. These tests pin both halves: the
+global ``~/.claude-launcher/workflows/`` — and the nearest one wins. That was
+always true and never tested; what is new is that the global layer is
+actually populated (by ``claunch install --global``, and by ``cflow add``),
+so the same name really can exist twice. These tests pin both halves: the
 resolution, and the reporting of what resolution passed over.
 """
 
@@ -37,7 +37,7 @@ def _write(path, name="tiny", desc="a workflow"):
 
 @pytest.fixture
 def project(tmp_path, monkeypatch, home):
-    """A project directory, with the shared layer pointed somewhere throwaway."""
+    """A project directory, with the global layer pointed somewhere throwaway."""
     proj = tmp_path / "proj"
     proj.mkdir()
     monkeypatch.chdir(proj)
@@ -47,7 +47,7 @@ def project(tmp_path, monkeypatch, home):
 # --------------------------------------------------------------------------- #
 # resolution
 # --------------------------------------------------------------------------- #
-def test_the_shared_layer_answers_when_the_project_does_not(project, home):
+def test_the_global_layer_answers_when_the_project_does_not(project, home):
     _write(home / "workflows" / "tiny.yaml")
     found = state_mod.locate("tiny")
     assert found.path == home / "workflows" / "tiny.yaml"
@@ -97,7 +97,7 @@ def test_an_unknown_name_names_both_layers_it_looked_in(project, home):
 
 
 # --------------------------------------------------------------------------- #
-# what ships, and how it gets to the shared layer
+# what ships, and how it gets to the global layer
 # --------------------------------------------------------------------------- #
 def test_the_packaged_workflows_are_valid_and_current():
     """A shipped default is read as a teaching example; it must not be stale.
@@ -115,8 +115,8 @@ def test_the_packaged_workflows_are_valid_and_current():
         assert not wf.deprecations, f"{name} teaches a deprecated form"
 
 
-def test_install_seeds_the_shared_layer(project, home):
-    lines = install_mod.install_into_project(project)
+def test_a_global_install_seeds_the_global_layer(project, home):
+    lines = install_mod.install_into_user()
     assert [line for line in lines if line.startswith("workflow ->")]
     for name, _ in state_mod.bundled_workflows():
         assert (home / "workflows" / f"{name}.yaml").is_file()
@@ -124,18 +124,26 @@ def test_install_seeds_the_shared_layer(project, home):
     assert "feature-dev" in dict(state_mod.list_workflows())
 
 
+def test_a_project_install_stays_inside_the_project(project, home):
+    """An install writes only inside its scope — the machine layer is the
+    global (and profile) install's business."""
+    lines = install_mod.install_into_project(project)
+    assert not [line for line in lines if line.startswith("workflow ->")]
+    assert not (home / "workflows").exists()
+
+
 def test_reinstalling_does_not_undo_an_edit(project, home):
-    install_mod.install_into_project(project)
+    install_mod.install_into_user()
     edited = home / "workflows" / "feature-dev.yaml"
     edited.write_text("name: mine\nsteps:\n  only:\n    instructions: x\n", "utf-8")
 
-    lines = install_mod.install_into_project(project)
+    lines = install_mod.install_into_user()
     assert edited.read_text(encoding="utf-8").startswith("name: mine")
     assert any("kept; yours differs" in line for line in lines)
 
 
 def test_a_forced_seed_replaces_an_edit(project, home):
-    install_mod.install_into_project(project)
+    install_mod.install_into_user()
     edited = home / "workflows" / "feature-dev.yaml"
     edited.write_text("name: mine\nsteps:\n  only:\n    instructions: x\n", "utf-8")
 
@@ -155,7 +163,7 @@ def test_seeding_reports_an_untouched_copy_as_unchanged(project, home):
 def test_add_promotes_a_project_workflow_by_name(project, home, capsys):
     """The common case: I wrote it here, I want it everywhere.
 
-    By name, not by path — otherwise using the shared layer means knowing
+    By name, not by path — otherwise using the global layer means knowing
     where both layers keep their files, which is the thing nobody knows.
     """
     mine = _write(project / ".claunch" / "workflows" / "tiny.yaml")
@@ -198,6 +206,19 @@ def test_add_can_install_into_the_project_instead(project, home):
     _write(home / "workflows" / "tiny.yaml")
     assert cli.main(["cflow", "add", "tiny", "--project", "--name", "forked"]) == 0
     assert (project / ".claunch" / "workflows" / "forked.yaml").is_file()
+
+
+def test_add_project_takes_a_directory(project, home, tmp_path):
+    _write(home / "workflows" / "tiny.yaml")
+    other = tmp_path / "other-proj"
+    assert cli.main(["cflow", "add", "tiny", "--project", str(other)]) == 0
+    assert (other / ".claunch" / "workflows" / "tiny.yaml").is_file()
+
+
+def test_add_global_is_the_default_and_may_be_spelled_out(project, home):
+    mine = _write(project / ".claunch" / "workflows" / "tiny.yaml")
+    assert cli.main(["cflow", "add", "tiny", "--global"]) == 0
+    assert (home / "workflows" / "tiny.yaml").read_bytes() == mine.read_bytes()
 
 
 def test_add_refuses_one_name_for_several_workflows(project, home, capsys):
@@ -247,8 +268,8 @@ def test_the_recorded_layer_survives_the_file_moving_underneath(project, home):
     """The run's answer is the one that was true when it started.
 
     Deleting the project copy mid-run makes the same name resolve to the
-    shared layer. The run is driving a snapshot of the project file, so
-    reporting it as the shared one would be a lie.
+    global layer. The run is driving a snapshot of the project file, so
+    reporting it as the global one would be a lie.
     """
     _write(home / "workflows" / "tiny.yaml")
     mine = _write(project / ".claunch" / "workflows" / "tiny.yaml")

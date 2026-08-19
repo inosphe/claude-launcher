@@ -12,6 +12,7 @@ import asyncio
 import json
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -1173,11 +1174,11 @@ def test_mesh_install_project(tmp_path, home):
     from claude_launcher import install
 
     done = install.install_into_project(tmp_path)
-    # one server, three skills, and the packaged workflows seeded into the
-    # shared layer (which the `home` fixture has pointed somewhere throwaway)
+    # one server, three skills — and nothing outside the project: workflow
+    # seeding is the global/profile installs' business
     assert len([line for line in done if line.startswith("skill ->")]) == 3
     assert sum(1 for line in done if line.startswith("mcp server")) == 1
-    assert [line for line in done if line.startswith("workflow ->")]
+    assert not [line for line in done if line.startswith("workflow ->")]
     doc = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
     server = doc["mcpServers"]["claunch"]
     assert server["args"][-1] == "mcp"
@@ -1200,6 +1201,33 @@ def test_mesh_install_project(tmp_path, home):
     install.install_into_project(tmp_path)
     doc2 = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
     assert set(doc2["mcpServers"]) == {"claunch", "other"}
+
+
+def test_global_install_targets_the_user_scope(tmp_path, home, monkeypatch):
+    """``--global`` writes where the user's own claude actually reads.
+
+    With CLAUDE_CONFIG_DIR set (the conftest fixture sets it), both the
+    skills and the user-scope ``.claude.json`` live inside that directory.
+    """
+    import os
+
+    from claude_launcher import config, install
+
+    cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    done = install.install_into_user()
+    assert len([line for line in done if line.startswith("skill ->")]) == 3
+    assert [line for line in done if line.startswith("workflow ->")]
+    assert (cfg / "skills" / "mesh" / "SKILL.md").is_file()
+    doc = json.loads((cfg / ".claude.json").read_text(encoding="utf-8"))
+    assert "claunch" in doc["mcpServers"]
+
+    # without CLAUDE_CONFIG_DIR, the user-scope config is ~/.claude.json —
+    # a sibling of ~/.claude, not a file inside it
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR")
+    fake_home = tmp_path / ".fake-user-home"
+    monkeypatch.setattr(config.Path, "home", classmethod(lambda cls: fake_home))
+    assert config.user_claude_json() == fake_home / ".claude.json"
+    assert config.default_config_dir() == fake_home / ".claude"
 
 
 def test_install_supersedes_the_split_servers(tmp_path, home):
