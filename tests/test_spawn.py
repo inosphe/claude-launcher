@@ -43,6 +43,8 @@ def test_child_inherits_everything_that_decides_what_runs():
         "cwd": "/tmp/project",
         "args": ["--flag"],
         "env": {"A": "1"},
+        "borrow": None,
+        "null_token": False,
     }
 
 
@@ -78,6 +80,58 @@ def test_env_is_merged_over_the_parents_not_replaced():
         policy, {"env": {"B": "2"}}, parent=PARENT, depth=0, children=0
     )
     assert child["env"] == {"A": "1", "B": "2"}
+
+
+# --------------------------------------------------------------------------- #
+# auth: borrow shares profile's gate, null has none
+# --------------------------------------------------------------------------- #
+def test_borrow_is_gated_behind_allow_profile():
+    """Same gate as profile because it is the same question — whose login
+    does the child hold. The denial names the key that grants it."""
+    with pytest.raises(spawn.SpawnDenied) as exc:
+        spawn.check(
+            _policy(), {"borrow": "lender"}, parent=PARENT, depth=0, children=0
+        )
+    assert "spawn.allow_profile" in str(exc.value)
+
+
+def test_an_unlocked_borrow_travels_and_replaces_inherited_tokenlessness():
+    policy = _policy(allow_profile=True)
+    parent = {**PARENT, "null_token": True}
+    child = spawn.check(
+        policy, {"borrow": "lender"}, parent=parent, depth=0, children=0
+    )
+    assert child["borrow"] == "lender"
+    assert child["null_token"] is False
+
+
+def test_null_is_never_gated_and_replaces_an_inherited_borrow():
+    """--null takes a credential away rather than granting one, so the
+    shipped (all-locked) policy still allows it."""
+    parent = {**PARENT, "borrow": "lender"}
+    child = spawn.check(
+        _policy(), {"null_token": True}, parent=parent, depth=0, children=0
+    )
+    assert child["null_token"] is True
+    assert child["borrow"] is None
+
+
+def test_a_child_authenticates_the_way_its_parent_does():
+    parent = {**PARENT, "borrow": "lender"}
+    child = spawn.check(_policy(), {}, parent=parent, depth=0, children=0)
+    assert child["borrow"] == "lender"
+
+
+def test_a_harness_swap_drops_the_inherited_auth_with_the_args():
+    """borrow/null are claude-only machinery; dragged onto another harness
+    they would fail the spawn over a field nobody in the request named."""
+    policy = _policy(allow_harness=["codex"])
+    parent = {**PARENT, "borrow": "lender", "null_token": False}
+    child = spawn.check(
+        policy, {"harness": "codex"}, parent=parent, depth=0, children=0
+    )
+    assert child["borrow"] is None
+    assert child["null_token"] is False
 
 
 # --------------------------------------------------------------------------- #
@@ -226,6 +280,29 @@ def test_capabilities_stays_quiet_about_workspaces_when_locked(tmp_path):
     )
     assert "workspace" not in report["may_choose"]
     assert "workspaces" not in report
+
+
+def test_capabilities_lists_the_profiles_only_when_the_field_is_unlocked():
+    """Same courtesy as workspaces: profile names live in a registry the
+    agent cannot read, so an unlocked field names its options."""
+    from claude_launcher import profile
+
+    profile.create("work")
+    profile.create("other")
+    report = spawn.capabilities(_policy(), depth=0, children=0)
+    assert "profile" not in report["may_choose"]
+    assert "borrow" not in report["may_choose"]
+    assert "profiles" not in report
+
+    report = spawn.capabilities(_policy(allow_profile=True), depth=0, children=0)
+    assert "profile" in report["may_choose"]
+    assert "borrow" in report["may_choose"]  # the same unlock covers both
+    assert report["profiles"] == ["other", "work"]
+
+
+def test_capabilities_always_offers_null_token():
+    report = spawn.capabilities(_policy(), depth=0, children=0)
+    assert "null_token" in report["may_choose"]
 
 
 # --------------------------------------------------------------------------- #
@@ -428,8 +505,10 @@ def test_new_session_refuses_from_inside_a_session_and_writes_the_spawn_line(
     # that sent the caller to the wrong door in the first place
     assert "claunch spawn -s coder --workspace hq" in err
     assert "--role coder" in err and "--workflow ecs-change" in err
-    # ...and the two fields that stop being the caller's business
-    assert "--profile nc is dropped" in err
+    # ...and the field that now needs the policy's say-so travels with the
+    # note naming the key that grants it
+    assert "--profile nc" in err
+    assert "spawn.allow_profile" in err
     assert "no --mesh needed" in err
 
 
@@ -477,6 +556,83 @@ def test_detached_is_the_way_out(monkeypatch, tmp_path):
     assert reached["body"]["name"] == "solo"
     # nobody's child: --detached does not smuggle a parent through
     assert "parent" not in reached["body"]
+
+
+def test_cli_spawn_sends_the_gated_fields_it_grew(monkeypatch, tmp_path):
+    """--profile/--null/--env and the arg remainder all travel in the request;
+    whether they are allowed stays the daemon's call, not this command's."""
+    from claude_launcher import cli, daemon_client
+
+    reached = {}
+
+    class _Client:
+        base_url = "http://x"
+
+        def get(self, path):
+            return {}
+
+        def post(self, path, body=None):
+            reached["path"], reached["body"] = path, body
+            return {"session": {"name": "kid", "cwd": str(tmp_path)}}
+
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: _Client())
+
+    assert cli.main([
+        "spawn", "--parent", "lead", "-s", "kid", "--profile", "other",
+        "--null", "--env", "K=V", "--", "--model", "opus",
+    ]) == 0
+    assert reached["path"] == "/api/sessions/lead/children"
+    body = reached["body"]
+    assert body["profile"] == "other"
+    assert body["null_token"] is True
+    assert body["env"] == {"K": "V"}
+    assert body["args"] == ["--model", "opus"]
+
+    assert cli.main(["spawn", "--parent", "lead", "--borrow", "lender"]) == 0
+    assert reached["body"]["borrow"] == "lender"
+    # unset flags must not travel as empty keys the daemon then gates on
+    for absent in ("null_token", "args", "env", "profile"):
+        assert absent not in reached["body"], absent
+
+
+def test_cli_spawn_refuses_null_with_borrow_at_the_parser(capsys):
+    from claude_launcher import cli
+
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["spawn", "--null", "--borrow", "x"])
+    assert "not allowed with" in capsys.readouterr().err
+
+
+def test_new_session_carries_its_auth_choice_to_the_daemon(monkeypatch, tmp_path):
+    from claude_launcher import cli, daemon_client
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    reached = {}
+
+    class _Client:
+        base_url = "http://x"
+
+        def get(self, path):
+            return {}
+
+        def post(self, path, body=None):
+            reached["body"] = body
+            return {"name": "s", "harness": "claude", "profile": "nc"}
+
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: _Client())
+
+    assert cli.main([
+        "new-session", "--profile", "nc", "-c", str(tmp_path), "--borrow",
+        "lender",
+    ]) == 0
+    assert reached["body"]["borrow"] == "lender"
+    assert "null_token" not in reached["body"]
+
+    assert cli.main([
+        "new-session", "--profile", "nc", "-c", str(tmp_path), "--null",
+    ]) == 0
+    assert reached["body"]["null_token"] is True
+    assert "borrow" not in reached["body"]
 
 
 def test_outside_a_session_new_session_is_untouched(monkeypatch, tmp_path):

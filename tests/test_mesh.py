@@ -1427,6 +1427,17 @@ def test_mesh_mcp_tools(home, monkeypatch):
     assert "'session' is required" in resp["result"]["content"][0]["text"]
 
 
+def test_every_offered_spawn_field_is_forwarded():
+    """A field the schema offers but the forwarder drops is a silent no-op
+    the caller reads as 'the daemon ignored me' — the two lists must not
+    drift apart (worktree once did exactly that)."""
+    from claude_launcher import mesh_mcp
+
+    spawn_tool = next(t for t in mesh_mcp.TOOLS if t["name"] == "spawn")
+    offered = set(spawn_tool["inputSchema"]["properties"])
+    assert offered <= set(mesh_mcp._SPAWN_KEYS)
+
+
 def test_cursors_phase1_format_migrates(home, tmp_path):
     _register_py_harness()
 

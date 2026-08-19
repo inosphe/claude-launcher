@@ -422,13 +422,15 @@ def _my_handle(members: list) -> str:
 #: reaching the daemon as a field it silently ignores.
 #:
 #: A few of these are deliberately *not* in the tool schema: ``cwd``,
-#: ``profile``, ``args`` and ``env`` are honoured if a caller supplies them
-#: (the CLI does), but they are not offered, because the offered way to move
-#: a child is ``workspace`` — a pick from the registry rather than a path
-#: spelled from memory.
+#: ``profile``, ``borrow``, ``null_token``, ``args`` and ``env`` are honoured
+#: if a caller supplies them (the CLI does), but they are not offered,
+#: because the offered way to move a child is ``workspace`` — a pick from
+#: the registry rather than a path spelled from memory — and the auth
+#: fields are the policy's to unlock, not the schema's to advertise.
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "connect", "workflow", "context",
-    "task", "harness", "workspace", "profile", "cwd", "args", "env",
+    "task", "harness", "workspace", "worktree", "rebase_onto",
+    "profile", "borrow", "null_token", "cwd", "args", "env",
 )
 
 

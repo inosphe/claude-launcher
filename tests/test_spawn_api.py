@@ -550,6 +550,44 @@ def test_an_unregistered_workspace_is_refused_with_403(home, tmp_path):
     asyncio.run(run())
 
 
+def test_a_borrow_is_refused_by_the_stock_policy_with_403(home, tmp_path):
+    """The policy (403, ask for the unlock) speaks before the definition
+    layer (400, wrong harness) ever sees the request."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "borrow": "lender"},
+                headers=BEARER,
+            )
+            assert resp.status == 403
+            assert "spawn.allow_profile" in (await resp.json())["error"]
+            assert mgr.children("lead") == []
+
+            # null_token passes the policy (never gated) and is then refused
+            # by the definition layer: a py harness has no token machinery.
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w2", "null_token": True},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            assert "claude harness" in (await resp.json())["error"]
+            assert mgr.children("lead") == []
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_an_exited_parent_cannot_spawn(home, tmp_path):
     _register_py_harness()
 
