@@ -168,11 +168,17 @@ def _locked_op(fn):
 # helpers
 # --------------------------------------------------------------------------- #
 def _base(state: dict) -> dict:
-    return {
+    base = {
         "run": state["run_id"],
         "workflow": state["workflow"],
         "steps_completed": state["completed"],
     }
+    # Which pass of a recurring workflow this run is. Absent on round 1 (and
+    # on every run of a non-recurring workflow) so the common case stays as
+    # it always read.
+    if int(state.get("round") or 1) > 1:
+        base["round"] = int(state["round"])
+    return base
 
 
 def _visits(state: dict, step_id: str) -> int:
@@ -553,10 +559,56 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
         state["status"] = "done"
         state_mod.save_state(state, cwd)
         state_mod.journal("done", {"run": state["run_id"]}, cwd)
+        if workflow.recur:
+            _request_next_round(state, cwd)
         return
     state["current"] = target
     state["visits"][target] = _visits(state, target) + 1
     state_mod.save_state(state, cwd)
+
+
+def _request_next_round(state: dict, cwd) -> None:
+    """A recurring run's normal end files the start request for its round + 1.
+
+    Recurrence is a property of the run's LIFECYCLE, not of the graph: every
+    round still reaches a real termination, and what loops is that finishing
+    asks — through the same request channel a human uses — for the workflow
+    to be started again. The driving agent performs that start itself, exactly
+    as it does for a human's request, so the single-writer rule holds and each
+    round gets its own run, visit counters and journal. A human stops the loop
+    between rounds by withdrawing the request ('claunch cflow request
+    --cancel', or the dashboard) and mid-round by aborting or archiving: an
+    aborted run never comes through here, which is precisely what makes those
+    the off switch.
+    """
+    if state_mod.read_request(cwd):
+        # Somebody asked for something while this round was finishing. Their
+        # request outranks the loop's own — recurrence must never overwrite a
+        # person's declared intent.
+        return
+    source = str(state.get("source") or "")
+    if not source:
+        return  # a legacy run with no recorded source cannot restart itself
+    request = {
+        "id": f"req-{secrets.token_hex(3)}",
+        # The snapshot's own file, not the name: a name can resolve to a
+        # different layer between rounds, and the loop that was started is
+        # the one that should keep running. Edits to that file DO take
+        # effect — each round re-reads and re-snapshots it.
+        "workflow": source,
+        "name": state["workflow"],
+        "resolved": source,
+        "context": str(state.get("context") or ""),
+        "by": "recur",
+        "round": int(state.get("round") or 1) + 1,
+        "at": state_mod.utcnow(),
+    }
+    state_mod.write_request(request, cwd)
+    state_mod.journal(
+        "recur_requested",
+        {"run": state["run_id"], "request": request["id"], "round": request["round"]},
+        cwd,
+    )
 
 
 def _done_payload(state: dict, cwd: Optional[str]) -> dict:
@@ -566,12 +618,24 @@ def _done_payload(state: dict, cwd: Optional[str]) -> dict:
         for e in entries
         if e.get("event") == "step_completed"
     ]
-    return {
+    payload = {
         **_base(state),
         "status": state["status"],  # done | aborted
         "journal": summaries,
         "note": "workflow finished; report the journal to the user",
     }
+    pending = state_mod.read_request(cwd)
+    if pending:
+        payload["pending_start"] = pending
+        if pending.get("by") == "recur":
+            payload["note"] = (
+                "round finished; this workflow recurs — report this round's "
+                "journal to the user, then start the next round: call 'start' "
+                "with exactly the requested workflow and context. Do not "
+                "invent a reason to stop: only a human ends the loop "
+                "('claunch cflow request --cancel', or archiving the run)"
+            )
+    return payload
 
 
 def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: bool) -> dict:
@@ -913,6 +977,20 @@ def start(
     text = path.read_text(encoding="utf-8")
     workflow = model.parse(text, default_name=path.stem)
 
+    fulfilled = bool(pending) and (
+        pending.get("workflow") == workflow_ref
+        or pending.get("resolved") == str(path)
+    )
+    # Fulfilling a recurring run's own request carries its round count into
+    # the new run; every other start — a human's request, a fresh loop, a
+    # non-recurring workflow — is round 1 again.
+    round_no = 1
+    if fulfilled and pending.get("by") == "recur":
+        try:
+            round_no = max(1, int(pending.get("round") or 1))
+        except (TypeError, ValueError):
+            round_no = 1
+
     state = {
         "run_id": f"run-{secrets.token_hex(4)}",
         "workflow": workflow.name,
@@ -937,6 +1015,7 @@ def start(
         "completed": 0,
         "visits": {workflow.start: 1},
         "loop_extensions": {},
+        "round": round_no,
     }
     state_mod.snapshot_workflow(text, cwd)
     state_mod.save_state(state, cwd)
@@ -952,16 +1031,15 @@ def start(
             "context": context or "",
             "total_steps": workflow.step_count(),
             "warnings": workflow.warnings,
+            **({"round": round_no} if round_no > 1 else {}),
         },
         cwd,
     )
-    # A start settles any pending human request for this slot — whether it
-    # fulfils it or (starting something else) supersedes it. Either way the
-    # request must not survive to be "fulfilled" a second time.
+    # A start settles any pending request for this slot — a human's or a
+    # recurring run's own — whether it fulfils it or (starting something
+    # else) supersedes it. Either way the request must not survive to be
+    # "fulfilled" a second time.
     if pending:
-        fulfilled = pending.get("workflow") == workflow_ref or (
-            pending.get("resolved") == str(path)
-        )
         state_mod.journal(
             "request_fulfilled" if fulfilled else "request_superseded",
             {

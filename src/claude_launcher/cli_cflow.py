@@ -62,7 +62,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
     path = state_mod.find_workflow(args.workflow)
     wf = model.load(path)
     print(f"{wf.name} — {wf.description}  [{path}]")
-    print(f"start: {wf.start}    max_visits: {wf.max_visits}")
+    recur = "    recur: yes (each finished round requests the next)" if wf.recur else ""
+    print(f"start: {wf.start}    max_visits: {wf.max_visits}{recur}")
     for s in wf.steps.values():
         flags = []
         if s.gate:

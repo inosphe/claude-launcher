@@ -8,6 +8,7 @@ and loops need no duplicated content::
     description: ...
     start: design           # optional (defaults to the first step)
     max_visits: 25          # optional loop guard (per step, per run)
+    recur: true             # optional: a finished round requests the next one
     steps:
       design:
         instructions: |
@@ -51,6 +52,12 @@ Termination: omitting ``next`` (or the reserved target ``end``) ends the run.
 Cycles are legal (they model iteration; a select is the loop exit) but are
 **warned** about; a workflow whose start cannot reach any termination is an
 **error** — at least one reachable end must be described.
+
+``recur: true`` is how a service loop is written without hiding one in the
+graph: every round still reaches a real end, and a run that terminates
+normally files the start request for its next round (see the engine). The
+repetition is a property of the run's lifecycle, stopped by a human — never
+a cycle the reachability rule would have to excuse.
 
 Delegated decisions
 -------------------
@@ -238,6 +245,13 @@ class Workflow:
     start: str
     steps: Dict[str, Step]
     max_visits: int = DEFAULT_MAX_VISITS
+    #: A service loop: a run that terminates normally files a start request
+    #: for its next round instead of going quiet. The graph is untouched —
+    #: every round must still reach a real end, so ``max_visits`` keeps
+    #: meaning the rework budget *within* a round — and stopping is a human
+    #: act (withdraw the request, or abort/archive mid-round), never the
+    #: driving agent's decision.
+    recur: bool = False
     warnings: List[str] = field(default_factory=list)
     #: Superseded spellings this file still uses. Kept apart from
     #: :attr:`warnings` on purpose: a warning describes a graph that may
@@ -285,6 +299,9 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         raise WorkflowError("'max_visits' must be an integer")
     if max_visits < 1:
         raise WorkflowError("'max_visits' must be >= 1")
+    recur = doc.get("recur", False)
+    if not isinstance(recur, bool):
+        raise WorkflowError("'recur' must be true or false")
 
     workflow = Workflow(
         name=str(doc.get("name") or default_name),
@@ -292,6 +309,7 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         start=start,
         steps=steps,
         max_visits=max_visits,
+        recur=recur,
         warnings=[],
     )
     _validate_graph(workflow)
@@ -301,6 +319,7 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         start=workflow.start,
         steps=workflow.steps,
         max_visits=workflow.max_visits,
+        recur=workflow.recur,
         warnings=_graph_warnings(workflow),
         deprecations=_deprecations(workflow),
     )
