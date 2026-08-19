@@ -111,6 +111,35 @@ workflow to be started here), that is the answer; otherwise list candidates
    and stop. A recur request is never wrong to fulfil — it is the loop the
    workflow declared. The request clears once you start.
 
+## A new task is a new run
+
+A run is one task — the context it started with. When a user message is a
+genuinely NEW requirement (a different feature, an unrelated fix, "actually
+do X instead") rather than feedback on the current work, do not fold it into
+the run: reports filed while moonlighting describe work the workflow never
+asked for, and the journal stops being a true account. Refuse explicitly —
+say the new task is outside this run and why — then get the old run retired
+and a fresh one started:
+
+- Run still ACTIVE: present the choice; the user makes it. Either finish
+  the current run first and bring the new task after, or retire the run
+  now — the user archives it (`! claunch cflow archive`, or the
+  dashboard's Archive button) and you `start` fresh with the new task as
+  context, or the user gives the explicit go-ahead for `start` with
+  `force: true` (aborts + archives; state and journal are kept). Never
+  absorb the task silently, never force on your own initiative.
+- Run FINISHED (done/aborted): it is closed — do not stretch it to cover
+  new work, and do not do the task bare when it is the kind of work the
+  declared workflows exist for. Report the finished run's journal if you
+  have not yet, then guide the start: propose the workflow and context
+  (`/cflow <name> <context>`), and call `start` once the user confirms.
+  `start` archives the finished run automatically; nothing is lost.
+- NOT new tasks: clarifications, corrections to the current step's work,
+  answers to questions you raised, scope the user adjusts within the same
+  goal. Those stay in the run. A `pending_start` is also not this
+  section's case — it is already an explicit request; follow the protocol
+  above.
+
 ## Answering for someone else
 
 Other sessions' runs may delegate a decision to your role — anything you are
@@ -152,6 +181,16 @@ run. Both are refused; neither is a thing to work around.
   holds for a delegated decision: `answer` acts on OTHER sessions' runs and
   refuses your own, so there is no arrangement of tool calls that unblocks
   a gate on you.
+- The human's `claunch cflow ...` commands find the run from wherever their
+  shell stands: the CLI walks up from the shell's directory (a chat
+  session's `!` shell is often pinned inside a git worktree under the
+  project root, while the run is keyed to the root) and, when a session is
+  named (`-t` or the session env), falls back to the machine's run
+  registry. If the user still gets "no active cflow run", the fix is
+  `-t <session-name>` (this session's name — see the payload or
+  `$CLAUNCH_SESSION`), or running the command from the run's own directory.
+  Relay exactly that; do not invent flags or have them hunt for
+  directories.
 - Gates and selects apply on every visit, and so do delegated decisions: a
   loop that passes an `ask` twice asks twice, and the second answer may
   differ from the first.
@@ -168,7 +207,10 @@ run. Both are refused; neither is a thing to work around.
   active run and archives it (state + journal are kept, not lost). Never
   pass `force` on your own initiative.
 - Finished (done/aborted) runs never block: `start` archives them
-  automatically and begins the new run.
+  automatically and begins the new run. That is the mechanics only —
+  whether to start one for a task the user just handed you is decided
+  per "A new task is a new run" above: close out the old run, confirm
+  the workflow with the user, then start.
 - A run can be replaced under you (someone archived it and started another,
   or started one from the dashboard). Then a tool answers that the run you
   were driving *is not the run here any more* — nothing was applied. Do not

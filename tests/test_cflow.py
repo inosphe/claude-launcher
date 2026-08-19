@@ -922,6 +922,50 @@ steps:
         model.parse(bad)
 
 
+def test_a_finished_run_says_a_new_task_needs_a_new_run(flow_dir):
+    """Every tool call on a done run funnels through the done payload, so the
+    rule arrives with the tool answer itself — an agent handed a fresh task
+    after 'done' is told to close out and confirm a new start with the user,
+    even when the skill has fallen out of a long context."""
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    _advance("one done")
+    payload = _advance("two done")
+    assert payload["status"] == "done"
+    assert "NEW run" in payload["note"]
+    assert "closed" in payload["note"]
+    # status after the fact re-serves the same guidance
+    assert "NEW run" in engine.status()["note"]
+
+
+def test_a_requested_start_is_not_bounced_back_at_its_author(flow_dir):
+    """With a human's pending_start on the slot, 'confirm with the user'
+    would send the request back at the person who filed it — the note points
+    at the request instead."""
+    _write(flow_dir, "linear", LINEAR)
+    engine.start("linear")
+    _advance("one done")
+    _advance("two done")
+    engine.request_start("linear", "next task", by="web")
+    note = engine.status()["note"]
+    assert "start was requested" in note
+    assert "NEW run" not in note
+
+
+def test_the_skill_states_that_a_new_task_is_a_new_run():
+    """The refusal itself is the agent's to make (only it sees the chat), so
+    the skill must spell out both halves: refuse to fold a new task into a
+    standing run, and route the cleanup through the user."""
+    from claude_launcher.cflow import install as cflow_install
+
+    text = " ".join(cflow_install.SKILL_MD.split())
+    assert "A new task is a new run" in text
+    assert "Refuse explicitly" in text
+    assert "claunch cflow archive" in text
+    assert "call `start` once the user confirms" in text
+    assert "never force on your own initiative" in text
+
+
 def test_recur_round_finishes_and_requests_the_next(flow_dir):
     _write(flow_dir, "heartbeat", RECUR)
     payload = engine.start("heartbeat", "serve the queue")

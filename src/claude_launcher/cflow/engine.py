@@ -105,6 +105,18 @@ NUDGE_STARTED = (
 )
 
 
+def _t_hint() -> str:
+    """Appended to CLI commands relayed to a human, for the shell that stands
+    somewhere else entirely. From anywhere in or under the run's directory the
+    CLI finds the run by itself (it walks up, then checks the run registry for
+    a named session) — but a chat session's ``!`` shell can be pinned to an
+    unrelated path, and there the session must be named."""
+    scope = state_mod.current_scope()
+    if scope == state_mod.DEFAULT_SCOPE:
+        return ""
+    return f"; if the shell reports no run here, add '-t {scope}'"
+
+
 def nudge_for_request(workflow: str) -> str:
     return (
         f"cflow: a start of workflow '{workflow}' was requested - call the "
@@ -504,20 +516,20 @@ def _ask_payload(base: dict, ask: dict) -> dict:
         payload["prompt"] = ask["prompt"]
         payload["options"] = ask["options"]
         payload["how_to_unblock"] = (
-            "a human must choose with 'claunch cflow select <option>' (inside "
-            "a chat session: '! claunch cflow select <option>') or an option "
-            "button on the daemon web dashboard. Stop your turn, present your "
-            "recommendation and reasoning, and wait to be nudged."
+            f"a human must choose with 'claunch cflow select <option>' (inside "
+            f"a chat session: '! claunch cflow select <option>'{_t_hint()}) or "
+            f"an option button on the daemon web dashboard. Stop your turn, "
+            f"present your recommendation and reasoning, and wait to be nudged."
         )
     else:
         payload["status"] = "waiting_approval"
         payload["reason"] = "ask"
         payload["gate"] = ask["prompt"]
         payload["how_to_unblock"] = (
-            "a human must approve: 'claunch cflow approve' in this directory "
-            "(inside a chat session: '! claunch cflow approve') or the Approve "
-            "button on the daemon web dashboard; the agent cannot approve. "
-            "Stop your turn, present your work so far, and wait to be nudged."
+            f"a human must approve: 'claunch cflow approve' (inside a chat "
+            f"session: '! claunch cflow approve'{_t_hint()}) or the Approve "
+            f"button on the daemon web dashboard; the agent cannot approve. "
+            f"Stop your turn, present your work so far, and wait to be nudged."
         )
     if unresolved:
         payload["note"] = (
@@ -622,7 +634,18 @@ def _done_payload(state: dict, cwd: Optional[str]) -> dict:
         **_base(state),
         "status": state["status"],  # done | aborted
         "journal": summaries,
-        "note": "workflow finished; report the journal to the user",
+        # Every tool call on a finished run funnels through here, so this is
+        # where the run says so itself: an agent handed a new task after
+        # 'done' must not stretch the closed run to cover it, and must not
+        # start a new one over the user's head. The skill states the same
+        # rule ("a new task is a new run"), but a skill can fall out of a
+        # long context — the payload cannot.
+        "note": (
+            "workflow finished; report the journal to the user. This run is "
+            "closed — do not keep working under it. A NEW task needs a NEW "
+            "run: confirm the workflow with the user, then call 'start' "
+            "(finished runs are archived automatically, journal kept)"
+        ),
     }
     pending = state_mod.read_request(cwd)
     if pending:
@@ -634,6 +657,14 @@ def _done_payload(state: dict, cwd: Optional[str]) -> dict:
                 "with exactly the requested workflow and context. Do not "
                 "invent a reason to stop: only a human ends the loop "
                 "('claunch cflow request --cancel', or archiving the run)"
+            )
+        else:
+            # A human already asked for the next run; telling the agent to go
+            # ask again would bounce the request back at its own author.
+            payload["note"] = (
+                "workflow finished, and a start was requested here (see "
+                "pending_start) — report this run's journal to the user, "
+                "then perform the requested start per the protocol"
             )
     return payload
 
@@ -662,10 +693,11 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
                 f"(limit {_limit(workflow, state, step.id)})"
             ),
             "how_to_unblock": (
-                "a human must extend the loop limit: 'claunch cflow approve' "
-                "(inside a chat session: '! claunch cflow approve') or the "
-                "Approve button on the daemon web dashboard. Stop your turn, "
-                "explain why the loop keeps repeating, and wait to be nudged."
+                f"a human must extend the loop limit: 'claunch cflow approve' "
+                f"(inside a chat session: '! claunch cflow approve'{_t_hint()}) "
+                f"or the Approve button on the daemon web dashboard. Stop your "
+                f"turn, explain why the loop keeps repeating, and wait to be "
+                f"nudged."
             ),
         }
         if mutate and state.get("gate_logged") != f"loop:{step.id}:{visit}":
@@ -691,11 +723,12 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
             ),
             "declined": declined,
             "how_to_unblock": (
-                "the workflow declares no route for a decline, so the run is "
-                "held. A human decides what happens: 'claunch cflow approve' "
-                "to override and enter anyway, or 'claunch cflow goto <step>' "
-                "to send the run somewhere else. Stop your turn, relay the "
-                "refusal and its reason to the user, and wait to be nudged."
+                f"the workflow declares no route for a decline, so the run is "
+                f"held. A human decides what happens: 'claunch cflow approve' "
+                f"to override and enter anyway, or 'claunch cflow goto <step>' "
+                f"to send the run somewhere else{_t_hint()}. Stop your turn, "
+                f"relay the refusal and its reason to the user, and wait to be "
+                f"nudged."
             ),
         }
 
@@ -707,11 +740,11 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
             "reason": "gate",
             "gate": step.gate,
             "how_to_unblock": (
-                "a human must approve: 'claunch cflow approve' in this "
-                "directory (inside a chat session: '! claunch cflow approve') "
-                "or the Approve button on the daemon web dashboard; the agent "
-                "cannot approve. Stop your turn, present your work so far, and "
-                "wait to be nudged."
+                f"a human must approve: 'claunch cflow approve' (inside a chat "
+                f"session: '! claunch cflow approve'{_t_hint()}) or the "
+                f"Approve button on the daemon web dashboard; the agent "
+                f"cannot approve. Stop your turn, present your work so far, "
+                f"and wait to be nudged."
             ),
         }
         if mutate and state.get("gate_logged") != f"gate:{step.id}:{visit}":
@@ -795,11 +828,11 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
                 "options": options,
                 "proposal": pending,
                 "how_to_unblock": (
-                    "a human must confirm with 'claunch cflow select <option>' "
-                    "(inside a chat session: '! claunch cflow select <option>') "
-                    "or an option button on the daemon web dashboard. Stop "
-                    "your turn, present your recommendation and reasoning, "
-                    "and wait to be nudged."
+                    f"a human must confirm with 'claunch cflow select "
+                    f"<option>' (inside a chat session: '! claunch cflow "
+                    f"select <option>'{_t_hint()}) or an option button on the "
+                    f"daemon web dashboard. Stop your turn, present your "
+                    f"recommendation and reasoning, and wait to be nudged."
                 ),
             }
         payload = {
