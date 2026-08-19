@@ -142,6 +142,15 @@ def test_reinstalling_does_not_undo_an_edit(project, home):
     assert any("kept; yours differs" in line for line in lines)
 
 
+def test_a_reinstall_reports_the_layer_as_up_to_date(project, home):
+    """Unchanged files get no line each, but not silence either — silence
+    reads as an omission ('did it skip the workflows?')."""
+    install_mod.install_into_user()
+    lines = install_mod.install_into_user()
+    assert not [line for line in lines if line.startswith("workflow ->")]
+    assert any(line.startswith("workflow layer -> up to date") for line in lines)
+
+
 def test_a_forced_seed_replaces_an_edit(project, home):
     install_mod.install_into_user()
     edited = home / "workflows" / "feature-dev.yaml"

@@ -506,10 +506,21 @@ def add_install_scope_args(parser: argparse.ArgumentParser) -> None:
         "MCP config) and seed the global workflow layer",
     )
     scope.add_argument("--profile", help="install into this profile's config dir")
+    scope.add_argument(
+        "--all-profile",
+        "--all",
+        dest="all_",
+        action="store_true",
+        help="install into every existing profile (not the user's global "
+        "setup; that stays --global)",
+    )
 
 
 def run_install(
-    profile_name: Optional[str], project: Optional[str], global_: bool = False
+    profile_name: Optional[str],
+    project: Optional[str],
+    global_: bool = False,
+    all_: bool = False,
 ) -> int:
     """Register the MCP server and every skill — the body of ``claunch install``.
 
@@ -520,7 +531,12 @@ def run_install(
     from . import install as install_mod
     from .cflow import state as cflow_state
 
-    if global_:
+    if all_:
+        done = install_mod.install_into_all_profiles()
+        if not done:
+            print("note: no profiles exist; nothing to install into")
+            return 0
+    elif global_:
         done = install_mod.install_into_user()
     elif profile_name:
         done = install_mod.install_into_profile(profile.require(profile_name))
@@ -528,7 +544,7 @@ def run_install(
         done = install_mod.install_into_project(Path(project or ".").resolve())
     for line in done:
         print(f"installed: {line}")
-    if not global_ and not profile_name:
+    if not global_ and not profile_name and not all_:
         # A project install stays inside its project; if nothing has seeded
         # the machine's workflow layer yet, say where that happens.
         if not any(cflow_state.global_workflows_dir().glob("*.y*ml")):
@@ -541,7 +557,7 @@ def run_install(
 
 
 def _cmd_install(args: argparse.Namespace) -> int:
-    return run_install(args.profile, args.project, args.global_)
+    return run_install(args.profile, args.project, args.global_, args.all_)
 
 
 def _cmd_mcp(_args: argparse.Namespace) -> int:
@@ -946,7 +962,8 @@ def build_parser() -> argparse.ArgumentParser:
         "install",
         help="give an agent the claunch toolkit: register the MCP server "
         "(workflow + mesh + team-building tools) and write the /cflow, "
-        "/mesh and commit-stamp skills (--project, --global, or --profile)",
+        "/mesh and commit-stamp skills (--project, --global, --profile, "
+        "or --all-profile)",
     )
     add_install_scope_args(p_install)
     p_install.set_defaults(func=_cmd_install)

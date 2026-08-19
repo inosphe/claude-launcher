@@ -22,6 +22,7 @@ Setup — pick the scope:
 claunch install                         # this project (.mcp.json + .claude/skills)
 claunch install --global                # you, everywhere (~/.claude/skills + user MCP)
 claunch install --profile work          # one claunch profile
+claunch install --all-profile           # every existing profile (alias: --all)
 ```
 
 The `--global` (and `--profile`) install also seeds the global layer with the

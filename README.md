@@ -1606,11 +1606,12 @@ up child sessions — arrives in **one install**:
 claunch install                    # this project: .mcp.json + .claude/skills
 claunch install --global           # the user: ~/.claude/skills + user-scope MCP
 claunch install --profile work     # or a profile's config dir
+claunch install --all-profile      # every existing profile (alias: --all)
 ```
 
 | Command | Description |
 | ------- | ----------- |
-| `install [--project [DIR] \| --global \| --profile P]` | Register the MCP server and write the `/cflow`, `/cflow-author`, `/mesh` and `commit-stamp` skills into one scope: a project (the default), the user globally, or a profile. `--global` and `--profile` also seed the global workflow layer. Supersedes the separate `cflow`/`mesh` server entries an earlier version registered — they are removed, not left running alongside. Restart claude afterwards. |
+| `install [--project [DIR] \| --global \| --profile P \| --all-profile]` | Register the MCP server and write the `/cflow`, `/cflow-author`, `/mesh` and `commit-stamp` skills into one scope: a project (the default), the user globally, or a profile. `--all-profile` (alias `--all`) is a profile install into every profile that exists — profiles are isolated config dirs, so a global install never reaches them; it does not touch the user's global setup. `--global`, `--profile` and `--all-profile` also seed the global workflow layer. Supersedes the separate `cflow`/`mesh` server entries an earlier version registered — they are removed, not left running alongside. Restart claude afterwards. |
 | `mcp` | The stdio MCP server itself (spawned by claude, not by hand): `start`/`report`/`next`/`select`/`status` from cflow, `send`/`members`/`history` plus `spawn`/`children`/`connect`/`disconnect` from mesh. |
 
 | Skill | Triggers on | Teaches |

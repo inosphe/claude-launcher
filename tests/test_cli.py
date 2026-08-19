@@ -23,6 +23,8 @@ def test_install_scopes_are_mutually_exclusive(home, capsys, tmp_path, monkeypat
         run("cflow", "install", "--global", "--profile", "work")
     with pytest.raises(SystemExit):
         run("mesh", "install", "--global", "--project")
+    with pytest.raises(SystemExit):
+        run("install", "--all", "--profile", "work")
 
 
 def test_install_global_through_the_cli(home, capsys, tmp_path, monkeypatch):
@@ -34,6 +36,44 @@ def test_install_global_through_the_cli(home, capsys, tmp_path, monkeypatch):
     assert "workflow ->" in out
     cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
     assert (cfg / "skills" / "cflow" / "SKILL.md").is_file()
+
+
+def test_install_all_profile_covers_every_profile_but_not_global(home, capsys, tmp_path, monkeypatch):
+    import json
+    import os
+
+    monkeypatch.chdir(tmp_path)
+    run("create", "work", "--no-seed")
+    run("create", "play", "--no-seed")
+    capsys.readouterr()
+    assert run("install", "--all-profile") == 0
+    out = capsys.readouterr().out
+    # each profile got its own MCP registration and skills
+    for name in ("work", "play"):
+        pdir = config.profiles_dir() / name
+        assert (pdir / "skills" / "cflow" / "SKILL.md").is_file()
+        servers = json.loads((pdir / ".claude.json").read_text(encoding="utf-8"))["mcpServers"]
+        assert "claunch" in servers
+    # the machine-wide workflow layer is seeded, but the user's global
+    # setup is left alone — that stays --global's job
+    assert "workflow ->" in out
+    cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
+    assert not (cfg / "skills" / "cflow" / "SKILL.md").exists()
+
+
+def test_install_all_is_an_alias_of_all_profile(home, capsys, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    run("create", "work", "--no-seed")
+    capsys.readouterr()
+    assert run("install", "--all") == 0
+    pdir = config.profiles_dir() / "work"
+    assert (pdir / "skills" / "cflow" / "SKILL.md").is_file()
+
+
+def test_install_all_profile_without_profiles_says_so(home, capsys, tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert run("install", "--all-profile") == 0
+    assert "no profiles exist" in capsys.readouterr().out
 
 
 def test_a_project_install_hints_at_the_empty_global_layer(home, capsys, tmp_path, monkeypatch):

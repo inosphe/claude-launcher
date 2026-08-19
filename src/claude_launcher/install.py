@@ -14,6 +14,13 @@ inside its own scope.
   ``~/.claude`` in the default layout; see :func:`config.user_claude_json`).
 - **profile** (``--profile``): a claunch-managed isolated config dir.
 
+``--all-profile`` (alias ``--all``) is not a fourth scope but the profile
+scope fanned out: a profile install into every profile that exists, and
+nothing else — in particular not the global install. It exists because a
+profile is *isolated* — nothing global ever reaches it — so covering every
+profile is otherwise one command per profile, forgotten as soon as the next
+profile is created.
+
 The global and profile installs additionally seed the machine-wide workflow
 layer (``~/.claude-launcher/workflows/``) with the workflows that ship in the
 package. That seeding is what makes the layer a real thing rather than a
@@ -87,13 +94,22 @@ def _workflow_lines() -> List[str]:
     profile) call this. Saying so on every such install is the point — that
     directory is where a workflow goes to be available from every project,
     and nothing else advertises it.
+
+    An unchanged file gets no line of its own, but total silence reads as an
+    omission — so when nothing was seeded or kept, one summary line says the
+    layer is already up to date.
     """
     lines = []
+    unchanged = 0
     for _, dest, outcome in cflow_install.seed_global_workflows():
         if outcome == cflow_install.KEPT:
             lines.append(f"workflow -> {dest} (kept; yours differs from the packaged one)")
         elif outcome == cflow_install.SEEDED:
             lines.append(f"workflow -> {dest}")
+        else:
+            unchanged += 1
+    if not lines and unchanged:
+        lines.append(f"workflow layer -> up to date ({unchanged} workflows)")
     return lines
 
 
@@ -116,16 +132,39 @@ def install_into_user() -> List[str]:
     )
 
 
-def install_into_profile(profile: Profile) -> List[str]:
-    """Register the MCP server + every skill inside a profile's config dir."""
+def _profile_lines(profile: Profile) -> List[str]:
+    """The profile-scoped writes: MCP registration + skills, nothing global."""
     settings.merge_mcp_servers(
         profile, {MCP_NAME: mcp_server_def()}, remove=LEGACY_MCP_NAMES
     )
-    return (
-        [f"mcp server {MCP_NAME!r} -> {profile.config_dir / settings.CLAUDE_JSON}"]
-        + _skill_lines(profile.config_dir / "skills")
-        + _workflow_lines()
-    )
+    return [
+        f"mcp server {MCP_NAME!r} -> {profile.config_dir / settings.CLAUDE_JSON}"
+    ] + _skill_lines(profile.config_dir / "skills")
+
+
+def install_into_profile(profile: Profile) -> List[str]:
+    """Register the MCP server + every skill inside a profile's config dir."""
+    return _profile_lines(profile) + _workflow_lines()
+
+
+def install_into_all_profiles() -> List[str]:
+    """A profile install into every existing profile, in one pass.
+
+    A profile is an isolated ``CLAUDE_CONFIG_DIR``, so a global install never
+    reaches it — covering every profile means writing each in turn. The user's
+    own global setup is deliberately not touched; that stays ``--global``'s
+    job. The workflow layer is machine-wide and is seeded once rather than
+    re-reported per profile — and not at all when there is no profile to
+    install into.
+    """
+    from . import profile as profile_mod
+
+    lines: List[str] = []
+    for p in profile_mod.list_all():
+        lines += _profile_lines(p)
+    if not lines:
+        return []
+    return lines + _workflow_lines()
 
 
 def install_into_project(project_dir: Path) -> List[str]:

@@ -385,7 +385,7 @@ def _cmd_install(args: argparse.Namespace) -> int:
 
     print("note: 'cflow install' is now 'claunch install'; installing every "
           "skill and the merged MCP server")
-    return run_install(args.profile, args.project, args.global_)
+    return run_install(args.profile, args.project, args.global_, args.all_)
 
 
 def _cmd_example(args: argparse.Namespace) -> int:
