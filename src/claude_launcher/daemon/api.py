@@ -20,7 +20,7 @@ from aiohttp import web
 from .. import __version__, harnesses as harness_registry
 from .. import profile as profile_mod, spawn as spawn_mod, workspaces
 from .. import worktree as worktree_mod
-from . import onboard
+from . import onboard, rebrief
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
@@ -248,6 +248,12 @@ def build_app(
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
+    # One composition, two verbs: GET hands the text to whoever will read it
+    # into context (the SessionStart hook, the MCP tool, the CLI); POST types
+    # it into the terminal — the operator's push for a session that does not
+    # know it needs one.
+    r.add_get("/api/sessions/{name}/rebrief", h_session_rebrief)
+    r.add_post("/api/sessions/{name}/rebrief", h_session_rebrief)
     r.add_get("/api/sessions/{name}/capture", h_session_capture)
     r.add_get("/api/sessions/{name}/wait", h_session_wait)
     r.add_post("/api/sessions/{name}/resize", h_session_resize)
@@ -1914,6 +1920,27 @@ async def h_session_deliver(request: web.Request) -> web.Response:
         return json_error(400, "'text' must be a non-empty string")
     delivered = await session.deliver(text)
     return web.json_response({"ok": True, "delivered": delivered})
+
+
+async def h_session_rebrief(request: web.Request) -> web.Response:
+    """The session's re-briefing, composed fresh from daemon state.
+
+    See :mod:`rebrief` for what goes in it and why. GET returns the text and
+    touches nothing — the SessionStart hook prints it to claude, the MCP tool
+    and CLI hand it to the agent that asked. POST delivers the same text into
+    the session's own terminal instead, best-effort like every delivery; an
+    empty composition is reported rather than typed, so pressing the button on
+    a bare session does not paste an empty message into it.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    block = rebrief.compose(name, manager=manager, mesh_mgr=_mesh_mgr(request))
+    if request.method == "GET":
+        return web.json_response({"session": name, "block": block})
+    if not block:
+        return web.json_response({"ok": True, "delivered": False, "empty": True})
+    delivered = await manager.get(name).deliver(block)
+    return web.json_response({"ok": True, "delivered": delivered, "empty": False})
 
 
 async def h_session_capture(request: web.Request) -> web.Response:

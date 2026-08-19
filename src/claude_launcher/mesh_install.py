@@ -203,7 +203,15 @@ left mail hanging.
 
 ## Recovery (after compaction or restart)
 
-Membership lives in the daemon and survives; your context may not. Recover:
+Membership lives in the daemon and survives; your context may not. The whole
+of it comes back in one call: the `rebrief` tool (or `claunch rebrief`)
+re-derives your memberships and roster, the replies you owe, your cflow run,
+your parent and children and your recorded opening task from the daemon's
+current state. Managed claude sessions also run it automatically — a
+SessionStart hook fires it on /compact and /clear — so if a rebrief block is
+already on screen, act on that instead of asking again.
+
+The pieces, if you need one alone:
 
 1. SESSION = `CLAUNCH_SESSION` env var.
 2. `claunch mesh ls` — the meshes on this daemon.

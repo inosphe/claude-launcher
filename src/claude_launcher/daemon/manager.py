@@ -229,6 +229,10 @@ class SessionManager:
                     # child's resolved cwd to work it out can stage first and
                     # :meth:`assign_identity` before launching.
                     "identity": identity,
+                    # Recorded, not (re)played: the live copy goes in once via
+                    # the opening block, and this record is what lets a
+                    # re-briefing restate it after a compaction (see rebrief).
+                    "task": str(request.get("task") or ""),
                 }
             )
         )

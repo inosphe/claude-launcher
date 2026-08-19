@@ -1345,8 +1345,9 @@ def test_mesh_mcp_tools(home, monkeypatch):
     assert [t["name"] for t in tools["result"]["tools"]] == [
         # talking ...
         "send", "members", "history",
-        # ... and building the team that does it: made, counted, ended, wired
-        "spawn", "children", "kill", "connect", "disconnect",
+        # ... building the team that does it: made, counted, re-oriented,
+        # ended, wired
+        "spawn", "children", "rebrief", "kill", "connect", "disconnect",
     ]
 
     # send requires a session identity

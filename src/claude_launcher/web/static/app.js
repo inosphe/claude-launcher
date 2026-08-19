@@ -949,6 +949,35 @@ $("term-resume").addEventListener("click", async () => {
   finally { btn.disabled = false; }
 });
 
+/* Rebrief: have the daemon re-derive this session's briefing (mesh roster,
+   owed replies, cflow position, parent/children, opening task) and type it
+   into the terminal — the operator's push for an agent whose context was
+   cleared or compacted and does not know what it lost. The automatic path is
+   the SessionStart hook every managed claude session carries; this button is
+   for the cases the hook cannot cover (another harness, a hook that was
+   stripped, or "I can see it flailing right now"). */
+$("term-rebrief").addEventListener("click", async () => {
+  if (!currentName) return;
+  const btn = $("term-rebrief");
+  btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(currentName)}/rebrief`,
+      { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      alert(info.error || `HTTP ${resp.status}`);
+      return;
+    }
+    if (info.empty) {
+      alert("nothing to re-brief: this session has no mesh membership, " +
+            "no cflow run, no parent or children, and no recorded task");
+    }
+  } catch { /* auth overlay is up */ }
+  finally { btn.disabled = false; }
+});
+
 /* ------------------------------------------------------------------ */
 /* terminal attachment                                                */
 /* ------------------------------------------------------------------ */
@@ -960,6 +989,9 @@ function setStatusBadge(status) {
   // kill what it actually is there: dropping the daemon's record of it.
   const exited = status === "exited";
   $("term-resume").classList.toggle("hidden", !exited);
+  // Rebrief types into a live terminal; on an exited one there is nobody to
+  // read it, so the button yields its spot to resume.
+  $("term-rebrief").classList.toggle("hidden", exited);
   const kill = $("term-kill");
   kill.textContent = exited ? "remove" : "kill";
   kill.title = exited

@@ -14,6 +14,7 @@ modelled here too.
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import uuid
@@ -38,6 +39,27 @@ _NESTED_SESSION_MARKERS = (
     "CLAUDE_CODE_ENTRYPOINT",
     "CLAUDE_CODE_SSE_PORT",
 )
+
+#: Injected on every claude spawn (``--settings``): a SessionStart hook that
+#: fires on ``compact`` and ``clear`` — the two moments the transcript-carried
+#: half of a session's briefing is lost while the process lives on — and whose
+#: stdout claude reads back into context. That makes re-briefing deterministic
+#: instead of resting on the agent remembering, post-loss, that it should ask.
+#: One static command with no arguments: the hook process inherits
+#: ``CLAUNCH_SESSION`` (exported below), which is all ``claunch rebrief``
+#: needs to find its session, and a command that never varies survives every
+#: shell claude may run hooks under. The composition itself is the daemon's
+#: (see :mod:`rebrief`); this is only the trigger.
+REBRIEF_HOOK_SETTINGS = {
+    "hooks": {
+        "SessionStart": [
+            {
+                "matcher": "compact|clear",
+                "hooks": [{"type": "command", "command": "claunch rebrief"}],
+            }
+        ]
+    }
+}
 
 
 class HarnessError(Exception):
@@ -104,6 +126,13 @@ class SessionDef:
     #: any inherited ``CLAUDE_CODE_OAUTH_TOKEN`` is cleared, so claude starts
     #: unauthenticated (log in with /login). claude harness only.
     null_token: bool = False
+    #: The opening task, kept as a *record*. The live copy went in exactly
+    #: once, on the first spawn (:func:`build_command`'s ``opening``), and is
+    #: never replayed — this field changes nothing about that. It exists so a
+    #: re-briefing can restate what the session was asked to do after its
+    #: context is compacted or cleared (see :mod:`rebrief`), which was the one
+    #: piece of a session's setup that nothing could reconstruct.
+    task: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -124,6 +153,7 @@ class SessionDef:
             "identity": self.identity,
             "borrow": self.borrow,
             "null_token": self.null_token,
+            "task": self.task,
         }
 
     @classmethod
@@ -146,6 +176,7 @@ class SessionDef:
             identity=str(data.get("identity") or "").strip() or None,
             borrow=str(data.get("borrow") or "").strip() or None,
             null_token=bool(data.get("null_token")),
+            task=str(data.get("task") or "").strip() or None,
         )
 
 
@@ -348,6 +379,14 @@ def build_command(
             borrow=borrow_prof, null_token=sdef.null_token,
         )
         argv = [launcher_config.claude_bin()]
+        # The rebrief hook, on every spawn and restore for the same reason the
+        # system prompt is: it lives in the process, not the transcript. First
+        # among the flags because a bare --resume must stay last (claude reads
+        # a trailing bare flag as "open the picker"). Withheld when the caller
+        # steers settings itself — two --settings on one command line leaves
+        # claude to pick, and the caller's must win.
+        if "--settings" not in sdef.args:
+            argv.extend(["--settings", json.dumps(REBRIEF_HOOK_SETTINGS)])
         if not steers_conversation(sdef.args):
             if restoring:
                 if sdef.conversation_id:

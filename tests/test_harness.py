@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 
 import pytest
@@ -393,3 +394,50 @@ def test_a_harness_with_no_prompt_argument_is_not_given_one(home, tmp_path):
     assert "take the API" not in argv
     assert harness.takes_opening_argv("h") is False
     assert harness.takes_opening_argv(harness.CLAUDE_HARNESS) is True
+
+
+def test_task_is_a_recorded_field(home):
+    """The opening task is kept on the definition — the one piece of a
+    session's setup a re-briefing could not otherwise reconstruct."""
+    sdef = SessionDef.from_dict({"name": "x", "task": "do the thing"})
+    assert sdef.task == "do the thing"
+    assert SessionDef.from_dict(sdef.to_dict()).task == "do the thing"
+    assert SessionDef.from_dict({"name": "x", "task": "  "}).task is None
+    assert SessionDef.from_dict({"name": "x"}).task is None
+
+
+def test_rebrief_hook_rides_on_every_claude_spawn(home, tmp_path):
+    """The SessionStart hook lives in the process like the system prompt, so
+    it is re-injected on restores too — and it fires only on the two events
+    that lose the transcript-carried briefing."""
+    profile.create("work")
+    sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+    for restoring in (False, True):
+        argv, _, _ = harness.build_command(sdef, restoring=restoring)
+        settings = json.loads(argv[argv.index("--settings") + 1])
+        (entry,) = settings["hooks"]["SessionStart"]
+        assert entry["matcher"] == "compact|clear"
+        assert entry["hooks"] == [{"type": "command", "command": "claunch rebrief"}]
+
+
+def test_callers_own_settings_suppress_the_hook(home, tmp_path):
+    """Two --settings on one command line leaves claude to pick one; the
+    caller's must win, so ours stays home."""
+    profile.create("work")
+    sdef = harness.normalize(
+        SessionDef(
+            name="x", profile="work", cwd=str(tmp_path),
+            args=("--settings", "{}"),
+        )
+    )
+    argv, _, _ = harness.build_command(sdef)
+    assert argv.count("--settings") == 1
+
+
+def test_non_claude_harness_gets_no_settings_flag(home, tmp_path):
+    """--settings is claude's flag; handed to another harness it is a stray
+    argument, exactly like the opening prompt would be."""
+    _declare_harness("h")
+    sdef = harness.normalize(SessionDef(name="x", harness="h", cwd=str(tmp_path)))
+    argv, _, _ = harness.build_command(sdef)
+    assert "--settings" not in argv

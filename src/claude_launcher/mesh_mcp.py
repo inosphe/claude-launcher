@@ -236,6 +236,19 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "rebrief",
+        "description": (
+            "Re-read this session's own briefing, composed fresh from the "
+            "daemon: mesh memberships and current roster, replies you owe, "
+            "the cflow run you drive, your parent and children, and your "
+            "recorded opening task. Call it whenever your context was "
+            "compacted or cleared and the state of your session is no longer "
+            "in it — the result is the current truth, not a summary of what "
+            "you used to know."
+        ),
+        "inputSchema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "kill",
         "description": (
             "End a session you spawned (or one of its descendants) and give "
@@ -339,6 +352,8 @@ def call_tool(name: str, args: dict) -> dict:
     # messaging tools share.
     if name == "children":
         return _client().get(f"/api/sessions/{_session()}/children")
+    if name == "rebrief":
+        return _client().get(f"/api/sessions/{_session()}/rebrief")
     if name == "spawn":
         return _spawn(args)
     if name == "kill":

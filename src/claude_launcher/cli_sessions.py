@@ -450,6 +450,37 @@ def _print_onboarding(result: dict) -> None:
         print("  opening task will be typed in once it settles")
 
 
+def _cmd_rebrief(args: argparse.Namespace) -> int:
+    """Print a session's re-briefing — the SessionStart hook's whole job.
+
+    Every claude session's hook runs this bare on ``compact``/``clear`` (see
+    :data:`harness.REBRIEF_HOOK_SETTINGS`), and claude reads the stdout back
+    into context — so stdout carries the block and nothing else, and a session
+    with nothing to be told prints nothing there. The aside goes to stderr,
+    for the human running it by hand: silence would read as the command
+    failing, when it is the answer.
+    """
+    name = args.session or os.environ.get("CLAUNCH_SESSION")
+    if not name:
+        print(
+            "error: no session: pass --session NAME, or run this inside a "
+            "managed session (which sets $CLAUNCH_SESSION)",
+            file=sys.stderr,
+        )
+        return 2
+    client = daemon_client.ensure_running()
+    block = client.get(f"/api/sessions/{name}/rebrief").get("block") or ""
+    if not block:
+        print(
+            f"(nothing to re-brief for {name!r}: no mesh membership, no cflow "
+            "run, no parent or children, no recorded task)",
+            file=sys.stderr,
+        )
+        return 0
+    print(block)
+    return 0
+
+
 def _by_lineage(sessions):
     """Order sessions parent-before-child, yielding ``(session, depth)``.
 
@@ -1143,6 +1174,18 @@ def register(sub) -> None:
         help="seconds of screen quiet that count as idle (default: daemon setting)",
     )
     p_wait.set_defaults(func=_cmd_wait_for)
+
+    p_rebrief = sub.add_parser(
+        "rebrief",
+        help="print a session's current briefing (mesh, run, parent, task), "
+             "re-derived from the daemon -- run automatically by the claude "
+             "SessionStart hook after /compact or /clear, and by hand after "
+             "any context loss",
+    )
+    p_rebrief.add_argument(
+        "--session", help="session to brief (default: $CLAUNCH_SESSION)"
+    )
+    p_rebrief.set_defaults(func=_cmd_rebrief)
 
     p_kill = sub.add_parser(
         "kill-session", help="kill a running session (or remove an exited one)"
