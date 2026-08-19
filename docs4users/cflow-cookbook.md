@@ -191,6 +191,12 @@ Driving a review pass from the chat:
 ! claunch cflow select rework      # or: select accept
 ```
 
+These commands find the run from wherever your shell happens to stand: the
+CLI walks up from the current directory (a chat's `!` shell is often pinned
+inside a git worktree under the project root, while the run is keyed to the
+root), and `-t <session>` targets a session's run from anywhere on the
+machine via the run registry.
+
 **Loop guards.** Independent of your exits, every step has a per-run visit
 cap (`max_visits`, default 25). Reaching it pauses the run like a gate
 (`status: waiting_approval`, `reason: loop_limit`); `claunch cflow approve`
