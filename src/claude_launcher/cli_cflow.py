@@ -18,21 +18,85 @@ from . import daemon_client
 from .cflow import engine, install, model, responders, state as state_mod
 
 
-def _resolve_scope(args: argparse.Namespace):
-    """Which run to operate on: -t/--session > $CLAUNCH_SESSION > the only
-    run in this directory. Ambiguity is an error, not a guess."""
-    explicit = getattr(args, "session", None)
-    if explicit:
-        return str(explicit)
-    if os.environ.get(state_mod.SESSION_ENV):
-        return None  # the ambient session scope applies
-    scopes = state_mod.scopes_in()
-    if len(scopes) > 1:
-        raise engine.CflowError(
-            f"multiple cflow runs in this directory ({', '.join(scopes)}); "
-            "pick one with -t/--session"
+def _note_redirect(cwd, scope: str) -> None:
+    print(f"note: using the cflow run at {cwd} (session {scope})")
+
+
+def _no_run_message(want) -> str:
+    here = state_mod.resolve_cwd()
+    what = (
+        f"no cflow run for session {want!r}" if want else "no active cflow run"
+    )
+    runs = state_mod.known_runs()
+    if runs:
+        listing = ", ".join(f"{c} [{s}]" for c, s in runs)
+        return (
+            f"{what} in {here} or any parent directory; known runs: {listing} "
+            f"(pick one with -t <session>, or run this from its directory)"
         )
-    return scopes[0] if scopes else None
+    return (
+        f"{what} in {here} or any parent directory (start one with the "
+        f"cflow 'start' tool or see 'claunch cflow ls')"
+    )
+
+
+def _resolve_run(args: argparse.Namespace, *, required: bool = True):
+    """Which run to operate on, as a ``(scope, cwd)`` pair for the engine.
+
+    The scope: -t/--session > $CLAUNCH_SESSION > the directory's only run.
+    The directory: this one — unless it holds no matching run. The shell a
+    human types these commands into often stands somewhere other than the
+    run's directory (the classic case: a chat session's ``!`` shell pinned
+    inside a git worktree under the project root, while the run is keyed to
+    the root), so before giving up the run is looked for where it could
+    actually live: the nearest ancestor directory holding one, then — when a
+    session was named (flag or env), which identifies the run machine-wide —
+    the run registry. A redirect is printed, never silent; ambiguity is an
+    error, not a guess.
+
+    ``required=False`` (status, request): a miss falls back to (scope, here)
+    so "idle here" stays an answer, and a request may create a fresh slot.
+    """
+    explicit = getattr(args, "session", None)
+    want = str(explicit) if explicit else os.environ.get(state_mod.SESSION_ENV)
+    here = Path(state_mod.resolve_cwd())
+
+    if want:
+        for cwd in (here, *here.parents):
+            if want in state_mod.scopes_in(str(cwd)):
+                if cwd == here:
+                    return want, None
+                _note_redirect(cwd, want)
+                return want, str(cwd)
+        hits = sorted({c for c, s in state_mod.known_runs() if s == want})
+        if len(hits) == 1:
+            _note_redirect(hits[0], want)
+            return want, hits[0]
+        if len(hits) > 1:
+            raise engine.CflowError(
+                f"session {want!r} has cflow runs in several directories "
+                f"({', '.join(hits)}); run this command from the right one"
+            )
+        if required:
+            raise engine.CflowError(_no_run_message(want))
+        return want, None
+
+    for cwd in (here, *here.parents):
+        scopes = state_mod.scopes_in(str(cwd))
+        if not scopes:
+            continue
+        if len(scopes) > 1:
+            raise engine.CflowError(
+                f"multiple cflow runs in {cwd} ({', '.join(scopes)}); "
+                "pick one with -t/--session"
+            )
+        if cwd == here:
+            return scopes[0], None
+        _note_redirect(cwd, scopes[0])
+        return scopes[0], str(cwd)
+    if required:
+        raise engine.CflowError(_no_run_message(None))
+    return None, None
 
 
 def _cmd_ls(_args: argparse.Namespace) -> int:
@@ -129,8 +193,8 @@ def _cmd_asks(args: argparse.Namespace) -> int:
 
 
 def _cmd_status(args: argparse.Namespace) -> int:
-    scope = _resolve_scope(args)
-    payload = engine.status(scope=scope)
+    scope, cwd = _resolve_run(args, required=False)
+    payload = engine.status(cwd=cwd, scope=scope)
     if args.json:
         _print_payload(payload)
         return 0
@@ -144,7 +208,7 @@ def _cmd_status(args: argparse.Namespace) -> int:
         # request counts as a scope now, and "runs exist for: default" while
         # standing in default is noise.
         here = scope or state_mod.current_scope()
-        others = [s for s in state_mod.scopes_in() if s != here]
+        others = [s for s in state_mod.scopes_in(cwd) if s != here]
         if others:
             print(f"runs exist for: {', '.join(others)} (use -t <session>)")
         return 0
@@ -199,41 +263,43 @@ def _print_pending(pending: dict) -> None:
 
 def _cmd_request(args: argparse.Namespace) -> int:
     """Ask the scope's agent to start a workflow (it performs the start)."""
-    scope = _resolve_scope(args)
+    scope, cwd = _resolve_run(args, required=False)
     if args.cancel:
-        payload = engine.cancel_request(by="user", scope=scope)
+        payload = engine.cancel_request(by="user", scope=scope, cwd=cwd)
         print(f"withdrew the pending start of {payload['request'].get('workflow')!r}")
         return 0
     if not args.workflow:
         raise engine.CflowError("a workflow name is required (or pass --cancel)")
     payload = engine.request_start(
-        args.workflow, args.context, by="user", scope=scope
+        args.workflow, args.context, by="user", scope=scope, cwd=cwd
     )
     request = payload["request"]
     _report_unblock(
         f"requested a start of {request['name']!r}",
         engine.nudge_for_request(request["workflow"]),
         scope,
+        cwd,
     )
     return 0
 
 
-def _nudge_via_daemon(message: str, scope) -> list:
+def _nudge_via_daemon(message: str, scope, cwd) -> list:
     """Type a resume nudge into the run's own session (scope == session name).
 
-    The run being unblocked is always the one in THIS directory, so that is
-    the cwd half of the pair; see :func:`responders.nudge` for the rest.
+    The cwd half of the pair is the run's own directory — where
+    :func:`_resolve_run` found it, which is not necessarily where this shell
+    stands; see :func:`responders.nudge` for the rest.
     """
     try:
         return responders.nudge(
-            scope or state_mod.current_scope(), message, cwd=str(Path.cwd())
+            scope or state_mod.current_scope(), message, cwd=cwd or str(Path.cwd())
         )
     except Exception:
         return []  # a nudge is a convenience; never fail a CLI action on it
 
 
-def _report_unblock(action: str, message: str, scope) -> None:
-    nudged = _nudge_via_daemon(message, scope)
+def _report_unblock(action: str, message: str, scope, cwd) -> None:
+    nudged = _nudge_via_daemon(message, scope, cwd)
     if nudged:
         print(f"{action}; nudged session(s): {', '.join(nudged)}")
     else:
@@ -241,29 +307,30 @@ def _report_unblock(action: str, message: str, scope) -> None:
 
 
 def _cmd_approve(args: argparse.Namespace) -> int:
-    scope = _resolve_scope(args)
-    payload = engine.approve(by="user", scope=scope)
+    scope, cwd = _resolve_run(args)
+    payload = engine.approve(by="user", scope=scope, cwd=cwd)
     _report_unblock(
         f"approved gate at step {payload.get('step_id')!r}",
         engine.NUDGE_APPROVED,
         scope,
+        cwd,
     )
     return 0
 
 
 def _cmd_select(args: argparse.Namespace) -> int:
-    scope = _resolve_scope(args)
-    payload = engine.select(args.option, args.reason, by="user", scope=scope)
+    scope, cwd = _resolve_run(args)
+    payload = engine.select(args.option, args.reason, by="user", scope=scope, cwd=cwd)
     if payload.get("status") in ("done", "aborted"):
         print(f"selected {args.option!r}; workflow is {payload['status']}")
     else:
-        _report_unblock(f"selected {args.option!r}", engine.NUDGE_SELECTED, scope)
+        _report_unblock(f"selected {args.option!r}", engine.NUDGE_SELECTED, scope, cwd)
     return 0
 
 
 def _cmd_goto(args: argparse.Namespace) -> int:
-    scope = _resolve_scope(args)
-    payload = engine.goto(args.step, by="user", reason=args.reason, scope=scope)
+    scope, cwd = _resolve_run(args)
+    payload = engine.goto(args.step, by="user", reason=args.reason, scope=scope, cwd=cwd)
     if payload.get("status") in ("done", "aborted"):
         print(f"workflow forced to {payload['status']}")
         return 0
@@ -271,18 +338,21 @@ def _cmd_goto(args: argparse.Namespace) -> int:
         f"current step forced to {args.step!r} (visit {payload.get('visit')})",
         engine.nudge_for_state(args.step),
         scope,
+        cwd,
     )
     return 0
 
 
 def _cmd_abort(args: argparse.Namespace) -> int:
-    payload = engine.abort(by="user", scope=_resolve_scope(args))
+    scope, cwd = _resolve_run(args)
+    payload = engine.abort(by="user", scope=scope, cwd=cwd)
     print(f"aborted run {payload.get('run')}")
     return 0
 
 
 def _cmd_archive(args: argparse.Namespace) -> int:
-    payload = engine.archive(by="user", scope=_resolve_scope(args))
+    scope, cwd = _resolve_run(args)
+    payload = engine.archive(by="user", scope=scope, cwd=cwd)
     print(f"archived run {payload.get('run')} -> {payload.get('archived_to')}")
     if payload.get("was") not in ("done", "aborted"):
         print("note: the run was still active; it was aborted before archiving")
@@ -291,13 +361,15 @@ def _cmd_archive(args: argparse.Namespace) -> int:
 
 
 def _cmd_reset(args: argparse.Namespace) -> int:
-    engine.reset(scope=_resolve_scope(args))
+    scope, cwd = _resolve_run(args)
+    engine.reset(cwd=cwd, scope=scope)
     print("cleared cflow run state (journal kept)")
     return 0
 
 
 def _cmd_journal(args: argparse.Namespace) -> int:
-    entries = state_mod.read_journal(scope=_resolve_scope(args))
+    scope, cwd = _resolve_run(args)
+    entries = state_mod.read_journal(cwd, scope=scope)
     for entry in entries[-args.tail :] if args.tail else entries:
         print(json.dumps(entry, ensure_ascii=False))
     return 0
@@ -418,8 +490,9 @@ def register(sub) -> None:
         parser.add_argument(
             "-t",
             "--session",
-            help="target this session's run (default: $CLAUNCH_SESSION, or "
-            "the directory's only run)",
+            help="target this session's run, wherever on this machine it "
+            "lives (default: $CLAUNCH_SESSION, or the nearest run in or "
+            "above this directory)",
         )
         return parser
 
