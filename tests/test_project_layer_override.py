@@ -30,29 +30,56 @@ OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
 
 #: Which step each override arms, and how strictly this file may say so.
 #: The worker's is pinned to the letter here because this file and it are
-#: edited together. The leader's rules are only checked for existence: that
-#: file is owned by the branch reworking the leader workflow, and asserting
-#: its final form from here would paint this suite red until that lands —
-#: the tightening belongs in the change that makes it true.
+#: edited together; the leader's is checked by prefix, so a change to its
+#: workflow does not paint this suite red before it lands.
 ARMED = {"improv-worker": "review", "improv-leader": "integrate"}
+
+# Both gates run against a venv that is already there. A worker's worktree
+# builds its venv once during the work ('uv sync --extra test'), and that one
+# sync also installs the xdist that -n 8 needs; after it, re-syncing inside a
+# verify is a side effect that really did block the gate — sync cannot replace
+# the claunch.exe a running daemon holds open (os error 5). So both are
+# --no-sync, and --extra test goes with the sync it belonged to.
+WORKER_SUITE = 'uv run --no-sync pytest tests -q -m "not worktree"'
+LEADER_SUITE = 'uv run --no-sync pytest tests -q'
 
 
 def test_the_worker_override_verifies_without_touching_the_environment():
     """The worker's gate command, spelled out — every word of it load-bearing.
 
-    ``--no-sync`` because a verify that re-installs the venv is a verify with
-    a side effect, and that side effect really did block the gate: sync
-    cannot replace the ``claunch.exe`` a running daemon holds open. The
-    basetemp is short (deep worktree paths under a long one hit Windows'
-    path limit) and per-session (pytest empties its basetemp at startup, so
-    a shared one has concurrent workers deleting each other's runs).
+    ``--no-sync`` keeps the verify from re-installing the venv out from under
+    a running daemon. ``-n 8`` is the measured ceiling (see
+    ``test_the_verify_runs_bounded_parallel``). The basetemp is short (deep
+    worktree paths under a long one hit Windows' path limit) and per-session
+    (pytest empties its basetemp at startup, so a shared one has concurrent
+    workers deleting each other's runs).
     """
     verify = model.load(OVERRIDES / "improv-worker.yaml").steps["review"].verify
     assert verify is not None, "the worker override lost its verify"
     assert verify.command == (
-        'uv run --no-sync pytest tests -q -m "not worktree" '
+        'uv run --no-sync pytest tests -q -m "not worktree" -n 8 '
         '--basetemp="C:/t/%CLAUNCH_SESSION%"'
     )
+
+
+@pytest.mark.parametrize(
+    "stem, step_id, suite",
+    [
+        ("improv-worker", "review", WORKER_SUITE),
+        ("improv-leader", "integrate", LEADER_SUITE),
+    ],
+)
+def test_the_override_carries_this_repos_suite_as_its_verify(
+    stem, step_id, suite
+):
+    wf = model.load(OVERRIDES / f"{stem}.yaml")
+    assert wf.name == stem
+    verify = wf.steps[step_id].verify
+    assert verify is not None, f"{stem}:{step_id} lost its verify"
+    assert verify.command.startswith(suite)
+    # basetemp keeps concurrent verifies out of each other's temp trees (and
+    # off the default %TEMP%, which has bitten this machine's permissions).
+    assert "--basetemp=" in verify.command
 
 
 def test_each_override_still_arms_its_step(stem="improv-leader"):

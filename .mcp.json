@@ -1,0 +1,12 @@
+{
+  "mcpServers": {
+    "claunch": {
+      "command": "cmd",
+      "args": [
+        "/c",
+        "claunch",
+        "mcp"
+      ]
+    }
+  }
+}
