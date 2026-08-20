@@ -10,6 +10,7 @@ browser history.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import secrets
 import time
@@ -280,6 +281,21 @@ async def _close_websockets(app: web.Application) -> None:
     for ws in set(app["websockets"]):
         try:
             await ws.close(code=WSCloseCode.GOING_AWAY, message=b"daemon shutdown")
+        except Exception:
+            pass
+
+
+async def notify_shutdown(app: web.Application) -> None:
+    """Tell every terminal viewer the daemon itself is going down.
+
+    Must be sent before the sessions are terminated: once ``shutdown_all``
+    kills a child, viewers receive the same ``exit`` frame a program dying on
+    its own would produce, and an attached CLI would give the wrong advice
+    (respawn) for what is really a daemon stop/restart (reattach).
+    """
+    for ws in set(app["websockets"]):
+        try:
+            await ws.send_str(json.dumps({"type": "shutdown"}))
         except Exception:
             pass
 

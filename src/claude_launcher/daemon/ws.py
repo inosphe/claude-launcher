@@ -15,7 +15,10 @@ Protocol (matches the SPA's app.js and any non-browser client):
   (resend the current screen — used by viewers on focus regain, since another
   viewer may have resized the session meanwhile), ``{"type":"ping"}``.
   server: ``{"type":"state","status":...}``, ``{"type":"exit","code":...}``,
-  ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"pong"}``.
+  ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"pong"}``, and
+  ``{"type":"shutdown"}`` — the daemon itself is stopping/restarting, sent
+  before its sessions are terminated so a viewer can tell this apart from the
+  session's program exiting on its own.
 
 Auth: the route sits under ``/api/``, so the shared middleware enforces the
 Bearer header (CLI/scripts — WebSocket client libraries can set headers) or

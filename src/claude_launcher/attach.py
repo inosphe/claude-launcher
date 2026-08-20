@@ -273,9 +273,16 @@ async def _attach_async(base_url: str, token: str, name: str) -> dict:
                             ctrl = json.loads(msg.data)
                         except ValueError:
                             continue
-                        if isinstance(ctrl, dict) and ctrl.get("type") == "exit":
+                        if not isinstance(ctrl, dict):
+                            continue
+                        if ctrl.get("type") == "exit":
                             outcome["reason"] = "exit"
                             outcome["code"] = ctrl.get("code")
+                            break
+                        if ctrl.get("type") == "shutdown":
+                            # The daemon itself is stopping/restarting; the
+                            # session goes down with it, not by its own doing.
+                            outcome["reason"] = "shutdown"
                             break
                     elif msg.type in (
                         aiohttp.WSMsgType.CLOSE,
@@ -354,8 +361,21 @@ def attach(client, name: str) -> int:
             f"(reattach: claunch attach {name})"
         )
         return 0
+    if reason == "shutdown":
+        print(
+            f"\n[claunch] the daemon is stopping — session {name!r} "
+            "goes down with it (not the program's own exit)"
+        )
+        print(
+            f"[claunch] once the daemon is back up, reattach with: "
+            f"claunch attach {name}"
+        )
+        return 0
     if reason == "error":
         print(f"\nerror: attach failed: {outcome.get('detail')}", file=sys.stderr)
         return 1
-    print("\n[claunch] connection closed by the daemon")
+    print(
+        f"\n[claunch] connection closed by the daemon — "
+        f"reattach with: claunch attach {name}"
+    )
     return 0

@@ -13,7 +13,7 @@ import threading
 import time
 
 from claude_launcher import attach as attach_mod
-from claude_launcher.daemon.api import build_app
+from claude_launcher.daemon.api import build_app, notify_shutdown
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
 
@@ -151,6 +151,50 @@ def test_attach_reports_session_exit(home, tmp_path, monkeypatch):
                 attach_mod._attach_async(base, "sekrit", "att2"), timeout=30
             )
             assert outcome["reason"] == "exit"
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_attach_reports_daemon_shutdown(home, tmp_path, monkeypatch):
+    """A daemon stop/restart announces itself before killing sessions, so the
+    bridge ends with reason 'shutdown' (reattach advice), not 'exit'."""
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    def fake_read():
+        time.sleep(30)  # never type; the shutdown frame must end the attach
+        return b""
+
+    monkeypatch.setattr(attach_mod, "_write_text", lambda text: None)
+    monkeypatch.setattr(attach_mod, "_read_stdin", fake_read)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            session = mgr.create(SessionDef(name="att3", harness="py", cwd=str(tmp_path)))
+            await _wait_screen(session, "READY")
+
+            base = str(client.make_url("")).rstrip("/")
+            task = asyncio.ensure_future(
+                attach_mod._attach_async(base, "sekrit", "att3")
+            )
+            deadline = time.monotonic() + 15
+            while not app["websockets"] and time.monotonic() < deadline:
+                await asyncio.sleep(0.05)
+            assert app["websockets"], "attach never connected"
+
+            # The daemon's shutdown sequence: announce, then terminate. The
+            # attach must surface the announcement, not the ensuing exit.
+            await notify_shutdown(app)
+            await mgr.shutdown_all()
+            outcome = await asyncio.wait_for(task, timeout=30)
+            assert outcome["reason"] == "shutdown"
         finally:
             await mgr.shutdown_all()
             await client.close()

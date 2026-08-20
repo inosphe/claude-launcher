@@ -18,7 +18,7 @@ from aiohttp import web
 
 from .. import daemon_client, store
 from . import cflow_clock, paths, runtime_state
-from .api import build_app
+from .api import build_app, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
 
@@ -120,6 +120,10 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     except asyncio.CancelledError:
         log.info("cancelled; shutting down")
     finally:
+        # Announce before anything is torn down: attached CLIs must learn this
+        # is a daemon stop/restart (reattach later) before shutdown_all makes
+        # their sessions look like programs that exited on their own.
+        await notify_shutdown(app)
         if uplink is not None:
             uplink.stop()
         if uplink_task is not None:
