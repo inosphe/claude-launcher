@@ -30,6 +30,7 @@ import re
 import shlex
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -156,7 +157,12 @@ def main() -> int:
                          "their own when it elapses. A saturated machine can "
                          "keep the mesh from delivering a 'hold', so the load "
                          "must not depend on being told to stop.")
-    ap.add_argument("--out", default="gate_bench.jsonl")
+    # NOT the repo root: the record is machine-local measurement data, and
+    # a default that dirties `git status` collides with the very workflow
+    # this gate belongs to (wrapup requires a clean tree). Printed on exit
+    # so a temp path does not mean a lost file.
+    ap.add_argument("--out", default=str(
+        Path(tempfile.gettempdir()) / "gate_bench.jsonl"))
     ap.add_argument("--basetemp-root", default="C:/t/s24b")
     ap.add_argument("--gate", default=(
         'uv run --no-sync pytest tests -q -m "not worktree" -n 8'))
@@ -203,6 +209,7 @@ def main() -> int:
         same = {json.dumps(r["counts"], sort_keys=True) for r in results}
         print(f"[{args.phase}] identical result sets: {len(same) == 1} "
               f"({len(same)} distinct)")
+        print(f"[{args.phase}] records: {args.out}")
         return 0
     finally:
         for b in burners:
