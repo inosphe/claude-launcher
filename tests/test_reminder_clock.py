@@ -158,6 +158,21 @@ def test_only_agent_actionable_positions_remind(proj):
     assert clock.scan(99999.0) == []
 
 
+def test_reminder_block_restates_done_when():
+    payload = {
+        "status": "step", "workflow": "linear", "step_id": "impl",
+        "visit": 1, "instructions": "implement it",
+    }
+    without = cflow_clock.reminder_block(payload, 180)
+    assert "done when:" not in without
+    assert "line is the test" not in without
+    block = cflow_clock.reminder_block(
+        {**payload, "done_when": "the diff is committed"}, 180
+    )
+    assert "done when: the diff is committed" in block
+    assert "(the 'done when' line is the test)" in block
+
+
 def test_reminder_block_for_a_branch_choice():
     block = cflow_clock.reminder_block(
         {

@@ -7,12 +7,18 @@ steps:
     title: Design
     instructions: |
       Write a short design note (goal, approach, files to touch, risks).
+    done_when: |
+      A design note covering goal, approach, files to touch and risks is
+      filed in the report.
     next: impl
 
   impl:
     title: Implement
     instructions: |
       Implement the design, or address the latest review feedback.
+    done_when: |
+      The design (or every point of the latest review feedback) is
+      implemented and committed; the report names the files touched.
     next: test
 
   test:
@@ -59,4 +65,7 @@ steps:
     instructions: |
       Commit with a clear message and draft the PR description from the run
       journal.
+    done_when: |
+      The work is committed and a PR description drafted from the run
+      journal is in the report.
     next: end

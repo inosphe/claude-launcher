@@ -31,6 +31,7 @@ and loops need no duplicated content::
         next: test
       test:
         instructions: ...
+        done_when: ...      # completion criterion; restated by status/reminders
         next: review
       review:
         select:
@@ -55,6 +56,21 @@ Termination: omitting ``next`` (or the reserved target ``end``) ends the run.
 Cycles are legal (they model iteration; a select is the loop exit) but are
 **warned** about; a workflow whose start cannot reach any termination is an
 **error** — at least one reachable end must be described.
+
+Completion criteria
+-------------------
+``verify`` is the machine-checkable completion criterion: a command that must
+exit 0 before ``next`` may leave the step. ``done_when`` is the declarative
+one — prose stating what must be *true* for the step to count as done — for
+the steps (most of them) whose done-ness no command can check. It enforces
+nothing; its value is placement: it rides in the step payload and in the
+reminder a stalled run hears, so "may I advance?" is answered against a
+criterion the author wrote instead of one the driver improvises. The two
+compose — ``verify`` checks what a command can, ``done_when`` states the
+rest. A select step takes neither: its completion IS the choice. Steps that
+declare neither are collected into :attr:`Workflow.advice` — the driver
+certifies its own way past them, which is worth a line in ``show`` but is
+not an error.
 
 ``recur: true`` is how a service loop is written without hiding one in the
 graph: every round still reaches a real end, and a run that terminates
@@ -252,6 +268,10 @@ class Step:
     gate: Optional[str] = None  # DEPRECATED entry gate; see `ask`
     ask: Optional[Ask] = None  # entry gate, delegated; approval per visit
     verify: Optional[Verify] = None
+    #: Declarative completion criterion — what must be TRUE for this step to
+    #: count as done, for the parts no command can check (those are `verify`).
+    #: Never enforced; surfaced by the step payload and the reminder clock.
+    done_when: Optional[str] = None
     select: Optional[Select] = None
     next: Optional[str] = None  # None = termination (non-select steps)
 
@@ -307,6 +327,12 @@ class Workflow:
     #: dashboard's workflow view; ``start`` stays quiet, so a workflow already
     #: in service does not nag on every run.
     deprecations: List[str] = field(default_factory=list)
+    #: More advice to the writer, same channel as :attr:`deprecations`:
+    #: steps whose done-ness nothing states (no ``verify``, no ``done_when``),
+    #: so the driver certifies its own way past them. Legal — plenty of steps
+    #: are cheap enough not to care — but worth showing whoever reviews the
+    #: file, and never in front of a run.
+    advice: List[str] = field(default_factory=list)
 
     def step(self, step_id: str) -> Step:
         try:
@@ -372,6 +398,7 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         filter_roles=workflow.filter_roles,
         warnings=_graph_warnings(workflow),
         deprecations=_deprecations(workflow),
+        advice=_advice(workflow),
     )
 
 
@@ -383,6 +410,28 @@ def _deprecations(workflow: Workflow) -> List[str]:
         f"[{{role: reviewer}}]') as the approvers"
         for step in workflow.steps.values()
         if step.gate
+    ]
+
+
+def _advice(workflow: Workflow) -> List[str]:
+    """One aggregated note for the steps whose done-ness nothing states.
+
+    A select step is exempt (its completion is the choice), and one line
+    covers them all: this is a review aid, not a per-step nag.
+    """
+    silent = [
+        s.id
+        for s in workflow.steps.values()
+        if not s.is_select and not s.verify and not s.done_when
+    ]
+    if not silent:
+        return []
+    return [
+        "steps with no completion criterion (neither 'verify' nor 'done_when'): "
+        + ", ".join(silent)
+        + " — the driver certifies its own way past them. State what must be "
+        "true to leave each one ('done_when'), or make it a command "
+        "('verify') where one can check"
     ]
 
 
@@ -464,6 +513,13 @@ def _parse_step(step_id: str, raw) -> Step:
             f"keep one. An 'ask' with no 'from' is the same gate"
         )
     verify = _parse_verify(raw.get("verify"), step_id)
+    done_when = raw.get("done_when")
+    if done_when is not None and not isinstance(done_when, str):
+        raise WorkflowError(
+            f"step {step_id!r}: 'done_when' must be a string — what must be "
+            f"true for this step to count as done"
+        )
+    done_when = done_when.strip() if done_when else None
     select = _parse_select(raw.get("select"), step_id)
     instructions = raw.get("instructions")
     if select is None and not instructions:
@@ -472,6 +528,11 @@ def _parse_step(step_id: str, raw) -> Step:
         if verify is not None:
             raise WorkflowError(
                 f"step {step_id!r}: 'verify' is not allowed on a select step"
+            )
+        if done_when:
+            raise WorkflowError(
+                f"step {step_id!r}: 'done_when' is not allowed on a select "
+                f"step — its completion is the choice itself"
             )
         if "next" in raw:
             raise WorkflowError(
@@ -485,6 +546,7 @@ def _parse_step(step_id: str, raw) -> Step:
         gate=gate,
         ask=ask,
         verify=verify,
+        done_when=done_when,
         select=select,
         next=_parse_next(raw.get("next"), step_id),
     )

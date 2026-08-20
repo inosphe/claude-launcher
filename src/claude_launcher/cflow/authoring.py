@@ -22,7 +22,8 @@ SKILL_MD = """\
 name: cflow-author
 description: >-
   Write or revise a claunch workflow file (.claunch/workflows/*.yaml) — the
-  step graph, its gates, its delegated decisions and its verify commands. Use
+  step graph, its gates, its delegated decisions, its verify commands and its
+  done_when completion criteria. Use
   when asked to create a workflow, add or reshape a step, decide who approves
   what, convert a deprecated 'gate:', or review an existing workflow file.
   NOT for running one: that is the 'cflow' skill.
@@ -57,6 +58,33 @@ one above it, and the bottom two cost a person's attention.
 `verify` is the one to reach for hardest. "The tests pass" is not a question
 for anybody — it is `verify: "pytest -q"`, and the server re-runs it, so no
 report can talk its way past it.
+
+## `done_when` — the stated completion criterion
+
+Most steps have no command that can check them — "the design note is filed",
+"the feedback is turned into follow-ups". For those, write `done_when`: one
+or two lines stating what must be TRUE for the step to count as done,
+phrased as a state of the world, not as an activity.
+
+```yaml
+impl:
+  instructions: Implement the design; keep commits small and focused.
+  done_when: The design is implemented and committed; the report names the files touched.
+  next: test
+```
+
+It is not a control point — nothing enforces it, and the driver still
+certifies its own way past it. Its value is placement: it rides in the step
+payload and in the reminder a stalled run hears, so "may I advance?" gets
+judged against a criterion you wrote instead of one the agent improvises
+mid-drift. Write both where they split the work: `verify` checks what a
+command can, `done_when` states the rest. If a command CAN check it, promote
+it to `verify` — a `done_when` saying "the tests pass" is a verify that gave
+up its teeth.
+
+A select step takes neither: its completion is the choice. `cflow show`
+lists the steps that declare no criterion at all, as advice, not an error —
+a cheap step may honestly not need one.
 
 ## The rule that matters most
 
@@ -184,6 +212,8 @@ Cycles are legal and are warned about (`cflow show` prints them). Two rules:
 - A `select` routes only through its options — no `next` on the step.
 - `verify` is a gate to **leave** a step; `ask`/`gate` gate **entering** it.
   A select step takes neither.
+- `done_when` states the leave criterion where no command can check it —
+  see its section above.
 - Steps should say what **evidence** to file in the report. Reports are
   journaled, shown live on the dashboard, and become the PR text; a step whose
   report is "done" has taught the agent nothing about what to record.
@@ -228,8 +258,9 @@ parse time, for the same reason a delegation's `role` is.
 ## Before you hand it over
 
 - `claunch cflow show <workflow>` — prints the graph, each step's control
-  points, cycle/unreachable warnings, and any deprecated spellings still in
-  the file.
+  points, cycle/unreachable warnings, any deprecated spellings still in
+  the file, and which steps declare no completion criterion (neither
+  `verify` nor `done_when`).
 - `claunch cflow ls` — confirms the name resolves to the file you just wrote,
   and not to an older copy of it in the other layer.
 - `claunch cflow request <workflow>` — reports `delegation_check`: what each

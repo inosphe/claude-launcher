@@ -357,6 +357,62 @@ steps:
         model.parse(bad)
 
 
+DONE_WHEN = """
+name: dw
+steps:
+  design:
+    instructions: write the note
+    done_when: the note is filed in the report
+    next: suite
+  suite:
+    instructions: run the suite
+    verify: "pytest -q"
+    next: silent
+  silent:
+    instructions: nothing states when this is done
+"""
+
+
+def test_done_when_parsed_and_criterionless_steps_collected():
+    wf = model.parse(DONE_WHEN)
+    assert wf.steps["design"].done_when == "the note is filed in the report"
+    assert wf.steps["silent"].done_when is None
+    # One aggregated advice line names exactly the steps with no completion
+    # criterion: 'design' has done_when, 'suite' has verify, 'silent' neither.
+    assert len(wf.advice) == 1
+    assert "silent" in wf.advice[0]
+    assert "design" not in wf.advice[0]
+    assert "suite" not in wf.advice[0]
+
+
+def test_every_step_covered_means_no_advice():
+    wf = model.parse(
+        "steps:\n  a:\n    instructions: x\n    done_when: x is true\n"
+    )
+    assert wf.advice == []
+
+
+def test_done_when_must_be_a_string():
+    bad = "steps:\n  a:\n    instructions: x\n    done_when: [not, prose]\n"
+    with pytest.raises(WorkflowError, match="done_when"):
+        model.parse(bad)
+
+
+def test_done_when_rejected_on_select_step():
+    bad = """
+steps:
+  s:
+    done_when: chosen
+    select:
+      prompt: p
+      chooser: agent
+      options:
+        a: {description: d, next: end}
+"""
+    with pytest.raises(WorkflowError, match="not allowed on a select"):
+        model.parse(bad)
+
+
 # --------------------------------------------------------------------------- #
 # engine: linear flow + reports
 # --------------------------------------------------------------------------- #
@@ -377,6 +433,16 @@ def test_linear_run(flow_dir):
     assert summaries == {"one": "did one", "two": "did two"}
     details = {e["step"]: e["details"] for e in payload["journal"]}
     assert details["one"] == "evidence: foo.py touched"
+
+
+def test_step_payload_carries_done_when(flow_dir):
+    _write(flow_dir, "dw", DONE_WHEN)
+    payload = engine.start("dw", context="t")
+    assert payload["done_when"] == "the note is filed in the report"
+    payload = _advance("noted")
+    assert payload["step_id"] == "suite"
+    # A step that declared none gets no key — silence, not an empty string.
+    assert "done_when" not in payload
 
 
 def test_next_requires_report(flow_dir):

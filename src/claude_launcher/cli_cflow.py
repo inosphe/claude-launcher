@@ -143,6 +143,13 @@ def _cmd_show(args: argparse.Namespace) -> int:
                 flags.append(f"decline -> {s.ask.on_decline}")
         if s.verify:
             flags.append(f"verify: {s.verify.command}")
+        if s.done_when:
+            # Multi-line prose collapsed to one line: show is a graph review,
+            # and `status` serves the full text to the run that needs it.
+            done_when = " ".join(s.done_when.split())
+            if len(done_when) > 72:
+                done_when = done_when[:72] + "…"
+            flags.append(f"done_when: {done_when}")
         suffix = f"  ({'; '.join(flags)})" if flags else ""
         if s.select:
             chooser = s.select.chooser
@@ -160,6 +167,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
     # not in front of every run (see `Workflow.deprecations`).
     for note in wf.deprecations:
         print(f"deprecated: {note}")
+    for note in wf.advice:
+        print(f"advice: {note}")
     return 0
 
 

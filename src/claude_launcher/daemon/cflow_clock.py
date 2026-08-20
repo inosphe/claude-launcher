@@ -313,12 +313,19 @@ def reminder_block(payload: dict, interval: float) -> str:
             )
         lines.append(f"position: {position}")
         lines.append(f"instructions: {instructions}")
+        done_when = str(payload.get("done_when") or "").strip()
+        if done_when:
+            # The one line a stalled agent needs most: what would let it
+            # advance — a stated criterion, not its own sense of enough.
+            lines.append(f"done when: {done_when}")
         if payload.get("verify"):
             lines.append(f"verify: {payload['verify']}")
         lines.append(
             "protocol: this is the step you are on -- the same instruction, "
             "repeated because the run has not moved, not a new one. If you "
-            "are mid-work, keep going. When it is done, file it with "
+            "are mid-work, keep going. When it is done"
+            + (" (the 'done when' line is the test)" if done_when else "")
+            + ", file it with "
             "'report' and advance with 'next'; if you have lost the thread, "
             "call 'status' first -- it is the current truth."
         )
