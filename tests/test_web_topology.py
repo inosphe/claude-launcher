@@ -13,7 +13,12 @@ DOM, ``lineage_check`` on the session list's tree ordering, ``railbadge_check`` 
 the cflow line each rail row carries — which run it speaks for, and when it is
 flagged as the reader's move rather than a peer's — ``sessmesh_check`` on
 the mesh tags beside each row's name, which come from the mesh poll rather
-than the session one and must not claim another daemon's rooms — ``bulk_check`` on the
+than the session one and must not claim another daemon's rooms —
+``raillayout_check`` on what those tags cost: a rail row carries every session
+at once, so the vertical room one takes is multiplied by twenty, and the check
+holds the name, its role and its rooms to a single shrinking line — pinning
+which children are allowed to break the row, and that a tag may be
+abbreviated but never shrunk to a capsule with nothing in it — ``bulk_check`` on the
 rail's bulk bar — which of stop/resume/clear/delete is offered on a given
 rail, and what each claims it would touch — ``owed_check`` on
 the Unanswered box and the requests its nudge/dismiss buttons send,
