@@ -179,6 +179,40 @@ def test_the_bundled_improv_worker_teaches_the_nested_merge_contract():
     assert "master를 직접 머지하지 않는다" in request
 
 
+def test_the_leader_does_not_hide_a_human_decision_behind_an_agent_chooser():
+    """``standby``'s exit must be a fact the agent can see for itself.
+
+    ``chooser: agent`` is read by the engine as *the agent is working*: no
+    ``waiting_selection``, no dashboard button, no run event, nothing that
+    tells a human a decision is pending — while the reminder clock keeps
+    typing "if you are mid-work, keep going". So a human instruction is the
+    one thing such a select may not wait on. It did once, and a leader run
+    sat on it for ninety minutes with six finished branches behind it.
+
+    The trigger is now evidence, and the gate that actually protects master
+    is the ``ask`` on the very next step — a pure user gate (no ``from``),
+    which the engine *does* surface. Both halves are pinned here: dropping
+    the second one would make the first one reckless.
+    """
+    bundled = dict(state_mod.bundled_workflows())
+    wf = model.load(bundled["improv-leader"])
+
+    standby = wf.steps["standby"]
+    assert standby.select.chooser == "agent"
+    for text in (standby.select.prompt, standby.instructions):
+        assert "사용자의 지시" not in text, (
+            "standby waits on a user instruction behind an agent chooser — "
+            "nothing surfaces that wait to a human"
+        )
+    # ...and what it waits on instead is the evidence the next gate judges.
+    assert "증거" in standby.select.options["integrate"].description
+
+    gate = wf.steps["integrate"].ask
+    assert gate is not None
+    assert not gate.delegate.candidates, "master's gate stopped being the user's"
+    assert gate.delegate.otherwise == model.OTHERWISE_HUMAN
+
+
 def test_a_global_install_seeds_the_global_layer(project, home):
     lines = install_mod.install_into_user()
     assert [line for line in lines if line.startswith("workflow ->")]

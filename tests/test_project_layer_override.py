@@ -19,24 +19,32 @@ from claude_launcher.cflow import model
 
 OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
 
-SUITE = 'uv run --extra test pytest tests -q'
+# The two run in different places, so they take uv differently. A worker runs
+# in a freshly made worktree, where the first verify legitimately has to build
+# the venv — it keeps the syncing form. The leader's gate runs in the live
+# checkout, where uv re-syncs after any pyproject change and cannot replace
+# ``.venv/Scripts/claunch.exe`` while the daemon and its sessions are running
+# it (os error 5); a gate's verify has no business mutating the environment
+# anyway, so it is ``--no-sync`` against the venv that is already there.
+WORKER_SUITE = 'uv run --extra test pytest tests -q -m "not worktree"'
+LEADER_SUITE = 'uv run --no-sync pytest tests -q'
 
 
 @pytest.mark.parametrize(
-    "stem, step_id, marker",
+    "stem, step_id, suite",
     [
-        ("improv-worker", "review", ' -m "not worktree"'),
-        ("improv-leader", "integrate", ""),
+        ("improv-worker", "review", WORKER_SUITE),
+        ("improv-leader", "integrate", LEADER_SUITE),
     ],
 )
 def test_the_override_carries_this_repos_suite_as_its_verify(
-    stem, step_id, marker
+    stem, step_id, suite
 ):
     wf = model.load(OVERRIDES / f"{stem}.yaml")
     assert wf.name == stem
     verify = wf.steps[step_id].verify
     assert verify is not None, f"{stem}:{step_id} lost its verify"
-    assert verify.command.startswith(SUITE + marker)
+    assert verify.command.startswith(suite)
     # basetemp keeps concurrent verifies out of each other's temp trees (and
     # off the default %TEMP%, which has bitten this machine's permissions).
     assert "--basetemp=" in verify.command
