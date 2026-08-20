@@ -322,6 +322,80 @@ async function refreshSessions() {
   // The mobile bottom bar carries this session's harness/profile, which only
   // the list knows.
   syncMobileBars();
+  // The rows and the runs arrive on separate polls; whichever lands last
+  // paints the cflow badges over the rows that exist now.
+  applyCflowBadges();
+}
+
+/* The cflow run a rail row speaks for. Runs are keyed (cwd, session); after a
+   migrate-session a stale run under the old cwd can share the scope, so the
+   one whose canonical cwd still holds the live session wins. */
+function sessCflowRun(name) {
+  const runs = (cflowCache || []).filter(
+    (r) => r.scope === name && r.status !== "idle"
+  );
+  return runs.find((r) => (r.sessions || []).includes(name)) || runs[0] || null;
+}
+
+/* Whether the run has stopped on something only a HUMAN resolves — a gate
+   approval or a branch choice. waiting_answer is deliberately excluded: that
+   one is with another agent, not with the person reading the rail. */
+function sessCflowGated(r) {
+  return r.status === "waiting_approval" || r.status === "waiting_selection";
+}
+
+function sessCflowLabel(r) {
+  if (r.status === "waiting_selection") return "choose an option";
+  if (r.status === "waiting_approval")
+    return r.reason === "loop_limit" ? "loop limit — approve to continue"
+         : r.reason === "declined" ? "declined — decide"
+         : "approval needed";
+  if (r.status === "waiting_answer") return `with ${askWho(r.ask)}`;
+  if (r.status === "report_required") return "report required";
+  if (r.status === "done" || r.status === "error" || r.status === "aborted")
+    return r.status;
+  return r.title || r.step_id || "running";
+}
+
+/* One line under each rail row: which workflow the session is on and where it
+   stands, amber-flagged when it is the reader's move. Applied idempotently
+   from both refreshSessions (rows rebuilt) and refreshCflow (runs updated),
+   because the two caches fill on independent requests. */
+function applyCflowBadges() {
+  const list = $("session-list");
+  if (!list) return;
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    const old = li.querySelector(".sess-cflow");
+    const r = sessCflowRun(li.dataset.name);
+    if (!r) { if (old) old.remove(); continue; }
+    const line = old || document.createElement("span");
+    if (!old) {
+      // The badge walks to the run page; the row it sits on attaches. One
+      // listener for the element's lifetime — it reads the run key from the
+      // dataset, which every poll below rewrites (a migrate-session moves
+      // the run's cwd under the same scope).
+      line.addEventListener("click", (e) => {
+        e.stopPropagation();
+        location.hash = "#/wf/" + encodeURIComponent(line.dataset.wf || "");
+      });
+      li.appendChild(line);
+    }
+    line.dataset.wf = `${r.scope || "default"}|${r.cwd}`;
+    const gated = sessCflowGated(r);
+    line.className = `sess-cflow${gated ? " gated" : ""}`;
+    line.textContent = "";
+    const dot = document.createElement("span");
+    dot.className = `dot ${wfDotClass(r.status)}`;
+    const txt = document.createElement("span");
+    txt.className = "sess-cflow-text";
+    txt.textContent =
+      `${r.workflow || "cflow"} · ${gated ? "⚑ " : ""}${sessCflowLabel(r)}`;
+    line.title = gated
+      ? (r.gate || r.prompt || "") +
+        (r.options ? ` — options: ${r.options.join(", ")}` : "")
+      : (r.title || r.step_id || "");
+    line.append(dot, txt);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -438,6 +512,7 @@ async function refreshCflow() {
   }
   const runs = data.runs || [];
   cflowCache = runs;
+  applyCflowBadges();  // the rail rows may have painted before this cache filled
   if (currentPage === "home") renderHome();
   const list = $("cflow-list");
   list.innerHTML = "";

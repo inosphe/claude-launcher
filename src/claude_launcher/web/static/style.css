@@ -48,6 +48,7 @@ body {
 #session-list li {
   padding: 10px 16px; cursor: pointer; border-bottom: 1px solid #22262d;
   display: flex; align-items: center; gap: 8px; font-size: 13px;
+  flex-wrap: wrap;  /* the cflow badge is a full-width second line */
 }
 #session-list li:hover { background: #22262d; }
 #session-list li.active { background: #2b313b; }
@@ -63,6 +64,18 @@ body {
 .dot.starting { background: #58a6ff; }
 .dot.exited { background: #6e7681; }
 #session-list .meta { color: #7d8590; font-size: 11px; margin-left: auto; }
+/* The session's cflow run, one line under the row. Indented past the status
+   dot so it reads as belonging to the name above it. */
+#session-list .sess-cflow {
+  flex-basis: 100%; display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding-left: 16px; font-size: 11px; color: #7d8590;
+}
+#session-list .sess-cflow .dot { width: 6px; height: 6px; }
+#session-list .sess-cflow-text {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Blocked on the person reading this — the amber that means "your move". */
+#session-list .sess-cflow.gated { color: #d29922; font-weight: 600; }
 
 /* Everything that acts on the rail as a whole. It wraps rather than
    scrolling: the rail is narrow, the labels carry counts, and a button that
