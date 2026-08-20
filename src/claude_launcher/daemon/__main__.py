@@ -24,6 +24,13 @@ from .mesh import MeshError, MeshManager
 
 log = logging.getLogger("claunch.daemon")
 
+#: What ``_serve`` returns when the shutdown it drained was a restart request
+#: (``POST /api/daemon/restart``): ``main`` spawns the successor only after
+#: releasing the singleton lock, so the new daemon finds it free instead of
+#: spending its grace window waiting this process out. Never a process exit
+#: code — the restarting daemon itself still exits 0.
+RESTART_CODE = 75
+
 
 def _setup_logging(foreground: bool) -> None:
     handlers = [logging.StreamHandler(sys.stderr)]
@@ -118,7 +125,10 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
 
     try:
         await app["shutdown_event"].wait()
-        log.info("shutdown requested")
+        log.info(
+            "shutdown requested%s",
+            " (restart)" if app["restart_requested"] else "",
+        )
     except asyncio.CancelledError:
         log.info("cancelled; shutting down")
     finally:
@@ -141,7 +151,7 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
         runtime_state.remove_daemon_json()
         await manager.shutdown_all()
         await runner.cleanup()
-    return 0
+    return RESTART_CODE if app["restart_requested"] else 0
 
 
 def _acquire_with_grace(
@@ -260,11 +270,16 @@ def main(argv=None) -> int:
         port = int(os.environ.get("CLAUNCH_DAEMON_PORT") or 0)
         log.info("daemon instance %r (state: %s)", paths.instance(), paths.daemon_dir())
     try:
-        return asyncio.run(_serve(host, port, cfg))
+        code = asyncio.run(_serve(host, port, cfg))
     except KeyboardInterrupt:
-        return 0
+        code = 0
     finally:
         lock.release()
+    if code == RESTART_CODE:
+        log.info("spawning successor daemon")
+        daemon_client.spawn_daemon()
+        return 0
+    return code
 
 
 if __name__ == "__main__":
