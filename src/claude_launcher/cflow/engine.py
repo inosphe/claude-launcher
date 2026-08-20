@@ -68,7 +68,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from . import model, responders, state as state_mod
+from . import checkout, model, responders, state as state_mod
 from .model import Delegate, Step, Workflow
 
 #: Kept from a verify command's combined output when reporting failure.
@@ -1051,6 +1051,7 @@ def start(
     role_filter_note = _enforce_role_filter(
         workflow, mesh=(mesh or "").strip(), cwd=cwd
     )
+    checkout_note = checkout.check(cwd=cwd)
 
     fulfilled = bool(pending) and (
         pending.get("workflow") == workflow_ref
@@ -1109,6 +1110,7 @@ def start(
             "warnings": workflow.warnings,
             **({"round": round_no} if round_no > 1 else {}),
             **({"role_filter": role_filter_note} if role_filter_note else {}),
+            **({"checkout": checkout_note} if checkout_note else {}),
         },
         cwd,
     )
@@ -1138,6 +1140,8 @@ def start(
         payload["workflow_warnings"] = workflow.warnings
     if role_filter_note:
         payload["role_filter"] = role_filter_note
+    if checkout_note:
+        payload["checkout"] = checkout_note
     check = delegation_check(workflow, mesh=state["mesh"], cwd=cwd)
     if check:
         payload["delegation_check"] = check
@@ -1376,6 +1380,12 @@ def next_step(*, cwd: Optional[str] = None) -> dict:
     # UNLOCKED — a build/test command can take an hour, and holding the slot
     # that long would block every human control (approve, archive, goto) on
     # the dashboard. The commit below re-checks the position instead.
+    #
+    # Asked here rather than at the gate's result: what the command is about
+    # to be run *in* decides what its exit code is worth, and a pass is the
+    # case that needs saying — a red gate stops the run by itself, while a
+    # green one from somebody else's tree is read as proof and is not.
+    isolation = checkout.check(cwd=cwd)
     result = _run_verify(step, cwd)
 
     with state_mod.run_lock(cwd):
@@ -1412,6 +1422,7 @@ def next_step(*, cwd: Optional[str] = None) -> dict:
                 "status": "verify_failed",
                 "command": step.verify.command,
                 **result,
+                **({"checkout": isolation} if isolation else {}),
                 "note": (
                     "the step's verify command failed; fix the problem, file a "
                     "new 'report', and call 'next' again (the command will be "
@@ -1420,11 +1431,19 @@ def next_step(*, cwd: Optional[str] = None) -> dict:
             }
         state_mod.journal(
             "verify_passed",
-            {"run": state["run_id"], "step": step.id, "command": step.verify.command},
+            {
+                "run": state["run_id"],
+                "step": step.id,
+                "command": step.verify.command,
+                **({"checkout": isolation} if isolation else {}),
+            },
             cwd,
         )
         filed = _current_report(state, step.id) or filed
-        return _advance(workflow, state, step, filed, cwd)
+        payload = _advance(workflow, state, step, filed, cwd)
+        if isolation:
+            payload["checkout"] = isolation
+        return payload
 
 
 def _run_verify(step: Step, cwd: Optional[str]) -> Optional[dict]:
