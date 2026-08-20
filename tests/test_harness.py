@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 
 import pytest
@@ -368,7 +369,13 @@ def test_the_opening_message_rides_in_as_the_positional_prompt(home, tmp_path):
     )
     block = "---\n# claunch mesh: join briefing\n---\n\ntake the API"
     argv, _, _ = harness.build_command(sdef, opening=block)
-    assert argv[-1] == block
+    # dated like every deliver()ed message: the argv handoff is the one
+    # delivery that skips deliver(), so the stamp is prefixed here instead
+    assert argv[-1].endswith("\n" + block)
+    assert re.fullmatch(
+        r"\[claunch delivered \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} [+-]\d{4}\]",
+        argv[-1].split("\n", 1)[0],
+    )
     # behind the end-of-options marker: an opening block routinely starts with
     # a fence of dashes, which claude's option parser would refuse to start on
     assert argv[-2] == "--"
