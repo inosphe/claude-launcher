@@ -454,6 +454,9 @@ def test_cflow_nudge_goes_through_deliver(home, tmp_path, monkeypatch):
     from claude_launcher.daemon.screen import ScreenState
 
     monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    # Pin the wall-clock stamp deliver() prefixes; its format has its own
+    # test in test_delivery_contract.py.
+    monkeypatch.setattr(session_mod, "delivery_stamp", lambda: "[T]")
     cwd = str(Path(tmp_path).resolve())
     writes: list = []
 
@@ -488,7 +491,7 @@ def test_cflow_nudge_goes_through_deliver(home, tmp_path, monkeypatch):
         api_mod._nudge_sessions(FakeManager(), cwd, "n1", "cflow: go")
     )
     assert nudged == ["n1"]
-    assert writes == [b"\x1b[200~cflow: go\x1b[201~", b"\r"]
+    assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
 
 
 def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):

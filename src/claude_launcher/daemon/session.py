@@ -81,6 +81,20 @@ def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def delivery_stamp() -> str:
+    """The wall-clock line prefixed to every :meth:`Session.deliver` message.
+
+    Machine-local time with its UTC offset, taken at the moment the paste is
+    about to land (so the holds in :meth:`Session.deliver` are already behind
+    it). One format, one place: agents and humans reading a transcript date
+    an automated delivery from this line, so nothing else should invent its
+    own variant of it.
+    """
+    return datetime.now().astimezone().strftime(
+        "[claunch delivered %Y-%m-%d %H:%M:%S %z]"
+    )
+
+
 class Session:
     """Owns one PTY child; created and torn down by the SessionManager.
 
@@ -282,11 +296,16 @@ class Session:
         nothing to tell a user. Returns whether it landed, so a caller that
         must not lose the message (mesh delivery advancing its cursor) can
         hold its position and retry on the next tick.
+
+        Every message is stamped with the wall-clock time it actually lands
+        (after the readiness/keyboard holds, in the machine's local zone), so
+        the receiving agent — and anyone reading its transcript — can tell
+        *when* an automated delivery arrived, not just that it did.
         """
         try:
             await self._await_readable()
             await self._await_keyboard_quiet()
-            await self.paste(text, enter=True)
+            await self.paste(f"{delivery_stamp()}\n{text}", enter=True)
         except Exception as exc:  # noqa: BLE001 — SessionGone, PTY write, ...
             log.debug("deliver to %r failed: %s", self.sdef.name, exc)
             return False

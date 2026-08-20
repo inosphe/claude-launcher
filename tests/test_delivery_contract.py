@@ -16,12 +16,18 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import re
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from claude_launcher.daemon import keys as keys_mod, session as session_mod
+
+#: The real stamp function, held before any test monkeypatches the module
+#: attribute (the autouse ``_fixed_stamp`` pins it for the exact-write tests).
+_REAL_STAMP = session_mod.delivery_stamp
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.screen import ScreenState
 
@@ -114,6 +120,13 @@ def test_no_second_http_path_for_delivering_messages():
     )
 
 
+@pytest.fixture(autouse=True)
+def _fixed_stamp(monkeypatch):
+    """Pin the delivery stamp: these tests assert exact PTY writes, and the
+    real stamp changes every second. Its format has its own test below."""
+    monkeypatch.setattr(session_mod, "delivery_stamp", lambda: "[T]")
+
+
 def _fake_session(*, bracketed: bool, ready: bool = True):
     """A stand-in Session. ``ready`` is the latch every already-running session
     carries; the readiness tests below clear it to watch it being set."""
@@ -151,7 +164,7 @@ def test_deliver_sends_the_enter_as_its_own_write(monkeypatch):
     monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
     s, writes = _fake_session(bracketed=True)
     assert asyncio.run(s.deliver("cflow: go")) is True
-    assert writes == [b"\x1b[200~cflow: go\x1b[201~", b"\r"]
+    assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
 
 
 def test_deliver_reports_failure_instead_of_raising(monkeypatch):
@@ -225,7 +238,7 @@ def test_deliver_waits_for_a_booting_tui_to_take_the_keyboard(monkeypatch):
         assert await asyncio.wait_for(sending, timeout=5) is True
 
     asyncio.run(run())
-    assert writes == [b"\x1b[200~cflow: go\x1b[201~", b"\r"]
+    assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
 
 
 def test_deliver_waits_out_the_startup_that_follows_the_keyboard(monkeypatch):
@@ -252,7 +265,7 @@ def test_deliver_waits_out_the_startup_that_follows_the_keyboard(monkeypatch):
         assert await asyncio.wait_for(sending, timeout=5) is True
 
     asyncio.run(run())
-    assert writes == [b"\x1b[200~cflow: go\x1b[201~", b"\r"]
+    assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
     assert s._input_ready is True  # latched: the next message pays nothing
 
 
@@ -262,7 +275,7 @@ def test_deliver_does_not_wait_on_a_harness_that_never_sets_the_mode():
     s, writes = _fake_session(bracketed=False, ready=False)
     s.sdef = SessionDef(name="s", harness="py")
     assert asyncio.run(s.deliver("echo hi")) is True
-    assert writes == [b"echo hi", b"\r"]
+    assert writes == [b"[T]\recho hi", b"\r"]
 
 
 def test_deliver_gives_up_waiting_once_the_session_is_no_longer_young():
@@ -271,7 +284,7 @@ def test_deliver_gives_up_waiting_once_the_session_is_no_longer_young():
     s, writes = _fake_session(bracketed=False, ready=False)
     s._started_mono = time.monotonic() - session_mod.INPUT_READY_TIMEOUT - 1
     assert asyncio.run(s.deliver("cflow: go")) is True
-    assert writes == [b"cflow: go", b"\r"]
+    assert writes == [b"[T]\rcflow: go", b"\r"]
 
 
 # --------------------------------------------------------------------------- #
@@ -294,7 +307,7 @@ def test_deliver_holds_while_a_human_is_typing(monkeypatch):
         assert await asyncio.wait_for(sending, timeout=5) is True
 
     asyncio.run(run())
-    assert writes == [b"\x1b[200~mesh: hello\x1b[201~", b"\r"]
+    assert writes == [b"\x1b[200~[T]\rmesh: hello\x1b[201~", b"\r"]
 
 
 def test_deliver_gives_up_the_typing_hold_rather_than_losing_the_message(
@@ -305,7 +318,23 @@ def test_deliver_gives_up_the_typing_hold_rather_than_losing_the_message(
     s, writes = _fake_session(bracketed=True)
     s.note_human_input()
     assert asyncio.run(s.deliver("mesh: hello")) is True
-    assert writes == [b"\x1b[200~mesh: hello\x1b[201~", b"\r"]
+    assert writes == [b"\x1b[200~[T]\rmesh: hello\x1b[201~", b"\r"]
+
+
+# --------------------------------------------------------------------------- #
+# every delivered message is dated: the stamp line deliver() prefixes carries
+# the machine-local wall clock, so a transcript shows WHEN a reminder or mesh
+# message landed, not just that it did.
+# --------------------------------------------------------------------------- #
+def test_delivery_stamp_is_local_wall_clock_with_offset():
+    stamp = _REAL_STAMP()
+    m = re.fullmatch(
+        r"\[claunch delivered \d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2} "
+        r"([+-]\d{4})\]",
+        stamp,
+    )
+    assert m, f"unexpected stamp format: {stamp!r}"
+    assert m.group(1) == datetime.now().astimezone().strftime("%z")
 
 
 def test_send_keys_counts_as_human_typing(monkeypatch):
