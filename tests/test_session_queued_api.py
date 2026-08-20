@@ -139,3 +139,166 @@ def test_empty_backlog_and_no_mesh_answer_the_same_quiet_shape(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# POST .../queued/flush — the operator overruling the wait
+#
+# The banner could only ever describe the hold. These cover the button that
+# ends it: what it delivers, what it deliberately still waits for, and what it
+# says when it delivers nothing.
+# --------------------------------------------------------------------------- #
+def test_flush_types_in_a_backlog_that_nothing_else_would_have_typed(
+    home, tmp_path
+):
+    """No delivery worker runs in these tests, so the backlog is permanent
+    until something forces it — which makes this the cleanest proof that the
+    flush is what put the messages in, and that it advanced the cursor rather
+    than merely claiming to."""
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            await mm.join("team", "s1", handle="worker")
+            await _wait_idle(mgr.get("s1"))
+
+            await mm.send("team", "operator", "worker", "first",
+                          external=True, type="fyi")
+            await mm.send("team", "operator", "worker", "second",
+                          external=True, type="fyi")
+            assert len(mm.queued_for_session("s1")) == 2
+
+            resp = await client.post(
+                "/api/sessions/s1/queued/flush", headers=BEARER
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            # both messages ride in one delivery block, so the count is the
+            # messages that left the backlog, not the number of pastes
+            assert body["flushed"] == 2
+            assert body["handles"] == ["worker@team"]
+            # the re-read backlog rides along so the caller need not re-poll
+            assert body["queued"]["messages"] == []
+            assert body["queued"]["reason"] is None
+            assert mm.queued_for_session("s1") == []
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_flush_overrules_the_idle_gate_but_still_waits_for_the_paste(
+    home, tmp_path, monkeypatch
+):
+    """The whole point, and its limit.
+
+    A live keyboard holds delivery: an ordinary worker pass declines to type.
+    The flush types anyway — that is the operator's call to make. What it does
+    NOT do is skip ``Session.deliver``'s own wait for the keyboard to fall
+    quiet; that wait is about the paste landing intact, not about politeness.
+    Its bound is shortened here so the test does not sit out the real one.
+    """
+    from claude_launcher.daemon import session as session_mod
+
+    _register_py_harness()
+    monkeypatch.setattr(session_mod, "TYPING_HOLD_TIMEOUT", 0.5)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            await mm.join("team", "s1", handle="worker")
+            session = mgr.get("s1")
+            await _wait_idle(session)
+            await mm.send("team", "operator", "worker", "urgent",
+                          external=True, type="ask")
+
+            # a keystroke is the hold the banner names
+            session.note_human_input()
+            assert session.keyboard_busy() is True
+            resp = await client.get("/api/sessions/s1/queued", headers=BEARER)
+            assert (await resp.json())["reason"] == "keyboard"
+
+            # an ordinary worker pass leaves it exactly where it was
+            mesh = mm.get("team")
+            await mm._deliver_to(mesh, mesh.members["worker"])
+            assert len(mm.queued_for_session("s1")) == 1
+
+            # the operator's flush types it in regardless
+            resp = await client.post(
+                "/api/sessions/s1/queued/flush", headers=BEARER
+            )
+            body = await resp.json()
+            assert body["flushed"] == 1
+            assert mm.queued_for_session("s1") == []
+            # ...and it went through deliver(), which is what kept the paste
+            # safe: the keyboard wait was entered, not skipped
+            assert session.keyboard_busy() is True
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_flush_delivers_nothing_to_an_exited_session_and_keeps_the_backlog(
+    home, tmp_path
+):
+    """``flushed: 0`` is an answer, not a failure. There is no terminal to
+    type into, so the messages stay queued for a respawn — losing them to
+    make a button feel responsive would be the worst possible trade."""
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            await mm.join("team", "s1", handle="worker")
+            await _wait_idle(mgr.get("s1"))
+            await mm.send("team", "operator", "worker", "for later",
+                          external=True, type="fyi")
+
+            await mgr.get("s1").shutdown()
+
+            resp = await client.post(
+                "/api/sessions/s1/queued/flush", headers=BEARER
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["flushed"] == 0
+            assert body["handles"] == []
+            assert [m["body"] for m in body["queued"]["messages"]] == ["for later"]
+            assert body["queued"]["reason"] == "exited"
+
+            # nothing queued at all is the same quiet success
+            mgr.create(SessionDef(name="s2", harness="py", cwd=str(tmp_path)))
+            resp = await client.post(
+                "/api/sessions/s2/queued/flush", headers=BEARER
+            )
+            assert (await resp.json())["flushed"] == 0
+
+            # unknown session: refused like every other session route
+            resp = await client.post(
+                "/api/sessions/nope/queued/flush", headers=BEARER
+            )
+            assert resp.status == 400
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
