@@ -64,6 +64,26 @@ body {
 .dot.starting { background: #58a6ff; }
 .dot.exited { background: #6e7681; }
 #session-list .meta { color: #7d8590; font-size: 11px; margin-left: auto; }
+/* The rooms a session is in, on the line under the name that is in them.
+   Same pill as .mesh-role so role and membership read as one set, but
+   neutral: the blue says what the session IS, the grey only says where it
+   belongs, which is not a state and so gets no saturation. Amber is spoken
+   for on this rail — there it means the run wants the reader's keyboard. */
+#session-list .rail-mesh {
+  font-size: 11px; padding: 1px 7px; border-radius: 9px; flex: none;
+  background: #191d24; color: #6e7681; border: 1px solid #2a2e36;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
+/* Its own line, indented past the status dot like the cflow badge below it,
+   so the pills read as belonging to the name above rather than floating in
+   the list. On the name's line they would not fit: a wrapping flex line
+   breaks before it shrinks, so one pill there is enough to push the ⓘ off
+   the row. */
+#session-list .rail-meshes {
+  flex-basis: 100%; display: flex; gap: 6px; min-width: 0;
+  padding-left: 16px; margin-top: 3px;
+}
 /* The session's cflow run, one line under the row. Indented past the status
    dot so it reads as belonging to the name above it. */
 #session-list .sess-cflow {

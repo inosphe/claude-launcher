@@ -11,7 +11,9 @@ So the harnesses in ``tests/web`` slice the real functions out of the shipped
 maths, ``render_check`` on the SVG the drawing code assembles against a stub
 DOM, ``lineage_check`` on the session list's tree ordering, ``railbadge_check`` on
 the cflow line each rail row carries — which run it speaks for, and when it is
-flagged as the reader's move rather than a peer's — ``bulk_check`` on the
+flagged as the reader's move rather than a peer's — ``sessmesh_check`` on
+the mesh tags beside each row's name, which come from the mesh poll rather
+than the session one and must not claim another daemon's rooms — ``bulk_check`` on the
 rail's bulk bar — which of stop/resume/clear/delete is offered on a given
 rail, and what each claims it would touch — ``owed_check`` on
 the Unanswered box and the requests its nudge/dismiss buttons send,
@@ -59,6 +61,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "render_check.js",
         "lineage_check.js",
         "railbadge_check.js",
+        "sessmesh_check.js",
         "bulk_check.js",
         "owed_check.js",
         "panel_check.js",

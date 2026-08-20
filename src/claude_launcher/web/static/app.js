@@ -276,6 +276,30 @@ async function refreshSessions() {
       role.className = "mesh-role";
       role.textContent = s.role;
     }
+    // Then which rooms it is in. Role first and in colour, membership after
+    // it in neutral grey: the pair reads as "what this session is, and where
+    // it belongs", and only the first of those is a property of the session
+    // itself. Drawn on the same terms as the role tag — a session in no mesh
+    // gets nothing rather than an empty pill.
+    // On a line of their own, under the name they belong to. Measured, not
+    // preferred: the rail is ~260px and an indented row spends ~158px of it
+    // on the tick, the dot, the name, the role pill, the profile and the ⓘ.
+    // A wrapping flex line breaks before it shrinks, so a pill on the name's
+    // line does not squeeze — it pushes the ⓘ onto a line by itself. This is
+    // the same shape the cflow badge already uses for the same reason.
+    const tags = railMeshTags(s.name);
+    let meshBox = null;
+    if (tags.length) {
+      meshBox = document.createElement("span");
+      meshBox.className = "rail-meshes";
+      for (const t of tags) {
+        const tag = document.createElement("span");
+        tag.className = t.more ? "rail-mesh rail-mesh-more" : "rail-mesh";
+        tag.textContent = t.text;
+        tag.title = t.title;
+        meshBox.appendChild(tag);
+      }
+    }
     const meta = document.createElement("span");
     meta.className = "meta";
     meta.textContent = s.status === "exited"
@@ -298,7 +322,10 @@ async function refreshSessions() {
       e.stopPropagation();   // the row itself attaches; this button does not
       openDetail(s.name);
     });
-    li.append(dot, label, ...(role ? [role] : []), meta, info);
+    // The mesh line goes last so it lands under the row rather than in it;
+    // the cflow badge, appended later still, takes the line below that.
+    li.append(dot, label, ...(role ? [role] : []), meta, info,
+              ...(meshBox ? [meshBox] : []));
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
@@ -334,6 +361,51 @@ async function refreshSessions() {
   // The rows and the runs arrive on separate polls; whichever lands last
   // paints the cflow badges over the rows that exist now.
   applyCflowBadges();
+}
+
+/* The meshes a rail row speaks for — the rooms that session is in.
+
+   Derived from the mesh poll rather than the session poll: /api/sessions
+   knows nothing about meshes, and the rooms are already on the client for
+   the sidebar's own list. Only LOCAL members are considered: a remote
+   member's session name lives on another daemon and may well collide with
+   one of ours, and tagging our row with somebody else's room would be a
+   lie the reader cannot check. */
+function sessMeshes(name) {
+  const out = [];
+  for (const m of meshCache || []) {
+    for (const mem of m.members || []) {
+      if (mem.local && mem.session === name) {
+        out.push({ mesh: m.name, handle: mem.handle, role: mem.role || "" });
+      }
+    }
+  }
+  return out.sort((a, b) => a.mesh.localeCompare(b.mesh));
+}
+
+/* What the row actually draws: the first few rooms, then a count for the
+   rest. A session is normally in one mesh, but nothing stops it joining
+   several, and five pills would push the name it belongs to off the row. */
+const RAIL_MESH_TAGS = 2;
+
+function railMeshTags(name) {
+  const meshes = sessMeshes(name);
+  const shown = meshes.slice(0, RAIL_MESH_TAGS).map((m) => ({
+    text: m.mesh,
+    title: `mesh ${m.mesh} — joined as ${m.handle}` +
+           (m.role ? ` (${m.role})` : ""),
+  }));
+  const rest = meshes.slice(RAIL_MESH_TAGS);
+  if (rest.length) {
+    // Flagged, not merely last: the row draws this one outside the shrinking
+    // box (see below), so it has to be told apart from a room's name.
+    shown.push({
+      text: `+${rest.length}`,
+      more: true,
+      title: "also in " + rest.map((m) => `${m.mesh} (${m.handle})`).join(", "),
+    });
+  }
+  return shown;
 }
 
 /* The cflow run a rail row speaks for. Runs are keyed (cwd, session); after a
