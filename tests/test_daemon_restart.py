@@ -99,29 +99,31 @@ def test_a_plain_shutdown_carries_no_restart_intent(home):
 # --------------------------------------------------------------------------- #
 # the handoff: main() spawns the successor, and only for a restart
 # --------------------------------------------------------------------------- #
-def test_a_restart_exit_spawns_the_successor(home, monkeypatch):
+def _drive_main(monkeypatch, code: int) -> list:
+    """Run ``main`` over a stubbed serve loop, recording successor spawns.
+
+    Logging is stubbed out along with it: ``main`` would otherwise attach a
+    root-logger FileHandler to this test's temp home and leave it open for
+    the rest of the session — a handle into a directory pytest is about to
+    delete, and one every later test would keep writing into.
+    """
     spawned = []
 
     async def fake_serve(host, port, cfg):
-        return daemon_main.RESTART_CODE
+        return code
 
+    monkeypatch.setattr(daemon_main, "_setup_logging", lambda foreground: None)
     monkeypatch.setattr(daemon_main, "_serve", fake_serve)
     monkeypatch.setattr(
         daemon_main.daemon_client, "spawn_daemon", lambda: spawned.append(True)
     )
     assert daemon_main.main([]) == 0
-    assert spawned == [True]
+    return spawned
+
+
+def test_a_restart_exit_spawns_the_successor(home, monkeypatch):
+    assert _drive_main(monkeypatch, daemon_main.RESTART_CODE) == [True]
 
 
 def test_a_plain_exit_spawns_nothing(home, monkeypatch):
-    spawned = []
-
-    async def fake_serve(host, port, cfg):
-        return 0
-
-    monkeypatch.setattr(daemon_main, "_serve", fake_serve)
-    monkeypatch.setattr(
-        daemon_main.daemon_client, "spawn_daemon", lambda: spawned.append(True)
-    )
-    assert daemon_main.main([]) == 0
-    assert spawned == []
+    assert _drive_main(monkeypatch, 0) == []
