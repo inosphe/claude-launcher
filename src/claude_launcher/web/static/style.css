@@ -600,10 +600,15 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .wf-gate { font-size: 14px; margin-bottom: 8px; }
 .wf-proposal { color: #9da5b0; font-size: 13px; margin-bottom: 8px; }
+/* A background in the base class, not only in the modifiers: a .wf-btn with
+   no modifier ("Set for this run", "Decide it myself", the pane's "Open the
+   run page") otherwise wears the browser's own button face — near-white,
+   under white text. */
 .wf-btn {
   padding: 6px 16px; margin-right: 8px; font-size: 13px; cursor: pointer;
-  border: none; border-radius: 5px; color: #fff;
+  border: none; border-radius: 5px; color: #fff; background: #30363d;
 }
+.wf-btn:hover { background: #3c444d; }
 /* the same chip when it is a link rather than a button (page-to-page moves) */
 a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-btn.approve { background: #238636; }
@@ -651,14 +656,44 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-start-context { flex: 1 1 200px; }
 .wf-start .wf-note { margin-top: 8px; }
 
-/* The run's two-column body: the picture on the left, everything to read and
-   press on the right. Both columns are elastic and the row wraps, so the one
-   structure follows the full page, the split pane at whatever ratio its bar
-   sits at, and a phone — a container that cannot hold both side by side
-   simply stacks the right column under the picture. */
+/* The run's two-column body: the picture on the left, everything to read on
+   the right. Both columns are elastic, so the one structure follows the full
+   page and the split pane at whatever ratio its bar sits at. */
 .wf-cols { display: flex; gap: 8px 26px; align-items: flex-start; flex-wrap: wrap; }
 .wf-diagram { flex: 1 1 380px; min-width: 300px; max-width: 640px; }
 .wf-side { flex: 1.3 1 340px; min-width: 300px; max-width: 760px; }
+
+/* With a run on screen (renderWfInto sets the class) the view stops
+   scrolling as a whole: the head and the button bar hold still, and the
+   picture and the text each own the scroll under them — the two halves of
+   the page move independently, in the pane and on the full page alike.
+   nowrap, unlike the plain flow above: a wrapped second row inside a
+   height-bound container would render below the fold with no way down to
+   it, so a too-narrow container scrolls sideways instead (phones opt out of
+   the whole mode — see the 820px block). */
+#wf-view.wf-scroll-split, #term-wf.wf-scroll-split {
+  display: flex; flex-direction: column; overflow-y: hidden;
+}
+.wf-scroll-split .wf-cols {
+  flex: 1 1 auto; min-height: 0; flex-wrap: nowrap; align-items: stretch;
+  overflow-x: auto;
+}
+.wf-scroll-split .wf-diagram, .wf-scroll-split .wf-side {
+  min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  padding-bottom: 12px;
+}
+
+/* The button bar: the actions box turned sideways and pinned under the head.
+   Its own scroll past 40% of the panel — a gate's prose can run long, and a
+   bar that will not yield eats the columns it is pinned above. */
+.wf-bar { flex: none; margin-top: 10px; }
+.wf-scroll-split .wf-bar { max-height: 40%; overflow-y: auto; }
+.wf-bar .wf-actions {
+  margin: 0; padding: 8px 12px;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+}
+.wf-bar .wf-actions p { margin: 0; }
+.wf-bar .wf-actions .wf-btn { margin: 0; }
 .wfd { width: 100%; height: auto; }
 .wfd-node { cursor: pointer; }
 .wfd-node:hover rect { stroke: #8fa1b3; }
@@ -1446,6 +1481,14 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   /* one column on a phone: each takes the row, and the 300px floors above
      would out-measure the narrowest screens' padding-box */
   .wf-diagram, .wf-side { flex: 1 1 100%; min-width: 0; }
+  /* ...and one flow: two pinned regions plus two scrollers have no room on
+     a phone, so the split-scroll mode gives the page its scrollbar back */
+  #wf-view.wf-scroll-split, #term-wf.wf-scroll-split {
+    display: block; overflow-y: auto;
+  }
+  .wf-scroll-split .wf-cols { flex-wrap: wrap; overflow-x: visible; }
+  .wf-scroll-split .wf-diagram, .wf-scroll-split .wf-side { overflow-y: visible; }
+  .wf-scroll-split .wf-bar { max-height: none; overflow-y: visible; }
   .pol-row { flex-wrap: wrap; margin-left: 0; }
   .pol-label { min-width: 0; }
   .mesh-send-row, .sess-send-row { flex-wrap: wrap; }

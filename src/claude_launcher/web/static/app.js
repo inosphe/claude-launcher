@@ -2763,6 +2763,10 @@ function renderWf(data) {
    lives, how it redraws, how it re-fetches after an action — so the pane is
    the page's material and not a lookalike that drifts. */
 function renderWfInto(view, data, ui) {
+  // With a run on screen the view stops scrolling as a whole: the head and
+  // the button bar hold still and each column below owns its own scroll
+  // (.wf-scroll-split). Idle is an ordinary page, so the class comes off.
+  view.classList.toggle("wf-scroll-split", data.status !== "idle");
   if (data.status === "idle") {
     // Built once and left alone: the 2s poll must not wipe the user's
     // in-progress picker/context input.
@@ -2793,12 +2797,20 @@ function renderWfInto(view, data, ui) {
   if (ui.fullLink) head.appendChild(wfFullLink(data));
   view.appendChild(head);
 
-  // Under the head the body is two columns: the picture on the left, and
-  // everything to read and press — description, meta, the gate and its
-  // buttons, the reports — down the right. One structure for both homes:
-  // the columns are elastic and the row wraps (see .wf-cols), so the same
-  // markup follows the full page, the split pane at whatever ratio the bar
-  // was left at, and a phone, without either home knowing which it is.
+  // The buttons at the panel's own top, not the screen's: the gate and the
+  // presses that clear it hold still under the head while everything below
+  // scrolls. The reminder form stays out of it (reminder: false) — it is a
+  // setting, not a press, and it reads better down among the text.
+  const bar = el("div", "wf-bar");
+  bar.appendChild(wfActions(data, { ...ui.actions, reminder: false }));
+  view.appendChild(bar);
+
+  // Under the bar the body is two columns: the picture on the left, and
+  // everything to read — description, meta, context, the reports, the
+  // journal — down the right. One structure for both homes: the full page
+  // and the split pane (at whatever ratio its bar sits at) both pin the
+  // head and the buttons and give each column its own scroll; only a phone
+  // falls back to one flow (see the 820px block).
   const side = el("div", "wf-side");
   if (wf.description) side.appendChild(el("p", "wf-desc", wf.description));
 
@@ -2844,7 +2856,11 @@ function renderWfInto(view, data, ui) {
   const pending = pendingBanner(data, ui.refresh);
   if (pending) side.appendChild(pending);
 
-  side.appendChild(wfActions(data, ui.actions));
+  // The reminder, out of the bar (see above). Offered exactly when the bar's
+  // nudge is: while the run is still somebody's to remind.
+  if (run.status !== "done" && run.status !== "aborted") {
+    side.appendChild(reminderControl(data, (ui.actions || {}).after, ui.host));
+  }
 
   // drop a stale selection if the workflow changed under us
   if (
@@ -2899,6 +2915,8 @@ function renderWfInto(view, data, ui) {
   cols.appendChild(side);
   view.appendChild(cols);
 
+  // Into the text column, not under the columns: outside them it would sit
+  // below two scrollers that never yield the height to reach it.
   const journal = document.createElement("details");
   journal.className = "wf-journal";
   journal.appendChild(el("summary", null, `journal (${(data.journal || []).length} events)`));
@@ -2908,7 +2926,7 @@ function renderWfInto(view, data, ui) {
       `${e.step ? "  " + e.step : ""}${e.option ? "  -> " + e.option : ""}`;
     journal.appendChild(el("div", "wf-journal-line mono", line));
   }
-  view.appendChild(journal);
+  side.appendChild(journal);
 }
 
 /* The way from the half to the whole: the split pane renders the run page's
@@ -3056,7 +3074,11 @@ function wfActions(data, opts = {}) {
       btn.title = "nothing to nudge: this run has no live session of its own";
     }
     box.appendChild(btn);
-    box.appendChild(reminderControl(data, after, opts.host));
+    // The run page and the pane pull the reminder out (reminder: false) and
+    // seat it in their text column; the fold keeps it here, in the one box.
+    if (opts.reminder !== false) {
+      box.appendChild(reminderControl(data, after, opts.host));
+    }
   }
 
   // Skipping a round. A recurring run's rounds only count upward — a normal
