@@ -192,9 +192,65 @@ def test_spawn_remembers_its_own_shorter_list(home):
     assert wizard.Wizard.recall_key != wizard.SpawnWizard.recall_key
     spawn_fields = set(wizard.SpawnWizard.recall_fields)
     # a child's harness, args and workspace are its parent's and the policy's
-    # to offer, so they are not carried across parents
-    assert not spawn_fields & {"harness", "args", "workspace", "parent", "name"}
-    assert {"profile", "role", "mesh"} <= spawn_fields
+    # to offer, so they are not carried across parents; its mesh is the
+    # parent's answer, not last launch's
+    assert not spawn_fields & {
+        "harness", "args", "workspace", "parent", "name", "mesh",
+    }
+    assert {"profile", "role"} <= spawn_fields
+
+
+def test_no_form_remembers_a_row_that_takes_no_preset(home):
+    """Only fields the form actually re-offers may be remembered.
+
+    The Workflow row is filled by ``sync_workflows`` from the directory and
+    the role and reads no preset, so remembering it would promise a default
+    that never lands — the same reason spawn's Mesh row is out.
+    """
+    for form in (wizard.Wizard, wizard.SpawnWizard):
+        assert "workflow" not in form.recall_fields
+    # the seam itself, so this stays true if the row ever gains a preset:
+    # a workflow named in the defaults does not reach the row today
+    cwd = os.path.abspath("/work/repo")
+    sources = FakeSources(workflows={cwd: ["ship-it"]})
+    w = wizard.Wizard(
+        sources, cwd=cwd,
+        defaults=wizard_recall.defaults(new_args(), {"workflow": "ship-it"}),
+    )
+    assert "ship-it" in [o.label for o in w.field("workflow").options]
+    assert w.value("workflow") == ""
+
+
+def test_a_policy_locked_row_is_not_remembered(home, monkeypatch):
+    """A greyed-out row holds what the form put there, not a person's answer.
+
+    Remembering one would replay a locked choice under the next parent —
+    a recall that causes refusals instead of saving typing.
+    """
+    locked = {
+        "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
+        "children_used": 0, "children_remaining": 3,
+        # profile stays the parent's: the row is shown, greyed, with the
+        # parent's own answer in it
+        "may_choose": [], "spawnable_harnesses": [], "workspaces": [],
+        "profiles": ["work", "ds4"],
+    }
+    made: dict = {}
+
+    class Locked(wizard.SpawnWizard):
+        def __init__(self, sources, *, cwd="", defaults=None):
+            super().__init__(sources, cwd=cwd, defaults=defaults)
+            self.color = False
+            made["form"] = self
+
+    assert drive(
+        monkeypatch, SUBMIT, spawn_args(), form=Locked,
+        sources=FakeSpawnSources(report=locked),
+    ) is True
+    assert made["form"].field("profile").disabled is True
+    assert "profile" not in wizard_recall.load("spawn")
+    # the rows the policy left alone are still remembered
+    assert "role" in wizard_recall.load("spawn")
 
 
 def spawn_args(**kw) -> argparse.Namespace:

@@ -1148,9 +1148,12 @@ class Wizard(Form):
     title = "claunch new-session"
 
     recall_key = "new"
+    # No `workflow`: that row is filled by `sync_workflows` from the
+    # directory and the role, and takes no preset -- remembering it would
+    # promise a default the form never applies.
     recall_fields = (
         "harness", "profile", "borrow", "null_token", "role", "args",
-        "mesh", "workflow", "restore", "attach",
+        "mesh", "restore", "attach",
     )
 
     # -- construction ---------------------------------------------------- #
@@ -1601,12 +1604,12 @@ class SpawnWizard(Form):
     # Narrower than new-session's on purpose: harness, args and workspace
     # options here are the parent's and the policy's to offer, so a
     # remembered pick could only be re-offered against a different parent
-    # than it was made for.
+    # than it was made for. `mesh` and `workflow` are out for a sharper
+    # reason -- neither row takes a preset (the mesh follows the parent, the
+    # workflow follows the role), and the mesh a child belongs in is its
+    # parent's answer, not last launch's.
     recall_key = "spawn"
-    recall_fields = (
-        "profile", "borrow", "null_token", "role", "mesh", "workflow",
-        "attach",
-    )
+    recall_fields = ("profile", "borrow", "null_token", "role", "attach")
 
     #: The mesh picker's "none at all" entry. The API spells it exactly so.
     NO_MESH = "-"
@@ -2213,8 +2216,17 @@ def run(
         print("cancelled; nothing was created", file=sys.stderr)
         return False
     wiz.apply(args)
+    # A row the policy greyed out holds whatever the form put there, not an
+    # answer this person gave -- remembering one would replay a locked
+    # choice under the next parent, which is how a recall starts causing
+    # refusals instead of saving typing.
     wizard_recall.save(
-        wiz.recall_key, {k: getattr(args, k, None) for k in wiz.recall_fields}
+        wiz.recall_key,
+        {
+            k: getattr(args, k, None)
+            for k in wiz.recall_fields
+            if not wiz.field(k).disabled
+        },
     )
     print(wiz.summary(), file=sys.stderr)
     return True
