@@ -49,6 +49,18 @@ async def _serve(mgr, mm):
     return client
 
 
+async def _wait_idle(session, timeout=10.0):
+    """Wait until the child is actually a terminal worth typing into.
+
+    This is a *readiness* wait, not a premise: a test that really pastes
+    something into the session needs the harness up and the screen settled
+    first. It is not a way to make ``status()`` say idle at some later
+    assertion — by then a late sample can have moved the baseline again
+    (see :func:`_pin_status`). Wait with this; assert with that.
+    """
+    await session.wait_for("idle", timeout=timeout, threshold=0.5)
+
+
 def _pin_status(session, status):
     """State the screen's status as a premise instead of racing the sampler.
 
