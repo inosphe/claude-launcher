@@ -2772,7 +2772,14 @@ function renderHome() {
    path rather than anything this card does. Not a shortcut around any
    approval gate either: what a restart *serves* (say, a new build going
    live) is still decided wherever it is decided — this button is only the
-   mechanics of `claunch daemon restart`, brought to the page. */
+   mechanics of `claunch daemon restart`, brought to the page.
+
+   What it deliberately is NOT: a rescue for a daemon that has stopped
+   answering. The POST is served by the daemon's own event loop, so a loop
+   that has stopped turning never accepts it - the button would sit there
+   looking like it should work, which is worse than not offering it. That
+   case belongs to the CLI, which can reach the process itself
+   (`claunch daemon restart --force`); the wording says so. */
 function daemonCard() {
   const card = el("div", "home-card static");
   const head = el("div", "home-card-head");
@@ -2785,14 +2792,20 @@ function daemonCard() {
       ` · ${plural(live, "live session")}`
   ));
   const btn = el("button", "wf-btn force", "Restart daemon");
-  btn.title = "stop this daemon and start a fresh one on the same state";
+  btn.title = "planned restart of a daemon that is answering - a daemon " +
+    "that has stopped answering cannot be restarted from here " +
+    "(claunch daemon restart --force)";
   btn.addEventListener("click", async () => {
     if (!confirm(
       "Restart the daemon?\n\n" +
       "Running sessions are stopped and relaunched into their own " +
       "conversations (per their restore flag). Attached terminals and this " +
       "page reconnect on their own — and the page will ask for the token " +
-      "again, because login cookies die with the process."
+      "again, because login cookies die with the process.\n\n" +
+      "This is a planned restart, and it goes through the daemon " +
+      "itself: if one has stopped answering, this button cannot " +
+      "reach it either - that case is 'claunch daemon restart " +
+      "--force' from a terminal."
     )) return;
     btn.disabled = true;
     btn.textContent = "Restarting…";

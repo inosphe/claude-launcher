@@ -763,6 +763,16 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     if action == "restart":
         if getattr(args, "all", False):
             return _restart_all_instances()
+        if getattr(args, "force", False):
+            return _force_replace()
+        # The ordinary path talks to the daemon, so it only works while the
+        # daemon is listening. A wedged one cannot be asked anything -- say so
+        # here rather than leaving the operator with "did not come up in 15s",
+        # which reads as a broken install instead of a daemon to replace.
+        report = daemon_client.diagnose(probes=2)
+        if report["state"] == daemon_client.WEDGED:
+            _print_wedged(report)
+            return 1
         daemon_client.stop()
         time.sleep(0.3)
         client = daemon_client.ensure_running()
@@ -771,6 +781,17 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     if action == "status":
         info = daemon_client.status()
         if info is None:
+            # "cannot connect" is not the same fact as "not running", and
+            # reporting them as one is what makes a wedged daemon look like an
+            # absent one -- the operator then starts a replacement that stands
+            # down against a lock the absent daemon is still holding.
+            report = daemon_client.diagnose(probes=3)
+            if report["state"] == daemon_client.WEDGED:
+                _print_wedged(report)
+                return 1
+            if report["state"] == daemon_client.STALE_RECORD:
+                print(f"daemon is not running ({report['why']})")
+                return 1
             print("daemon is not running")
             return 1
         print(f"pid:      {info.get('pid')}")
@@ -789,6 +810,66 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         print(cli_mesh.relay_line(info.get("relay")))
         return 0
     raise AssertionError(f"unknown daemon action {action!r}")
+
+
+def _print_wedged(report: dict) -> None:
+    """Say what a wedged daemon is, and what the one way out of it is."""
+    print(f"daemon is WEDGED: {report['why']}", file=sys.stderr)
+    print(
+        "  it still holds the singleton lock, so a replacement cannot start "
+        "while it lives",
+        file=sys.stderr,
+    )
+    print(
+        "  recover with: claunch daemon restart --force  "
+        "(ends that process and its sessions, then starts a fresh daemon)",
+        file=sys.stderr,
+    )
+
+
+def _force_replace() -> int:
+    """Replace a daemon that cannot be asked to leave.
+
+    Reserved for the wedged case and never automatic: ending the process
+    skips the drain a graceful shutdown does, and a single missed health
+    check is a normal thing on a loaded machine. So the state is re-checked
+    here -- with several probes -- and anything that is merely serving is
+    sent down the ordinary path instead.
+    """
+    report = daemon_client.diagnose(probes=3)
+    state = report["state"]
+    if state == daemon_client.SERVING:
+        print(
+            "daemon is answering — no force needed; "
+            "restarting it the ordinary way",
+            file=sys.stderr,
+        )
+        daemon_client.stop()
+        time.sleep(0.3)
+        client = daemon_client.ensure_running()
+        print(f"daemon restarted at {client.base_url}")
+        return 0
+    if state == daemon_client.NOT_RUNNING:
+        client = daemon_client.ensure_running()
+        print(f"daemon started at {client.base_url}")
+        return 0
+    pid = report.get("pid") or 0
+    if state == daemon_client.WEDGED:
+        print(f"daemon pid {pid} is wedged ({report['why']}); ending it")
+        if not daemon_client.terminate_process(int(pid)):
+            print(
+                f"error: could not end pid {pid} — end it by hand, "
+                "then run 'claunch daemon start'",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"pid {pid} ended (its sessions went with it; the new daemon "
+              "restores the ones marked for it)")
+    else:  # stale_record: the process is already gone, only the file remains
+        print(f"clearing a stale record for pid {pid}")
+    client = daemon_client.ensure_running()
+    print(f"daemon restarted at {client.base_url}")
+    return 0
 
 
 def _restart_all_instances() -> int:
@@ -1311,6 +1392,12 @@ def register(sub) -> None:
                 "--all", action="store_true",
                 help="restart every running daemon instance (the default one "
                      "and all named -L instances)",
+            )
+            p.add_argument(
+                "--force", action="store_true",
+                help="for a daemon that has stopped answering: end its "
+                     "process (and its sessions) and start a fresh one -- "
+                     "the only way past a lock a wedged daemon still holds",
             )
         p.set_defaults(func=_cmd_daemon, action=action)
     p_token = dsub.add_parser("token", help="print the API/web login token")

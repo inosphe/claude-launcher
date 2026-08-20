@@ -224,3 +224,147 @@ def status() -> Optional[dict]:
     merged = dict(doc)
     merged.update(info if isinstance(info, dict) else {})
     return merged
+
+
+# --------------------------------------------------------------------------- #
+# diagnosis: telling "not running" apart from "running but not answering"
+# --------------------------------------------------------------------------- #
+#: States :func:`diagnose` reports.
+NOT_RUNNING = "not_running"    # nothing announced, or the announcement is stale
+STALE_RECORD = "stale_record"  # daemon.json names a pid that is gone
+WEDGED = "wedged"              # the process is alive and holds the lock, but
+                               # answers nothing — an event loop that stopped
+                               # turning takes the whole HTTP surface with it
+SERVING = "serving"            # answering health checks
+
+
+def process_alive(pid: int) -> Optional[bool]:
+    """Whether ``pid`` is a live process; ``None`` when we cannot tell.
+
+    Deliberately not ``os.kill(pid, 0)``: on Windows Python maps ``os.kill``
+    onto ``TerminateProcess``, so the usual POSIX liveness probe would *kill*
+    the daemon it was asked about. Windows gets a query-only handle instead,
+    and POSIX keeps signal 0 (``EPERM`` means alive but not ours).
+    """
+    if pid <= 0:
+        return None
+    if sys.platform == "win32":
+        import ctypes
+        from ctypes import wintypes
+
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        STILL_ACTIVE = 259
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION, False, pid
+        )
+        if not handle:
+            return False  # gone (or, rarely, not ours to look at)
+        try:
+            code = wintypes.DWORD()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return None
+            return code.value == STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def diagnose(*, probes: int = 1, gap: float = 0.5) -> dict:
+    """What the daemon is doing, from the outside, with the evidence for it.
+
+    Exists because "cannot connect" has two very different causes and the
+    client used to report both as "not running": a daemon whose event loop is
+    blocked keeps its pid, its port and — the part that makes it unrecoverable
+    without help — its singleton lock, so every attempt to start a replacement
+    stands down for a predecessor that is never coming back.
+
+    ``probes`` health checks spaced ``gap`` apart, because the honest reading
+    of a single failed check on a loaded machine is "busy", not "wedged": one
+    timeout during a test sweep must not be evidence for killing anything.
+    """
+    doc = runtime_state.read_daemon_json()
+    if not doc:
+        return {
+            "state": NOT_RUNNING,
+            "pid": None,
+            "base_url": None,
+            "lock_free": runtime_state.lock_is_free(),
+            "why": "no daemon.json — nothing has announced itself",
+        }
+    base_url = _base_url(doc)
+    pid = int(doc.get("pid") or 0)
+    for attempt in range(max(1, probes)):
+        if _health_ok(base_url):
+            return {
+                "state": SERVING,
+                "pid": pid,
+                "base_url": base_url,
+                "lock_free": False,
+                "why": "answering /api/health",
+            }
+        if attempt + 1 < max(1, probes):
+            time.sleep(gap)
+    alive = process_alive(pid)
+    if alive is False:
+        return {
+            "state": STALE_RECORD,
+            "pid": pid,
+            "base_url": base_url,
+            "lock_free": runtime_state.lock_is_free(),
+            "why": f"daemon.json names pid {pid}, which is gone",
+        }
+    return {
+        "state": WEDGED,
+        "pid": pid,
+        "base_url": base_url,
+        # Reported rather than assumed: a wedged daemon normally still holds
+        # the lock, and whether it does decides if a replacement can start.
+        "lock_free": runtime_state.lock_is_free(),
+        "why": (
+            f"pid {pid} is alive and {base_url} is announced, but "
+            f"{max(1, probes)} health check(s) went unanswered"
+        ),
+    }
+
+
+def terminate_process(pid: int, *, timeout: float = 10.0) -> bool:
+    """End ``pid`` and wait for it to actually go; ``True`` when it is gone.
+
+    The last resort for a daemon that stopped answering. There is no gentler
+    lever: the singleton lock is an OS file lock held by the process itself,
+    so nothing outside it can hand the lock to a successor — the holder has
+    to die first. On Windows the whole process tree goes (``taskkill /T``),
+    because a daemon killed on its own would leave its session children
+    running with nothing driving them, and the successor would then restore
+    those same sessions a second time.
+    """
+    if pid <= 0:
+        return False
+    try:
+        if sys.platform == "win32":
+            subprocess.run(
+                ["taskkill", "/PID", str(pid), "/T", "/F"],
+                capture_output=True,
+                timeout=timeout,
+            )
+        else:
+            import signal
+
+            os.kill(pid, signal.SIGTERM)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process_alive(pid) is False:
+            return True
+        time.sleep(0.2)
+    return process_alive(pid) is False
