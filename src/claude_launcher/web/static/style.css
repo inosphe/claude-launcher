@@ -196,6 +196,9 @@ body {
   border: 1px solid #2a2e36; border-radius: 8px; text-decoration: none;
 }
 .home-card:hover { border-color: #3c444d; background: #1f232a; }
+/* the Daemon card is not a doorway: no link affordance, no hover shift */
+.home-card.static { cursor: default; }
+.home-card.static:hover { border-color: #2a2e36; background: #1b1e24; }
 .home-card-head { display: flex; align-items: baseline; gap: 8px; }
 .home-card-head h3 { font-size: 14px; color: #e6edf3; }
 .home-go { margin-left: auto; color: #58a6ff; font-size: 16px; }

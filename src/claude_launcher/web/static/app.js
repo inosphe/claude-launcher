@@ -2685,7 +2685,60 @@ function renderHome() {
       : "none registered"
   ));
 
+  // Last: the one card that is not a doorway — the machinery every other
+  // card lives in, with the one control that acts on it.
+  grid.appendChild(daemonCard());
+
   view.appendChild(grid);
+}
+
+/* The daemon's own card: what is serving (from the last /api/daemon read;
+   boot() refills it on every recovery) and the restart control. The POST
+   only asks — the daemon finishes the reply, drains its sessions, and
+   spawns its own successor; the page then notices the new boot_id in
+   pollOnce() and re-boots itself, so recovery is the ordinary reconnect
+   path rather than anything this card does. Not a shortcut around any
+   approval gate either: what a restart *serves* (say, a new build going
+   live) is still decided wherever it is decided — this button is only the
+   mechanics of `claunch daemon restart`, brought to the page. */
+function daemonCard() {
+  const card = el("div", "home-card static");
+  const head = el("div", "home-card-head");
+  head.appendChild(el("h3", null, "Daemon"));
+  card.appendChild(head);
+  const live = sessionsCache.filter((s) => s.status !== "exited").length;
+  card.appendChild(el(
+    "p", "home-sub",
+    (daemonCache ? `v${daemonCache.version}` : "version unknown") +
+      ` · ${plural(live, "live session")}`
+  ));
+  const btn = el("button", "wf-btn force", "Restart daemon");
+  btn.title = "stop this daemon and start a fresh one on the same state";
+  btn.addEventListener("click", async () => {
+    if (!confirm(
+      "Restart the daemon?\n\n" +
+      "Running sessions are stopped and relaunched into their own " +
+      "conversations (per their restore flag). Attached terminals and this " +
+      "page reconnect on their own — and the page will ask for the token " +
+      "again, because login cookies die with the process."
+    )) return;
+    btn.disabled = true;
+    btn.textContent = "Restarting…";
+    try {
+      await api("/api/daemon/restart", { method: "POST" });
+    } catch {
+      btn.disabled = false;   // down already, or the auth overlay is up
+      btn.textContent = "Restart daemon";
+      return;
+    }
+    // From here the daemon goes quiet on purpose; label the gap so the rail
+    // does not read as a mystery outage. pollOnce()'s boot_id check does the
+    // actual recovery the moment the successor answers.
+    setDaemonOnline(false);
+    $("daemon-info").textContent = "restarting…";
+  });
+  card.appendChild(btn);
+  return card;
 }
 
 /* ------------------------------------------------------------------ */
@@ -8344,6 +8397,7 @@ let pollTimer = null;
 let booted = false;        // boot() has seeded the page and routed once
 let daemonOnline = true;   // last verdict; only the transitions do any work
 let daemonBoot = null;     // which daemon that verdict was about
+let daemonCache = null;    // last /api/daemon payload; the home card reads it
 
 function authOpen() {
   return !$("auth-overlay").classList.contains("hidden");
@@ -8372,6 +8426,7 @@ async function boot() {
   } catch {
     return;   // down, or the auth overlay is up — the poll comes back to this
   }
+  daemonCache = info;
   const badge = $("daemon-info");
   badge.textContent = `v${info.version}`;
   badge.title = "";

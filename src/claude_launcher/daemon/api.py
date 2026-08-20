@@ -150,6 +150,9 @@ def build_app(
     app["started_at"] = started_at
     app["boot_id"] = boot_id
     app["shutdown_event"] = asyncio.Event()
+    #: Whether the shutdown now in progress should spawn a successor. Read by
+    #: ``__main__`` after the loop drains — the handler only marks intent.
+    app["restart_requested"] = False
     app["websockets"] = set()
     # Open terminal sockets never close on their own; without this, runner
     # cleanup waits its shutdown timeout for every browser tab left open.
@@ -160,6 +163,7 @@ def build_app(
     r.add_post("/api/auth/session", h_auth_session)
     r.add_get("/api/daemon", h_daemon_info)
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
+    r.add_post("/api/daemon/restart", h_daemon_restart)
     r.add_get("/api/profiles", h_profiles)
     r.add_get("/api/roles", h_roles)
     r.add_get("/api/workspaces", h_workspaces)
@@ -349,6 +353,22 @@ async def h_daemon_shutdown(request: web.Request) -> web.Response:
     loop = asyncio.get_running_loop()
     loop.call_later(0.1, request.app["shutdown_event"].set)
     return web.json_response({"ok": True})
+
+
+async def h_daemon_restart(request: web.Request) -> web.Response:
+    """Shut down and hand this port to a fresh daemon process.
+
+    Identical to shutdown from in here — same event, same teardown, same
+    notice to attached clients — plus one bit of intent that ``__main__``
+    reads once the loop has drained. The successor is spawned there, after
+    the singleton lock is released, so it finds the lock free instead of
+    spending its grace window waiting this process out. Sessions come back
+    the way they do on any restart: relaunched per their ``restore`` flag.
+    """
+    request.app["restart_requested"] = True
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.1, request.app["shutdown_event"].set)
+    return web.json_response({"ok": True, "restarting": True})
 
 
 async def h_profiles(request: web.Request) -> web.Response:
