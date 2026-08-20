@@ -3313,6 +3313,18 @@ async function cflowPost(path, body) {
    - "Start directly" writes the run here and nudges the terminal. For a slot
      with no live session (an agent that attaches later, a script), where
      there is nobody to ask. */
+/* One line per workflow in the picker. An option cannot wrap, and the native
+   popup sizes itself to the widest option: a paragraph-length description
+   drags the whole dropdown past the viewport edge, where the browser pins and
+   clips it. So the list gets one clipped line per workflow; the full
+   description renders under the select for whichever is picked. */
+function wfOptionLabel(w) {
+  if (!w.description) return w.name;
+  const d = w.description.replace(/\s+/g, " ").trim();
+  const clipped = d.length > 48 ? d.slice(0, 48).trimEnd() + "…" : d;
+  return `${w.name} — ${clipped}`;
+}
+
 async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) {
   box.dataset.slot = `${scope}|${cwd}`;
   box.appendChild(el("h3", null,
@@ -3335,21 +3347,10 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
 
   const sel = document.createElement("select");
   sel.className = "wf-start-select";
-  /* An option cannot wrap, and the native popup sizes itself to the widest
-     option: a paragraph-length description drags the whole dropdown past the
-     viewport edge, where the browser pins and clips it. So the list gets one
-     clipped line per workflow; the full description renders under the select
-     for whichever is picked. */
-  const clip = (s, n) => {
-    s = s.replace(/\s+/g, " ").trim();
-    return s.length > n ? s.slice(0, n).trimEnd() + "…" : s;
-  };
   for (const w of flows) {
     const opt = document.createElement("option");
     opt.value = w.name;
-    opt.textContent = w.description
-      ? `${w.name} — ${clip(w.description, 48)}`
-      : w.name;
+    opt.textContent = wfOptionLabel(w);
     opt.title = w.path;
     sel.appendChild(opt);
   }
