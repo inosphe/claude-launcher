@@ -93,7 +93,11 @@ steps:
     # 겹겹이 쌓여 Windows 경로 한계에 먼저 닿는다(긴 경로에서 'GIT_DIR too
     # big'·FileNotFoundError로 무더기 실패). --no-sync는 여기에 넣지 않는다 —
     # 워커는 새 워크트리에서 첫 실행에 sync로 venv를 만들어야 한다.
-    verify: 'uv run --extra test pytest tests -q -m "not worktree" --basetemp="C:/t/verify"'
+    # 경로가 세션별로 갈리는 이유: pytest는 시작할 때 basetemp를 자기 것으로
+    # 비우므로, 고정 경로면 나중에 시작한 워커가 먼저 돌던 워커의 tmp를
+    # 지운다. verify는 cmd.exe를 거쳐 실행되어 %CLAUNCH_SESSION%가 그 자리에서
+    # 확장되므로, 오버라이드가 scope를 몰라도 세션마다 다른 경로가 된다.
+    verify: 'uv run --extra test pytest tests -q -m "not worktree" --basetemp="C:/t/%CLAUNCH_SESSION%"'
     next: commit
 
   commit:
