@@ -156,6 +156,29 @@ def test_the_improv_workflows_carry_no_repo_specific_verify():
             )
 
 
+def test_the_bundled_improv_worker_teaches_the_nested_merge_contract():
+    """A worker that spawned sub-workers folds their branches upward as a
+    tree: each finished child branch is collected with a ``--no-ff`` merge
+    into the worker's own branch, and integration is then *requested* from
+    the parent session (leader -> master review, worker -> --no-ff merge
+    into its branch) — the worker never merges master itself. The bundled
+    file is the teaching copy of that contract; this pins it."""
+    bundled = dict(state_mod.bundled_workflows())
+    wf = model.load(bundled["improv-worker"])
+
+    collect = wf.steps["commit"].instructions
+    assert "자식" in collect and "--no-ff" in collect
+    assert "트리" in collect
+
+    landing = wf.steps["landing"].select
+    assert "상위" in landing.prompt
+    assert set(landing.options) == {"request", "hold"}
+
+    request = wf.steps["integration-request"].instructions
+    assert "상위 세션" in request and "--no-ff" in request
+    assert "master를 직접 머지하지 않는다" in request
+
+
 def test_a_global_install_seeds_the_global_layer(project, home):
     lines = install_mod.install_into_user()
     assert [line for line in lines if line.startswith("workflow ->")]
