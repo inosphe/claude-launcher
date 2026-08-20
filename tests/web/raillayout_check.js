@@ -105,6 +105,19 @@ function terminalOnScreen() { return false; }
 function attach() {}
 function setStatusBadge() {}
 function $(id) { return list; }
+function refreshParentChoices() {}
+/* Not a no-op, because what it does touches what this harness pins. The real
+   one hangs a context note on the row AND on the name, joining whatever title
+   was already there rather than replacing it — so a name clipped to an
+   ellipsis can still say what it was. The note is fixed here (the real one
+   reads s.context) because the shape is the part that matters: a title may
+   grow lines, and the name has to stay the first of them. */
+function ctxNoteOnRow(row, name, s) {
+  const note = "context not known yet — no completed turn to read";
+  const join = (had) => [had, note].filter(Boolean).join("\\n");
+  if (row) row.title = join(row.title);
+  if (name) name.title = join(name.title);
+}
 `;
 
 const ctx = {};
@@ -184,9 +197,16 @@ ctx.setMeshes([
         row("loner").querySelectorAll(".mesh-role").length, 0);
 
   /* An ellipsised name is only acceptable because the whole one is a hover
-     away — the row's own title is about lineage, so the label carries it. */
-  check("the name carries itself as hover text",
-        find("s25", ".rail-name").title, "s25");
+     away — the row's own title is about lineage, so the label carries it.
+
+     Pinned as the FIRST LINE rather than the whole title, because the title is
+     shared: the context note joins it instead of replacing it, and the next
+     thing that wants a word will join it too. Demanding the title be exactly
+     the name would fail on a row that is perfectly correct, and pinning
+     nothing would let a future note push the name out of reach — which is the
+     one thing the ellipsis is relying on. */
+  check("the name is still the first line of its hover text",
+        find("s25", ".rail-name").title.split("\n")[0], "s25");
 
   /* The indent may not eat the row: it is the one part that grows without
      bound as the tree deepens, and past a few levels it would spend the
