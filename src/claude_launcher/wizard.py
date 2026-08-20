@@ -1587,6 +1587,11 @@ class SpawnWizard(Form):
     #: The mesh picker's "none at all" entry. The API spells it exactly so.
     NO_MESH = "-"
 
+    #: The Args row's hint with nothing known about the parent yet. Left
+    #: empty the child runs the parent's args, so the row says so rather
+    #: than letting a blank box read as "no args".
+    ARGS_HINT = "passed to the harness INSTEAD of the parent's own args"
+
     def _build(self, d: Any) -> List[Field]:
         def get(name, fallback=None):
             return getattr(d, name, fallback) if d is not None else fallback
@@ -1665,10 +1670,19 @@ class SpawnWizard(Form):
         if get("null_token"):
             null.select(True)
         extra = get("args") or []
+        # Empty, like every other override row: the box is what the child
+        # would run INSTEAD of its parent's args, so pre-filling it with the
+        # parent's own would read as a value somebody typed and would be
+        # sent back verbatim. What the parent runs belongs in the hint, the
+        # way the harness/profile/workspace rows carry "(the parent's: X)"
+        # -- the inherited value is shown, not proposed.
         args_field = TextField(
             key="args", label="Args",
-            placeholder="(inherited from the parent)",
-            hint="passed to the harness INSTEAD of the parent's own args",
+            # Blank, not "(none)": left empty the child runs its parent's
+            # args, so a parenthetical claiming no args would be a lie the
+            # row tells at a glance. The hint says what empty means.
+            placeholder="",
+            hint=self.ARGS_HINT,
             text=" ".join(x for x in extra if x != "--"),
         )
         workspace = ChoiceField(
@@ -1926,6 +1940,15 @@ class SpawnWizard(Form):
         borrow.disabled = "borrow" not in may
         borrow.disabled_note = (
             "the child authenticates as its parent does (spawn.allow_profile)"
+        )
+
+        # The one inherited value with no options list to carry it: the Args
+        # row is free text, so what the parent runs is spelled out in its
+        # hint instead of sitting in an option label.
+        theirs = " ".join(str(a) for a in (info.get("args") or ()) if a != "--")
+        self.field("args").hint = (
+            f"{self.ARGS_HINT} (the parent's: {theirs})" if theirs
+            else f"{self.ARGS_HINT} (it has none of its own)"
         )
 
         workspace = self.field("workspace")
