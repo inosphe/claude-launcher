@@ -39,7 +39,8 @@ const ctx = {};
 new Function(
   "exports", "el", "sessionsCache",
   ["fmtAge", "ctxShort", "ctxAgeOf", "ctxKnowable", "ctxSentence",
-   "ctxBreakdown", "ctxTooltip", "ctxChip"].map(slice).join("\n") + `
+   "ctxBreakdown", "ctxTooltip", "ctxNoteOnRow", "ctxChip"].map(slice).join("\n") + `
+exports.onRow = ctxNoteOnRow;
 exports.short = ctxShort;
 exports.sentence = ctxSentence;
 exports.tooltip = ctxTooltip;
@@ -116,6 +117,35 @@ check("a session with no reading gets a marked absence, not a zero",
 check("and a harness that never has one gets no chip",
       ctx.chip("pi"), null);
 check("nor does a session the rail no longer knows", ctx.chip("gone"), null);
+
+/* ---- what the rail row ends up carrying ---- */
+/* The row, and the name inside it. A child's title wins wherever the pointer
+   lands, and the name is where it lands — so the note has to go on both, and
+   it has to join what the name already said rather than take its place: the
+   rail clips a long name and that tooltip is where the rest of it went. */
+function row(title = "") { return { title }; }
+
+let li = row("spawned by lead"), nm = row("a-very-long-session-name");
+ctx.onRow(li, nm, LIVE);
+check("the row keeps what it already said and adds the reading",
+      li.title, `spawned by lead\n${ctx.tooltip(LIVE)}`);
+check("and the name does too — a clipped name must still be readable",
+      nm.title, `a-very-long-session-name\n${ctx.tooltip(LIVE)}`);
+
+li = row(); nm = row();
+ctx.onRow(li, nm, QUIET);
+check("a session with no reading says so on both",
+      [li.title, nm.title], [ctx.tooltip(QUIET), ctx.tooltip(QUIET)]);
+
+li = row("exited — open it to resume"); nm = row("pi");
+ctx.onRow(li, nm, OTHER);
+check("and a harness that never has one leaves both exactly as they were",
+      [li.title, nm.title], ["exited — open it to resume", "pi"]);
+
+li = row("solo");
+ctx.onRow(li, null, LIVE);
+check("a row with no name element beside it is not a crash",
+      li.title.startsWith("solo"), true);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

@@ -311,8 +311,7 @@ async function refreshSessions() {
     // How full this session's context is, in the one place on a rail row that
     // costs nothing to fill: the tooltip. Twenty rows is the question being
     // answered, and a line per row would make the rail itself the problem.
-    const ctxNote = ctxTooltip(s);
-    if (ctxNote) li.title = [li.title, ctxNote].filter(Boolean).join("\n");
+    ctxNoteOnRow(li, label, s);
     // The row attaches — that is what the session is doing. This opens what
     // it *is* (definition, meshes, its cflow run) beside it, so the two are
     // not two places you have to travel between.
@@ -568,6 +567,27 @@ function ctxTooltip(s) {
   if (!sentence) return "";
   const c = s && s.context;
   return c ? `${sentence}\n${ctxBreakdown(c)}` : sentence;
+}
+
+/* Hang that note on a rail row, without giving the row a single new pixel.
+
+   On both the row and its name, because a child's `title` wins over its
+   parent's wherever the pointer actually lands — and the name is where it
+   lands. The name carries one of its own (the rail clips a long name with an
+   ellipsis and the tooltip is where the rest of it went), so the note joins
+   that one instead of replacing it: a row whose name is cut still has to be
+   able to say what its name was.
+
+   This is a function rather than three lines inside the row builder so it
+   can be tested, and so the row builder — which is a busy piece of code that
+   more than one pair of hands edits — carries one line about context and no
+   more. */
+function ctxNoteOnRow(row, name, s) {
+  const note = ctxTooltip(s);
+  if (!note) return;
+  const join = (had) => [had, note].filter(Boolean).join("\n");
+  if (row) row.title = join(row.title);
+  if (name) name.title = join(name.title);
 }
 
 /* The chip on an open briefing card's head — the same fact, in the one place
