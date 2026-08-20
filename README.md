@@ -2205,17 +2205,19 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | PUT    | `/api/cflow/reminder`          | `{enabled?, interval?}` — set those defaults; the clock re-reads them every tick, so this applies without a restart |
 | POST   | `/api/cflow/reminder`          | `{cwd, scope, enabled?, interval?}` or `{cwd, scope, clear: true}` — one run's override, stored (and archived) with the run |
 
-**Step reminders.** Sessions forget the /cflow protocol the way they forget
-everything else, and a forgotten run does not fail — it just sits. The daemon
-therefore watches every run: when one has held the same agent-actionable
-position (`step` or `select`) for its reminder interval, the current step's
-own instructions are re-typed into the driving session (idle-gated, like
-every delivery), and again every interval until the run moves. Progress
-resets the timer, so an agent that is advancing hears nothing — and a repeat
-is only sent to a session that has shown screen activity since the previous
-one landed, so an effectively suspended session (process stopped, machine
-asleep, TUI wedged) holds exactly one reminder instead of an interval-paced
-pile, and picks the cadence back up the moment it shows life. Defaults:
+**Step reminders.** An agent mid-work forgets the /cflow protocol the way it
+forgets everything else — a long side quest buries the step instructions —
+and a forgotten run does not fail, it just sits. The daemon therefore
+watches every run: when one has held the same agent-actionable position
+(`step` or `select`) for its reminder interval, the current step's own
+instructions are re-typed into the driving session, and again every interval
+until the run moves. Progress resets the timer, so an agent that is
+advancing hears nothing — and a reminder is only typed into a session that
+is actually **working** (busy). An idle session has ended its turn, and a
+suspended one (process stopped, machine asleep, TUI wedged) is not reading:
+neither is mid-way through forgetting anything, so neither hears a reminder;
+the due reminder is held and lands the moment the session is working again.
+Defaults:
 `claunch daemon config cflow_reminder true|false` /
 `cflow_reminder_interval 180` — these two keys are read live, no restart —
 with a per-run override on the run's web page (or the POST above).

@@ -49,22 +49,15 @@ def proj(home, tmp_path, monkeypatch):
     return d
 
 
-class _FakeTracker:
-    """last_meaningful_change() the tests can move by hand."""
-
-    def __init__(self) -> None:
-        self.last = time.monotonic()
-
-    def last_meaningful_change(self):
-        return self.last
-
-
 class _FakeSession:
     def __init__(self, name: str, cwd: str) -> None:
         self.exited = False
         self.sdef = SessionDef(name=name, cwd=cwd)
         self.delivered: list = []
-        self.tracker = _FakeTracker()
+        self.status_value = "busy"  # an agent mid-work, the reminder's audience
+
+    def status(self, threshold=None):
+        return self.status_value
 
     async def deliver(self, text: str) -> bool:
         self.delivered.append(text)
@@ -203,31 +196,27 @@ def test_delivery_goes_to_the_scope_session_in_the_same_cwd(proj):
     assert clock2._session_for(str(proj.parent), "w1") is None
 
 
-def test_a_suspended_session_holds_one_reminder(proj):
-    """No activity since the last reminder means nobody is reading: the next
-    one is held — not dropped — and goes out the moment the screen moves."""
+def test_only_a_working_session_is_reminded(proj):
+    """The reminder steers an agent mid-work off-protocol drift; a session
+    that is idle (turn over), suspended or wedged hears nothing. The debt is
+    held — not dropped — and lands the moment the session works again."""
     cwd = str(proj)
     cflow_engine.start("linear", cwd=cwd, scope="w1")
     sess = _FakeSession("w1", cwd)
+    sess.status_value = "idle"                   # nobody is working here
     clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
     t = time.monotonic()
     clock.scan(t)
     due = clock.scan(t + 181)
+    assert due                                   # the debt is due...
     asyncio.run(clock._deliver(*due[0]))
-    assert len(sess.delivered) == 1
-    delivered_at = clock._seen[(cwd, "w1")]["delivered_at"]
+    assert sess.delivered == []                  # ...but nothing is typed
 
-    # the only screen change since is the paste's own echo (inside the grace)
-    sess.tracker.last = delivered_at + 1.0
     due = clock.scan(time.monotonic() + 400)
-    assert due                                   # the debt stays due...
+    assert due                                   # held, so still due next poll
+    sess.status_value = "busy"                   # the agent starts working
     asyncio.run(clock._deliver(*due[0]))
-    assert len(sess.delivered) == 1              # ...but nothing is typed
-
-    # the session shows life -> the held reminder goes out at once
-    sess.tracker.last = delivered_at + 60.0
-    asyncio.run(clock._deliver(*due[0]))
-    assert len(sess.delivered) == 2
+    assert len(sess.delivered) == 1              # the held reminder lands
 
 
 # --------------------------------------------------------------------------- #

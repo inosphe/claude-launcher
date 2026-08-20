@@ -37,6 +37,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, state as cflow_state
+from .session import STATUS_BUSY
 
 log = logging.getLogger("claunch.daemon.cflow")
 
@@ -116,10 +117,6 @@ _ACTIONABLE = ("step", "select")
 #: `status` call is the readable copy, and the block says so.
 _INSTRUCTIONS_LIMIT = 1200
 
-#: Screen changes within this many seconds of a delivery are the delivery —
-#: the paste echoing and the Enter rendering — not the agent responding.
-REMINDER_ECHO_GRACE = 5.0
-
 
 class ReminderClock:
     """Re-types the current step's instructions into runs that stopped moving.
@@ -133,17 +130,16 @@ class ReminderClock:
     *No progress* is the trigger, not the calendar: the position key
     (run, status, step, visit) resets the timer whenever it changes, so an
     agent that is advancing hears nothing, and one that has stalled hears the
-    same instruction again every interval until it moves. Delivery is
-    :meth:`Session.deliver` — idle-gated, so the reminder also never lands
-    mid-keystroke on an agent that is merely slow.
+    same instruction again every interval until it moves.
 
-    And *one unanswered reminder at a time*: a repeat is sent only to a
-    session that has shown meaningful screen activity since the previous one
-    landed (beyond the paste's own echo). A session that is effectively
-    suspended — its process stopped, its machine asleep, its TUI wedged —
-    holds exactly one reminder, not an interval-paced pile of them; the
-    moment it shows life again, the held reminder goes out and the cadence
-    resumes.
+    And *only while the agent is working*: the drift this clock corrects is
+    an agent mid-turn, burying the step instructions under everything else
+    on its screen — so a reminder is typed only into a session that reads
+    busy. Idle, suspended and exited sessions hear nothing: nobody is
+    working there, so there is no work to steer, and a paste would open a
+    fresh turn just to say "keep going" to an agent that has stopped. A due
+    reminder is held rather than dropped — retried every poll — so it lands
+    the moment the session is working again.
 
     Configuration is read fresh on every pass: the machine defaults
     (``cflow_reminder`` / ``cflow_reminder_interval``) come from
@@ -238,19 +234,14 @@ class ReminderClock:
         session = self._session_for(cwd, scope)
         if session is None:
             return
-        entry = self._seen.get((cwd, scope))
-        if entry is not None and not _responded_since(
-            session, entry.get("delivered_at")
-        ):
-            # Nothing has happened on that screen since the last reminder:
-            # the session is not consuming input, and a second paste would
-            # only queue behind the first. Held, not dropped — the debt stays
-            # due and is retried each poll, so the first sign of life gets
-            # the reminder at once.
-            log.debug(
-                "cflow reminder held for %r: no activity since the last one",
-                scope,
-            )
+        if session.status() != STATUS_BUSY:
+            # Not working: an idle agent has ended its turn, a suspended or
+            # wedged one is not reading, and a paste into either would open
+            # a fresh turn just to restate a protocol nobody is mid-way
+            # through forgetting. Held, not dropped — the debt stays due and
+            # is retried each poll, so the reminder lands the moment the
+            # session is working again.
+            log.debug("cflow reminder held for %r: session is not working", scope)
             return
         try:
             delivered = await session.deliver(block)
@@ -258,11 +249,11 @@ class ReminderClock:
             log.exception("cflow reminder delivery to %r failed", scope)
             return
         if delivered:
-            # Rearm only on success: a session that was busy past deliver's
+            # Rearm only on success: a delivery that failed past deliver's
             # holds keeps its debt and is tried again next poll.
             entry = self._seen.get((cwd, scope))
             if entry is not None:
-                entry["at"] = entry["delivered_at"] = time.monotonic()
+                entry["at"] = time.monotonic()
             log.info("cflow reminder delivered to %r (%s)", scope, cwd)
 
     def _session_for(self, cwd: str, scope: str):
@@ -286,24 +277,6 @@ class ReminderClock:
         return session
 
 
-def _responded_since(session, delivered_at: Optional[float]) -> bool:
-    """Whether the session has shown life since the last reminder landed.
-
-    The signal is the idle tracker's *meaningful* screen change — the same
-    one that decides busy/idle — so a claude spinner does not count as life
-    any more than it counts as work. The grace window discounts the delivery
-    itself: the paste and its Enter render on screen at delivery time, and a
-    session whose only change since is that echo has not responded, it has
-    merely received. ``delivered_at`` of ``None`` means no reminder has
-    landed at this position yet, and the first one is always allowed —
-    waking an idle-but-live agent is the feature.
-    """
-    if delivered_at is None:
-        return True
-    last = session.tracker.last_meaningful_change()
-    return last is not None and last > delivered_at + REMINDER_ECHO_GRACE
-
-
 def reminder_block(payload: dict, interval: float) -> str:
     """The text a stalled run's session hears, composed from its status.
 
@@ -316,7 +289,7 @@ def reminder_block(payload: dict, interval: float) -> str:
     lines = [
         "---",
         "# claunch cflow: reminder -- machine-generated; repeats every "
-        f"{interval:.0f}s while this step does not move",
+        f"{interval:.0f}s while you keep working without this step moving",
         f"workflow: {payload.get('workflow')}",
     ]
     step = payload.get("step_id")
