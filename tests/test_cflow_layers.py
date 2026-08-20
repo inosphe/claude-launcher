@@ -392,3 +392,91 @@ def test_the_recorded_layer_survives_the_file_moving_underneath(project, home):
 
     assert engine.status()["origin"] == state_mod.LAYER_PROJECT
     assert engine.status()["source"] == str(mine)
+
+
+# --------------------------------------------------------------------------- #
+# what the shipped improv pair teaches about verification
+# --------------------------------------------------------------------------- #
+def _bundled(name):
+    return model.load(dict(state_mod.bundled_workflows())[name])
+
+
+def test_the_worker_does_not_fold_into_a_retired_or_frozen_branch():
+    """A worktree that runs several rounds outlives the rule written for one.
+
+    "Fold the feature branch into the worktree branch" assumes that branch is
+    still this round's. Once it has landed in master, folding revives a strand
+    behind master; once it is under integration review, folding moves a tip
+    somebody else is judging. Both are one-way, so the rule has to name them
+    and say what to hand over instead.
+    """
+    commit = _bundled("improv-worker").steps["commit"]
+    assert "git branch --contains" in commit.instructions
+    for anchor in ("은퇴", "동결", "심사", "피처 브랜치"):
+        assert anchor in commit.instructions, f"commit lost its {anchor!r} case"
+    assert "은퇴" in commit.done_when
+
+
+def test_the_worker_review_says_what_a_number_is_a_verdict_about():
+    """A suite number is not a verdict until it names its tree and window.
+
+    Every anchor here is a rule that cost the fleet a wrong conclusion once:
+    which tree ran, which packages, who else was sweeping, and what the check
+    cannot see.
+    """
+    review = _bundled("improv-worker").steps["review"]
+    for anchor in (
+        "--directory",                     # which tree
+        "uv sync --extra test",            # ...and which packages
+        "import pytest, xdist",            # verify by import, not by existence
+        "트리 해시",                        # numbers carry their tree
+        "--collect-only",                  # baselines cost nothing
+        "Get-CimInstance",                 # the literal probe, not a description
+        "distinct basetemp",               # concurrent sweeps
+        "8초",                             # the startup blind spot
+        "지금 시작한다",                    # ...and the only defence there is
+        "게이트 verify를 수치의 출처로",     # gate journals keep no numbers
+    ):
+        assert anchor in review.instructions, f"review lost its {anchor!r} rule"
+
+
+def test_the_worker_review_admits_what_the_scan_cannot_see():
+    """A check whose blind spots are undocumented gets built upon."""
+    review = _bundled("improv-worker").steps["review"]
+    assert "로컬 프로세스만" in review.instructions
+    assert "Name 제한을 없애지 마라" in review.instructions
+
+
+def test_the_leader_checks_who_else_stands_in_the_tree_before_merging():
+    """The merge and the sweep happen in one checkout; the preflight names who
+    else is in it, and the existing user gate decides. It is deliberately not
+    a wall: a leader cannot move sessions outside its own subtree, and a gate
+    that blocks forever is a gate that gets bypassed on day one."""
+    leader = _bundled("improv-leader")
+    assert "integrate-preflight" in leader.steps
+    pre = leader.steps["integrate-preflight"]
+    assert "claunch cflow checkout" in pre.instructions
+    assert pre.next == "integrate"
+    # reachable: standby's integrate option must route through it
+    assert leader.steps["standby"].select.options["integrate"].next == "integrate-preflight"
+    # and the decision stays with the human gate that already exists
+    assert "preflight" in leader.steps["integrate"].entry_prompt
+
+
+def test_the_leader_gate_points_at_a_record_that_can_exist():
+    """The collection table cannot be filed as a report: standby is a select
+    step and `report` is refused there. Its home is the select's reason."""
+    prompt = _bundled("improv-leader").steps["integrate"].entry_prompt
+    assert "reason" in prompt
+    assert "select_confirmed" in prompt
+    standby = _bundled("improv-leader").steps["standby"]
+    assert standby.is_select  # the premise of the rule above
+    assert "reason" in standby.instructions
+
+
+def test_the_leader_treats_a_clean_merge_as_unproven():
+    """Text silence is not runtime safety, and the absence of a conflict
+    marker is exactly what removes the place a human would look."""
+    integrate = _bundled("improv-leader").steps["integrate"]
+    for anchor in ("충돌 없음은 안전 판정이 아니다", "같은 모듈", "스텁", "프리뷰"):
+        assert anchor in integrate.instructions, f"integrate lost {anchor!r}"
