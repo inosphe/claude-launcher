@@ -119,14 +119,14 @@ def _drive_main(monkeypatch, code: int, *, bound_port: int = 0) -> list:
     monkeypatch.setattr(daemon_main, "_setup_logging", lambda foreground: None)
     monkeypatch.setattr(daemon_main, "_serve", fake_serve)
     monkeypatch.setattr(
-        daemon_main.daemon_client, "spawn_daemon", lambda: spawned.append(True)
+        daemon_main.daemon_client, "spawn_daemon", lambda env=None: spawned.append(env)
     )
     assert daemon_main.main([]) == 0
     return spawned
 
 
 def test_a_restart_exit_spawns_the_successor(home, monkeypatch):
-    assert _drive_main(monkeypatch, daemon_main.RESTART_CODE) == [True]
+    assert len(_drive_main(monkeypatch, daemon_main.RESTART_CODE)) == 1
 
 
 def test_a_plain_exit_spawns_nothing(home, monkeypatch):
@@ -138,19 +138,28 @@ def test_a_plain_exit_spawns_nothing(home, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_a_named_instance_hands_its_port_to_the_successor(home, monkeypatch):
     """An instance binds an ephemeral port, so nothing but this would put the
-    successor back on the address the page that asked for the restart is on."""
+    successor back on the address the page that asked for the restart is on.
+
+    Asserted on the environment handed to the spawn, never on this process's
+    own: the pin belongs to the child, and a daemon that set it on itself on
+    the way out would leave it behind for whatever shares that environment.
+    """
     monkeypatch.setenv(paths.INSTANCE_ENV, "inst")
     monkeypatch.delenv("CLAUNCH_DAEMON_PORT", raising=False)
 
-    assert _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671)
-    assert os.environ["CLAUNCH_DAEMON_PORT"] == "45671"
+    spawned = _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671)
+    assert spawned[0]["CLAUNCH_DAEMON_PORT"] == "45671"
+    assert "CLAUNCH_DAEMON_PORT" not in os.environ
 
 
 def test_a_pinned_port_is_left_alone(home, monkeypatch):
+    """Already pinned: the successor inherits that pin as-is, so there is
+    nothing for this to override — it hands over no environment at all."""
     monkeypatch.setenv(paths.INSTANCE_ENV, "inst")
     monkeypatch.setenv("CLAUNCH_DAEMON_PORT", "9999")
 
-    assert _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671)
+    spawned = _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671)
+    assert spawned == [None]
     assert os.environ["CLAUNCH_DAEMON_PORT"] == "9999"
 
 
@@ -160,5 +169,5 @@ def test_the_default_daemon_pins_nothing(home, monkeypatch):
     monkeypatch.delenv(paths.INSTANCE_ENV, raising=False)
     monkeypatch.delenv("CLAUNCH_DAEMON_PORT", raising=False)
 
-    assert _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671)
+    assert _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671) == [None]
     assert "CLAUNCH_DAEMON_PORT" not in os.environ

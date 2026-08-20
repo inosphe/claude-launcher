@@ -280,29 +280,33 @@ def main(argv=None) -> int:
     finally:
         lock.release()
     if code == RESTART_CODE:
-        _keep_address(bound.get("port"))
         log.info("spawning successor daemon")
-        daemon_client.spawn_daemon()
+        daemon_client.spawn_daemon(_successor_env(bound.get("port")))
         return 0
     return code
 
 
-def _keep_address(actual_port: Optional[int]) -> None:
-    """Pin the successor to the port this daemon was serving on.
+def _successor_env(actual_port: Optional[int]) -> Optional[dict]:
+    """The environment for the successor, or ``None`` to inherit ours.
 
-    Only named instances need it, and only they are affected: the default
-    daemon's port is fixed in the config, so its successor rebinds the same
-    one anyway, while an instance binds an ephemeral port and would come
-    back somewhere else. That matters because the thing most likely to have
-    asked for the restart is a browser on this address — a successor that
-    moves is one the page cannot follow. An explicitly pinned port
-    (``CLAUNCH_DAEMON_PORT`` already set) is left exactly as it is.
+    Its one job is pinning the successor to the port this daemon was
+    serving on. Only named instances need it, and only they are affected:
+    the default daemon's port is fixed in the config, so its successor
+    rebinds the same one anyway, while an instance binds an ephemeral port
+    and would come back somewhere else. That matters because the thing most
+    likely to have asked for the restart is a browser on this address — a
+    successor that moves is one the page cannot follow. An explicitly
+    pinned port (``CLAUNCH_DAEMON_PORT`` already set) is left as it is.
+
+    Returned as a copy rather than set on ``os.environ``: a variable poked
+    into this process on the way out is still there for everything else
+    sharing it, which in a test run is every later test.
     """
     if not actual_port or not paths.instance():
-        return
+        return None
     if os.environ.get("CLAUNCH_DAEMON_PORT"):
-        return
-    os.environ["CLAUNCH_DAEMON_PORT"] = str(actual_port)
+        return None
+    return {**os.environ, "CLAUNCH_DAEMON_PORT": str(actual_port)}
 
 
 if __name__ == "__main__":

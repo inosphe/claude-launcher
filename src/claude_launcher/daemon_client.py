@@ -133,8 +133,15 @@ def connect() -> Optional[DaemonClient]:
     return DaemonClient(base_url, token)
 
 
-def spawn_daemon() -> None:
-    """Start the daemon as a fully detached background process."""
+def spawn_daemon(env: Optional[dict] = None) -> None:
+    """Start the daemon as a fully detached background process.
+
+    ``env`` replaces the child's whole environment; ``None`` (the default)
+    inherits this process's. Callers that need to hand the child one extra
+    variable pass a copy with that variable added, rather than setting it on
+    ``os.environ`` here — a spawn must not leave its caller's environment
+    changed behind it.
+    """
     paths.daemon_dir().mkdir(parents=True, exist_ok=True)
     log = open(paths.log_file(), "ab")
     kwargs = {}
@@ -151,6 +158,7 @@ def spawn_daemon() -> None:
             stdout=log,
             stderr=log,
             close_fds=True,
+            env=env,
             **kwargs,
         )
     finally:
