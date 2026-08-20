@@ -89,15 +89,18 @@ steps:
       바꾼 영역을 덮는 신규·확장 테스트가 존재하고, 보고에 수치(전체 N/N,
       신규 K)와 "간소화 스위트 기준" 명시가 있다.
     # 저장소 특화 verify는 정본이 아니라 프로젝트 레이어(.claunch/workflows/)에.
-    # basetemp가 짧아야 하는 이유: 테스트가 만드는 워크트리 경로가 이 밑에
-    # 겹겹이 쌓여 Windows 경로 한계에 먼저 닿는다(긴 경로에서 'GIT_DIR too
-    # big'·FileNotFoundError로 무더기 실패). --no-sync는 여기에 넣지 않는다 —
-    # 워커는 새 워크트리에서 첫 실행에 sync로 venv를 만들어야 한다.
-    # 경로가 세션별로 갈리는 이유: pytest는 시작할 때 basetemp를 자기 것으로
-    # 비우므로, 고정 경로면 나중에 시작한 워커가 먼저 돌던 워커의 tmp를
-    # 지운다. verify는 cmd.exe를 거쳐 실행되어 %CLAUNCH_SESSION%가 그 자리에서
-    # 확장되므로, 오버라이드가 scope를 몰라도 세션마다 다른 경로가 된다.
-    verify: 'uv run --extra test pytest tests -q -m "not worktree" --basetemp="C:/t/%CLAUNCH_SESSION%"'
+    # --no-sync인 이유: 게이트의 검증 명령이 환경을 변형해서는 안 된다. sync는
+    # .venv를 재설치하려 들고, 그 안의 claunch.exe로 떠 있는 데몬이 파일을
+    # 잡고 있으면 교체에 실패해(os error 5) 검증이 아니라 게이트가 막힌다 —
+    # 워크트리 준비는 작업 중에 'uv sync --extra test' 한 번으로 끝내고,
+    # verify는 이미 준비된 환경을 쓰기만 한다(--extra test는 sync 없이는
+    # 의미가 없어 함께 뺀다).
+    # basetemp가 짧고 세션별인 이유: 테스트가 만드는 워크트리 경로가 이 밑에
+    # 겹겹이 쌓여 Windows 경로 한계에 먼저 닿고(긴 경로에서 'GIT_DIR too
+    # big'·FileNotFoundError), pytest는 시작할 때 basetemp를 자기 것으로 비우니
+    # 고정 경로면 동시에 도는 워커끼리 서로의 tmp를 지운다. verify는 cmd.exe를
+    # 거치므로 %CLAUNCH_SESSION%이 그 자리에서 세션 이름으로 확장된다.
+    verify: 'uv run --no-sync pytest tests -q -m "not worktree" --basetemp="C:/t/%CLAUNCH_SESSION%"'
     next: commit
 
   commit:
