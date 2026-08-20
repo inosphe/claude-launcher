@@ -24,6 +24,10 @@ the workflow picker's option line — clipped so a paragraph-length description
 cannot drag the native popup past the viewport edge — ``sesslayout_check``
 on the per-session layout — the Details/Workflow radio, the run pane halved
 into the terminal's column, and the localStorage both are remembered in —
+``rolepanel_check`` on the panels a session gets for its ROLE — which roles
+claim which panels, the leader's quick-job spawn (what its pickers put in the
+request, and how a refused policy reads) and its reaping nudge, which reports
+idle children into the leader's own terminal rather than killing anything —
 ``queued_check`` on
 the queued-deliveries banner — the backlog the daemon is holding for the
 attached session, and whose keyboard it blames for the hold — ``seq_check`` on the
@@ -66,6 +70,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "sessrun_check.js",
         "wfstart_check.js",
         "sesslayout_check.js",
+        "rolepanel_check.js",
         "queued_check.js",
         "seq_check.js",
         "seqrender_check.js",

@@ -92,6 +92,11 @@ let currentPage = "terminal", currentName = "coder2";
 let sessName = null, sessPollTimer = null, sessStartBox = null, sessSendBox = null;
 let sessRunFold = null, sessRunStops = 0;
 function stopSessRun() { sessRunStops++; }
+// The role panels' own state and poll: their content is rolepanel_check's,
+// but dropping/repointing the panel has to take them down with it, so the
+// hooks have to exist here too.
+let sessQuickJobBox = null, sessKidsBox = null, sessKidsStops = 0;
+function stopSessKids() { sessKidsStops++; }
 let detailWasUp = false;
 let refreshes = 0, gone = null, fits = 0;
 let term = {}, location = { hash: "#/" };
@@ -144,6 +149,8 @@ Object.assign(exports, {
   goto: (h) => { location.hash = h; route(); },
   runFold: () => sessRunFold, runStops: () => sessRunStops,
   holdRun: () => { sessRunFold = "the open fold"; },
+  kidsBox: () => sessKidsBox, kidsStops: () => sessKidsStops,
+  holdKids: () => { sessKidsBox = "the children roster"; },
 });`
 )(ctx, $, document, MOBILE_MQ, () => 1, () => {}, el, terminalOnScreen);
 
@@ -231,6 +238,21 @@ ctx.holdRun();
 ctx.closeDetail();
 check("closing the panel does too",
       ctx.runFold() === null && ctx.runStops() > stops + 1);
+
+/* ---- and neither does a leader's children roster ---- */
+/* Same reason, one poll further: it is aimed at one session's subtree, and
+   carried across a repoint it would list the previous leader's children
+   under the new session's name. */
+ctx.openDetail("coder2");
+ctx.holdKids();
+const kidStops = ctx.kidsStops();
+ctx.openDetail("coder3");                      // repoint
+check("re-aiming lets go of the children roster", ctx.kidsBox() === null);
+check("...and stops its poll", ctx.kidsStops() > kidStops);
+ctx.holdKids();
+ctx.closeDetail();
+check("closing the panel does too",
+      ctx.kidsBox() === null && ctx.kidsStops() > kidStops + 1);
 ctx.setCur("coder2");
 
 /* ---- the header's `details` says whether it would close ---- */
