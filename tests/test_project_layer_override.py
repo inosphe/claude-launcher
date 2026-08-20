@@ -28,36 +28,75 @@ from claude_launcher.cflow import model
 
 OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
 
-SUITE = 'uv run --extra test pytest tests -q'
+#: Which step each override arms, and how strictly this file may say so.
+#: The worker's is pinned to the letter here because this file and it are
+#: edited together; the leader's is checked by prefix, so a change to its
+#: workflow does not paint this suite red before it lands.
+ARMED = {"improv-worker": "review", "improv-leader": "integrate"}
+
+# Both gates run against a venv that is already there. A worker's worktree
+# builds its venv once during the work ('uv sync --extra test'), and that one
+# sync also installs the xdist that -n 8 needs; after it, re-syncing inside a
+# verify is a side effect that really did block the gate — sync cannot replace
+# the claunch.exe a running daemon holds open (os error 5). So both are
+# --no-sync, and --extra test goes with the sync it belonged to.
+WORKER_SUITE = 'uv run --no-sync pytest tests -q -m "not worktree"'
+LEADER_SUITE = 'uv run --no-sync pytest tests -q'
+
+
+def test_the_worker_override_verifies_without_touching_the_environment():
+    """The worker's gate command, spelled out — every word of it load-bearing.
+
+    ``--no-sync`` keeps the verify from re-installing the venv out from under
+    a running daemon. ``-n 8`` is the measured ceiling (see
+    ``test_the_verify_runs_bounded_parallel``). The basetemp is short (deep
+    worktree paths under a long one hit Windows' path limit) and per-session
+    (pytest empties its basetemp at startup, so a shared one has concurrent
+    workers deleting each other's runs).
+    """
+    verify = model.load(OVERRIDES / "improv-worker.yaml").steps["review"].verify
+    assert verify is not None, "the worker override lost its verify"
+    assert verify.command == (
+        'uv run --no-sync pytest tests -q -m "not worktree" -n 8 '
+        '--basetemp="C:/t/%CLAUNCH_SESSION%"'
+    )
 
 
 @pytest.mark.parametrize(
-    "stem, step_id, marker",
+    "stem, step_id, suite",
     [
-        ("improv-worker", "review", ' -m "not worktree"'),
-        ("improv-leader", "integrate", ""),
+        ("improv-worker", "review", WORKER_SUITE),
+        ("improv-leader", "integrate", LEADER_SUITE),
     ],
 )
 def test_the_override_carries_this_repos_suite_as_its_verify(
-    stem, step_id, marker
+    stem, step_id, suite
 ):
     wf = model.load(OVERRIDES / f"{stem}.yaml")
     assert wf.name == stem
     verify = wf.steps[step_id].verify
     assert verify is not None, f"{stem}:{step_id} lost its verify"
-    assert verify.command.startswith(SUITE + marker)
+    assert verify.command.startswith(suite)
     # basetemp keeps concurrent verifies out of each other's temp trees (and
     # off the default %TEMP%, which has bitten this machine's permissions).
     assert "--basetemp=" in verify.command
 
 
-@pytest.mark.parametrize("stem", ["improv-worker", "improv-leader"])
+def test_each_override_still_arms_its_step(stem="improv-leader"):
+    """The leader half, held to the one thing that is this file's business:
+    the override exists to add a machine check, so it must have one."""
+    verify = model.load(OVERRIDES / f"{stem}.yaml").steps[ARMED[stem]].verify
+    assert verify is not None, f"{stem} lost its verify"
+    assert "pytest" in verify.command and "--basetemp=" in verify.command
+
+
+@pytest.mark.parametrize("stem", sorted(ARMED))
 def test_the_override_adds_no_other_verify(stem):
     """The override's whole diff against canonical is its machine checks —
     every other step stays verify-free exactly like the file it shadows."""
     wf = model.load(OVERRIDES / f"{stem}.yaml")
     armed = [s.id for s in wf.steps.values() if s.verify is not None]
-    assert armed == (["review"] if stem == "improv-worker" else ["integrate"])
+    assert armed == [ARMED[stem]]
 
 
 #: Windows refuses a path this long; the run that broke measured exactly 260.

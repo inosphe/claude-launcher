@@ -64,6 +64,26 @@ body {
 .dot.starting { background: #58a6ff; }
 .dot.exited { background: #6e7681; }
 #session-list .meta { color: #7d8590; font-size: 11px; margin-left: auto; }
+/* The rooms a session is in, on the line under the name that is in them.
+   Same pill as .mesh-role so role and membership read as one set, but
+   neutral: the blue says what the session IS, the grey only says where it
+   belongs, which is not a state and so gets no saturation. Amber is spoken
+   for on this rail — there it means the run wants the reader's keyboard. */
+#session-list .rail-mesh {
+  font-size: 11px; padding: 1px 7px; border-radius: 9px; flex: none;
+  background: #191d24; color: #6e7681; border: 1px solid #2a2e36;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
+/* Its own line, indented past the status dot like the cflow badge below it,
+   so the pills read as belonging to the name above rather than floating in
+   the list. On the name's line they would not fit: a wrapping flex line
+   breaks before it shrinks, so one pill there is enough to push the ⓘ off
+   the row. */
+#session-list .rail-meshes {
+  flex-basis: 100%; display: flex; gap: 6px; min-width: 0;
+  padding-left: 16px; margin-top: 3px;
+}
 /* The session's cflow run, one line under the row. Indented past the status
    dot so it reads as belonging to the name above it. */
 #session-list .sess-cflow {
@@ -196,6 +216,9 @@ body {
   border: 1px solid #2a2e36; border-radius: 8px; text-decoration: none;
 }
 .home-card:hover { border-color: #3c444d; background: #1f232a; }
+/* the Daemon card is not a doorway: no link affordance, no hover shift */
+.home-card.static { cursor: default; }
+.home-card.static:hover { border-color: #2a2e36; background: #1b1e24; }
 .home-card-head { display: flex; align-items: baseline; gap: 8px; }
 .home-card-head h3 { font-size: 14px; color: #e6edf3; }
 .home-go { margin-left: auto; color: #58a6ff; font-size: 16px; }
@@ -546,6 +569,47 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-migrate .wf-btn + .wf-note, .sess-migrate .wf-btn + .wf-warning {
   margin: 8px 0 0;
 }
+/* role-specific panels: the leader's dispatch form and its children roster.
+   Same card as the panel's other boxes, same field skin as the send box. */
+.sess-quickjob, .sess-kids {
+  margin: 14px 0; padding: 12px 16px; background: #1b1e24;
+  border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
+}
+.sess-quickjob h3, .sess-kids h3 {
+  font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
+}
+.sess-quickjob select, .sess-quickjob input:not([type="checkbox"]),
+.sess-quickjob textarea {
+  background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
+  border-radius: 5px; padding: 6px 9px; font-size: 13px;
+}
+.sess-quickjob select { flex: 1 1 auto; min-width: 0; }
+.sess-quickjob input:not([type="checkbox"]) { width: 100%; margin-bottom: 8px; }
+.sess-quickjob textarea {
+  width: 100%; resize: vertical; margin-bottom: 8px; font-family: inherit;
+}
+.sess-quickjob label.check {
+  display: flex; align-items: flex-start; gap: 6px; margin: 0 0 8px;
+  font-size: 13px; color: #c6cdd5;
+}
+.sess-quickjob label.check input { width: auto; margin-top: 3px; }
+.sess-quickjob-btns { display: flex; gap: 8px; flex-wrap: wrap; }
+.sess-quickjob .wf-btn { margin: 0; }
+.sess-quickjob .wf-note, .sess-quickjob .wf-warning {
+  margin: 8px 0 0; overflow-wrap: anywhere;
+}
+.sess-kid {
+  display: flex; align-items: center; gap: 8px; padding: 3px 0;
+  font-size: 13px;
+}
+.sess-kid .dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+.sess-kid-name { color: #58a6ff; text-decoration: none; }
+.sess-kid-name:hover { text-decoration: underline; }
+.sess-kid-flow { overflow-wrap: anywhere; }
+.sess-kids .wf-btn { margin: 8px 8px 0 0; }
+.sess-kids .wf-note, .sess-kids .wf-warning {
+  margin: 8px 0 0; overflow-wrap: anywhere;
+}
 .sess-mesh {
   display: inline-block; margin: 0 8px 6px 0; padding: 3px 10px;
   border-radius: 10px; background: #172947; color: #58a6ff;
@@ -620,7 +684,7 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .docked .sess-meta dt { margin-top: 7px; font-size: 11px; }
 .docked .sess-meshes, .docked .sess-wf, .docked .sess-send, .docked .sess-queued,
-.docked .sess-migrate {
+.docked .sess-migrate, .docked .sess-quickjob, .docked .sess-kids {
   margin: 10px 0; padding: 10px 12px; max-width: none; background: #16181d;
 }
 /* a rail column has no room for two controls side by side */
@@ -763,7 +827,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 }
 .wf-bar .wf-actions p { margin: 0; }
 .wf-bar .wf-actions .wf-btn { margin: 0; }
-.wfd { width: 100%; height: auto; }
+/* Natural size (the svg's own width/height attrs), shrunk-to-fit only:
+   a wider column must not zoom the graph, so 100% became a ceiling. */
+.wfd { max-width: 100%; height: auto; display: block; }
 .wfd-node { cursor: pointer; }
 .wfd-node:hover rect { stroke: #8fa1b3; }
 .wfd-node rect { fill: #1b1e24; stroke: #30363d; stroke-width: 1.5; }
@@ -1540,6 +1606,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   .mesh-members, .mesh-send, .mesh-fed, .mesh-policy, .mesh-links,
   .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo,
   .sess-meta, .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-migrate,
+  .sess-quickjob, .sess-kids,
   .wf-pending, .ws-add, .ws-list, #ws-view > .wf-note { max-width: none; }
   /* The add row is three controls on one line at desk width; on a phone the
      path alone needs the whole line. */

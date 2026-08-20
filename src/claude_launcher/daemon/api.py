@@ -20,7 +20,7 @@ from typing import List, Optional
 from aiohttp import web
 
 from .. import __version__, harnesses as harness_registry
-from .. import profile as profile_mod, spawn as spawn_mod, store, workspaces
+from .. import profile as profile_mod, quickjob, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import briefing, cflow_clock, onboard, rebrief
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
@@ -150,6 +150,9 @@ def build_app(
     app["started_at"] = started_at
     app["boot_id"] = boot_id
     app["shutdown_event"] = asyncio.Event()
+    #: Whether the shutdown now in progress should spawn a successor. Read by
+    #: ``__main__`` after the loop drains — the handler only marks intent.
+    app["restart_requested"] = False
     app["websockets"] = set()
     # Open terminal sockets never close on their own; without this, runner
     # cleanup waits its shutdown timeout for every browser tab left open.
@@ -160,6 +163,7 @@ def build_app(
     r.add_post("/api/auth/session", h_auth_session)
     r.add_get("/api/daemon", h_daemon_info)
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
+    r.add_post("/api/daemon/restart", h_daemon_restart)
     r.add_get("/api/profiles", h_profiles)
     r.add_get("/api/roles", h_roles)
     r.add_get("/api/workspaces", h_workspaces)
@@ -184,6 +188,8 @@ def build_app(
     # tick); POST is one run's override, stored in that run's state.
     r.add_get("/api/cflow/reminder", h_cflow_reminder_defaults)
     r.add_put("/api/cflow/reminder", h_cflow_reminder_defaults_set)
+    r.add_get("/api/quickjob", h_quickjob_get)
+    r.add_put("/api/quickjob", h_quickjob_set)
     r.add_post("/api/cflow/reminder", h_cflow_reminder_run_set)
     r.add_get("/api/mesh", h_mesh_list)
     r.add_post("/api/mesh", h_mesh_create)
@@ -349,6 +355,22 @@ async def h_daemon_shutdown(request: web.Request) -> web.Response:
     loop = asyncio.get_running_loop()
     loop.call_later(0.1, request.app["shutdown_event"].set)
     return web.json_response({"ok": True})
+
+
+async def h_daemon_restart(request: web.Request) -> web.Response:
+    """Shut down and hand this port to a fresh daemon process.
+
+    Identical to shutdown from in here — same event, same teardown, same
+    notice to attached clients — plus one bit of intent that ``__main__``
+    reads once the loop has drained. The successor is spawned there, after
+    the singleton lock is released, so it finds the lock free instead of
+    spending its grace window waiting this process out. Sessions come back
+    the way they do on any restart: relaunched per their ``restore`` flag.
+    """
+    request.app["restart_requested"] = True
+    loop = asyncio.get_running_loop()
+    loop.call_later(0.1, request.app["shutdown_event"].set)
+    return web.json_response({"ok": True, "restarting": True})
 
 
 async def h_profiles(request: web.Request) -> web.Response:
@@ -1008,6 +1030,31 @@ async def h_cflow_reminder_defaults_set(request: web.Request) -> web.Response:
         if interval is not None:
             store.set_daemon_field("cflow_reminder_interval", interval)
         return web.json_response({"defaults": _reminder_defaults()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_quickjob_get(request: web.Request) -> web.Response:
+    """The quick-job defaults — what the dashboard's leader form is prefilled
+    with. Read live from the config file, like every launcher setting."""
+    try:
+        return web.json_response({"quick_job": quickjob.load()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_quickjob_set(request: web.Request) -> web.Response:
+    """Update the quick-job defaults from the dashboard.
+
+    Written to the config file — the same ``quick_job`` block a user edits by
+    hand — so the form and the YAML can never disagree about what the
+    defaults are. Partial on purpose: only the keys sent change.
+    """
+    body = await _json_body(request)
+    try:
+        return web.json_response({"quick_job": quickjob.save(body)})
+    except (ValueError, TypeError) as exc:
+        return json_error(400, str(exc))
     except store.StoreError as exc:
         return json_error(500, str(exc))
 

@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import time
+from typing import Optional
 
 from aiohttp import web
 
@@ -23,6 +24,13 @@ from .manager import SessionManager
 from .mesh import MeshError, MeshManager
 
 log = logging.getLogger("claunch.daemon")
+
+#: What ``_serve`` returns when the shutdown it drained was a restart request
+#: (``POST /api/daemon/restart``): ``main`` spawns the successor only after
+#: releasing the singleton lock, so the new daemon finds it free instead of
+#: spending its grace window waiting this process out. Never a process exit
+#: code — the restarting daemon itself still exits 0.
+RESTART_CODE = 75
 
 
 def _setup_logging(foreground: bool) -> None:
@@ -39,7 +47,7 @@ def _setup_logging(foreground: bool) -> None:
     )
 
 
-async def _serve(host: str, port: int, cfg: dict) -> int:
+async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) -> int:
     manager = SessionManager(
         idle_threshold=float(cfg["idle_threshold"]),
         scrollback=int(cfg["scrollback_lines"]),
@@ -102,6 +110,8 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     if server is not None and server.sockets:
         actual_port = server.sockets[0].getsockname()[1]
     runtime_state.write_daemon_json(host, actual_port)
+    if bound is not None:
+        bound["port"] = actual_port
     log.info("listening on http://%s:%s", host, actual_port)
 
     uplink, uplink_task = _start_uplink(actual_port)
@@ -118,7 +128,10 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
 
     try:
         await app["shutdown_event"].wait()
-        log.info("shutdown requested")
+        log.info(
+            "shutdown requested%s",
+            " (restart)" if app["restart_requested"] else "",
+        )
     except asyncio.CancelledError:
         log.info("cancelled; shutting down")
     finally:
@@ -141,7 +154,7 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
         runtime_state.remove_daemon_json()
         await manager.shutdown_all()
         await runner.cleanup()
-    return 0
+    return RESTART_CODE if app["restart_requested"] else 0
 
 
 def _acquire_with_grace(
@@ -259,12 +272,41 @@ def main(argv=None) -> int:
         # (their daemon.json is the discovery channel) unless one is pinned.
         port = int(os.environ.get("CLAUNCH_DAEMON_PORT") or 0)
         log.info("daemon instance %r (state: %s)", paths.instance(), paths.daemon_dir())
+    bound: dict = {}
     try:
-        return asyncio.run(_serve(host, port, cfg))
+        code = asyncio.run(_serve(host, port, cfg, bound))
     except KeyboardInterrupt:
-        return 0
+        code = 0
     finally:
         lock.release()
+    if code == RESTART_CODE:
+        log.info("spawning successor daemon")
+        daemon_client.spawn_daemon(_successor_env(bound.get("port")))
+        return 0
+    return code
+
+
+def _successor_env(actual_port: Optional[int]) -> Optional[dict]:
+    """The environment for the successor, or ``None`` to inherit ours.
+
+    Its one job is pinning the successor to the port this daemon was
+    serving on. Only named instances need it, and only they are affected:
+    the default daemon's port is fixed in the config, so its successor
+    rebinds the same one anyway, while an instance binds an ephemeral port
+    and would come back somewhere else. That matters because the thing most
+    likely to have asked for the restart is a browser on this address — a
+    successor that moves is one the page cannot follow. An explicitly
+    pinned port (``CLAUNCH_DAEMON_PORT`` already set) is left as it is.
+
+    Returned as a copy rather than set on ``os.environ``: a variable poked
+    into this process on the way out is still there for everything else
+    sharing it, which in a test run is every later test.
+    """
+    if not actual_port or not paths.instance():
+        return None
+    if os.environ.get("CLAUNCH_DAEMON_PORT"):
+        return None
+    return {**os.environ, "CLAUNCH_DAEMON_PORT": str(actual_port)}
 
 
 if __name__ == "__main__":
