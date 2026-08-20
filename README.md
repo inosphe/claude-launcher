@@ -2219,7 +2219,7 @@ neither is mid-way through forgetting anything, so neither hears a reminder;
 the due reminder is held and lands the moment the session is working again.
 Defaults:
 `claunch daemon config cflow_reminder true|false` /
-`cflow_reminder_interval 300` — these two keys are read live, no restart —
+`cflow_reminder_interval 600` — these two keys are read live, no restart —
 with a per-run override on the run's web page (or the POST above).
 
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
