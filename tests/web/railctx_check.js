@@ -76,11 +76,21 @@ const list = node("ul");
 let served = { sessions: [] };
 const api = async () => ({ ok: true, json: async () => served });
 
-/* Everything refreshSessions leans on that is not the row itself. */
+/* Everything refreshSessions leans on that is not the row itself.
+
+   This list is a standing liability and worth naming as one: it has to hold
+   every call the function makes, including ones this harness has no interest
+   in, so any branch that adds a call to `refreshSessions` breaks every
+   harness that slices it — with a ReferenceError that reads like a defect
+   and is not one. It bit twice in one batch (`refreshParentChoices` below,
+   which arrived with the spawn form, and `ctxNoteOnRow`, which arrived from
+   here and broke someone else's). Point RAILCTX_APP_JS at the merged tree
+   before believing a green here. */
 const stubs = `
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null;
 function refreshResumeChoices() {}
+function refreshParentChoices() {}
 function renderHome() {}
 function syncBulkActions() {}
 function syncMobileBars() {}
