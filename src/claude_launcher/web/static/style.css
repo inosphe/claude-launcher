@@ -697,7 +697,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 }
 .wf-bar .wf-actions p { margin: 0; }
 .wf-bar .wf-actions .wf-btn { margin: 0; }
-.wfd { width: 100%; height: auto; }
+/* Natural size (the svg's own width/height attrs), shrunk-to-fit only:
+   a wider column must not zoom the graph, so 100% became a ceiling. */
+.wfd { max-width: 100%; height: auto; display: block; }
 .wfd-node { cursor: pointer; }
 .wfd-node:hover rect { stroke: #8fa1b3; }
 .wfd-node rect { fill: #1b1e24; stroke: #30363d; stroke-width: 1.5; }

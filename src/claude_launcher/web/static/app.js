@@ -3594,7 +3594,14 @@ function wfDiagramSvg(wf, run, selected) {
   const yTop = (id) => 8 + rowOf(id) * ROWH;
 
   const parts = [];
-  parts.push(`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="wfd">`);
+  // width/height attrs pin the drawing at its natural size (one SVG unit =
+  // one CSS pixel): the column growing must not blow the graph up with it.
+  // The stylesheet only ever shrinks it (max-width) on columns narrower
+  // than the drawing.
+  parts.push(
+    `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" ` +
+    `xmlns="http://www.w3.org/2000/svg" class="wfd">`
+  );
   parts.push(
     '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" ' +
     'markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
