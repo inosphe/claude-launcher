@@ -2061,25 +2061,6 @@ class SpawnWizard(Form):
                 "('claunch kill-session <child>')"
             )
             out.append(("parent", "; ".join(blocked) + " - " + fix))
-        # A profile the user TYPED, on a parent whose policy will not take
-        # one. `apply` drops the value rather than provoking a 403, which
-        # is right for a value the form itself put there -- but a flag the
-        # user spelled out is their current intent, and dropping THAT in
-        # silence is the form quietly doing something else than it was
-        # asked. So it is refused here, before anything is built.
-        #
-        # The judgement is the daemon's, not ours: `may_choose` is the
-        # same report that greys the row. Working out whether
-        # allow_profile is set would put the policy in two places, and
-        # the copy that drifts is the one that lies.
-        if self._typed_profile and self.field("profile").disabled:
-            out.append((
-                "profile",
-                f"--profile {self._typed_profile!r} was given, but this "
-                "parent may not choose a profile (spawn.allow_profile) - "
-                "pick a parent whose policy allows one, or start again "
-                "without the flag",
-            ))
         out.extend(check_worktree(self))
         return out
 
@@ -2107,11 +2088,19 @@ class SpawnWizard(Form):
         args.harness = self.value("harness") or None
         # Read through the disable, like borrow and args below: a value
         # standing on a greyed-out row is not an answer the user gave --
-        # it is what the row held before the policy shut it, or before
-        # the parent changed under the form. Sending it provokes a 403
-        # naming a field nobody in this form could still choose.
+        # it is what the row held before the policy shut it, or before the
+        # parent changed under the form (which `wizard_recall.drop_locked`
+        # cannot catch: it runs once, before either can happen). Sending
+        # that provokes a 403 naming a field nobody in this form could
+        # still choose.
+        #
+        # A profile TYPED this session is the exception, and travels even
+        # onto a locked row: it is this person's current intent, so the
+        # daemon's refusal is the loud failure it deserves rather than a
+        # silent drop. Same line drop_locked draws, same seam it reads.
         args.profile = (
-            None if self.field("profile").disabled
+            self._typed_profile or None
+            if self.field("profile").disabled
             else self.value("profile") or None
         )
         # Read through the disable, like the other form: a borrow picked and

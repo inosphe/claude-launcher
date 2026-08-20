@@ -825,7 +825,12 @@ def test_a_locked_profile_row_never_travels():
 def test_a_parent_that_locks_the_row_mid_form_takes_the_value_with_it():
     """The seam apply() is the fix for: the form opened on a permissive
     parent, a profile was picked, and then the parent changed to one whose
-    policy forbids it. The row greys, and the answer must grey with it."""
+    policy forbids it. The row greys, and the answer must grey with it.
+
+    The recall's own guard cannot reach this one — `drop_locked` runs once,
+    just after the form is built, and the parent changes long afterwards.
+    A verdict taken at apply() time is what covers it, which is why the fix
+    lives there."""
     sources = FakeSpawnSources(
         report=_open_report(),
         sessions=[
@@ -853,25 +858,40 @@ def test_a_parent_that_locks_the_row_mid_form_takes_the_value_with_it():
     assert args.profile is None
 
 
-def test_a_profile_TYPED_on_the_command_line_is_refused_out_loud():
-    """The other half of the same rule. Dropping a value the FORM put on the
-    row is right; dropping a flag the user spelled out is the form quietly
-    doing something other than it was asked — so it is refused, before
-    anything is built, and the message names the key that would allow it."""
+def test_a_profile_TYPED_on_the_command_line_travels_even_onto_a_locked_row():
+    """The exception that keeps the rule honest, and the line the recall
+    already draws: a value the FORM left on a greyed row may be dropped in
+    silence, but a flag this person spelled out is their current intent —
+    it travels, and the daemon's refusal is the loud failure it deserves."""
     # --profile work --wizard, on the shipped policy that locks the row
     wiz = spawn_form(defaults=argparse.Namespace(profile="work"))
     assert not wiz.field("profile").selectable
-    assert wiz.handle("submit") is None
-    assert "--profile" in wiz.error and "'work'" in wiz.error
-    assert "spawn.allow_profile" in wiz.error
+    assert wiz.handle("submit") == "create"
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.profile == "work"
 
 
-def test_the_refusal_is_the_daemon_s_judgement_not_a_second_copy_of_it():
-    """The check reads the row the capabilities report greyed, never the
-    policy itself: a report that unlocks the field lets the same typed flag
-    straight through. A client that worked out 'is allow_profile set' would
-    put the rule in two places, and the copy that drifts is the one that
-    lies."""
+def test_a_REMEMBERED_profile_is_not_mistaken_for_a_typed_one():
+    """The two arrive on the same namespace, so the form has to ask which
+    it is — a recall behind an unanswered flag must not buy the exception
+    above, or every remembered profile would travel to a refusal nobody
+    typed."""
+    from claude_launcher import wizard_recall
+
+    recalled = wizard_recall.defaults(
+        argparse.Namespace(profile=None), {"profile": "ds4"}
+    )
+    wiz = spawn_form(defaults=recalled)
+    assert not wiz.field("profile").selectable
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.profile is None
+
+
+def test_an_unlocked_row_answers_with_whatever_it_holds():
+    """The exception is only about locked rows: with the policy open, the
+    typed flag and the picked value are the same kind of answer."""
     wiz = spawn_form(report=_open_report(),   # may_choose includes profile
                      defaults=argparse.Namespace(profile="other"))
     assert wiz.value("profile") == "other"   # the flag pre-filled the row
