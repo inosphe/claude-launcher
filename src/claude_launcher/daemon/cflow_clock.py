@@ -111,11 +111,35 @@ def tick() -> List[dict]:
 #: enforces (minutes), coarse enough that the registry scan stays invisible.
 REMINDER_POLL = 15.0
 
-#: The two statuses where the *agent* is the one the run is waiting on. Every
-#: other position is blocked on somebody else — a human's gate, a responder's
-#: answer — and re-typing step instructions there would tell the agent to act
-#: on a step it is not allowed to enter.
+#: The two statuses where the *agent* is plainly the one the run is waiting
+#: on. Every other position is blocked on somebody else — a human's gate, a
+#: responder's answer — and re-typing step instructions there would tell the
+#: agent to act on a step it is not allowed to enter.
 _ACTIONABLE = ("step", "select")
+
+
+def _ask_reached_nobody(payload: dict) -> bool:
+    """A ``waiting_answer`` that was never actually put to anyone.
+
+    Opening a delegated ask is a write, so a read-only ``status`` cannot do
+    it (see :func:`cflow.engine.goto`): a run forced onto such a step with
+    ``goto`` reports ``waiting_answer`` with no ask behind it — "not put to
+    anyone yet" — and only the driver's own ``next`` opens the question.
+
+    The distinction matters because the two ``waiting_answer``\\ s want
+    opposite treatment. One that genuinely reached a responder is theirs to
+    answer, and poking the driver about it is noise. One that reached nobody
+    is nobody's, and it is the shape a run dies in: the driver hears nothing,
+    the dashboard calls it delegated, and the run sits forever.
+    """
+    if payload.get("status") != "waiting_answer":
+        return False
+    return not ((payload.get("ask") or {}).get("asked") or [])
+
+
+def _actionable(payload: dict) -> bool:
+    """Whether the run's own agent is the one who can move it from here."""
+    return payload.get("status") in _ACTIONABLE or _ask_reached_nobody(payload)
 
 #: A reminder restates, it does not re-document: past this the step's own
 #: `status` call is the readable copy, and the block says so.
@@ -206,7 +230,7 @@ class ReminderClock:
             except Exception as exc:
                 log.debug("cflow reminder skipped %s/%s: %s", cwd, scope, exc)
                 continue
-            if payload.get("status") not in _ACTIONABLE:
+            if not _actionable(payload):
                 self._seen.pop(key, None)
                 continue
             override = payload.get("reminder") or {}
@@ -299,7 +323,23 @@ def reminder_block(payload: dict, interval: float) -> str:
     step = payload.get("step_id")
     visit = payload.get("visit")
     position = f"step '{step}'" + (f" (visit {visit})" if visit and visit > 1 else "")
-    if payload.get("status") == "select":
+    if _ask_reached_nobody(payload):
+        # No instructions to restate: the step's content is withheld behind
+        # the very approval nobody holds. So this block says the one true
+        # thing about the position instead — the question exists, it was
+        # never put to anyone, and 'next' is what puts it.
+        lines.append(f"position: {position}, entry approval not yet opened")
+        if payload.get("prompt"):
+            lines.append(f"prompt: {payload['prompt']}")
+        lines.append(
+            "protocol: this run is parked on a delegated decision that was "
+            "never actually put to anyone -- most likely the position was "
+            "forced here with 'goto', which does not deliver the step. It "
+            "reads as 'waiting on somebody else', but nobody has it. Call "
+            "'next' to open the question and route it; do not wait to be "
+            "answered."
+        )
+    elif payload.get("status") == "select":
         lines.append(f"position: branch choice at {position}")
         lines.append(f"prompt: {payload.get('prompt')}")
         for opt in payload.get("options") or []:
@@ -472,8 +512,15 @@ class RunEventClock:
                 continue
             if (
                 status in ("waiting_approval", "waiting_selection")
-                and prev[1] != status
-            ):
+                or _ask_reached_nobody(payload)
+            ) and prev[1] != status:
+                # An ask nobody holds belongs here too. `approve()` resolves
+                # it — `_blocked` calls the step "ask"-blocked whether or not
+                # the question was ever opened — so a human really can lift
+                # it. And they may be the only one who can: the reminder that
+                # would otherwise poke the driver is typed only into a busy
+                # session, so an idle or dead driver leaves this run silent
+                # in the one state that never times out.
                 events.append(self._event(cwd, scope, "human-gate", payload))
             elif (
                 pending_by == "recur"
@@ -625,20 +672,37 @@ def event_block(scope: str, kind: str, payload: dict) -> str:
         f"session: {scope}",
     ]
     if kind == "human-gate":
+        unrouted = _ask_reached_nobody(payload)
         what = (
             "approval"
-            if payload.get("status") == "waiting_approval"
+            if payload.get("status") == "waiting_approval" or unrouted
             else "selection"
         )
-        lines.append(f"event: waiting on a human {what} at {workflow}/{step}")
+        if unrouted:
+            lines.append(
+                f"event: parked at {workflow}/{step} on a delegated {what} "
+                "that was never put to anyone -- it reads as delegated, but "
+                "no responder holds it"
+            )
+        else:
+            lines.append(f"event: waiting on a human {what} at {workflow}/{step}")
         prompt = str(payload.get("gate") or payload.get("prompt") or "").strip()
         if prompt:
             lines.append(f"prompt: {prompt.splitlines()[0]}")
-        lines.append(
-            "note: the gate is a person's to answer and the wait is that "
-            "run's protocol -- do not clear it for them. If it stays "
-            "unanswered, surface it to the user."
-        )
+        if unrouted:
+            lines.append(
+                "note: two things end this and neither is you -- the run's "
+                "own agent calling 'next' (which opens the question and "
+                "routes it), or a person approving it outright. Nudge the "
+                "driver, or surface it to the user; do not answer it for "
+                "them."
+            )
+        else:
+            lines.append(
+                "note: the gate is a person's to answer and the wait is that "
+                "run's protocol -- do not clear it for them. If it stays "
+                "unanswered, surface it to the user."
+            )
     elif kind == "round-done":
         lines.append(
             f"event: finished its round of {workflow}; recur filed the next "
