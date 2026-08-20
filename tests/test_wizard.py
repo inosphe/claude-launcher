@@ -356,13 +356,13 @@ def test_the_form_asks_rolefilter_rather_than_guessing_the_rule():
     start it precedes.
 
     The form used to carry its own copy of the whitelist/blacklist reading,
-    and the two had already drifted: for a ``type`` outside the sanctioned
-    pair the copy fell back to whitelist while :class:`RoleFilter` falls back
-    to blacklist, so they answered every such filter in opposite directions.
-    The parser refuses those types, which is exactly why the disagreement
-    could sit here unnoticed — this pins the form to the model's answer.
+    and the two had already drifted. This pins the form to the model's answer
+    wherever the model has one — that is, across the sanctioned vocabulary.
+    A ``type`` outside it is not a disagreement to fix but a question with no
+    rule behind it; :func:`test_an_unreadable_filter_is_not_volunteered_on`
+    states what the form does there, and why that is the form's call alone.
     """
-    for ftype in ("whitelist", "blacklist", "bogus", ""):
+    for ftype in model.FILTER_TYPES:
         for roles in (["worker"], ["leader"], []):
             f = {"type": ftype, "roles": roles}
             entry = wizard._workflow_entry({"name": "w", "filter_roles": f})
@@ -372,6 +372,45 @@ def test_the_form_asks_rolefilter_rather_than_guessing_the_rule():
             assert wizard._workflow_admits(entry, "worker") is expected, (
                 f"the form disagrees with RoleFilter on {f!r}"
             )
+
+
+def test_an_unreadable_filter_is_not_volunteered_on():
+    """A ``type`` the vocabulary does not contain must sink a workflow, not
+    float it.
+
+    The parser refuses such a file, so nothing legitimate carries one and
+    this cannot be provoked through the daemon — but the default has to lean
+    the safe way regardless, because the failure it guards against is
+    auto-selecting the very workflow an unreadable filter may have been
+    written to keep away. Deferring to :class:`RoleFilter` here would do the
+    opposite: its whitelist-or-else reading takes an unknown word as a
+    blacklist and admits everyone.
+    """
+    for ftype in ("bogus", "", "  ", None):
+        entry = wizard._workflow_entry(
+            {"name": "w", "filter_roles": {"type": ftype, "roles": ["leader"]}}
+        )
+        assert wizard._workflow_admits(entry, "worker") is False, (
+            f"{ftype!r} was volunteered on"
+        )
+    # Casing and stray space are the vocabulary's, not an unknown word: this
+    # one is a whitelist of leaders, refused by the rule rather than for want
+    # of one.
+    spelled = wizard._workflow_entry(
+        {"name": "w", "filter_roles": {"type": " WHITELIST ", "roles": ["worker"]}}
+    )
+    assert wizard._workflow_admits(spelled, "worker") is True
+
+    # and a sunk workflow is still offered, never auto-picked
+    sources = FakeSources(workflows={"/srv/api": [
+        {"name": "unreadable", "default_role": "worker", "priority": 9,
+         "filter_roles": {"type": "bogus", "roles": ["worker"]}},
+    ]})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    pick(wiz, "role", "worker")
+    assert wiz.value("workflow") == ""
+    assert [o.value for o in wiz.field("workflow").options] == ["", "unreadable"]
 
 
 def test_a_filter_only_speaks_once_a_role_is_picked():
