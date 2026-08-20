@@ -586,6 +586,51 @@ def _cmd_respawn(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_migrate_session(args: argparse.Namespace) -> int:
+    """Move a session (kill, carry its conversation, relaunch) elsewhere."""
+    body: dict = {"children": bool(args.children)}
+    if args.to:
+        # Resolved against *this* shell before it travels: the daemon would
+        # resolve a relative path against its own cwd, which is nowhere the
+        # person typing stands.
+        body["cwd"] = os.path.abspath(args.to)
+    else:
+        body["worktree"] = args.worktree_name or ""
+    client = daemon_client.ensure_running()
+    # Roomy on purpose: a migrate is a graceful shutdown (up to ~5s), a git
+    # worktree add, and a relaunch — per session, children included.
+    info = client.post(
+        f"/api/sessions/{args.session}/migrate", body, timeout=120.0
+    )
+    wt = info.get("worktree")
+    where = (
+        f"worktree {wt['name']!r} (branch {wt['branch']!r}, "
+        f"{'created' if wt['created'] else 'reused'}): {wt['path']}"
+        if wt
+        else info.get("cwd", "")
+    )
+    carried = (
+        " — conversation carried" if info.get("transcript_moved")
+        else ""
+    )
+    print(f"session {info['name']!r} migrated to {where}{carried}")
+    failed = False
+    for child in info.get("children") or []:
+        if child.get("ok"):
+            print(f"  child {child['name']!r} migrated too")
+        else:
+            failed = True
+            print(
+                f"  child {child['name']!r} NOT migrated: {child.get('error')}",
+                file=sys.stderr,
+            )
+    if args.attach:
+        from . import attach as attach_mod
+
+        return attach_mod.attach(client, info["name"])
+    return 1 if failed else 0
+
+
 def _cmd_clear_sessions(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     doc = client.delete("/api/sessions" + ("?logs=1" if args.logs else ""))
@@ -1196,6 +1241,34 @@ def register(sub) -> None:
     )
     p_rebrief.set_defaults(func=_cmd_rebrief)
 
+    p_migrate = sub.add_parser(
+        "migrate-session",
+        help="move a session to a git worktree (or another directory): stop "
+             "it, carry its claude conversation, relaunch it there",
+    )
+    p_migrate.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
+    p_migrate.add_argument("session", nargs="?")
+    where = p_migrate.add_mutually_exclusive_group(required=True)
+    where.add_argument(
+        "--worktree", dest="worktree_name", nargs="?", const="", metavar="NAME",
+        help="move into this worktree of the session's own repository "
+             "(created under .claude/worktrees/, or reused; omit NAME for a "
+             "generated one)",
+    )
+    where.add_argument(
+        "--to", metavar="DIR",
+        help="move into an existing directory instead of a worktree",
+    )
+    p_migrate.add_argument(
+        "--children", action="store_true",
+        help="also migrate the session's descendants that stand in the same "
+             "directory (those already elsewhere stay put)",
+    )
+    p_migrate.add_argument(
+        "-a", "--attach", action="store_true", help="attach once migrated"
+    )
+    p_migrate.set_defaults(func=_cmd_migrate_session_dispatch)
+
     p_kill = sub.add_parser(
         "kill-session", help="kill a running session (or remove an exited one)"
     )
@@ -1293,6 +1366,12 @@ def _cmd_capture_pane_dispatch(args: argparse.Namespace) -> int:
     if not _resolve_target(args):
         return 1
     return _cmd_capture_pane(args)
+
+
+def _cmd_migrate_session_dispatch(args: argparse.Namespace) -> int:
+    if not _resolve_target(args):
+        return 1
+    return _cmd_migrate_session(args)
 
 
 def _cmd_kill_session_dispatch(args: argparse.Namespace) -> int:

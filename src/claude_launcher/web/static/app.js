@@ -3283,6 +3283,7 @@ let sessName = null;      // the session whose detail is open (null = closed)
 let sessPollTimer = null;
 let sessStartBox = null;  // reused across polls: it holds the user's typing
 let sessSendBox = null;   // and so does the message box — same reason
+let sessMigrateBox = null; // and the migrate picker — same reason again
 let sessRunFold = null;   // reused across polls too: it holds open/shut
 let sessRunTimer = null;  // the fold's own poll, alive only while it is open
 
@@ -3294,6 +3295,7 @@ function dropDetail() {
   sessName = null;
   sessStartBox = null;
   sessSendBox = null;
+  sessMigrateBox = null;
   sessRunFold = null;
   $("sess-view").innerHTML = "";
   markDetailRow();
@@ -3322,6 +3324,7 @@ function repointDetail(name) {
   sessName = name;
   sessStartBox = null;
   sessSendBox = null;
+  sessMigrateBox = null;
   sessRunFold = null;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
@@ -3520,6 +3523,159 @@ function renderSession(data) {
   view.appendChild(meshBox);
 
   view.appendChild(sessWorkflow(data));
+
+  view.appendChild(sessMigrate(data));
+}
+
+/* ---- move this session to another checkout ----
+   `claunch migrate-session`, from the panel that names the session. Claude
+   keeps transcripts per working directory, so this is more than a cwd edit:
+   the daemon stops the session, re-files its conversation under the target
+   directory's slug, and relaunches it there — same name, same conversation,
+   same mesh memberships. The picker offers the checkouts that make sense
+   from where the session stands: its repository's existing worktrees, or a
+   new one cut on the spot. Directories outside the repository stay a CLI
+   affair (`--to DIR`), the same way free-text paths are kept out of the
+   create form. */
+function sessMigrate(data) {
+  const s = data.session || {};
+  const box = el("div", "sess-migrate");
+  box.appendChild(el("h3", null, "Move to worktree"));
+
+  // Rebuilt only when the session or its directory changes — the 2s poll
+  // must not wipe a picked destination, and after a successful move the cwd
+  // itself changes the key, which is what re-aims the picker.
+  const key = `${s.name}|${s.cwd}`;
+  if (sessMigrateBox && sessMigrateBox.dataset.slot === key) {
+    box.appendChild(sessMigrateBox);   // appending moves the live node here
+    return box;
+  }
+  const form = el("div", "sess-migrate-form");
+  form.dataset.slot = key;
+  sessMigrateBox = form;
+  box.appendChild(form);
+
+  form.appendChild(el(
+    "p", "wf-note",
+    "stops the session, carries its conversation to the checkout you pick, " +
+    "and relaunches it there — same name, same conversation"
+  ));
+
+  const row = el("div", "sess-send-row");
+  const dest = document.createElement("select");
+  dest.disabled = true;
+  dest.appendChild(el("option", null, "reading the repository…"));
+  row.appendChild(dest);
+  const nameIn = document.createElement("input");
+  nameIn.placeholder = "new worktree name (blank = generated)";
+  nameIn.className = "hidden";
+  const kids = el("label", "check");
+  const kidsBox = document.createElement("input");
+  kidsBox.type = "checkbox";
+  kids.append(kidsBox, el(
+    "span", null, "also move children standing in this directory"
+  ));
+  const moveBtn = el("button", "wf-btn option", "Migrate");
+  moveBtn.disabled = true;
+  const status = el("p", "wf-note hidden");
+  form.append(row, nameIn, kids, moveBtn, status);
+
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  // The choices are the daemon's answer, not a guess: which worktrees
+  // already stand beside this session's checkout, and whether there is a
+  // repository to cut a new one of at all.
+  (async () => {
+    let info = {};
+    try {
+      const resp = await api(`/api/git?cwd=${encodeURIComponent(s.cwd || "")}`);
+      info = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(info.error || `HTTP ${resp.status}`);
+    } catch (e) {
+      say(`cannot read the repository: ${e.message || e}`, "wf-warning");
+      return;
+    }
+    if (sessMigrateBox !== form) return; // the panel moved on mid-flight
+    if (!info.repo) {
+      say(
+        "not inside a git repository — nothing to make a worktree of " +
+        "(claunch migrate-session --to DIR moves it anywhere)",
+        "wf-warning"
+      );
+      return;
+    }
+    dest.innerHTML = "";
+    for (const w of info.worktrees || []) {
+      const opt = document.createElement("option");
+      opt.value = `wt:${w}`;
+      opt.textContent = `worktree: ${w}`;
+      dest.appendChild(opt);
+    }
+    const fresh = document.createElement("option");
+    fresh.value = "new";
+    fresh.textContent = "new worktree…";
+    dest.appendChild(fresh);
+    if (!(info.worktrees || []).length) dest.value = "new";
+    const sync = () =>
+      nameIn.classList.toggle("hidden", dest.value !== "new");
+    dest.addEventListener("change", sync);
+    sync();
+    dest.disabled = false;
+    moveBtn.disabled = false;
+  })();
+
+  moveBtn.addEventListener("click", async () => {
+    if (moveBtn.disabled) return;
+    const name = s.name;
+    const wt = dest.value === "new" ? nameIn.value.trim() : dest.value.slice(3);
+    moveBtn.disabled = true;
+    say("migrating… (stopping it, moving its transcript, relaunching)");
+    let doc = {};
+    let resp;
+    try {
+      resp = await api(`/api/sessions/${encodeURIComponent(name)}/migrate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ worktree: wt, children: kidsBox.checked }),
+      });
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      say("could not reach the daemon — nothing was moved", "wf-warning");
+      moveBtn.disabled = false;
+      return;
+    }
+    moveBtn.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    const kidsOk = (doc.children || []).filter((c) => c.ok);
+    const kidsFailed = (doc.children || []).filter((c) => !c.ok);
+    say(
+      `migrated to ${doc.cwd}` +
+      (kidsOk.length ? ` — ${kidsOk.map((c) => c.name).join(", ")} too` : "") +
+      (kidsFailed.length
+        ? `; NOT moved: ${kidsFailed
+            .map((c) => `${c.name} (${c.error})`)
+            .join(", ")}`
+        : ""),
+      kidsFailed.length ? "wf-warning" : "wf-note"
+    );
+    // The migrate relaunched a fresh PTY under the same name; a terminal
+    // attached to the old one is watching a socket that just died.
+    if (currentName === name) {
+      detach();
+      await refreshSessions();
+      attach(name);
+    } else {
+      refreshSessions();
+    }
+  });
+
+  return box;
 }
 
 /* ---- say something to this session, from the panel that names it ----

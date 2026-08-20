@@ -15,12 +15,15 @@ for all of them, both reachable only from the CLI and the web UI.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 from dataclasses import replace
-from typing import Dict, Iterable, List, Optional, Union
+from typing import Dict, Iterable, List, Optional, Tuple, Union
 
+from .. import profile as profile_mod
 from .. import spawn as spawn_mod
+from .. import transcripts
 from . import harness as harness_mod
 from . import mesh_roles
 from . import paths
@@ -458,6 +461,74 @@ class SessionManager:
         except Exception:
             self._sessions[name] = session  # keep the exited record on failure
             raise
+
+    async def migrate(self, name: str, new_cwd: str) -> Tuple[Session, bool]:
+        """Move a session to another directory: stop it, carry its claude
+        conversation's transcript, and relaunch it there.
+
+        The one thing a plain kill-and-recreate cannot do. Claude keeps
+        transcripts per working directory (see :mod:`claude_launcher.transcripts`),
+        so a session relaunched somewhere else resumes nothing — unless its
+        transcript is re-filed under the new directory first, which is exactly
+        the step this method adds between :meth:`kill` and :meth:`respawn`.
+        Everything else about the session survives by not being touched: the
+        name, the pinned conversation id, the mesh memberships keyed on the
+        name, the parent edge.
+
+        Refused while nothing has been stopped or moved: a target that is not
+        a directory, a session already there, a claude session with no pinned
+        conversation (its transcript cannot be identified, so moving it would
+        silently lose the conversation), and a profile that no longer exists.
+        A relaunch that fails afterwards puts everything back — the transcript
+        returns to the old slug and the record keeps its old definition — so
+        the failure mode is "still where it was", not "half-moved".
+
+        Returns the relaunched session and whether a transcript was actually
+        carried (``False`` for other harnesses, and for a conversation that
+        never wrote one — resuming that was already broken, and is reported
+        rather than refused because the move changes nothing about it).
+        """
+        session = self.get(name)
+        old = session.sdef
+        new_cwd = os.path.abspath(new_cwd)
+        if not os.path.isdir(new_cwd):
+            raise ManagerError(f"target directory does not exist: {new_cwd}")
+        if os.path.normcase(new_cwd) == os.path.normcase(
+            os.path.abspath(old.cwd or "")
+        ):
+            raise ManagerError(f"session {name!r} is already in {new_cwd}")
+        config_dir = None
+        if old.harness == harness_mod.CLAUDE_HARNESS:
+            if not old.conversation_id:
+                raise ManagerError(
+                    f"session {name!r} has no pinned conversation to carry "
+                    "(it was started with its own --resume/--continue/"
+                    "--session-id args), so its transcript cannot be "
+                    "identified and migrating would lose the conversation"
+                )
+            try:
+                config_dir = profile_mod.require(old.profile).config_dir
+            except profile_mod.ProfileError as exc:
+                raise ManagerError(str(exc)) from exc
+        if not session.exited:
+            await session.shutdown()
+        moved = None
+        if config_dir is not None:
+            moved = transcripts.relocate(
+                config_dir, old.conversation_id, old.cwd, new_cwd
+            )
+        del self._sessions[name]
+        try:
+            relaunched = self.create(replace(old, cwd=new_cwd), restoring=True)
+        except Exception:
+            if moved is not None:
+                transcripts.relocate(
+                    config_dir, old.conversation_id, new_cwd, old.cwd
+                )
+            self._sessions[name] = session  # keep the record, as it was
+            self.persist()
+            raise
+        return relaunched, moved is not None
 
     async def shutdown_all(self) -> None:
         self.persist()  # record which sessions were alive, for restore
