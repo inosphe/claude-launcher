@@ -20,7 +20,7 @@ from typing import List, Optional
 from aiohttp import web
 
 from .. import __version__, harnesses as harness_registry
-from .. import profile as profile_mod, spawn as spawn_mod, store, workspaces
+from .. import profile as profile_mod, quickjob, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import cflow_clock, onboard, rebrief
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
@@ -184,6 +184,8 @@ def build_app(
     # tick); POST is one run's override, stored in that run's state.
     r.add_get("/api/cflow/reminder", h_cflow_reminder_defaults)
     r.add_put("/api/cflow/reminder", h_cflow_reminder_defaults_set)
+    r.add_get("/api/quickjob", h_quickjob_get)
+    r.add_put("/api/quickjob", h_quickjob_set)
     r.add_post("/api/cflow/reminder", h_cflow_reminder_run_set)
     r.add_get("/api/mesh", h_mesh_list)
     r.add_post("/api/mesh", h_mesh_create)
@@ -1007,6 +1009,31 @@ async def h_cflow_reminder_defaults_set(request: web.Request) -> web.Response:
         if interval is not None:
             store.set_daemon_field("cflow_reminder_interval", interval)
         return web.json_response({"defaults": _reminder_defaults()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_quickjob_get(request: web.Request) -> web.Response:
+    """The quick-job defaults — what the dashboard's leader form is prefilled
+    with. Read live from the config file, like every launcher setting."""
+    try:
+        return web.json_response({"quick_job": quickjob.load()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_quickjob_set(request: web.Request) -> web.Response:
+    """Update the quick-job defaults from the dashboard.
+
+    Written to the config file — the same ``quick_job`` block a user edits by
+    hand — so the form and the YAML can never disagree about what the
+    defaults are. Partial on purpose: only the keys sent change.
+    """
+    body = await _json_body(request)
+    try:
+        return web.json_response({"quick_job": quickjob.save(body)})
+    except (ValueError, TypeError) as exc:
+        return json_error(400, str(exc))
     except store.StoreError as exc:
         return json_error(500, str(exc))
 
