@@ -1684,12 +1684,18 @@ class SpawnWizard(Form):
         # remembered here and consumed on the first rebuild.
         self._preset_profile: str = get("profile") or ""
         self._preset_borrow: str = get("borrow") or ""
-        #: The same flag, kept rather than consumed: `_preset_profile`
-        #: is spent seeding the row on the first rebuild, and after that
+        #: The same flag, kept rather than consumed: `_preset_profile` is
+        #: spent seeding the row on the first rebuild, and after that
         #: nothing remembers that the user asked for a profile at all.
-        #: A value the policy will not allow has to be refused out loud
-        #: (see `_check`), which needs exactly that memory.
-        self._typed_profile: str = get("profile") or ""
+        #: A value the policy will not allow is handled by where it CAME
+        #: from, so this must be the command line's answer only -- `d` has
+        #: the recall merged in behind it, and a remembered profile is not
+        #: something this person asked for (see wizard_recall.typed).
+        from . import wizard_recall
+
+        self._typed_profile: str = (
+            "" if d is None else str(wizard_recall.typed(d, "profile") or "")
+        )
         profile = ChoiceField(
             key="profile", label="Profile",
             hint="a different profile for the child (spawn.allow_profile "

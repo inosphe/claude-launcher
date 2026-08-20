@@ -122,6 +122,23 @@ def defaults(args: Any, remembered: Dict[str, Any]) -> Any:
     return Defaults(args, remembered) if remembered else args
 
 
+def typed(defaults: Any, key: str) -> Any:
+    """What the COMMAND LINE said for ``key``, with any recall behind it
+    ignored.
+
+    :class:`Defaults` deliberately reads as one namespace, which is what
+    lets the forms treat a remembered answer exactly like a typed one while
+    filling their rows in. Past that point the two stop being
+    interchangeable: a remembered value may be dropped in silence, because
+    it is not what this person asked for, and a typed one may not. This is
+    the seam that tells them apart, and it lives here because this module
+    is what merged them -- a form reaching behind the wrapper itself would
+    be a second copy of that knowledge, in the place least likely to be
+    updated when the merge changes.
+    """
+    return getattr(getattr(defaults, "_args", defaults), key, None)
+
+
 def _reset(field: Any) -> None:
     """Put one row back on the answer it would hold with nothing remembered."""
     if hasattr(field, "chosen"):  # MultiField, before its ChoiceField base
