@@ -3872,7 +3872,14 @@ function wfDiagramSvg(wf, run, selected) {
   const yTop = (id) => 8 + rowOf(id) * ROWH;
 
   const parts = [];
-  parts.push(`<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg" class="wfd">`);
+  // width/height attrs pin the drawing at its natural size (one SVG unit =
+  // one CSS pixel): the column growing must not blow the graph up with it.
+  // The stylesheet only ever shrinks it (max-width) on columns narrower
+  // than the drawing.
+  parts.push(
+    `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" ` +
+    `xmlns="http://www.w3.org/2000/svg" class="wfd">`
+  );
   parts.push(
     '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" ' +
     'markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
@@ -3978,16 +3985,22 @@ let sessSendBox = null;   // and so does the message box — same reason
 let sessMigrateBox = null; // and the migrate picker — same reason again
 let sessRunFold = null;   // reused across polls too: it holds open/shut
 let sessRunTimer = null;  // the fold's own poll, alive only while it is open
+let sessQuickJobBox = null; // the quick-job form — it holds a typed task
+let sessKidsBox = null;   // the children panel, which polls on its own
+let sessKidsTimer = null;
 
 /* Forget the open detail. State only — the caller syncs the layout, which is
    what actually takes the panel off the screen. */
 function dropDetail() {
   if (sessPollTimer) { clearInterval(sessPollTimer); sessPollTimer = null; }
   stopSessRun();
+  stopSessKids();
   sessName = null;
   sessStartBox = null;
   sessSendBox = null;
   sessMigrateBox = null;
+  sessQuickJobBox = null;
+  sessKidsBox = null;
   sessRunFold = null;
   $("sess-view").innerHTML = "";
   markDetailRow();
@@ -4013,10 +4026,13 @@ function openDetail(name) {
 function repointDetail(name) {
   if (sessPollTimer) clearInterval(sessPollTimer);
   stopSessRun();
+  stopSessKids();
   sessName = name;
   sessStartBox = null;
   sessSendBox = null;
   sessMigrateBox = null;
+  sessQuickJobBox = null;
+  sessKidsBox = null;
   sessRunFold = null;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
@@ -4253,6 +4269,12 @@ function renderSession(data) {
     meshBox.appendChild(trace);
   }
   view.appendChild(meshBox);
+
+  // What this session is FOR, by role: a leader gets its dispatch and reaping
+  // panels here, other roles whatever ROLE_PANELS declares for them. Between
+  // the memberships (identity) and the migrate form (plumbing), because these
+  // are the panel's verbs.
+  for (const build of rolePanels(data)) view.appendChild(build(data));
 
   view.appendChild(sessMigrate(data));
 }
@@ -4824,6 +4846,425 @@ function sessRunTrack(wf, run) {
   line.title = "◆ a branch · | a gate to enter or a verify to leave · ×n revisits";
   wrap.appendChild(line);
   return wrap;
+}
+
+/* ---- role-specific panels ----------------------------------------------
+   The rail reads the same for every session, but what a session is FOR
+   differs by role: a leader dispatches work and reaps the workers it
+   spawned, a worker just works. This registry is the seam between the two —
+   a role name maps to the panel builders that role's sessions get, and
+   renderSession asks it and nothing else. Growing a role's UI is one entry
+   here, not another branch in the renderer.
+
+   A session's roles are read from both places one is declared: the
+   definition's own role (the stance injected at every spawn) and the role
+   each mesh membership carries — the same session is 'leader' in its own
+   definition and 'leader' again in the mesh roster, but either alone must
+   be enough, because either alone is how operators actually set them. */
+const ROLE_PANELS = {
+  leader: [sessQuickJob, sessChildren],
+};
+
+function sessRoleNames(data) {
+  const s = data.session || {};
+  const names = new Set();
+  const add = (r) => { if (r) names.add(String(r).toLowerCase()); };
+  add(data.role ? data.role.name : s.role);
+  for (const m of data.meshes || []) add(m.role);
+  return names;
+}
+
+/* The panels `data`'s session gets, in ROLE_PANELS order, each at most once —
+   a session that is 'leader' twice over must not get two dispatch forms. */
+function rolePanels(data) {
+  const roles = sessRoleNames(data);
+  const out = [];
+  for (const [role, builders] of Object.entries(ROLE_PANELS)) {
+    if (!roles.has(role)) continue;
+    for (const b of builders) if (!out.includes(b)) out.push(b);
+  }
+  return out;
+}
+
+/* ---- quick job: one form, one worker ----
+   The wizard's spawn form shrunk to the child a leader actually dispatches:
+   a worker-role session driving the worker workflow, in a checkout of its
+   own, briefed with one task. Everything but the task is prefilled from the
+   `quick_job:` block of ~/.claunch.yaml (GET /api/quickjob), and the form
+   can write edited defaults back (PUT) — the YAML stays the single source,
+   the form is just a hand on it. What a child MAY be is still the spawn
+   policy's call: a default the policy refuses is refused at spawn time,
+   with the daemon's own message shown here. */
+const QUICKJOB_FALLBACK = {
+  role: "worker", workflow: "improv-worker", worktree: true,
+  name_prefix: "job", task: "",
+};
+
+function qjStamp() {
+  const d = new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}${p2(d.getMonth() + 1)}${p2(d.getDate())}` +
+    `-${p2(d.getHours())}${p2(d.getMinutes())}${p2(d.getSeconds())}`;
+}
+
+/* The nudge's whole text, in one place so a test can hold it against what
+   the button sends. It reports idleness and asks for judgement; the daemon
+   kills nothing on its own. */
+function idleNudgeText(idle) {
+  return (
+    `[dashboard nudge] idle child session(s): ${idle.join(", ")} — for each ` +
+    "one, if its work is done and you have its report, kill it ('kill' via " +
+    "MCP, or 'claunch kill NAME') so the slot comes back; if it should " +
+    "still be working, ask it what it is waiting on. Your call — this " +
+    "button only reports idleness."
+  );
+}
+
+function sessQuickJob(data) {
+  const s = data.session || {};
+  const box = el("div", "sess-quickjob");
+  box.appendChild(el("h3", null, "Quick job"));
+
+  // Rebuilt only when the panel repoints: the 2s poll must not wipe a
+  // half-typed task, and the pickers were fetched for THIS session's cwd.
+  const key = `${s.name}|${s.cwd}`;
+  if (sessQuickJobBox && sessQuickJobBox.dataset.slot === key) {
+    box.appendChild(sessQuickJobBox);   // appending moves the live node here
+    return box;
+  }
+  const form = el("div", "sess-quickjob-form");
+  form.dataset.slot = key;
+  sessQuickJobBox = form;
+  box.appendChild(form);
+
+  form.appendChild(el(
+    "p", "wf-note",
+    "spawn one worker under this leader: role, workflow and worktree are " +
+    "the quick_job defaults from ~/.claunch.yaml — type the task, press Spawn"
+  ));
+
+  const row = el("div", "sess-send-row");
+  const roleSel = document.createElement("select");
+  const wfSel = document.createElement("select");
+  for (const sel of [roleSel, wfSel]) {
+    sel.disabled = true;
+    sel.appendChild(el("option", null, "loading…"));
+  }
+  roleSel.title = "the child's role — a stance injected at every spawn";
+  wfSel.title = "the cflow workflow started for the child, from those " +
+    "declared in this directory";
+  row.append(roleSel, wfSel);
+
+  const wtLabel = el("label", "check");
+  const wtBox = document.createElement("input");
+  wtBox.type = "checkbox";
+  wtLabel.append(wtBox, el(
+    "span", null, "cut it a worktree of its own (no collisions with siblings)"
+  ));
+
+  const nameIn = document.createElement("input");
+  nameIn.placeholder = "child name (blank = auto)";
+  const task = document.createElement("textarea");
+  task.rows = 3;
+  task.placeholder = "the job: what this worker is for — typed to it once " +
+    "it has booted";
+
+  const spawnBtn = el("button", "wf-btn approve", "Spawn worker");
+  spawnBtn.disabled = true;
+  const saveBtn = el("button", "wf-btn option", "Save as defaults");
+  saveBtn.title = "write role/workflow/worktree back to the quick_job block " +
+    "of ~/.claunch.yaml";
+  saveBtn.disabled = true;
+  const btns = el("div", "sess-quickjob-btns");
+  btns.append(spawnBtn, saveBtn);
+  const status = el("p", "wf-note hidden");
+  form.append(row, wtLabel, nameIn, task, btns, status);
+
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  let defaults = { ...QUICKJOB_FALLBACK };
+  let canSave = false;
+
+  const fill = (sel, names, none, want) => {
+    sel.innerHTML = "";
+    const empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = none;
+    sel.appendChild(empty);
+    for (const n of names) {
+      const opt = document.createElement("option");
+      opt.value = n;
+      opt.textContent = n;
+      sel.appendChild(opt);
+    }
+    // The default may name a role/workflow this daemon does not know; offer
+    // it anyway, marked, rather than silently spawning without it.
+    if (want && !names.includes(want)) {
+      const opt = document.createElement("option");
+      opt.value = want;
+      opt.textContent = `${want} (not found here)`;
+      sel.appendChild(opt);
+    }
+    sel.value = want || "";
+    sel.disabled = false;
+  };
+
+  (async () => {
+    // Four closed sets, fetched once per repoint like the wizard's sources:
+    // the defaults, the role and workflow lists, and what this parent may
+    // still spawn. Each failure degrades its own field, not the form.
+    const [qj, roles, wfs, kids] = await Promise.all([
+      api("/api/quickjob").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      api("/api/roles").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      api(`/api/cflow/workflows?cwd=${encodeURIComponent(s.cwd || "")}`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      api(`/api/sessions/${encodeURIComponent(s.name)}/children`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ]);
+    if (sessQuickJobBox !== form) return; // the panel moved on mid-flight
+
+    if (qj && qj.quick_job) {
+      defaults = { ...QUICKJOB_FALLBACK, ...qj.quick_job };
+      canSave = true;
+    } else {
+      say(
+        "this daemon has no /api/quickjob — using built-in defaults; " +
+        "'claunch daemon restart' to pick up this version", "wf-warning"
+      );
+    }
+    fill(
+      roleSel,
+      ((roles && roles.roles) || []).map((r) => r.name).filter(Boolean),
+      "(no role)", defaults.role
+    );
+    fill(
+      wfSel,
+      ((wfs && wfs.workflows) || [])
+        .map((w) => (typeof w === "string" ? w : w && !w.error && w.name))
+        .filter(Boolean),
+      "(no workflow)", defaults.workflow
+    );
+    wtBox.checked = !!defaults.worktree;
+    if (defaults.task) {
+      task.placeholder = `${defaults.task} …plus what you type here`;
+    }
+    saveBtn.disabled = !canSave;
+
+    // The policy's own verdict, before the button is pressed: a form that
+    // lets you type a task and then refuses the press taught you nothing.
+    if (kids && kids.can_spawn === false) {
+      say((kids.blocked_by || []).join("; ") || "this session may not spawn",
+        "wf-warning");
+      return; // spawnBtn stays disabled
+    }
+    if (kids && typeof kids.children_remaining === "number") {
+      say(`${kids.children_remaining} child slot(s) left`);
+    }
+    spawnBtn.disabled = false;
+  })();
+
+  spawnBtn.addEventListener("click", async () => {
+    if (spawnBtn.disabled) return;
+    const typed = task.value.trim();
+    const brief = [defaults.task, typed].filter(Boolean).join("\n\n");
+    if (!brief) {
+      say("a worker needs a task — it is the one field with no default",
+        "wf-warning");
+      return;
+    }
+    const body = { task: brief };
+    if (roleSel.value) body.role = roleSel.value;
+    if (wfSel.value) body.workflow = wfSel.value;
+    const name = nameIn.value.trim();
+    if (name) body.name = name;
+    if (wtBox.checked) {
+      body.worktree = name || `${defaults.name_prefix || "job"}-${qjStamp()}`;
+    }
+    spawnBtn.disabled = true;
+    say("spawning…");
+    let resp, doc = {};
+    try {
+      resp = await api(`/api/sessions/${encodeURIComponent(s.name)}/children`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      say("could not reach the daemon — nothing was spawned", "wf-warning");
+      spawnBtn.disabled = false;
+      return;
+    }
+    spawnBtn.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `spawn refused (HTTP ${resp.status})`, "wf-warning");
+      return;
+    }
+    const child = (doc.session || {}).name || "(unnamed)";
+    const joined = (doc.mesh || {}).ok ? ` — joined mesh '${doc.mesh.mesh}'` : "";
+    say(`spawned '${child}'${joined}`);
+    task.value = "";
+    nameIn.value = "";
+    refreshSessKids();     // the roster below should show it now, not in 5s
+    refreshSessions();     // and so should the rail
+  });
+
+  saveBtn.addEventListener("click", async () => {
+    if (saveBtn.disabled) return;
+    saveBtn.disabled = true;
+    let resp, doc = {};
+    try {
+      resp = await api("/api/quickjob", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          role: roleSel.value,
+          workflow: wfSel.value,
+          worktree: wtBox.checked,
+        }),
+      });
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      say("could not reach the daemon — defaults unchanged", "wf-warning");
+      saveBtn.disabled = false;
+      return;
+    }
+    saveBtn.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `save refused (HTTP ${resp.status})`, "wf-warning");
+      return;
+    }
+    defaults = { ...defaults, ...(doc.quick_job || {}) };
+    say("saved to ~/.claunch.yaml (quick_job)");
+  });
+
+  return box;
+}
+
+/* ---- the leader's children, and the reaping nudge ----
+   The roster GET /children already carries — each child, its status, the
+   run it drives — put where the leader's operator is looking, with the one
+   button the fleet keeps needing: point the leader at its idle children.
+   The button KILLS NOTHING. It types a request into the leader's own
+   terminal (send-keys via /deliver), because whether an idle child is
+   'finished, holding a report' or 'stuck mid-task' is the leader's judgement
+   to make, and it is the one who must collect the report before the kill. */
+function sessChildren(data) {
+  const s = data.session || {};
+  const box = el("div", "sess-kids");
+  box.appendChild(el("h3", null, "Children"));
+
+  const key = s.name || sessName || "";
+  if (sessKidsBox && sessKidsBox.dataset.slot === key) {
+    box.appendChild(sessKidsBox);   // appending moves the live node here
+    return box;
+  }
+  stopSessKids();
+  const bodyEl = el("div", "sess-kids-body");
+  bodyEl.dataset.slot = key;
+  sessKidsBox = bodyEl;
+  box.appendChild(bodyEl);
+  bodyEl.appendChild(el("p", "wf-note", "loading…"));
+  refreshSessKids();
+  // Its own poll, slower than the panel's: statuses drift in seconds, but a
+  // roster is glanced at, not watched.
+  sessKidsTimer = setInterval(refreshSessKids, 5000);
+  return box;
+}
+
+function stopSessKids() {
+  if (sessKidsTimer) { clearInterval(sessKidsTimer); sessKidsTimer = null; }
+}
+
+async function refreshSessKids() {
+  const bodyEl = sessKidsBox;
+  // Detached while the Workflow tab has the column: skip the fetch, keep the
+  // timer — the Details tab re-adopts the same node when it comes back.
+  if (!bodyEl || !bodyEl.isConnected) return;
+  const name = bodyEl.dataset.slot;
+  let doc;
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/children`);
+    doc = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      bodyEl.innerHTML = "";
+      bodyEl.appendChild(el(
+        "p", "wf-warning", doc.error || "cannot read this session's children"
+      ));
+      return;
+    }
+  } catch {
+    return; // the poll comes back round
+  }
+  if (sessKidsBox !== bodyEl) return; // repointed mid-flight
+  renderSessKids(bodyEl, doc);
+}
+
+function renderSessKids(bodyEl, doc) {
+  bodyEl.innerHTML = "";
+  const kids = doc.children || [];
+  if (!kids.length) {
+    bodyEl.appendChild(el("p", "wf-note",
+      "no children — the quick job form above spawns one"));
+    return;
+  }
+  for (const k of kids) {
+    const row = el("div", "sess-kid");
+    row.appendChild(el("span", `dot ${k.status || ""}`));
+    const link = el("a", "sess-kid-name", k.name);
+    link.href = "#/s/" + encodeURIComponent(k.name);
+    row.appendChild(link);
+    row.appendChild(el("span", "meta", k.status || "?"));
+    if (k.cflow) {
+      row.appendChild(el("span", "meta sess-kid-flow",
+        `${k.cflow.workflow || "run"}${k.cflow.step ? " · " + k.cflow.step : ""}`));
+    }
+    bodyEl.appendChild(row);
+  }
+
+  const idle = kids.filter((k) => k.status === "idle").map((k) => k.name);
+  const nudge = el(
+    "button", "wf-btn option",
+    idle.length ? `Nudge: reap idle children (${idle.length})`
+      : "Nudge: reap idle children"
+  );
+  nudge.disabled = !idle.length;
+  nudge.title = idle.length
+    ? "types a request into this leader's terminal to review " +
+      idle.join(", ") + " and kill the finished ones — nothing is killed " +
+      "by the dashboard itself"
+    : "no idle children right now";
+  const status = el("p", "wf-note hidden");
+  nudge.addEventListener("click", async () => {
+    if (nudge.disabled) return;
+    nudge.disabled = true;
+    let resp, doc2 = {};
+    try {
+      resp = await api(
+        `/api/sessions/${encodeURIComponent(bodyEl.dataset.slot)}/deliver`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text: idleNudgeText(idle) }),
+        });
+      doc2 = await resp.json().catch(() => ({}));
+    } catch {
+      status.className = "wf-warning";
+      status.textContent = "could not reach the daemon — nothing was sent";
+      nudge.disabled = false;
+      return;
+    }
+    nudge.disabled = false;
+    status.className = resp.ok ? "wf-note" : "wf-warning";
+    status.textContent = resp.ok
+      ? (doc2.delivered
+        ? "typed into the leader's terminal"
+        : "accepted — queued until the leader's terminal is free")
+      : (doc2.error || `nudge refused (HTTP ${resp.status})`);
+  });
+  bodyEl.append(nudge, status);
 }
 
 /* ------------------------------------------------------------------ */
