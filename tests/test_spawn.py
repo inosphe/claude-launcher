@@ -306,6 +306,142 @@ def test_capabilities_always_offers_null_token():
 
 
 # --------------------------------------------------------------------------- #
+# fork: a copy of the parent's own conversation
+# --------------------------------------------------------------------------- #
+#: A parent that could actually be forked: claude, with a conversation pinned.
+TALKER = {**PARENT, "harness": "claude", "conversation_id": "c-1"}
+
+
+def test_fork_hands_the_child_a_copy_of_the_parents_conversation():
+    """Spelled as the two fields the harness already launches with, so the
+    child's copy is restorable like any other conversation."""
+    child = spawn.check(
+        _policy(), {"fork": True}, parent=TALKER, depth=0, children=0
+    )
+    assert child["resume"] == "c-1"
+    assert child["fork_session"] is True
+
+
+def test_fork_is_never_gated():
+    """It copies what the parent already holds — no directory, profile or
+    token becomes reachable — so the shipped, all-locked policy allows it,
+    exactly like --null."""
+    policy = _policy(
+        allow_profile=False, allow_cwd=False, allow_workspace=False,
+        allow_worktree=False, allow_args=False, allow_env=False,
+    )
+    child = spawn.check(policy, {"fork": True}, parent=TALKER, depth=0, children=0)
+    assert child["fork_session"] is True
+
+
+def test_a_child_that_was_not_asked_to_fork_starts_fresh():
+    child = spawn.check(_policy(), {}, parent=TALKER, depth=0, children=0)
+    assert "resume" not in child
+    assert "fork_session" not in child
+
+
+def test_forking_a_parent_with_no_conversation_is_refused():
+    """A parent that steers its own conversation from args, or that opened
+    claude's picker, has nothing pinned to copy."""
+    with pytest.raises(spawn.SpawnDenied) as exc:
+        spawn.check(
+            _policy(), {"fork": True},
+            parent={**TALKER, "conversation_id": None}, depth=0, children=0,
+        )
+    assert "no conversation to fork" in str(exc.value)
+
+
+def test_forking_onto_another_harness_is_refused():
+    """The thing being copied is a claude transcript; there is nothing to
+    hand another program."""
+    policy = _policy(allow_harness=["codex"])
+    with pytest.raises(spawn.SpawnDenied) as exc:
+        spawn.check(
+            policy, {"fork": True, "harness": "codex"},
+            parent=TALKER, depth=0, children=0,
+        )
+    assert "claude" in str(exc.value)
+    # ...and on a parent that was never claude either, without a swap.
+    with pytest.raises(spawn.SpawnDenied):
+        spawn.check(_policy(), {"fork": True}, parent=PARENT, depth=0, children=0)
+
+
+@pytest.mark.parametrize(
+    "moving",
+    [
+        {"workspace": "hq"},
+        {"worktree": "review"},
+        {"cwd": "/tmp/elsewhere"},
+    ],
+)
+def test_a_fork_cannot_also_move_the_child(tmp_path, moving):
+    """The combination that would launch and still be broken: claude keeps
+    transcripts per working directory, so a child sent elsewhere opens a
+    conversation that is not there and boots empty. Refused rather than
+    spawned, because an empty child that was asked to inherit everything is
+    the failure nobody would think to look for."""
+    ws = tmp_path / "hq"
+    ws.mkdir()
+    workspaces.add(str(ws), name="hq")
+    policy = _policy(allow_cwd=True)
+    with pytest.raises(spawn.SpawnDenied) as exc:
+        spawn.check(
+            policy, {"fork": True, **moving}, parent=TALKER, depth=0, children=0
+        )
+    assert "transcripts per working directory" in str(exc.value)
+    # Each half is still fine on its own — it is the pair that cannot be.
+    assert spawn.check(policy, moving, parent=TALKER, depth=0, children=0)
+
+
+def test_capabilities_offers_fork_only_where_there_is_one_to_offer():
+    """Ungated like null_token, but conditional on the parent rather than on
+    the policy — so an agent reads whether it can fork instead of trying."""
+    assert "fork" in spawn.capabilities(
+        _policy(), depth=0, children=0, parent=TALKER
+    )["may_choose"]
+    assert "fork" not in spawn.capabilities(
+        _policy(), depth=0, children=0, parent=PARENT
+    )["may_choose"]
+    assert "fork" not in spawn.capabilities(
+        _policy(), depth=0, children=0,
+        parent={**TALKER, "conversation_id": ""},
+    )["may_choose"]
+    # An unknown parent (no definition to read) claims nothing.
+    assert "fork" not in spawn.capabilities(
+        _policy(), depth=0, children=0
+    )["may_choose"]
+
+
+def test_a_forked_child_launches_on_the_parents_conversation(tmp_path):
+    """The whole point, end to end: what `check` records has to survive into
+    the command line the child actually starts with — the parent's
+    conversation, copied, on a fresh id of the child's own so the copy is
+    restorable and the parent's is untouched."""
+    from claude_launcher import profile as profile_mod
+    from claude_launcher.daemon import harness as harness_mod
+
+    profile_mod.create("work")
+    conversation = "11111111-2222-3333-4444-555555555555"
+    parent = {
+        **TALKER, "cwd": str(tmp_path), "args": [],
+        "conversation_id": conversation,
+    }
+    child = spawn.check(_policy(), {"fork": True}, parent=parent, depth=0, children=0)
+    sdef = harness_mod.normalize(
+        SessionDef.from_dict({**child, "name": "helper", "parent": "lead"})
+    )
+    argv, _, _ = harness_mod.build_command(sdef)
+    assert argv[argv.index("--resume") + 1] == conversation
+    assert "--fork-session" in argv
+    # A fresh id for the copy: the child is restorable, and restoring it
+    # reopens its own conversation rather than forking the parent again.
+    assert sdef.conversation_id and sdef.conversation_id != conversation
+    again, _, _ = harness_mod.build_command(sdef, restoring=True)
+    assert again[again.index("--resume") + 1] == sdef.conversation_id
+    assert "--fork-session" not in again
+
+
+# --------------------------------------------------------------------------- #
 # harness
 # --------------------------------------------------------------------------- #
 def test_a_harness_swap_needs_an_explicit_unlock():

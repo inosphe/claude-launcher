@@ -182,6 +182,22 @@ TOOLS = [
                         "has booted — what it is for, in its own words"
                     ),
                 },
+                "fork": {
+                    "type": "boolean",
+                    "description": (
+                        "hand the child a COPY of YOUR OWN conversation, so "
+                        "it starts knowing everything you know instead of "
+                        "from the task line alone — useful when the context "
+                        "is long and re-explaining it would lose detail. "
+                        "Yours is untouched; the copy diverges from the "
+                        "child's first word. Needs the claude harness and a "
+                        "conversation of your own ('children' lists 'fork' "
+                        "in may_choose when you have one), and cannot be "
+                        "combined with 'workspace', 'cwd' or 'worktree': "
+                        "claude keeps transcripts per directory, so a child "
+                        "started elsewhere would boot empty"
+                    ),
+                },
                 "harness": {
                     "type": "string",
                     "description": (
@@ -445,7 +461,7 @@ def _my_handle(members: list) -> str:
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "connect", "workflow", "context",
     "task", "harness", "workspace", "worktree", "rebase_onto",
-    "profile", "borrow", "null_token", "cwd", "args", "env",
+    "profile", "borrow", "null_token", "cwd", "args", "env", "fork",
 )
 
 

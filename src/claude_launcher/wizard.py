@@ -1712,6 +1712,21 @@ class SpawnWizard(Form):
         )
         if get("null_token"):
             null.select(True)
+        # Above the directory rows on purpose: a fork is only possible while
+        # the child stays where its parent is, so the row that offers it is
+        # read before the rows that would take it away.
+        fork = ChoiceField(
+            key="fork", label="Fork",
+            hint="start the child from a COPY of the parent's conversation, "
+                 "so it knows what the parent knows (the parent's own is "
+                 "left untouched)",
+            options=[
+                Option("no - the child starts fresh", False),
+                Option("yes - copy the parent's conversation", True),
+            ],
+        )
+        if get("fork"):
+            fork.select(True)
         extra = get("args") or []
         # Empty, like every other override row: the box is what the child
         # would run INSTEAD of its parent's args, so pre-filling it with the
@@ -1795,7 +1810,8 @@ class SpawnWizard(Form):
         )
         attach.select(bool(get("attach")))
         return [
-            parent, over_limit, name, harness, profile, borrow, null, workspace,
+            parent, over_limit, name, harness, profile, borrow, null, fork,
+            workspace,
             *worktree_fields(""), args_field,
             mesh, handle, role, connect, workflow, context, task, attach,
             ActionField(key="create", label="Spawn child"),
@@ -1912,6 +1928,35 @@ class SpawnWizard(Form):
             allowed="worktree" in (self._report.get("may_choose") or []),
             note="a child inherits its parent's directory (spawn.allow_worktree)",
         )
+        # Read after the directory rows, because it depends on them. Forking
+        # needs two things the policy has no say in: a parent holding a
+        # claude conversation (the daemon says so in may_choose -- an older
+        # one never will, which greys the row rather than offering something
+        # it would refuse), and a child that stays in the directory that
+        # conversation was held in. Claude keeps transcripts per directory,
+        # so a workspace or a worktree of its own would leave the child
+        # opening a conversation that is not there.
+        fork_f = self.field("fork")
+        choice, _base = worktree_answer(self)
+        elsewhere = (
+            "a workspace" if self.value("workspace")
+            else "a worktree of its own" if choice is not worktree.NEVER
+            else ""
+        )
+        if child_harness and child_harness != "claude":
+            fork_f.disabled = True
+            fork_f.disabled_note = "the claude harness only"
+        elif "fork" not in may:
+            fork_f.disabled = True
+            fork_f.disabled_note = "the parent has no claude conversation to copy"
+        elif elsewhere:
+            fork_f.disabled = True
+            fork_f.disabled_note = (
+                f"the child runs in {elsewhere}, and claude keeps transcripts "
+                "per directory"
+            )
+        else:
+            fork_f.disabled = False
         sync_workflows(self, cwd, self.value("role") or "")
         self.field("context").hidden = not self.value("workflow")
 
@@ -2108,6 +2153,12 @@ class SpawnWizard(Form):
             bool(self.value("null_token"))
             if not self.field("null_token").disabled else False
         )
+        # Read through the disable, like borrow: a yes given before a
+        # workspace was picked must not travel as a fork the daemon would
+        # refuse, or worse, honour into an empty conversation.
+        args.fork = (
+            bool(self.value("fork")) if not self.field("fork").disabled else False
+        )
         text = "" if self.field("args").disabled else self.field("args").value
         try:
             args.args = shlex.split(text, posix=os.name != "nt") if text else []
@@ -2150,6 +2201,8 @@ class SpawnWizard(Form):
             parts.append("borrowing " + str(self.value("borrow")))
         if not self.field("null_token").disabled and self.value("null_token"):
             parts.append("no oauth token")
+        if not self.field("fork").disabled and self.value("fork"):
+            parts.append("forking the parent's conversation")
         for label, key in (
             ("harness", "harness"), ("workspace", "workspace"),
             ("role", "role"), ("workflow", "workflow"),

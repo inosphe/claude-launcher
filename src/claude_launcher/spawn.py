@@ -363,7 +363,89 @@ def check(
         else:
             child[key] = str(value)
 
+    if request.get("fork"):
+        _fork_parents_conversation(child, parent, request)
+
     return child
+
+
+#: The request keys that send a child somewhere other than its parent's
+#: directory. They are what makes a fork impossible, so they are listed once,
+#: here, rather than spelled again in the refusal.
+_MOVES_THE_CHILD = ("cwd", "workspace", "worktree")
+
+
+def can_fork(parent: Optional[dict]) -> bool:
+    """Whether ``parent`` has a conversation a child could be handed a copy of.
+
+    The same two facts :func:`_fork_parents_conversation` refuses on, asked
+    ahead of time — it is what the capability report and the spawn wizard's
+    Fork row both need, and asking it in one place is what keeps the offer and
+    the refusal from disagreeing.
+    """
+    if not parent:
+        return False
+    return (
+        (parent.get("harness") or "") == "claude"
+        and bool(parent.get("conversation_id"))
+    )
+
+
+def _fork_parents_conversation(child: dict, parent: dict, request: dict) -> None:
+    """Point the child at a COPY of the parent's own conversation.
+
+    ``fork`` is the spawn-side spelling of claude's ``--resume <id>
+    --fork-session``: the child opens the parent's conversation, copied, so it
+    starts knowing everything the parent knew and diverges from its first
+    word. The parent's own conversation is untouched.
+
+    **Ungated on purpose**, and for the same reason as ``null_token``: it
+    grants the child nothing its parent did not already hold. The thing being
+    copied *is* the parent's context, the child is the parent's own creation,
+    and no directory, profile or token becomes reachable that was not
+    reachable before — so there is no unlock to write in ``~/.claunch.yaml``,
+    only two things to be true.
+
+    The first is the harness: a forked conversation is a claude transcript,
+    and there is nothing to hand another program. The second is the
+    directory, and it is the one that surprises people. Claude Code keeps
+    transcripts **per working directory** (see
+    :func:`claude_launcher.worktree.resolve`), so the parent's conversation
+    only resolves where the parent held it. A child sent to a workspace or
+    cut a worktree of its own would look for that conversation in a directory
+    it was never written to and wake up with nothing — a fork in name, empty
+    in fact. That is refused here rather than launched: an empty child that
+    was asked to inherit everything is the failure nobody would think to look
+    for.
+    """
+    if (child.get("harness") or "") != "claude":
+        raise SpawnDenied(
+            "'fork' copies the parent's claude conversation, which is a "
+            f"claude transcript — it has no meaning for the "
+            f"{child.get('harness')!r} harness; drop 'fork', or drop the "
+            "harness swap"
+        )
+    moved = [k for k in _MOVES_THE_CHILD if request.get(k)]
+    if moved:
+        raise SpawnDenied(
+            f"'fork' cannot be combined with {moved[0]!r}: claude keeps "
+            "transcripts per working directory, so the parent's conversation "
+            "only opens where the parent held it — a child started elsewhere "
+            "would find nothing and boot empty. Fork the conversation and "
+            "stay put, or move the child and let it start fresh"
+        )
+    conversation = str(parent.get("conversation_id") or "")
+    if not conversation:
+        raise SpawnDenied(
+            "the parent has no conversation to fork: it steers its own with "
+            "harness args, or it opened claude's picker and nothing is "
+            "pinned yet — spawn without 'fork'"
+        )
+    # Spelled as the two fields the harness already knows how to launch:
+    # `--resume <id> --fork-session`. normalize() then pins the child a fresh
+    # conversation id of its own, so the copy is restorable like any other.
+    child["resume"] = conversation
+    child["fork_session"] = True
 
 
 
@@ -402,11 +484,22 @@ def make_worktree(child: dict, request: dict) -> dict:
         child["cwd"] = str(tree.path)
     return child
 
-def capabilities(policy: SpawnPolicy, *, depth: int, children: int) -> dict:
+def capabilities(
+    policy: SpawnPolicy,
+    *,
+    depth: int,
+    children: int,
+    parent: Optional[dict] = None,
+) -> dict:
     """What this session may spawn right now — the report the MCP tool shows.
 
     Answering "can I, and with what" in one place means an agent does not have
     to provoke a :class:`SpawnDenied` to find out.
+
+    ``parent`` is the parent's own definition, and it is optional because most
+    of this report is the policy's alone. Only ``fork`` needs it: whether
+    there is a conversation to copy is a fact about that one session, not
+    about what the user unlocked.
     """
     remaining = max(0, policy.max_children - children)
     blocked = []
@@ -440,6 +533,11 @@ def capabilities(policy: SpawnPolicy, *, depth: int, children: int) -> dict:
             # Always choosable: it removes a credential rather than granting
             # one, so no unlock stands in front of it.
             + ["null_token"]
+            # Ungated too, but conditional on the parent rather than on the
+            # policy: forking copies a conversation, and a parent that holds
+            # none has nothing to offer. Reported only when it would work, so
+            # an agent reading this list does not have to try it to find out.
+            + (["fork"] if can_fork(parent) else [])
         ),
         "spawnable_harnesses": list(policy.allow_harness),
     }

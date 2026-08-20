@@ -332,6 +332,7 @@ async function refreshSessions() {
     list.appendChild(li);
   }
   refreshResumeChoices();  // the spawn form offers these same conversations
+  refreshParentChoices();  // ...and the same sessions, as parents to spawn from
   if (currentPage === "home") renderHome();
   syncBulkActions(sessionsCache);
 
@@ -1088,6 +1089,80 @@ function syncForkAvailability() {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* the create form as `claunch spawn`: a CHILD of a session            */
+/* ------------------------------------------------------------------ */
+/* Naming a parent turns Create into a spawn. A child inherits everything
+   that decides what runs — harness, profile, auth, directory, args — so
+   those rows are not asked here: the daemon would refuse most of them
+   anyway (the per-field unlocks in ~/.claunch.yaml), and a form that offers
+   what it cannot send teaches the policy wrong. What is left is what makes
+   the child a different worker: its name, its mesh arrangement, its run,
+   its opening task — and whether it starts from a copy of the parent's
+   conversation. */
+const SPAWN_INHERITS = ["harness", "profile", "borrow", "null_token", "cwd",
+                        "args", "resume", "fork"];
+
+/* The sessions a child can be a child of: the live ones. An exited session
+   is refused by the daemon ("an exited session cannot spawn children"), so
+   it is not offered. */
+function refreshParentChoices() {
+  const select = document.querySelector("#new-session select[name=parent]");
+  if (!select) return;
+  const previous = select.value;
+  select.innerHTML = "";
+  select.appendChild(new Option("(none — a session of its own)", ""));
+  for (const s of sessionsCache) {
+    if (s.status === "exited") continue;
+    select.appendChild(new Option(`${s.name} — ${s.status}`, s.name));
+  }
+  select.value = [...select.options].some((o) => o.value === previous)
+    ? previous
+    : "";
+  syncSpawnMode();
+}
+
+function spawnParent() {
+  const f = $("new-session");
+  const name = f.parent ? f.parent.value : "";
+  return name ? sessionsCache.find((s) => s.name === name) || null : null;
+}
+
+/* Grey what a child inherits, and offer the fork only where there is a
+   conversation to copy. Claude keeps transcripts per working directory and
+   a child stays in its parent's, so the fork here is always the parent's
+   own — there is no directory question to contradict it. */
+function syncSpawnMode() {
+  const f = $("new-session");
+  const parent = spawnParent();
+  const hint = $("parent-hint");
+  for (const key of SPAWN_INHERITS) if (f[key]) f[key].disabled = !!parent;
+  if (parent) {
+    hint.textContent =
+      `a child of ${parent.name}: it inherits that session's harness, ` +
+      `profile, login, directory and args — only the rows below travel`;
+    hint.classList.remove("hidden");
+  } else {
+    hint.classList.add("hidden");
+    // The rows go back to the form that owns them, which has its own
+    // reasons to grey some of them (a non-claude harness, --null).
+    syncForkAvailability();
+  }
+  const row = $("new-fork-row");
+  row.classList.toggle("hidden", !parent);
+  const forkable =
+    !!parent && parent.harness === "claude" && !!parent.conversation_id;
+  f.fork_parent.disabled = !forkable;
+  if (!forkable) f.fork_parent.checked = false;
+  row.title = forkable
+    ? "the child opens a copy of the parent's conversation and diverges from there"
+    : "the parent has no claude conversation to copy";
+}
+
+document
+  .querySelector("#new-session select[name=parent]")
+  .addEventListener("change", syncSpawnMode);
+
 document
   .querySelector("#new-session select[name=role]")
   .addEventListener("change", renderRoleStance);
@@ -1098,16 +1173,21 @@ $("new-session").null_token.addEventListener("change", syncForkAvailability);
 $("new-session").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target;
-  const body = {
+  const parent = spawnParent();
+  // A child is built from its parent's definition, so only the fields that
+  // make it a different worker are sent — the rest would be refused by the
+  // spawn policy, field by field.
+  const body = parent ? { name: f.name.value.trim() } : {
     name: f.name.value.trim(),
     harness: f.harness.value || "claude",
     profile: f.profile.value || null,
     cwd: f.cwd.value,  // a registered workspace path, or "" = the daemon's cwd
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
+  if (parent && f.fork_parent.checked) body.fork = true;
   if (f.role.value) body.role = f.role.value;
-  if (f.borrow.value) body.borrow = f.borrow.value;
-  if (f.null_token.checked) body.null_token = true;
+  if (!parent && f.borrow.value) body.borrow = f.borrow.value;
+  if (!parent && f.null_token.checked) body.null_token = true;
   // Onboarding: only sent when chosen. The daemon checks each before it
   // builds anything, so a stale mesh or workflow is refused with nothing
   // left behind.
@@ -1120,17 +1200,22 @@ $("new-session").addEventListener("submit", async (e) => {
     if (f.context.value.trim()) body.context = f.context.value.trim();
   }
   if (f.task.value.trim()) body.task = f.task.value.trim();
-  if (f.resume.value) {
+  if (!parent && f.resume.value) {
     // "" (no resume) is left off entirely: the API reads a missing key as
     // "a new conversation" and an empty string as "open the picker".
     body.resume = f.resume.value === PICKER ? "" : f.resume.value;
     body.fork_session = f.fork.checked;
   }
-  const resp = await api("/api/sessions", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
+  const resp = await api(
+    parent
+      ? `/api/sessions/${encodeURIComponent(parent.name)}/children`
+      : "/api/sessions",
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }
+  );
   const err = $("create-error");
   if (!resp.ok) {
     const doc = await resp.json().catch(() => ({}));
@@ -1151,8 +1236,11 @@ $("new-session").addEventListener("submit", async (e) => {
   f.context.value = "";
   syncForkAvailability();
   const info = await resp.json();
+  // The spawn endpoint wraps the child (it also reports the parent and what
+  // the onboarding did); the create one answers with the session itself.
+  const made = info.session || info;
   await refreshSessions();
-  location.hash = "#/s/" + encodeURIComponent(info.name);
+  location.hash = "#/s/" + encodeURIComponent(made.name);
 });
 
 $("term-details").addEventListener("click", () => openDetail(currentName));

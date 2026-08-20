@@ -264,10 +264,14 @@ class SessionManager:
 
     def spawn_capabilities(self, parent: str) -> dict:
         """What ``parent`` may spawn right now (policy + its current counts)."""
+        session = self._sessions.get(parent)
         return spawn_mod.capabilities(
             spawn_mod.SpawnPolicy.load(),
             depth=self.depth(parent),
             children=len(self.live_children(parent)),
+            # For 'fork' alone: whether there is a conversation to copy is a
+            # fact about this session, not about the policy.
+            parent=session.sdef.to_dict() if session else None,
         )
 
     def _auto_name(self) -> str:
