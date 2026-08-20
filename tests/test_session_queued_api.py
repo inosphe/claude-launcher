@@ -16,6 +16,7 @@ import sys
 import time
 
 from claude_launcher import store
+from claude_launcher.daemon import session as session_mod
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -48,16 +49,36 @@ async def _serve(mgr, mm):
     return client
 
 
-async def _wait_idle(session, timeout=10.0):
-    await session.wait_for("idle", timeout=timeout, threshold=0.5)
+def _pin_status(session, status):
+    """State the screen's status as a premise instead of racing the sampler.
+
+    ``reason`` is derived from the status and the keyboard
+    (``_session_queued`` in daemon/api.py) and *that* derivation is what
+    these tests are about — not the sampler's ability to call a screen quiet.
+    Waiting for the real thing reads honest and is not: the sampler does
+    reach idle, and then a paint that lands late moves the baseline back.
+    (``IdleTracker.sample`` stamps ``_last_meaningful`` with now on any
+    meaningful change; on a loaded machine the 0.4s sample loop is starved,
+    so a child's last repaint can be *seen* after the wait already returned.)
+    The very next ``status()`` then says busy, the endpoint correctly reports
+    ``busy``, and the assertion below fails while nothing is actually wrong.
+    Raising the idle threshold cannot help — the baseline was reset, not
+    merely young — so the fix is to stop making the premise a race.
+    """
+    session.status = lambda threshold=None: status
 
 
-def test_backlog_is_listed_and_the_keyboard_hold_is_named(home, tmp_path):
+def test_backlog_is_listed_and_the_keyboard_hold_is_named(home, tmp_path, monkeypatch):
     """One undelivered message: the endpoint lists it (the recipient's own
     body, who sent it, through which mesh), and the reason tracks the same
     signals the delivery gate reads — quiet keyboard first, then a keystroke
     flips it to ``keyboard`` without touching the backlog itself."""
     _register_py_harness()
+    # The keystroke below must still count as "just typed" when the assertion
+    # reads it. What is under test is that a keystroke causes the hold, not
+    # when the guard lapses, so the window is widened out of the way rather
+    # than left to how fast the two requests happen to run.
+    monkeypatch.setattr(session_mod, "TYPING_GUARD", 3600.0)
 
     async def run():
         mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
@@ -70,7 +91,7 @@ def test_backlog_is_listed_and_the_keyboard_hold_is_named(home, tmp_path):
             mm.create("team")
             mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
             await mm.join("team", "s1", handle="worker")
-            await _wait_idle(mgr.get("s1"))
+            _pin_status(mgr.get("s1"), session_mod.STATUS_IDLE)
 
             await mm.send("team", "operator", "worker", "hello there",
                           external=True, type="ask")
@@ -134,6 +155,69 @@ def test_empty_backlog_and_no_mesh_answer_the_same_quiet_shape(home, tmp_path):
             resp = await client.get("/api/sessions/nope/queued", headers=BEARER)
             assert resp.status == 400
 
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_blunter_hold_wins_when_two_of_them_apply(home, tmp_path, monkeypatch):
+    """``reason`` is one word for a backlog that several things can be
+    holding, so the order matters and it is the delivery gate's order: a
+    session that has exited cannot be typed into at all, a session mid-turn
+    is held before anyone thinks to ask about the keyboard, and only once the
+    screen is quiet is the keyboard left to explain the wait. The sharper
+    reason must never hide the blunter one — a banner saying "your typing"
+    about a session that is busy (or gone) sends the operator to the wrong
+    fix. The raw signals ride along either way, so a client can still see
+    that both applied."""
+    _register_py_harness()
+    monkeypatch.setattr(session_mod, "TYPING_GUARD", 3600.0)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            await mm.join("team", "s1", handle="worker")
+            session = mgr.get("s1")
+            await mm.send("team", "operator", "worker", "hello there",
+                          external=True, type="ask")
+
+            # A keystroke lands: on its own this is the ``keyboard`` hold.
+            await client.post(
+                "/api/sessions/s1/keys",
+                json={"keys": ["x"], "literal": True}, headers=BEARER,
+            )
+
+            _pin_status(session, session_mod.STATUS_BUSY)
+            body = await (await client.get(
+                "/api/sessions/s1/queued", headers=BEARER)).json()
+            assert (body["reason"], body["keyboard_busy"]) == ("busy", True)
+
+            # Still starting counts as busy too — not yet a terminal to type into.
+            _pin_status(session, session_mod.STATUS_STARTING)
+            body = await (await client.get(
+                "/api/sessions/s1/queued", headers=BEARER)).json()
+            assert body["reason"] == "busy"
+
+            # Quiet screen: now the keyboard is the only thing left holding it.
+            _pin_status(session, session_mod.STATUS_IDLE)
+            body = await (await client.get(
+                "/api/sessions/s1/queued", headers=BEARER)).json()
+            assert body["reason"] == "keyboard"
+
+            # And an exit outranks everything, however quiet the screen reads.
+            session.exited = True
+            body = await (await client.get(
+                "/api/sessions/s1/queued", headers=BEARER)).json()
+            assert body["reason"] == "exited"
+            assert len(body["messages"]) == 1  # no hold is a loss
+
+            session.exited = False
             await mgr.shutdown_all()
         finally:
             await client.close()
