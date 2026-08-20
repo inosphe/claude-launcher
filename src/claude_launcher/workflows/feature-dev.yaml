@@ -8,6 +8,9 @@ steps:
       Analyze the request and the relevant code. Write a short design note
       (goal, approach, files to touch, risks) before changing anything.
       Keep it concise enough to paste into a PR description later.
+    done_when: |
+      A design note covering goal, approach, files to touch and risks is
+      filed in the report.
     next: triage
 
   triage:
@@ -30,6 +33,9 @@ steps:
     instructions: |
       Implement the design (or address the latest review feedback).
       Keep commits small and focused.
+    done_when: |
+      The design (or every point of the latest review feedback) is
+      implemented and committed; the report names the files touched.
     next: test
 
   test:
@@ -47,6 +53,9 @@ steps:
       prompt: present the diff summary and wait for human review
     instructions: |
       Relay the review feedback you received into concrete follow-ups.
+    done_when: |
+      Every piece of review feedback is restated as a concrete follow-up in
+      the report — none summarized away.
     next: verdict
 
   verdict:
@@ -69,4 +78,7 @@ steps:
     instructions: |
       Commit the work with a clear message and prepare the PR description
       from the run journal (design note, decisions, review outcomes).
+    done_when: |
+      The work is committed and a PR description drafted from the run
+      journal is in the report.
     next: end

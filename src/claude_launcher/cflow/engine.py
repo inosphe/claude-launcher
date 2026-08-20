@@ -873,6 +873,10 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
             "{summary, details?} and advance with 'next'"
         ),
     }
+    if step.done_when:
+        # The declarative completion criterion — judge "may I advance?"
+        # against this, not against a feeling of having done enough.
+        payload["done_when"] = step.done_when
     if step.verify:
         payload["verify"] = (
             f"leaving this step runs: {step.verify.command!r} — 'next' is "

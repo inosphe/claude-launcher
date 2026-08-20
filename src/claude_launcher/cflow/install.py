@@ -50,7 +50,9 @@ workflow to be started here), that is the answer; otherwise list candidates
    sentences on what actually happened; put evidence in `details` (commands
    run, test names, failure lines, files touched). Reports are journaled,
    shown live on the daemon web dashboard, and become the PR text. Failures
-   belong in the report too.
+   belong in the report too. If the payload carries `done_when`, that is the
+   step's completion criterion: before calling `next`, check the statement is
+   actually TRUE — and if it is not yet, keep working instead of advancing.
 3. Act on the returned `status`:
    - `step` — do the work, then `report {summary, details}`, then `next {}`.
    - `report_required` — you called `next` without filing the step's
