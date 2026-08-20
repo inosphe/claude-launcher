@@ -109,6 +109,8 @@ const stubs = `
 let sessRunFold = null, sessRunTimer = null, wfReminderBox = null;
 let posted = [], nudged = [];
 function cflowAction(path, body, after) { posted.push({ path, body, after }); }
+function cflowPost(path, body) { posted.push({ path, body }); return Promise.resolve({}); }
+function refreshCflow() {}
 function nudgeRun(cwd, scope) { nudged.push({ cwd, scope }); return Promise.resolve(); }
 function confirm() { return true; }
 function alert() {}
@@ -123,12 +125,13 @@ new Function(
   [slice("flowOrder"), slice("flowTrack"), slice("flowNeedsHuman"),
    slice("flowState"), slice("flowMetrics"), slice("flowPipShape"),
    slice("flowTrackSvg"), slice("svg"), slice("wfActions"),
-   slice("reminderControl"),
+   slice("reminderControl"), slice("pendingBanner"),
    slice("sessRunFoldFor"), slice("stopSessRun"), slice("refreshSessRun"),
    slice("renderSessRun"), slice("sessRunTrack")].join("\n") +
   `
 Object.assign(exports, {
   sessRunFoldFor, refreshSessRun, renderSessRun, sessRunTrack, wfActions,
+  pendingBanner,
   fold: () => sessRunFold, timer: () => sessRunTimer,
   drop: () => { sessRunFold = null; },
   posted: () => posted,
@@ -232,6 +235,40 @@ check("and the cut is stated, not silent",
 check("the newest report leads", texts(body).includes(`pass ${NREP - 1}`));
 const jnl = walk(body).filter((k) => k.classes.has("wf-journal-line"));
 check("the journal is capped too", jnl.length === CAPS.SESS_RUN_JOURNAL, jnl.length);
+
+/* ---- recur: the loop's own controls ---- */
+check("a non-recurring run offers no reset", !has(page, "reset"));
+const LOOP = { ...DATA, run: { ...RUN, recur: true, round: 3, workflow: "ecs-change" } };
+const acts = ctx.wfActions(LOOP);
+const rst = walk(acts).find((k) => k.classes.has("reset"));
+check("a recurring run offers Reset loop", !!rst);
+check("...saying it goes back to round 1",
+      rst && rst.text.includes("round 3 → 1"), rst && rst.text);
+if (rst) rst.fire("click");
+const rp = ctx.posted().find((p) => p.path === "/api/cflow/reset");
+check("pressing it posts the reset for this slot",
+      rp && rp.body.cwd === DATA.cwd && rp.body.scope === "coder3", rp);
+
+/* the request a finished round files for its own next round reads as the
+   loop looping, and its cancel is the loop's off switch */
+const banner = ctx.pendingBanner({
+  cwd: DATA.cwd, scope: "coder3",
+  pending_start: { name: "ecs-change", by: "recur", round: 4,
+                   at: "2026-08-12T11:00:00" },
+});
+check("a recur request reads as the next round, not as somebody's ask",
+      texts(banner).includes("next round requested") &&
+      texts(banner).includes("round 4"), texts(banner));
+const stop = walk(banner).find((k) => k.classes.has("clear"));
+check("and its cancel is named as stopping the loop",
+      stop && stop.text === "Stop the loop", stop && stop.text);
+const human = ctx.pendingBanner({
+  cwd: DATA.cwd, scope: "coder3",
+  pending_start: { name: "ecs-change", by: "web", at: "2026-08-12T11:00:00" },
+});
+check("a human's request still reads as one",
+      texts(human).includes("start requested") &&
+      walk(human).some((k) => k.text === "Withdraw request"), texts(human));
 
 /* ---- the run ends ---- */
 const gone = node("div");

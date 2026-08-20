@@ -2012,6 +2012,11 @@ def status(cwd: Optional[str] = None) -> dict:
         return payload
     workflow, state = _load(cwd)
     payload = _payload(workflow, state, cwd, mutate=False)
+    # Said by every status, not only the graph payload: the runs list, the
+    # session panel and the run page all read this, and "this run loops"
+    # changes what its controls should offer (the dashboard's Reset).
+    if workflow.recur:
+        payload["recur"] = True
     payload["visits"] = dict(state["visits"])
     payload["started_at"] = state.get("started_at")
     # Which file this run is a snapshot of. The run itself reads the snapshot

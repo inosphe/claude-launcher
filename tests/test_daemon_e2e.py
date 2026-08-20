@@ -649,6 +649,79 @@ def test_api_cflow_request_can_be_withdrawn(home, tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_api_cflow_reset_restarts_the_loop(home, tmp_path, monkeypatch):
+    """/api/cflow/reset retires the slot's run and re-requests the same
+    workflow (same source file, same context) from round 1 — the dashboard's
+    one-press reset for a ``recur: true`` loop, mid-round or between rounds."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    _register_py_harness()
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.cflow import engine as cflow_engine
+
+    (tmp_path / "wf.yaml").write_text(
+        "name: loop\nrecur: true\nsteps:\n  one:\n    instructions: do one\n",
+        encoding="utf-8",
+    )
+    cflow_engine.start("wf.yaml", context="serve", cwd=str(tmp_path), scope="s1")
+    st = cflow_engine.status(cwd=str(tmp_path), scope="s1")
+    assert st["recur"] is True  # status says the run loops
+
+    # finishing the round files the loop's own request for round 2
+    cflow_engine.report("served", "evidence", cwd=str(tmp_path), scope="s1")
+    assert cflow_engine.next_step(cwd=str(tmp_path), scope="s1")["status"] == "done"
+    st = cflow_engine.status(cwd=str(tmp_path), scope="s1")
+    assert st["pending_start"]["by"] == "recur"
+    assert st["pending_start"]["round"] == 2
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            bearer = {"Authorization": "Bearer sekrit"}
+            body = {"cwd": str(tmp_path), "scope": "s1"}
+            resp = await client.post("/api/cflow/reset", json=body, headers=bearer)
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["status"] == "start_requested"
+            req = doc["request"]
+            assert req["by"] == "web-reset"
+            assert req["name"] == "loop"
+            assert req["context"] == "serve"
+            assert "round" not in req  # round 1 again, not round 3
+
+            # the finished run was archived; the fresh request holds the slot
+            st2 = cflow_engine.status(cwd=str(tmp_path), scope="s1")
+            assert st2["status"] == "idle"
+            assert st2["pending_start"]["id"] == req["id"]
+
+            # fulfilling it starts round 1 (a round-1 run reports no 'round')
+            started = cflow_engine.start(
+                req["workflow"], context=req["context"],
+                cwd=str(tmp_path), scope="s1",
+            )
+            assert "round" not in started
+
+            # mid-round reset: the ACTIVE run is aborted+archived the same way
+            resp = await client.post("/api/cflow/reset", json=body, headers=bearer)
+            assert resp.status == 200
+            st3 = cflow_engine.status(cwd=str(tmp_path), scope="s1")
+            assert st3["status"] == "idle"
+            assert st3["pending_start"]["by"] == "web-reset"
+
+            # an empty slot has nothing to reset
+            cflow_engine.cancel_request(cwd=str(tmp_path), scope="s1")
+            resp = await client.post("/api/cflow/reset", json=body, headers=bearer)
+            assert resp.status == 400
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_api_session_respawn(home, tmp_path):
     """An exited session relaunches under its own name and definition;
     respawning a live one is refused."""
