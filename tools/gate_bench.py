@@ -138,7 +138,18 @@ def run_gate(cmd: list, cwd: Path, basetemp: str) -> dict:
     }
 
 
-def main() -> int:
+def gate_argv(gate: str) -> list:
+    """Split the gate command line the way a shell would.
+
+    NOT ``str.split()``: the gate carries ``-m "not worktree"``, and naive
+    splitting hands pytest a ``-m`` of ``'"not'`` and a path of ``worktree"``
+    — which collects nothing and exits 5, i.e. a run that looks green in the
+    only way that matters (no failures) precisely because it ran no tests.
+    """
+    return shlex.split(gate)
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         # NOT __doc__: argparse writes it to stdout, and a cp949 console
         # raises UnicodeEncodeError on the dashes this file is written
@@ -166,13 +177,14 @@ def main() -> int:
     ap.add_argument("--basetemp-root", default="C:/t/s24b")
     ap.add_argument("--gate", default=(
         'uv run --no-sync pytest tests -q -m "not worktree" -n 8'))
-    args = ap.parse_args()
+    return ap
+
+
+def main() -> int:
+    args = build_parser().parse_args()
 
     cwd = Path(__file__).resolve().parents[1]
-    # shlex, not str.split: the gate carries -m "not worktree", and naive
-    # splitting hands pytest a -m of '"not' and a path of 'worktree"' — which
-    # collects nothing and exits 5, i.e. a green-looking run that ran nothing.
-    cmd = shlex.split(args.gate)
+    cmd = gate_argv(args.gate)
 
     burners = []
     load_desc = {"emulate": 0, "burners": 0}
