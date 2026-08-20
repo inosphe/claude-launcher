@@ -22,7 +22,7 @@ from aiohttp import web
 from .. import __version__, harnesses as harness_registry
 from .. import profile as profile_mod, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
-from . import cflow_clock, onboard, rebrief
+from . import briefing, cflow_clock, onboard, rebrief
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
@@ -250,6 +250,7 @@ def build_app(
     r.add_post("/api/sessions/respawn", h_sessions_respawn_all)
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
+    r.add_get("/api/sessions/{name}/briefing", h_session_briefing)
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
     r.add_get("/api/sessions/{name}/children", h_session_children)
     r.add_post("/api/sessions/{name}/children", h_session_spawn)
@@ -2285,6 +2286,31 @@ async def h_session_rebrief(request: web.Request) -> web.Response:
         return web.json_response({"ok": True, "delivered": False, "empty": True})
     delivered = await manager.get(name).deliver(block)
     return web.json_response({"ok": True, "delivered": delivered, "empty": False})
+
+
+async def h_session_briefing(request: web.Request) -> web.Response:
+    """One session's LLM-composed status briefing (see :mod:`briefing`).
+
+    404 for an unknown session (not the middleware's 400: the web UI keys its
+    cards by name and must tell "gone" from "misconfigured"), 400 when the
+    ``llm:`` block is absent or incomplete, 502 when the configured endpoint
+    fails. ``?refresh=1`` bypasses the in-memory cache.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    try:
+        session = manager.get(name)
+    except ManagerError:
+        return json_error(404, f"no session named {name!r}")
+    cfg = briefing.llm_config()
+    if not briefing.llm_configured(cfg):
+        return json_error(400, "llm not configured")
+    refresh = request.query.get("refresh") in ("1", "true")
+    try:
+        payload = await briefing.compose(session, cfg, refresh=refresh)
+    except briefing.BriefingError as exc:
+        return json_error(502, str(exc))
+    return web.json_response(payload)
 
 
 async def h_session_capture(request: web.Request) -> web.Response:
