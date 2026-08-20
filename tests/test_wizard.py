@@ -14,6 +14,7 @@ import pytest
 
 from claude_launcher import attach as attach_mod
 from claude_launcher import cli_sessions, wizard, worktree
+from claude_launcher.cflow import model
 
 
 class FakeSources(wizard.Sources):
@@ -348,6 +349,69 @@ def test_a_default_the_filter_refuses_is_never_volunteered():
     options = wiz.field("workflow").options
     assert options[-1].value == "trap"       # sunk, but still pickable
     assert "turns 'worker' away" in options[-1].detail
+
+
+def test_the_form_asks_rolefilter_rather_than_guessing_the_rule():
+    """Who a filter admits is decided in one place, for both the form and the
+    start it precedes.
+
+    The form used to carry its own copy of the whitelist/blacklist reading,
+    and the two had already drifted: for a ``type`` outside the sanctioned
+    pair the copy fell back to whitelist while :class:`RoleFilter` falls back
+    to blacklist, so they answered every such filter in opposite directions.
+    The parser refuses those types, which is exactly why the disagreement
+    could sit here unnoticed — this pins the form to the model's answer.
+    """
+    for ftype in ("whitelist", "blacklist", "bogus", ""):
+        for roles in (["worker"], ["leader"], []):
+            f = {"type": ftype, "roles": roles}
+            entry = wizard._workflow_entry({"name": "w", "filter_roles": f})
+            expected = model.RoleFilter(
+                type=ftype, roles=tuple(roles)
+            ).allows("worker")
+            assert wizard._workflow_admits(entry, "worker") is expected, (
+                f"the form disagrees with RoleFilter on {f!r}"
+            )
+
+
+def test_a_filter_only_speaks_once_a_role_is_picked():
+    """The form's own two conditions, kept out of the model: with no filter
+    or no role chosen there is no question to put to it. ``RoleFilter``
+    itself would refuse an empty role against a whitelist."""
+    entry = wizard._workflow_entry({
+        "name": "w", "filter_roles": {"type": "whitelist", "roles": ["leader"]},
+    })
+    assert wizard._workflow_admits(entry, "") is True      # nothing picked yet
+    assert wizard._workflow_admits({"name": "w"}, "worker") is True  # no filter
+
+
+def test_a_priority_that_is_not_a_number_does_not_take_the_picker_down():
+    """``_workflow_entry`` is the tolerant edge: it already reads a bare
+    string as a workflow and coerces every other field, so the one coercion
+    that could raise must not be able to. A daemon of another version serving
+    ``priority: soon`` should cost that workflow its rank, not the whole
+    form."""
+    for junk in ("soon", [], {}, "3.5.1"):
+        entry = wizard._workflow_entry({"name": "w", "priority": junk})
+        assert entry["priority"] == 0
+
+    sources = FakeSources(workflows={"/srv/api": [
+        {"name": "broken", "default_role": "worker", "priority": "soon"},
+        {"name": "sound", "default_role": "worker", "priority": 2},
+    ]})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    pick(wiz, "role", "worker")          # the form renders instead of raising
+    assert wiz.value("workflow") == "sound"   # ranked above the unranked one
+    assert [o.value for o in wiz.field("workflow").options] == [
+        "", "sound", "broken",
+    ]
+
+
+def test_a_priority_that_is_a_numeric_string_still_ranks():
+    """Tolerating junk is not the same as discarding what is readable: JSON
+    that spells a number as a string is still a number."""
+    assert wizard._workflow_entry({"name": "w", "priority": "7"})["priority"] == 7
 
 
 def test_type_to_jump_in_a_long_picker():

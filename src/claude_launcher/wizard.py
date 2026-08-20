@@ -49,6 +49,7 @@ from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Dict, List, Optional
 
 from . import worktree
+from .cflow.model import RoleFilter
 
 #: Value of the worktree picker's "name it myself" entry. Not a name anyone
 #: could type (``validate_name`` rejects the space), so it cannot collide with
@@ -649,10 +650,18 @@ def _workflow_entry(raw) -> dict:
     workflow that volunteers for nobody.
     """
     if isinstance(raw, dict):
+        try:
+            priority = int(raw.get("priority") or 0)
+        except (TypeError, ValueError):
+            # Every other field here degrades rather than raises, and this is
+            # the one coercion that can throw. A picker that dies because one
+            # workflow in the list carried a priority the parser would have
+            # refused is worse than that workflow sorting as unranked.
+            priority = 0
         return {
             "name": str(raw.get("name") or ""),
             "default_role": str(raw.get("default_role") or "").strip().lower(),
-            "priority": int(raw.get("priority") or 0),
+            "priority": priority,
             "filter_roles": raw.get("filter_roles"),
         }
     return {
@@ -669,14 +678,19 @@ def _workflow_admits(entry: dict, role: str) -> bool:
     joins no mesh is admitted whatever the filter says), so the form only
     refuses to *volunteer* a workflow the filter would turn away -- it never
     stops a person picking one.
+
+    Whether a filter admits a role is :class:`RoleFilter`'s rule, not this
+    form's: the same words decided here and at start time must not be able to
+    drift apart. Only the two conditions above are the form's own -- they say
+    when to ask the question, not what the answer is.
     """
     f = entry.get("filter_roles")
     if not isinstance(f, dict) or not role:
         return True
-    roles = [str(r).strip().lower() for r in (f.get("roles") or [])]
-    if f.get("type") == "blacklist":
-        return role not in roles
-    return role in roles
+    return RoleFilter(
+        type=str(f.get("type") or ""),
+        roles=tuple(str(r).strip().lower() for r in (f.get("roles") or [])),
+    ).allows(role)
 
 
 def _workflow_rank(entry: dict, role: str) -> tuple:
