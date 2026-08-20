@@ -3335,13 +3335,25 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
 
   const sel = document.createElement("select");
   sel.className = "wf-start-select";
+  /* An option cannot wrap, and the native popup sizes itself to the widest
+     option: a paragraph-length description drags the whole dropdown past the
+     viewport edge, where the browser pins and clips it. So the list gets one
+     clipped line per workflow; the full description renders under the select
+     for whichever is picked. */
+  const clip = (s, n) => {
+    s = s.replace(/\s+/g, " ").trim();
+    return s.length > n ? s.slice(0, n).trimEnd() + "…" : s;
+  };
   for (const w of flows) {
     const opt = document.createElement("option");
     opt.value = w.name;
-    opt.textContent = w.description ? `${w.name} — ${w.description}` : w.name;
+    opt.textContent = w.description
+      ? `${w.name} — ${clip(w.description, 48)}`
+      : w.name;
     opt.title = w.path;
     sel.appendChild(opt);
   }
+  const desc = el("p", "wf-start-desc");
   /* A name is not a file: the same name can be declared in the project and in
      the global layer, and picking from a list of names hides which one runs.
      The path goes under the select rather than into the option text — an
@@ -3350,6 +3362,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   const showSource = () => {
     const w = flows.find((f) => f.name === sel.value);
     source.replaceChildren();
+    desc.textContent = w && w.description ? w.description : "";
     if (!w) return;
     source.appendChild(el("span", "wf-source-path", w.path));
     if (w.shadowed && w.shadowed.length) {
@@ -3430,6 +3443,7 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
   const row = el("div", "wf-start-row");
   row.append(sel, ctx, ask, direct);
   box.appendChild(row);
+  box.appendChild(desc);
   box.appendChild(source);
   box.appendChild(el(
     "p", "wf-note",
