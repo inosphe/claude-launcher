@@ -89,7 +89,11 @@ steps:
       바꾼 영역을 덮는 신규·확장 테스트가 존재하고, 보고에 수치(전체 N/N,
       신규 K)와 "간소화 스위트 기준" 명시가 있다.
     # 저장소 특화 verify는 정본이 아니라 프로젝트 레이어(.claunch/workflows/)에.
-    verify: 'uv run --extra test pytest tests -q -m "not worktree" --basetemp="%LOCALAPPDATA%/Temp/claude/pt-verify"'
+    # basetemp가 짧아야 하는 이유: 테스트가 만드는 워크트리 경로가 이 밑에
+    # 겹겹이 쌓여 Windows 경로 한계에 먼저 닿는다(긴 경로에서 'GIT_DIR too
+    # big'·FileNotFoundError로 무더기 실패). --no-sync는 여기에 넣지 않는다 —
+    # 워커는 새 워크트리에서 첫 실행에 sync로 venv를 만들어야 한다.
+    verify: 'uv run --extra test pytest tests -q -m "not worktree" --basetemp="C:/t/verify"'
     next: commit
 
   commit:
