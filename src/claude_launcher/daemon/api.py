@@ -20,7 +20,7 @@ from aiohttp import web
 from .. import __version__, harnesses as harness_registry
 from .. import profile as profile_mod, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
-from . import onboard, rebrief
+from . import cflow_clock, onboard, rebrief
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
@@ -1693,22 +1693,32 @@ async def _onboard_and_launch(
 
 
 async def h_session_children(request: web.Request) -> web.Response:
-    """A session's subtree plus what it may still spawn."""
+    """A session's subtree plus what it may still spawn.
+
+    Each child row also carries the cflow run that child drives, when there
+    is one — the overseer-facing counterpart of the run event clock's push,
+    so "where is everybody" is one call instead of one shell read per child.
+    """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
     manager.get(name)  # 404 for an unknown parent, before reporting on it
+    children = []
+    for child in manager.children(name):
+        sess = manager.get(child)
+        entry = {
+            "name": child,
+            "status": sess.status(),
+            "children": manager.children(child),
+        }
+        run = cflow_clock.run_summary(child, sess.sdef.cwd or "")
+        if run:
+            entry["cflow"] = run
+        children.append(entry)
     return web.json_response(
         {
             "session": name,
             "parent": manager.get(name).sdef.parent,
-            "children": [
-                {
-                    "name": child,
-                    "status": manager.get(child).status(),
-                    "children": manager.children(child),
-                }
-                for child in manager.children(name)
-            ],
+            "children": children,
             "descendants": manager.descendants(name),
             **manager.spawn_capabilities(name),
         }
