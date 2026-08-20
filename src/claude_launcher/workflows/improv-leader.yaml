@@ -110,17 +110,20 @@ steps:
       프리뷰(후보 브랜치를 임시 브랜치에 합친 트리)의 스윕을 맡겨 실패를
       미리 걸러낸다 — tester가 없으면 mesh 스킬의 spawn으로 만든다.
       머지는 반드시 --no-ff, 커밋 메시지는 저장소 관례(한 줄 요약 —
-      「무엇을 어떻게」)를 따른다. verify가 머지 결과 트리에서 전체
-      스윕(build+typecheck+전체 스위트)을 재실행한다 — 워커 회차마다
-      돌리지 않은 스윕이 여기서 배치당 한 번 도는 것이다. 머지 커밋
-      해시·diffstat을 보고에 남기고, 메시 전체에
+      「무엇을 어떻게」)를 따른다. 머지 결과 트리에서 전체
+      스윕(build+typecheck+전체 스위트)을 돌린다 — 워커 회차마다
+      돌리지 않은 스윕이 여기서 배치당 한 번 도는 것이다. 스윕 명령은
+      저장소마다 다르므로 정본은 명령을 박지 않는다 — 저장소별 명령은
+      프로젝트 레이어(.claunch/workflows/ 오버라이드)가 verify로 담고,
+      오버라이드가 없으면 스윕 결과 수치를 보고에 남기는 것이 판정
+      근거다. 머지 커밋 해시·diffstat을 보고에 남기고, 메시 전체에
       fyi로 알린다: master가 움직였고, 머지된 브랜치는 동결이며, 신규
       작업은 새 master 기준 브랜치로.
     done_when: |
       승인된 배치의 통합 대기 브랜치가 전부 --no-ff로 master에 머지되었고,
-      머지 커밋 해시·diffstat이 보고에 있으며 메시 전체 fyi 공지가 나갔다.
-      verify(전체 스윕)는 머지 결과 트리의 기계 확인이다.
-    verify: "npm --prefix design-notebook run build && npm --prefix design-notebook test"
+      머지 결과 트리의 전체 스윕 수치와 머지 커밋 해시·diffstat이 보고에
+      있으며 메시 전체 fyi 공지가 나갔다.
+    # 저장소 특화 verify는 정본이 아니라 프로젝트 레이어(.claunch/workflows/)에.
     next: reflect
 
   reflect:

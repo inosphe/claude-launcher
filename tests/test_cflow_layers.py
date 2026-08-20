@@ -115,6 +115,70 @@ def test_the_packaged_workflows_are_valid_and_current():
         assert not wf.deprecations, f"{name} teaches a deprecated form"
 
 
+def test_the_worker_workflow_keeps_its_isolation_rules():
+    """``improv-worker``'s intake must carry the two isolation rules.
+
+    A worker spawned without a worktree lands in its parent's checkout, and
+    the intake step is the one place it is told to notice that and move: a
+    new feature gets a new branch, and a shared checkout gets a new worktree,
+    with the determination procedure spelled out. A later rewording that
+    drops these anchors would silently un-teach the rule, so pin them here.
+    """
+    bundled = dict(state_mod.bundled_workflows())
+    intake = model.load(bundled["improv-worker"]).steps["intake"]
+    for anchor in (
+        "새 피처 브랜치",                      # new feature -> new branch
+        "새 워크트리",                         # shared checkout -> new worktree
+        "git rev-parse --show-toplevel",       # primary determination
+        "--git-common-dir",                    # fallback when parent cwd is unknown
+        "$CLAUNCH_SESSION",                    # how a worker names itself
+    ):
+        assert anchor in intake.instructions, f"intake lost its {anchor!r} rule"
+    assert "작업 위치" in intake.done_when
+
+
+def test_the_improv_workflows_carry_no_repo_specific_verify():
+    """The improv pair ships to every repository; a verify would not.
+
+    A suite command is a property of one repository, and a canonical
+    ``verify`` hard-codes it for all of them — a run in any other repo
+    blocks on a command that cannot exit 0 there. The policy is layering:
+    the canonical files carry none, and a repository that wants a machine
+    check overrides in its project layer (``.claunch/workflows/``).
+    """
+    bundled = dict(state_mod.bundled_workflows())
+    for name in ("improv-worker", "improv-leader"):
+        wf = model.load(bundled[name])
+        for step_id, step in wf.steps.items():
+            assert step.verify is None, (
+                f"{name}:{step_id} carries a verify — repo-specific commands "
+                "belong in the project layer"
+            )
+
+
+def test_the_bundled_improv_worker_teaches_the_nested_merge_contract():
+    """A worker that spawned sub-workers folds their branches upward as a
+    tree: each finished child branch is collected with a ``--no-ff`` merge
+    into the worker's own branch, and integration is then *requested* from
+    the parent session (leader -> master review, worker -> --no-ff merge
+    into its branch) — the worker never merges master itself. The bundled
+    file is the teaching copy of that contract; this pins it."""
+    bundled = dict(state_mod.bundled_workflows())
+    wf = model.load(bundled["improv-worker"])
+
+    collect = wf.steps["commit"].instructions
+    assert "자식" in collect and "--no-ff" in collect
+    assert "트리" in collect
+
+    landing = wf.steps["landing"].select
+    assert "상위" in landing.prompt
+    assert set(landing.options) == {"request", "hold"}
+
+    request = wf.steps["integration-request"].instructions
+    assert "상위 세션" in request and "--no-ff" in request
+    assert "master를 직접 머지하지 않는다" in request
+
+
 def test_a_global_install_seeds_the_global_layer(project, home):
     lines = install_mod.install_into_user()
     assert [line for line in lines if line.startswith("workflow ->")]
