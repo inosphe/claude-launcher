@@ -160,6 +160,13 @@ def test_a_forced_seed_replaces_an_edit(project, home):
     assert model.load(edited).name == "feature-dev"
 
 
+def test_seeding_carries_workflow_sidecar_assets(project, home):
+    """A verify script must land where its workflow's verify command looks:
+    the global layer, next to the yaml — a yaml seeded without it is broken."""
+    cflow_install.seed_global_workflows()
+    assert (home / "workflows" / "e2e-session-roundtrip-verify.mjs").is_file()
+
+
 def test_seeding_reports_an_untouched_copy_as_unchanged(project, home):
     cflow_install.seed_global_workflows()
     again = cflow_install.seed_global_workflows()

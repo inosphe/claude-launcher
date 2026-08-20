@@ -157,6 +157,20 @@ def bundled_workflows() -> List[Tuple[str, Path]]:
     return [(p.stem, p) for p in sorted(base.glob("*.y*ml"))]
 
 
+def bundled_workflow_assets() -> List[Path]:
+    """Non-workflow files that ship alongside the bundled workflows.
+
+    Verify scripts (``*-verify.mjs``) that a workflow's ``verify:`` command
+    resolves at run time — project copy first, then the global layer. No
+    name resolves to these; they only have to land in the same directory as
+    the yaml they serve, so seeding copies them and nothing else reads them.
+    """
+    base = bundled_workflows_dir()
+    if not base.is_dir():
+        return []
+    return sorted(base.glob("*.mjs"))
+
+
 def runs_registry_path() -> Path:
     return config.launcher_home() / "cflow_runs.json"
 

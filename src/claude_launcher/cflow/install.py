@@ -263,9 +263,14 @@ def seed_global_workflows(force: bool = False) -> List[Tuple[str, Path, str]]:
     is the deliberate one: the global layer is meant to be yours.
     """
     dest_dir = state.global_workflows_dir()
+    sources = list(state.bundled_workflows())
+    # Sidecar assets (verify scripts) ride along under the same edit-respecting
+    # rules — a workflow whose verify command looks them up in this layer is
+    # broken without them.
+    sources += [(src.stem, src) for src in state.bundled_workflow_assets()]
     return [
         (name, dest_dir / src.name, install_workflow(src, dest_dir / src.name, force))
-        for name, src in state.bundled_workflows()
+        for name, src in sources
     ]
 
 

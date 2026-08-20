@@ -1,0 +1,107 @@
+name: e2e-session-roundtrip
+description: >
+  세션 백엔드 실전 왕복 E2E — 라이브 노트북 서버에서 실제 claunch 세션을
+  워커로 세워, 요청 단위 지정(X-GDS-Worker-Session)으로 조판 잡이 지정
+  레인에 가고 next_job -> post_delta -> post_result 왕복이 완주하는지
+  실측한다. 왕복 성공과 정리 완료는 verify(서버 실측)가 판정하므로 보고로
+  통과할 수 없고, 라이브를 건드리는 진입은 리더 승인 게이트를 지난다.
+  검증 전용 런이다 — 코드 수정이 필요해지면 이 런에서 고치지 않고 보고로
+  남겨 별도 회차로 넘긴다.
+start: preflight
+
+# 드라이버는 worker 세션이다 — 검증 실행은 워커 몫이고, 승인(ask)은 리더 몫.
+filter_roles:
+  type: whitelist
+  roles: [worker]
+
+steps:
+  preflight:
+    title: 준비 실측·스냅샷
+    instructions: |
+      라이브를 만지기 전에 사실을 기록한다. 상태 파일
+      .claunch/tmp/e2e-roundtrip.json 을 만들어(디렉터리 없으면 생성)
+      다음을 채운다 — 이후 모든 verify가 이 파일을 읽는다:
+      - base: 노트북 서버 URL (기본 http://127.0.0.1:5757)
+      - restore_provider: GET {base}/api/llm-provider 의 current 값
+        그대로 — 검증이 끝나면 이 값으로 원복해야 하고, cleanup verify가
+        대조한다
+      워커 세션 공급 경로도 여기서 정한다(사실 판단이라 스스로 정한다):
+      GET {base}/api/claunch/status 가 configured+reachable이면 프록시
+      생성 POST /api/claunch/sessions 우선(그 경로 자체가 검증 대상),
+      아니면 spawn으로 자식 세션 — 자식에게는 gds-notebook MCP가 없을 수
+      있으니 REST 루프(next_job/delta/result 3종 curl과 자기 레인 이름)를
+      task 브리핑에 그대로 적어 준다. 보고에는 base·현재 프로바이더·공급
+      경로 판단을 남긴다.
+    # verify 스크립트는 프로젝트 사본 → 글로벌(~/.claude-launcher/workflows) 순으로 찾는다 —
+    # 이 워크플로는 글로벌 레이어에 설치되므로 프로젝트에 사본이 없어도 성립해야 한다
+    verify: node -e "const os=require('os'),fs=require('fs'),cp=require('child_process');const p=['.claunch/workflows/e2e-session-roundtrip-verify.mjs',os.homedir()+'/.claude-launcher/workflows/e2e-session-roundtrip-verify.mjs'].find(f=>fs.existsSync(f));if(!p){console.error('e2e verify 스크립트를 찾을 수 없다');process.exit(1)}cp.spawn(process.execPath,[p,'preflight'],{stdio:'inherit'}).on('exit',n=>process.exit(n===0?0:1))"
+    next: roundtrip
+
+  roundtrip:
+    title: 실전 왕복 (라이브 접촉)
+    ask:
+      # 라이브 공용 상태(프로바이더 설정)를 잠시 만지고, 토큰을 쓰는 실세션을
+      # 하나 세운다 — 진입은 라이브 운영 책임자의 승인 사안이다.
+      prompt: |
+        세션 왕복 E2E가 라이브 노트북 서버에 진입하려 한다. 하는 일:
+        (1) 검증 전용 문서 1개 생성, (2) 워커용 실세션 1개 공급(토큰 비용
+        발생, 이름은 완료 보고에 명시되고 검증 후 정리된다), (3) LLM
+        프로바이더를 세션으로 전환해 잡 2개를 걸고 등록 즉시 원복(잡은
+        등록 시점 프로바이더로 이미 디스패치되므로 안전).
+        지금 라이브에서 다른 사용자의 조판·일괄 작업이 돌고 있으면
+        거절하라 — 프로바이더 전환이 그 잡들에 끼어든다. 애매하면 거절이
+        기본값이다.
+      from: [{ role: leader, scope: ancestor }]
+      otherwise: human
+      timeout: 1800
+      on_decline: end
+    instructions: |
+      왕복을 실행하고 증거를 상태 파일에 기록한다.
+      - 검증 문서: POST {base}/api/documents/import — 한글 원문은 반드시
+        UTF-8로 저장한 파일을 --data-binary @file 로 보낸다. 콘솔 인라인
+        한글은 금지(CP949 주입으로 원문이 깨진 전례가 있다 — 그 사고의
+        재발 방지가 이 규칙이다). doc_id·cell_ids를 상태 파일에 기록.
+      - 워커 세션: preflight에서 정한 경로로 공급하고 이름을 worker에
+        기록. spawn이면 자식의 REST 루프 기동을 확인한다.
+      - 잡 등록(2회): PUT llm-provider(session) → POST
+        /api/cells/{id}/typeset 에 X-GDS-Worker-Session: {worker} 헤더
+        → 즉시 PUT llm-provider({restore_provider}) 순서를 지킨다.
+        2회째는 source_md 교체를 겸해 내용 충실도(수치 보존·창작 없음)를
+        본다. job_id들을 job_ids에 기록.
+      - 종결 감시는 폴링 sleep 체인이 아니라 Monitor로 건다. 데몬 wake가
+        없어도 long-poll 폴백으로 도는지가 관찰 포인트 중 하나다.
+      보고에는 잡별 소요·model 값·델타 수신 여부·워커 세션의 자체 보고를
+      남긴다. verify가 서버에서 잡 status/model/제안 존재를 재실측한다.
+    verify: node -e "const os=require('os'),fs=require('fs'),cp=require('child_process');const p=['.claunch/workflows/e2e-session-roundtrip-verify.mjs',os.homedir()+'/.claude-launcher/workflows/e2e-session-roundtrip-verify.mjs'].find(f=>fs.existsSync(f));if(!p){console.error('e2e verify 스크립트를 찾을 수 없다');process.exit(1)}cp.spawn(process.execPath,[p,'roundtrip'],{stdio:'inherit'}).on('exit',n=>process.exit(n===0?0:1))"
+    next: cleanup
+
+  cleanup:
+    title: 잔류물 정리 (실측 판정)
+    instructions: |
+      만든 것을 전부 회수한다 — 고아 세션을 조용히 남기는 것이 유일한
+      금지 사항이다.
+      - 워커 세션: spawn 자식이면 완료 보고를 받은 뒤 kill. 프록시로
+        만들었으면 종료 권한이 없을 수 있다 — 그 경우 이름을 보고에
+        명시해 정리를 사용자/리더 몫으로 넘긴다(명시 없이 넘기는 것이
+        금지다).
+      - 검증 문서 삭제: DELETE {base}/api/documents/{doc_id}.
+      - 프로바이더가 restore_provider로 돌아와 있는지 확인.
+      상태 파일은 아직 지우지 않는다 — verify가 읽는다. verify 통과 후
+      report 단계에서 지운다.
+    verify: node -e "const os=require('os'),fs=require('fs'),cp=require('child_process');const p=['.claunch/workflows/e2e-session-roundtrip-verify.mjs',os.homedir()+'/.claude-launcher/workflows/e2e-session-roundtrip-verify.mjs'].find(f=>fs.existsSync(f));if(!p){console.error('e2e verify 스크립트를 찾을 수 없다');process.exit(1)}cp.spawn(process.execPath,[p,'cleanup'],{stdio:'inherit'}).on('exit',n=>process.exit(n===0?0:1))"
+    next: report
+
+  report:
+    title: 증거 보고·마감
+    instructions: |
+      증거 묶음을 만들어 리더에게 fyi로 보내고(메시 미가입이면 보고로만),
+      사용자에게 요약한다: 방법(공급 경로·헤더·프로바이더 전환 타이밍),
+      잡별 결과(job_id·소요·model=session:{worker}·제안 rev), 워커 세션
+      이름과 정리 상태(kill 완료 / 이름 인계), 관찰된 강등·결함(데몬
+      미설정으로 비활성인 경로, 발견한 갭 등 — 수정은 이 런의 몫이 아니라
+      별도 회차 후보로만 적는다). 마지막으로 상태 파일
+      .claunch/tmp/e2e-roundtrip.json 을 삭제한다 — verify가 부재를
+      확인한다(보고를 보내기 전에 지우면 verify는 통과하지만 증거 없는
+      보고가 된다 — 순서는 보고 먼저다).
+    verify: "node -e \"process.exit(require('fs').existsSync('.claunch/tmp/e2e-roundtrip.json')?1:0)\""
+    next: end
