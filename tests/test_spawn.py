@@ -350,6 +350,48 @@ def test_child_limit_stops_runaway_fanout():
     with pytest.raises(spawn.SpawnDenied) as exc:
         spawn.check(policy, {}, parent=PARENT, depth=0, children=2)
     assert "max_children" in str(exc.value)
+    # ...and the refusal teaches the way past it: the cap is soft
+    assert "over_limit" in str(exc.value)
+
+
+def test_the_child_cap_is_soft_for_a_request_that_says_so():
+    """It exists to interrupt a fan-out loop, not to forbid a fifth child
+    anyone actually wanted — over_limit: true crosses it deliberately, and
+    a parent standing at 3/2 afterwards is fine."""
+    policy = _policy(max_children=2)
+    child = spawn.check(
+        policy, {"over_limit": True}, parent=PARENT, depth=0, children=2
+    )
+    assert child["harness"] == "py"  # the spawn went through, inherited
+
+
+def test_over_limit_does_not_waive_the_depth_limit():
+    """Depth is the axis recursion runs away on, so it stays hard."""
+    policy = _policy(max_depth=2)
+    with pytest.raises(spawn.SpawnDenied) as exc:
+        spawn.check(
+            policy, {"over_limit": True}, parent=PARENT, depth=2, children=0
+        )
+    assert "max_depth" in str(exc.value)
+
+
+def test_capabilities_reports_the_child_cap_as_the_soft_block_it_is():
+    """A subset of blocked_by, so a client that only reads blocked_by still
+    refuses by default — and one with a person to ask can offer the
+    override instead of a dead end."""
+    report = spawn.capabilities(_policy(max_children=2), depth=0, children=2)
+    assert report["can_spawn"] is False
+    assert report["soft_blocked_by"] == ["child limit reached (2/2)"]
+    assert report["blocked_by"] == ["child limit reached (2/2)"]
+
+    hard = spawn.capabilities(
+        _policy(max_children=2, max_depth=1), depth=1, children=2
+    )
+    assert "depth limit reached (1/1)" in hard["blocked_by"]
+    assert hard["soft_blocked_by"] == ["child limit reached (2/2)"]
+
+    open_report = spawn.capabilities(_policy(), depth=0, children=0)
+    assert open_report["soft_blocked_by"] == []
 
 
 def test_spawning_can_be_switched_off_entirely():

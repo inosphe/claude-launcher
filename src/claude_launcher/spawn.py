@@ -14,8 +14,8 @@ field, in ``~/.claunch.yaml``::
 
     spawn:
       enabled: true
-      max_children: 4          # direct children per parent
-      max_depth: 3             # root session = depth 0
+      max_children: 4          # direct children per parent -- a SOFT cap
+      max_depth: 3             # root session = depth 0 -- hard
       allow_harness: [codex]   # [] = the parent's harness only
       allow_profile: false
       allow_cwd: false
@@ -51,6 +51,14 @@ following its tools cannot wander into spawning a session under another
 profile, in another directory, with flags nobody chose. Treat the numbers as
 blast-radius limits on honest mistakes — runaway recursion, a fan-out loop —
 not as a security boundary against a hostile session.
+
+``max_children`` is a **soft** cap for exactly that reason: it exists to
+interrupt a fan-out loop, not to forbid a fifth child anyone actually wanted.
+A request carrying ``over_limit: true`` crosses it deliberately — the spawn
+wizard's *Over limit* row and the CLI's ``--over-limit`` are the two places
+that say it — and a parent standing at 5/4 afterwards is fine. ``max_depth``
+stays hard: runaway recursion is the mistake the limits are for, and depth is
+the axis it runs away on.
 """
 
 from __future__ import annotations
@@ -259,11 +267,16 @@ def check(
             f"{policy.max_depth} (spawn.max_depth) — give the work to an "
             "existing session instead of nesting further"
         )
-    if children >= policy.max_children:
+    if children >= policy.max_children and not request.get("over_limit"):
+        # A SOFT cap: it interrupts a fan-out loop, it does not forbid a
+        # child somebody wanted on purpose. Saying so takes an explicit
+        # over_limit in the request, which the UI only sends after asking.
         raise SpawnDenied(
             f"this session already has {children} direct child(ren) running, "
             f"the limit is {policy.max_children} (spawn.max_children) — reuse "
-            "one of them, or end one first ('kill'), which frees its slot"
+            "one of them, or end one first ('kill'), which frees its slot; "
+            "it is a soft cap, crossed only by a request that says so "
+            "explicitly ('--over-limit', over_limit: true)"
         )
 
     child = {
@@ -401,11 +414,18 @@ def capabilities(policy: SpawnPolicy, *, depth: int, children: int) -> dict:
         blocked.append("spawning is disabled (spawn.enabled)")
     if depth >= policy.max_depth:
         blocked.append(f"depth limit reached ({depth}/{policy.max_depth})")
+    # Soft, and reported apart: the child cap can be crossed by a request
+    # that says so (over_limit: true), so a client with a person to ask --
+    # the spawn wizard's Over limit row -- offers the override instead of a
+    # dead end. Kept IN blocked_by too, so a client that only reads that
+    # still refuses by default.
+    soft = []
     if not remaining:
-        blocked.append(f"child limit reached ({children}/{policy.max_children})")
+        soft.append(f"child limit reached ({children}/{policy.max_children})")
     report = {
-        "can_spawn": not blocked,
-        "blocked_by": blocked,
+        "can_spawn": not (blocked or soft),
+        "blocked_by": blocked + soft,
+        "soft_blocked_by": soft,
         "depth": depth,
         "max_depth": policy.max_depth,
         # ``children_used``, not ``children``: this report is merged into a

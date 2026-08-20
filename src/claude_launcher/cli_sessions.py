@@ -360,6 +360,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         k: v
         for k, v in (
             ("name", args.name),
+            ("over_limit", getattr(args, "over_limit", False)),
             ("mesh", args.mesh),
             ("handle", args.handle),
             ("role", args.role),
@@ -1089,6 +1090,12 @@ def register(sub) -> None:
     )
     p_spawn.add_argument(
         "--parent", help="parent session (default: $CLAUNCH_SESSION)"
+    )
+    p_spawn.add_argument(
+        "--over-limit", dest="over_limit", action="store_true",
+        help="spawn past the parent's child cap (spawn.max_children) -- the "
+        "cap is soft, but crossing it takes this explicit flag; the wizard "
+        "asks the same question on its Over limit row",
     )
     p_spawn.add_argument("-s", "--name", help="child session name")
     p_spawn.add_argument(

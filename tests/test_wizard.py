@@ -692,6 +692,83 @@ def test_a_parent_with_no_slots_is_refused_before_anything_is_arranged():
     assert wiz.current.key == "parent"
 
 
+def test_the_parent_row_names_role_and_directory():
+    """A picker of ten s-numbers is a guessing game without them: who a
+    session is (its role) and where it stands (its cwd) are what tell two
+    workers apart."""
+    wiz = spawn_form(sessions=[
+        {"name": "lead", "status": "idle", "harness": "claude",
+         "profile": "work", "cwd": "/work/repo", "role": "leader"},
+    ])
+    detail = wiz.field("parent").options[0].detail
+    assert "leader" in detail
+    assert "/work/repo" in detail
+
+
+def _full_report(**extra):
+    """A parent at its child cap, on a daemon that reports the cap as soft."""
+    return {
+        "can_spawn": False,
+        "blocked_by": ["child limit reached (4/4)"],
+        "soft_blocked_by": ["child limit reached (4/4)"],
+        "depth": 1, "max_depth": 3, "children_used": 4, "children_remaining": 0,
+        "may_choose": [], "spawnable_harnesses": [],
+        **extra,
+    }
+
+
+def test_a_soft_child_cap_offers_the_override_row():
+    """The cap interrupts fan-out loops, it does not forbid a fifth child
+    somebody wanted: the form asks the deliberate yes and only then sends
+    over_limit along."""
+    wiz = spawn_form(report=_full_report())
+    assert not wiz.field("over_limit").hidden
+    assert wiz.handle("submit") is None
+    assert "soft cap" in wiz.error
+    pick(wiz, "over_limit", "yes")
+    assert wiz.handle("submit") == "create"
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.over_limit is True
+    assert "over the child cap" in wiz.summary()
+
+
+def test_the_override_waives_only_the_child_cap():
+    """Depth (and enabled) stay exactly as refused: recursion is the mistake
+    the limits are for, and depth is the axis it runs away on."""
+    wiz = spawn_form(report=_full_report(
+        blocked_by=["depth limit reached (3/3)", "child limit reached (4/4)"],
+    ))
+    pick(wiz, "over_limit", "yes")
+    assert wiz.handle("submit") is None
+    assert "depth limit" in wiz.error
+    assert "child limit" not in wiz.error
+
+
+def test_the_override_row_stays_hidden_while_slots_remain():
+    """A row that is always there stops being read — and a yes given to a
+    full parent must not travel once the pick moves to one with slots."""
+    wiz = spawn_form()
+    assert wiz.field("over_limit").hidden
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.over_limit is False
+
+
+def test_an_older_daemon_keeps_the_cap_hard():
+    """No soft_blocked_by in the report means a daemon that would refuse the
+    override anyway, so the form does not offer what it cannot deliver."""
+    wiz = spawn_form(report={
+        "can_spawn": False,
+        "blocked_by": ["child limit reached (4/4)"],
+        "depth": 1, "max_depth": 3, "children_used": 4, "children_remaining": 0,
+        "may_choose": [], "spawnable_harnesses": [],
+    })
+    assert wiz.field("over_limit").hidden
+    assert wiz.handle("submit") is None
+    assert "child limit reached (4/4)" in wiz.error
+
+
 def test_the_policy_decides_which_rows_are_open():
     wiz = spawn_form()
     # allow_harness is empty in the default report: the child runs what its

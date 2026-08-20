@@ -1554,6 +1554,7 @@ def _parent_option(session: dict, here: str) -> Option:
     detail = ", ".join(
         x for x in (
             status,
+            session.get("role") or "",
             session.get("profile") or session.get("harness") or "",
             session.get("cwd") or "",
         ) if x
@@ -1624,6 +1625,21 @@ class SpawnWizard(Form):
             (i for i, o in enumerate(parent.options) if not o.disabled), 0
         )
         parent.select(get("parent") or here or "")
+
+        # Only exists while the parent's child cap is actually reached (shown
+        # by _rebuild_for_parent): the cap is soft, but crossing it takes a
+        # deliberate yes, and a row that is always there stops being read.
+        over_limit = ChoiceField(
+            key="over_limit", label="Over limit", hidden=True,
+            hint="the child cap is a soft cap - saying yes here crosses it "
+                 "on purpose (the parent may end up at, say, 5/4)",
+            options=[
+                Option("no - respect the cap", False),
+                Option("yes - spawn past it anyway", True),
+            ],
+        )
+        if get("over_limit"):
+            over_limit.select(True)
 
         name = TextField(
             key="name", label="Name", placeholder="(auto)",
@@ -1738,7 +1754,7 @@ class SpawnWizard(Form):
         )
         attach.select(bool(get("attach")))
         return [
-            parent, name, harness, profile, borrow, null, workspace,
+            parent, over_limit, name, harness, profile, borrow, null, workspace,
             *worktree_fields(""), args_field,
             mesh, handle, role, connect, workflow, context, task, attach,
             ActionField(key="create", label="Spawn child"),
@@ -1871,6 +1887,10 @@ class SpawnWizard(Form):
             f"child of this one: {used} running, {left} left "
             f"(depth {report.get('depth')}/{report.get('max_depth')})"
         )
+        # The override row exists only when the daemon says the cap is what
+        # stands in the way AND says it is soft (an older daemon reports no
+        # soft_blocked_by, and would refuse the override anyway).
+        self.field("over_limit").hidden = not report.get("soft_blocked_by")
 
         harness = self.field("harness")
         keep = harness.value
@@ -1986,15 +2006,34 @@ class SpawnWizard(Form):
                 "and there is no session here yet",
             ))
             return out
-        blocked = self._report.get("blocked_by") or []
+        blocked = list(self._report.get("blocked_by") or [])
+        soft = set(self._report.get("soft_blocked_by") or [])
+        if soft and self._over_limit():
+            # The child cap is the one block a deliberate yes waives; depth
+            # and enabled stay exactly as refused.
+            blocked = [b for b in blocked if b not in soft]
         if blocked:
-            out.append((
-                "parent",
-                "; ".join(blocked) + " - pick another parent, or free a slot "
-                "('claunch kill-session <child>')",
-            ))
+            fix = (
+                "it is a soft cap: answer yes on the Over limit row to "
+                "spawn past it, or free a slot ('claunch kill-session "
+                "<child>')"
+                if soft and all(b in soft for b in blocked) else
+                "pick another parent, or free a slot "
+                "('claunch kill-session <child>')"
+            )
+            out.append(("parent", "; ".join(blocked) + " - " + fix))
         out.extend(check_worktree(self))
         return out
+
+    def _over_limit(self) -> bool:
+        """Whether the cap was deliberately waived: a yes on a VISIBLE row.
+
+        Read through the hidden flag, like borrow reads through its disable:
+        a yes given while the row was shown, on a parent that then changed to
+        one with slots free, must not travel as an override nobody was asked
+        about.
+        """
+        return bool(self.value("over_limit")) and not self.field("over_limit").hidden
 
     # -- the answers ----------------------------------------------------- #
     def apply(self, args: Any) -> Any:
@@ -2005,6 +2044,7 @@ class SpawnWizard(Form):
         are the daemon's, unchanged.
         """
         args.parent = self.value("parent")
+        args.over_limit = self._over_limit()
         args.name = self.value("name")
         args.harness = self.value("harness") or None
         args.profile = self.value("profile") or None
@@ -2052,6 +2092,8 @@ class SpawnWizard(Form):
 
     def summary(self) -> str:
         parts = ["child of " + str(self.value("parent"))]
+        if self._over_limit():
+            parts.append("over the child cap")
         if self.value("profile"):
             parts.append("profile " + str(self.value("profile")))
         if not self.field("borrow").disabled and self.value("borrow"):
