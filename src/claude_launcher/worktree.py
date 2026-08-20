@@ -158,18 +158,20 @@ def _registered(root: Path, path: Path) -> bool:
     return False
 
 
-def pane_label(identity: str, cwd: str) -> str:
-    """What a launch is called on a pane: who, on which branch, in which
-    directory.
+def pane_label(identity: str, cwd: str, role: str = "") -> str:
+    """What a launch is called on a pane: who (as which role), on which
+    branch, in which directory.
 
     Read from the directory the launch actually lands in rather than from a
     worktree that was just made, so the three facts are the same three
     whether the checkout was cut a moment ago, entered from an earlier run,
     or never a worktree at all. The path is what separates two checkouts of
-    one branch, which is the case a fleet runs into first.
+    one branch, which is the case a fleet runs into first. The role is the
+    session's own (``SessionDef.role``); a launch without one labels exactly
+    as before.
     """
     branch = current_branch(Path(cwd)) if cwd and os.path.isdir(cwd) else ""
-    return herdr.launch_label(identity, branch, cwd)
+    return herdr.launch_label(identity, branch, cwd, role)
 
 
 def current_branch(cwd: Path) -> str:

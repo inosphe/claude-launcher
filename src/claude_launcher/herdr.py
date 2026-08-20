@@ -92,7 +92,11 @@ def clear_pane_label(pane: Optional[str] = None) -> bool:
 
 
 def launch_label(
-    identity: str, branch: str = "", path: str = "", limit: int = LABEL_LIMIT
+    identity: str,
+    branch: str = "",
+    path: str = "",
+    role: str = "",
+    limit: int = LABEL_LIMIT,
 ) -> str:
     """The pane label for a launch: who is running here, on what, and where.
 
@@ -100,6 +104,10 @@ def launch_label(
     (the session's name, or for ``claunch run`` the profile's) is what an
     operator scans for; ``branch`` is the state they are about to judge; and
     the directory is what tells two checkouts of the same branch apart.
+    ``role`` rides with the identity (``s22 (worker)``) rather than standing
+    as a segment of its own, because it answers the same question the
+    identity does -- who this pane is -- and a bare word between separators
+    would read as a branch.
 
     The directory is the only part that can run long, so it is the only part
     that is shortened -- home collapses to ``~``, and an overlong label drops
@@ -107,14 +115,17 @@ def launch_label(
     worktree of a repository from another; the drive and the road to the
     workspace are the same on every pane.
     """
-    identity, branch = identity.strip(), branch.strip()
+    identity, branch, role = identity.strip(), branch.strip(), role.strip()
+    who = identity
+    if role:
+        who = f"{identity} ({role})" if identity else f"({role})"
     shown = _display_path(path)
-    fixed = len(" · ".join(p for p in (identity, branch) if p))
+    fixed = len(" · ".join(p for p in (who, branch) if p))
     if shown and fixed:
         shown = _fit(shown, limit - fixed - len(" · "))
     elif shown:
         shown = _fit(shown, limit)
-    return " · ".join(part for part in (identity, branch, shown) if part)
+    return " · ".join(part for part in (who, branch, shown) if part)
 
 
 def _display_path(path: str) -> str:
