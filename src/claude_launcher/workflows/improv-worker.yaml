@@ -96,6 +96,9 @@ steps:
         master 통합 심사를 요청하는가, 아니면 브랜치를 동결해 두고(리더의
         일괄 통합 대기 등) 이 회차를 마감하는가? 어느 쪽이든 master 머지
         자체는 리더의 통합 단계에서 실행된다 — 이 워커가 하지 않는다.
+        워커에게: 제안은 select 도구로 남기되 확정은 사용자의 것이다 —
+        CLI(claunch cflow select)로 스스로 확정하지 않는다. 결정까지
+        대기가 프로토콜이다.
       chooser: user
       options:
         request:
