@@ -109,16 +109,16 @@ def test_no_progress_then_repeat(proj):
     clock = cflow_clock.ReminderClock(_FakeManager({}))
     t = 1000.0
     assert clock.scan(t) == []                      # armed, not fired
-    assert clock.scan(t + 179) == []                # default 180 not yet up
-    due = clock.scan(t + 181)
+    assert clock.scan(t + 599) == []                # default 600 not yet up
+    due = clock.scan(t + 601)
     assert [(c, s) for c, s, _ in due] == [(cwd, "w1")]
     assert "do one" in due[0][2]                    # the step's instructions
     assert "step 'one'" in due[0][2]
     # the run moves: the new position re-arms instead of firing
     cflow_engine.report("did one", cwd=cwd, scope="w1")
     cflow_engine.next_step(cwd=cwd, scope="w1")
-    assert clock.scan(t + 400) == []
-    due = clock.scan(t + 400 + 181)
+    assert clock.scan(t + 700) == []
+    due = clock.scan(t + 700 + 601)
     assert "do two" in due[0][2]
 
 
@@ -195,7 +195,7 @@ def test_delivery_goes_to_the_scope_session_in_the_same_cwd(proj):
     clock = cflow_clock.ReminderClock(_FakeManager({"w1": right}))
     t = time.monotonic()
     clock.scan(t)
-    due = clock.scan(t + 181)
+    due = clock.scan(t + 601)
     assert due
     asyncio.run(clock._deliver(*due[0]))
     assert len(right.delivered) == 1
@@ -222,12 +222,12 @@ def test_only_a_working_session_is_reminded(proj):
     clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
     t = time.monotonic()
     clock.scan(t)
-    due = clock.scan(t + 181)
+    due = clock.scan(t + 601)
     assert due                                   # the debt is due...
     asyncio.run(clock._deliver(*due[0]))
     assert sess.delivered == []                  # ...but nothing is typed
 
-    due = clock.scan(time.monotonic() + 400)
+    due = clock.scan(time.monotonic() + 700)
     assert due                                   # held, so still due next poll
     sess.status_value = "busy"                   # the agent starts working
     asyncio.run(clock._deliver(*due[0]))
@@ -252,7 +252,7 @@ def test_the_api_edits_defaults_and_per_run_overrides(proj):
         try:
             resp = await client.get("/api/cflow/reminder", headers=BEARER)
             defs = (await resp.json())["defaults"]
-            assert defs == {"enabled": True, "interval": 180.0}
+            assert defs == {"enabled": True, "interval": 600.0}
 
             resp = await client.put(
                 "/api/cflow/reminder", headers=BEARER,

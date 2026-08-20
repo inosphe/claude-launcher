@@ -184,7 +184,7 @@ DAEMON_DEFAULTS = {
     # state (engine.set_reminder). Read LIVE by the daemon on every clock
     # tick — unlike the keys above, editing these needs no restart.
     "cflow_reminder": True,
-    "cflow_reminder_interval": 180.0,
+    "cflow_reminder_interval": 600.0,
     # The run event clock's machine switch: whether an overseer session (the
     # driver's spawn parent, else its mesh leader) is told when a run it
     # oversees hits a human gate, finishes a recurring round, or loses its
