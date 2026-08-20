@@ -588,6 +588,8 @@ def _serialize_workflow(wf) -> dict:
         "start": wf.start,
         "max_visits": wf.max_visits,
         "recur": wf.recur,
+        "default_role": wf.default_role,
+        "priority": wf.priority,
         "filter_roles": (
             {"type": wf.filter_roles.type, "roles": list(wf.filter_roles.roles)}
             if wf.filter_roles
@@ -745,6 +747,19 @@ def _startable_workflows(cwd: str) -> list:
             entry["description"] = wf.description
             entry["steps"] = wf.step_count()
             entry["recur"] = wf.recur
+            # What a role-aware picker needs: who this workflow volunteers
+            # itself to, its rank among rivals, and the filter that decides
+            # whether volunteering even applies.
+            entry["default_role"] = wf.default_role
+            entry["priority"] = wf.priority
+            entry["filter_roles"] = (
+                {
+                    "type": wf.filter_roles.type,
+                    "roles": list(wf.filter_roles.roles),
+                }
+                if wf.filter_roles
+                else None
+            )
         except WorkflowError as exc:
             entry["error"] = str(exc)
         flows.append(entry)

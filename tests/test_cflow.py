@@ -2173,6 +2173,45 @@ def test_role_filter_rejects_unknown_keys():
         model.parse(bad)
 
 
+def test_default_role_and_priority_parse_and_normalize():
+    wf = model.parse(
+        "name: w\ndefault_role: Worker\npriority: 7\n"
+        "steps:\n  a:\n    instructions: x\n"
+    )
+    assert wf.default_role == "worker"  # lower-cased, like the mesh
+    assert wf.priority == 7
+
+
+def test_default_role_and_priority_default_to_nothing():
+    wf = model.parse("steps:\n  a:\n    instructions: x\n")
+    assert wf.default_role is None
+    assert wf.priority == 0
+
+
+def test_default_role_must_be_a_real_name():
+    with pytest.raises(WorkflowError, match="non-empty role name"):
+        model.parse("default_role: '  '\nsteps:\n  a:\n    instructions: x\n")
+
+
+def test_priority_must_be_an_integer():
+    with pytest.raises(WorkflowError, match="'priority' must be an integer"):
+        model.parse("priority: soon\nsteps:\n  a:\n    instructions: x\n")
+
+
+def test_default_role_its_own_filter_refuses_is_a_contradiction():
+    """A default nobody may drive is an authoring mistake, caught at parse."""
+    with pytest.raises(WorkflowError, match="turned away"):
+        model.parse(WORKER_ONLY + "default_role: leader\n")
+    with pytest.raises(WorkflowError, match="turned away"):
+        model.parse(
+            WORKER_ONLY.replace("whitelist", "blacklist")
+            + "default_role: worker\n"
+        )
+    # the admitted spelling parses, and both fields normalize together
+    wf = model.parse(WORKER_ONLY + "default_role: WORKER\n")
+    assert wf.default_role == "worker"
+
+
 def test_start_admits_a_whitelisted_driver(flow_dir, monkeypatch):
     _write(flow_dir, "worker-only", WORKER_ONLY)
     _driving_session(monkeypatch)

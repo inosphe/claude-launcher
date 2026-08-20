@@ -354,7 +354,13 @@ class Sources:
     def members(self, mesh: str) -> List[str]:
         return []
 
-    def workflows(self, cwd: str) -> List[str]:
+    def workflows(self, cwd: str) -> List[dict]:
+        """The cflow workflows declared in ``cwd``.
+
+        Entries are mappings -- name, default_role, priority, filter_roles
+        (see :func:`_workflow_entry`); a bare name is accepted from simpler
+        sources and reads as a workflow with none of that declared.
+        """
         return []
 
     def git(self, cwd: str) -> dict:
@@ -453,7 +459,7 @@ class DaemonSources(Sources):
                 ]
         return []
 
-    def workflows(self, cwd: str) -> List[str]:
+    def workflows(self, cwd: str) -> List[dict]:
         key = "wf:" + cwd
         if key in self._cache:
             return self._cache[key]
@@ -461,14 +467,14 @@ class DaemonSources(Sources):
             from urllib.parse import quote
 
             doc = self.client.get(f"/api/cflow/workflows?cwd={quote(cwd)}")
-            names = [
-                (w.get("name") if isinstance(w, dict) else w)
+            entries = [
+                _workflow_entry(w)
                 for w in (doc.get("workflows") or [])
                 if not (isinstance(w, dict) and w.get("error"))
             ]
         except Exception:
-            names = []
-        self._cache[key] = [n for n in names if n]
+            entries = []
+        self._cache[key] = [e for e in entries if e["name"]]
         return self._cache[key]
 
     def git(self, cwd: str) -> dict:
@@ -630,6 +636,113 @@ def worktree_answer(form: "Form") -> tuple:
         choice = form.value("worktree_name") or form.auto_worktree_name()
     base = str(form.value("rebase_onto") or "") if form.value("update") else ""
     return choice, base
+
+
+# --------------------------------------------------------------------------- #
+# the Workflow row: shared between the two forms, like the worktree rows
+# --------------------------------------------------------------------------- #
+def _workflow_entry(raw) -> dict:
+    """One workflow the sources offered, normalized.
+
+    The daemon serves mappings (name, default_role, priority, filter_roles);
+    a bare name -- an older daemon, a simpler test double -- reads as a
+    workflow that volunteers for nobody.
+    """
+    if isinstance(raw, dict):
+        return {
+            "name": str(raw.get("name") or ""),
+            "default_role": str(raw.get("default_role") or "").strip().lower(),
+            "priority": int(raw.get("priority") or 0),
+            "filter_roles": raw.get("filter_roles"),
+        }
+    return {
+        "name": str(raw or ""), "default_role": "", "priority": 0,
+        "filter_roles": None,
+    }
+
+
+def _workflow_admits(entry: dict, role: str) -> bool:
+    """Would this workflow's ``filter_roles`` let ``role`` drive it?
+
+    True with no filter or no role picked. The filter is enforced at start
+    against a mesh identity this form cannot fully predict (a session that
+    joins no mesh is admitted whatever the filter says), so the form only
+    refuses to *volunteer* a workflow the filter would turn away -- it never
+    stops a person picking one.
+    """
+    f = entry.get("filter_roles")
+    if not isinstance(f, dict) or not role:
+        return True
+    roles = [str(r).strip().lower() for r in (f.get("roles") or [])]
+    if f.get("type") == "blacklist":
+        return role not in roles
+    return role in roles
+
+
+def _workflow_rank(entry: dict, role: str) -> tuple:
+    """Sort key: the picked role's own candidates first, then the rest, the
+    ones its filter refuses last -- each band by descending priority. The
+    arrow keys walk the same ranking the auto-pick used."""
+    band = 1
+    if role and entry["default_role"] == role and _workflow_admits(entry, role):
+        band = 0
+    elif not _workflow_admits(entry, role):
+        band = 2
+    return (band, -entry["priority"], entry["name"])
+
+
+def _workflow_options(entries: List[dict], role: str) -> List[Option]:
+    out = []
+    for e in sorted(entries, key=lambda e: _workflow_rank(e, role)):
+        detail = []
+        if e["default_role"]:
+            detail.append(f"default for {e['default_role']}")
+        if e["priority"]:
+            detail.append(f"priority {e['priority']}")
+        if role and not _workflow_admits(e, role):
+            detail.append(f"filter_roles turns {role!r} away")
+        out.append(Option(e["name"], e["name"], ", ".join(detail)))
+    return out
+
+
+def _workflow_default(entries: List[dict], role: str) -> str:
+    """The workflow a picked role selects on its own: the highest-priority
+    one declaring ``default_role: <role>`` that its own filter admits."""
+    if not role:
+        return ""
+    best = [
+        e for e in entries
+        if e["default_role"] == role and _workflow_admits(e, role)
+    ]
+    best.sort(key=lambda e: (-e["priority"], e["name"]))
+    return best[0]["name"] if best else ""
+
+
+def sync_workflows(form: "Form", cwd: str, role: str) -> None:
+    """Rebuild the Workflow row when the directory or the role changed.
+
+    Choosing a role selects its default workflow (rivals settled by
+    priority) -- but only over a row this function itself filled in last
+    time: a workflow a person picked survives every later role change, and
+    an auto-pick is never mistaken for one because the last auto-picked
+    value is remembered and compared.
+    """
+    role = str(role or "").strip().lower()
+    wf = form.field("workflow")
+    key = (cwd, role)
+    if form._workflows_for == key:
+        return
+    form._workflows_for = key
+    keep = wf.value
+    raw = (form.sources.workflows(cwd) or []) if cwd else []
+    entries = [e for e in map(_workflow_entry, raw) if e["name"]]
+    wf.options = [Option("(none)", "")] + _workflow_options(entries, role)
+    wf.index = 0
+    if keep and keep != form._workflow_auto and wf.select(keep):
+        return
+    auto = _workflow_default(entries, role)
+    form._workflow_auto = auto if auto and wf.select(auto) else ""
+
 
 # --------------------------------------------------------------------------- #
 # the form
@@ -1033,7 +1146,8 @@ class Wizard(Form):
 
         # What each conditional list was last built for, so `_sync` refetches
         # only when the answer it follows has actually changed.
-        self._workflows_for: Optional[str] = None
+        self._workflows_for: Optional[tuple] = None
+        self._workflow_auto: str = ""
         self._members_for: Optional[str] = None
         self._worktrees_for: Optional[str] = None
 
@@ -1169,7 +1283,7 @@ class Wizard(Form):
         workflow = ChoiceField(
             key="workflow", label="Workflow",
             hint="a cflow workflow started for it, from those declared in that "
-                 "directory",
+                 "directory; picking a role selects its default one",
             options=[],
         )
         context = TextField(
@@ -1292,15 +1406,10 @@ class Wizard(Form):
             connect.chosen = [c for c in connect.chosen if c in members]
         connect.hidden = not mesh or not connect.options
 
-        wf = self.field("workflow")
-        if self._workflows_for != cwd:
-            self._workflows_for = cwd
-            keep = wf.value
-            names = self.sources.workflows(cwd) or []
-            wf.options = [Option("(none)", "")] + [Option(n, n) for n in names]
-            wf.index = 0
-            if keep:
-                wf.select(keep)
+        # The role only counts for a claude session (the row is greyed out
+        # otherwise), and a greyed-out row must not keep steering this one.
+        role = "" if self.field("role").disabled else (self.value("role") or "")
+        sync_workflows(self, cwd, role)
         self.field("context").hidden = not self.value("workflow")
 
     # -- validation ------------------------------------------------------ #
@@ -1486,7 +1595,8 @@ class SpawnWizard(Form):
         # remembers which one it was last built for.
         self._parent_for: Optional[str] = None
         self._mesh_for: Optional[str] = None
-        self._workflows_for: Optional[str] = None
+        self._workflows_for: Optional[tuple] = None
+        self._workflow_auto: str = ""
         self._worktrees_for: Optional[tuple] = None
         # Fixed once, not per render: a name that ticked over between the
         # picker showing it and Create sending it would cut a worktree under
@@ -1601,7 +1711,8 @@ class SpawnWizard(Form):
         workflow = ChoiceField(
             key="workflow", label="Workflow",
             hint="a cflow workflow started for the child, from those declared "
-                 "in the directory it will run in",
+                 "in the directory it will run in; picking a role selects "
+                 "its default one",
             options=[],
         )
         context = TextField(
@@ -1744,15 +1855,7 @@ class SpawnWizard(Form):
             allowed="worktree" in (self._report.get("may_choose") or []),
             note="a child inherits its parent's directory (spawn.allow_worktree)",
         )
-        wf = self.field("workflow")
-        if self._workflows_for != cwd:
-            self._workflows_for = cwd
-            keep = wf.value
-            names = self.sources.workflows(cwd) if cwd else []
-            wf.options = [Option("(none)", "")] + [Option(n, n) for n in names]
-            wf.index = 0
-            if keep:
-                wf.select(keep)
+        sync_workflows(self, cwd, self.value("role") or "")
         self.field("context").hidden = not self.value("workflow")
 
     def _rebuild_for_parent(self, parent: str) -> None:

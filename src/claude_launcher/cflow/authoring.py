@@ -255,6 +255,19 @@ guards a fleet's division of labour, and a standalone run has no fleet.
 Role names are matched against the mesh's vocabulary at start time, not at
 parse time, for the same reason a delegation's `role` is.
 
+A workflow can also volunteer itself for a role, instead of waiting to be
+picked:
+
+    default_role: worker     # pickers auto-select this workflow when that role is chosen
+    priority: 10             # tie-breaker when several volunteer for the same
+                             # role — higher wins, and pickers list candidates
+                             # in this order (0 when unstated)
+
+Advisory, not enforcement: `filter_roles` still decides who may drive, a
+picker never volunteers a workflow whose filter turns the chosen role away,
+and a `default_role` the workflow's own filter refuses is rejected at parse
+time as a contradiction.
+
 ## Before you hand it over
 
 - `claunch cflow show <workflow>` — prints the graph, each step's control
