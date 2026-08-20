@@ -19,7 +19,9 @@ the Unanswered box and the requests its nudge/dismiss buttons send,
 terminal, or the page slot on a phone) and what closing it leaves behind,
 ``sesssend_check`` on the message that panel can put into the mesh — whose
 handle it lands on and what it does with a refusal — ``sessrun_check`` on the
-run it can fold open in place of a trip to the run page, ``sesslayout_check``
+run it can fold open in place of a trip to the run page, ``wfstart_check`` on
+the workflow picker's option line — clipped so a paragraph-length description
+cannot drag the native popup past the viewport edge — ``sesslayout_check``
 on the per-session layout — the Details/Workflow radio, the run pane halved
 into the terminal's column, and the localStorage both are remembered in —
 ``queued_check`` on
@@ -62,6 +64,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "panel_check.js",
         "sesssend_check.js",
         "sessrun_check.js",
+        "wfstart_check.js",
         "sesslayout_check.js",
         "queued_check.js",
         "seq_check.js",

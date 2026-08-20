@@ -655,6 +655,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-start-select { max-width: 320px; }
 .wf-start-context { flex: 1 1 200px; }
 .wf-start .wf-note { margin-top: 8px; }
+/* full text of the clipped option line for whichever workflow is selected */
+.wf-start-desc { margin-top: 8px; color: #9da5b0; font-size: 13px; line-height: 1.5; }
+.wf-start-desc:empty { display: none; }
 
 /* The run's two-column body: the picture on the left, everything to read on
    the right. Both columns are elastic, so the one structure follows the full
