@@ -2364,6 +2364,12 @@ async def h_session_capture(request: web.Request) -> web.Response:
     session = _session(request)
     history = request.query.get("history") in ("1", "true")
     trim = request.query.get("trim", "1") not in ("0", "false")
+    # The grid renders a slice behind the byte stream (ScreenFeeder), and a
+    # capture is the one read that means "what is on screen NOW" -- so wait
+    # for it, by awaiting rather than by blocking the loop.
+    synced = getattr(session, "screen_synced", None)
+    if synced is not None:
+        await synced()
     lines = session.capture(history=history)
     if trim:
         while lines and not lines[-1]:

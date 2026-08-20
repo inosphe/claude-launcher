@@ -14,8 +14,10 @@ module watches the byte stream for ``CSI ? Pm h/l`` itself.
 
 from __future__ import annotations
 
+import asyncio
 import re
-from typing import List, Tuple
+from collections import deque
+from typing import Deque, List, Optional, Tuple
 
 import pyte
 
@@ -88,7 +90,31 @@ class ScreenState:
         return self._screen.lines
 
     def feed(self, data: bytes) -> None:
+        """Track modes and render, in one go — the synchronous path.
+
+        Callers on the event loop want :class:`ScreenFeeder` instead: the
+        render half is CPU-bound and unbounded (see its docstring).
+        """
+        self.track_modes(data)
+        self.feed_render(data)
+
+    def track_modes(self, data: bytes) -> None:
+        """The cheap half: a regex sweep for the private modes we track.
+
+        Kept separate because it must stay *synchronous with input*. A
+        ``send-keys`` arriving right after a program turns DECCKM on has to
+        encode arrows the new way, so this cannot lag behind the way the
+        rendered grid may.
+        """
         self._track_modes(data)
+
+    def feed_render(self, data: bytes) -> None:
+        """The expensive half: pyte's VT emulation of ``data``.
+
+        Roughly 530 KiB/s on this project's screens (pyte draws a cell at a
+        time, rebuilding a namedtuple per character), so a 64 KiB PTY chunk
+        is ~144 ms of solid CPU.
+        """
         self._stream.feed(data)
 
     def _track_modes(self, data: bytes) -> None:
@@ -172,3 +198,104 @@ class ScreenState:
         if current not in (None, "0"):
             out.append("\x1b[0m")
         return "".join(out)
+
+
+# --------------------------------------------------------------------------- #
+# feeding the screen without stalling the event loop
+# --------------------------------------------------------------------------- #
+#: Bytes rendered between yields. pyte runs at roughly 530 KiB/s here, so this
+#: bounds one uninterrupted render to about 7 ms — short enough that an HTTP
+#: accept or a mesh delivery waiting behind it is not noticeable, long enough
+#: that the per-slice overhead stays in the noise.
+SLICE = 4096
+
+
+class ScreenFeeder:
+    """Renders PTY output into a :class:`ScreenState` a slice at a time.
+
+    The daemon used to render inline, on the event loop, in the callback that
+    received each PTY chunk. That is fine until a session floods -- and then
+    it is not merely slow, it is a stall with no bottom: asyncio drains every
+    ready callback before it polls for I/O again, so a reader thread posting
+    chunks faster than pyte renders them keeps the ready queue permanently
+    non-empty and the loop never gets back to ``accept()``. A daemon in that
+    state is alive, listening, burning a core, and answering nothing -- and it
+    still holds the singleton lock, so no replacement can take over either.
+
+    So the render is pulled out of the callback and into a task that consumes
+    a queue in bounded slices, yielding between them. The work is the same
+    work; what changes is that the loop gets a turn every :data:`SLICE` bytes.
+    Output ordering is preserved (one consumer, FIFO), and the grid converges
+    a little behind the byte stream -- :meth:`drained` is how the few readers
+    that need it exactly (capture, attach repaint) wait for it to catch up.
+    """
+
+    def __init__(self, screen: ScreenState, *, slice_size: int = SLICE) -> None:
+        self.screen = screen
+        self._slice = max(1, slice_size)
+        self._pending: Deque[bytes] = deque()
+        self._pump: Optional[asyncio.Task] = None
+        self._idle = asyncio.Event()
+        self._idle.set()
+
+    @property
+    def pending_bytes(self) -> int:
+        return sum(len(c) for c in self._pending)
+
+    def submit(self, data: bytes) -> None:
+        """Queue ``data`` for rendering; returns immediately.
+
+        The mode tracking rides along here rather than in the pump: it is a
+        regex over the chunk, not a screen update, and the keyboard encoding
+        that reads it must not lag behind the bytes that set it.
+        """
+        if not data:
+            return
+        self.screen.track_modes(data)
+        self._pending.append(data)
+        self._idle.clear()
+        if self._pump is None or self._pump.done():
+            self._pump = asyncio.get_event_loop().create_task(self._run())
+
+    async def _run(self) -> None:
+        try:
+            while self._pending:
+                # The unrendered remainder stays at the head of the queue
+                # rather than being held in a local, so pending_bytes always
+                # answers "how much has not reached the grid yet" -- mid-chunk
+                # included. That is the number worth watching in an outage.
+                head = self._pending[0]
+                if len(head) <= self._slice:
+                    self._pending.popleft()
+                    self.screen.feed_render(head)
+                else:
+                    self._pending[0] = head[self._slice :]
+                    self.screen.feed_render(head[: self._slice])
+                # The whole point: hand the loop back between slices, so an
+                # accept or a delivery queued behind us gets its turn.
+                await asyncio.sleep(0)
+        finally:
+            if not self._pending:
+                self._idle.set()
+
+    async def drained(self) -> None:
+        """Wait until everything submitted so far has been rendered."""
+        await self._idle.wait()
+
+    def drain_now(self) -> None:
+        """Render everything pending, synchronously.
+
+        For teardown and for callers with no loop to await on (tests, the
+        final capture of an exited session) -- never for the hot path, which
+        is the stall this class exists to prevent.
+        """
+        while self._pending:
+            self.screen.feed_render(self._pending.popleft())
+        self._idle.set()
+
+    def close(self) -> None:
+        if self._pump is not None:
+            self._pump.cancel()
+            self._pump = None
+        self._pending.clear()
+        self._idle.set()

@@ -35,6 +35,19 @@ from aiohttp import WSMsgType, web
 from .session import Session, SessionGone
 
 
+
+async def _synced(session) -> None:
+    """Let the rendered grid catch up before it is replayed to a viewer.
+
+    A repaint is a snapshot: sent mid-render it would show a half-drawn
+    screen and stay that way until the next output arrived. Dead sessions
+    have no feeder and nothing pending, hence the getattr.
+    """
+    synced = getattr(session, "screen_synced", None)
+    if synced is not None:
+        await synced()
+
+
 async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     # Auth already happened: this route lives under /api/, so the middleware
     # validated a Bearer header (CLI/scripts) or the session cookie (the SPA
@@ -68,6 +81,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                 }
             )
         )
+        await _synced(session)
         await ws.send_bytes(session.screen.repaint_sequence())
 
         sender = asyncio.ensure_future(_pump_to_client(ws, queue))
@@ -128,6 +142,7 @@ async def _handle_control(ws: web.WebSocketResponse, session: Session, raw: str)
         except (KeyError, ValueError, TypeError, SessionGone):
             pass
     elif kind == "repaint":
+        await _synced(session)
         await ws.send_bytes(session.screen.repaint_sequence())
     elif kind == "ping":
         await ws.send_str(json.dumps({"type": "pong"}))
