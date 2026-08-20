@@ -101,8 +101,8 @@ def labels_are_machine_independent(monkeypatch, tmp_path):
     real = herdr.launch_label
     monkeypatch.setattr(
         herdr, "launch_label",
-        lambda identity, branch="", path="", limit=10_000:
-            real(identity, branch, path, limit),
+        lambda identity, branch="", path="", role="", limit=10_000:
+            real(identity, branch, path, role, limit),
     )
 
 
@@ -661,6 +661,11 @@ def test_new_session_refuses_a_new_worktree_with_a_resume(
         (("api", "master", ""), "api · master"),
         (("", "master", "/w/repo"), "master · /w/repo"),
         (("api", "", ""), "api"),
+        # The role rides with the identity, never as a segment of its own —
+        # a bare word between separators would read as a branch.
+        (("s22", "review", "/w/repo", "worker"), "s22 (worker) · review · /w/repo"),
+        (("s22", "", "", "worker"), "s22 (worker)"),
+        (("", "master", "/w/repo", "worker"), "(worker) · master · /w/repo"),
     ],
 )
 def test_launch_label_composition(args, expected):
@@ -690,10 +695,26 @@ def test_launch_label_never_truncates_the_identity():
     assert label.startswith("api · review")
 
 
+def test_launch_label_never_truncates_the_role_either():
+    """The role is part of the identity half, so it is part of the fixed
+    part the path budget is measured against."""
+    label = herdr.launch_label("api", "review", "/w/repo", "worker", limit=12)
+    assert label.startswith("api (worker) · review")
+
+
 def test_pane_label_reads_branch_and_directory_from_a_worktree(repo):
     made = worktree.resolve(str(repo), "review")
     assert worktree.pane_label("api", str(made.path)) == (
         f"api · review · {made.path}"
+    )
+
+
+def test_pane_label_carries_the_session_role(repo):
+    """An attach knows the session's role; the label says it next to the
+    name, and a session without one labels exactly as before."""
+    made = worktree.resolve(str(repo), "review")
+    assert worktree.pane_label("s22", str(made.path), "worker") == (
+        f"s22 (worker) · review · {made.path}"
     )
 
 
