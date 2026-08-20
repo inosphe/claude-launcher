@@ -822,6 +822,49 @@ def test_no_mesh_at_all_takes_the_handle_and_the_roster_with_it():
     assert args.handle is None and args.connect == []
 
 
+def test_the_args_row_shows_the_parents_flags_without_proposing_them():
+    """Every other override row names what it would inherit -- "(the
+    parent's: claude)" and so on -- but Args is free text, so the inherited
+    value has nowhere to sit except the hint. It has to be *shown* and not
+    *pre-filled*: text put in the box is what the child runs INSTEAD of its
+    parent's args, so seeding it would send the parent's own flags back as
+    if somebody had typed them."""
+    wiz = spawn_form(sessions=[
+        {"name": "lead", "status": "idle", "harness": "claude",
+         "cwd": "/work/repo", "args": ["--model", "opus", "--verbose"]},
+    ])
+    field = wiz.field("args")
+    assert field.text == ""              # nothing proposed
+    assert field.display() == ""         # and the row reads empty, not "(none)"
+    assert "the parent's: --model opus --verbose" in field.hint
+    # Untouched, the child still inherits: apply sends nothing, and an empty
+    # 'args' is what spawn reads as "run what the parent runs".
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.args == []
+
+
+def test_the_args_row_says_so_when_the_parent_has_no_flags_of_its_own():
+    """The blank box would otherwise be ambiguous — nothing inherited, or
+    nothing known?"""
+    wiz = spawn_form(sessions=[
+        {"name": "lead", "status": "idle", "harness": "claude", "cwd": "/work/repo"},
+    ])
+    assert "none of its own" in wiz.field("args").hint
+
+
+def test_the_args_hint_follows_the_parent_that_is_picked():
+    wiz = spawn_form(sessions=[
+        {"name": "lead", "status": "idle", "harness": "claude",
+         "cwd": "/work/repo", "args": ["--verbose"]},
+        {"name": "other", "status": "idle", "harness": "claude",
+         "cwd": "/work/repo", "args": ["--model", "haiku"]},
+    ])
+    assert "the parent's: --verbose" in wiz.field("args").hint
+    pick(wiz, "parent", "other")
+    assert "the parent's: --model haiku" in wiz.field("args").hint
+
+
 def test_the_roster_is_the_parents_mesh_minus_the_parent():
     """It can always reach its parent, so offering that as a connection would
     be offering something that is already true."""
