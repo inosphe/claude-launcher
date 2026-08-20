@@ -106,7 +106,7 @@ const clearInterval = () => { timers--; };
 
 /* Everything the sliced code leans on and this file is not testing. */
 const stubs = `
-let sessRunFold = null, sessRunTimer = null, wfReminderBox = null;
+let sessRunFold = null, sessRunTimer = null, wfReminderBoxes = {};
 let posted = [], nudged = [];
 function cflowAction(path, body, after) { posted.push({ path, body, after }); }
 function cflowPost(path, body) { posted.push({ path, body }); return Promise.resolve({}); }
@@ -190,6 +190,16 @@ check("a rebuild of the panel re-uses the very same node",
       ctx.sessRunFoldFor(flow) === fold);
 check("another session's run does not", ctx.sessRunFoldFor(
   { cwd: DATA.cwd, scope: "s7", status: "running" }) !== fold);
+
+/* The Workflow panel asks for it open (the reader chose the run with the
+   radio), but only on creation — a fold shut by hand must stay shut across
+   the panel's 2s rebuilds, and the cached node is how it does. */
+ctx.drop();
+const dedicated = ctx.sessRunFoldFor(flow, true);
+check("the dedicated panel's fold starts open", dedicated.open === true);
+dedicated.open = false;
+check("...and shut by hand stays shut on the rebuild",
+      ctx.sessRunFoldFor(flow, true) === dedicated && dedicated.open === false);
 
 /* ---- open: it fetches, and it polls only while open ---- */
 ctx.drop();

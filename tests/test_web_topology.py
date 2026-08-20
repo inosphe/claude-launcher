@@ -17,7 +17,10 @@ the Unanswered box and the requests its nudge/dismiss buttons send,
 terminal, or the page slot on a phone) and what closing it leaves behind,
 ``sesssend_check`` on the message that panel can put into the mesh — whose
 handle it lands on and what it does with a refusal — ``sessrun_check`` on the
-run it can fold open in place of a trip to the run page, ``queued_check`` on
+run it can fold open in place of a trip to the run page, ``sesslayout_check``
+on the per-session layout — the Details/Workflow radio, the run pane halved
+into the terminal's column, and the localStorage both are remembered in —
+``queued_check`` on
 the queued-deliveries banner — the backlog the daemon is holding for the
 attached session, and whose keyboard it blames for the hold — ``seq_check`` on the
 message trace's event list — the order a mesh's traffic is read in, and what
@@ -56,6 +59,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "panel_check.js",
         "sesssend_check.js",
         "sessrun_check.js",
+        "sesslayout_check.js",
         "queued_check.js",
         "seq_check.js",
         "seqrender_check.js",
