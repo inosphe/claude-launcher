@@ -283,6 +283,35 @@ check("a human's request still reads as one",
       texts(human).includes("start requested") &&
       walk(human).some((k) => k.text === "Withdraw request"), texts(human));
 
+/* ---- the actions box keeps prose and presses apart ---- */
+/* One box, three homes (wf-act-msgs / wf-act-main / wf-act-tools): the CSS
+   lays the bar out from those groups, so a button that lands in the wrong
+   one is a layout regression the styles cannot see. */
+const grp = (root, cls) => walk(root).find((k) => classOf(k).has(cls));
+const SEL = { ...DATA, run: {
+  ...RUN, status: "waiting_selection", step_id: "check", recur: true, round: 2,
+  workflow: "ecs-change", prompt: "ship it?",
+  proposal: { option: "ship", reason: "suite green" },
+  options: [{ name: "ship" }, { name: "again" }],
+} };
+const sel = ctx.wfActions(SEL);
+for (const c of ["wf-act-msgs", "wf-act-main", "wf-act-tools"]) {
+  check(`the box builds ${c}`, !!grp(sel, c));
+}
+check("the prompt and the proposal live among the prose",
+      has(grp(sel, "wf-act-msgs"), "wf-gate") &&
+      has(grp(sel, "wf-act-msgs"), "wf-proposal"));
+check("the option presses answer it from the main group",
+      walk(grp(sel, "wf-act-main")).filter((k) => classOf(k).has("option")).length === 2);
+check("...with their explainer beside them, not among the prose",
+      has(grp(sel, "wf-act-main"), "wf-note") &&
+      !has(grp(sel, "wf-act-msgs"), "wf-note"));
+check("run management is its own group: nudge, skip and archive",
+      has(grp(sel, "wf-act-tools"), "nudge") &&
+      has(grp(sel, "wf-act-tools"), "skip") &&
+      has(grp(sel, "wf-act-tools"), "archive"));
+check("no press strays into the prose", !has(grp(sel, "wf-act-msgs"), "wf-btn"));
+
 /* ---- the run ends ---- */
 const gone = node("div");
 ctx.renderSessRun(gone, { status: "idle", cwd: DATA.cwd, scope: "coder3" });

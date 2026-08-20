@@ -3237,6 +3237,17 @@ function wfActions(data, opts = {}) {
   const run = data.run || {};
   const after = opts.after;
   const box = el("div", "wf-actions");
+  // Three homes inside the one box, so prose and presses stop interleaving:
+  // everything to read (msgs), the presses that answer the gate (main), and
+  // the run-management presses (tools). The bar lays main and tools out on
+  // one line, decisions left and management right; the fold stacks them.
+  // An empty home takes no row (CSS :empty).
+  const msgs = el("div", "wf-act-msgs");
+  const main = el("div", "wf-act-main");
+  const tools = el("div", "wf-act-tools");
+  box.appendChild(msgs);
+  box.appendChild(main);
+  box.appendChild(tools);
   // Leads, because it changes how everything below it reads: a run whose
   // session is not running is not being worked on, whatever position it
   // recorded before it stopped. Said after "agent is working on 'survey'",
@@ -3244,7 +3255,7 @@ function wfActions(data, opts = {}) {
   const homeless = !(data.sessions || []).length;
   const scoped = data.scope && data.scope !== "default";
   if (homeless && run.status !== "done" && run.status !== "aborted") {
-    box.appendChild(el(
+    msgs.appendChild(el(
       "p", scoped ? "wf-warning" : "wf-note",
       scoped
         ? `session '${data.scope}' is not running — nothing is driving this run`
@@ -3255,21 +3266,21 @@ function wfActions(data, opts = {}) {
   // for every ask, answered by an agent or fallen to us: "no leader above
   // this run" is the whole explanation for why a question is on this screen.
   if (run.ask) {
-    box.appendChild(el("p", "wf-note", `asked: ${askWho(run.ask)}`));
+    msgs.appendChild(el("p", "wf-note", `asked: ${askWho(run.ask)}`));
     for (const s of run.ask.skipped || []) {
-      box.appendChild(el("p", "wf-note", `skipped ${s.candidate} — ${s.reason}`));
+      msgs.appendChild(el("p", "wf-note", `skipped ${s.candidate} — ${s.reason}`));
     }
     if (run.ask.deadline) {
-      box.appendChild(el("p", "wf-note", `moves on after ${run.ask.deadline}`));
+      msgs.appendChild(el("p", "wf-note", `moves on after ${run.ask.deadline}`));
     }
     if (run.ask.undelivered) {
-      box.appendChild(el("p", "wf-warning",
+      msgs.appendChild(el("p", "wf-warning",
         `recorded, but not announced: ${run.ask.undelivered}`));
     }
   }
   if (run.status === "waiting_answer") {
-    box.appendChild(el("p", "wf-gate", run.ask ? run.ask.prompt : "waiting for a decision"));
-    box.appendChild(el("p", "wf-note",
+    msgs.appendChild(el("p", "wf-gate", run.ask ? run.ask.prompt : "waiting for a decision"));
+    msgs.appendChild(el("p", "wf-note",
       "this is with another agent; you do not have to do anything. Take it " +
       "over only if it is stuck."));
     const btn = el("button", "wf-btn", "Decide it myself");
@@ -3285,14 +3296,14 @@ function wfActions(data, opts = {}) {
       }
       cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
     });
-    box.appendChild(btn);
+    main.appendChild(btn);
   } else if (run.status === "waiting_approval") {
     const isLoop = run.reason === "loop_limit";
     if (run.reason === "declined" && run.declined) {
-      box.appendChild(el("p", "wf-warning",
+      msgs.appendChild(el("p", "wf-warning",
         `${run.declined.by} declined: ${run.declined.reason || "no reason given"}`));
     }
-    box.appendChild(el("p", "wf-gate", run.gate || "waiting for approval"));
+    msgs.appendChild(el("p", "wf-gate", run.gate || "waiting for approval"));
     const btn = el("button", "wf-btn approve",
       isLoop ? "Extend loop limit"
         : run.reason === "declined" ? "Override the refusal" : "Approve gate");
@@ -3304,11 +3315,11 @@ function wfActions(data, opts = {}) {
         cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
       }
     });
-    box.appendChild(btn);
+    main.appendChild(btn);
   } else if (run.status === "waiting_selection" || run.status === "select") {
-    box.appendChild(el("p", "wf-gate", run.prompt || "decision point"));
+    msgs.appendChild(el("p", "wf-gate", run.prompt || "decision point"));
     if (run.proposal) {
-      box.appendChild(el(
+      msgs.appendChild(el(
         "p", "wf-proposal",
         `agent proposes: ${run.proposal.option} — ${run.proposal.reason || ""}`
       ));
@@ -3324,17 +3335,18 @@ function wfActions(data, opts = {}) {
             }, after);
           }
         });
-        box.appendChild(btn);
+        main.appendChild(btn);
       }
-      box.appendChild(el("p", "wf-note",
+      // Beside the presses it explains, not among the prose above them.
+      main.appendChild(el("p", "wf-note",
         "confirming unblocks the agent; its managed session is nudged automatically"));
     } else {
-      box.appendChild(el("p", "wf-note", "the agent decides this branch on its own"));
+      msgs.appendChild(el("p", "wf-note", "the agent decides this branch on its own"));
     }
   } else if (run.status === "done" || run.status === "aborted") {
-    box.appendChild(el("p", "wf-note", `workflow ${run.status}`));
+    msgs.appendChild(el("p", "wf-note", `workflow ${run.status}`));
   } else {
-    box.appendChild(el(
+    msgs.appendChild(el(
       "p", "wf-note",
       homeless
         ? `recorded position: step '${run.step_id}' — stopped here`
@@ -3360,7 +3372,7 @@ function wfActions(data, opts = {}) {
       btn.disabled = true;
       btn.title = "nothing to nudge: this run has no live session of its own";
     }
-    box.appendChild(btn);
+    tools.appendChild(btn);
     // The run page and the pane pull the reminder out (reminder: false) and
     // seat it in their text column; the fold keeps it here, in the one box.
     if (opts.reminder !== false) {
@@ -3391,7 +3403,7 @@ function wfActions(data, opts = {}) {
         cflowAction("/api/cflow/skip", { cwd: data.cwd, scope: data.scope }, after);
       }
     });
-    box.appendChild(skp);
+    tools.appendChild(skp);
   }
 
   if (opts.archive === false) return box;
@@ -3414,7 +3426,7 @@ function wfActions(data, opts = {}) {
       cflowAction("/api/cflow/archive", { cwd: data.cwd, scope: data.scope });
     }
   });
-  box.appendChild(arch);
+  tools.appendChild(arch);
   return box;
 }
 

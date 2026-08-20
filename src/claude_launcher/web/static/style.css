@@ -639,9 +639,9 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 /* the same amber a blocked card gets in the flow view */
 .sess-run-track.blocked .flow-pip.current .flow-pip-mark { stroke: #d29922; }
 .sess-run-track.blocked .flow-halo { stroke: #d29922; opacity: 0.55; }
+/* the fold keeps the stacked layout (msgs, then each button row); spacing
+   comes from the box's own gaps, so no per-button margins here */
 .sess-run .wf-actions { margin: 10px 0; padding: 10px 12px; background: #14161a; }
-/* the rail's .wf-btn drops its right margin; these sit in rows and wrap */
-.sess-run .wf-actions .wf-btn { margin: 8px 8px 0 0; }
 .sess-run .wf-journal-line { overflow-wrap: anywhere; }
 .sess-run h4 {
   margin: 14px 0 2px; font-size: 11px; text-transform: uppercase; color: #7d8590;
@@ -701,6 +701,8 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .mono { font-family: Cascadia Mono, Consolas, Menlo, monospace; font-size: 12px; }
 .wf-head { display: flex; align-items: center; gap: 12px; }
 .wf-head h2 { font-size: 20px; }
+/* the way out to the full page sits at the head's far edge, off the badges */
+.wf-head .wf-btn.wf-full { margin-left: auto; margin-right: 0; }
 .badge.wf-running { background: #172947; color: #58a6ff; }
 .badge.wf-waiting { background: #4d3800; color: #d29922; }
 .badge.wf-delegated { background: #2b1d47; color: #a371f7; }
@@ -727,9 +729,21 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .wf-actions {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px;
+  display: flex; flex-direction: column; gap: 10px;
 }
-.wf-gate { font-size: 14px; margin-bottom: 8px; }
-.wf-proposal { color: #9da5b0; font-size: 13px; margin-bottom: 8px; }
+/* The box's three homes (see wfActions): the prose, the presses that answer
+   it, and the run-management presses. Spacing is the containers' gap, not
+   per-element margins — that is what kept the old flow ragged. An empty home
+   must take no row, or its gap reads as a mystery blank. */
+.wf-act-msgs { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.wf-act-main, .wf-act-tools {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+}
+.wf-act-msgs:empty, .wf-act-main:empty, .wf-act-tools:empty { display: none; }
+.wf-actions p { margin: 0; }
+.wf-actions .wf-btn { margin: 0; }
+.wf-gate { font-size: 14px; }
+.wf-proposal { color: #9da5b0; font-size: 13px; }
 /* A background in the base class, not only in the modifiers: a .wf-btn with
    no modifier ("Set for this run", "Decide it myself", the pane's "Open the
    run page") otherwise wears the browser's own button face — near-white,
@@ -745,22 +759,24 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-btn.approve:hover { background: #2ea043; }
 .wf-btn.option { background: #1f6feb; }
 .wf-btn.option:hover { background: #388bfd; }
-.wf-btn.nudge { background: #30363d; color: #c6cdd5; margin-top: 8px; }
+.wf-btn.nudge { background: #30363d; color: #c6cdd5; }
 .wf-btn.nudge:hover { background: #3c444d; }
 .wf-btn.force { background: #7d4e11; margin-top: 10px; }
 .wf-btn.force:hover { background: #9e6214; }
 .wf-btn.force:disabled:hover { background: #7d4e11; }
 .wf-btn.clear { background: #30363d; color: #c6cdd5; padding: 3px 10px; font-size: 11px; }
 .wf-btn.clear:hover { background: #3c444d; }
-.wf-btn.archive { background: #6e2f36; margin-top: 8px; }
+.wf-btn.archive { background: #6e2f36; }
 .wf-btn.archive:hover { background: #8b3a44; }
 /* the loop's restart: cyan like the recur badge, because it is the loop
    continuing (from the top), not the loop ending — that one is archive-red */
-.wf-btn.skip { background: #0f5a68; margin-top: 8px; }
+.wf-btn.skip { background: #0f5a68; }
 .wf-btn.skip:hover { background: #14758a; }
 .wf-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .wf-btn:disabled:hover { background: #30363d; }
-.wf-actions .wf-note { margin-top: 8px; }
+/* the reminder form is the box's odd one out (a setting, not a press): its
+   own border-top separates it, the box gap already spaces it */
+.wf-actions .wf-reminder { margin-top: 0; }
 
 .wf-pending {
   margin: 14px 0; padding: 12px 16px; background: #1d1a12;
@@ -821,12 +837,17 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
    bar that will not yield eats the columns it is pinned above. */
 .wf-bar { flex: none; margin-top: 10px; }
 .wf-scroll-split .wf-bar { max-height: 40%; overflow-y: auto; }
+/* In the bar the box turns sideways: the prose keeps the full width above,
+   and under it the two button groups share one line — the presses that
+   answer the gate on the left, run management pushed to the right, so the
+   destructive chips stop sitting shoulder to shoulder with the decision. */
 .wf-bar .wf-actions {
-  margin: 0; padding: 8px 12px;
-  display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px;
+  margin: 0; padding: 10px 14px;
+  flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px 12px;
 }
-.wf-bar .wf-actions p { margin: 0; }
-.wf-bar .wf-actions .wf-btn { margin: 0; }
+.wf-bar .wf-act-msgs { flex: 1 1 100%; }
+.wf-bar .wf-act-main { flex: none; }
+.wf-bar .wf-act-tools { flex: none; margin-left: auto; }
 /* Natural size (the svg's own width/height attrs), shrunk-to-fit only:
    a wider column must not zoom the graph, so 100% became a ceiling. */
 .wfd { max-width: 100%; height: auto; display: block; }
