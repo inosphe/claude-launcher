@@ -117,6 +117,46 @@ def _t_hint() -> str:
     return f"; if the shell reports no run here, add '-t {scope}'"
 
 
+def _asking_well(lead: str) -> str:
+    """The closing every human-facing ``how_to_unblock`` shares.
+
+    A gate is a question put to a person, and their answer is only as good
+    as what they were handed to answer it with. "Present your recommendation
+    and wait" -- which is all this used to say -- reliably produced a one-line
+    demand to confirm: an option name, no evidence, no cost, nothing the
+    reader could weigh. So the requirement is spelled out here rather than
+    left to taste, and it lives *in the payload* because the payload is
+    re-delivered on every poll: an agent whose context was compacted between
+    reaching the gate and being nudged still reads it. The ``/cflow`` skill
+    text carries the same rule at more length, for the agent that still has
+    its briefing.
+
+    Asking well is not a courtesy here. The person at the gate is standing
+    there precisely because the run does not get to decide this one, and a
+    request that hides its weak half buys a confirmation that was never
+    really given.
+
+    Waiting counts as an answer, which is why the cost clause names it. A
+    gate that reads "the live server is serving pre-merge code -- restart
+    now?" is not missing politeness; it is missing what the reader is
+    actually weighing -- what a restart cuts, whether it can be undone, and
+    what piles up for as long as they leave it. Say those and the same
+    question becomes answerable.
+    """
+    return (
+        f"Stop your turn and put this to them as a request, not an "
+        f"instruction. {lead} Give what the decision actually rests on: the "
+        f"concrete evidence (commands run, test counts, commit hashes, files "
+        f"touched -- not adjectives); what each answer costs, holding off "
+        f"included -- what it does, what can be undone, and what piles up "
+        f"while the run waits; your recommendation, its reasoning, and what "
+        f"would overturn it; and the weakest part of your own case. Close "
+        f"with how to answer, and make clear any option is theirs to take, "
+        f"including one you did not recommend. Then wait to be nudged -- no "
+        f"urgency you invented, no asking again."
+    )
+
+
 def nudge_for_request(workflow: str) -> str:
     return (
         f"cflow: a start of workflow '{workflow}' was requested - call the "
@@ -518,8 +558,11 @@ def _ask_payload(base: dict, ask: dict) -> dict:
         payload["how_to_unblock"] = (
             f"a human must choose with 'claunch cflow select <option>' (inside "
             f"a chat session: '! claunch cflow select <option>'{_t_hint()}) or "
-            f"an option button on the daemon web dashboard. Stop your turn, "
-            f"present your recommendation and reasoning, and wait to be nudged."
+            f"an option button on the daemon web dashboard. "
+            + _asking_well(
+                "Name the decision in one line, then say which option you "
+                "recommend."
+            )
         )
     else:
         payload["status"] = "waiting_approval"
@@ -529,7 +572,10 @@ def _ask_payload(base: dict, ask: dict) -> dict:
             f"a human must approve: 'claunch cflow approve' (inside a chat "
             f"session: '! claunch cflow approve'{_t_hint()}) or the Approve "
             f"button on the daemon web dashboard; the agent cannot approve. "
-            f"Stop your turn, present your work so far, and wait to be nudged."
+            + _asking_well(
+                "Say plainly what you are asking them to approve, and show "
+                "the work it would be approved on."
+            )
         )
     if unresolved:
         payload["note"] = (
@@ -695,9 +741,12 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
             "how_to_unblock": (
                 f"a human must extend the loop limit: 'claunch cflow approve' "
                 f"(inside a chat session: '! claunch cflow approve'{_t_hint()}) "
-                f"or the Approve button on the daemon web dashboard. Stop your "
-                f"turn, explain why the loop keeps repeating, and wait to be "
-                f"nudged."
+                f"or the Approve button on the daemon web dashboard. "
+                + _asking_well(
+                    "Explain why the loop keeps repeating and what another "
+                    "pass would do differently -- whether anything will "
+                    "change is the thing they are actually weighing."
+                )
             ),
         }
         if mutate and state.get("gate_logged") != f"loop:{step.id}:{visit}":
@@ -726,9 +775,13 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
                 f"the workflow declares no route for a decline, so the run is "
                 f"held. A human decides what happens: 'claunch cflow approve' "
                 f"to override and enter anyway, or 'claunch cflow goto <step>' "
-                f"to send the run somewhere else{_t_hint()}. Stop your turn, "
-                f"relay the refusal and its reason to the user, and wait to be "
-                f"nudged."
+                f"to send the run somewhere else{_t_hint()}. "
+                + _asking_well(
+                    "Relay the refusal and its stated reason first, in the "
+                    "responder's own words and ahead of any answer of your "
+                    "own -- what is being weighed is whether to overrule a "
+                    "colleague who looked at this."
+                )
             ),
         }
 
@@ -743,8 +796,11 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
                 f"a human must approve: 'claunch cflow approve' (inside a chat "
                 f"session: '! claunch cflow approve'{_t_hint()}) or the "
                 f"Approve button on the daemon web dashboard; the agent "
-                f"cannot approve. Stop your turn, present your work so far, "
-                f"and wait to be nudged."
+                f"cannot approve. "
+                + _asking_well(
+                    "Say plainly what entering this step will do, and show "
+                    "the work the gate is standing in front of."
+                )
             ),
         }
         if mutate and state.get("gate_logged") != f"gate:{step.id}:{visit}":
@@ -831,8 +887,12 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
                     f"a human must confirm with 'claunch cflow select "
                     f"<option>' (inside a chat session: '! claunch cflow "
                     f"select <option>'{_t_hint()}) or an option button on the "
-                    f"daemon web dashboard. Stop your turn, present your "
-                    f"recommendation and reasoning, and wait to be nudged."
+                    f"daemon web dashboard. "
+                    + _asking_well(
+                        "Name the decision in one line, then say which option "
+                        "you recommend -- what you called is recorded as a "
+                        "proposal, not taken."
+                    )
                 ),
             }
         payload = {

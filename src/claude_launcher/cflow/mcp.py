@@ -128,7 +128,18 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "option": {"type": "string", "description": "one of the offered option names"},
-                "reason": {"type": "string", "description": "why (journaled)"},
+                "reason": {
+                    "type": "string",
+                    # Not a note to the file. On a user-chooser step this is
+                    # what the CLI and the dashboard show the person at the
+                    # moment they confirm, so it is read as the case for the
+                    # option -- 'seems right' asks them to ratify a decision
+                    # they were given no way to check.
+                    "description": (
+                        "why. Journaled, and shown to whoever confirms -- "
+                        "give the evidence, not an assertion"
+                    ),
+                },
             },
             "required": ["option"],
         },

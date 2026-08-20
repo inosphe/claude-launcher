@@ -65,19 +65,21 @@ workflow to be started here), that is the answer; otherwise list candidates
    - `select` with `chooser: agent` — decide per the prompt's criteria and
      call `select {option, reason}`.
    - `select` with `chooser: user`, or `waiting_selection` — call `select`
-     once to record your RECOMMENDATION with reasoning, then STOP your turn:
-     present the options and your pick, and tell the user to confirm with
-     `! claunch cflow select <option>` or from the daemon web dashboard
-     (they may pick a different one).
+     once to record your RECOMMENDATION with reasoning, then STOP your turn
+     and write the decision brief below. Ask them to confirm with `!
+     claunch cflow select <option>` or from the daemon web dashboard, and
+     say that any option is theirs to take — your call recorded a proposal,
+     it did not take the decision.
    - `waiting_approval` — a human gate (or the loop guard, when `reason` is
      `loop_limit`; or a delegated decision that reached a human, when it is
      `ask`, or that nobody refused but nobody could take, when the payload's
-     `ask.skipped` is non-empty). STOP your turn: present the work so far
-     (for a loop limit, explain why the loop keeps repeating; for an `ask`,
-     say who was meant to decide it and why they could not — that is what
-     `ask.skipped` is), and tell the user to approve with `! claunch cflow
-     approve` or the web dashboard's Approve button. You cannot approve and
-     must not simulate approval.
+     `ask.skipped` is non-empty). STOP your turn and write the decision
+     brief below — approve/hold are its two options. For a loop limit, the
+     brief must say why the loop keeps repeating and what another pass
+     would do differently; for an `ask`, who was meant to decide and why
+     they could not (that is what `ask.skipped` is). Then ask them to
+     approve with `! claunch cflow approve` or the web dashboard's Approve
+     button. You cannot approve and must not simulate approval.
    - `waiting_answer` — the workflow delegated this decision to another
      session, and `ask.asked` says who. STOP your turn: present what you
      have so far and say who is deciding. You cannot answer it — not with
@@ -90,9 +92,12 @@ workflow to be started here), that is the answer; otherwise list candidates
      would be false.
    - `waiting_approval` with `reason: declined` — a responder refused, and
      the workflow declared nowhere for a refusal to go. Relay the refusal
-     and its reason (`declined.by`, `declined.reason`) to the user and stop:
-     a human decides whether to override (`! claunch cflow approve`) or send
-     the run elsewhere (`! claunch cflow goto <step>`).
+     and its reason (`declined.by`, `declined.reason`) in the responder's
+     own words, ahead of any answer of your own, then write the decision
+     brief below and stop: a human decides whether to override (`! claunch
+     cflow approve`) or send the run elsewhere (`! claunch cflow goto
+     <step>`). They are being asked to overrule someone who looked at this,
+     so a brief that argues only your side is not enough to decide on.
    - `done` — report the run using the returned journal and finish. If the
      payload carries a `pending_start` filed `by: "recur"`, this workflow is
      a service loop: report this round's journal, then immediately start the
@@ -112,6 +117,48 @@ workflow to be started here), that is the answer; otherwise list candidates
    the chat). If a human request is clearly wrong, do NOT start it: say why
    and stop. A recur request is never wrong to fulfil — it is the loop the
    workflow declared. The request clears once you start.
+
+## Asking a person to decide
+
+Every stop above ends with a person being asked something. What you write
+there is the whole basis they have for answering — they did not watch you
+work, and the payload's own text is a stub. A one-line "I recommend X,
+confirm with `! claunch cflow select X`" is not a request; it asks them to
+ratify a decision you already made. Write a brief that could change their
+mind, and cover:
+
+- **The decision, in one line.** What is actually being chosen — not the
+  step id, not the workflow's phrasing repeated back.
+- **What it rests on.** Concrete evidence, checkable: commands run, tests,
+  commit hashes, files touched, the failure line. Not adjectives. If a
+  number is the reason, give the number.
+- **What each answer costs, holding off included.** What taking it does,
+  what it forecloses, which options can be undone later, and what piles up
+  for as long as the gate goes unanswered. Not deciding is one of the
+  answers available to them, and it has a price they cannot see from where
+  they stand — you can.
+- **Your recommendation, and what would overturn it.** Say which you would
+  take and why, then name the evidence that would flip you. A
+  recommendation with no such condition is a demand wearing a hedge.
+- **The weakest part of your own case.** What you could not check, what you
+  are guessing at, where the suite is thin. Hiding it buys a confirmation
+  that was never really given, and you are the only one positioned to see
+  it.
+- **How to answer, and that the answer is theirs.** The exact command or
+  button, plus the standing fact that they may take an option you did not
+  recommend, or ask you for more before deciding.
+
+A worked example of what this catches: "the live server is serving
+pre-merge code — restart now?" is a polite, clear, useless request. What
+the reader is weighing is none of it — whether a restart cuts the sessions
+attached right now, whether it can be undone, and what keeps accruing if
+they leave it. Politeness was never the missing part.
+
+Put it to them as a request, not an instruction. No manufactured deadline,
+no re-asking a gate that is already waiting, no "just confirm" — pressure
+applied to a decision that is not yours is how a run collects a rubber
+stamp instead of a judgment. Length is not the goal either: this is a
+brief, not a report. Say the deciding things and stop.
 
 ## A new task is a new run
 
