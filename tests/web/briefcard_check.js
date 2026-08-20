@@ -91,8 +91,12 @@ async function api(p) {
 const flush = () => new Promise((r) => setImmediate(r));  // let a fetch settle
 
 const ctx = {};
+/* The head also carries a context chip; that fact has its own harness
+   (ctxsize_check), so here it is stubbed out to keep this one about the
+   briefing. */
+const noChip = () => null;
 new Function(
-  "exports", "$", "document", "api",
+  "exports", "$", "document", "api", "ctxChip",
   [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
    slice("fetchBriefing"), slice("toggleBriefing"),
    slice("renderBriefingCard"), slice("applyBriefingCards")].join("\n") + `
@@ -100,7 +104,7 @@ const briefingOpen = new Set();
 const briefingCache = new Map();
 exports.apply = applyBriefingCards;
 `)(ctx, (id) => (id === "session-list" ? list : null),
-   { createElement: mkel }, api);
+   { createElement: mkel }, api, noChip);
 
 let failures = 0;
 function check(what, got, want) {

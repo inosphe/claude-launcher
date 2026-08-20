@@ -43,8 +43,11 @@ here that is not a poll and so has to repair itself deliberately,
 folds open, and which of the daemon's answers (a briefing, unshaped prose,
 no LLM, no record) it is showing — and the two
 ``flow*_check`` harnesses on the flow view — one on the track a workflow
-becomes, one on the page those tracks are drawn into. This wrapper is what
-makes them run with everything else.
+becomes, one on the page those tracks are drawn into — and ``ctxsize_check``
+on how full a session's conversation is said to be: a count with no
+percentage beside it, because no denominator exists to make one from, and an
+absence that must never be drawn as a zero. This wrapper is what makes them
+run with everything else.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
@@ -85,6 +88,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "briefcard_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
+        "ctxsize_check.js",
     ],
 )
 def test_topology_diagram_logic(script):

@@ -1,0 +1,124 @@
+/* The context reading, as the dashboard writes it, run against the real
+   functions from app.js.
+
+   The daemon hands each session a `context` block or nothing at all, and
+   everything here is the wording of that. Two rules are what these checks
+   exist for, because both are ways of lying with a true number:
+
+   - No percentage, ever. There is no denominator — nothing records a
+     session's context limit and it differs by model — so any figure that
+     reads as "x% full" would be invented. The model's name goes in its
+     place.
+   - "Not known" is not a number. A session that has said nothing yet, and a
+     harness that keeps no transcript, must not come out as 0 or as a blank
+     that looks like one.
+
+   And the rail row gets none of this in pixels: it goes in the tooltip,
+   because twenty rows needing a glance is the problem being solved and a
+   line per row would be a worse one. */
+const fs = require("fs");
+const path = require("path");
+const src = fs.readFileSync(
+  path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "static",
+            "app.js"),
+  "utf8"
+);
+
+function slice(name) {
+  const start = src.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error(`cannot locate ${name} in app.js`);
+  let depth = 0;
+  for (let j = src.indexOf("{", start); j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}") { depth--; if (!depth) return src.slice(start, j + 1); }
+  }
+  throw new Error(`unbalanced ${name}`);
+}
+
+const ctx = {};
+new Function(
+  "exports", "el", "sessionsCache",
+  ["fmtAge", "ctxShort", "ctxAgeOf", "ctxKnowable", "ctxSentence",
+   "ctxBreakdown", "ctxTooltip", "ctxChip"].map(slice).join("\n") + `
+exports.short = ctxShort;
+exports.sentence = ctxSentence;
+exports.tooltip = ctxTooltip;
+exports.chip = ctxChip;
+exports.setSessions = (s) => { sessionsCache = s; };
+`)(ctx,
+   (tag, cls, text) => ({ tag, className: cls || "", textContent: text ?? "",
+                          title: "" }),
+   []);
+
+let failures = 0;
+function check(what, got, want) {
+  const g = JSON.stringify(got), w = JSON.stringify(want);
+  if (g !== w) {
+    console.error(`FAIL ${what}\n  got  ${g}\n  want ${w}`);
+    failures++;
+  }
+}
+
+/* ---- the number itself ---- */
+check("under a thousand is written out", ctx.short(742), "742");
+check("a small count keeps a decimal so 1.2k and 1.9k differ",
+      [ctx.short(1200), ctx.short(9400)], ["1.2k", "9.4k"]);
+check("a large one is rounded — nobody compares the last 500 tokens",
+      [ctx.short(59088), ctx.short(154706)], ["59k", "155k"]);
+check("a missing count is not a small one", ctx.short(undefined), "?");
+
+/* ---- the sentence ---- */
+const AT = new Date(Date.now() - 185_000).toISOString();   // 3m ago
+const READING = {
+  tokens: 154706, input: 2, cache_read: 154073, cache_write: 631,
+  output: 210, model: "claude-opus-5", at: AT,
+};
+const LIVE = { name: "lead", harness: "claude", context: READING };
+const QUIET = { name: "quiet", harness: "claude" };        // nothing said yet
+const OTHER = { name: "pi", harness: "codex" };
+
+check("the count, the model, and how old the count is",
+      ctx.sentence(LIVE),
+      `context ${(154706).toLocaleString()} tokens · claude-opus-5 · as of 3m ago`);
+check("a session that has not answered yet says so, in words",
+      ctx.sentence(QUIET), "context not known yet — no completed turn to read");
+check("a harness that keeps no transcript says nothing at all",
+      ctx.sentence(OTHER), "");
+check("a reading with no timestamp still dates itself honestly",
+      ctx.sentence({ harness: "claude", context: { ...READING, at: null } })
+        .endsWith("as of its last turn"), true);
+
+/* ---- the tooltip: the sentence, plus how the number is made up ---- */
+const tip = ctx.tooltip(LIVE);
+check("the tooltip leads with the sentence", tip.split("\n")[0], ctx.sentence(LIVE));
+check("and breaks the input side down, since it is one number billed three ways",
+      ["fresh input", "replayed from cache", "written to cache", "answer"]
+        .every((k) => tip.includes(k)), true);
+check("...saying out loud why there is no percentage",
+      tip.includes("the context limit is not recorded anywhere"), true);
+check("no percentage is offered anywhere — there is no denominator to make one",
+      /%/.test(tip), false);
+check("an unknown session's tooltip is the sentence and nothing more",
+      ctx.tooltip(QUIET), "context not known yet — no completed turn to read");
+check("a harness with no transcript adds nothing to its row's tooltip",
+      ctx.tooltip(OTHER), "");
+
+/* ---- the chip on the briefing card's head ---- */
+ctx.setSessions([LIVE, QUIET, OTHER]);
+const lead = ctx.chip("lead");
+check("the chip is the count, short, and carries the full story on hover",
+      [lead.textContent, lead.className, lead.title === tip],
+      ["155k ctx", "sess-brief-ctx", true]);
+const quiet = ctx.chip("quiet");
+check("a session with no reading gets a marked absence, not a zero",
+      [quiet.textContent, quiet.className],
+      ["ctx ?", "sess-brief-ctx unknown"]);
+check("and a harness that never has one gets no chip",
+      ctx.chip("pi"), null);
+check("nor does a session the rail no longer knows", ctx.chip("gone"), null);
+
+if (failures) {
+  console.error(`${failures} check(s) failed`);
+  process.exit(1);
+}
+console.log("ctxsize_check: ok");

@@ -308,6 +308,11 @@ async function refreshSessions() {
     if (s.status === "exited") {
       li.title = [li.title, "exited — open it to resume"].filter(Boolean).join(" · ");
     }
+    // How full this session's context is, in the one place on a rail row that
+    // costs nothing to fill: the tooltip. Twenty rows is the question being
+    // answered, and a line per row would make the rail itself the problem.
+    const ctxNote = ctxTooltip(s);
+    if (ctxNote) li.title = [li.title, ctxNote].filter(Boolean).join("\n");
     // The row attaches — that is what the session is doing. This opens what
     // it *is* (definition, meshes, its cflow run) beside it, so the two are
     // not two places you have to travel between.
@@ -481,6 +486,105 @@ function applyCflowBadges() {
 }
 
 /* ------------------------------------------------------------------ */
+/* context size                                                       */
+/* ------------------------------------------------------------------ */
+/* How full each session's conversation is. The daemon reads it out of the
+   transcript the harness itself writes (see daemon/ctxsize.py) and hangs it
+   on the session as `context`, so everything here is formatting — no fetch
+   of its own, no second opinion about what the number means.
+
+   Two facts shape every string below:
+
+   * There is no percentage, because there is no denominator. Nothing records
+     the context limit and it differs by model — a claude-opus-5 session in
+     this fleet was measured at 286,674 tokens, so a hardcoded 200k would
+     already be a lie. The model's name is shown instead: it is what someone
+     who wants to judge "is that a lot" actually needs.
+   * The number is the last *completed* turn's, never this instant's, so its
+     age travels with it. An idle session's hour-old reading is exactly
+     right; a busy one's is a floor.
+
+   And where there is no number there is no number: "not known", never 0. */
+
+function ctxShort(n) {
+  if (!Number.isFinite(n) || n < 0) return "?";
+  if (n < 1000) return String(n);
+  const k = n / 1000;
+  return (k < 10 ? k.toFixed(1) : String(Math.round(k))) + "k";
+}
+
+function ctxAgeOf(iso) {
+  const t = Date.parse(iso || "");
+  return Number.isFinite(t)
+    ? fmtAge(Math.max(0, Math.floor((Date.now() - t) / 1000)))
+    : "";
+}
+
+/* Whether this session is one that *could* have a reading. Only claude keeps
+   the transcript this is read from, so on any other harness the absence is
+   not news to report — the row says nothing rather than "unknown", which
+   would read as something having gone wrong. */
+function ctxKnowable(s) {
+  return !!s && (s.harness || "claude") === "claude";
+}
+
+/* The whole sentence, for a tooltip or a details row. Empty where there is
+   nothing to say at all. */
+function ctxSentence(s) {
+  const c = s && s.context;
+  if (!c) {
+    return ctxKnowable(s)
+      ? "context not known yet — no completed turn to read"
+      : "";
+  }
+  const parts = [`context ${c.tokens.toLocaleString()} tokens`];
+  if (c.model) parts.push(c.model);
+  const age = ctxAgeOf(c.at);
+  parts.push(age ? `as of ${age} ago` : "as of its last turn");
+  return parts.join(" · ");
+}
+
+/* The breakdown, for the tooltip under the sentence. The three input numbers
+   are one number split by how it was billed, not three different things —
+   said here so nobody reads "cache read 154k" as an aside to a small
+   "input 2". */
+function ctxBreakdown(c) {
+  if (!c) return "";
+  return [
+    `fresh input ${c.input.toLocaleString()}`,
+    `replayed from cache ${c.cache_read.toLocaleString()}`,
+    `written to cache ${c.cache_write.toLocaleString()}`,
+    `answer ${c.output.toLocaleString()}`,
+    "no percentage: the context limit is not recorded anywhere and " +
+      "differs by model",
+  ].join("\n");
+}
+
+/* What the rail row adds to its tooltip. The row itself gets no new pixels:
+   twenty rows are the problem this answers, and a second line on each of
+   them would be a different, worse one. */
+function ctxTooltip(s) {
+  const sentence = ctxSentence(s);
+  if (!sentence) return "";
+  const c = s && s.context;
+  return c ? `${sentence}\n${ctxBreakdown(c)}` : sentence;
+}
+
+/* The chip on an open briefing card's head — the same fact, in the one place
+   that already has room for it. */
+function ctxChip(name) {
+  const s = sessionsCache.find((x) => x.name === name);
+  if (!ctxKnowable(s)) return null;
+  const c = s && s.context;
+  const chip = el(
+    "span", "sess-brief-ctx" + (c ? "" : " unknown"),
+    c ? `${ctxShort(c.tokens)} ctx` : "ctx ?"
+  );
+  chip.title = ctxTooltip(s);
+  return chip;
+}
+
+/* ------------------------------------------------------------------ */
 /* session briefing card                                              */
 /* ------------------------------------------------------------------ */
 /* A row can fold open a card summarising what its session is up to: the
@@ -563,6 +667,10 @@ function renderBriefingCard(name, entry) {
       `${fmtAge(secs)} ago${data.cached ? " · cached" : ""}`
     ));
   }
+  // The card is the row's "what is this session doing"; how much room it has
+  // left to keep doing it belongs on the same line.
+  const chip = ctxChip(name);
+  if (chip) head.appendChild(chip);
   const refresh = el("button", `sess-brief-refresh${loading ? " spinning" : ""}`, "⟳");
   refresh.type = "button";
   refresh.title = "re-summarise now";
@@ -4211,6 +4319,9 @@ function renderSession(data) {
     s.cwd
   );
   metaRow(dl, "conversation", s.conversation_id, "claude --session-id");
+  // Under the conversation, because it is a fact about the conversation and
+  // not about the process: how much of it the harness last carried.
+  metaRow(dl, "context", ctxSentence(s), ctxBreakdown(s.context));
   if (s.resume !== null && s.resume !== undefined) {
     metaRow(
       dl, "opened",
