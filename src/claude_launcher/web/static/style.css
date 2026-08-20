@@ -77,6 +77,72 @@ body {
 /* Blocked on the person reading this — the amber that means "your move". */
 #session-list .sess-cflow.gated { color: #d29922; font-weight: 600; }
 
+/* The briefing card a row folds open. Its pieces are appended after the
+   row's inline children, so flex `order` (not DOM order) lines them up:
+   toggle at the end of the name line, then the cflow line, then the card —
+   the wrap algorithm runs after ordering, so each still breaks where its
+   flex-basis says. */
+#session-list .sess-brief-toggle {
+  flex: none; order: 1; background: none; border: none; color: #6e7681;
+  font-size: 11px; line-height: 1; padding: 2px 4px; cursor: pointer;
+}
+#session-list .sess-brief-toggle:hover { color: #58a6ff; }
+#session-list .sess-cflow { order: 2; }
+#session-list .sess-brief {
+  flex-basis: 100%; order: 3; min-width: 0; margin: 6px 0 2px;
+  padding: 8px 10px; background: #1b1e24; border: 1px solid #2a2e36;
+  border-radius: 6px; font-size: 12px; color: #c6cdd5; cursor: default;
+  font-weight: 400;
+}
+/* a refresh in flight: the old text stays readable underneath, dimmed */
+#session-list .sess-brief.refreshing { opacity: 0.6; }
+.sess-brief-head { display: flex; align-items: center; gap: 8px; }
+.sess-brief-head + * { margin-top: 6px; }
+.sess-brief-state {
+  flex: none; font-size: 10px; padding: 1px 7px; border-radius: 9px;
+  text-transform: uppercase; letter-spacing: 0.04em;
+}
+/* working/idle/done are wallpaper; blocked and waiting are the two that may
+   be waiting on the reader, so they get the loud treatment. */
+.sess-brief-state.st-working { background: #172947; color: #58a6ff; }
+.sess-brief-state.st-blocked {
+  background: #3d1a1a; color: #f85149; border: 1px solid #6e2c2c;
+  font-weight: 700;
+}
+.sess-brief-state.st-waiting {
+  background: #2d2308; color: #d29922; border: 1px solid #4d3c10;
+  font-weight: 700;
+}
+.sess-brief-state.st-idle { background: #191d24; color: #6e7681; }
+.sess-brief-state.st-done { background: #12261e; color: #3fb950; }
+.sess-brief-state.st-other { background: #191d24; color: #7d8590; }
+.sess-brief-age { color: #7d8590; font-size: 11px; }
+.sess-brief-refresh {
+  margin-left: auto; flex: none; background: none; border: none;
+  color: #6e7681; font-size: 13px; line-height: 1; padding: 0 2px;
+  cursor: pointer;
+}
+.sess-brief-refresh:hover { color: #58a6ff; }
+.sess-brief-refresh.spinning {
+  color: #58a6ff; animation: spin 0.7s linear infinite; cursor: default;
+}
+.sess-brief-row { display: flex; gap: 8px; margin: 3px 0; }
+.sess-brief-k {
+  flex: none; width: 52px; color: #7d8590; font-size: 10px;
+  text-transform: uppercase; letter-spacing: 0.04em; padding-top: 2px;
+}
+.sess-brief-v {
+  min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+.sess-brief-raw {
+  white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px;
+  overflow-y: auto; font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 11px; line-height: 1.5; color: #8b949e;
+}
+.sess-brief-note { color: #7d8590; }
+.sess-brief-note.error { color: #f85149; }
+
 /* Everything that acts on the rail as a whole. It wraps rather than
    scrolling: the rail is narrow, the labels carry counts, and a button that
    ran off the edge would be a bulk action nobody could see they had. */
