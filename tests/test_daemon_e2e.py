@@ -649,10 +649,12 @@ def test_api_cflow_request_can_be_withdrawn(home, tmp_path, monkeypatch):
     asyncio.run(run())
 
 
-def test_api_cflow_reset_restarts_the_loop(home, tmp_path, monkeypatch):
-    """/api/cflow/reset retires the slot's run and re-requests the same
-    workflow (same source file, same context) from round 1 — the dashboard's
-    one-press reset for a ``recur: true`` loop, mid-round or between rounds."""
+def test_api_cflow_skip_advances_the_loop(home, tmp_path, monkeypatch):
+    """/api/cflow/skip cuts the ACTIVE round short: the run is archived and
+    the same workflow (same source file, same context) is requested again at
+    round + 1 — the count keeps climbing, it never rewinds. A finished round
+    has already filed its own next-round request, so there is nothing to
+    skip between rounds."""
     monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     _register_py_harness()
     from aiohttp.test_utils import TestClient, TestServer
@@ -667,13 +669,6 @@ def test_api_cflow_reset_restarts_the_loop(home, tmp_path, monkeypatch):
     st = cflow_engine.status(cwd=str(tmp_path), scope="s1")
     assert st["recur"] is True  # status says the run loops
 
-    # finishing the round files the loop's own request for round 2
-    cflow_engine.report("served", "evidence", cwd=str(tmp_path), scope="s1")
-    assert cflow_engine.next_step(cwd=str(tmp_path), scope="s1")["status"] == "done"
-    st = cflow_engine.status(cwd=str(tmp_path), scope="s1")
-    assert st["pending_start"]["by"] == "recur"
-    assert st["pending_start"]["round"] == 2
-
     async def run():
         mgr = _manager()
         app = build_app(mgr, "sekrit", started_at=time.monotonic())
@@ -682,38 +677,48 @@ def test_api_cflow_reset_restarts_the_loop(home, tmp_path, monkeypatch):
         try:
             bearer = {"Authorization": "Bearer sekrit"}
             body = {"cwd": str(tmp_path), "scope": "s1"}
-            resp = await client.post("/api/cflow/reset", json=body, headers=bearer)
+
+            # mid-round: the active round-1 run is archived, round 2 requested
+            resp = await client.post("/api/cflow/skip", json=body, headers=bearer)
             assert resp.status == 200
             doc = await resp.json()
             assert doc["status"] == "start_requested"
             req = doc["request"]
-            assert req["by"] == "web-reset"
+            assert req["by"] == "web-skip"
             assert req["name"] == "loop"
             assert req["context"] == "serve"
-            assert "round" not in req  # round 1 again, not round 3
+            assert req["round"] == 2  # the count climbed, it did not rewind
 
-            # the finished run was archived; the fresh request holds the slot
+            # the cut-short run was archived; the request holds the slot
             st2 = cflow_engine.status(cwd=str(tmp_path), scope="s1")
             assert st2["status"] == "idle"
             assert st2["pending_start"]["id"] == req["id"]
 
-            # fulfilling it starts round 1 (a round-1 run reports no 'round')
+            # fulfilling the skip's request joins the loop at round 2
             started = cflow_engine.start(
                 req["workflow"], context=req["context"],
                 cwd=str(tmp_path), scope="s1",
             )
-            assert "round" not in started
+            assert started["round"] == 2
 
-            # mid-round reset: the ACTIVE run is aborted+archived the same way
-            resp = await client.post("/api/cflow/reset", json=body, headers=bearer)
-            assert resp.status == 200
+            # a finished round already filed its own next-round request —
+            # skipping is refused and that request is left standing
+            cflow_engine.report("served", "evidence", cwd=str(tmp_path), scope="s1")
+            assert cflow_engine.next_step(cwd=str(tmp_path), scope="s1")["status"] == "done"
             st3 = cflow_engine.status(cwd=str(tmp_path), scope="s1")
-            assert st3["status"] == "idle"
-            assert st3["pending_start"]["by"] == "web-reset"
+            assert st3["pending_start"]["by"] == "recur"
+            assert st3["pending_start"]["round"] == 3
+            resp = await client.post("/api/cflow/skip", json=body, headers=bearer)
+            assert resp.status == 400
+            st4 = cflow_engine.status(cwd=str(tmp_path), scope="s1")
+            assert st4["pending_start"]["round"] == 3
 
-            # an empty slot has nothing to reset
+            # a finished run with no request, and an empty slot: nothing to skip
             cflow_engine.cancel_request(cwd=str(tmp_path), scope="s1")
-            resp = await client.post("/api/cflow/reset", json=body, headers=bearer)
+            resp = await client.post("/api/cflow/skip", json=body, headers=bearer)
+            assert resp.status == 400
+            cflow_engine.archive(by="test", cwd=str(tmp_path), scope="s1")
+            resp = await client.post("/api/cflow/skip", json=body, headers=bearer)
             assert resp.status == 400
         finally:
             await mgr.shutdown_all()

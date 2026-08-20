@@ -247,17 +247,20 @@ const jnl = walk(body).filter((k) => k.classes.has("wf-journal-line"));
 check("the journal is capped too", jnl.length === CAPS.SESS_RUN_JOURNAL, jnl.length);
 
 /* ---- recur: the loop's own controls ---- */
-check("a non-recurring run offers no reset", !has(page, "reset"));
+check("a non-recurring run offers no skip", !has(page, "skip"));
 const LOOP = { ...DATA, run: { ...RUN, recur: true, round: 3, workflow: "ecs-change" } };
 const acts = ctx.wfActions(LOOP);
-const rst = walk(acts).find((k) => k.classes.has("reset"));
-check("a recurring run offers Reset loop", !!rst);
-check("...saying it goes back to round 1",
-      rst && rst.text.includes("round 3 → 1"), rst && rst.text);
-if (rst) rst.fire("click");
-const rp = ctx.posted().find((p) => p.path === "/api/cflow/reset");
-check("pressing it posts the reset for this slot",
-      rp && rp.body.cwd === DATA.cwd && rp.body.scope === "coder3", rp);
+const skp = walk(acts).find((k) => k.classes.has("skip"));
+check("a live recurring run offers Skip round", !!skp);
+check("...saying the count keeps climbing, never rewinding",
+      skp && skp.text.includes("round (3 → 4)"), skp && skp.text);
+if (skp) skp.fire("click");
+const sp = ctx.posted().find((p) => p.path === "/api/cflow/skip");
+check("pressing it posts the skip for this slot",
+      sp && sp.body.cwd === DATA.cwd && sp.body.scope === "coder3", sp);
+const DONE = { ...DATA, run: { ...RUN, recur: true, round: 3, status: "done" } };
+check("a finished round offers no skip — its next round is already filed",
+      !has(ctx.wfActions(DONE), "skip"));
 
 /* the request a finished round files for its own next round reads as the
    loop looping, and its cancel is the loop's off switch */

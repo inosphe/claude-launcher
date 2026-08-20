@@ -2712,7 +2712,7 @@ function renderWfInto(view, data, ui) {
     const loop = el("span", "badge wf-recur",
       run.round ? `recurring · round ${run.round}` : "recurring");
     loop.title = "recur: true — each finished round requests the next; " +
-      "only a human ends the loop (withdraw the request, Reset, or archive)";
+      "only a human ends the loop (withdraw the request, or archive)";
     head.appendChild(loop);
   }
   if (ui.fullLink) head.appendChild(wfFullLink(data));
@@ -2984,28 +2984,30 @@ function wfActions(data, opts = {}) {
     box.appendChild(reminderControl(data, after, opts.host));
   }
 
-  // The loop's reset. A recurring run's rounds only count upward; this is
-  // the one press back to round 1: archive the current run, request the
-  // same workflow (same context) again, nudge the session. Offered in the
-  // session fold too — unlike archive it does not end anything, it is how
-  // the loop keeps going, from the top.
-  if (run.recur || (data.workflow || {}).recur) {
-    const rst = el("button", "wf-btn reset",
-      run.round ? `Reset loop (round ${run.round} → 1)` : "Reset loop");
-    rst.title = "archive this run and request the same workflow again " +
-      "from round 1 — the loop restarts from the top";
-    rst.addEventListener("click", () => {
-      const active = run.status !== "done" && run.status !== "aborted";
+  // Skipping a round. A recurring run's rounds only count upward — a normal
+  // finish files the request for round N+1 by itself; this is the forced
+  // version mid-round: archive the run as it stands, request the same
+  // workflow (same context) at round N+1, nudge the session. Offered in the
+  // session fold too — unlike archive it does not end the loop, it moves it
+  // along. Only while the round is live: a finished one has already filed
+  // its own next-round request, and there is nothing left to cut short.
+  const live = run.status !== "done" && run.status !== "aborted";
+  if (live && (run.recur || (data.workflow || {}).recur)) {
+    const r = Number(run.round) || 1;
+    const skp = el("button", "wf-btn skip", `Skip round (${r} → ${r + 1})`);
+    skp.title = "archive this round as it stands and request the same " +
+      `workflow again as round ${r + 1} — the loop moves on early`;
+    skp.addEventListener("click", () => {
       const q =
-        (active ? "This round is still ACTIVE.\n\n" : "") +
-        `Reset the '${run.workflow || "workflow"}' loop?\n\nThe current run ` +
-        "is archived and the same workflow (same context) is requested " +
-        "again from round 1. The session is nudged to start it.";
+        `Skip round ${r} of the '${run.workflow || "workflow"}' loop?\n\n` +
+        "The round is cut short: the current run is archived and the same " +
+        `workflow (same context) is requested again as round ${r + 1}. ` +
+        "The session is nudged to start it.";
       if (confirm(q)) {
-        cflowAction("/api/cflow/reset", { cwd: data.cwd, scope: data.scope }, after);
+        cflowAction("/api/cflow/skip", { cwd: data.cwd, scope: data.scope }, after);
       }
     });
-    box.appendChild(rst);
+    box.appendChild(skp);
   }
 
   if (opts.archive === false) return box;

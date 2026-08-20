@@ -608,8 +608,8 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-btn.archive:hover { background: #8b3a44; }
 /* the loop's restart: cyan like the recur badge, because it is the loop
    continuing (from the top), not the loop ending — that one is archive-red */
-.wf-btn.reset { background: #0f5a68; margin-top: 8px; }
-.wf-btn.reset:hover { background: #14758a; }
+.wf-btn.skip { background: #0f5a68; margin-top: 8px; }
+.wf-btn.skip:hover { background: #14758a; }
 .wf-btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .wf-btn:disabled:hover { background: #30363d; }
 .wf-actions .wf-note { margin-top: 8px; }

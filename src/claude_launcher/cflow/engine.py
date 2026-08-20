@@ -1056,11 +1056,12 @@ def start(
         pending.get("workflow") == workflow_ref
         or pending.get("resolved") == str(path)
     )
-    # Fulfilling a recurring run's own request carries its round count into
-    # the new run; every other start — a human's request, a fresh loop, a
-    # non-recurring workflow — is round 1 again.
+    # Fulfilling a request that carries a round count — a recurring run's own
+    # next-round request, or the dashboard's skip — carries it into the new
+    # run; every other start (a human's request, a fresh loop, a
+    # non-recurring workflow) is round 1 again.
     round_no = 1
-    if fulfilled and pending.get("by") == "recur":
+    if fulfilled:
         try:
             round_no = max(1, int(pending.get("round") or 1))
         except (TypeError, ValueError):
@@ -1149,6 +1150,7 @@ def request_start(
     context: Optional[str] = None,
     *,
     by: str = "web",
+    round_no: Optional[int] = None,
     cwd: Optional[str] = None,
 ) -> dict:
     """Ask this slot's agent to start ``workflow_ref`` — the human side of a
@@ -1183,6 +1185,10 @@ def request_start(
         "resolved": str(path),
         "context": (context or "").strip(),
         "by": by,
+        # A round count on a request is a claim of continuity: the start that
+        # fulfils it joins the loop at this round instead of opening round 1.
+        # Filed by the dashboard's skip; a plain human request never has one.
+        **({"round": int(round_no)} if round_no and int(round_no) > 1 else {}),
         "at": state_mod.utcnow(),
     }
     state_mod.write_request(request, cwd)

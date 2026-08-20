@@ -172,7 +172,7 @@ def build_app(
     r.add_post("/api/cflow/start", h_cflow_start)
     r.add_post("/api/cflow/request", h_cflow_request)
     r.add_post("/api/cflow/request/cancel", h_cflow_request_cancel)
-    r.add_post("/api/cflow/reset", h_cflow_reset)
+    r.add_post("/api/cflow/skip", h_cflow_skip)
     r.add_post("/api/cflow/archive", h_cflow_archive)
     r.add_post("/api/cflow/approve", h_cflow_approve)
     r.add_post("/api/cflow/select", h_cflow_select)
@@ -808,38 +808,45 @@ async def h_cflow_start(request: web.Request) -> web.Response:
     return web.json_response(payload)
 
 
-async def h_cflow_reset(request: web.Request) -> web.Response:
-    """Reset the slot's workflow loop: retire the current run and file a
-    fresh start request for the same workflow and context — round 1 again.
+async def h_cflow_skip(request: web.Request) -> web.Response:
+    """Skip the rest of the current round: retire the active run and file the
+    start request for the same workflow and context at round + 1.
 
-    One press for what is otherwise archive-then-request, offered because a
-    ``recur: true`` workflow's rounds only ever count upward and "start the
-    loop over" is a thing a human watching one actually wants. Deliberately
-    the *request* path, not a direct start: the agent still performs the
-    start itself, so the run it drives is one it has read (see
-    ``h_cflow_request``). The source and context come from the run itself —
-    or, in the window where a round finished and only its next-round request
-    is left, from that request — so the file that was looping is the file
-    that loops again, whatever its name resolves to today.
+    The forced version of what a ``recur: true`` run does by itself at a
+    normal finish — the round count keeps climbing, so the loop's history
+    still reads as "this is its Nth entry", and the ``web-skip`` marker on
+    the archive and the request records that this round was cut short, not
+    completed. Deliberately the *request* path, not a direct start: the agent
+    still performs the start itself, so the run it drives is one it has read
+    (see ``h_cflow_request``). Only an ACTIVE round can be skipped — once a
+    round finished, its own next-round request is already on file and there
+    is nothing left to cut short.
     """
     resolved, err = await _cflow_action_cwd(request)
     if err:
         return err
     cwd, scope, _ = resolved
     current = cflow_engine.status(cwd, scope=scope)
-    pending = current.get("pending_start") or {}
-    source = str(current.get("source") or pending.get("resolved") or "")
-    context = str(current.get("context") or pending.get("context") or "") or None
+    if current.get("status") in ("idle", "done", "aborted"):
+        pending = current.get("pending_start") or {}
+        if pending.get("by") == "recur":
+            return json_error(
+                400,
+                "nothing to skip: this round already finished and its own "
+                "next-round request is on file",
+            )
+        return json_error(400, "nothing to skip: no active round here")
+    source = str(current.get("source") or "")
     if not source:
         return json_error(
-            400,
-            "nothing to reset here: no run with a recorded source file "
-            "and no pending start request",
+            400, "nothing to skip: this run has no recorded source file"
         )
-    if current.get("status") != "idle":
-        cflow_engine.archive(by="web-reset", cwd=cwd, scope=scope)
+    context = str(current.get("context") or "") or None
+    round_next = int(current.get("round") or 1) + 1
+    cflow_engine.archive(by="web-skip", cwd=cwd, scope=scope)
     payload = cflow_engine.request_start(
-        source, context=context, by="web-reset", cwd=cwd, scope=scope
+        source, context=context, by="web-skip", round_no=round_next,
+        cwd=cwd, scope=scope,
     )
     name = (payload.get("request") or {}).get("name") or source
     payload["nudged_sessions"] = await _nudge_sessions(
