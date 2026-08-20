@@ -75,6 +75,37 @@ def unset_env(profile: Profile, keys: Iterable[str]) -> Dict[str, str]:
     return env
 
 
+def merge_permission_deny(path: Path, rules: Iterable[str]) -> bool:
+    """Append ``rules`` to a Claude Code settings file's ``permissions.deny``.
+
+    Creates the file (and parents) when missing; returns True when the file
+    changed. Only ever appends what is absent — the user's own permission
+    edits (allow lists included) survive a reinstall untouched. A settings
+    file whose ``permissions``/``deny`` is some other shape is left alone
+    rather than repaired: it is the user's file, and a guard is not worth
+    clobbering whatever they meant.
+    """
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, json.JSONDecodeError):
+        doc = {}
+    if not isinstance(doc, dict):
+        doc = {}
+    perms = doc.setdefault("permissions", {})
+    if not isinstance(perms, dict):
+        return False
+    deny = perms.setdefault("deny", [])
+    if not isinstance(deny, list):
+        return False
+    missing = [rule for rule in rules if rule not in deny]
+    if not missing:
+        return False
+    deny.extend(missing)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
 CLAUDE_JSON = ".claude.json"
 
 
