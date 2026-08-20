@@ -473,7 +473,7 @@ async function renderReminderDefaults() {
   iv.min = "30";
   iv.step = "10";
   iv.className = "pol-num";
-  iv.value = String(Math.round(defs.interval || 180));
+  iv.value = String(Math.round(defs.interval || 300));
   row.appendChild(iv);
   row.appendChild(el("span", "pol-label", "s without progress"));
   const save = el("button", "wf-btn", "Save defaults");
@@ -3157,7 +3157,7 @@ function reminderControl(data, after, host = "page") {
   const effOn = override && "enabled" in override
     ? !!override.enabled : !!defs.enabled;
   const effIv = override && "interval" in override
-    ? override.interval : (defs.interval || 180);
+    ? override.interval : (defs.interval || 300);
 
   const head = el("label", "wf-reminder-head");
   const on = document.createElement("input");
