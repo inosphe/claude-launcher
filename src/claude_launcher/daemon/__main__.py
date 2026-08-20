@@ -13,6 +13,7 @@ import logging
 import os
 import sys
 import time
+from typing import Optional
 
 from aiohttp import web
 
@@ -46,7 +47,7 @@ def _setup_logging(foreground: bool) -> None:
     )
 
 
-async def _serve(host: str, port: int, cfg: dict) -> int:
+async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) -> int:
     manager = SessionManager(
         idle_threshold=float(cfg["idle_threshold"]),
         scrollback=int(cfg["scrollback_lines"]),
@@ -109,6 +110,8 @@ async def _serve(host: str, port: int, cfg: dict) -> int:
     if server is not None and server.sockets:
         actual_port = server.sockets[0].getsockname()[1]
     runtime_state.write_daemon_json(host, actual_port)
+    if bound is not None:
+        bound["port"] = actual_port
     log.info("listening on http://%s:%s", host, actual_port)
 
     uplink, uplink_task = _start_uplink(actual_port)
@@ -269,17 +272,37 @@ def main(argv=None) -> int:
         # (their daemon.json is the discovery channel) unless one is pinned.
         port = int(os.environ.get("CLAUNCH_DAEMON_PORT") or 0)
         log.info("daemon instance %r (state: %s)", paths.instance(), paths.daemon_dir())
+    bound: dict = {}
     try:
-        code = asyncio.run(_serve(host, port, cfg))
+        code = asyncio.run(_serve(host, port, cfg, bound))
     except KeyboardInterrupt:
         code = 0
     finally:
         lock.release()
     if code == RESTART_CODE:
+        _keep_address(bound.get("port"))
         log.info("spawning successor daemon")
         daemon_client.spawn_daemon()
         return 0
     return code
+
+
+def _keep_address(actual_port: Optional[int]) -> None:
+    """Pin the successor to the port this daemon was serving on.
+
+    Only named instances need it, and only they are affected: the default
+    daemon's port is fixed in the config, so its successor rebinds the same
+    one anyway, while an instance binds an ephemeral port and would come
+    back somewhere else. That matters because the thing most likely to have
+    asked for the restart is a browser on this address — a successor that
+    moves is one the page cannot follow. An explicitly pinned port
+    (``CLAUNCH_DAEMON_PORT`` already set) is left exactly as it is.
+    """
+    if not actual_port or not paths.instance():
+        return
+    if os.environ.get("CLAUNCH_DAEMON_PORT"):
+        return
+    os.environ["CLAUNCH_DAEMON_PORT"] = str(actual_port)
 
 
 if __name__ == "__main__":

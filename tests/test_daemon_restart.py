@@ -14,9 +14,11 @@ window.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 
 from claude_launcher.daemon import __main__ as daemon_main
+from claude_launcher.daemon import paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.manager import SessionManager
 
@@ -99,7 +101,7 @@ def test_a_plain_shutdown_carries_no_restart_intent(home):
 # --------------------------------------------------------------------------- #
 # the handoff: main() spawns the successor, and only for a restart
 # --------------------------------------------------------------------------- #
-def _drive_main(monkeypatch, code: int) -> list:
+def _drive_main(monkeypatch, code: int, *, bound_port: int = 0) -> list:
     """Run ``main`` over a stubbed serve loop, recording successor spawns.
 
     Logging is stubbed out along with it: ``main`` would otherwise attach a
@@ -109,7 +111,9 @@ def _drive_main(monkeypatch, code: int) -> list:
     """
     spawned = []
 
-    async def fake_serve(host, port, cfg):
+    async def fake_serve(host, port, cfg, bound=None):
+        if bound is not None and bound_port:
+            bound["port"] = bound_port
         return code
 
     monkeypatch.setattr(daemon_main, "_setup_logging", lambda foreground: None)
@@ -127,3 +131,34 @@ def test_a_restart_exit_spawns_the_successor(home, monkeypatch):
 
 def test_a_plain_exit_spawns_nothing(home, monkeypatch):
     assert _drive_main(monkeypatch, 0) == []
+
+
+# --------------------------------------------------------------------------- #
+# the address: a restart the browser can follow
+# --------------------------------------------------------------------------- #
+def test_a_named_instance_hands_its_port_to_the_successor(home, monkeypatch):
+    """An instance binds an ephemeral port, so nothing but this would put the
+    successor back on the address the page that asked for the restart is on."""
+    monkeypatch.setenv(paths.INSTANCE_ENV, "inst")
+    monkeypatch.delenv("CLAUNCH_DAEMON_PORT", raising=False)
+
+    assert _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671)
+    assert os.environ["CLAUNCH_DAEMON_PORT"] == "45671"
+
+
+def test_a_pinned_port_is_left_alone(home, monkeypatch):
+    monkeypatch.setenv(paths.INSTANCE_ENV, "inst")
+    monkeypatch.setenv("CLAUNCH_DAEMON_PORT", "9999")
+
+    assert _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671)
+    assert os.environ["CLAUNCH_DAEMON_PORT"] == "9999"
+
+
+def test_the_default_daemon_pins_nothing(home, monkeypatch):
+    """Its port is fixed in the config; the successor rebinds it by itself,
+    and an env pin would outlive a later config edit."""
+    monkeypatch.delenv(paths.INSTANCE_ENV, raising=False)
+    monkeypatch.delenv("CLAUNCH_DAEMON_PORT", raising=False)
+
+    assert _drive_main(monkeypatch, daemon_main.RESTART_CODE, bound_port=45671)
+    assert "CLAUNCH_DAEMON_PORT" not in os.environ
