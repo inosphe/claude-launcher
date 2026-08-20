@@ -479,15 +479,19 @@ async function refreshCflow() {
 
     if (r.step_id) {
       const visit = r.visit > 1 ? ` · visit ${r.visit}` : "";
+      const round = r.round ? ` · round ${r.round}` : r.recur ? " · recurs" : "";
       li.appendChild(cflowLine(
-        `step: ${r.title || r.step_id}${visit} · ${r.steps_completed ?? 0} done`
+        `step: ${r.title || r.step_id}${visit}${round} · ${r.steps_completed ?? 0} done`
       ));
     }
     // A slot with no run but a request filed against it is listed too — that
     // waiting period is exactly when a human wants to see something.
     if (r.pending_start) {
       li.appendChild(cflowLine(
-        `start requested: ${r.pending_start.name || r.pending_start.workflow}`,
+        r.pending_start.by === "recur"
+          ? `recurs — next round requested` +
+            (r.pending_start.round ? ` (round ${r.pending_start.round})` : "")
+          : `start requested: ${r.pending_start.name || r.pending_start.workflow}`,
         "report"
       ));
     }
@@ -1259,6 +1263,10 @@ function handleFrame(msg) {
    nothing to hold them for, and a buffer that fills over a lunch break and
    then fires into a live shell is far worse than a lost keystroke. */
 function sendInput(data) {
+  // Every keystroke aimed at this terminal, whether it reaches the daemon or
+  // waits in linkQueue: the queued-deliveries banner uses this to tell "YOUR
+  // typing is holding delivery" apart from some other viewer's keyboard.
+  lastLocalKey = Date.now();
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(linkEncoder.encode(data));
     return;
@@ -1367,6 +1375,128 @@ function detach() {
 
 $("term-link").addEventListener("click", () => reconnectNow(true));
 $("m-link").addEventListener("click", () => $("term-link").click());
+
+/* ---- queued deliveries ----
+   Mesh messages are not typed into a terminal the moment they are sent: the
+   daemon holds them while the agent is mid-turn — and, less obviously, while
+   a KEYBOARD is active on the session, because a paste landing in a human's
+   thinking pause submits their half-typed line with the message folded in.
+   Which means the operator most often blocks their own message: they send it
+   from the panel, stare at the terminal, touch a key — and the touching is
+   the hold. Nothing on screen said so; this banner is that missing sentence.
+
+   It sits between the header and the terminal, amber like the busy badge,
+   and folds open to show the actual backlog (from/via/how long, and the
+   text) so "did it take my message?" never needs the CLI. Fed by its own
+   lightweight endpoint on the same 2s poll as everything else; a daemon too
+   old to have the route just never shows it. */
+let lastLocalKey = 0;   // when THIS tab last typed into the attached terminal
+let tqOpen = false;     // the banner's fold; survives every repaint
+
+/* Could the keyboard the daemon is waiting out be ours? The daemon's guard
+   is 5s of quiet (TYPING_GUARD); claim the hold a little longer than that so
+   the wording never flips to "another viewer" while our own last keystroke
+   is still the one being waited out. */
+function localTyping() {
+  return Date.now() - lastLocalKey < 8000;
+}
+
+/* One sentence for WHY the backlog is a backlog — shared by the banner and
+   the session panel. `mine` says whether this tab's typing can be the
+   keyboard in question (false when the panel describes another session). */
+function queuedReason(q, mine) {
+  switch (q.reason) {
+    case "keyboard":
+      return mine && localTyping()
+        ? "held by YOUR typing — leave the keyboard alone a few seconds and it will be typed in"
+        : "held: a keyboard is active on this session (another viewer, or claunch attach)";
+    case "busy":
+      return q.status === "starting"
+        ? "held: the session is still starting"
+        : "held: the agent is mid-turn — typed in when it goes idle";
+    case "exited":
+      return "held: the session has exited — delivered if it is respawned";
+    default:
+      return "delivering…";
+  }
+}
+
+function queuedMsgRow(m) {
+  const row = el("div", "tq-msg");
+  const meta = el(
+    "div", "tq-msg-meta",
+    `${m.from} → ${m.handle} · via ${m.mesh}` +
+    (m.type && m.type !== "say" ? ` · ${m.type}` : "") +
+    (m.held_for !== null && m.held_for !== undefined
+      ? ` · waiting ${fmtAge(m.held_for)}` : "")
+  );
+  if (m.id) meta.title = m.id;
+  row.appendChild(meta);
+  row.appendChild(el("div", "tq-msg-body", m.body || ""));
+  return row;
+}
+
+function renderTermQueued(q) {
+  const box = $("term-queued");
+  const msgs = (q && q.messages) || [];
+  const show = msgs.length > 0 && currentPage === "terminal" && !!currentName;
+  // The banner and the terminal share a column, so appearing, disappearing
+  // and folding all change the grid the session draws into — refit on any of
+  // them, and only on them (a 2s repaint with the same shape must not).
+  const sig = show ? (tqOpen ? `open:${msgs.length}` : "shut") : "hidden";
+  const changed = box.dataset.sig !== sig;
+  box.dataset.sig = sig;
+  if (!show) {
+    box.classList.add("hidden");
+    box.innerHTML = "";
+    if (changed) refitSoon(60);
+    return;
+  }
+  box.innerHTML = "";
+  // The whole strip is one button: there is nothing else to do to it but
+  // open it, and a target the full width wide works on a phone.
+  const head = el("button", "tq-head");
+  head.type = "button";
+  head.title =
+    "messages the mesh has accepted for this session but not yet typed " +
+    "into this terminal";
+  head.appendChild(el(
+    "span", "tq-count",
+    `⏸ ${msgs.length} queued message${msgs.length === 1 ? "" : "s"}`
+  ));
+  head.appendChild(el("span", "tq-reason", queuedReason(q, true)));
+  head.appendChild(el("span", "tq-toggle", tqOpen ? "hide ▴" : "show ▾"));
+  head.addEventListener("click", () => {
+    tqOpen = !tqOpen;
+    renderTermQueued(q);
+  });
+  box.appendChild(head);
+  if (tqOpen) {
+    const list = el("div", "tq-list");
+    for (const m of msgs) list.appendChild(queuedMsgRow(m));
+    box.appendChild(list);
+  }
+  // Loudest exactly when the reader is the reason: their own keystrokes are
+  // what delivery is waiting out.
+  box.classList.toggle("focus-hold", q.reason === "keyboard" && localTyping());
+  box.classList.remove("hidden");
+  if (changed) refitSoon(60);
+}
+
+async function refreshTermQueued() {
+  const name = currentName;
+  if (!name || currentPage !== "terminal") { renderTermQueued(null); return; }
+  let q = null;
+  try {
+    const resp = await api(`/api/sessions/${encodeURIComponent(name)}/queued`);
+    if (!resp.ok) { renderTermQueued(null); return; } // older daemon: no route
+    q = await resp.json();
+  } catch {
+    return; // offline — the health poll owns saying so; keep the last truth
+  }
+  if (name !== currentName || currentPage !== "terminal") return;
+  renderTermQueued(q);
+}
 // The network coming back is the one event that says "try now" without a
 // person having to be there. Guarded like the rest: it does nothing unless
 // the link is down.
@@ -1761,6 +1891,11 @@ function showView(name) {
   // detach() own that object's life.
   $("term-header").classList.toggle("hidden", !(showTerm && currentName));
   $("terminal").classList.toggle("hidden", !showTerm);
+  // The queued-deliveries banner belongs to the terminal under it: gone with
+  // the terminal, re-asked-for on the way back in (the 2s poll would repaint
+  // it anyway, but a page swap should not flash a stale backlog first).
+  if (!showTerm) renderTermQueued(null);
+  else refreshTermQueued();
   for (const [page, id] of Object.entries(VIEWS)) {
     $(id).classList.toggle("hidden", name !== page);
   }
@@ -2312,6 +2447,15 @@ function renderWf(data) {
     run.status === "waiting_approval" && run.reason === "loop_limit"
       ? "loop limit" : run.status
   ));
+  // recur: true is a fact about every round, so it reads as part of the
+  // run's identity, not as a detail buried in the YAML.
+  if (run.recur || wf.recur) {
+    const loop = el("span", "badge wf-recur",
+      run.round ? `recurring · round ${run.round}` : "recurring");
+    loop.title = "recur: true — each finished round requests the next; " +
+      "only a human ends the loop (withdraw the request, Reset, or archive)";
+    head.appendChild(loop);
+  }
   view.appendChild(head);
   if (wf.description) view.appendChild(el("p", "wf-desc", wf.description));
 
@@ -2557,6 +2701,30 @@ function wfActions(data, opts = {}) {
     box.appendChild(reminderControl(data, after));
   }
 
+  // The loop's reset. A recurring run's rounds only count upward; this is
+  // the one press back to round 1: archive the current run, request the
+  // same workflow (same context) again, nudge the session. Offered in the
+  // session fold too — unlike archive it does not end anything, it is how
+  // the loop keeps going, from the top.
+  if (run.recur || (data.workflow || {}).recur) {
+    const rst = el("button", "wf-btn reset",
+      run.round ? `Reset loop (round ${run.round} → 1)` : "Reset loop");
+    rst.title = "archive this run and request the same workflow again " +
+      "from round 1 — the loop restarts from the top";
+    rst.addEventListener("click", () => {
+      const active = run.status !== "done" && run.status !== "aborted";
+      const q =
+        (active ? "This round is still ACTIVE.\n\n" : "") +
+        `Reset the '${run.workflow || "workflow"}' loop?\n\nThe current run ` +
+        "is archived and the same workflow (same context) is requested " +
+        "again from round 1. The session is nudged to start it.";
+      if (confirm(q)) {
+        cflowAction("/api/cflow/reset", { cwd: data.cwd, scope: data.scope }, after);
+      }
+    });
+    box.appendChild(rst);
+  }
+
   if (opts.archive === false) return box;
 
   const finished = run.status === "done" || run.status === "aborted";
@@ -2686,21 +2854,37 @@ async function renderWfIdle(view, data) {
 function pendingBanner(data, after) {
   const req = data.pending_start || (data.run || {}).pending_start;
   if (!req) return null;
+  // A recurring run files its own next round through this same channel, and
+  // that is a different thing to read: nobody "asked", the loop is looping —
+  // and withdrawing the request is the loop's off switch.
+  const recur = req.by === "recur";
   const box = el("div", "wf-pending");
   box.appendChild(el(
     "p", "wf-pending-head",
-    `start requested: ${req.name || req.workflow}`
+    recur
+      ? `next round requested: ${req.name || req.workflow}` +
+        (req.round ? ` (round ${req.round})` : "")
+      : `start requested: ${req.name || req.workflow}`
   ));
   if (req.context) box.appendChild(el("p", "wf-pending-ctx", req.context));
   box.appendChild(el(
     "p", "wf-note",
-    `asked by ${req.by || "?"} at ${(req.at || "").replace("T", " ")} — the ` +
-    `session's agent starts it itself, so it knows what it is running. It ` +
-    `picks the request up on its next cflow 'status' call.`
+    recur
+      ? `this workflow recurs: the round that finished at ` +
+        `${(req.at || "?").replace("T", " ")} filed this itself. The agent ` +
+        `starts the next round on its next cflow 'status' call; withdrawing ` +
+        `the request is how the loop is stopped.`
+      : `asked by ${req.by || "?"} at ${(req.at || "").replace("T", " ")} — the ` +
+        `session's agent starts it itself, so it knows what it is running. It ` +
+        `picks the request up on its next cflow 'status' call.`
   ));
-  const cancel = el("button", "wf-btn clear", "Withdraw request");
+  const cancel = el("button", "wf-btn clear", recur ? "Stop the loop" : "Withdraw request");
   cancel.addEventListener("click", async () => {
-    if (!confirm(`Withdraw the pending start of '${req.name || req.workflow}'?`)) return;
+    const q = recur
+      ? `Stop the '${req.name || req.workflow}' loop?\n\nThe next round's ` +
+        `request is withdrawn; the finished run stays as it is.`
+      : `Withdraw the pending start of '${req.name || req.workflow}'?`;
+    if (!confirm(q)) return;
     await cflowPost("/api/cflow/request/cancel", {
       cwd: data.cwd, scope: data.scope,
     });
@@ -2786,6 +2970,12 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
       ));
     } else if (w.origin) {
       source.appendChild(el("span", "wf-source-origin", ` — ${w.origin}`));
+    }
+    if (w.recur) {
+      source.appendChild(el(
+        "span", "wf-source-origin",
+        " · recurs: each finished round requests the next"
+      ));
     }
   };
   sel.addEventListener("change", showSource);
@@ -3294,6 +3484,12 @@ function renderSession(data) {
   // which rooms this session can be spoken to in, this says something in one.
   view.appendChild(sessSend(data));
 
+  // And directly under the send box, what became of messages like it: the
+  // backlog the daemon has accepted but not yet typed in, with the reason.
+  // "Send" answering with a quiet terminal is exactly when this is read.
+  const queued = sessQueued(data);
+  if (queued) view.appendChild(queued);
+
   const meshes = data.meshes || [];
   const meshBox = el("div", "sess-meshes");
   meshBox.appendChild(el("h3", null, `Meshes (${meshes.length})`));
@@ -3471,6 +3667,29 @@ function sessSend(data) {
   return box;
 }
 
+/* ---- the backlog, in the panel ----
+   The terminal page's banner (renderTermQueued) says the same thing to the
+   person watching the terminal; this says it to the person reading the
+   panel — which may be about ANOTHER session than the one on screen, so the
+   "your typing" attribution only holds when the two names agree. Nothing
+   rendered when the backlog is empty: an always-present "Queued (0)" box
+   would train the eye to skip the one time it matters. */
+function sessQueued(data) {
+  const q = data.queued;
+  if (!q || !(q.messages || []).length) return null;
+  const s = data.session || {};
+  const box = el("div", "sess-queued");
+  if (q.reason === "keyboard") box.className += " held";
+  box.appendChild(el("h3", null, `Queued deliveries (${q.messages.length})`));
+  box.appendChild(el(
+    "p", q.reason === "keyboard" ? "wf-warning" : "wf-note",
+    "accepted by the mesh, not yet typed into the terminal — " +
+    queuedReason(q, s.name === currentName)
+  ));
+  for (const m of q.messages) box.appendChild(queuedMsgRow(m));
+  return box;
+}
+
 /* The session's cflow slot: a run is keyed by (directory, scope) and the
    scope IS this session's name, so there is exactly one to show. */
 function sessWorkflow(data) {
@@ -3501,7 +3720,9 @@ function sessWorkflow(data) {
     const line = el("div", "sess-wf-run");
     line.appendChild(el("span", `dot ${wfDotClass(flow.status)}`));
     line.appendChild(el("span", "sess-wf-name", flow.workflow || "(workflow)"));
-    line.appendChild(el("span", "meta", flow.status));
+    line.appendChild(el("span", "meta",
+      flow.status +
+      (flow.round ? ` · round ${flow.round}` : flow.recur ? " · recurs" : "")));
     box.appendChild(line);
     if (flow.step_id) {
       box.appendChild(el(
@@ -7434,6 +7655,7 @@ async function pollOnce() {
   refreshSessions();
   refreshMeshList();
   refreshCflow();
+  refreshTermQueued();
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
   refreshWorkspaces();

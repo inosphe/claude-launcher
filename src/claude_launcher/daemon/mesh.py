@@ -895,6 +895,45 @@ class MeshManager:
                     )
         return out
 
+    def queued_for_session(self, session: str) -> List[dict]:
+        """Messages accepted for ``session``'s handles but not yet typed into
+        its terminal — the delivery worker's backlog, re-derived exactly the
+        way :meth:`_deliver_to` derives it (:meth:`Mesh.pending`), so this
+        view cannot disagree with what the worker is about to type in.
+
+        Each entry carries the recipient's OWN slice of the body (see
+        :func:`recipient_body`), clipped the way delivery clips it, and how
+        long that handle's backlog has been waiting (``held_for``, seconds).
+        Ordered oldest first — the order delivery will type them.
+        """
+        out: List[dict] = []
+        now = time.monotonic()
+        for mesh in self.list():
+            for handle in sorted(mesh.members):
+                member = mesh.members[handle]
+                if member.session != session or not self._is_local(mesh, member):
+                    continue
+                first = mesh._first_pending.get(handle)
+                for m in mesh.pending(handle):
+                    body = recipient_body(m, handle)
+                    if len(body) > MAX_DELIVERY_BODY:
+                        body = body[:MAX_DELIVERY_BODY] + " …[clipped]"
+                    out.append(
+                        {
+                            "mesh": mesh.name,
+                            "handle": handle,
+                            "id": m.get("id"),
+                            "ts": m.get("ts"),
+                            "from": m.get("from"),
+                            "type": msg_type_for(m, handle),
+                            "reply_to": m.get("reply_to"),
+                            "body": body,
+                            "held_for": (now - first) if first is not None else None,
+                        }
+                    )
+        out.sort(key=lambda e: str(e.get("ts") or ""))
+        return out
+
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #

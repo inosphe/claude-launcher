@@ -120,6 +120,11 @@
       <button id="term-details" class="term-btn" type="button" aria-pressed="false"
               title="this session's metadata and workflow">ⓘ details</button>
     </div>
+    <!-- Deliveries the daemon has accepted for this session but not yet
+         typed into it — most often held by the reader's own focus (their
+         keystrokes keep the keyboard busy). Rendered by renderTermQueued();
+         hidden whenever the backlog is empty. -->
+    <div id="term-queued" class="hidden"></div>
     <div id="terminal"></div>
 
     <div id="home-view" class="hidden"></div>

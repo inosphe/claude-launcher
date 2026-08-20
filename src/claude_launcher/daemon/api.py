@@ -171,6 +171,7 @@ def build_app(
     r.add_post("/api/cflow/start", h_cflow_start)
     r.add_post("/api/cflow/request", h_cflow_request)
     r.add_post("/api/cflow/request/cancel", h_cflow_request_cancel)
+    r.add_post("/api/cflow/reset", h_cflow_reset)
     r.add_post("/api/cflow/archive", h_cflow_archive)
     r.add_post("/api/cflow/approve", h_cflow_approve)
     r.add_post("/api/cflow/select", h_cflow_select)
@@ -247,6 +248,7 @@ def build_app(
     r.add_post("/api/sessions/respawn", h_sessions_respawn_all)
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
+    r.add_get("/api/sessions/{name}/queued", h_session_queued)
     r.add_get("/api/sessions/{name}/children", h_session_children)
     r.add_post("/api/sessions/{name}/children", h_session_spawn)
     r.add_delete("/api/sessions/{name}/children/{child}", h_session_child_kill)
@@ -567,6 +569,7 @@ def _serialize_workflow(wf) -> dict:
         "description": wf.description,
         "start": wf.start,
         "max_visits": wf.max_visits,
+        "recur": wf.recur,
         "filter_roles": (
             {"type": wf.filter_roles.type, "roles": list(wf.filter_roles.roles)}
             if wf.filter_roles
@@ -723,6 +726,7 @@ def _startable_workflows(cwd: str) -> list:
             wf = cflow_model.load(found.path)
             entry["description"] = wf.description
             entry["steps"] = wf.step_count()
+            entry["recur"] = wf.recur
         except WorkflowError as exc:
             entry["error"] = str(exc)
         flows.append(entry)
@@ -798,6 +802,46 @@ async def h_cflow_start(request: web.Request) -> web.Response:
     payload = cflow_engine.start(workflow, context=context, cwd=cwd, scope=scope)
     payload["nudged_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, cflow_engine.NUDGE_STARTED
+    )
+    return web.json_response(payload)
+
+
+async def h_cflow_reset(request: web.Request) -> web.Response:
+    """Reset the slot's workflow loop: retire the current run and file a
+    fresh start request for the same workflow and context — round 1 again.
+
+    One press for what is otherwise archive-then-request, offered because a
+    ``recur: true`` workflow's rounds only ever count upward and "start the
+    loop over" is a thing a human watching one actually wants. Deliberately
+    the *request* path, not a direct start: the agent still performs the
+    start itself, so the run it drives is one it has read (see
+    ``h_cflow_request``). The source and context come from the run itself —
+    or, in the window where a round finished and only its next-round request
+    is left, from that request — so the file that was looping is the file
+    that loops again, whatever its name resolves to today.
+    """
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, _ = resolved
+    current = cflow_engine.status(cwd, scope=scope)
+    pending = current.get("pending_start") or {}
+    source = str(current.get("source") or pending.get("resolved") or "")
+    context = str(current.get("context") or pending.get("context") or "") or None
+    if not source:
+        return json_error(
+            400,
+            "nothing to reset here: no run with a recorded source file "
+            "and no pending start request",
+        )
+    if current.get("status") != "idle":
+        cflow_engine.archive(by="web-reset", cwd=cwd, scope=scope)
+    payload = cflow_engine.request_start(
+        source, context=context, by="web-reset", cwd=cwd, scope=scope
+    )
+    name = (payload.get("request") or {}).get("name") or source
+    payload["nudged_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, cflow_engine.nudge_for_request(name)
     )
     return web.json_response(payload)
 
@@ -1879,6 +1923,7 @@ async def h_session_meta(request: web.Request) -> web.Response:
         "workspace_subpath": within,
         "role": role,
         "meshes": request.app["mesh"].meshes_for_session(name),
+        "queued": _session_queued(request, session),
         "cflow": None,
         "workflows": [],
     }
@@ -1886,6 +1931,60 @@ async def h_session_meta(request: web.Request) -> web.Response:
         body["cflow"] = _cflow_entry(manager, cwd, name)
         body["workflows"] = _startable_workflows(cwd)
     return web.json_response(body)
+
+
+def _session_queued(request: web.Request, session) -> dict:
+    """The session's delivery backlog, with the reason it is still a backlog.
+
+    ``messages`` is what the mesh has accepted for this session but not yet
+    typed into its terminal (see :meth:`MeshManager.queued_for_session`), and
+    ``reason`` is why the worker is holding them, derived from the SAME two
+    signals the worker's own gate reads (status and the keyboard) so the
+    banner drawn from this cannot claim a hold the daemon is not applying:
+
+    * ``exited``   — nobody to type into; held until the session respawns.
+    * ``busy``     — mid-turn (or still starting); held until it goes idle.
+    * ``keyboard`` — the screen is idle but someone is typing here (the web
+      terminal or an attach). This is the hold a human causes *themselves*
+      by keeping focus in the terminal they are waiting on, which is why it
+      is told apart from ``busy`` rather than folded into it.
+    * ``settling`` — nothing is holding it; the next worker tick delivers.
+
+    The raw signals ride along so a client can sharpen the wording (the web
+    UI says "your typing" when its own keystrokes are recent), and
+    ``busy_hold`` says when a busy/keyboard hold gives up and types anyway.
+    """
+    mm = _mesh_mgr(request)
+    messages = mm.queued_for_session(session.sdef.name)
+    status = session.status()
+    keyboard = session.keyboard_busy()
+    if not messages:
+        reason = None
+    elif session.exited:
+        reason = "exited"
+    elif status != STATUS_IDLE:
+        reason = "busy"
+    elif keyboard:
+        reason = "keyboard"
+    else:
+        reason = "settling"
+    return {
+        "messages": messages,
+        "status": status,
+        "keyboard_busy": keyboard,
+        "reason": reason,
+        "busy_hold": mm.busy_hold,
+    }
+
+
+async def h_session_queued(request: web.Request) -> web.Response:
+    """What the daemon is holding FOR this session: messages accepted into a
+    mesh log, addressed to one of its handles, and not yet typed into its
+    terminal. Polled by the terminal page's banner, which exists to answer
+    the operator staring at a quiet terminal wondering where their message
+    went — most often: it is held because their own focus keeps the keyboard
+    busy. The same payload rides inside ``/meta`` for the detail panel."""
+    return web.json_response(_session_queued(request, _session(request)))
 
 
 def _mesh_holds(request: web.Request, name: str) -> List[dict]:

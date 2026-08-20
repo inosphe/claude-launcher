@@ -769,6 +769,17 @@ entries addressed to it:
    messages deliver when the session is respawned (same name). Cursors are
    persisted, so a daemon restart redelivers anything not yet injected.
 
+The backlog this pipeline is holding is **visible**, because its commonest
+cause is invisible from the terminal: the operator sends a message, watches
+the recipient's terminal for it, touches a key — and that keystroke IS the
+hold (step 2's keyboard gate). `GET /api/sessions/{name}/queued` lists the
+undelivered messages for a session's handles with the reason the worker's
+own gate would give (`busy`, `keyboard`, `exited`, or `settling`); the web
+terminal draws it as an amber strip above the session ("N queued messages",
+fold-open for the bodies), worded as "held by YOUR typing" when this tab's
+keystrokes are the recent ones, and the session detail panel shows the same
+backlog under its send box. The payload also rides inside `/meta`.
+
 ## CLI (phase 1)
 
 ```
