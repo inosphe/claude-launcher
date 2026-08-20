@@ -253,6 +253,74 @@ def test_a_policy_locked_row_is_not_remembered(home, monkeypatch):
     assert "role" in wizard_recall.load("spawn")
 
 
+LOCKED_REPORT = {
+    "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
+    "children_used": 0, "children_remaining": 3,
+    "may_choose": [], "spawnable_harnesses": [], "workspaces": [],
+    "profiles": ["work", "ds4"],
+}
+
+
+def spawn_run(monkeypatch, args, *, report):
+    """One scripted spawn launch; returns the form ``run`` built."""
+    made: dict = {}
+
+    class Recorded(wizard.SpawnWizard):
+        def __init__(self, sources, *, cwd="", defaults=None):
+            super().__init__(sources, cwd=cwd, defaults=defaults)
+            self.color = False
+            made["form"] = self
+
+    ok = drive(
+        monkeypatch, SUBMIT, args, form=Recorded,
+        sources=FakeSpawnSources(report=report),
+    )
+    assert ok is True
+    return made["form"]
+
+
+def test_a_remembered_answer_is_not_injected_into_a_locked_row(home, monkeypatch):
+    """Remembered under a permissive parent, replayed under a strict one.
+
+    The recall is injected before the form exists, so the policy's verdict
+    on that row arrives later — and when it says "locked", the remembered
+    value has to come back out rather than travel to a refusal nobody typed.
+    """
+    wizard_recall.save("spawn", {"profile": "ds4", "role": "worker"})
+
+    args = spawn_args()
+    form = spawn_run(monkeypatch, args, report=LOCKED_REPORT)
+    assert form.field("profile").disabled is True
+    assert form.value("profile") == ""  # dropped, not greyed-out-and-armed
+    assert args.profile is None  # so nothing travels to the daemon
+    # the unlocked row keeps its recall
+    assert form.value("role") == "worker" and args.role == "worker"
+
+
+def test_a_typed_flag_still_reaches_a_locked_row(home, monkeypatch):
+    """A flag typed this session is the person's current intent.
+
+    It is left where it is on purpose: the daemon's refusal is the loud
+    failure that tells them the policy forbids it. Dropping it silently
+    would be the recall's rule applied to something that is not a recall.
+    """
+    wizard_recall.save("spawn", {"profile": "ds4"})
+    args = spawn_args(profile="work")
+    form = spawn_run(monkeypatch, args, report=LOCKED_REPORT)
+    assert form.field("profile").disabled is True
+    assert form.value("profile") == "work"
+    assert args.profile == "work"
+
+
+def test_nothing_is_dropped_when_the_policy_allows_the_row(home, monkeypatch):
+    wizard_recall.save("spawn", {"profile": "ds4"})
+    permissive = {**LOCKED_REPORT, "may_choose": ["profile", "borrow"]}
+    args = spawn_args()
+    form = spawn_run(monkeypatch, args, report=permissive)
+    assert form.field("profile").disabled is False
+    assert form.value("profile") == "ds4" and args.profile == "ds4"
+
+
 def spawn_args(**kw) -> argparse.Namespace:
     """The namespace ``spawn`` hands the wizard, flags left unanswered."""
     base = dict(

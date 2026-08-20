@@ -120,3 +120,42 @@ class Defaults:
 def defaults(args: Any, remembered: Dict[str, Any]) -> Any:
     """``args`` as the form's defaults, recall included when there is any."""
     return Defaults(args, remembered) if remembered else args
+
+
+def _reset(field: Any) -> None:
+    """Put one row back on the answer it would hold with nothing remembered."""
+    if hasattr(field, "chosen"):  # MultiField, before its ChoiceField base
+        field.chosen = []
+    elif hasattr(field, "options"):
+        field.index = 0
+    elif hasattr(field, "text"):
+        field.text = ""
+
+
+def drop_locked(form: Any, args: Any, remembered: Dict[str, Any]) -> list:
+    """Undo the recall on rows the form turned out to have locked.
+
+    Injection happens before the form exists, so whether a row is the
+    policy's to answer is only known once it is built — a profile
+    remembered under a permissive parent otherwise lands, greyed out, on a
+    parent whose policy forbids choosing one, and travels to a refusal
+    nobody typed.
+
+    A flag typed *this* session is left exactly where it is. That is the
+    line: a remembered value is not the person's current intent and may
+    vanish quietly, while a typed one is, and deserves the daemon's loud
+    refusal rather than a silent drop. Returns the keys it reset.
+    """
+    dropped = []
+    for key in getattr(form, "recall_fields", ()):
+        if key not in remembered or getattr(args, key, None):
+            continue
+        try:
+            field = form.field(key)
+        except KeyError:
+            continue
+        if not getattr(field, "disabled", False):
+            continue
+        _reset(field)
+        dropped.append(key)
+    return dropped

@@ -2193,6 +2193,10 @@ def run(
         sources or Sources(), cwd=cwd,
         defaults=wizard_recall.defaults(args, remembered),
     )
+    # Only now is it known which rows the policy locked, so this is where a
+    # remembered answer that landed on one is taken back out.
+    if wizard_recall.drop_locked(wiz, args, remembered):
+        wiz._sync()
     import codecs
 
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
