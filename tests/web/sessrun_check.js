@@ -124,7 +124,8 @@ new Function(
   sliceLine("const SESS_RUN_REPORTS") + sliceLine("const SESS_RUN_JOURNAL") +
   [slice("flowOrder"), slice("flowTrack"), slice("flowNeedsHuman"),
    slice("flowState"), slice("flowMetrics"), slice("flowPipShape"),
-   slice("flowTrackSvg"), slice("svg"), slice("wfActions"),
+   slice("flowTrackSvg"), slice("svg"), slice("askWho"),
+   slice("answerFellToUs"), slice("wfActions"),
    slice("reminderControl"), slice("pendingBanner"),
    slice("sessRunFoldFor"), slice("stopSessRun"), slice("refreshSessRun"),
    slice("renderSessRun"), slice("sessRunTrack")].join("\n") +
@@ -311,6 +312,51 @@ check("run management is its own group: nudge, skip and archive",
       has(grp(sel, "wf-act-tools"), "skip") &&
       has(grp(sel, "wf-act-tools"), "archive"));
 check("no press strays into the prose", !has(grp(sel, "wf-act-msgs"), "wf-btn"));
+
+/* ---- waiting_answer: delivered, versus put to nobody ------------------ */
+/* The status word is the same in both, so only the payload tells them
+   apart: a delivered ask names its holder, one that reached nobody is a
+   gate wearing another word — and saying "you do not have to do anything"
+   about THAT is what let a run stand for ever. */
+const answerRun = (ask) => ({
+  ...DATA,
+  run: { ...RUN, status: "waiting_answer", step_id: "plan", ask,
+         prompt: undefined },
+});
+
+const withPeer = ctx.wfActions(answerRun({ prompt: "ship it?", asked: [{ handle: "lead" }] }));
+check("a delivered ask still reads as somebody else's",
+      texts(withPeer).includes("this is with another agent"), texts(withPeer));
+check("...and offers no gate press, only the takeover",
+      !has(withPeer, "approve") &&
+      walk(withPeer).some((k) => k.text === "Decide it myself"));
+
+for (const [what, ask] of [
+  ["an ask that reached nobody", { prompt: "ship it?", asked: [] }],
+  ["a step forced onto an asking step (no ask at all)", undefined],
+]) {
+  const box = ctx.wfActions(answerRun(ask));
+  check(`${what} does not claim a peer has it`,
+        !texts(box).includes("you do not have to do anything"), texts(box));
+  check(`${what} says nobody was asked`,
+        texts(box).includes("put to nobody"), texts(box));
+  check(`${what} warns rather than reassures`, has(box, "wf-warning"));
+  const btn = walk(box).find((k) => classOf(k).has("approve"));
+  check(`${what} offers the gate press`, !!btn && btn.text === "Approve gate",
+        btn && btn.text);
+  /* ...and the press is the ordinary approve the daemon already handles for
+     "an ask that reached nobody" — not a second endpoint invented here. */
+  if (btn) btn.fire("click");
+  const posted = ctx.posted().filter((p) => p.path === "/api/cflow/approve");
+  check(`${what} clears through /api/cflow/approve`,
+        posted.length > 0 &&
+        posted[posted.length - 1].body.cwd === DATA.cwd &&
+        posted[posted.length - 1].body.scope === "coder3",
+        posted[posted.length - 1]);
+  check(`${what} puts the press with the decisions, not the prose`,
+        has(grp(box, "wf-act-main"), "approve") &&
+        !has(grp(box, "wf-act-msgs"), "wf-btn"));
+}
 
 /* ---- the run ends ---- */
 const gone = node("div");

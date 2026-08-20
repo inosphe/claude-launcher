@@ -30,6 +30,7 @@ const code = [
   slice("const FLOW = {", "let flowMesh"),
   slice("function flowMetrics(", "/* The steps of a workflow"),
   slice("function flowOrder(", "/* Blocked on a HUMAN"), // + flowTrack
+  slice("function answerFellToUs(", "function shortenPath("),
   slice("function flowNeedsHuman(", "const FLOW_WORDS"), // + flowState
 ].join("\n");
 
@@ -210,6 +211,29 @@ const WF = {
   check("the row is taller than the card, so cards never touch",
         long.rowH > long.cardH && long.colW > long.cardW, long);
 }
+
+/* ---- waiting_answer: delegated, unless it reached nobody -------------- */
+/* The card gets one word, so this is where the lie was loudest: "waiting on
+   a peer" for a run no peer has ever heard of. */
+const PEER = { status: "waiting_answer", ask: { asked: [{ handle: "lead" }] } };
+const NOBODY = { status: "waiting_answer", ask: { asked: [] } };
+const NOASK = { status: "waiting_answer" };
+
+check("an ask with a holder is the peer's",
+      ctx.flowState(PEER) === "delegated", ctx.flowState(PEER));
+check("...and is not counted as the reader's move",
+      ctx.flowNeedsHuman(PEER) === false, ctx.flowNeedsHuman(PEER));
+check("an ask that reached nobody is the reader's",
+      ctx.flowNeedsHuman(NOBODY) === true, ctx.flowNeedsHuman(NOBODY));
+check("...so the card says so rather than naming a peer",
+      ctx.flowState(NOBODY) === "blocked", ctx.flowState(NOBODY));
+check("no ask at all reads the same way (a forced goto leaves this)",
+      ctx.flowState(NOASK) === "blocked", ctx.flowState(NOASK));
+/* A stopped session outranks it: the run is where the agent left it, and
+   there is nobody in front of it to press anything. */
+check("a stopped session still outranks it",
+      ctx.flowState({ ...NOBODY, stopped: true }) === "stopped",
+      ctx.flowState({ ...NOBODY, stopped: true }));
 
 if (failures) {
   console.log(`${failures} check(s) failed`);

@@ -28,6 +28,7 @@ const RULE = "/* ---------------------------------------------------------------
 const code = [
   slice("function escXml(", RULE),                            // + wfDiagramSvg
   slice("const RING = {", "/* The send/add forms must survive the 2s poll"),
+  slice("function answerFellToUs(", "function shortenPath("),
   slice("const FLOW = {", "/* boot  "),
 ].join("\n");
 
