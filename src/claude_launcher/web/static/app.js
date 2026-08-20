@@ -1562,6 +1562,58 @@ $("m-zoom-out").addEventListener("click", () => $("term-zoom-out").click());
 $("m-zoom-in").addEventListener("click", () => $("term-zoom-in").click());
 syncZoomControls();
 
+/* ---- per-session layout ----
+   Two choices a reader makes about a session's screen and expects to find
+   again: which panel the right rail shows (the details, or the workflow run),
+   and whether the run page is halved into the bottom of the terminal's
+   column — with where they left the bar between the two. Remembered per
+   SESSION, unlike the font size: "watch s15's run under its terminal" is a
+   fact about s15, not about the reader, and walking to another session must
+   not drag it along. One key with a map inside rather than a key per
+   session: sessions come and go too fast to each own a localStorage row, and
+   an entry left behind by a deleted session is a few bytes of nothing. */
+const SESSLAYOUT_KEY = `claunch_sesslayout:${BASE}`;
+const SPLIT_DEFAULT = 0.6;   // the terminal's share of the column
+const SPLIT_MIN = 0.2;       // past either end the loser is too short to read
+const SPLIT_MAX = 0.8;
+
+function clampSplitRatio(x) {
+  if (!Number.isFinite(x)) return SPLIT_DEFAULT;
+  return Math.min(SPLIT_MAX, Math.max(SPLIT_MIN, Math.round(x * 1000) / 1000));
+}
+
+function loadSessLayouts() {
+  // Junk in the key (hand-edited, or another tool's) must not brick the page.
+  try {
+    const doc = JSON.parse(localStorage.getItem(SESSLAYOUT_KEY) || "{}");
+    return doc && typeof doc === "object" && !Array.isArray(doc) ? doc : {};
+  } catch {
+    return {};
+  }
+}
+
+/* Always whole and always sane, whatever the key holds: junk falls back
+   field by field rather than as a lump, so a broken ratio does not cost the
+   radio its choice. */
+function sessLayoutFor(name) {
+  const raw = (name && loadSessLayouts()[name]) || {};
+  return {
+    rail: raw.rail === "wf" ? "wf" : "detail",
+    split: !!raw.split,
+    ratio: clampSplitRatio(Number(raw.ratio)),
+  };
+}
+
+function setSessLayout(name, patch) {
+  if (!name) return;
+  const all = loadSessLayouts();
+  // Through the reader on the way in, so what is stored is already whole —
+  // the next read never depends on this patch having been complete.
+  all[name] = { ...sessLayoutFor(name), ...patch };
+  localStorage.setItem(SESSLAYOUT_KEY, JSON.stringify(all));
+  syncSplitPane();
+}
+
 /* Bind the terminal to a session. Called only by the #/s/<name> route, so
    the attached session is in the URL: a reload, a bookmark or a shared link
    lands back on the same terminal instead of on an empty slot. */
@@ -1690,6 +1742,7 @@ function syncLayout() {
   railOpen = MOBILE_MQ.matches && page === "home";
   document.body.classList.toggle("rail-open", railOpen);
   syncDetailPanel();
+  syncSplitPane();
   syncMobileBars();
   // Coming back from the rail the terminal was display:none, so its grid is
   // whatever it was before the viewport last changed. Re-fit it.
@@ -1731,6 +1784,44 @@ function syncDetailPanel() {
   // session wraps its output against a width that is no longer there.
   if (!narrow && up !== detailWasUp) refitSoon(60);
   detailWasUp = up;
+}
+
+/* Whether the run pane is halved into the terminal's column, and at what
+   ratio. Derived like the rest of the chrome — from (breakpoint, page,
+   session) plus the session's remembered choice — and never toggled from the
+   outside: the header's ⬒ button writes the choice down (setSessLayout) and
+   this reads it back, so a reload, a session switch and the button all take
+   the same path. Wide screens only: below the breakpoint the terminal is
+   already fighting a keyboard for rows, and half of that is no use to
+   anybody — the choice is kept, not honoured, until the screen comes back. */
+let splitWasUp = false;
+
+function syncSplitPane() {
+  const name = currentPage === "terminal" ? currentName : null;
+  const lay = name ? sessLayoutFor(name) : null;
+  const up = !!lay && lay.split && !MOBILE_MQ.matches;
+  $("term-split").classList.toggle("hidden", !up);
+  $("term-wf").classList.toggle("hidden", !up);
+  document.body.classList.toggle("term-split", up);
+  // Pressed is the session's remembered choice, not what fits this screen:
+  // the button must read "on" on a narrowed window too, or pressing it there
+  // would silently write the opposite of what it appears to do.
+  const btn = $("term-splitbtn");
+  btn.setAttribute("aria-pressed", String(!!lay && lay.split));
+  btn.title = lay && lay.split
+    ? "close the run pane — the terminal takes the column back"
+    : "this session's workflow run under the terminal — " +
+      "drag the bar between them to resize";
+  if (up) {
+    applySplitRatio(lay.ratio);
+    if (splitFor !== name) openSplit(name);
+  } else if (splitFor) {
+    closeSplit();
+  }
+  // The pane takes height off the terminal and gives it back, and no resize
+  // event announces that — same deal as the detail rail docking beside it.
+  if (up !== splitWasUp) refitSoon(60);
+  splitWasUp = up;
 }
 
 /* Which row's ⓘ is lit. Rebuilt rows get this from refreshSessions; this is
@@ -1943,10 +2034,171 @@ async function refreshWf() {
   renderWf(data);
 }
 
-function selectWfStep(step) {
-  wfSelectedStep = step;
-  if (wfLastData) renderWf(wfLastData);
+/* The page's identity, as renderWfInto sees it: where the step selection
+   lives, how to redraw and re-fetch, and whose reminder box is whose. The
+   split pane below hands the same renderer a different one of these
+   (splitUi), which is the whole of how one run page draws in two places. */
+const wfPageUi = {
+  host: "page",
+  getStep: () => wfSelectedStep,
+  putStep: (s) => { wfSelectedStep = s; },
+  select(step) { this.putStep(step); if (wfLastData) renderWf(wfLastData); },
+  refresh: () => refreshWf(),
+  stillHere: (cwd) => wfCwd === cwd,
+  fullLink: false,
+  // The page keeps wfActions' defaults — archive offered, no `after` needed
+  // because cflowAction already re-fetches this very page.
+  actions: {},
+};
+
+/* ------------------------------------------------------------------ */
+/* split mode: the run page halved into the terminal's column          */
+/* ------------------------------------------------------------------ */
+/* The same material as #/wf/<scope|cwd>, rendered under the terminal that
+   drives it, so the run and the agent working it are read together. The
+   pane owns its own slot, poll, selection and last payload — the page's
+   globals above belong to the page, and the two must be able to differ. */
+let splitFor = null;           // the session the pane is showing (null = shut)
+let splitCwd = null;           // its slot, resolved once from the meta endpoint
+let splitScope = null;
+let splitPollTimer = null;
+let splitSelectedStep = null;
+let splitLastData = null;
+
+const splitUi = {
+  host: "split",
+  getStep: () => splitSelectedStep,
+  putStep: (s) => { splitSelectedStep = s; },
+  select(step) { this.putStep(step); if (splitLastData) renderSplit(splitLastData); },
+  refresh: () => refreshSplit(),
+  stillHere: (cwd) => splitCwd === cwd,
+  fullLink: true,   // the way from the half to the whole page
+  // cflowAction re-fetches the PAGE after an action; this pane it does not
+  // know about, so the pane asks for itself.
+  actions: { after: () => refreshSplit() },
+};
+
+function renderSplit(data) {
+  renderWfInto($("term-wf"), data, splitUi);
 }
+
+/* Point the pane at a session. Everything else is the poll's: resolving the
+   slot is in there too, so an ask that fails on the first paint (the auth
+   overlay is up, the daemon blinked) is simply asked again two seconds on,
+   instead of leaving the pane on "loading…" for good. */
+function openSplit(name) {
+  closeSplit();
+  splitFor = name;
+  $("term-wf").innerHTML = "<p class='wf-note'>loading…</p>";
+  refreshSplit();
+  splitPollTimer = setInterval(refreshSplit, 2000);
+}
+
+function closeSplit() {
+  if (splitPollTimer) { clearInterval(splitPollTimer); splitPollTimer = null; }
+  splitFor = null;
+  splitCwd = null;
+  splitScope = null;
+  splitSelectedStep = null;
+  splitLastData = null;
+  $("term-wf").innerHTML = "";
+}
+
+async function refreshSplit() {
+  const want = splitFor;
+  if (!want) return;
+  // A run is keyed by (cwd, scope) and the meta endpoint already answers
+  // that resolution for a session — ask it rather than re-deriving the slot
+  // rules here. null is "not asked yet"; "" is "asked, and there is none",
+  // which unlike a failed ask is an answer, so the poll stops asking.
+  if (splitCwd === null) {
+    let flow;
+    try {
+      const resp = await api(`/api/sessions/${encodeURIComponent(want)}/meta`);
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) return;   // the poll will come back round
+      flow = data.cflow || null;
+    } catch {
+      return;
+    }
+    if (splitFor !== want) return;   // repointed while the reply was in flight
+    if (!flow || !flow.cwd) {
+      splitCwd = "";
+      $("term-wf").innerHTML = "";
+      $("term-wf").appendChild(el(
+        "p", "wf-note",
+        "this session has no working directory — there is no run slot to show"
+      ));
+      return;
+    }
+    splitCwd = flow.cwd;
+    splitScope = flow.scope || want;
+  }
+  if (!splitCwd) return;   // resolved: this session has no slot
+  let data;
+  try {
+    const resp = await api(
+      `/api/cflow/run?cwd=${encodeURIComponent(splitCwd)}` +
+      `&scope=${encodeURIComponent(splitScope)}`
+    );
+    data = await resp.json();
+    if (!resp.ok) {
+      $("term-wf").innerHTML = "";
+      $("term-wf").appendChild(
+        el("p", "wf-warning", data.error || "cannot load run"));
+      return;
+    }
+  } catch {
+    return;
+  }
+  if (splitFor !== want) return;   // repointed while the reply was in flight
+  splitLastData = data;
+  renderSplit(data);
+}
+
+/* The ⬒ button: writes the choice down; syncSplitPane (via the setter) is
+   what actually opens and closes the pane, so a press and a reload agree. */
+$("term-splitbtn").addEventListener("click", () => {
+  if (!currentName) return;
+  setSessLayout(currentName, { split: !sessLayoutFor(currentName).split });
+});
+
+/* The bar between the two. The ratio is applied live while the hand moves
+   and written down once at release — localStorage is not a place to stream
+   pointer events into. */
+function applySplitRatio(r) {
+  $("main").style.setProperty("--split-term", String(r));
+  $("main").style.setProperty("--split-wf", String(1 - r));
+}
+
+let splitDragRatio = null;   // non-null only mid-drag
+
+$("term-split").addEventListener("pointerdown", (e) => {
+  if (!currentName) return;
+  e.preventDefault();   // a drag must not start selecting terminal text
+  $("term-split").setPointerCapture(e.pointerId);
+  $("term-split").classList.add("dragging");
+  splitDragRatio = sessLayoutFor(currentName).ratio;
+});
+$("term-split").addEventListener("pointermove", (e) => {
+  if (splitDragRatio === null) return;
+  const bar = $("term-split");
+  const top = $("terminal").getBoundingClientRect().top;
+  const span = $("term-wf").getBoundingClientRect().bottom - top - bar.offsetHeight;
+  if (span <= 0) return;
+  splitDragRatio = clampSplitRatio((e.clientY - top - bar.offsetHeight / 2) / span);
+  applySplitRatio(splitDragRatio);
+  refitSoon();   // debounced: the real refit lands when the hand pauses
+});
+const endSplitDrag = () => {
+  if (splitDragRatio === null) return;
+  $("term-split").classList.remove("dragging");
+  if (currentName) setSessLayout(currentName, { ratio: splitDragRatio });
+  splitDragRatio = null;
+  refitSoon(60);
+};
+$("term-split").addEventListener("pointerup", endSplitDrag);
+$("term-split").addEventListener("pointercancel", endSplitDrag);
 
 /* ------------------------------------------------------------------ */
 /* router: hash -> page. Knows nothing about screen width.             */
@@ -2428,11 +2680,18 @@ async function cflowAction(path, body, after) {
 }
 
 function renderWf(data) {
-  const view = $("wf-view");
+  renderWfInto($("wf-view"), data, wfPageUi);
+}
+
+/* One renderer, two homes: the #/wf page, and the split pane halved into the
+   terminal's column. `ui` says which home this is — where its step selection
+   lives, how it redraws, how it re-fetches after an action — so the pane is
+   the page's material and not a lookalike that drifts. */
+function renderWfInto(view, data, ui) {
   if (data.status === "idle") {
     // Built once and left alone: the 2s poll must not wipe the user's
     // in-progress picker/context input.
-    if (!view.querySelector(".wf-start")) renderWfIdle(view, data);
+    if (!view.querySelector(".wf-start")) renderWfIdle(view, data, ui);
     return;
   }
   view.innerHTML = "";
@@ -2456,6 +2715,7 @@ function renderWf(data) {
       "only a human ends the loop (withdraw the request, Reset, or archive)";
     head.appendChild(loop);
   }
+  if (ui.fullLink) head.appendChild(wfFullLink(data));
   view.appendChild(head);
   if (wf.description) view.appendChild(el("p", "wf-desc", wf.description));
 
@@ -2498,27 +2758,28 @@ function renderWf(data) {
     view.appendChild(el("p", "wf-warning", `⚠ ${w}`));
   }
 
-  const pending = pendingBanner(data, () => refreshWf());
+  const pending = pendingBanner(data, ui.refresh);
   if (pending) view.appendChild(pending);
 
-  view.appendChild(wfActions(data));
+  view.appendChild(wfActions(data, ui.actions));
 
   // drop a stale selection if the workflow changed under us
   if (
-    wfSelectedStep && wfSelectedStep !== "end" &&
-    !(wf.steps || []).some((s) => s.id === wfSelectedStep)
+    ui.getStep() && ui.getStep() !== "end" &&
+    !(wf.steps || []).some((s) => s.id === ui.getStep())
   ) {
-    wfSelectedStep = null;
+    ui.putStep(null);
   }
+  const sel = ui.getStep();
 
   const cols = el("div", "wf-cols");
   const dia = el("div", "wf-diagram");
-  dia.innerHTML = wfDiagramSvg(wf, run, wfSelectedStep);
+  dia.innerHTML = wfDiagramSvg(wf, run, sel);
   const finished = run.status === "done" || run.status === "aborted";
   dia.querySelectorAll("g.wfd-node[data-step]").forEach((g) => {
     g.addEventListener("click", () => {
       const step = g.dataset.step;
-      selectWfStep(wfSelectedStep === step ? null : step); // click again = clear
+      ui.select(ui.getStep() === step ? null : step); // click again = clear
     });
   });
   cols.appendChild(dia);
@@ -2529,15 +2790,15 @@ function renderWf(data) {
 
   const forceBtn = el(
     "button", "wf-btn force",
-    !wfSelectedStep
+    !sel
       ? "Force set state (select a step first)"
-      : wfSelectedStep === "end"
+      : sel === "end"
         ? "Force-finish this run"
-        : `Force run to '${wfSelectedStep}'`
+        : `Force run to '${sel}'`
   );
-  forceBtn.disabled = !wfSelectedStep;
-  if (wfSelectedStep) {
-    const step = wfSelectedStep;
+  forceBtn.disabled = !sel;
+  if (sel) {
+    const step = sel;
     forceBtn.addEventListener("click", () => {
       const q = step === "end"
         ? "Force-FINISH this workflow run?"
@@ -2551,7 +2812,7 @@ function renderWf(data) {
   }
   dia.appendChild(forceBtn);
 
-  cols.appendChild(wfReports(data));
+  cols.appendChild(wfReports(data, ui));
   view.appendChild(cols);
 
   const journal = document.createElement("details");
@@ -2564,6 +2825,19 @@ function renderWf(data) {
     journal.appendChild(el("div", "wf-journal-line mono", line));
   }
   view.appendChild(journal);
+}
+
+/* The way from the half to the whole: the split pane renders the run page's
+   material, and this is the button to the page itself — same run, full
+   height, and nothing else on screen to share it with. */
+function wfFullLink(data) {
+  const btn = el("button", "wf-btn wf-full", "Open the run page");
+  btn.title = "this run as its own page";
+  btn.addEventListener("click", () => {
+    location.hash =
+      "#/wf/" + encodeURIComponent(`${data.scope || "default"}|${data.cwd}`);
+  });
+  return btn;
 }
 
 /* The human controls for a run. Shared with the session panel's fold, which
@@ -2698,7 +2972,7 @@ function wfActions(data, opts = {}) {
       btn.title = "nothing to nudge: this run has no live session of its own";
     }
     box.appendChild(btn);
-    box.appendChild(reminderControl(data, after));
+    box.appendChild(reminderControl(data, after, opts.host));
   }
 
   // The loop's reset. A recurring run's rounds only count upward; this is
@@ -2755,12 +3029,18 @@ function wfActions(data, opts = {}) {
    the machine defaults edited on the Workflows page. Rebuilt only when the
    slot changes (the sess-send-box pattern): the 2s poll must not wipe a
    half-typed interval — a save clears the cache so the server's answer is
-   what the next poll draws. */
-let wfReminderBox = null;
-function reminderControl(data, after) {
+   what the next poll draws.
+
+   Cached per HOST, not one node for everybody: the session panel's fold and
+   the split pane can show the same slot at the same time, and a single cached
+   node would be *moved* between the two by whichever poll ran last —
+   appendChild takes the live node with it. */
+let wfReminderBoxes = {};
+function reminderControl(data, after, host = "page") {
   const run = data.run || {};
   const key = `${data.scope}|${data.cwd}`;
-  if (wfReminderBox && wfReminderBox.dataset.slot === key) return wfReminderBox;
+  const kept = wfReminderBoxes[host];
+  if (kept && kept.dataset.slot === key) return kept;
   const box = el("div", "wf-reminder");
   box.dataset.slot = key;
 
@@ -2794,7 +3074,7 @@ function reminderControl(data, after) {
   const save = el("button", "wf-btn", "Set for this run");
   save.title = "stored with this run only; the machine defaults stay untouched";
   save.addEventListener("click", () => {
-    wfReminderBox = null;
+    delete wfReminderBoxes[host];
     cflowAction("/api/cflow/reminder", {
       cwd: data.cwd, scope: data.scope,
       enabled: on.checked, interval: +iv.value,
@@ -2805,7 +3085,7 @@ function reminderControl(data, after) {
   clear.disabled = !override;
   clear.title = "drop this run's override and follow the machine defaults again";
   clear.addEventListener("click", () => {
-    wfReminderBox = null;
+    delete wfReminderBoxes[host];
     cflowAction("/api/cflow/reminder", {
       cwd: data.cwd, scope: data.scope, clear: true,
     }, after);
@@ -2820,12 +3100,12 @@ function reminderControl(data, after) {
       : `following the machine defaults (${defs.enabled ? "on" : "off"}, ` +
         `${Math.round(defs.interval || 0)}s) — set on the Workflows page`
   ));
-  wfReminderBox = box;
+  wfReminderBoxes[host] = box;
   return box;
 }
 
 /* Idle (cwd, scope): offer to start a new run. */
-async function renderWfIdle(view, data) {
+async function renderWfIdle(view, data, ui) {
   view.innerHTML = "";
   // Which slot is empty, not just which directory: the same directory holds
   // one slot per session, and all but this one may well be busy.
@@ -2835,7 +3115,8 @@ async function renderWfIdle(view, data) {
       ? `no active cflow run for session '${data.scope}' in ${data.cwd}`
       : `no active cflow run in ${data.cwd}`
   ));
-  const pending = pendingBanner(data, () => refreshWf());
+  if (ui.fullLink) view.appendChild(wfFullLink(data));
+  const pending = pendingBanner(data, ui.refresh);
   if (pending) view.appendChild(pending);
   const box = el("div", "wf-start");
   view.appendChild(box); // present immediately so the poll doesn't rebuild
@@ -2843,8 +3124,8 @@ async function renderWfIdle(view, data) {
     cwd: data.cwd,
     scope: data.scope || "default",
     sessions: data.sessions || [],
-    stillHere: () => wfCwd === data.cwd,
-    after: () => { refreshWf(); refreshCflow(); },
+    stillHere: () => ui.stillHere(data.cwd),
+    after: () => { ui.refresh(); refreshCflow(); },
   });
 }
 
@@ -3073,22 +3354,23 @@ async function nudgeRun(cwd, scope) {
   }
 }
 
-function wfReports(data) {
+function wfReports(data, ui) {
+  const sel = ui.getStep();
   const box = el("div", "wf-reports");
   const head = el("div", "wf-reports-head");
   head.appendChild(el("h3", null,
-    wfSelectedStep ? `Step reports — ${wfSelectedStep}` : "Step reports"));
-  if (wfSelectedStep) {
+    sel ? `Step reports — ${sel}` : "Step reports"));
+  if (sel) {
     const clear = el("button", "wf-btn clear", "Show all");
     clear.title = "clear the step selection and expand every report";
-    clear.addEventListener("click", () => selectWfStep(null));
+    clear.addEventListener("click", () => ui.select(null));
     head.appendChild(clear);
   }
   box.appendChild(head);
 
-  if (wfSelectedStep && wfSelectedStep !== "end") {
+  if (sel && sel !== "end") {
     const step = ((data.workflow || {}).steps || [])
-      .find((s) => s.id === wfSelectedStep);
+      .find((s) => s.id === sel);
     if (step && (step.instructions || step.select || step.gate)) {
       const inst = el("div", "wf-instructions");
       inst.appendChild(el("h4", null, "Instructions"));
@@ -3111,12 +3393,12 @@ function wfReports(data) {
 
   const reports = (data.reports || []).slice(); // journal order: oldest first
   if (!reports.length) box.appendChild(el("p", "wf-note", "no reports yet"));
-  if (wfSelectedStep && reports.length &&
-      !reports.some((r) => r.step === wfSelectedStep)) {
-    box.appendChild(el("p", "wf-note", `no reports for '${wfSelectedStep}' yet`));
+  if (sel && reports.length &&
+      !reports.some((r) => r.step === sel)) {
+    box.appendChild(el("p", "wf-note", `no reports for '${sel}' yet`));
   }
   for (const r of reports) {
-    const expanded = !wfSelectedStep || r.step === wfSelectedStep;
+    const expanded = !sel || r.step === sel;
     const card = el("div", expanded ? "wf-report" : "wf-report folded");
     const rhead = el("div", "wf-report-head");
     rhead.appendChild(el("span", "wf-report-step", r.visit > 1 ? `${r.step} ×${r.visit}` : r.step));
@@ -3127,7 +3409,7 @@ function wfReports(data) {
       if (r.details) card.appendChild(el("pre", "wf-report-details", r.details));
     } else {
       card.title = `show reports for '${r.step}'`;
-      card.addEventListener("click", () => selectWfStep(r.step));
+      card.addEventListener("click", () => ui.select(r.step));
     }
     box.appendChild(card);
   }
@@ -3417,6 +3699,32 @@ function sessHead(s) {
   return head;
 }
 
+/* The radio under the head: which panel this column is. `Details` is the
+   session's facts and the ways to speak to it; `Workflow` is its run, given
+   the whole column instead of a section at the bottom of one. A pair of
+   buttons where one is always dead, like the trace page's mesh tabs — the
+   lit one not being wired is what makes the pair read as a radio. The choice
+   is the session's, remembered with its layout (sessLayoutFor). */
+function sessRailTabs(name) {
+  const bar = el("div", "seq-tabs sess-tabs");
+  const cur = sessLayoutFor(name).rail;
+  for (const [id, label] of [["detail", "Details"], ["wf", "Workflow"]]) {
+    const on = cur === id;
+    const tab = el("button", "seq-tab" + (on ? " on" : ""), label);
+    tab.title = id === "wf"
+      ? "this session's workflow run, at full height"
+      : "what this session is: metadata, messages, meshes";
+    if (!on) {
+      tab.addEventListener("click", () => {
+        setSessLayout(name, { rail: id });
+        refreshSession();   // redraw now, not at the poll's leisure
+      });
+    }
+    bar.appendChild(tab);
+  }
+  return bar;
+}
+
 function renderSession(data) {
   const view = $("sess-view");
   const s = data.session || {};
@@ -3430,6 +3738,20 @@ function renderSession(data) {
   view.innerHTML = "";
 
   view.appendChild(sessHead(s));
+
+  // The workflow used to be the last section of this panel; now it is the
+  // radio's other panel, with the column to itself. Everything below the
+  // branch is the Details panel only.
+  const name = s.name || sessName;
+  view.appendChild(sessRailTabs(name));
+  if (sessLayoutFor(name).rail === "wf") {
+    view.appendChild(sessWorkflow(data));
+    return;
+  }
+  // The fold belongs to the other panel; showing this one must take its poll
+  // down with it, or it keeps asking about a run nobody is reading.
+  stopSessRun();
+  sessRunFold = null;
 
   const dl = el("dl", "sess-meta");
   metaRow(dl, "harness", s.harness, (data.harness || {}).description);
@@ -3518,8 +3840,6 @@ function renderSession(data) {
     meshBox.appendChild(trace);
   }
   view.appendChild(meshBox);
-
-  view.appendChild(sessWorkflow(data));
 }
 
 /* ---- say something to this session, from the panel that names it ----
@@ -3745,7 +4065,9 @@ function sessWorkflow(data) {
     });
     box.appendChild(link);
     if (pending) box.appendChild(pending);
-    box.appendChild(sessRunFoldFor(flow));
+    // Open from the start: this block is the Workflow panel now, chosen by
+    // the radio — a reader who asked for the run should not find it folded.
+    box.appendChild(sessRunFoldFor(flow, true));
     return box;
   }
 
@@ -3781,7 +4103,7 @@ function sessWorkflow(data) {
    the first open and stop on close. The node survives the panel's 2s rebuild
    the way the start box does, so neither the fold's state nor the reports the
    user just expanded blink away underneath them. */
-function sessRunFoldFor(flow) {
+function sessRunFoldFor(flow, unfold) {
   const key = `${flow.scope}|${flow.cwd}`;
   if (sessRunFold && sessRunFold.dataset.slot === key) return sessRunFold;
   stopSessRun();
@@ -3801,6 +4123,10 @@ function sessRunFoldFor(flow) {
     sessRunTimer = setInterval(refreshSessRun, 2000);
   });
   sessRunFold = fold;
+  // On creation only, so shutting it stays shut across the panel's rebuilds:
+  // the browser answers this assignment with the same toggle event a click
+  // fires, and the poll starts through the one path above.
+  if (unfold) fold.open = true;
   return fold;
 }
 
@@ -3859,7 +4185,9 @@ function renderSessRun(body, data) {
   }
 
   // The point of the fold: the gate, and the button that clears it.
-  body.appendChild(wfActions(data, { archive: false, after: refreshSessRun }));
+  body.appendChild(wfActions(data, {
+    archive: false, after: refreshSessRun, host: "fold",
+  }));
 
   const reports = (data.reports || []).slice().reverse();  // newest first
   body.appendChild(el("h4", null, `Reports (${reports.length})`));

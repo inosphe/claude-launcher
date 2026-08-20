@@ -350,6 +350,40 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #terminal .xterm-viewport {
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
+
+/* ---- split mode: the run pane halved into the terminal's column ----
+   Both panes grow from a zero basis, so the two ratio variables ARE the
+   split: the free height left by the header divides exactly by them, and the
+   bar's drag only has to move two numbers (applySplitRatio). */
+body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; }
+#term-wf {
+  flex: var(--split-wf, 0.4) 1 0; min-height: 0;
+  /* Its own scroller, apart from the terminal's scrollback above it: a wheel
+     over the run must never fight the session for the same flick. */
+  overflow-y: auto; overscroll-behavior: contain;
+  padding: 0 16px 14px;
+}
+/* a <select> is as wide as its longest option — a path would shove #main open */
+#term-wf select { max-width: 100%; }
+/* The head holds still while the run scrolls under it — it names the run,
+   and it carries the way out to the full page. */
+#term-wf .wf-head {
+  position: sticky; top: 0; z-index: 1; flex-wrap: wrap; gap: 6px 10px;
+  margin: 0 -16px 6px; padding: 9px 16px 7px;
+  background: #14161a; border-bottom: 1px solid #262b33;
+}
+#term-wf .wf-head h2 { font-size: 15px; }
+/* The bar between the two. The whole strip drags; the grip only says so. */
+#term-split {
+  flex: none; height: 8px; cursor: row-resize; touch-action: none;
+  display: flex; align-items: center; justify-content: center;
+  background: #1b1e24;
+  border-top: 1px solid #2a2e36; border-bottom: 1px solid #2a2e36;
+}
+#term-split::after {
+  content: ""; width: 44px; height: 2px; border-radius: 2px; background: #4d5566;
+}
+#term-split:hover::after, #term-split.dragging::after { background: #58a6ff; }
 /* session detail. One node, two homes: the page slot on a phone (these
    rules) and the right-hand rail on a wide screen (.docked, further down),
    where there is room for a second column beside the terminal. The JS moves
@@ -363,6 +397,11 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* lit while this row is the one open in the right rail */
 #session-list .sess-info.on { color: #58a6ff; }
 .sess-head { flex-wrap: wrap; }
+/* The panel's radio: Details or Workflow, one lit and dead, the other live.
+   The trace page's tabs already dress this; only the widths are ours — two
+   equal halves read as a switch, a pair of pills reads as a menu. */
+.sess-tabs { margin: 12px 0 0; }
+.sess-tabs .seq-tab { flex: 1 1 0; max-width: 160px; text-align: center; }
 /* This panel is describing a session other than the terminal on screen. */
 .sess-elsewhere {
   font-size: 11px; padding: 1px 7px; border-radius: 9px;

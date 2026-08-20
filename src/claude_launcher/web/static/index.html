@@ -117,6 +117,12 @@
         <button id="term-zoom-in" class="term-btn" type="button"
                 title="larger text — fewer columns and rows in this session">+</button>
       </span>
+      <!-- Split mode: the session's workflow run halved into the bottom of
+           this column, so the run and the agent driving it are read together.
+           Remembered per session; syncSplitPane owns the title and the
+           pressed state. -->
+      <button id="term-splitbtn" class="term-btn" type="button" aria-pressed="false"
+              title="this session's workflow run under the terminal">⬒ run</button>
       <button id="term-details" class="term-btn" type="button" aria-pressed="false"
               title="this session's metadata and workflow">ⓘ details</button>
     </div>
@@ -126,6 +132,12 @@
          hidden whenever the backlog is empty. -->
     <div id="term-queued" class="hidden"></div>
     <div id="terminal"></div>
+    <!-- Split mode's bar and pane, under the terminal they halve. The pane
+         renders the same material as #/wf/<scope|cwd>; both stay hidden
+         unless the header's ⬒ run toggle is on for the attached session
+         (syncSplitPane), and the bar drags the ratio between the two. -->
+    <div id="term-split" class="hidden"></div>
+    <div id="term-wf" class="hidden"></div>
 
     <div id="home-view" class="hidden"></div>
 
