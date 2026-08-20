@@ -198,6 +198,24 @@ ctx.setMeshes([
   ok("the indent leaves most of a 260px rail to the row",
      pad("s25") <= 60, `depth-2 indent is ${pad("s25")}px`);
 
+  /* A deep chain must not indent itself off the rail. The tick and the
+     "spawned by" tooltip carry the lineage; the indent only has to make the
+     nesting scannable, so past a few levels it stops paying for depth. */
+  served = { sessions: [{ name: "d0", status: "idle", profile: "nc", parent: null }]
+    .concat([1, 2, 3, 4, 5, 6, 7].map((i) => (
+      { name: `d${i}`, status: "idle", profile: "nc", parent: `d${i - 1}` }))) };
+  ctx.setMeshes([]);
+  await ctx.refresh();
+  const deep = list.kids.map((r) => parseInt(r.style.paddingLeft || "0", 10));
+  check("the rail still lists the whole chain",
+        list.kids.map((r) => r.dataset.name).length, 8);
+  ok("the deepest row still leaves the rail most of its width",
+     Math.max(...deep) <= 60, `indents ${deep.join(",")}`);
+  ok("the indent stops growing once the nesting is already legible",
+     deep[7] === deep[5], `d5 ${deep[5]}px vs d7 ${deep[7]}px`);
+  ok("but it does grow over the first few levels",
+     deep[1] > deep[0] && deep[3] > deep[1], `indents ${deep.join(",")}`);
+
   /* ---- the line budget, which lives in the stylesheet ------------------ */
   ok("style.css comments are balanced",
      css.split("/*").length === css.split("*/").length,
