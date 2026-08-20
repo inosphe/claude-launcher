@@ -133,6 +133,14 @@ def _cmd_show(args: argparse.Namespace) -> int:
             f"filter_roles: {wf.filter_roles.describe()} — which mesh roles "
             f"may drive a run"
         )
+    if wf.default_role:
+        prio = f"    priority: {wf.priority}" if wf.priority else ""
+        print(
+            f"default_role: {wf.default_role} — pickers select this workflow "
+            f"when that role is chosen{prio}"
+        )
+    elif wf.priority:
+        print(f"priority: {wf.priority} — rank among a picker's candidates")
     for s in wf.steps.values():
         flags = []
         if s.gate:

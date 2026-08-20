@@ -12,6 +12,10 @@ and loops need no duplicated content::
     filter_roles:           # optional: which mesh roles may DRIVE this run
       type: whitelist       # whitelist (only these) | blacklist (all but these)
       roles: [worker]
+    default_role: worker    # optional: pickers auto-select this workflow
+                            # when that role is chosen
+    priority: 10            # optional tie-breaker between defaults for the
+                            # same role (higher wins; 0 when unstated)
     steps:
       design:
         instructions: |
@@ -110,6 +114,15 @@ session's recorded mesh role; a driver with no resolvable mesh identity (not
 a managed session, not enrolled, daemon down) is admitted with the fact
 journaled — the filter is a guardrail on the fleet's division of labour, and
 a standalone run has no labour to divide.
+
+``default_role`` is the opposite arrow, and advisory where the filter is an
+enforcement: it names the mesh role this workflow volunteers itself to, so a
+picker (the wizard's Role row) that has that role chosen selects this workflow
+without being asked. Several workflows may volunteer for the same role;
+``priority`` breaks the tie (higher wins) and orders them wherever they are
+listed as candidates. Neither admits anybody anywhere — ``filter_roles``
+still decides who may drive — and a ``default_role`` the workflow's own
+filter turns away is a contradiction refused at parse time.
 
 A candidate needs a ``role`` — a delegation is to a *function*, and "whoever
 happens to be connected" is not one. ``scope`` narrows further: ``any``
@@ -319,6 +332,13 @@ class Workflow:
     recur: bool = False
     #: Which mesh roles may drive a run of this workflow; ``None`` = any.
     filter_roles: Optional[RoleFilter] = None
+    #: The mesh role this workflow volunteers itself to: pickers auto-select
+    #: it when that role is chosen. Advisory — :attr:`filter_roles` remains
+    #: the enforcement. Stored lower-cased, like every resolved role.
+    default_role: Optional[str] = None
+    #: Tie-breaker between workflows volunteering for the same role, and the
+    #: order pickers list them in: higher first, 0 when unstated.
+    priority: int = 0
     warnings: List[str] = field(default_factory=list)
     #: Superseded spellings this file still uses. Kept apart from
     #: :attr:`warnings` on purpose: a warning describes a graph that may
@@ -376,6 +396,21 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
     if not isinstance(recur, bool):
         raise WorkflowError("'recur' must be true or false")
     filter_roles = _parse_role_filter(doc.get("filter_roles"))
+    default_role: Optional[str] = None
+    if doc.get("default_role") is not None:
+        default_role = str(doc.get("default_role")).strip().lower()
+        if not default_role:
+            raise WorkflowError("'default_role' must be a non-empty role name")
+    try:
+        priority = int(doc.get("priority", 0))
+    except (TypeError, ValueError):
+        raise WorkflowError("'priority' must be an integer")
+    if default_role and filter_roles and not filter_roles.allows(default_role):
+        raise WorkflowError(
+            f"'default_role' {default_role!r} is turned away by this "
+            f"workflow's own filter_roles {filter_roles.describe()} — a "
+            f"default nobody may drive; drop one of the two"
+        )
 
     workflow = Workflow(
         name=str(doc.get("name") or default_name),
@@ -385,6 +420,8 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         max_visits=max_visits,
         recur=recur,
         filter_roles=filter_roles,
+        default_role=default_role,
+        priority=priority,
         warnings=[],
     )
     _validate_graph(workflow)
@@ -396,6 +433,8 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         max_visits=workflow.max_visits,
         recur=workflow.recur,
         filter_roles=workflow.filter_roles,
+        default_role=workflow.default_role,
+        priority=workflow.priority,
         warnings=_graph_warnings(workflow),
         deprecations=_deprecations(workflow),
         advice=_advice(workflow),

@@ -41,7 +41,10 @@ class FakeSources(wizard.Sources):
         ]
 
     def roles(self):
-        return [{"name": "worker", "aliases": ["hand"], "stance": "do the work"}]
+        return [
+            {"name": "worker", "aliases": ["hand"], "stance": "do the work"},
+            {"name": "leader", "aliases": [], "stance": "steer the fleet"},
+        ]
 
     def resumable(self):
         return [{"name": "old", "status": "exited", "conversation_id": "u1"}]
@@ -282,6 +285,69 @@ def test_workflows_follow_the_directory():
     assert "ship-it" in [o.value for o in wiz.field("workflow").options]
     pick(wiz, "workflow", "ship-it")
     assert not wiz.field("context").hidden
+
+
+def test_picking_a_role_selects_its_default_workflow():
+    sources = FakeSources(workflows={"/srv/api": [
+        {"name": "audit", "default_role": "leader", "priority": 9},
+        {"name": "improv", "default_role": "worker", "priority": 1},
+    ]})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    assert wiz.value("workflow") == ""       # nobody volunteered for no role
+    pick(wiz, "role", "worker")
+    assert wiz.value("workflow") == "improv"
+    pick(wiz, "role", "leader")              # the auto-pick keeps following
+    assert wiz.value("workflow") == "audit"
+    pick(wiz, "role", "(no role)")
+    assert wiz.value("workflow") == ""       # and lets go with the role
+
+
+def test_rival_defaults_settle_by_priority_and_sort_the_picker():
+    sources = FakeSources(workflows={"/srv/api": [
+        {"name": "b-low", "default_role": "worker", "priority": 1},
+        {"name": "a-high", "default_role": "worker", "priority": 5},
+        {"name": "plain"},
+    ]})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    pick(wiz, "role", "worker")
+    assert wiz.value("workflow") == "a-high"
+    # the arrow keys walk the same ranking the auto-pick used: the role's
+    # candidates by descending priority, then everything else
+    assert [o.value for o in wiz.field("workflow").options] == [
+        "", "a-high", "b-low", "plain",
+    ]
+
+
+def test_a_workflow_a_person_picked_survives_a_role_change():
+    sources = FakeSources(workflows={"/srv/api": [
+        {"name": "improv", "default_role": "worker", "priority": 1},
+        {"name": "other"},
+    ]})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    pick(wiz, "workflow", "other")
+    pick(wiz, "role", "worker")
+    assert wiz.value("workflow") == "other"  # a human's answer, kept
+
+
+def test_a_default_the_filter_refuses_is_never_volunteered():
+    """The form takes its sources' word rather than re-parsing: whatever
+    served the list, a workflow whose filter_roles turns the picked role away
+    is never auto-selected — only offered, at the bottom of the picker."""
+    sources = FakeSources(workflows={"/srv/api": [
+        {"name": "trap", "default_role": "worker", "priority": 9,
+         "filter_roles": {"type": "whitelist", "roles": ["leader"]}},
+        {"name": "safe", "default_role": "worker", "priority": 1},
+    ]})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    pick(wiz, "role", "worker")
+    assert wiz.value("workflow") == "safe"
+    options = wiz.field("workflow").options
+    assert options[-1].value == "trap"       # sunk, but still pickable
+    assert "turns 'worker' away" in options[-1].detail
 
 
 def test_type_to_jump_in_a_long_picker():
@@ -770,6 +836,23 @@ def test_workflows_follow_the_directory_the_child_will_run_in():
     assert [o.value for o in wiz.field("workflow").options] == [""]
     pick(wiz, "workspace", "api")
     assert "ship-it" in [o.value for o in wiz.field("workflow").options]
+
+
+def test_spawn_role_pick_selects_the_default_workflow_too():
+    """Same contract as the new-session form: the role volunteers its
+    workflow, priority settles rivals, in the directory the CHILD runs in."""
+    sources = FakeSpawnSources(workflows={"/work/repo": [
+        {"name": "improv-low", "default_role": "worker", "priority": 1},
+        {"name": "improv", "default_role": "worker", "priority": 5},
+        {"name": "audit", "default_role": "leader", "priority": 9},
+    ]})
+    wiz = wizard.SpawnWizard(sources, cwd="/work/repo")
+    assert wiz.value("workflow") == ""
+    pick(wiz, "role", "worker")
+    assert wiz.value("workflow") == "improv"
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.workflow == "improv"
 
 
 def test_spawn_apply_writes_the_flags_spawn_reads():
