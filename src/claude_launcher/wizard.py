@@ -781,6 +781,14 @@ class Form:
     #: Shown top left, and in front of a picker's own title.
     title = "claunch"
 
+    #: What :func:`run` remembers on submit and re-offers as defaults next
+    #: time (see :mod:`wizard_recall`). An empty key opts the form out. Only
+    #: repeatable ANSWERS belong in the field list -- never per-launch
+    #: identity (name, worktree), per-conversation state (resume, fork) or
+    #: directions (cwd, workspace).
+    recall_key = ""
+    recall_fields: tuple = ()
+
     def __init__(self, sources: Sources, *, cwd: str = "", defaults: Any = None) -> None:
         self.sources = sources
         self.cwd = os.path.abspath(cwd or os.getcwd())
@@ -1138,6 +1146,12 @@ class Wizard(Form):
     """
 
     title = "claunch new-session"
+
+    recall_key = "new"
+    recall_fields = (
+        "harness", "profile", "borrow", "null_token", "role", "args",
+        "mesh", "workflow", "restore", "attach",
+    )
 
     # -- construction ---------------------------------------------------- #
     def _build(self, d: Any) -> List[Field]:
@@ -1583,6 +1597,16 @@ class SpawnWizard(Form):
     """
 
     title = "claunch spawn"
+
+    # Narrower than new-session's on purpose: harness, args and workspace
+    # options here are the parent's and the policy's to offer, so a
+    # remembered pick could only be re-offered against a different parent
+    # than it was made for.
+    recall_key = "spawn"
+    recall_fields = (
+        "profile", "borrow", "null_token", "role", "mesh", "workflow",
+        "attach",
+    )
 
     #: The mesh picker's "none at all" entry. The API spells it exactly so.
     NO_MESH = "-"
@@ -2157,10 +2181,15 @@ def run(
     command is being answered (:class:`Wizard` for ``new-session``,
     :class:`SpawnWizard` for ``spawn``).
     """
-    from . import attach as attach_mod
+    from . import attach as attach_mod, wizard_recall
 
     require_terminal()
-    wiz = (form or Wizard)(sources or Sources(), cwd=cwd, defaults=args)
+    form_cls = form or Wizard
+    remembered = wizard_recall.load(form_cls.recall_key)
+    wiz = form_cls(
+        sources or Sources(), cwd=cwd,
+        defaults=wizard_recall.defaults(args, remembered),
+    )
     import codecs
 
     decoder = codecs.getincrementaldecoder("utf-8")("replace")
@@ -2184,5 +2213,8 @@ def run(
         print("cancelled; nothing was created", file=sys.stderr)
         return False
     wiz.apply(args)
+    wizard_recall.save(
+        wiz.recall_key, {k: getattr(args, k, None) for k in wiz.recall_fields}
+    )
     print(wiz.summary(), file=sys.stderr)
     return True
