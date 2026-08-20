@@ -15,7 +15,7 @@ import sys
 from pathlib import Path
 
 from . import daemon_client
-from .cflow import engine, install, model, responders, state as state_mod
+from .cflow import checkout, engine, install, model, responders, state as state_mod
 
 
 def _note_redirect(cwd, scope: str) -> None:
@@ -394,6 +394,32 @@ def _cmd_journal(args: argparse.Namespace) -> int:
     entries = state_mod.read_journal(cwd, scope=scope)
     for entry in entries[-args.tail :] if args.tail else entries:
         print(json.dumps(entry, ensure_ascii=False))
+    return 0
+
+
+def _cmd_checkout(args: argparse.Namespace) -> int:
+    """Who else is standing in the directory this run works in.
+
+    Prints, never gates: the exit code stays 0 even with neighbours, because
+    the answer this command gives is one a human decides on. A checkout
+    shared with sessions the decider cannot move (another subtree's, say)
+    must not become a wall that stops every integration — the value here is
+    that nobody passes through *unknowingly*, not that nobody passes.
+    """
+    session = args.session or os.environ.get(state_mod.SESSION_ENV) or ""
+    occ = checkout.inspect(session=session, cwd=None)
+    print(f"cwd     : {occ.run_cwd}")
+    if occ.problem:
+        # Not an error: "could not ask" is a different answer from "nobody is
+        # there", and saying which one it is keeps the reader from reading
+        # silence as an all-clear.
+        print(f"unknown : {occ.problem}")
+        return 0
+    print(f"session : {occ.session_cwd}")
+    print(f"peers   : {', '.join(occ.peers) if occ.peers else '(none)'}")
+    note = checkout.warning(occ)
+    if note:
+        print(f"warning : {note}")
     return 0
 
 
