@@ -433,7 +433,7 @@ def test_the_worker_review_says_what_a_number_is_a_verdict_about():
         "--collect-only",                  # baselines cost nothing
         "Get-CimInstance",                 # the literal probe, not a description
         "distinct basetemp",               # concurrent sweeps
-        "8초",                             # the startup blind spot
+        "1~3초",                           # the startup blind spot
         "지금 시작한다",                    # ...and the only defence there is
         "popen-gw",                        # a dead run's numbers are on disk
         "verify` 필드가 있으면",            # ...and leaving such a step is a sweep
