@@ -267,6 +267,15 @@ async function refreshSessions() {
     dot.className = `dot ${s.status}`;
     const label = document.createElement("span");
     label.textContent = s.name;
+    // The session's role, next to the name it is part of — same tag the mesh
+    // roster draws, so "worker" reads as the same fact in both places. Only
+    // rendered when the session has one; most ad-hoc sessions do not, and a
+    // blank pill on every row would just be noise.
+    const role = s.role ? document.createElement("span") : null;
+    if (role) {
+      role.className = "mesh-role";
+      role.textContent = s.role;
+    }
     const meta = document.createElement("span");
     meta.className = "meta";
     meta.textContent = s.status === "exited"
@@ -289,7 +298,7 @@ async function refreshSessions() {
       e.stopPropagation();   // the row itself attaches; this button does not
       openDetail(s.name);
     });
-    li.append(dot, label, meta, info);
+    li.append(dot, label, ...(role ? [role] : []), meta, info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });

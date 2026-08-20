@@ -326,7 +326,7 @@ def attach(client, name: str) -> int:
     # would outlive it and still read as true. Cleared on the way out for the
     # same reason.
     labelled = herdr.rename_pane(
-        worktree.pane_label(name, info.get("cwd") or "")
+        worktree.pane_label(name, info.get("cwd") or "", info.get("role") or "")
     )
 
     outcome = {"reason": "closed"}
