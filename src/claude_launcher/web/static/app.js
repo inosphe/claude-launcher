@@ -2717,7 +2717,15 @@ function renderWfInto(view, data, ui) {
   }
   if (ui.fullLink) head.appendChild(wfFullLink(data));
   view.appendChild(head);
-  if (wf.description) view.appendChild(el("p", "wf-desc", wf.description));
+
+  // Under the head the body is two columns: the picture on the left, and
+  // everything to read and press — description, meta, the gate and its
+  // buttons, the reports — down the right. One structure for both homes:
+  // the columns are elastic and the row wraps (see .wf-cols), so the same
+  // markup follows the full page, the split pane at whatever ratio the bar
+  // was left at, and a phone, without either home knowing which it is.
+  const side = el("div", "wf-side");
+  if (wf.description) side.appendChild(el("p", "wf-desc", wf.description));
 
   const meta = el("div", "wf-meta");
   // Which session owns this run is its identity, not a detail: several
@@ -2741,7 +2749,7 @@ function renderWfInto(view, data, ui) {
     link.href = "#/s/" + encodeURIComponent(s);
     meta.appendChild(link);
   }
-  view.appendChild(meta);
+  side.appendChild(meta);
   /* The run reads a snapshot, so this file is where it CAME from — which is
      the only way to tell two same-named workflows apart after the fact, and
      the thing to open when the run is doing something surprising. */
@@ -2751,17 +2759,17 @@ function renderWfInto(view, data, ui) {
     if (run.origin) {
       src.appendChild(el("span", "wf-source-origin", ` — ${run.origin}`));
     }
-    view.appendChild(src);
+    side.appendChild(src);
   }
-  if (run.context) view.appendChild(el("p", "wf-context", `context: ${run.context}`));
+  if (run.context) side.appendChild(el("p", "wf-context", `context: ${run.context}`));
   for (const w of wf.warnings || []) {
-    view.appendChild(el("p", "wf-warning", `⚠ ${w}`));
+    side.appendChild(el("p", "wf-warning", `⚠ ${w}`));
   }
 
   const pending = pendingBanner(data, ui.refresh);
-  if (pending) view.appendChild(pending);
+  if (pending) side.appendChild(pending);
 
-  view.appendChild(wfActions(data, ui.actions));
+  side.appendChild(wfActions(data, ui.actions));
 
   // drop a stale selection if the workflow changed under us
   if (
@@ -2812,7 +2820,8 @@ function renderWfInto(view, data, ui) {
   }
   dia.appendChild(forceBtn);
 
-  cols.appendChild(wfReports(data, ui));
+  side.appendChild(wfReports(data, ui));
+  cols.appendChild(side);
   view.appendChild(cols);
 
   const journal = document.createElement("details");

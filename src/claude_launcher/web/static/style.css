@@ -617,8 +617,14 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-start-context { flex: 1 1 200px; }
 .wf-start .wf-note { margin-top: 8px; }
 
-.wf-cols { display: flex; gap: 26px; align-items: flex-start; flex-wrap: wrap; }
-.wf-diagram { flex: 0 0 480px; max-width: 100%; }
+/* The run's two-column body: the picture on the left, everything to read and
+   press on the right. Both columns are elastic and the row wraps, so the one
+   structure follows the full page, the split pane at whatever ratio its bar
+   sits at, and a phone — a container that cannot hold both side by side
+   simply stacks the right column under the picture. */
+.wf-cols { display: flex; gap: 8px 26px; align-items: flex-start; flex-wrap: wrap; }
+.wf-diagram { flex: 1 1 380px; min-width: 300px; max-width: 640px; }
+.wf-side { flex: 1.3 1 340px; min-width: 300px; max-width: 760px; }
 .wfd { width: 100%; height: auto; }
 .wfd-node { cursor: pointer; }
 .wfd-node:hover rect { stroke: #8fa1b3; }
@@ -634,7 +640,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wfd-edge { fill: none; stroke: #4d5566; stroke-width: 1.5; }
 .wfd-elabel { fill: #8fa1b3; font-size: 10px; }
 
-.wf-reports { flex: 1 1 320px; min-width: 280px; }
+.wf-reports { margin-top: 14px; }
 .wf-reports h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
 }
@@ -1403,7 +1409,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   .ws-row { flex-wrap: wrap; }
   .ws-text { flex-basis: 100%; }
   .wf-cols { gap: 16px; }
-  .wf-diagram { flex: 1 1 auto; }
+  /* one column on a phone: each takes the row, and the 300px floors above
+     would out-measure the narrowest screens' padding-box */
+  .wf-diagram, .wf-side { flex: 1 1 100%; min-width: 0; }
   .pol-row { flex-wrap: wrap; margin-left: 0; }
   .pol-label { min-width: 0; }
   .mesh-send-row, .sess-send-row { flex-wrap: wrap; }
