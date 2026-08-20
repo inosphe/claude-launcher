@@ -1,15 +1,19 @@
 """The clocks cflow cannot carry itself.
 
 Everything else in cflow happens because somebody called a tool: the agent
-advances, a human approves, a responder answers. Two things have nobody to
-call them, so the daemon carries both, scanning the same machine-local run
-registry the dashboard lists runs from:
+advances, a human approves, a responder answers. Three things have nobody to
+call them, so the daemon carries all three, scanning the same machine-local
+run registry the dashboard lists runs from:
 
 * :class:`AskClock` — a delegated decision's ``timeout``. The one agent that
   would notice an expiry is the one stopped waiting for the answer.
 * :class:`ReminderClock` — the step instructions an agent has drifted away
   from. The agent that would notice it has forgotten the protocol is,
   definitionally, the one that forgot it.
+* :class:`RunEventClock` — the moment a run stops being its own agent's: a
+  human gate entered, a recurring round finished, a driver that exited. The
+  session that would want to know — the overseer that spawned the driver —
+  is precisely not the one anything happens in, so nothing else tells it.
 
 Two consequences worth stating plainly, because both are deliberate:
 
@@ -33,7 +37,7 @@ import asyncio
 import contextlib
 import logging
 import time
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, state as cflow_state
@@ -331,3 +335,356 @@ def reminder_block(payload: dict, interval: float) -> str:
         )
     lines.append("---")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# the run event clock
+# --------------------------------------------------------------------------- #
+#: How often the event clock looks. The transitions it reports move at human
+#: and agent speed (minutes), so the reminder clock's cadence is plenty.
+EVENT_POLL = 20.0
+
+#: Statuses in which the run is somebody's to advance — the complement of the
+#: blocked/parked positions the events below report entering.
+_RUNNING = ("step", "select")
+
+
+class RunEventClock:
+    """Tells a run's overseer when the run stops being its own agent's.
+
+    A leader steering worker sessions has no push channel for their runs: the
+    cflow MCP tools read only the caller's own run, and a worker that has
+    stopped moving is silent in exactly the same way whether it is working,
+    parked on a human gate, waiting for its next round's goal, or dead. This
+    clock closes that gap: it watches every run on the machine (the same
+    registry scan as the other clocks) and, when one crosses a transition
+    worth an overseer's attention, types a short machine-generated fyi into
+    the overseer's session.
+
+    Three events, deliberately few:
+
+    * **human-gate** — the run entered ``waiting_approval``/``waiting_selection``:
+      blocked on a person, and the overseer may need to surface that to one.
+    * **round-done** — a recurring run finished its round and filed the next
+      one: the driver is out of work until somebody gives it a goal.
+    * **orphaned** — the run is active but its driving session has exited:
+      nobody is driving, and no transition will ever come.
+
+    The overseer is the driver's spawn-tree parent when it is alive — in a
+    leader/worker fleet the parent *is* the leader, and the daemon's manager
+    already knows it. A driver with no live parent falls back to the local
+    ``leader``-role member of its mesh; with neither, the event is logged and
+    dropped (the web dashboard remains the human's view).
+
+    Transitions are detected by diffing each run's position between polls, so
+    the first sight of a run only arms it — a daemon restart does not replay
+    events, and one that happens while a run sits at a gate misses that
+    entry (the overseer's pull channel, ``claunch cflow status -t``, is the
+    safety net; ``orphaned`` is state, not a transition, so it alone still
+    fires after a restart). Delivery is a debt like the reminder's: a failed
+    type-in is retried every poll until it lands. Unlike the reminder there
+    is no busy-only hold — the point is to WAKE an idle overseer, not to
+    steer a working one.
+
+    The machine switch is ``cflow_events`` (``store.daemon_config()``), read
+    fresh every pass like the reminder's. While it is off, positions are
+    still tracked — silently — so turning it back on does not replay every
+    transition that happened in the dark.
+    """
+
+    def __init__(self, manager, mesh=None, *, poll: float = EVENT_POLL) -> None:
+        self.manager = manager
+        self.mesh = mesh
+        self.poll = poll
+        self._task: Optional[asyncio.Task] = None
+        #: (cwd, scope) -> last observed position key. In memory only, same
+        #: trade as the reminder's timers.
+        self._seen: Dict[Tuple[str, str], tuple] = {}
+        #: (cwd, scope, run) whose orphaning was already reported.
+        self._orphaned: Set[Tuple[str, str, str]] = set()
+        #: Events found but not yet delivered — retried every poll.
+        self._debt: List[dict] = []
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.poll)
+                self._debt.extend(await asyncio.to_thread(self.scan))
+                remaining: List[dict] = []
+                for event in self._debt:
+                    if not await self._deliver(event):
+                        remaining.append(event)
+                self._debt = remaining
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One unreadable run must not stop the clock for the rest.
+                log.exception("cflow run event clock tick failed")
+
+    def scan(self) -> List[dict]:
+        """One pass over the registry: the transitions since the last one.
+        Blocking (config + every run's state); call it in a thread. Public
+        for the tests."""
+        try:
+            cfg = store.daemon_config()
+        except store.StoreError as exc:
+            log.warning("cflow run events: config unreadable, skipping: %s", exc)
+            return []
+        enabled = bool(cfg.get("cflow_events"))
+        events: List[dict] = []
+        live = set()
+        for cwd, scope in cflow_state.known_runs():
+            key = (cwd, scope)
+            live.add(key)
+            try:
+                payload = cflow_engine.status(cwd, scope=scope)
+            except Exception as exc:
+                log.debug("cflow run events skipped %s/%s: %s", cwd, scope, exc)
+                continue
+            pending_by = str((payload.get("pending_start") or {}).get("by") or "")
+            status = payload.get("status")
+            pos = (
+                payload.get("run"), status,
+                payload.get("step_id"), payload.get("visit"), pending_by,
+            )
+            prev, self._seen[key] = self._seen.get(key), pos
+            run_id = payload.get("run")
+            if (
+                enabled and run_id and status not in ("done", "aborted")
+                and (cwd, scope, run_id) not in self._orphaned
+                and self._driver_gone(cwd, scope)
+            ):
+                # State, not a transition — fires on sight, once per run.
+                self._orphaned.add((cwd, scope, run_id))
+                events.append(self._event(cwd, scope, "orphaned", payload))
+            if prev is None or prev == pos or not enabled:
+                continue
+            if (
+                status in ("waiting_approval", "waiting_selection")
+                and prev[1] != status
+            ):
+                events.append(self._event(cwd, scope, "human-gate", payload))
+            elif (
+                pending_by == "recur"
+                and status in ("idle", "done")
+                and prev[1] in _RUNNING
+            ):
+                events.append(self._event(cwd, scope, "round-done", payload))
+        for key in list(self._seen):
+            if key not in live:
+                del self._seen[key]
+        return events
+
+    def _event(self, cwd: str, scope: str, kind: str, payload: dict) -> dict:
+        return {
+            "cwd": cwd,
+            "scope": scope,
+            "kind": kind,
+            "block": event_block(scope, kind, payload),
+        }
+
+    def _driver_gone(self, cwd: str, scope: str) -> bool:
+        """True when the run's scope names a managed session that has exited.
+
+        Same containment rule as :meth:`ReminderClock._session_for`: the
+        scope IS the session name, and the cwd must match. A scope no manager
+        knows is a standalone/CLI run — not driven by a session, so never
+        orphaned by one — and a matching name in another directory is
+        somebody else's session.
+        """
+        try:
+            session = self.manager.get(scope)
+        except Exception:
+            return False
+        if not session.sdef.cwd:
+            return False
+        try:
+            if cflow_state.resolve_cwd(session.sdef.cwd) != cwd:
+                return False
+        except Exception:
+            return False
+        return bool(session.exited)
+
+    async def _deliver(self, event: dict) -> bool:
+        """Type the event into its overseer. True = settled (delivered, or
+        dropped for want of anyone to tell); False keeps the debt."""
+        target = self._recipient(event["cwd"], event["scope"])
+        if target is None:
+            log.info(
+                "cflow run event (%s) about %r dropped: no overseer to tell",
+                event["kind"], event["scope"],
+            )
+            return True
+        try:
+            delivered = await target.deliver(event["block"])
+        except Exception:
+            log.exception(
+                "cflow run event delivery to %r failed", target.sdef.name
+            )
+            return False
+        if delivered:
+            log.info(
+                "cflow run event (%s) about %r delivered to %r",
+                event["kind"], event["scope"], target.sdef.name,
+            )
+        return bool(delivered)
+
+    def _recipient(self, cwd: str, scope: str):
+        """The live session to tell: spawn parent first, mesh leader after.
+
+        The parent is answered by the manager alone and is the leader in the
+        fleet shape this clock exists for. The fallback needs the mesh: the
+        driver's memberships, disambiguated by the run's own ``mesh`` field
+        when it has one, then the local ``leader``-role member. Ambiguity is
+        a skip, never a guess.
+        """
+        try:
+            parent = self.manager.get(scope).sdef.parent or ""
+        except Exception:
+            parent = ""
+        if parent:
+            try:
+                candidate = self.manager.get(parent)
+                if not candidate.exited:
+                    return candidate
+            except Exception:
+                pass
+        if self.mesh is None:
+            return None
+        try:
+            memberships = self.mesh.meshes_for_session(scope)
+        except Exception:
+            return None
+        names = sorted({m["mesh"] for m in memberships})
+        if len(names) > 1:
+            wanted = self._run_mesh(cwd, scope)
+            names = [n for n in names if n == wanted] or names
+        if len(names) != 1:
+            if names:
+                log.debug(
+                    "cflow run event for %r: member of several meshes (%s) "
+                    "and the run names none; skipping",
+                    scope, ", ".join(names),
+                )
+            return None
+        try:
+            mesh = self.mesh.get(names[0])
+        except Exception:
+            return None
+        for handle in sorted(mesh.members):
+            member = mesh.members[handle]
+            if member.role != "leader" or member.session == scope:
+                continue
+            if not self.mesh._is_local(mesh, member):
+                continue
+            try:
+                candidate = self.manager.get(member.session)
+            except Exception:
+                continue
+            if not candidate.exited:
+                return candidate
+        return None
+
+    def _run_mesh(self, cwd: str, scope: str) -> str:
+        """The mesh the run was started against, or ''. Best-effort — the
+        field exists only when ``start`` was told one."""
+        token = cflow_state.push_scope(scope)
+        try:
+            return str(cflow_state.load_state(cwd).get("mesh") or "")
+        except Exception:
+            return ""
+        finally:
+            cflow_state.pop_scope(token)
+
+
+def event_block(scope: str, kind: str, payload: dict) -> str:
+    """The text an overseer hears about a watched run, composed per event.
+
+    An fyi, not an order: the overseer's own workflow says what (if anything)
+    to do about it, so the block reports the fact, points at the pull channel
+    for the rest, and — for the gate — restates whose the gate is, because
+    the reader is an agent and the gate is not its to clear.
+    """
+    workflow = payload.get("workflow") or "?"
+    step = payload.get("step_id")
+    lines = [
+        "---",
+        "# claunch cflow: run event -- machine-generated. A run you oversee "
+        "changed state; fyi, your own protocol decides what to do with it.",
+        f"session: {scope}",
+    ]
+    if kind == "human-gate":
+        what = (
+            "approval"
+            if payload.get("status") == "waiting_approval"
+            else "selection"
+        )
+        lines.append(f"event: waiting on a human {what} at {workflow}/{step}")
+        prompt = str(payload.get("gate") or payload.get("prompt") or "").strip()
+        if prompt:
+            lines.append(f"prompt: {prompt.splitlines()[0]}")
+        lines.append(
+            "note: the gate is a person's to answer and the wait is that "
+            "run's protocol -- do not clear it for them. If it stays "
+            "unanswered, surface it to the user."
+        )
+    elif kind == "round-done":
+        lines.append(
+            f"event: finished its round of {workflow}; recur filed the next "
+            "one, so the session is waiting for a goal"
+        )
+    elif kind == "orphaned":
+        lines.append(
+            f"event: run {payload.get('run')} of {workflow} is active at "
+            f"step '{step}' but its session has exited -- nobody is driving"
+        )
+    lines.append(
+        f"read it yourself: claunch cflow status -t {scope} --json "
+        f"(details: claunch cflow journal -t {scope})"
+    )
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def run_summary(name: str, cwd: str) -> Optional[dict]:
+    """The cflow run session ``name`` drives in ``cwd``, compactly — or None.
+
+    The same containment rule as the clocks, read in the other direction: the
+    scope IS the session name and the run must live in the session's own
+    directory. Serves the ``children`` API view, so an overseer's roster can
+    carry each child's run position without a second tool."""
+    if not name or not cwd:
+        return None
+    try:
+        resolved = cflow_state.resolve_cwd(cwd)
+        if name not in cflow_state.scopes_in(resolved):
+            return None
+        payload = cflow_engine.status(resolved, scope=name)
+    except Exception:
+        return None
+    pending = payload.get("pending_start")
+    if payload.get("status") == "idle" and not pending:
+        return None
+    out: dict = {"status": payload.get("status")}
+    for src, dst in (
+        ("workflow", "workflow"), ("run", "run"),
+        ("step_id", "step"), ("started_at", "started_at"),
+    ):
+        if payload.get(src):
+            out[dst] = payload[src]
+    if pending:
+        out["pending_start"] = {
+            "workflow": pending.get("workflow"), "by": pending.get("by"),
+        }
+    return out

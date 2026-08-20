@@ -185,6 +185,11 @@ DAEMON_DEFAULTS = {
     # tick — unlike the keys above, editing these needs no restart.
     "cflow_reminder": True,
     "cflow_reminder_interval": 180.0,
+    # The run event clock's machine switch: whether an overseer session (the
+    # driver's spawn parent, else its mesh leader) is told when a run it
+    # oversees hits a human gate, finishes a recurring round, or loses its
+    # driver. Read LIVE like the reminder keys.
+    "cflow_events": True,
 }
 
 

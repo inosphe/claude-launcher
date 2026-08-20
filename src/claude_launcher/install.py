@@ -63,6 +63,31 @@ MCP_NAME = "claunch"
 #: Server names earlier versions registered, replaced by :data:`MCP_NAME`.
 LEGACY_MCP_NAMES = ("cflow", "mesh")
 
+#: Harness permission rules that keep the AGENT's hands off the human gate
+#: commands (``claunch cflow approve|select|goto|abort``).
+#:
+#: The cflow split is channels: the MCP tools are the agent's and carry no
+#: approve, the CLI is the human's — but an agent with a shell tool holds
+#: both, and could clear its own (or another run's) user gate with one Bash
+#: call. The CLI itself cannot tell them apart: a human approving from a chat
+#: session's ``!`` shell — a flow the gate messages themselves recommend —
+#: runs with the very same environment. The harness permission layer is the
+#: one place that knows WHO issued a command (deny rules bind the model's
+#: tool calls and never the user's typed ``!`` input), so that is where the
+#: guard lives. Same spirit as ``new-session``'s in-session refusal: a
+#: drift-arresting bump that leaves every human door open, not a security
+#: boundary.
+#:
+#: Both spellings per command (exact and ``:*`` prefix), for both shell
+#: tools this harness may expose; a rule naming a tool a setup lacks is
+#: inert.
+GATE_DENY_RULES = tuple(
+    f"{tool}(claunch cflow {cmd}{suffix})"
+    for cmd in ("approve", "select", "goto", "abort")
+    for tool in ("Bash", "PowerShell")
+    for suffix in ("", ":*")
+)
+
 
 def mcp_server_def() -> dict:
     """The stdio server entry for the merged MCP bridge.
@@ -74,6 +99,13 @@ def mcp_server_def() -> dict:
     if sys.platform == "win32":
         return {"command": "cmd", "args": ["/c", "claunch", "mcp"]}
     return {"command": "claunch", "args": ["mcp"]}
+
+
+def _gate_guard_lines(settings_path: Path) -> List[str]:
+    """Merge :data:`GATE_DENY_RULES` into one settings file; report it."""
+    changed = settings.merge_permission_deny(settings_path, GATE_DENY_RULES)
+    note = "" if changed else " (already present)"
+    return [f"gate guard (cflow human commands) -> {settings_path}{note}"]
 
 
 def _skill_lines(skills_dir: Path) -> List[str]:
@@ -128,6 +160,7 @@ def install_into_user() -> List[str]:
     return (
         [f"mcp server {MCP_NAME!r} -> {path}"]
         + _skill_lines(skills)
+        + _gate_guard_lines(config.default_config_dir() / settings.SETTINGS_FILENAME)
         + _workflow_lines()
     )
 
@@ -137,9 +170,11 @@ def _profile_lines(profile: Profile) -> List[str]:
     settings.merge_mcp_servers(
         profile, {MCP_NAME: mcp_server_def()}, remove=LEGACY_MCP_NAMES
     )
-    return [
-        f"mcp server {MCP_NAME!r} -> {profile.config_dir / settings.CLAUDE_JSON}"
-    ] + _skill_lines(profile.config_dir / "skills")
+    return (
+        [f"mcp server {MCP_NAME!r} -> {profile.config_dir / settings.CLAUDE_JSON}"]
+        + _skill_lines(profile.config_dir / "skills")
+        + _gate_guard_lines(profile.config_dir / settings.SETTINGS_FILENAME)
+    )
 
 
 def install_into_profile(profile: Profile) -> List[str]:
@@ -188,6 +223,10 @@ def install_into_project(project_dir: Path) -> List[str]:
             servers.pop(name, None)
         servers[MCP_NAME] = mcp_server_def()
     mcp_path.write_text(json.dumps(doc, indent=2) + "\n", encoding="utf-8")
-    return [f"mcp server {MCP_NAME!r} -> {mcp_path}"] + _skill_lines(
-        project_dir / ".claude" / "skills"
+    return (
+        [f"mcp server {MCP_NAME!r} -> {mcp_path}"]
+        + _skill_lines(project_dir / ".claude" / "skills")
+        + _gate_guard_lines(
+            project_dir / ".claude" / settings.SETTINGS_FILENAME
+        )
     )
