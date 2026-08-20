@@ -424,11 +424,16 @@ def build_command(
             argv.extend(["--append-system-prompt", "\n\n".join(blocks)])
         argv.extend(sdef.args)
         if opening and not restoring:
-            # The positional prompt — claude's first turn. Behind ``--``
+            # The positional prompt — claude's first turn. Dated with the same
+            # stamp deliver() prefixes to every typed-in message: the argv
+            # handoff is the one delivery that skips deliver(), and it must
+            # not be the one delivery a transcript cannot date. Behind ``--``
             # because an opening block routinely starts with a line of dashes
             # (the mesh briefing's own fence does), and claude's option parser
             # reads that as a flag and refuses to start.
-            argv.extend(["--", opening])
+            from . import session as session_mod  # late: session imports us
+
+            argv.extend(["--", f"{session_mod.delivery_stamp()}\n{opening}"])
     else:
         entry = harness_registry.get(sdef.harness)
         if entry is None:  # normalize() refuses these; belt and braces
