@@ -32,7 +32,10 @@ the picture is allowed to claim about where each message got to —
 ``seqrender_check`` on the sequence that list is drawn into, ``zoom_check`` on
 the header's text-size knob — which sizes the session's grid and not merely
 this tab's view — ``reconnect_check`` on the terminal's link, the one thing
-here that is not a poll and so has to repair itself deliberately, and the two
+here that is not a poll and so has to repair itself deliberately,
+``briefcard_check`` on the rail's briefing card — the session summary a row
+folds open, and which of the daemon's answers (a briefing, unshaped prose,
+no LLM, no record) it is showing — and the two
 ``flow*_check`` harnesses on the flow view — one on the track a workflow
 becomes, one on the page those tracks are drawn into. This wrapper is what
 makes them run with everything else.
@@ -71,6 +74,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "seqrender_check.js",
         "zoom_check.js",
         "reconnect_check.js",
+        "briefcard_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
     ],

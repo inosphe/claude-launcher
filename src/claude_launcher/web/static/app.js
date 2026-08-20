@@ -334,6 +334,7 @@ async function refreshSessions() {
   // The rows and the runs arrive on separate polls; whichever lands last
   // paints the cflow badges over the rows that exist now.
   applyCflowBadges();
+  applyBriefingCards();
 }
 
 /* The cflow run a rail row speaks for. Runs are keyed (cwd, session); after a
@@ -404,6 +405,158 @@ function applyCflowBadges() {
         (r.options ? ` — options: ${r.options.join(", ")}` : "")
       : (r.title || r.step_id || "");
     line.append(dot, txt);
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* session briefing card                                              */
+/* ------------------------------------------------------------------ */
+/* A row can fold open a card summarising what its session is up to: the
+   daemon reads the session's own record and has the configured LLM compress
+   it to goal / now / state / progress. Rows are rebuilt on every poll, so
+   which cards are open and what each one knows live here, and
+   applyBriefingCards() repaints them onto whatever rows exist now — the
+   same idempotent shape as the cflow badge above. */
+const briefingOpen = new Set();     // session names whose card is folded open
+const briefingCache = new Map();    // name -> {phase, data?, error?}
+
+/* The states the summariser is allowed to claim. blocked and waiting are
+   the two where the reader may BE the unblock, so they carry the loud
+   colours; anything unrecognised stays neutral rather than borrowing a
+   meaning it was not given. */
+function briefingStateClass(state) {
+  return ["working", "blocked", "waiting", "idle", "done"].includes(state)
+    ? state : "other";
+}
+
+async function fetchBriefing(name, refresh) {
+  // A refresh keeps the old text on screen, dimmed, instead of blanking the
+  // card for however long the summariser takes.
+  const prev = briefingCache.get(name);
+  briefingCache.set(name, { phase: "loading", data: prev && prev.data });
+  applyBriefingCards();
+  let entry;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/briefing${refresh ? "?refresh=1" : ""}`
+    );
+    const body = await resp.json().catch(() => null);
+    if (resp.ok) {
+      entry = { phase: "ok", data: body };
+    } else if (resp.status === 400) {
+      entry = { phase: "unconfigured" };
+    } else if (resp.status === 404) {
+      entry = { phase: "norecord" };
+    } else {
+      entry = { phase: "error", error: (body && body.error) || `HTTP ${resp.status}` };
+    }
+  } catch {
+    entry = { phase: "error", error: "request failed" };
+  }
+  briefingCache.set(name, entry);
+  applyBriefingCards();
+}
+
+function toggleBriefing(name) {
+  if (briefingOpen.has(name)) {
+    briefingOpen.delete(name);
+  } else {
+    briefingOpen.add(name);
+    // Reopening shows what we already have (with its age on it); the person
+    // who wants a fresh read has the ⟳ for exactly that.
+    if (!briefingCache.has(name)) fetchBriefing(name, false);
+  }
+  applyBriefingCards();
+}
+
+function renderBriefingCard(name, entry) {
+  const card = el("div", "sess-brief");
+  // The row underneath navigates; the card is for reading.
+  card.addEventListener("click", (e) => e.stopPropagation());
+  const data = entry && entry.data;
+  const brief = data && data.briefing;
+  const loading = !entry || entry.phase === "loading";
+  if (loading && data) card.className += " refreshing";
+
+  const head = el("div", "sess-brief-head");
+  if (brief && brief.state) {
+    head.appendChild(el(
+      "span", `sess-brief-state st-${briefingStateClass(brief.state)}`, brief.state
+    ));
+  }
+  if (data && data.generated_at) {
+    const secs = Math.max(0, Math.floor((Date.now() - Date.parse(data.generated_at)) / 1000));
+    head.appendChild(el(
+      "span", "sess-brief-age",
+      `${fmtAge(secs)} ago${data.cached ? " · cached" : ""}`
+    ));
+  }
+  const refresh = el("button", `sess-brief-refresh${loading ? " spinning" : ""}`, "⟳");
+  refresh.type = "button";
+  refresh.title = "re-summarise now";
+  refresh.disabled = loading;
+  refresh.addEventListener("click", (e) => {
+    e.stopPropagation();
+    fetchBriefing(name, true);
+  });
+  head.appendChild(refresh);
+  card.appendChild(head);
+
+  if (loading && !data) {
+    card.appendChild(el("div", "sess-brief-note", "summarising…"));
+  } else if (!entry || entry.phase === "unconfigured") {
+    card.appendChild(el(
+      "div", "sess-brief-note",
+      "no LLM configured — set the llm section (endpoint, model, api_key) in ~/.claunch.yaml"
+    ));
+  } else if (entry.phase === "norecord") {
+    card.appendChild(el("div", "sess-brief-note", "no session record to summarise"));
+  } else if (entry.phase === "error") {
+    card.appendChild(el("div", "sess-brief-note error", entry.error || "briefing failed"));
+  } else if (brief) {
+    for (const [key, val] of [
+      ["goal", brief.goal], ["now", brief.now], ["progress", brief.progress],
+    ]) {
+      if (val === undefined || val === null || val === "") continue;
+      const row = el("div", "sess-brief-row");
+      row.append(el("span", "sess-brief-k", key), el("span", "sess-brief-v", String(val)));
+      card.appendChild(row);
+    }
+  } else if (data && data.raw) {
+    // The summariser answered but not in the agreed shape — its words are
+    // still the best available summary, so show them as they came.
+    card.appendChild(el("pre", "sess-brief-raw", data.raw));
+  } else {
+    card.appendChild(el("div", "sess-brief-note", "empty briefing"));
+  }
+  return card;
+}
+
+/* Repaint every row's toggle and card from the state above. Safe to call
+   any time; refreshSessions calls it after each rebuild. The card is
+   rebuilt in place (its listeners live and die with it) — only the toggle
+   is reused, and it carries no state beyond its glyph. */
+function applyBriefingCards() {
+  const list = $("session-list");
+  if (!list) return;
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    const name = li.dataset.name;
+    let btn = li.querySelector(".sess-brief-toggle");
+    if (!btn) {
+      btn = el("button", "sess-brief-toggle");
+      btn.type = "button";
+      btn.title = "briefing: goal, current work, state — summarised";
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();   // the row itself attaches; this button does not
+        toggleBriefing(name);
+      });
+      li.appendChild(btn);
+    }
+    const open = briefingOpen.has(name);
+    btn.textContent = open ? "▾" : "▸";
+    const old = li.querySelector(".sess-brief");
+    if (old) old.remove();
+    if (open) li.appendChild(renderBriefingCard(name, briefingCache.get(name)));
   }
 }
 
