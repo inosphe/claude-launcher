@@ -69,6 +69,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "lineage_check.js",
         "railbadge_check.js",
         "sessmesh_check.js",
+        "raillayout_check.js",
         "bulk_check.js",
         "owed_check.js",
         "panel_check.js",

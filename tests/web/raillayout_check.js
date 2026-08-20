@@ -1,0 +1,268 @@
+/* How much vertical room one session costs on the rail.
+
+   The rail carries every live session at once, so a row that grows a line
+   costs twenty. It grew three: the mesh tags took a line of their own, and
+   because a full-width child at the default `order: 0` breaks the flex line
+   before the ▸ toggle (`order: 1`) is reached, the toggle took a third.
+
+   What has to hold: the name, the role it holds and the rooms it is in are
+   ONE group in ONE container, so they share a line and shrink instead of
+   wrapping; nothing that belongs on that line declares itself full-width; the
+   only full-width children are the two deliberate lines below (the cflow run
+   and the folded-open briefing card) and both sort AFTER the toggle; and the
+   tags still say which rooms, since a pill that can shrink to an empty
+   capsule has lost the fact it was drawn for.
+
+   The real refreshSessions builds the rows here, against a stub DOM. */
+const fs = require("fs");
+const path = require("path");
+const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher",
+                         "web", "static");
+const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
+const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8");
+
+function slice(name) {
+  const start = src.indexOf(`function ${name}(`);
+  if (start < 0) throw new Error("missing " + name);
+  const head = src.lastIndexOf("async ", start) === start - 6 ? start - 6 : start;
+  let depth = 0;
+  for (let j = src.indexOf("{", start); j < src.length; j++) {
+    if (src[j] === "{") depth++;
+    else if (src[j] === "}") { depth--; if (!depth) return src.slice(head, j + 1); }
+  }
+  throw new Error("unbalanced " + name);
+}
+const capLine = src.match(/^const RAIL_MESH_TAGS = .+$/m);
+if (!capLine) throw new Error("cannot locate RAIL_MESH_TAGS in app.js");
+
+let failures = 0;
+function check(what, got, want) {
+  const g = JSON.stringify(got), w = JSON.stringify(want);
+  if (g !== w) {
+    console.error(`FAIL ${what}\n  got  ${g}\n  want ${w}`);
+    failures++;
+  }
+}
+function ok(what, cond, detail) {
+  if (!cond) { console.error(`FAIL ${what}${detail ? "\n  " + detail : ""}`); failures++; }
+}
+
+/* ---- stub DOM ---------------------------------------------------------- */
+function node(tag) {
+  const n = {
+    tag, kids: [], text: "", classes: new Set(), dataset: {}, style: {},
+    title: "", type: "", parent: null,
+    appendChild(c) { c.parent = this; this.kids.push(c); return c; },
+    append(...cs) { cs.forEach((c) => this.appendChild(c)); },
+    addEventListener() {},
+    querySelector(sel) { return this.querySelectorAll(sel)[0] || null; },
+    querySelectorAll(sel) {
+      const cls = sel.replace(/^\./, "");
+      return walk(this).filter((k) => k.classes.has(cls));
+    },
+    get textContent() { return this.text; },
+    set textContent(v) { this.text = String(v); },
+    get className() { return [...this.classes].join(" "); },
+    set className(v) {
+      this.classes = new Set(String(v).split(/\s+/).filter(Boolean));
+    },
+    get innerHTML() { return ""; },
+    set innerHTML(v) { this.kids = []; },
+  };
+  n.classList = {
+    add: (...cs) => cs.forEach((c) => n.classes.add(c)),
+    contains: (c) => n.classes.has(c),
+  };
+  return n;
+}
+function walk(n, out = []) {
+  for (const k of n.kids) { out.push(k); walk(k, out); }
+  return out;
+}
+const document = { createElement: (tag) => node(tag) };
+function el(tag, cls, text) {
+  const n = node(tag);
+  if (cls) String(cls).split(/\s+/).forEach((c) => c && n.classes.add(c));
+  if (text !== undefined) n.text = String(text);
+  return n;
+}
+
+const list = node("ul");
+let served = { sessions: [] };
+const api = async () => ({ ok: true, json: async () => served });
+
+/* Everything refreshSessions leans on that is not the row itself. */
+const stubs = `
+let sessionsCache = [], currentName = null, currentPage = "home";
+let attachedPid = null, linkState = "down", sessName = null;
+function refreshResumeChoices() {}
+function renderHome() {}
+function syncBulkActions() {}
+function syncMobileBars() {}
+function applyCflowBadges() {}
+function applyBriefingCards() {}
+function terminalOnScreen() { return false; }
+function attach() {}
+function setStatusBadge() {}
+function $(id) { return list; }
+`;
+
+const ctx = {};
+new Function(
+  "exports", "document", "el", "api", "list", "meshCache",
+  stubs + capLine[0] + "\n"
+  + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags")
+  + slice("refreshSessions")
+  + `
+Object.assign(exports, {
+  refresh: refreshSessions,
+  setMeshes: (ms) => { meshCache = ms; },
+});`)(ctx, document, el, api, list, []);
+
+/* ---- the rail, built by the real code ---------------------------------- */
+const member = (session) => ({ session, handle: session, role: "worker",
+                               local: true, machine: "" });
+served = { sessions: [
+  { name: "s20", status: "idle", role: "leader", profile: "nc", parent: null },
+  { name: "s21", status: "busy", role: "worker", profile: "nc", parent: "s20" },
+  { name: "s25", status: "idle", role: "worker", profile: "nc", parent: "s21" },
+  { name: "loner", status: "idle", profile: "nc", parent: null },
+] };
+ctx.setMeshes([
+  { name: "mesh0", members: ["s20", "s21", "s25"].map(member) },
+  { name: "gds", members: [member("s21")] },
+]);
+
+(async () => {
+  await ctx.refresh();
+
+  const rows = list.kids;
+  check("every session gets a row", rows.map((r) => r.dataset.name),
+        ["s20", "s21", "s25", "loner"]);
+
+  const row = (name) => rows.find((r) => r.dataset.name === name);
+  const kidClasses = (r) => r.kids.map((k) => k.className);
+
+  /* The row's own children ARE its lines: anything that is not on the name
+     line has to be a full-width child, so counting the direct children is
+     how many things are competing for that line. The name, its role and its
+     rooms must not be three of them. */
+  check("the row's parts are the dot, the name group, the profile and the ⓘ",
+        kidClasses(row("s21")), ["dot busy", "rail-head", "meta", "sess-info"]);
+  check("a session with no role and one room keeps the same four parts",
+        kidClasses(row("loner")), ["dot idle", "rail-head", "meta", "sess-info"]);
+
+  /* The point of the change: role and rooms are siblings inside one box, not
+     loose on the row where they wrapped. */
+  // `?? node("span")` throughout: when the grouping is gone these read as
+  // plain failures rather than a stack trace that hides the rest of the run.
+  const some = (n) => n || node("span");
+  const head = (name) => some(row(name).querySelector(".rail-head"));
+  const find = (name, cls) => some(row(name).querySelector(cls));
+  check("name, role and rooms share one container",
+        head("s21").kids.map((k) => k.className),
+        ["rail-name", "mesh-role", "rail-meshes"]);
+  check("the mesh tags sit beside the role badge, not under the row",
+        some(find("s21", ".rail-mesh").parent).parent?.className ?? "(loose)",
+        "rail-head");
+  check("the role badge and the mesh tags have the same parent",
+        find("s21", ".mesh-role").parent?.className ?? "(none)",
+        find("s21", ".rail-meshes").parent?.className ?? "(none)");
+
+  /* Nothing was dropped to win the line back. */
+  check("the rooms are still named, and still capped and ordered",
+        row("s21").querySelectorAll(".rail-mesh").map((t) => t.text),
+        ["gds", "mesh0"]);
+  check("a session in one room shows it",
+        row("s25").querySelectorAll(".rail-mesh").map((t) => t.text), ["mesh0"]);
+  check("the hover text still carries handle and role",
+        find("s25", ".rail-mesh").title,
+        "mesh mesh0 — joined as s25 (worker)");
+  check("a session in no mesh grows no tag box",
+        row("loner").querySelectorAll(".rail-meshes").length, 0);
+  check("a session with no role grows no badge",
+        row("loner").querySelectorAll(".mesh-role").length, 0);
+
+  /* An ellipsised name is only acceptable because the whole one is a hover
+     away — the row's own title is about lineage, so the label carries it. */
+  check("the name carries itself as hover text",
+        find("s25", ".rail-name").title, "s25");
+
+  /* The indent may not eat the row: it is the one part that grows without
+     bound as the tree deepens, and past a few levels it would spend the
+     whole rail on whitespace. */
+  const pad = (name) => parseInt(row(name).style.paddingLeft || "0", 10);
+  ok("a child row is indented", pad("s21") > 0, `s21 padding ${pad("s21")}`);
+  ok("a grandchild is indented further than its parent",
+     pad("s25") > pad("s21"), `s21 ${pad("s21")} vs s25 ${pad("s25")}`);
+  ok("the indent leaves most of a 260px rail to the row",
+     pad("s25") <= 60, `depth-2 indent is ${pad("s25")}px`);
+
+  /* ---- the line budget, which lives in the stylesheet ------------------ */
+  ok("style.css comments are balanced",
+     css.split("/*").length === css.split("*/").length,
+     `${css.split("/*").length - 1} openers, ${css.split("*/").length - 1} closers`);
+
+  const plain = css.replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = new Map();
+  for (const m of plain.matchAll(/([^{}]+)\{([^{}]*)\}/g)) {
+    const decls = {};
+    for (const d of m[2].split(";")) {
+      const i = d.indexOf(":");
+      if (i > 0) decls[d.slice(0, i).trim()] = d.slice(i + 1).trim();
+    }
+    for (const sel of m[1].split(",")) {
+      const key = sel.trim();
+      rules.set(key, Object.assign(rules.get(key) || {}, decls));
+    }
+  }
+  const decl = (sel, prop) => (rules.get(sel) || {})[prop];
+
+  /* A full-width child is a line break. Only the two deliberate ones may be,
+     and both must sort after the toggle — a breaker at the default order 0
+     ends the line before the toggle can land on it, which is the bug. */
+  const BREAKERS = ["#session-list .sess-cflow", "#session-list .sess-brief"];
+  const fullWidth = [...rules].filter(([sel, d]) =>
+    sel.startsWith("#session-list") &&
+    (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
+  ).map(([sel]) => sel);
+  check("only the cflow line and the briefing card break the row",
+        fullWidth.sort(), [...BREAKERS].sort());
+
+  const toggleOrder = Number(decl("#session-list .sess-brief-toggle", "order"));
+  ok("the ▸ toggle declares an order", Number.isFinite(toggleOrder));
+  for (const sel of BREAKERS) {
+    const o = Number(decl(sel, "order"));
+    ok(`${sel} sorts after the toggle so the toggle stays on the name line`,
+       Number.isFinite(o) && o > toggleOrder, `order ${decl(sel, "order")} vs toggle ${toggleOrder}`);
+  }
+
+  /* The name group holds its line by refusing to wrap and by basing at 0 —
+     a flex line is wrapped on base sizes and only shrunk afterwards, so a
+     content-sized box would push the ⓘ and ▸ off before shrinking. */
+  check("the name group never wraps",
+        decl("#session-list .rail-head", "flex-wrap"), "nowrap");
+  const headFlex = decl("#session-list .rail-head", "flex") || "";
+  ok("the name group bases at 0 so the row's fixed parts are placed first",
+     /(^|\s)0(\D|$)/.test(headFlex), `flex is "${headFlex}"`);
+  check("the tag box does not take a line of its own",
+        decl("#session-list .rail-meshes", "flex-basis"), undefined);
+
+  /* Shrinking is what replaced wrapping, so it must stop while the pill can
+     still say which room: a capsule holding nothing is not an abbreviation. */
+  for (const sel of ["#session-list .rail-mesh", "#session-list .mesh-role"]) {
+    const mw = decl(sel, "min-width");
+    ok(`${sel} keeps a floor so it cannot shrink to an empty capsule`,
+       mw && mw !== "0" && parseFloat(mw) > 0, `min-width is ${mw}`);
+    check(`${sel} ellipsises rather than clipping`,
+          decl(sel, "text-overflow"), "ellipsis");
+  }
+  check("the +N counter is never abbreviated — '+' would misstate the count",
+        decl("#session-list .rail-mesh-more", "flex"), "none");
+
+  if (failures) {
+    console.error(`${failures} check(s) failed`);
+    process.exit(1);
+  }
+  console.log("raillayout_check: ok");
+})();

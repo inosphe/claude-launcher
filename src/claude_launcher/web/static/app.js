@@ -258,15 +258,25 @@ async function refreshSessions() {
     if (s.name === currentName) li.classList.add("active");
     // The indent goes on the row, not on a spacer element, so the whole row
     // stays one click target and the hover/active background still spans it.
+    // The step is deliberately small: on a 260px rail every pixel of indent
+    // is taken from the name and its tags, and depth is already spelt out by
+    // the └ tick — the indent only has to make the nesting scannable, not
+    // measure it. It stops growing past four levels for the same reason; a
+    // deep child that indented itself off the rail would be unreadable in
+    // exchange for a fact the tick and the tooltip already carry.
     if (depth) {
-      li.style.paddingLeft = `${16 + depth * 14}px`;
+      li.style.paddingLeft = `${12 + Math.min(depth, 4) * 10}px`;
       li.classList.add("child");
       li.title = `spawned by ${s.parent}`;
     }
     const dot = document.createElement("span");
     dot.className = `dot ${s.status}`;
     const label = document.createElement("span");
+    label.className = "rail-name";
     label.textContent = s.name;
+    // A name too long for the rail is cut with an ellipsis rather than
+    // wrapping the row; this is where the rest of it went.
+    label.title = s.name;
     // The session's role, next to the name it is part of — same tag the mesh
     // roster draws, so "worker" reads as the same fact in both places. Only
     // rendered when the session has one; most ad-hoc sessions do not, and a
@@ -281,12 +291,6 @@ async function refreshSessions() {
     // it belongs", and only the first of those is a property of the session
     // itself. Drawn on the same terms as the role tag — a session in no mesh
     // gets nothing rather than an empty pill.
-    // On a line of their own, under the name they belong to. Measured, not
-    // preferred: the rail is ~260px and an indented row spends ~158px of it
-    // on the tick, the dot, the name, the role pill, the profile and the ⓘ.
-    // A wrapping flex line breaks before it shrinks, so a pill on the name's
-    // line does not squeeze — it pushes the ⓘ onto a line by itself. This is
-    // the same shape the cflow badge already uses for the same reason.
     const tags = railMeshTags(s.name);
     let meshBox = null;
     if (tags.length) {
@@ -322,10 +326,17 @@ async function refreshSessions() {
       e.stopPropagation();   // the row itself attaches; this button does not
       openDetail(s.name);
     });
-    // The mesh line goes last so it lands under the row rather than in it;
-    // the cflow badge, appended later still, takes the line below that.
-    li.append(dot, label, ...(role ? [role] : []), meta, info,
-              ...(meshBox ? [meshBox] : []));
+    // The name and the two things that qualify it travel together, in a box
+    // that shrinks instead of wrapping. That is the whole trick: the row
+    // itself must wrap (the cflow line and the briefing card are full-width
+    // lines below it), and a wrapping flex line breaks before it shrinks — so
+    // a pill sitting loose on the row pushed the ⓘ, and then the ▸, onto
+    // lines of their own. Inside a nowrap box the pills have nowhere to break
+    // to and give up width instead, which is what ellipsis is for.
+    const head = document.createElement("span");
+    head.className = "rail-head";
+    head.append(label, ...(role ? [role] : []), ...(meshBox ? [meshBox] : []));
+    li.append(dot, head, meta, info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
