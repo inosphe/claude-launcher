@@ -10,6 +10,7 @@ browser history.
 from __future__ import annotations
 
 import asyncio
+import os
 import secrets
 import time
 from pathlib import Path
@@ -254,6 +255,7 @@ def build_app(
     r.add_delete("/api/sessions/{name}/children/{child}", h_session_child_kill)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
+    r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
     # One composition, two verbs: GET hands the text to whoever will read it
@@ -2094,6 +2096,97 @@ async def h_session_respawn(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     session = manager.respawn(request.match_info["name"])
     return web.json_response(session.info())
+
+
+async def h_session_migrate(request: web.Request) -> web.Response:
+    """Move a session to another checkout — and, if asked, the children that
+    share its directory.
+
+    Body: exactly one of ``worktree`` (a worktree of the session's own
+    repository, created or reused under ``.claude/worktrees/``; ``""`` for a
+    generated name) or ``cwd`` (an existing directory, resolved on the daemon
+    like every path in this API). ``children: true`` also migrates every
+    descendant standing in the *same* directory the session is leaving —
+    those elsewhere (their own worktrees included) are exactly where someone
+    put them, and stay.
+
+    The move itself is :meth:`SessionManager.migrate`: stop, carry the claude
+    transcript to the new directory's slug, relaunch there. The named session
+    is all-or-nothing (a refusal leaves it untouched); the children are each
+    their own attempt, reported per name, because "the parent moved but w3
+    would not" is a state the operator can finish by hand, while unwinding a
+    parent that already moved over one stubborn child is not.
+
+    Operator-only, like respawn: no agent-facing route reaches this. An agent
+    that wants a child in a worktree says so at spawn time, which is the
+    moment the move is free.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    body = await _json_body(request)
+    session = manager.get(name)  # ManagerError -> 400
+    old_cwd = session.sdef.cwd
+    wt_name, to = body.get("worktree"), body.get("cwd")
+    if (wt_name is None) == (to is None):
+        return json_error(400, "pass exactly one of 'worktree' or 'cwd'")
+    wt = None
+    if wt_name is not None:
+        root = worktree_mod.repo_root(old_cwd)
+        if root is None:
+            return json_error(
+                400,
+                f"{old_cwd} is not inside a git repository, so there is "
+                "nothing to make a worktree of — pass 'cwd' instead",
+            )
+        try:
+            wt = worktree_mod.create(
+                root, str(wt_name).strip() or worktree_mod.default_name()
+            )
+        except worktree_mod.WorktreeError as exc:
+            return json_error(400, str(exc))
+        new_cwd = str(wt.path)
+    else:
+        new_cwd = str(to)
+    # Who follows is decided against the directory being LEFT, before the
+    # parent moves — afterwards the parent's cwd is the answer to a different
+    # question.
+    followers: List[str] = []
+    if body.get("children"):
+        old_key = os.path.normcase(os.path.abspath(old_cwd or ""))
+        followers = [
+            child
+            for child in manager.descendants(name)
+            if os.path.normcase(
+                os.path.abspath(manager.get(child).sdef.cwd or "")
+            ) == old_key
+        ]
+    migrated, carried = await manager.migrate(name, new_cwd)
+    children = []
+    for child in followers:
+        try:
+            _, child_carried = await manager.migrate(child, new_cwd)
+            children.append(
+                {"name": child, "ok": True, "transcript_moved": child_carried}
+            )
+        except (ManagerError, HarnessError, ProfileError) as exc:
+            children.append({"name": child, "ok": False, "error": str(exc)})
+    return web.json_response(
+        {
+            **migrated.info(),
+            "transcript_moved": carried,
+            "worktree": (
+                {
+                    "name": wt.name,
+                    "path": str(wt.path),
+                    "branch": wt.branch,
+                    "created": wt.created,
+                }
+                if wt
+                else None
+            ),
+            "children": children,
+        }
+    )
 
 
 async def h_session_keys(request: web.Request) -> web.Response:

@@ -1,0 +1,88 @@
+"""Where claude keeps a conversation on disk, and how to carry one to a new cwd.
+
+Claude Code stores transcripts **per working directory**: a conversation lives
+at ``<CLAUDE_CONFIG_DIR>/projects/<slug>/<conversation-id>.jsonl``, where
+``<slug>`` is the absolute working directory with every character outside
+``[A-Za-z0-9]`` replaced by ``-`` (``F:\\works\\x`` -> ``F--works-x``). Resume
+looks the conversation up under the slug of the directory it is resumed *in* —
+which is why a session relaunched somewhere else finds nothing, and why moving
+the one file is the whole trick: the jsonl itself carries no cwd check, so a
+conversation whose file stands under the new directory's slug resumes there and
+appends there, same id and all. (Verified against claude 2.1.237.)
+
+This module is that trick, spelled carefully: compute the slug the same way
+claude does, find the file even if our spelling of the *old* cwd disagrees with
+claude's (search by conversation id — it is a uuid, unique across the config
+dir), and move it. It knows nothing about sessions; the daemon's
+:meth:`SessionManager.migrate` is the caller that ties it to one.
+"""
+
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
+from typing import Optional
+
+#: Everything a slug keeps; the rest becomes ``-``. This is claude's own rule,
+#: read off the directories it makes — change it only against evidence.
+_SLUG_RE = re.compile(r"[^A-Za-z0-9]")
+
+
+def project_slug(cwd: str) -> str:
+    """The directory name claude files ``cwd``'s conversations under."""
+    return _SLUG_RE.sub("-", os.path.abspath(cwd))
+
+
+def project_dir(config_dir: Path, cwd: str) -> Path:
+    """Where conversations held in ``cwd`` live, for this config dir."""
+    return Path(config_dir) / "projects" / project_slug(cwd)
+
+
+def find(config_dir: Path, conversation_id: str) -> Optional[Path]:
+    """The transcript of ``conversation_id``, wherever it is filed.
+
+    A fallback for when the expected slug and claude's disagree (a path
+    claude normalized differently than :func:`project_slug` predicts). The id
+    is a uuid, so one match is the match; scanning tens of project dirs for
+    one filename is cheap enough to be the safety net.
+    """
+    root = Path(config_dir) / "projects"
+    if not root.is_dir():
+        return None
+    name = f"{conversation_id}.jsonl"
+    try:
+        for child in root.iterdir():
+            candidate = child / name
+            if candidate.is_file():
+                return candidate
+    except OSError:
+        return None
+    return None
+
+
+def relocate(
+    config_dir: Path, conversation_id: str, old_cwd: str, new_cwd: str
+) -> Optional[Path]:
+    """Move one conversation's transcript from ``old_cwd``'s slug to
+    ``new_cwd``'s, returning where it now is — or ``None`` when there is no
+    transcript to move (a session that never wrote one; resuming it was
+    already broken, and moving nothing does not break it further).
+
+    A *move*, not a copy: a copy left behind is the same conversation growing
+    two divergent histories, one per directory, and whichever the user finds
+    later reads as the session having lost work. The destination is replaced
+    if something already sits there — the file being moved is the live
+    conversation, so anything at its new address is stale by definition.
+    """
+    src = project_dir(config_dir, old_cwd) / f"{conversation_id}.jsonl"
+    if not src.is_file():
+        src = find(config_dir, conversation_id)
+        if src is None:
+            return None
+    dest = project_dir(config_dir, new_cwd) / src.name
+    if src == dest:
+        return dest
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    os.replace(src, dest)
+    return dest
