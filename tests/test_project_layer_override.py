@@ -8,14 +8,18 @@ verify its layer exists to add — the worker's simplified suite on ``review``,
 the leader's full sweep on ``integrate``. A later edit that breaks the yaml
 or drops a verify would otherwise only be discovered by a run blocking on it.
 
-Both run under ``-n auto``: measured 532s -> 154s, and the suite is parallel
-safe (the heavy e2e tests all take an OS-assigned port, and ``conftest``
-gives every test its own tmp home). That speed comes with a Windows string
-attached, which :func:`test_the_verify_basetemp_leaves_room_for_xdist` pins.
+Both run under a *bounded* ``-n``: the suite is parallel safe (the heavy
+e2e tests all take an OS-assigned port, and ``conftest`` gives every test
+its own tmp home), but its cost is spawning processes rather than burning
+CPU, so workers past a handful buy nothing —
+:func:`test_the_verify_runs_bounded_parallel` keeps the width honest, and
+:func:`test_the_verify_basetemp_leaves_room_for_xdist` keeps the paths it
+builds under Windows' limit.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -45,8 +49,6 @@ def test_the_override_carries_this_repos_suite_as_its_verify(
     # basetemp keeps concurrent verifies out of each other's temp trees (and
     # off the default %TEMP%, which has bitten this machine's permissions).
     assert "--basetemp=" in verify.command
-    # One worker per core, or the sweep is a 9-minute gate for no reason.
-    assert " -n auto" in verify.command
 
 
 @pytest.mark.parametrize("stem", ["improv-worker", "improv-leader"])
@@ -96,3 +98,35 @@ def test_the_verify_basetemp_leaves_room_for_xdist(stem):
         f"characters, over Windows' {MAX_PATH}: xdist's popen-gwN/ and the "
         f"transcript slug under it spend every character of it twice"
     )
+
+
+#: Measured on this suite (32 cores): serial 532s, ``-n 4`` 230s, ``-n 8``
+#: 178s, ``-n auto`` (= 32 here) 184s. Past a handful of workers the curve is
+#: flat, because the wall clock belongs to daemons and PTYs starting up, not
+#: to arithmetic.
+MAX_USEFUL_WORKERS = 8
+
+
+@pytest.mark.parametrize("stem", ["improv-worker", "improv-leader"])
+def test_the_verify_runs_bounded_parallel(stem):
+    """Parallel, but with a ceiling — and the ceiling is the point.
+
+    ``-n auto`` reads as the obvious choice and is the wrong one here. It
+    measured no faster than ``-n 8`` while running four times the processes,
+    and that contention starved the PTY-timing tests: one sweep in three
+    failed ``test_delivery_holds_while_a_human_is_typing``, whose 20-second
+    wait for a screen to render is generous until 32 workers are spawning
+    daemons at once. A gate that fails one run in three teaches people to
+    re-run it, which is worse than a slow gate. The ceiling also has to hold
+    when *six* sessions verify at once, which is the normal state of this
+    mesh: 6x8 fits this machine, 6x32 does not.
+    """
+    wf = model.load(OVERRIDES / f"{stem}.yaml")
+    verify = wf.steps["review" if stem == "improv-worker" else "integrate"].verify
+    width = re.search(r" -n (\S+)", verify.command)
+    assert width, f"{stem}'s verify lost its -n; the gate is serial again"
+    assert width.group(1) != "auto", (
+        "-n auto is one worker per core (32 here): no faster than -n 8 and "
+        "flaky with it — see this test's docstring"
+    )
+    assert 2 <= int(width.group(1)) <= MAX_USEFUL_WORKERS

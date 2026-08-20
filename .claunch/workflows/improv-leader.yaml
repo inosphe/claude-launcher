@@ -124,15 +124,19 @@ steps:
       머지 결과 트리의 전체 스윕 수치와 머지 커밋 해시·diffstat이 보고에
       있으며 메시 전체 fyi 공지가 나갔다.
     # 저장소 특화 verify는 정본이 아니라 프로젝트 레이어(.claunch/workflows/)에.
-    # -n auto: 이 스위트는 병렬 안전하다(무거운 e2e는 전부 OS 임시 포트,
-    # conftest는 테스트마다 tmp 홈+env 격리) — 실측 532s→154s.
+    # -n 8: 이 스위트는 병렬 안전하다(무거운 e2e는 전부 OS 임시 포트,
+    # conftest는 테스트마다 tmp 홈+env 격리). 폭이 8인 건 실측 결과다 —
+    # 직렬 532s, n=4 230s, n=8 178s, n=auto(이 머신 32) 184s. 32 워커는
+    # 8보다 빠르지도 않으면서(프로세스·I/O 바운드라 코어를 더 줘도 안 는다)
+    # PTY 타이밍 테스트를 굶겨 3회 중 1회 산발 실패를 냈다. 게다가 게이트는
+    # 세션 6개가 동시에 돌린다: 6×8=48은 감당하지만 6×32=192는 아니다.
     # basetemp가 짧아야 하는 건 취향이 아니라 한계다: xdist가 basetemp 아래
     # popen-gwN/을 끼우는데, 트랜스크립트 테스트는 cwd 절대경로를 슬러그로
     # 파일명에 되감는다 — basetemp 한 글자가 두 번 쓰여 경로 = 2×basetemp+162.
     # 260자(MAX_PATH)를 넘으면 FileNotFoundError다. 실측: basetemp 48자는
     # 258자로 통과, 49자는 260자로 실패(한 글자 차이), 옛 pt-* 는 272자.
     # C:/t/<세션>은 178~204자로 여유 ~56자. tests/test_project_layer_override.py가 못박는다.
-    verify: 'uv run --extra test pytest tests -q -n auto --basetemp="C:/t/%CLAUNCH_SESSION%i"'
+    verify: 'uv run --extra test pytest tests -q -n 8 --basetemp="C:/t/%CLAUNCH_SESSION%i"'
     next: reflect
 
   reflect:
