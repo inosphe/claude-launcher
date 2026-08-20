@@ -636,8 +636,12 @@ class FakeSpawnSources(FakeSources):
 
 
 def spawn_form(**kw) -> wizard.SpawnWizard:
+    # `defaults` is the namespace argparse already filled in: flags typed
+    # alongside --wizard arrive exactly this way, so a test that passes one
+    # is exercising the real door rather than the form's insides.
+    defaults = kw.pop("defaults", None)
     sources = kw.pop("sources", None) or FakeSpawnSources(**kw)
-    wiz = wizard.SpawnWizard(sources, cwd="/work/repo")
+    wiz = wizard.SpawnWizard(sources, cwd="/work/repo", defaults=defaults)
     wiz.color = False
     return wiz
 
@@ -803,6 +807,78 @@ def _open_report(**extra):
         "profiles": ["other", "work"],
         **extra,
     }
+
+
+def test_a_locked_profile_row_never_travels():
+    """The rule the other rows already keep: a value standing on a greyed-out
+    row is not an answer the user gave, so it must not reach the daemon —
+    which would refuse it naming a field this form could not still choose."""
+    wiz = spawn_form()  # the stock policy: profile locked
+    assert not wiz.field("profile").selectable
+    # the row still HOLDS a value (it is greyed, not emptied)...
+    wiz.field("profile").select("work")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.profile is None
+
+
+def test_a_parent_that_locks_the_row_mid_form_takes_the_value_with_it():
+    """The seam apply() is the fix for: the form opened on a permissive
+    parent, a profile was picked, and then the parent changed to one whose
+    policy forbids it. The row greys, and the answer must grey with it."""
+    sources = FakeSpawnSources(
+        report=_open_report(),
+        sessions=[
+            {"name": "lead", "status": "idle", "harness": "claude",
+             "profile": "work", "cwd": "/work/repo"},
+            {"name": "strict", "status": "idle", "harness": "claude",
+             "profile": "work", "cwd": "/work/other"},
+        ],
+    )
+    wiz = spawn_form(sources=sources)
+    # 'work' on purpose: a locked report names no profiles, so the row falls
+    # back to the registry — and a pick that SURVIVES that rebuild is the
+    # only way this test sees the greyed row still holding a value. Picking
+    # one the fallback list drops would pass whether or not apply() reads
+    # through the disable, which is no test at all.
+    pick(wiz, "profile", "work")
+    assert wiz.value("profile") == "work"
+    # ...and now the parent moves to one the policy keeps shut
+    sources._report = {**_open_report(), "may_choose": []}
+    pick(wiz, "parent", "strict")
+    assert not wiz.field("profile").selectable
+    assert wiz.field("profile").value == "work"   # the row kept it
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.profile is None
+
+
+def test_a_profile_TYPED_on_the_command_line_is_refused_out_loud():
+    """The other half of the same rule. Dropping a value the FORM put on the
+    row is right; dropping a flag the user spelled out is the form quietly
+    doing something other than it was asked — so it is refused, before
+    anything is built, and the message names the key that would allow it."""
+    # --profile work --wizard, on the shipped policy that locks the row
+    wiz = spawn_form(defaults=argparse.Namespace(profile="work"))
+    assert not wiz.field("profile").selectable
+    assert wiz.handle("submit") is None
+    assert "--profile" in wiz.error and "'work'" in wiz.error
+    assert "spawn.allow_profile" in wiz.error
+
+
+def test_the_refusal_is_the_daemon_s_judgement_not_a_second_copy_of_it():
+    """The check reads the row the capabilities report greyed, never the
+    policy itself: a report that unlocks the field lets the same typed flag
+    straight through. A client that worked out 'is allow_profile set' would
+    put the rule in two places, and the copy that drifts is the one that
+    lies."""
+    wiz = spawn_form(report=_open_report(),   # may_choose includes profile
+                     defaults=argparse.Namespace(profile="other"))
+    assert wiz.value("profile") == "other"   # the flag pre-filled the row
+    assert wiz.handle("submit") == "create"
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.profile == "other"
 
 
 def test_unlocked_profile_borrow_and_args_travel_on_apply():

@@ -1684,6 +1684,12 @@ class SpawnWizard(Form):
         # remembered here and consumed on the first rebuild.
         self._preset_profile: str = get("profile") or ""
         self._preset_borrow: str = get("borrow") or ""
+        #: The same flag, kept rather than consumed: `_preset_profile`
+        #: is spent seeding the row on the first rebuild, and after that
+        #: nothing remembers that the user asked for a profile at all.
+        #: A value the policy will not allow has to be refused out loud
+        #: (see `_check`), which needs exactly that memory.
+        self._typed_profile: str = get("profile") or ""
         profile = ChoiceField(
             key="profile", label="Profile",
             hint="a different profile for the child (spawn.allow_profile "
@@ -2049,6 +2055,25 @@ class SpawnWizard(Form):
                 "('claunch kill-session <child>')"
             )
             out.append(("parent", "; ".join(blocked) + " - " + fix))
+        # A profile the user TYPED, on a parent whose policy will not take
+        # one. `apply` drops the value rather than provoking a 403, which
+        # is right for a value the form itself put there -- but a flag the
+        # user spelled out is their current intent, and dropping THAT in
+        # silence is the form quietly doing something else than it was
+        # asked. So it is refused here, before anything is built.
+        #
+        # The judgement is the daemon's, not ours: `may_choose` is the
+        # same report that greys the row. Working out whether
+        # allow_profile is set would put the policy in two places, and
+        # the copy that drifts is the one that lies.
+        if self._typed_profile and self.field("profile").disabled:
+            out.append((
+                "profile",
+                f"--profile {self._typed_profile!r} was given, but this "
+                "parent may not choose a profile (spawn.allow_profile) - "
+                "pick a parent whose policy allows one, or start again "
+                "without the flag",
+            ))
         out.extend(check_worktree(self))
         return out
 
@@ -2074,7 +2099,15 @@ class SpawnWizard(Form):
         args.over_limit = self._over_limit()
         args.name = self.value("name")
         args.harness = self.value("harness") or None
-        args.profile = self.value("profile") or None
+        # Read through the disable, like borrow and args below: a value
+        # standing on a greyed-out row is not an answer the user gave --
+        # it is what the row held before the policy shut it, or before
+        # the parent changed under the form. Sending it provokes a 403
+        # naming a field nobody in this form could still choose.
+        args.profile = (
+            None if self.field("profile").disabled
+            else self.value("profile") or None
+        )
         # Read through the disable, like the other form: a borrow picked and
         # then greyed out (harness flipped, null said yes) must not travel.
         args.borrow = (
