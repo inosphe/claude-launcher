@@ -361,6 +361,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         for k, v in (
             ("name", args.name),
             ("over_limit", getattr(args, "over_limit", False)),
+            ("fork", getattr(args, "fork", False)),
             ("mesh", args.mesh),
             ("handle", args.handle),
             ("role", args.role),
@@ -1116,6 +1117,16 @@ def register(sub) -> None:
     )
     p_spawn.add_argument(
         "--parent", help="parent session (default: $CLAUNCH_SESSION)"
+    )
+    p_spawn.add_argument(
+        "--fork", action="store_true",
+        help="give the child a COPY of the PARENT's conversation "
+        "(--resume <the parent's> --fork-session), so it starts with "
+        "everything the parent knows instead of the opening task alone -- "
+        "the parent's own conversation is left untouched. Needs the claude "
+        "harness and a parent that has one, and cannot be combined with "
+        "--workspace or --worktree: claude keeps transcripts per directory, "
+        "so a child started elsewhere would find nothing to open",
     )
     p_spawn.add_argument(
         "--over-limit", dest="over_limit", action="store_true",

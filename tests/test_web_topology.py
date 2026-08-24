@@ -41,7 +41,9 @@ this tab's view — ``reconnect_check`` on the terminal's link, the one thing
 here that is not a poll and so has to repair itself deliberately,
 ``briefcard_check`` on the rail's briefing card — the session summary a row
 folds open, and which of the daemon's answers (a briefing, unshaped prose,
-no LLM, no record) it is showing — and the two
+no LLM, no record) it is showing — ``spawnform_check`` on the create form
+turned into a spawn — what a child may be asked once a parent is named, and
+when the parent's conversation is on offer to fork — and the two
 ``flow*_check`` harnesses on the flow view — one on the track a workflow
 becomes, one on the page those tracks are drawn into. This wrapper is what
 makes them run with everything else.
@@ -83,6 +85,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "zoom_check.js",
         "reconnect_check.js",
         "briefcard_check.js",
+        "spawnform_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
     ],

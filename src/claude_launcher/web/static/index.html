@@ -144,6 +144,16 @@
     <div id="new-view" class="hidden">
       <form id="new-session">
         <div class="page-head"><h2>New session</h2></div>
+        <!-- Naming a parent turns this form into `claunch spawn`: the child
+             inherits what decides how it runs, so those rows grey out and
+             only the rows that make it a different worker are sent. -->
+        <label>Parent <select name="parent"></select></label>
+        <label class="check hidden" id="new-fork-row">
+          <input type="checkbox" name="fork_parent">
+          <span><code>--fork-session</code> (start the child from a copy of
+            the parent's conversation, leaving the parent's own untouched)</span>
+        </label>
+        <p id="parent-hint" class="hidden"></p>
         <label>Name <input name="name" placeholder="(auto)"></label>
         <label>Harness <select name="harness"></select></label>
         <label>Profile <select name="profile"></select></label>

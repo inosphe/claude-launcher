@@ -1073,6 +1073,68 @@ def test_spawn_apply_writes_the_flags_spawn_reads():
     assert wiz.handle("submit") == "create"
 
 
+#: A daemon that says this parent has a conversation worth copying. The
+#: stock fixture deliberately does not: most parents have nothing to fork.
+def _forkable(**over) -> dict:
+    return {
+        "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
+        "children_used": 1, "children_remaining": 3,
+        "may_choose": ["workspace", "worktree", "fork"],
+        "spawnable_harnesses": [], "workspaces": [
+            {"name": "api", "path": "/srv/api", "exists": True}
+        ],
+        **over,
+    }
+
+
+def test_fork_is_offered_only_when_the_parent_has_a_conversation():
+    """The daemon decides — it is the one that can read the parent's pinned
+    conversation — and an older daemon that never says so greys the row
+    rather than offering something it would refuse."""
+    assert not spawn_form().field("fork").selectable
+    assert "no claude conversation" in spawn_form().field("fork").disabled_note
+    wiz = spawn_form(report=_forkable())
+    assert wiz.field("fork").selectable
+
+
+def test_sending_the_child_elsewhere_takes_the_fork_with_it():
+    """Claude keeps transcripts per working directory, so a child in a
+    workspace of its own would open a conversation that is not there. The
+    form greys the row instead of letting the daemon refuse a filled-in
+    form -- and a yes given before the workspace was picked does not travel."""
+    wiz = spawn_form(report=_forkable())
+    pick(wiz, "fork", "yes")
+    assert wiz.value("fork") is True
+    pick(wiz, "workspace", "api")
+    assert not wiz.field("fork").selectable
+    assert "per directory" in wiz.field("fork").disabled_note
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.fork is False
+    # ...and putting the child back beside its parent brings it back.
+    pick(wiz, "workspace", "(the parent")
+    assert wiz.field("fork").selectable
+    wiz.apply(args)
+    assert args.fork is True
+
+
+def test_a_worktree_of_its_own_also_takes_the_fork():
+    wiz = spawn_form(report=_forkable())
+    pick(wiz, "fork", "yes")
+    pick(wiz, "worktree", "new worktree")
+    assert not wiz.field("fork").selectable
+    assert "worktree of its own" in wiz.field("fork").disabled_note
+
+
+def test_a_fork_is_named_in_the_summary_and_the_flags():
+    wiz = spawn_form(report=_forkable())
+    pick(wiz, "fork", "yes")
+    assert "forking the parent's conversation" in wiz.summary()
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.fork is True
+
+
 def test_the_spawn_form_says_whose_child_it_is_making():
     wiz = spawn_form()
     assert wiz.summary().startswith("spawning: child of lead")
