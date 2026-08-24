@@ -183,7 +183,10 @@ NAME` / `--null` (and `claunch spawn`, under the [spawn
 policy](#agents-that-build-their-own-team-spawn--hierarchy--member-graph)). There the choice
 is part of the session's *definition*, so it holds across daemon restarts and
 `respawn` — and the token is looked up fresh at every relaunch, so a restore
-borrows what the lender holds *then*, not a copy from creation day.
+borrows what the lender holds *then*, not a copy from creation day. And
+because it is the definition's, it can be changed later: `claunch reborrow
+S NAME` stops the session and relaunches it on another profile's token
+(`--none` clears a borrow) — same name, same conversation, same directory.
 
 ### Running in a git worktree
 
@@ -1140,6 +1143,8 @@ and a form painted into its PTY would hang the session it was creating.
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
+| `migrate-session S`   | Move a session to another checkout: `--worktree [NAME]` cuts (or reuses) a worktree of its own repository, `--to DIR` moves it anywhere else — the daemon stops it, carries its claude conversation's transcript, and relaunches it there. `--children` moves the descendants standing in the same directory too; `-a` attaches. Also a **Move to worktree** picker in the web UI's session panel. |
+| `reborrow S [NAME]`   | Restart a session on another profile's token (`--borrow`): stop it, relaunch it with the borrow swapped — same name, same conversation, same directory. `--none` clears a borrow (back on its own profile's token); `-a` attaches. Also a **Borrowed auth** picker in the web UI's session panel. |
 | `send-keys [-l] S KEYS...` | tmux semantics: `Enter`, `Escape`, `Tab`, `C-c`, `M-x`, `Up`... are keys; everything else is literal text. `-l` sends all args literally. `-t S` also accepted. |
 | `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
@@ -2159,6 +2164,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
 | GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
+| POST   | `/api/sessions/{name}/migrate` | move to another checkout: exactly one of `{worktree: NAME-or-""}` / `{cwd: DIR}`; `{children: true}` moves the descendants standing in the same directory. The claude transcript is carried to the new directory's slug |
+| POST   | `/api/sessions/{name}/reborrow` | restart on another profile's token: `{borrow: NAME-or-null}` — the definition's borrow is swapped and the session relaunched; the directory is untouched, so nothing is carried |
 | POST   | `/api/sessions/{name}/keys`    | raw keyboard: `{keys: [...], literal}` — send-keys; or `{paste, enter}` — one bracketed paste (multiline-safe) |
 | POST   | `/api/sessions/{name}/deliver` | `{text}` — hand the agent a message (paste + separately-written Enter). What every automated sender uses; `/keys` is for a human at a keyboard |
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |

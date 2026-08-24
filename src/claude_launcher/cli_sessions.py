@@ -632,6 +632,32 @@ def _cmd_migrate_session(args: argparse.Namespace) -> int:
     return 1 if failed else 0
 
 
+def _cmd_reborrow(args: argparse.Namespace) -> int:
+    """Restart a session on another profile's token (or back on its own)."""
+    client = daemon_client.ensure_running()
+    # Roomy like a migrate: a graceful shutdown plus a relaunch.
+    info = client.post(
+        f"/api/sessions/{args.session}/reborrow",
+        {"borrow": args.borrow},
+        timeout=120.0,
+    )
+    if info.get("borrow"):
+        print(
+            f"session {info['name']!r} restarted, now borrowing "
+            f"{info['borrow']!r}'s token (pid {info.get('pid')})"
+        )
+    else:
+        print(
+            f"session {info['name']!r} restarted on profile "
+            f"{info.get('profile')!r}'s own token (pid {info.get('pid')})"
+        )
+    if args.attach:
+        from . import attach as attach_mod
+
+        return attach_mod.attach(client, info["name"])
+    return 0
+
+
 def _cmd_clear_sessions(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     doc = client.delete("/api/sessions" + ("?logs=1" if args.logs else ""))
@@ -1276,6 +1302,27 @@ def register(sub) -> None:
     )
     p_migrate.set_defaults(func=_cmd_migrate_session_dispatch)
 
+    p_reborrow = sub.add_parser(
+        "reborrow",
+        help="restart a session on another profile's token (--borrow), or "
+             "back on its own: stop it, relaunch it with the borrow swapped "
+             "— same name, same conversation, same directory",
+    )
+    p_reborrow.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
+    p_reborrow.add_argument("session", nargs="?")
+    p_reborrow.add_argument(
+        "borrow", nargs="?", metavar="NAME",
+        help="profile whose token (and provider) the relaunch borrows",
+    )
+    p_reborrow.add_argument(
+        "--none", action="store_true",
+        help="clear the borrow — run on the session's own profile token",
+    )
+    p_reborrow.add_argument(
+        "-a", "--attach", action="store_true", help="attach once restarted"
+    )
+    p_reborrow.set_defaults(func=_cmd_reborrow_dispatch)
+
     p_kill = sub.add_parser(
         "kill-session", help="kill a running session (or remove an exited one)"
     )
@@ -1379,6 +1426,24 @@ def _cmd_migrate_session_dispatch(args: argparse.Namespace) -> int:
     if not _resolve_target(args):
         return 1
     return _cmd_migrate_session(args)
+
+
+def _cmd_reborrow_dispatch(args: argparse.Namespace) -> int:
+    if not _resolve_target(args):
+        return 1
+    # Exactly one answer to "whose token": a lender's name, or --none for
+    # the session's own. Both and neither are the same refusal the daemon
+    # would give, said before the round-trip.
+    if (args.borrow is None) == (not args.none):
+        print(
+            "error: pass a profile NAME to borrow, or --none to run on the "
+            "session's own token",
+            file=sys.stderr,
+        )
+        return 1
+    if args.none:
+        args.borrow = None
+    return _cmd_reborrow(args)
 
 
 def _cmd_kill_session_dispatch(args: argparse.Namespace) -> int:

@@ -520,12 +520,13 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .sess-meta dt { color: #7d8590; }
 .sess-meta dd { color: #c6cdd5; overflow-wrap: anywhere; }
-.sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-migrate {
+.sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-migrate,
+.sess-reborrow {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
 }
 .sess-meshes h3, .sess-wf h3, .sess-send h3, .sess-queued h3,
-.sess-migrate h3 {
+.sess-migrate h3, .sess-reborrow h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
 }
 /* the backlog box wears the hold's color when the hold is a human's keyboard
@@ -550,23 +551,27 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-send .wf-note, .sess-send .wf-warning {
   margin-top: 8px; overflow-wrap: anywhere;
 }
-/* move this session to another checkout: the migrate picker */
-.sess-migrate select, .sess-migrate input:not([type="checkbox"]) {
+/* move this session to another checkout: the migrate picker; and restart it
+   on another token: the borrow picker — same field skin either way */
+.sess-migrate select, .sess-migrate input:not([type="checkbox"]),
+.sess-reborrow select {
   background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
   border-radius: 5px; padding: 6px 9px; font-size: 13px;
 }
-.sess-migrate select { flex: 1 1 auto; min-width: 0; }
+.sess-migrate select, .sess-reborrow select { flex: 1 1 auto; min-width: 0; }
 .sess-migrate input:not([type="checkbox"]) { width: 100%; margin-bottom: 8px; }
 .sess-migrate label.check {
   display: flex; align-items: flex-start; gap: 6px; margin: 0 0 8px;
   font-size: 13px; color: #c6cdd5;
 }
 .sess-migrate label.check input { width: auto; margin-top: 3px; }
-.sess-migrate .wf-btn { margin-right: 0; }
-.sess-migrate .wf-note, .sess-migrate .wf-warning {
+.sess-migrate .wf-btn, .sess-reborrow .wf-btn { margin-right: 0; }
+.sess-migrate .wf-note, .sess-migrate .wf-warning,
+.sess-reborrow .wf-note, .sess-reborrow .wf-warning {
   margin: 0 0 8px; overflow-wrap: anywhere;
 }
-.sess-migrate .wf-btn + .wf-note, .sess-migrate .wf-btn + .wf-warning {
+.sess-migrate .wf-btn + .wf-note, .sess-migrate .wf-btn + .wf-warning,
+.sess-reborrow .wf-btn + .wf-note, .sess-reborrow .wf-btn + .wf-warning {
   margin: 8px 0 0;
 }
 /* role-specific panels: the leader's dispatch form and its children roster.
@@ -684,7 +689,7 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .docked .sess-meta dt { margin-top: 7px; font-size: 11px; }
 .docked .sess-meshes, .docked .sess-wf, .docked .sess-send, .docked .sess-queued,
-.docked .sess-migrate, .docked .sess-quickjob, .docked .sess-kids {
+.docked .sess-migrate, .docked .sess-reborrow, .docked .sess-quickjob, .docked .sess-kids {
   margin: 10px 0; padding: 10px 12px; max-width: none; background: #16181d;
 }
 /* a rail column has no room for two controls side by side */
@@ -1606,7 +1611,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   .mesh-members, .mesh-send, .mesh-fed, .mesh-policy, .mesh-links,
   .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo,
   .sess-meta, .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-migrate,
-  .sess-quickjob, .sess-kids,
+  .sess-reborrow, .sess-quickjob, .sess-kids,
   .wf-pending, .ws-add, .ws-list, #ws-view > .wf-note { max-width: none; }
   /* The add row is three controls on one line at desk width; on a phone the
      path alone needs the whole line. */

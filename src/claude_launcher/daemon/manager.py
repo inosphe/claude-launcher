@@ -462,6 +462,102 @@ class SessionManager:
             self._sessions[name] = session  # keep the exited record on failure
             raise
 
+    async def redefine(self, name: str, **changes) -> Session:
+        """Stop a session and relaunch it under a changed definition.
+
+        The skeleton every restart-with-changes shares: shut the session down
+        (an exited one is already down), recreate it under ``replace(old,
+        **changes)`` with restore semantics, and put the old record back if
+        the relaunch fails — the failure mode is "stopped, still what it
+        was", never half-changed. The name, the pinned conversation, the mesh
+        memberships and the parent edge survive by not being touched.
+
+        What may be *refused* is each caller's own check, done before this
+        stops anything: a migrate refuses a missing directory, a reborrow an
+        unknown lender. The one refusal made here is the no-op — a restart
+        that would change nothing must not cost the session its process.
+        """
+        session = self.get(name)
+        old = session.sdef
+        new = replace(old, **changes)
+        if new == old:
+            raise ManagerError(
+                f"session {name!r} already runs exactly that definition — "
+                "nothing to restart for"
+            )
+        if not session.exited:
+            await session.shutdown()
+        return self._recreate(name, session, new)
+
+    def _recreate(
+        self, name: str, session: AnySession, new_def: SessionDef
+    ) -> Session:
+        """Create over a stopped session's slot, keeping its record on failure.
+
+        The record swap every relaunch-under-a-definition ends with: the old
+        record leaves the registry for the create, and goes back — stopped,
+        and honest about it — if the create fails, so a failed relaunch
+        strands nothing.
+        """
+        del self._sessions[name]
+        try:
+            return self.create(new_def, restoring=True)
+        except Exception:
+            self._sessions[name] = session  # keep the record, as it was
+            self.persist()
+            raise
+
+    async def reborrow(self, name: str, borrow: Optional[str]) -> Session:
+        """Restart a session on another profile's token — or back on its own.
+
+        :meth:`migrate` for the auth half of a definition instead of the
+        location half, and simpler for it: the directory does not move, so
+        the conversation stays filed where it always was and there is no
+        transcript to carry. What changes is whose token (and provider) the
+        relaunch injects. The borrow is part of the definition, so the new
+        choice holds across daemon restarts exactly like one made at
+        creation — and the token is still looked up fresh at every relaunch.
+
+        Refused while nothing has been stopped: a non-claude session (borrow
+        is spelled in claude's own env), an unknown lender, a no-op, and the
+        ``--null`` pairing creation also refuses — the two flags answer
+        "whose token" with opposite answers. ``borrow=None`` clears one.
+        """
+        session = self.get(name)
+        old = session.sdef
+        if old.harness != harness_mod.CLAUDE_HARNESS:
+            raise ManagerError(
+                f"--borrow only applies to the claude harness, "
+                f"not {old.harness!r}"
+            )
+        lender = (borrow or "").strip() or None
+        if lender == old.borrow:
+            if lender:
+                raise ManagerError(
+                    f"session {name!r} already borrows {lender!r}"
+                )
+            raise ManagerError(
+                f"session {name!r} already starts with no token (--null)"
+                if old.null_token
+                else f"session {name!r} already runs on profile "
+                     f"{old.profile!r}'s own token — nothing to clear"
+            )
+        if lender is not None:
+            # Checked now rather than left for the relaunch to discover: a
+            # typo must cost a 400, not a stopped session. (The token itself
+            # is *not* required — same terms as creation, where a tokenless
+            # lender simply starts unauthenticated.)
+            try:
+                profile_mod.require(lender)
+            except profile_mod.ProfileError as exc:
+                raise ManagerError(str(exc)) from exc
+            if old.null_token:
+                raise ManagerError(
+                    "--null launches without any OAuth token; it cannot be "
+                    f"combined with --borrow {lender}"
+                )
+        return await self.redefine(name, borrow=lender)
+
     async def migrate(self, name: str, new_cwd: str) -> Tuple[Session, bool]:
         """Move a session to another directory: stop it, carry its claude
         conversation's transcript, and relaunch it there.
@@ -470,10 +566,10 @@ class SessionManager:
         transcripts per working directory (see :mod:`claude_launcher.transcripts`),
         so a session relaunched somewhere else resumes nothing — unless its
         transcript is re-filed under the new directory first, which is exactly
-        the step this method adds between :meth:`kill` and :meth:`respawn`.
-        Everything else about the session survives by not being touched: the
-        name, the pinned conversation id, the mesh memberships keyed on the
-        name, the parent edge.
+        the step this method adds inside :meth:`redefine`'s stop-and-relaunch
+        skeleton. Everything else about the session survives by not being
+        touched: the name, the pinned conversation id, the mesh memberships
+        keyed on the name, the parent edge.
 
         Refused while nothing has been stopped or moved: a target that is not
         a directory, a session already there, a claude session with no pinned
@@ -517,16 +613,15 @@ class SessionManager:
             moved = transcripts.relocate(
                 config_dir, old.conversation_id, old.cwd, new_cwd
             )
-        del self._sessions[name]
         try:
-            relaunched = self.create(replace(old, cwd=new_cwd), restoring=True)
+            relaunched = self._recreate(name, session, replace(old, cwd=new_cwd))
         except Exception:
             if moved is not None:
+                # the transcript returns to the old slug, as the record
+                # _recreate restored already keeps its old definition
                 transcripts.relocate(
                     config_dir, old.conversation_id, new_cwd, old.cwd
                 )
-            self._sessions[name] = session  # keep the record, as it was
-            self.persist()
             raise
         return relaunched, moved is not None
 

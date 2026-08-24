@@ -264,6 +264,7 @@ def build_app(
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
+    r.add_post("/api/sessions/{name}/reborrow", h_session_reborrow)
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
     # One composition, two verbs: GET hands the text to whoever will read it
@@ -2283,6 +2284,34 @@ async def h_session_migrate(request: web.Request) -> web.Response:
             "children": children,
         }
     )
+
+
+async def h_session_reborrow(request: web.Request) -> web.Response:
+    """Restart a session on another profile's token — or back on its own.
+
+    Body: ``{"borrow": "NAME"}`` to borrow that profile's token (and
+    provider), ``{"borrow": null}`` (or ``""``) to clear a borrow. The
+    restart is :meth:`SessionManager.reborrow` — stop, relaunch under the
+    definition with its borrow swapped. The directory does not move, so the
+    conversation stays filed where it always was and there is nothing to
+    carry; the new choice persists in the definition exactly like one made
+    at creation.
+
+    Operator-only, like migrate and respawn: no agent-facing route reaches
+    this. An agent's auth is its spawner's arrangement, changed by the human
+    or at spawn time, never by the agent mid-run.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    if "borrow" not in body:
+        return json_error(
+            400, "pass 'borrow' — a profile name, or null to run on its own"
+        )
+    borrow = body["borrow"]
+    if borrow is not None and not isinstance(borrow, str):
+        return json_error(400, "'borrow' must be a profile name or null")
+    session = await manager.reborrow(request.match_info["name"], borrow)
+    return web.json_response(session.info())
 
 
 async def h_session_keys(request: web.Request) -> web.Response:
