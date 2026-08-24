@@ -109,11 +109,14 @@ new Function(
   + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags")
   + slice("fmtAge") + slice("ctxShort") + slice("ctxAgeOf")
   + slice("ctxKnowable") + slice("ctxSentence") + slice("ctxBreakdown")
-  + slice("ctxTooltip") + slice("ctxNoteOnRow")
+  + slice("ctxTooltip") + slice("ctxNoteOnRow") + slice("ctxRailChip")
   + slice("refreshSessions")
   + `
-Object.assign(exports, { refresh: refreshSessions, tooltip: ctxTooltip });`
-)(ctx, document, el, api, list, []);
+Object.assign(exports, {
+  refresh: refreshSessions,
+  tooltip: ctxTooltip,
+  railChip: ctxRailChip,
+});`)(ctx, document, el, api, list, []);
 
 let failures = 0;
 function check(what, got, want) {
@@ -168,6 +171,28 @@ served = { sessions: [FULL, QUIET, OTHER] };
   check("a harness that keeps no transcript is told nothing about context",
         [row("pi").title, (nameEl(OTHER) || {}).title || ""]
           .some((t) => t.includes("context")), false);
+
+  /* The count now also shows on the row, as a small chip between the profile
+     and the ⓘ — found by class, not position, for the same reason the name
+     is: the row gets rearranged around this. */
+  const chipOf = (name) =>
+    descendants(row(name)).find((k) => k.className === "rail-ctx"
+      || k.className === "rail-ctx unknown");
+  const chipText = (name) => (chipOf(name) || {}).text;
+
+  check("the row shows the short count", chipText("full"), "155k");
+  check("a session that has not answered shows a greyed ?, not a count",
+        chipText("quiet"), "?");
+  check("and the unknown chip is marked, so it reads as absence, not a small count",
+        chipOf("quiet").className, "rail-ctx unknown");
+  check("a harness that keeps no transcript grows no chip",
+        chipOf("pi"), undefined);
+
+  /* The chip is the glance; the reading stays one hover away on the row. */
+  const rail = ctx.railChip(FULL);
+  check("the rail chip is the bare count", rail.text, "155k");
+  check("...and its tooltip is the same story the row carries",
+        carries(rail, note), true);
 
   check("no row claims a percentage — there is no denominator to make one",
         rows.some((r) => /%/.test(r.title)), false);

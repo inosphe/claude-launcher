@@ -199,6 +199,18 @@ body {
   padding: 0 5px; line-height: 16px;
 }
 .sess-brief-ctx.unknown { color: #6e7681; font-style: italic; }
+/* The same count, on the rail row itself, slimmer for the rail's budget: the
+   name group takes every spare pixel, so this is the short count alone, with
+   no chip background — a grey monospace "155k" between the profile and the
+   ⓘ reads as data, and the story (model, age, why there is no percentage)
+   is one hover away on a row that already carries it. flex:none so it never
+   squeezes the name; the unknown form is the same greyed "?" stillness as
+   its card sibling. */
+#session-list .rail-ctx {
+  flex: none; font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 11px; color: #7d8590; line-height: 16px;
+}
+#session-list .rail-ctx.unknown { color: #6e7681; font-style: italic; }
 .sess-brief-refresh {
   margin-left: auto; flex: none; background: none; border: none;
   color: #6e7681; font-size: 13px; line-height: 1; padding: 0 2px;
