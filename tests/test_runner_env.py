@@ -168,3 +168,75 @@ def test_resolve_with_source(home):
     )
     store.set_profile_field("kid", "provider", "glm")
     assert providers.resolve_with_source(child) == ("glm", "set on profile 'kid'")
+
+
+def test_profile_env_overrides_provider_env(home):
+    # The requested precedence: a profile's own ``env`` beats the provider's
+    # for a shared key — provider env is a low-priority backend default, and
+    # child_env applies it before the profile env. Keys only the provider sets
+    # still reach the child.
+    p = profile.create("work")
+    settings.set_env(p, {"ANTHROPIC_MODEL": "neural-chat"})
+    store.update(
+        lambda doc: doc.update(
+            {
+                "providers": {
+                    "backend": {
+                        "env": {
+                            "ANTHROPIC_MODEL": "glm-5p2",
+                            "ANTHROPIC_BASE_URL": "https://backend.example/inference",
+                        }
+                    }
+                }
+            }
+        )
+    )
+    store.set_profile_field("work", "provider", "backend")
+    env = runner.child_env(p, with_token=True)
+    assert env["ANTHROPIC_MODEL"] == "neural-chat"  # profile wins
+    assert env["ANTHROPIC_BASE_URL"] == "https://backend.example/inference"
+
+
+def test_env_precedence_shell_under_provider_under_profile(home, monkeypatch):
+    # shell < provider < profile: the provider covers the shell, and the
+    # profile covers the provider for the same key.
+    p = profile.create("work")
+    monkeypatch.setenv("ANTHROPIC_MODEL", "shell-stale")
+    settings.set_env(p, {"ANTHROPIC_MODEL": "profile-model"})
+    store.update(
+        lambda doc: doc.update(
+            {"providers": {"backend": {"env": {"ANTHROPIC_MODEL": "provider-model"}}}}
+        )
+    )
+    store.set_profile_field("work", "provider", "backend")
+    env = runner.child_env(p, with_token=True)
+    assert env["ANTHROPIC_MODEL"] == "profile-model"
+
+
+def test_profile_without_key_uses_provider_value(home):
+    # No profile pin for a key -> the provider's default shows through.
+    p = profile.create("work")
+    store.update(
+        lambda doc: doc.update(
+            {"providers": {"backend": {"env": {"ANTHROPIC_MODEL": "provider-model"}}}}
+        )
+    )
+    store.set_profile_field("work", "provider", "backend")
+    env = runner.child_env(p, with_token=True)
+    assert env["ANTHROPIC_MODEL"] == "provider-model"
+
+
+def test_borrow_keeps_running_profile_env_over_lender_provider(home):
+    # Borrow swaps the auth backend but not the running profile's env: the
+    # runner's own keys still beat the lender's provider defaults.
+    runner_p = profile.create("work")
+    settings.set_env(runner_p, {"ANTHROPIC_MODEL": "runner-model"})
+    lender = profile.create("lender")
+    store.update(
+        lambda doc: doc.update(
+            {"providers": {"backend": {"env": {"ANTHROPIC_MODEL": "lender-model"}}}}
+        )
+    )
+    store.set_profile_field("lender", "provider", "backend")
+    env = runner.child_env(runner_p, with_token=True, borrow=lender)
+    assert env["ANTHROPIC_MODEL"] == "runner-model"

@@ -18,9 +18,14 @@ of truth, see :mod:`store`), which the launcher reads live at launch:
       work:
         provider: fireworks-glm5p2    # per-profile override (optional)
 
-The built-in ``default`` provider is plain Anthropic (no overrides); selecting
-any other provider layers its env over the profile's own and lets the provider
-supply auth instead of the launcher injecting the profile's OAuth token.
+The built-in ``default`` provider is plain Anthropic (no overrides). Any other
+provider contributes its env as a *low-priority backend default*: it sits above
+the launching shell but below the profile's own ``env`` (applied last), so a
+profile key always beats a provider key — only keys a profile never sets fall
+through to the provider's value. Selecting a non-default provider also swaps
+auth: the profile's stored ``set-token`` secret (own, inherited, or borrowed)
+is exported as ``ANTHROPIC_AUTH_TOKEN`` instead of the launcher injecting the
+profile's OAuth ``CLAUDE_CODE_OAUTH_TOKEN``.
 """
 
 from __future__ import annotations
