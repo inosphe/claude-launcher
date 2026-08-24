@@ -34,6 +34,8 @@ function slice(name) {
 }
 const capLine = src.match(/^const RAIL_MESH_TAGS = .+$/m);
 if (!capLine) throw new Error("cannot locate RAIL_MESH_TAGS in app.js");
+const domLine = src.match(/^const CTX_DOMAIN = .+$/m);
+if (!domLine) throw new Error("cannot locate CTX_DOMAIN in app.js");
 
 /* ---- stub DOM: nested nodes, because the note may be hung on a child ---- */
 function node(tag) {
@@ -109,13 +111,13 @@ new Function(
   + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags")
   + slice("fmtAge") + slice("ctxShort") + slice("ctxAgeOf")
   + slice("ctxKnowable") + slice("ctxSentence") + slice("ctxBreakdown")
-  + slice("ctxTooltip") + slice("ctxNoteOnRow") + slice("ctxRailChip")
-  + slice("refreshSessions")
+  + slice("ctxTooltip") + slice("ctxNoteOnRow") + domLine[0] + "\n"
+  + slice("ctxRailLine") + slice("refreshSessions")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,
   tooltip: ctxTooltip,
-  railChip: ctxRailChip,
+  railLine: ctxRailLine,
 });`)(ctx, document, el, api, list, []);
 
 let failures = 0;
@@ -131,7 +133,8 @@ const AT = new Date(Date.now() - 185_000).toISOString();
 const FULL = {
   name: "full", status: "busy", harness: "claude", profile: "nc", parent: null,
   context: { tokens: 154706, input: 2, cache_read: 154073, cache_write: 631,
-             output: 210, model: "claude-opus-5", at: AT },
+             output: 210, model: "claude-opus-5", at: AT,
+             compact_window: 200_000 },
 };
 const QUIET = { name: "quiet", status: "idle", harness: "claude",
                 profile: "nc", parent: null };
@@ -172,30 +175,73 @@ served = { sessions: [FULL, QUIET, OTHER] };
         [row("pi").title, (nameEl(OTHER) || {}).title || ""]
           .some((t) => t.includes("context")), false);
 
-  /* The count now also shows on the row, as a small chip between the profile
-     and the ⓘ — found by class, not position, for the same reason the name
-     is: the row gets rearranged around this. */
-  const chipOf = (name) =>
-    descendants(row(name)).find((k) => k.className === "rail-ctx"
-      || k.className === "rail-ctx unknown");
-  const chipText = (name) => (chipOf(name) || {}).text;
+  /* The count now takes one deliberate line on the row: a gauge bar beside
+     the short count — found by class, not position, for the same reason the
+     name is: the row gets rearranged around this. */
+  const lineOf = (name) =>
+    descendants(row(name)).find((k) => k.className === "rail-ctx-line"
+      || k.className === "rail-ctx-line unknown");
+  const under = (name, cls) =>
+    descendants(lineOf(name) || node("span")).find((k) => k.classes.has(cls));
+  const numText = (name) => (under(name, "rail-ctx") || {}).text;
 
-  check("the row shows the short count", chipText("full"), "155k");
+  check("the row's line shows the short count", numText("full"), "155k");
+  check("...beside a bar whose fill is the count over the fixed 0–1M domain, " +
+        "coloured against the compact window it will actually compact at",
+        [(under("full", "rail-ctx-fill") || {}).className,
+         ((under("full", "rail-ctx-fill") || {}).style || {}).width],
+        ["rail-ctx-fill warm", "15.5%"]);
+  check("...and a tick where this session's auto-compact window sits",
+        ((under("full", "rail-ctx-tick") || {}).style || {}).left, "20.0%");
   check("a session that has not answered shows a greyed ?, not a count",
-        chipText("quiet"), "?");
-  check("and the unknown chip is marked, so it reads as absence, not a small count",
-        chipOf("quiet").className, "rail-ctx unknown");
-  check("a harness that keeps no transcript grows no chip",
-        chipOf("pi"), undefined);
+        numText("quiet"), "?");
+  check("and its line is marked, so it reads as absence, not a small count",
+        [lineOf("quiet").className,
+         (under("quiet", "rail-ctx") || {}).className],
+        ["rail-ctx-line unknown", "rail-ctx unknown"]);
+  check("...with an empty track, never a zero-width fill pretending to measure",
+        under("quiet", "rail-ctx-fill"), undefined);
+  check("a harness that keeps no transcript grows no line",
+        lineOf("pi"), undefined);
 
-  /* The chip is the glance; the reading stays one hover away on the row. */
-  const rail = ctx.railChip(FULL);
-  check("the rail chip is the bare count", rail.text, "155k");
-  check("...and its tooltip is the same story the row carries",
+  /* The line is the glance; the reading stays one hover away on it. */
+  const rail = ctx.railLine(FULL);
+  check("the line's tooltip is the same story the row carries",
         carries(rail, note), true);
+  check("...plus the domain and where the tick is",
+        [rail.title.includes("bar spans 0–1M tokens"),
+         rail.title.includes("auto-compact window at 200k")],
+        [true, true]);
+
+  /* The colour is judged against the compact window (compaction fires at the
+     tick, not at 1M), the fill against the domain — two different questions
+     one bar answers. */
+  const fillOf = (line) =>
+    descendants(line).find((k) => k.classes.has("rail-ctx-fill"));
+  const hot = ctx.railLine({ harness: "claude",
+    context: { ...FULL.context, tokens: 190_000 } });
+  check("a count at 95% of its compact window is hot while the bar is short",
+        [fillOf(hot).className, fillOf(hot).style.width],
+        ["rail-ctx-fill hot", "19.0%"]);
+  const free = ctx.railLine({ harness: "claude",
+    context: { ...FULL.context, compact_window: undefined } });
+  check("with no window configured there is no tick, and the colour falls " +
+        "back to the domain",
+        [descendants(free).some((k) => k.classes.has("rail-ctx-tick")),
+         fillOf(free).className],
+        [false, "rail-ctx-fill"]);
+  check("...and the tooltip then claims only the domain, never a window",
+        [free.title.includes("bar spans 0–1M tokens"),
+         free.title.includes("auto-compact")],
+        [true, false]);
+  const past = ctx.railLine({ harness: "claude",
+    context: { ...FULL.context, tokens: 1_200_000 } });
+  check("a count past the domain clamps at full rather than overrunning",
+        fillOf(past).style.width, "100.0%");
 
   check("no row claims a percentage — there is no denominator to make one",
-        rows.some((r) => /%/.test(r.title)), false);
+        rows.concat(rows.flatMap((r) => descendants(r)))
+          .some((n) => /%/.test(n.title)), false);
 
   if (failures) {
     console.error(`${failures} check(s) failed`);
