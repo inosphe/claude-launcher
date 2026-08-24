@@ -123,6 +123,7 @@ new Function(
   stubs
   + sliceConst("const QUICKJOB_FALLBACK = {")
   + slice("spawnReport") + slice("spawnPreflightNote") + slice("postSpawn")
+  + slice("spawnMissingSources") + slice("spawnSourceNote")
   + slice("qjStamp") + slice("idleNudgeText")
   + slice("sessQuickJob") + slice("renderSessKids")
   + slice("sessRoleNames") + slice("rolePanels") + slice("sessChildren")
@@ -255,6 +256,42 @@ async function main() {
   await settle();
   check("a blocked spawn opens no wizard", ctx.opens().length === 0,
     ctx.opens().length);
+
+  /* ---- a picker emptied by a failed fetch says so, and refuses to save ---
+     The panel's two pickers are also what "Save as defaults" WRITES to
+     ~/.claunch.yaml. So a dead /api/roles is worse here than in the wizard:
+     the role list degrades to empty, the picker holds the placeholder, and
+     one press of Save would put that empty string over the user's real
+     default. The warning has to be visible and the save has to be shut. */
+  ctx.drop();
+  routes = QJ_ROUTES();
+  routes["GET /api/roles"] = { throw: true };
+  ctx.resetOpens();
+  sent = [];
+  const dead = ctx.sessQuickJob(data);
+  await settle();
+  const dp = qjParts(dead);
+  check("a dead source is named", texts(dead).includes("could not load roles"),
+    texts(dead).slice(-200));
+  check("...as a failed fetch, not an empty offering",
+    texts(dead).includes("not because there is nothing to offer"));
+  check("...and Save is shut so it cannot overwrite the yaml",
+    dp.save.disabled === true);
+  // The slot count must not paint over the warning.
+  check("...the warning outranks the slot count",
+    !texts(dead).includes("3 child slot(s) left"), texts(dead).slice(-200));
+  // Spawning is still allowed: the wizard is where the pick is finally made,
+  // and it raises its own warning. Only the silent WRITE is forbidden.
+  check("...but dispatch still works", dp.spawn.disabled === false);
+
+  /* the healthy panel says nothing about sources and saves as before */
+  ctx.drop();
+  routes = QJ_ROUTES();
+  const live = ctx.sessQuickJob(data);
+  await settle();
+  check("a healthy panel raises no source warning",
+    !texts(live).includes("could not load"));
+  check("...and Save is available", qjParts(live).save.disabled === false);
 
   /* ---- the reaping nudge: reported idleness, leader's judgement ---------- */
   const KIDS = { children: [

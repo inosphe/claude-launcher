@@ -157,6 +157,7 @@ new Function(
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
   + slice("syncSpawnGates") + slice("spawnPayload")
   + slice("spawnReport") + slice("spawnPreflightNote") + slice("postSpawn")
+  + slice("spawnMissingSources") + slice("spawnSourceNote")
   + slice("qjStamp") + slice("fillSpawnSelect") + slice("spawnRow") + slice("spawnCheckRow")
   + slice("refillSpawnWorkflows") + slice("spawnConnectNow")
   + slice("buildSpawnForm")
@@ -168,6 +169,7 @@ Object.assign(exports, {
   spawnWorkflowEntry, spawnAutoWorktree, spawnMeshNow,
   spawnRecall, saveSpawnRecall, buildSpawnForm, openSpawnModal, spawnModalClose,
   refillSpawnWorkflows, spawnConnectNow,
+  spawnMissingSources, spawnSourceNote,
   setSessions: (a) => { sessionsCache = a; },
   setSess: (n) => { sessName = n; },
   isOpen: () => spawnModal !== null,
@@ -455,6 +457,53 @@ async function main() {
   const counted = ctx.counters();
   check("success refreshes the roster and the rail",
     counted.kids >= 1 && counted.rail >= 1, counted);
+
+  /* ---- a picker emptied by a failed fetch says so ------------------------
+     The bug this pins: every option source degrades to null, so a daemon
+     that answers /children but not /roles leaves the Role picker holding
+     nothing but its placeholder — indistinguishable, on screen, from a
+     daemon that declares no roles. The wizard must name the sources that
+     did not arrive, in the warning colour, instead of standing there armed
+     over blank pickers. */
+  check("no missing sources means no note", ctx.spawnSourceNote([]) === "");
+  check("one missing source is named, singular",
+    /^could not load roles — that picker is empty/.test(
+      ctx.spawnSourceNote(["roles"])), ctx.spawnSourceNote(["roles"]));
+  check("several are named, plural",
+    /^could not load roles, workflows — those pickers are empty/.test(
+      ctx.spawnSourceNote(["roles", "workflows"])));
+  check("a source is missing only when its doc is falsy",
+    JSON.stringify(ctx.spawnMissingSources({
+      roles: { roles: [] }, workflows: null, git: undefined, meshes: { a: 1 },
+    })) === JSON.stringify(["workflows", "git"]),
+    ctx.spawnMissingSources({
+      roles: { roles: [] }, workflows: null, git: undefined, meshes: { a: 1 } }));
+  // An EMPTY list is an answer and must NOT be reported as a failed fetch.
+  check("an empty-but-present list is not 'missing'",
+    ctx.spawnMissingSources({ roles: { roles: [] } }).length === 0);
+
+  const goodRoles = routes["GET /api/roles"];
+  const goodWfs = routes["GET /api/cflow/workflows?cwd=C%3A%2Frepo"];
+  routes["GET /api/roles"] = { throw: true };
+  routes["GET /api/cflow/workflows?cwd=C%3A%2Frepo"] = { ok: false, status: 500 };
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  const warned = texts(modalEls["modal-body"]);
+  check("the modal names both dead sources",
+    warned.includes("could not load roles, workflows"), warned.slice(-220));
+  check("...and says an empty picker is not an empty offering",
+    warned.includes("not because there is nothing to offer"));
+  check("...still reporting the slots it did learn",
+    warned.includes("3 child slot(s) left"), warned.slice(-220));
+  routes["GET /api/roles"] = goodRoles;
+  routes["GET /api/cflow/workflows?cwd=C%3A%2Frepo"] = goodWfs;
+  // ...and a healthy load says nothing about sources.
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  check("a healthy load raises no source warning",
+    !texts(modalEls["modal-body"]).includes("could not load"));
 
   /* ---- a denied parent is told before the button can be pressed ---------- */
   routes["GET /api/sessions/lead1/children"] = { doc: {

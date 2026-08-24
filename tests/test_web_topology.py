@@ -132,6 +132,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "briefingtop_check.js",
         "briefrow_check.js",
         "spawnform_check.js",
+        "selectpopup_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
         "ctxsize_check.js",
