@@ -3983,6 +3983,7 @@ let sessPollTimer = null;
 let sessStartBox = null;  // reused across polls: it holds the user's typing
 let sessSendBox = null;   // and so does the message box — same reason
 let sessMigrateBox = null; // and the migrate picker — same reason again
+let sessReborrowBox = null; // and the borrow picker — same reason again
 let sessRunFold = null;   // reused across polls too: it holds open/shut
 let sessRunTimer = null;  // the fold's own poll, alive only while it is open
 let sessQuickJobBox = null; // the quick-job form — it holds a typed task
@@ -3999,6 +4000,7 @@ function dropDetail() {
   sessStartBox = null;
   sessSendBox = null;
   sessMigrateBox = null;
+  sessReborrowBox = null;
   sessQuickJobBox = null;
   sessKidsBox = null;
   sessRunFold = null;
@@ -4031,6 +4033,7 @@ function repointDetail(name) {
   sessStartBox = null;
   sessSendBox = null;
   sessMigrateBox = null;
+  sessReborrowBox = null;
   sessQuickJobBox = null;
   sessKidsBox = null;
   sessRunFold = null;
@@ -4276,7 +4279,154 @@ function renderSession(data) {
   // are the panel's verbs.
   for (const build of rolePanels(data)) view.appendChild(build(data));
 
+  view.appendChild(sessReborrow(data));
   view.appendChild(sessMigrate(data));
+}
+
+/* ---- restart this session on another profile's token ----
+   `claunch reborrow`, from the panel that names the session. A managed
+   session's --borrow is part of its definition — reapplied on every restore —
+   so changing it is a restart, not an edit: the daemon stops the session and
+   relaunches it with the borrow swapped. Same name, same conversation, same
+   directory — unlike a migrate there is nothing to carry. The picker offers
+   every profile plus "its own token", which is how a borrow is cleared. */
+function sessReborrow(data) {
+  const s = data.session || {};
+  const box = el("div", "sess-reborrow");
+  box.appendChild(el("h3", null, "Borrowed auth"));
+
+  // A claude-only flag: another harness has no OAuth token to swap, and the
+  // daemon refuses the restart — said here as a note rather than a dead form.
+  if (s.harness !== "claude") {
+    sessReborrowBox = null;
+    box.appendChild(el(
+      "p", "wf-note",
+      `--borrow is a claude-harness flag — this session runs ${s.harness || "?"}`
+    ));
+    return box;
+  }
+
+  // Rebuilt only when the auth state changes — the 2s poll must not wipe a
+  // picked lender, and a successful restart changes the key, which is what
+  // re-aims the picker at the new current.
+  const key = `${s.name}|${s.borrow || ""}|${s.null_token ? 1 : 0}`;
+  if (sessReborrowBox && sessReborrowBox.dataset.slot === key) {
+    box.appendChild(sessReborrowBox);   // appending moves the live node here
+    return box;
+  }
+  const form = el("div", "sess-reborrow-form");
+  form.dataset.slot = key;
+  sessReborrowBox = form;
+  box.appendChild(form);
+
+  form.appendChild(el(
+    "p", "wf-note",
+    (s.borrow
+      ? `borrowing ${s.borrow}'s token (and provider) — the config and skills stay ${s.profile}'s`
+      : `running on ${s.profile}'s own token`) +
+    ". Changing it stops the session and relaunches it — same name, same conversation"
+  ));
+
+  if (s.null_token) {
+    form.appendChild(el(
+      "p", "wf-note",
+      "started --null: no token is injected at all, and a borrow cannot be " +
+      "combined with that — this session keeps starting unauthenticated"
+    ));
+    return box;
+  }
+
+  const row = el("div", "sess-send-row");
+  const dest = document.createElement("select");
+  dest.disabled = true;
+  dest.appendChild(el("option", null, "reading the profiles…"));
+  row.appendChild(dest);
+  const goBtn = el("button", "wf-btn option", "Restart");
+  goBtn.disabled = true;
+  goBtn.title = "stop the session and relaunch it on the picked token";
+  const status = el("p", "wf-note hidden");
+  form.append(row, goBtn, status);
+
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  // The choices are the daemon's answer, not a guess: every profile it knows,
+  // plus "its own token" for clearing a borrow. The current one is preselected
+  // and picking it again enables nothing — a restart that changes nothing is
+  // the daemon's refusal, mirrored here as a dead button.
+  (async () => {
+    let profiles = [];
+    try {
+      const resp = await api("/api/profiles");
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
+      profiles = doc.profiles || [];
+    } catch (e) {
+      say(`cannot read the profiles: ${e.message || e}`, "wf-warning");
+      return;
+    }
+    if (sessReborrowBox !== form) return; // the panel moved on mid-flight
+    dest.innerHTML = "";
+    const own = document.createElement("option");
+    own.value = "";
+    own.textContent = `its own token (${s.profile})`;
+    dest.appendChild(own);
+    for (const p of profiles) {
+      const opt = document.createElement("option");
+      opt.value = p;
+      opt.textContent = `borrow: ${p}`;
+      dest.appendChild(opt);
+    }
+    dest.value = s.borrow || "";
+    const sync = () => { goBtn.disabled = dest.value === (s.borrow || ""); };
+    dest.addEventListener("change", sync);
+    dest.disabled = false;
+    sync();
+  })();
+
+  goBtn.addEventListener("click", async () => {
+    if (goBtn.disabled) return;
+    const name = s.name;
+    goBtn.disabled = true;
+    say("restarting… (stopping it, relaunching on the picked token)");
+    let doc = {};
+    let resp;
+    try {
+      resp = await api(`/api/sessions/${encodeURIComponent(name)}/reborrow`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ borrow: dest.value || null }),
+      });
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      say("could not reach the daemon — nothing was changed", "wf-warning");
+      goBtn.disabled = false;
+      return;
+    }
+    goBtn.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    say(
+      doc.borrow
+        ? `restarted — now borrowing ${doc.borrow}`
+        : `restarted — back on ${doc.profile}'s own token`
+    );
+    // The restart relaunched a fresh PTY under the same name; a terminal
+    // attached to the old one is watching a socket that just died.
+    if (currentName === name) {
+      detach();
+      await refreshSessions();
+      attach(name);
+    } else {
+      refreshSessions();
+    }
+  });
+
+  return box;
 }
 
 /* ---- move this session to another checkout ----
