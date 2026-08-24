@@ -1886,8 +1886,15 @@ def goto(
     when the graph and reality disagree (a step never got delivered, work
     must be redone, or a finished run needs reopening). ``end`` force-
     finishes. The move is journaled; the step itself is NOT delivered here —
-    the agent fetches it via 'next'/'status' (so per-visit gates re-apply),
-    which is why callers pair this with a session nudge.
+    the agent fetches it with 'next' (so per-visit gates re-apply), which is
+    why callers pair this with a session nudge.
+
+    'next' and not 'status': a step whose entry is delegated only *becomes*
+    a question somebody holds when the ask is opened, and opening one is a
+    write. ``status`` reads with ``mutate=False`` and therefore cannot do it
+    — by design, since a run must not change because somebody looked at it.
+    So a run left here reports an approval "not put to anyone yet" until the
+    agent calls 'next', and nothing but 'next' ends that.
     """
     workflow, state = _load(cwd)
     target = None if step_id == model.END else step_id
@@ -1915,7 +1922,7 @@ def goto(
         "step_id": target,
         "visit": _visits(state, target),
         "note": (
-            "position forced; the agent picks the step up via 'next'/'status' "
+            "position forced; the agent picks the step up via 'next' "
             "- nudge it to continue"
         ),
     }
