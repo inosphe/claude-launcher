@@ -14,7 +14,7 @@ import pytest
 
 from claude_launcher import attach as attach_mod
 from claude_launcher import cli_sessions, wizard, worktree
-from claude_launcher.cflow import model
+from claude_launcher.cflow import model, state as cflow_state
 
 
 class FakeSources(wizard.Sources):
@@ -302,6 +302,42 @@ def test_picking_a_role_selects_its_default_workflow():
     assert wiz.value("workflow") == "audit"
     pick(wiz, "role", "(no role)")
     assert wiz.value("workflow") == ""       # and lets go with the role
+
+
+def test_bundled_improv_workflows_volunteer_for_their_whitelisted_role():
+    """The shipped improv workflows declare ``default_role``, so the wizard's
+    Role row auto-selects them. This is the seam the feature used to die on:
+    no workflow in any layer declared a ``default_role``, so picking worker
+    (or any role) left the Workflow row on \"(none)\" whatever the form
+    offered — the auto-select ran, found nobody volunteering, and picked
+    nothing."""
+    bundled = cflow_state.bundled_workflows_dir()
+    entries = []
+    for path in sorted(bundled.glob("improv-*.yaml")):
+        wf = model.load(path)
+        flt = (
+            {"type": wf.filter_roles.type, "roles": list(wf.filter_roles.roles)}
+            if wf.filter_roles
+            else None
+        )
+        entries.append(
+            wizard._workflow_entry(
+                {
+                    "name": wf.name,
+                    "default_role": wf.default_role,
+                    "priority": wf.priority,
+                    "filter_roles": flt,
+                }
+            )
+        )
+    by_name = {e["name"]: e for e in entries}
+    assert by_name["improv-worker"]["default_role"] == "worker"
+    assert by_name["improv-leader"]["default_role"] == "leader"
+    assert wizard._workflow_default(entries, "worker") == "improv-worker"
+    assert wizard._workflow_default(entries, "leader") == "improv-leader"
+    # a role nobody volunteered for still selects nothing — the mapping is
+    # opt-in per workflow, not a blanket role -> workflow table
+    assert wizard._workflow_default(entries, "reviewer") == ""
 
 
 def test_rival_defaults_settle_by_priority_and_sort_the_picker():
