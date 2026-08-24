@@ -49,7 +49,7 @@ from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Dict, List, Optional
 
 from . import worktree
-from .cflow.model import RoleFilter
+from .cflow.model import FILTER_TYPES, RoleFilter
 
 #: Value of the worktree picker's "name it myself" entry. Not a name anyone
 #: could type (``validate_name`` rejects the space), so it cannot collide with
@@ -683,12 +683,22 @@ def _workflow_admits(entry: dict, role: str) -> bool:
     form's: the same words decided here and at start time must not be able to
     drift apart. Only the two conditions above are the form's own -- they say
     when to ask the question, not what the answer is.
+
+    A ``type`` outside the vocabulary is the exception, because there is no
+    rule to defer to: the parser rejects such a file, so nothing that reached
+    :class:`RoleFilter` legitimately can hold one, and its whitelist-or-else
+    reading would take the unknown word as a blacklist -- volunteering the
+    very workflow an unreadable filter might have been written to keep away.
+    An answer that cannot be trusted is not one to volunteer on.
     """
     f = entry.get("filter_roles")
     if not isinstance(f, dict) or not role:
         return True
+    kind = str(f.get("type") or "").strip().lower()
+    if kind not in FILTER_TYPES:
+        return False
     return RoleFilter(
-        type=str(f.get("type") or ""),
+        type=kind,
         roles=tuple(str(r).strip().lower() for r in (f.get("roles") or [])),
     ).allows(role)
 
