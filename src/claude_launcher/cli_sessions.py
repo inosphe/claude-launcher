@@ -633,24 +633,22 @@ def _cmd_migrate_session(args: argparse.Namespace) -> int:
 
 
 def _cmd_reborrow(args: argparse.Namespace) -> int:
-    """Restart a session on another profile's token (or back on its own)."""
+    """Restart a session on another answer to "whose token"."""
     client = daemon_client.ensure_running()
+    body = {"borrow": args.borrow}  # None for --none and --null alike
+    if args.null_token:
+        body["null_token"] = True
     # Roomy like a migrate: a graceful shutdown plus a relaunch.
     info = client.post(
-        f"/api/sessions/{args.session}/reborrow",
-        {"borrow": args.borrow},
-        timeout=120.0,
+        f"/api/sessions/{args.session}/reborrow", body, timeout=120.0
     )
     if info.get("borrow"):
-        print(
-            f"session {info['name']!r} restarted, now borrowing "
-            f"{info['borrow']!r}'s token (pid {info.get('pid')})"
-        )
+        what = f"now borrowing {info['borrow']!r}'s token"
+    elif info.get("null_token"):
+        what = "now running with no token (--null)"
     else:
-        print(
-            f"session {info['name']!r} restarted on profile "
-            f"{info.get('profile')!r}'s own token (pid {info.get('pid')})"
-        )
+        what = f"back on profile {info.get('profile')!r}'s own token"
+    print(f"session {info['name']!r} restarted, {what} (pid {info.get('pid')})")
     if args.attach:
         from . import attach as attach_mod
 
@@ -1304,9 +1302,10 @@ def register(sub) -> None:
 
     p_reborrow = sub.add_parser(
         "reborrow",
-        help="restart a session on another profile's token (--borrow), or "
-             "back on its own: stop it, relaunch it with the borrow swapped "
-             "— same name, same conversation, same directory",
+        help="restart a session on another answer to 'whose token' "
+             "(--borrow NAME, --none for its own, --null for none): stop "
+             "it, relaunch it with the auth swapped — same name, same "
+             "conversation, same directory",
     )
     p_reborrow.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
     p_reborrow.add_argument("session", nargs="?")
@@ -1316,7 +1315,11 @@ def register(sub) -> None:
     )
     p_reborrow.add_argument(
         "--none", action="store_true",
-        help="clear the borrow — run on the session's own profile token",
+        help="run on the session's own profile token (clears --null too)",
+    )
+    p_reborrow.add_argument(
+        "--null", dest="null_token", action="store_true",
+        help="run with no token at all (the create form's --null)",
     )
     p_reborrow.add_argument(
         "-a", "--attach", action="store_true", help="attach once restarted"
@@ -1431,13 +1434,14 @@ def _cmd_migrate_session_dispatch(args: argparse.Namespace) -> int:
 def _cmd_reborrow_dispatch(args: argparse.Namespace) -> int:
     if not _resolve_target(args):
         return 1
-    # Exactly one answer to "whose token": a lender's name, or --none for
-    # the session's own. Both and neither are the same refusal the daemon
-    # would give, said before the round-trip.
-    if (args.borrow is None) == (not args.none):
+    # Exactly one answer to "whose token": a lender's name, --none for the
+    # session's own, --null for none at all. Both and neither are the same
+    # refusal the daemon would give, said before the round-trip.
+    picks = sum((args.borrow is not None, args.none, args.null_token))
+    if picks != 1:
         print(
-            "error: pass a profile NAME to borrow, or --none to run on the "
-            "session's own token",
+            "error: pass exactly one — a profile NAME to borrow, --none for "
+            "its own token, or --null for no token",
             file=sys.stderr,
         )
         return 1

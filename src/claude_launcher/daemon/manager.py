@@ -507,21 +507,28 @@ class SessionManager:
             self.persist()
             raise
 
-    async def reborrow(self, name: str, borrow: Optional[str]) -> Session:
-        """Restart a session on another profile's token — or back on its own.
+    async def reborrow(
+        self, name: str, borrow: Optional[str], *, null_token: bool = False
+    ) -> Session:
+        """Restart a session on another answer to "whose token".
 
         :meth:`migrate` for the auth half of a definition instead of the
         location half, and simpler for it: the directory does not move, so
         the conversation stays filed where it always was and there is no
-        transcript to carry. What changes is whose token (and provider) the
-        relaunch injects. The borrow is part of the definition, so the new
-        choice holds across daemon restarts exactly like one made at
-        creation — and the token is still looked up fresh at every relaunch.
+        transcript to carry. The answers are the same three creation offers
+        — borrow a profile's token (and provider), run on the session's own
+        profile's, or run with none (``--null``) — and they are *one*
+        choice, so picking any of them clears the others: a borrow set on a
+        ``--null`` session turns the token back on, and a token asked back
+        on a borrowed session turns the borrow off. The new choice is the
+        definition's, so it holds across daemon restarts exactly like one
+        made at creation — and the token is still looked up fresh at every
+        relaunch.
 
-        Refused while nothing has been stopped: a non-claude session (borrow
-        is spelled in claude's own env), an unknown lender, a no-op, and the
-        ``--null`` pairing creation also refuses — the two flags answer
-        "whose token" with opposite answers. ``borrow=None`` clears one.
+        Refused while nothing has been stopped: a non-claude session (auth
+        is spelled in claude's own env), a borrow paired with ``--null``
+        (creation's own refusal — the two flags answer "whose token" with
+        opposite answers), an unknown lender, and a no-op.
         """
         session = self.get(name)
         old = session.sdef
@@ -531,16 +538,10 @@ class SessionManager:
                 f"not {old.harness!r}"
             )
         lender = (borrow or "").strip() or None
-        if lender == old.borrow:
-            if lender:
-                raise ManagerError(
-                    f"session {name!r} already borrows {lender!r}"
-                )
+        if lender is not None and null_token:
             raise ManagerError(
-                f"session {name!r} already starts with no token (--null)"
-                if old.null_token
-                else f"session {name!r} already runs on profile "
-                     f"{old.profile!r}'s own token — nothing to clear"
+                "--null launches without any OAuth token; it cannot be "
+                f"combined with --borrow {lender}"
             )
         if lender is not None:
             # Checked now rather than left for the relaunch to discover: a
@@ -551,12 +552,20 @@ class SessionManager:
                 profile_mod.require(lender)
             except profile_mod.ProfileError as exc:
                 raise ManagerError(str(exc)) from exc
-            if old.null_token:
+        if lender == old.borrow and null_token == old.null_token:
+            if lender:
                 raise ManagerError(
-                    "--null launches without any OAuth token; it cannot be "
-                    f"combined with --borrow {lender}"
+                    f"session {name!r} already borrows {lender!r}"
                 )
-        return await self.redefine(name, borrow=lender)
+            raise ManagerError(
+                f"session {name!r} already starts with no token (--null)"
+                if old.null_token
+                else f"session {name!r} already runs on profile "
+                     f"{old.profile!r}'s own token — nothing to clear"
+            )
+        return await self.redefine(
+            name, borrow=lender, null_token=null_token
+        )
 
     async def migrate(self, name: str, new_cwd: str) -> Tuple[Session, bool]:
         """Move a session to another directory: stop it, carry its claude

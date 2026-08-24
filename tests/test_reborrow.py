@@ -155,12 +155,59 @@ def test_reborrow_refusals_touch_nothing(home, tmp_path, monkeypatch):
         with pytest.raises(ManagerError, match="own token"):
             await mgr.reborrow("s1", None)  # nothing to clear
         with pytest.raises(ManagerError, match="cannot be combined"):
-            await mgr.reborrow("s3", "p2")
+            await mgr.reborrow("s1", "p2", null_token=True)
         with pytest.raises(ManagerError, match="no token"):
-            await mgr.reborrow("s3", None)  # a --null session, honestly said
+            await mgr.reborrow("s3", None, null_token=True)  # already --null
         # none of them went down for a refusal
         for s in (session, other, nulled):
             assert not s.exited
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_reborrow_turns_the_token_back_on_for_a_null_session(home, tmp_path, monkeypatch):
+    """The three auth answers are one choice: a borrow set on a --null session
+    clears the --null, and a token asked back clears both."""
+    profile_mod.create("p1")
+    profile_mod.create("p2")
+    monkeypatch.setattr(harness_mod, "build_command", _fake_claude_build_command)
+
+    async def run():
+        mgr = _manager()
+        mgr.create(
+            SessionDef(
+                name="s1", harness="claude", profile="p1",
+                cwd=str(tmp_path), null_token=True,
+            )
+        )
+        borrowed = await mgr.reborrow("s1", "p2")
+        assert borrowed.sdef.borrow == "p2"
+        assert borrowed.sdef.null_token is False  # the --null is off again
+        own = await mgr.reborrow("s1", None, null_token=False)
+        assert own.sdef.borrow is None
+        assert own.sdef.null_token is False
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_reborrow_sets_null_on_a_token_session(home, tmp_path, monkeypatch):
+    profile_mod.create("p1")
+    profile_mod.create("p2")
+    monkeypatch.setattr(harness_mod, "build_command", _fake_claude_build_command)
+
+    async def run():
+        mgr = _manager()
+        mgr.create(
+            SessionDef(
+                name="s1", harness="claude", profile="p1",
+                cwd=str(tmp_path), borrow="p2",
+            )
+        )
+        relaunched = await mgr.reborrow("s1", None, null_token=True)
+        assert relaunched.sdef.null_token is True
+        assert relaunched.sdef.borrow is None  # the borrow went with it
         await mgr.shutdown_all()
 
     asyncio.run(run())
@@ -263,6 +310,22 @@ def test_api_reborrow_sets_and_clears(home, tmp_path, monkeypatch):
             assert resp.status == 200
             assert (await resp.json())["borrow"] is None
             assert mgr.get("s1").sdef.borrow is None
+            # and --null is one of the answers, settable the same way
+            resp = await client.post(
+                "/api/sessions/s1/reborrow",
+                json={"null_token": True},
+                headers=BEARER,
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["null_token"] is True and body["borrow"] is None
+            # asking for a token again turns the --null back off
+            resp = await client.post(
+                "/api/sessions/s1/reborrow", json={"borrow": "p2"}, headers=BEARER
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            assert body["borrow"] == "p2" and body["null_token"] is False
             await mgr.shutdown_all()
         finally:
             await client.close()
@@ -283,14 +346,19 @@ def test_api_reborrow_refusals(home, tmp_path, monkeypatch):
                     name="s1", harness="claude", profile="p1", cwd=str(tmp_path)
                 )
             )
-            for body in ({}, {"borrow": 123}):
+            for body in ({}, {"borrow": 123}, {"null_token": "yes"}):
                 resp = await client.post(
                     "/api/sessions/s1/reborrow", json=body, headers=BEARER
                 )
                 assert resp.status == 400
-            # an unknown lender and a no-op are the manager's 400s, as they
-            # always were — and the session never went down for any of them
-            for body in ({"borrow": "nosuch"}, {"borrow": None}):
+            # an unknown lender, a borrow paired with --null, and a no-op are
+            # the manager's 400s, as they always were — and the session never
+            # went down for any of them
+            for body in (
+                {"borrow": "nosuch"},
+                {"borrow": "p1", "null_token": True},
+                {"borrow": None},
+            ):
                 resp = await client.post(
                     "/api/sessions/s1/reborrow", json=body, headers=BEARER
                 )
