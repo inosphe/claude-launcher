@@ -1633,8 +1633,16 @@ class SpawnWizard(Form):
     # reason -- neither row takes a preset (the mesh follows the parent, the
     # workflow follows the role), and the mesh a child belongs in is its
     # parent's answer, not last launch's.
+    #
+    # The PARENT itself IS remembered, though. It is the one answer every
+    # other row is re-read from, and "spawn another child of the same fleet
+    # member" is the human's most repeated spawn -- the form opens on the
+    # previous parent instead of making them re-pick it. A remembered parent
+    # that no longer stands (exited, or gone since) simply is not selected:
+    # `ChoiceField.select` skips rows that cannot take a child, and the form
+    # falls back to the session it was invoked from.
     recall_key = "spawn"
-    recall_fields = ("profile", "borrow", "null_token", "role", "attach")
+    recall_fields = ("parent", "profile", "borrow", "null_token", "role", "attach")
 
     #: The mesh picker's "none at all" entry. The API spells it exactly so.
     NO_MESH = "-"
