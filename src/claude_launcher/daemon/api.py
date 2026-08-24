@@ -1883,6 +1883,14 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
     which and why, so the omission is visible instead of looking like the
     clear did not take.
 
+    ``?force=1`` resolves the hold instead of honouring it: each held record
+    is taken off its rosters (:meth:`MeshManager.leave`, the same call as the
+    roster's ×) and then dropped, so the row and the record go together — the
+    invariant the guard exists for, kept from the other side. A membership
+    that will not release (a mirror's leave is a call to a primary that may
+    be unreachable) keeps its record and reports the refusal in that row's
+    ``error``, because a force that half-releases must say which half.
+
     ``?running=1`` widens it from "the exited ones" to "all of them": every
     running session is shut down first — terminated, waited out, force-killed
     if it will not go — and only then are the records dropped. That wait is
@@ -1895,6 +1903,7 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     mesh = request.app["mesh"]
     logs = request.query.get("logs") in ("1", "true")
+    force = request.query.get("force") in ("1", "true")
     stopped: List[str] = []
     if request.query.get("running") in ("1", "true"):
         live = [s for s in manager.list() if not s.exited]
@@ -1903,15 +1912,16 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
             # ten of them in a row is ten graces long for no reason.
             await asyncio.gather(*(s.shutdown() for s in live))
         stopped = [s.sdef.name for s in live]
-    kept = [
-        {"name": name, "meshes": held}
-        for name, held in (
-            (s.sdef.name, mesh.meshes_for_session(s.sdef.name))
-            for s in manager.list()
-            if s.exited
-        )
-        if held
-    ]
+    kept: List[dict] = []
+    for name, held in (
+        (s.sdef.name, mesh.meshes_for_session(s.sdef.name))
+        for s in manager.list()
+        if s.exited
+    ):
+        if held and force:
+            held = await _leave_meshes(mesh, held)
+        if held:
+            kept.append({"name": name, "meshes": held})
     removed = manager.clear(logs=logs, keep=[k["name"] for k in kept])
     return web.json_response(
         {"removed": removed, "kept": kept, "logs": logs, "stopped": stopped}
@@ -2138,13 +2148,38 @@ def _mesh_holds(request: web.Request, name: str) -> List[dict]:
 
 
 def _mesh_holds_error(name: str, held: List[dict]) -> str:
-    where = ", ".join(f"{h['mesh']} (as {h['handle']})" for h in held)
+    where = ", ".join(
+        f"{h['mesh']} (as {h['handle']})"
+        + (f" — leave failed: {h['error']}" if h.get("error") else "")
+        for h in held
+    )
     return (
         f"{name!r} is still a mesh member — {where}. Dropping its record now "
         "would leave that row naming a session nobody can respawn or reach. "
         "Remove it from the mesh first (the roster's ×, or claunch mesh "
-        "leave), then clear the record."
+        "leave), then clear the record — or force the delete to do both "
+        "at once."
     )
+
+
+async def _leave_meshes(mesh_mgr, held: List[dict]) -> List[dict]:
+    """The force path's answer to :func:`_mesh_holds`: release each row
+    instead of honouring it, with :meth:`MeshManager.leave` — the same call
+    the roster's × makes, so everything that × keeps consistent (cursors,
+    write-offs, member edges, guest fan-out) stays consistent here.
+
+    Returns the rows that would NOT release, each carrying the refusal as
+    ``error``. Leave is not guaranteed: on a mirror it is a call to the
+    primary, which may be unreachable — and a session held by two meshes
+    where only one released is still held, so the caller keeps its record.
+    """
+    still: List[dict] = []
+    for row in held:
+        try:
+            await mesh_mgr.leave(row["mesh"], row["handle"])
+        except Exception as exc:  # one refusal must not strand the others
+            still.append({**row, "error": str(exc)})
+    return still
 
 
 async def h_session_delete(request: web.Request) -> web.Response:
@@ -2152,6 +2187,12 @@ async def h_session_delete(request: web.Request) -> web.Response:
 
     The second half is guarded: see :func:`_mesh_holds`. Killing is not — a
     member row is *meant* to outlive the terminal, reading ``exited``.
+
+    ``?force=1`` carries its meaning to whichever half runs: on a running
+    session it is SIGKILL (as it always was), on a held exited one it takes
+    the record off its rosters first (:func:`_leave_meshes`) and then drops
+    it. One word because it is one stance — do it anyway — and because
+    ``claunch kill-session --force`` already says it.
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
@@ -2159,6 +2200,8 @@ async def h_session_delete(request: web.Request) -> web.Response:
     session = manager.get(name)  # ManagerError -> 400, as it always did
     if session.exited:
         held = _mesh_holds(request, name)
+        if held and force:
+            held = await _leave_meshes(request.app["mesh"], held)
         if held:
             return json_error(409, _mesh_holds_error(name, held))
     session = manager.kill(name, force=force)

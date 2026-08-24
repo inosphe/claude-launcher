@@ -200,31 +200,70 @@ function syncBulkActions(sessions) {
   if (bar) bar.classList.toggle("hidden", sessions.length === 0);
 }
 
-/* A bulk call answers with what it did *and* with what it did not: a record
-   held back because a mesh row still names it, a session that would not come
-   back. Either one is why the rail a second later does not match the count on
-   the button, and an omission the button never mentions reads as the button
-   not having worked — the next click is someone trying harder. So both are
-   said out loud, once, here. */
-function reportBulk(result, verb) {
-  const kept = (result && result.kept) || [];
+/* The stand-in for confirm()/alert() on the flows that end a session or its
+   record. Not restyling for its own sake: a native dialog can only answer
+   yes or no, and the question these flows actually end on — a record a mesh
+   row still names, force it off the roster or keep it — needs a third
+   button. Resolves to the pressed action's `value`; Escape, the backdrop
+   and Cancel are all null, so every caller's "did not answer" is one shape. */
+function showModal({ title, body, actions }) {
+  return new Promise((resolve) => {
+    const overlay = $("modal-overlay");
+    $("modal-title").textContent = title;
+    $("modal-body").textContent = body;
+    const row = $("modal-actions");
+    row.innerHTML = "";
+    const done = (value) => {
+      overlay.classList.add("hidden");
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    };
+    const onKey = (e) => { if (e.key === "Escape") done(null); };
+    for (const a of actions) {
+      const btn = document.createElement("button");
+      btn.type = "button";
+      btn.textContent = a.label;
+      if (a.danger) btn.classList.add("danger");
+      btn.addEventListener("click", () => done(a.value));
+      row.appendChild(btn);
+    }
+    // Assigned, not addEventListener'd: each asking replaces the last one's
+    // backdrop handler instead of stacking a resolved promise's behind it.
+    overlay.onclick = (e) => { if (e.target === overlay) done(null); };
+    document.addEventListener("keydown", onKey);
+    overlay.classList.remove("hidden");
+    // Focus the first (safe) answer: a stray Enter must not confirm a
+    // delete the way it would with the destructive button focused.
+    const first = row.querySelector("button");
+    if (first) first.focus();
+  });
+}
+
+const modalInfo = (title, body) =>
+  showModal({ title, body, actions: [{ label: "OK", value: true }] });
+
+const modalConfirm = (title, body, label, danger = true) =>
+  showModal({
+    title, body,
+    actions: [
+      { label: "Cancel", value: null },
+      { label, value: true, danger },
+    ],
+  });
+
+/* A bulk call answers with what it did *and* with what it did not: a session
+   that would not stop, one that would not come back. That omission is why
+   the rail a second later does not match the count on the button, and left
+   unmentioned it reads as the button not having worked — the next click is
+   someone trying harder. (The other omission, a record a mesh still names,
+   is a question rather than a report and is offerForce()'s.) */
+async function reportBulk(result, verb) {
   const failed = (result && result.failed) || [];
-  const parts = [];
-  if (kept.length) {
-    parts.push(
-      `Kept ${kept.length} record(s) still named by a mesh:\n` +
-      kept.map((k) => `  ${k.name} — ${k.meshes.map((m) => m.mesh).join(", ")}`)
-        .join("\n") +
-      `\n\nRemove them from the mesh first (the roster's ×), then ${verb} again.`
-    );
-  }
-  if (failed.length) {
-    parts.push(
-      `${failed.length} session(s) could not ${verb}:\n` +
-      failed.map((f) => `  ${f.name} — ${f.error}`).join("\n")
-    );
-  }
-  if (parts.length) alert(parts.join("\n\n"));
+  if (!failed.length) return;
+  await modalInfo(
+    `${failed.length} session(s) could not ${verb}`,
+    failed.map((f) => `${f.name} — ${f.error}`).join("\n")
+  );
 }
 
 /* Send one, keeping its button pressed-out for the duration: these are slow
@@ -236,16 +275,63 @@ async function bulkAction(btn, path, opts, verb) {
     const resp = await api(path, opts);
     const result = await resp.json().catch(() => null);
     if (!resp.ok) {
-      alert((result && result.error) || `HTTP ${resp.status}`);
+      await modalInfo(`Could not ${verb}`,
+                      (result && result.error) || `HTTP ${resp.status}`);
       return null;
     }
-    reportBulk(result, verb);
+    await reportBulk(result, verb);
     return result;
   } catch {
     return null;  // the auth overlay is up; api() has already raised it
   } finally {
     btn.disabled = false;
   }
+}
+
+/* The clear/delete pair's second act. The server keeps a record a mesh row
+   still names rather than strand the row (the API's _mesh_holds), and used
+   to leave the operator to walk each roster's × by hand. The hold still
+   stands — it is what keeps the row and the record one fact — but it is now
+   a question instead of a wall: force re-issues the same call with ?force=1,
+   which takes the held records off their rosters first and then drops them.
+   A membership that will not release (its primary unreachable) comes back
+   still kept, with the refusal on the row, and is reported as such. */
+async function offerForce(btn, path, verb) {
+  let result = await bulkAction(btn, path, { method: "DELETE" }, verb);
+  const kept = (result && result.kept) || [];
+  if (!kept.length) return result;
+  const list = kept
+    .map((k) => `${k.name} — ${k.meshes.map((m) => m.mesh).join(", ")}`)
+    .join("\n");
+  const go = await showModal({
+    title: `Kept ${kept.length} record(s) still named by a mesh`,
+    body:
+      `${list}\n\n` +
+      `Dropping a record its roster still names would leave that member ` +
+      `pointing at nothing, so these were kept. Force ${verb} removes them ` +
+      `from their meshes first (the roster's ×), then drops the records.`,
+    actions: [
+      { label: "Keep them", value: null },
+      { label: `Force ${verb}`, value: true, danger: true },
+    ],
+  });
+  if (!go) return result;
+  const sep = path.includes("?") ? "&" : "?";
+  const forced = await bulkAction(btn, `${path}${sep}force=1`,
+                                  { method: "DELETE" }, verb);
+  const still = (forced && forced.kept) || [];
+  if (still.length) {
+    await modalInfo(
+      `${still.length} record(s) would not release`,
+      still.map((k) =>
+        `${k.name} — ` +
+        k.meshes
+          .map((m) => m.mesh + (m.error ? ` (${m.error})` : ""))
+          .join(", ")
+      ).join("\n")
+    );
+  }
+  return forced || result;
 }
 
 async function refreshSessions() {
@@ -1454,11 +1540,39 @@ $("term-kill").addEventListener("click", async () => {
   // anything — that is the one path that makes the session unresumable, so
   // it asks first (killing a live program keeps its existing behaviour).
   const exited = $("term-status").textContent === "exited";
-  if (exited && !confirm(
-    `Remove exited session '${name}'?\n\nThe daemon forgets it, so it can no ` +
-    `longer be resumed from here.`
-  )) return;
-  await api(`/api/sessions/${encodeURIComponent(name)}`, { method: "DELETE" });
+  if (exited && !(await modalConfirm(
+    `Remove exited session '${name}'?`,
+    "The daemon forgets it, so it can no longer be resumed from here.",
+    "Remove"
+  ))) return;
+  let resp = await api(`/api/sessions/${encodeURIComponent(name)}`,
+                       { method: "DELETE" });
+  // The one refusal this route has: a mesh row still names the record. The
+  // same choice the bulk buttons get (offerForce), asked for one session.
+  if (exited && resp.status === 409) {
+    const doc = await resp.json().catch(() => ({}));
+    const go = await showModal({
+      title: `'${name}' is still a mesh member`,
+      body:
+        (doc.error || "A mesh roster still names this record.") +
+        "\n\nForce remove takes it off its rosters first, then drops the " +
+        "record.",
+      actions: [
+        { label: "Keep it", value: null },
+        { label: "Force remove", value: true, danger: true },
+      ],
+    });
+    if (!go) return;
+    resp = await api(`/api/sessions/${encodeURIComponent(name)}?force=1`,
+                     { method: "DELETE" });
+  }
+  if (!resp.ok) {
+    const doc = await resp.json().catch(() => ({}));
+    await modalInfo(`Could not remove '${name}'`,
+                    doc.error || `HTTP ${resp.status}`);
+    refreshSessions();
+    return;
+  }
   if (exited) {
     detach();
     currentName = null;
@@ -1474,11 +1588,13 @@ $("stop-all").addEventListener("click", async () => {
   const live = sessionsCache
     .filter((s) => s.status !== "exited").map((s) => s.name);
   if (!live.length) return;
-  if (!confirm(
-    `Stop ${live.length} running session(s)?\n\n${live.join(", ")}\n\n` +
+  if (!(await modalConfirm(
+    `Stop ${live.length} running session(s)?`,
+    `${live.join(", ")}\n\n` +
     `The program in each one is terminated. Their records stay, so all of ` +
-    `them can be resumed from here afterwards.`
-  )) return;
+    `them can be resumed from here afterwards.`,
+    "Stop", false
+  ))) return;
   await bulkAction($("stop-all"), "/api/sessions/kill", { method: "POST" }, "stop");
   // The open terminal's own socket sees its child go before the next poll
   // does, so there is nothing to reattach here — only the rail to redraw.
@@ -1493,11 +1609,13 @@ $("resume-all").addEventListener("click", async () => {
   const dead = sessionsCache
     .filter((s) => s.status === "exited").map((s) => s.name);
   if (!dead.length) return;
-  if (!confirm(
-    `Resume ${dead.length} exited session(s)?\n\n${dead.join(", ")}\n\n` +
+  if (!(await modalConfirm(
+    `Resume ${dead.length} exited session(s)?`,
+    `${dead.join(", ")}\n\n` +
     `Each comes back under its own name — the claude harness with --resume of ` +
-    `the conversation it was pinned to.`
-  )) return;
+    `the conversation it was pinned to.`,
+    "Resume", false
+  ))) return;
   const result = await bulkAction(
     $("resume-all"), "/api/sessions/respawn", { method: "POST" }, "resume"
   );
@@ -1510,16 +1628,17 @@ $("resume-all").addEventListener("click", async () => {
 $("clear-exited").addEventListener("click", async () => {
   const dead = sessionsCache.filter((s) => s.status === "exited").map((s) => s.name);
   if (!dead.length) return;
-  if (!confirm(
-    `Drop the records of ${dead.length} exited session(s)?\n\n${dead.join(", ")}\n\n` +
-    `They can no longer be resumed. Running sessions are untouched.`
-  )) return;
+  if (!(await modalConfirm(
+    `Drop the records of ${dead.length} exited session(s)?`,
+    `${dead.join(", ")}\n\n` +
+    `They can no longer be resumed. Running sessions are untouched.`,
+    "Clear"
+  ))) return;
   // A record a mesh row still names is kept, not dropped — the two are one
   // fact, and half of it left behind is a member nobody can respawn or reach.
-  // reportBulk() is what says so, for this button and for delete alike.
-  const result = await bulkAction(
-    $("clear-exited"), "/api/sessions", { method: "DELETE" }, "clear"
-  );
+  // offerForce() is what says so, for this button and for delete alike, and
+  // what turns the hold into a choice: release the rosters too, or keep both.
+  const result = await offerForce($("clear-exited"), "/api/sessions", "clear");
   dropIfGone(result, dead);
   refreshSessions();
 });
@@ -1532,13 +1651,15 @@ $("delete-all").addEventListener("click", async () => {
   const all = sessionsCache.map((s) => s.name);
   if (!all.length) return;
   const live = sessionsCache.filter((s) => s.status !== "exited").length;
-  if (!confirm(
-    `Delete all ${all.length} session(s)?\n\n${all.join(", ")}\n\n` +
+  if (!(await modalConfirm(
+    `Delete all ${all.length} session(s)?`,
+    `${all.join(", ")}\n\n` +
     (live ? `${live} of them are still running and are stopped first. ` : "") +
-    `The daemon then forgets every record, so none of them can be resumed.`
-  )) return;
-  const result = await bulkAction(
-    $("delete-all"), "/api/sessions?running=1", { method: "DELETE" }, "delete"
+    `The daemon then forgets every record, so none of them can be resumed.`,
+    "Delete all"
+  ))) return;
+  const result = await offerForce(
+    $("delete-all"), "/api/sessions?running=1", "delete"
   );
   dropIfGone(result, all);
   refreshSessions();

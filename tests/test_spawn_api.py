@@ -1244,6 +1244,63 @@ def test_a_record_a_mesh_still_names_is_not_dropped(home, tmp_path):
     asyncio.run(run())
 
 
+def test_force_delete_releases_the_roster_and_the_record_together(home, tmp_path):
+    """``?force=1`` is the guard resolved rather than bypassed: the held
+    record is taken off its rosters first (the same leave as the roster's ×)
+    and only then dropped, so the row and the record still go together —
+    the invariant the 409 exists for, kept from the other side. Both the
+    single delete and the bulk clear speak it."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            for child in ("w1", "w2"):
+                resp = await client.post(
+                    "/api/sessions/lead/children",
+                    json={"name": child},
+                    headers=BEARER,
+                )
+                assert resp.status == 201
+                resp = await client.delete(
+                    f"/api/sessions/{child}", headers=BEARER
+                )
+                assert resp.status == 200
+                await _wait_for(
+                    lambda c=child: mgr.get(c).exited, f"{child} to exit"
+                )
+            name = mm.list()[0].name
+            assert {"w1", "w2"} <= set(mm.get(name).members)
+
+            # the single delete: refused plain, released and dropped forced
+            resp = await client.delete("/api/sessions/w1", headers=BEARER)
+            assert resp.status == 409
+            resp = await client.delete(
+                "/api/sessions/w1?force=1", headers=BEARER
+            )
+            assert resp.status == 200
+            assert "w1" not in mm.get(name).members
+            assert "w1" not in [s.sdef.name for s in mgr.list()]
+
+            # the bulk clear: kept plain (nothing else to remove), gone forced
+            resp = await client.delete("/api/sessions", headers=BEARER)
+            body = await resp.json()
+            assert [k["name"] for k in body["kept"]] == ["w2"]
+            resp = await client.delete("/api/sessions?force=1", headers=BEARER)
+            body = await resp.json()
+            assert body["removed"] == ["w2"] and body["kept"] == []
+            assert "w2" not in mm.get(name).members
+            assert [s.sdef.name for s in mgr.list()] == ["lead"]
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # a checkout of the child's own
 # --------------------------------------------------------------------------- #
