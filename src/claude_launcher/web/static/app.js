@@ -4584,19 +4584,21 @@ function renderSession(data) {
   view.appendChild(sessMigrate(data));
 }
 
-/* ---- restart this session on another profile's token ----
+/* ---- restart this session on another answer to "whose token" ----
    `claunch reborrow`, from the panel that names the session. A managed
-   session's --borrow is part of its definition — reapplied on every restore —
+   session's auth is part of its definition — reapplied on every restore —
    so changing it is a restart, not an edit: the daemon stops the session and
-   relaunches it with the borrow swapped. Same name, same conversation, same
-   directory — unlike a migrate there is nothing to carry. The picker offers
-   every profile plus "its own token", which is how a borrow is cleared. */
+   relaunches it with the auth swapped. Same name, same conversation, same
+   directory — unlike a migrate there is nothing to carry. The picker asks
+   the one question creation asks: its own token, a borrowed one, or none
+   (--null) — and picking any clears the others, so a borrow chosen on a
+   --null session turns the token back on. */
 function sessReborrow(data) {
   const s = data.session || {};
   const box = el("div", "sess-reborrow");
   box.appendChild(el("h3", null, "Borrowed auth"));
 
-  // A claude-only flag: another harness has no OAuth token to swap, and the
+  // A claude-only affair: another harness has no OAuth token to swap, and the
   // daemon refuses the restart — said here as a note rather than a dead form.
   if (s.harness !== "claude") {
     sessReborrowBox = null;
@@ -4608,7 +4610,7 @@ function sessReborrow(data) {
   }
 
   // Rebuilt only when the auth state changes — the 2s poll must not wipe a
-  // picked lender, and a successful restart changes the key, which is what
+  // picked answer, and a successful restart changes the key, which is what
   // re-aims the picker at the new current.
   const key = `${s.name}|${s.borrow || ""}|${s.null_token ? 1 : 0}`;
   if (sessReborrowBox && sessReborrowBox.dataset.slot === key) {
@@ -4620,22 +4622,17 @@ function sessReborrow(data) {
   sessReborrowBox = form;
   box.appendChild(form);
 
+  // Whose token it runs on now — one accurate sentence for each of the
+  // three modes — plus the warning that changing it costs a restart.
+  const current = s.borrow
+    ? `borrowing ${s.borrow}'s token (and provider) — the config and skills stay ${s.profile}'s`
+    : s.null_token
+      ? "started --null — no token is injected at all"
+      : `running on ${s.profile}'s own token`;
   form.appendChild(el(
     "p", "wf-note",
-    (s.borrow
-      ? `borrowing ${s.borrow}'s token (and provider) — the config and skills stay ${s.profile}'s`
-      : `running on ${s.profile}'s own token`) +
-    ". Changing it stops the session and relaunches it — same name, same conversation"
+    `${current}. Changing it stops the session and relaunches it — same name, same conversation`
   ));
-
-  if (s.null_token) {
-    form.appendChild(el(
-      "p", "wf-note",
-      "started --null: no token is injected at all, and a borrow cannot be " +
-      "combined with that — this session keeps starting unauthenticated"
-    ));
-    return box;
-  }
 
   const row = el("div", "sess-send-row");
   const dest = document.createElement("select");
@@ -4644,7 +4641,7 @@ function sessReborrow(data) {
   row.appendChild(dest);
   const goBtn = el("button", "wf-btn option", "Restart");
   goBtn.disabled = true;
-  goBtn.title = "stop the session and relaunch it on the picked token";
+  goBtn.title = "stop the session and relaunch it on the picked auth";
   const status = el("p", "wf-note hidden");
   form.append(row, goBtn, status);
 
@@ -4653,10 +4650,12 @@ function sessReborrow(data) {
     status.textContent = msg;
   };
 
-  // The choices are the daemon's answer, not a guess: every profile it knows,
-  // plus "its own token" for clearing a borrow. The current one is preselected
-  // and picking it again enables nothing — a restart that changes nothing is
-  // the daemon's refusal, mirrored here as a dead button.
+  // One question, three answers: own token, none, or a borrowed one. The
+  // values are prefixed like the migrate picker's (wt:), so a profile named
+  // 'own' or 'null' cannot collide with a mode. The current one is
+  // preselected and picking it again enables nothing — a restart that
+  // changes nothing is the daemon's refusal, mirrored here as a dead button.
+  const currentChoice = s.borrow ? `b:${s.borrow}` : s.null_token ? "null" : "own";
   (async () => {
     let profiles = [];
     try {
@@ -4670,18 +4669,19 @@ function sessReborrow(data) {
     }
     if (sessReborrowBox !== form) return; // the panel moved on mid-flight
     dest.innerHTML = "";
-    const own = document.createElement("option");
-    own.value = "";
-    own.textContent = `its own token (${s.profile})`;
-    dest.appendChild(own);
-    for (const p of profiles) {
+    const choices = [
+      ["own", `its own token (${s.profile})`],
+      ["null", "no token (--null)"],
+      ...profiles.map((p) => [`b:${p}`, `borrow: ${p}`]),
+    ];
+    for (const [value, label] of choices) {
       const opt = document.createElement("option");
-      opt.value = p;
-      opt.textContent = `borrow: ${p}`;
+      opt.value = value;
+      opt.textContent = label;
       dest.appendChild(opt);
     }
-    dest.value = s.borrow || "";
-    const sync = () => { goBtn.disabled = dest.value === (s.borrow || ""); };
+    dest.value = currentChoice;
+    const sync = () => { goBtn.disabled = dest.value === currentChoice; };
     dest.addEventListener("change", sync);
     dest.disabled = false;
     sync();
@@ -4690,15 +4690,20 @@ function sessReborrow(data) {
   goBtn.addEventListener("click", async () => {
     if (goBtn.disabled) return;
     const name = s.name;
+    const choice = dest.value;
+    const body =
+      choice === "own" ? { borrow: null }
+      : choice === "null" ? { borrow: null, null_token: true }
+      : { borrow: choice.slice(2) };
     goBtn.disabled = true;
-    say("restarting… (stopping it, relaunching on the picked token)");
+    say("restarting… (stopping it, relaunching on the picked auth)");
     let doc = {};
     let resp;
     try {
       resp = await api(`/api/sessions/${encodeURIComponent(name)}/reborrow`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ borrow: dest.value || null }),
+        body: JSON.stringify(body),
       });
       doc = await resp.json().catch(() => ({}));
     } catch {
@@ -4714,7 +4719,9 @@ function sessReborrow(data) {
     say(
       doc.borrow
         ? `restarted — now borrowing ${doc.borrow}`
-        : `restarted — back on ${doc.profile}'s own token`
+        : doc.null_token
+          ? "restarted — now running with no token (--null)"
+          : `restarted — back on ${doc.profile}'s own token`
     );
     // The restart relaunched a fresh PTY under the same name; a terminal
     // attached to the old one is watching a socket that just died.

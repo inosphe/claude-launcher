@@ -2292,15 +2292,16 @@ async def h_session_migrate(request: web.Request) -> web.Response:
 
 
 async def h_session_reborrow(request: web.Request) -> web.Response:
-    """Restart a session on another profile's token — or back on its own.
+    """Restart a session on another answer to "whose token".
 
     Body: ``{"borrow": "NAME"}`` to borrow that profile's token (and
-    provider), ``{"borrow": null}`` (or ``""``) to clear a borrow. The
-    restart is :meth:`SessionManager.reborrow` — stop, relaunch under the
-    definition with its borrow swapped. The directory does not move, so the
-    conversation stays filed where it always was and there is nothing to
-    carry; the new choice persists in the definition exactly like one made
-    at creation.
+    provider), ``{"borrow": null}`` (or ``""``) for its own profile's, and
+    ``{"null_token": true}`` for none at all (``--null``). They are one
+    choice — picking any clears the others, so a borrow set on a ``--null``
+    session turns the token back on. The restart is
+    :meth:`SessionManager.reborrow` — stop, relaunch under the definition
+    with the auth swapped. The directory does not move, so the conversation
+    stays filed where it always was and there is nothing to carry.
 
     Operator-only, like migrate and respawn: no agent-facing route reaches
     this. An agent's auth is its spawner's arrangement, changed by the human
@@ -2308,14 +2309,21 @@ async def h_session_reborrow(request: web.Request) -> web.Response:
     """
     manager: SessionManager = request.app["manager"]
     body = await _json_body(request)
-    if "borrow" not in body:
+    if "borrow" not in body and "null_token" not in body:
         return json_error(
-            400, "pass 'borrow' — a profile name, or null to run on its own"
+            400,
+            "pass 'borrow' (a profile name, or null) and/or 'null_token' — "
+            "one answer to whose token it runs on",
         )
-    borrow = body["borrow"]
+    borrow = body.get("borrow")
     if borrow is not None and not isinstance(borrow, str):
         return json_error(400, "'borrow' must be a profile name or null")
-    session = await manager.reborrow(request.match_info["name"], borrow)
+    null_token = body.get("null_token", False)
+    if not isinstance(null_token, bool):
+        return json_error(400, "'null_token' must be a boolean")
+    session = await manager.reborrow(
+        request.match_info["name"], borrow, null_token=null_token
+    )
     return web.json_response(session.info())
 
 
