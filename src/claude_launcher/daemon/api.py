@@ -1702,9 +1702,20 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     # Whether the briefing summariser is usable rides the list the UI already
     # polls, so the rail can disable the briefing toggles (and say why) up
     # front instead of every click discovering the 400 for itself.
+    attached = []
+    for s in manager.list():
+        info = ctxsize.attach(s)
+        # The cached briefing's one-liner, when it exists — rides the list the
+        # UI already polls so a row can show it without an open card or an LLM
+        # call, and so a browser refresh repaints it from the daemon's session
+        # state instead of regenerating.
+        d = briefing.digest(info.get("name") or "")
+        if d:
+            info["briefing"] = d
+        attached.append(info)
     return web.json_response(
         {
-            "sessions": [ctxsize.attach(s) for s in manager.list()],
+            "sessions": attached,
             "llm_configured": briefing.llm_configured(briefing.llm_config()),
         }
     )

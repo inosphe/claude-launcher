@@ -100,6 +100,11 @@ function syncBulkActions() {}
 function syncMobileBars() {}
 function applyCflowBadges() {}
 function applyBriefingCards() {}
+/* The briefing's per-row decoration (the one-line and the collapsed ⟳) is
+   its own harness (briefrow_check); here, like applyBriefingCards, it is a
+   no-op so what this harness pins — the context note's containment — stays
+   about context. */
+function decorateBriefingRow(li, s) {}
 function terminalOnScreen() { return false; }
 function attach() {}
 function setStatusBadge() {}
