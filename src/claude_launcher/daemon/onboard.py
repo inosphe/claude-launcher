@@ -238,6 +238,22 @@ def preflight(
                     f"handle {wanted_handle!r} is already taken in mesh "
                     f"{mesh!r} — pick another"
                 )
+            # An exclusive role already held live fails the CREATE, not just
+            # the join: a session built anyway would come up outside its mesh,
+            # and a half-arrived member is worse than a refused request. The
+            # join re-checks (it is the authority), so a race between here and
+            # there still cannot seat two — this is the early, legible no.
+            if wanted_handle:
+                holder = mesh_mgr.exclusive_holder(local_mesh, wanted_handle, role)
+                if holder is not None:
+                    raise OnboardError(
+                        f"mesh {mesh!r} already has a live "
+                        f"{holder.role!r} ({holder.handle!r}), and that role "
+                        f"is exclusive — this session was not created. Join "
+                        f"under another role (a crew of your own makes you a "
+                        f"worker that integrates upward), or retire "
+                        f"{holder.handle!r} first"
+                    )
     elif handle or connect:
         raise OnboardError(
             "'handle' and 'connect' only mean something with a 'mesh' to join"

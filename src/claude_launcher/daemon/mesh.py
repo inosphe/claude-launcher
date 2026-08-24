@@ -2052,18 +2052,34 @@ class MeshManager:
             resolved = mesh.roleset.resolve(handle, role)
         except mesh_roles.RoleError as exc:
             raise MeshError(str(exc)) from None
-        role_def = mesh.roleset.get(resolved)
-        if role_def is not None and role_def.exclusive:
-            holder = self._live_holder(mesh, resolved)
-            if holder is not None:
-                raise MeshConflict(
-                    f"role {resolved!r} is exclusive in mesh {mesh.name!r} and "
-                    f"{holder.handle!r} already holds it — join under another "
-                    f"role (a crew of your own makes you a worker that "
-                    f"integrates upward), or have {holder.handle!r} leave "
-                    f"first"
-                )
+        holder = self.exclusive_holder(mesh, handle, role)
+        if holder is not None:
+            raise MeshConflict(
+                f"role {resolved!r} is exclusive in mesh {mesh.name!r} and "
+                f"{holder.handle!r} already holds it — join under another "
+                f"role (a crew of your own makes you a worker that "
+                f"integrates upward), or have {holder.handle!r} leave "
+                f"first"
+            )
         return resolved
+
+    def exclusive_holder(self, mesh: Mesh, handle: str, role: str) -> Optional[Member]:
+        """The live member blocking ``(handle, role)`` from joining, or None.
+
+        Public so session creation can ask the question BEFORE building
+        anything (``onboard.preflight``): a create that would come up outside
+        its mesh is refused outright rather than half-succeeding. A role the
+        vocabulary cannot resolve answers None — the join itself refuses it
+        with the right message, and this check must not shadow that one.
+        """
+        try:
+            resolved = mesh.roleset.resolve(handle, role)
+        except mesh_roles.RoleError:
+            return None
+        role_def = mesh.roleset.get(resolved)
+        if role_def is None or not role_def.exclusive:
+            return None
+        return self._live_holder(mesh, resolved)
 
     def _live_holder(self, mesh: Mesh, role_name: str) -> Optional[Member]:
         """The member holding ``role_name`` whose session is still alive.
