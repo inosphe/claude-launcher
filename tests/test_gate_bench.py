@@ -72,3 +72,51 @@ def test_the_record_file_defaults_outside_the_working_tree():
 
     assert out.is_absolute(), out
     assert REPO not in out.parents and out.parent != REPO, out
+
+
+def test_burner_aliveness_counts_its_own_processes():
+    """The load evidence must be this run's burners, counted directly.
+
+    The old proxy -- a python-proc count against a pre-run baseline -- could
+    never certify the load it was started to prove: main() launches the
+    burners before the gate, they sit in the baseline, and the delta that
+    results tracks whatever other python processes the machine happens to
+    run. ``poll()`` returning None is a burner alive, and that is the whole
+    instrument.
+    """
+    import subprocess
+    import sys
+
+    live = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)"])
+    done = subprocess.Popen([sys.executable, "-c", "pass"])
+    done.wait()  # read as not-alive without killing anything
+    try:
+        alive, total = _load()._burners_alive([live, done])
+    finally:
+        live.kill()
+        live.wait()
+    assert (alive, total) == (1, 2)
+
+
+def test_burner_aliveness_with_no_burners_is_absent_not_zero():
+    """No burners must read as a missing probe, not as a measurement of zero.
+
+    A quiet-phase record of {"alive": 0, "total": 0} would look like measured
+    certainty that no load sat at 0 -- absence dressed as a reading.
+    """
+    assert _load()._burners_alive(None) == (None, None)
+    assert _load()._burners_alive([]) == (None, None)
+
+
+def test_run_gate_samples_burners_passed_to_it():
+    """The sampler must be told which processes are this run's load.
+
+    The instrument only exists to answer questions about runs under a load it
+    stands up itself; a sampling point that cannot see that load would answer
+    a quieter question under the same name.
+    """
+    import inspect
+
+    params = inspect.signature(_load().run_gate).parameters
+    assert "burners" in params
