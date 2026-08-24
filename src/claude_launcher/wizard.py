@@ -1703,6 +1703,18 @@ class SpawnWizard(Form):
         # remembered here and consumed on the first rebuild.
         self._preset_profile: str = get("profile") or ""
         self._preset_borrow: str = get("borrow") or ""
+        #: The same flag, kept rather than consumed: `_preset_profile` is
+        #: spent seeding the row on the first rebuild, and after that
+        #: nothing remembers that the user asked for a profile at all.
+        #: A value the policy will not allow is handled by where it CAME
+        #: from, so this must be the command line's answer only -- `d` has
+        #: the recall merged in behind it, and a remembered profile is not
+        #: something this person asked for (see wizard_recall.typed).
+        from . import wizard_recall
+
+        self._typed_profile: str = (
+            "" if d is None else str(wizard_recall.typed(d, "profile") or "")
+        )
         profile = ChoiceField(
             key="profile", label="Profile",
             hint="a different profile for the child (spawn.allow_profile "
@@ -2156,7 +2168,23 @@ class SpawnWizard(Form):
         args.over_limit = self._over_limit()
         args.name = self.value("name")
         args.harness = self.value("harness") or None
-        args.profile = self.value("profile") or None
+        # Read through the disable, like borrow and args below: a value
+        # standing on a greyed-out row is not an answer the user gave --
+        # it is what the row held before the policy shut it, or before the
+        # parent changed under the form (which `wizard_recall.drop_locked`
+        # cannot catch: it runs once, before either can happen). Sending
+        # that provokes a 403 naming a field nobody in this form could
+        # still choose.
+        #
+        # A profile TYPED this session is the exception, and travels even
+        # onto a locked row: it is this person's current intent, so the
+        # daemon's refusal is the loud failure it deserves rather than a
+        # silent drop. Same line drop_locked draws, same seam it reads.
+        args.profile = (
+            self._typed_profile or None
+            if self.field("profile").disabled
+            else self.value("profile") or None
+        )
         # Read through the disable, like the other form: a borrow picked and
         # then greyed out (harness flipped, null said yes) must not travel.
         args.borrow = (
