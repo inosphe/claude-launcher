@@ -268,6 +268,11 @@
          into #layout, opposite the session list (see syncDetailPanel). It is
          declared here because a phone keeps it here, and because the page
          slot is the safe place for it to start. -->
+    <!-- Desktop only: the bar between #main and the docked rail. Dragging
+         it resizes the rail, and the width is remembered by this browser. A
+         phone never shows it — there the detail is a page, not a column.
+         Declared beside the rail because the JS carries them as one pair. -->
+    <div id="detail-split"></div>
     <div id="sess-view" class="hidden"></div>
     <div id="wf-view" class="hidden"></div>
     <div id="msg-view" class="hidden"></div>
