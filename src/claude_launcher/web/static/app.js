@@ -6521,6 +6521,28 @@ function spawnPreflightNote(kids) {
   return { ok: true, msg: "", cls: "wf-note" };
 }
 
+/* ---- an empty picker is two different facts ----
+   Every list in the spawn surfaces is filled from its own fetch, and every
+   one of those fetches degrades the same way: `.catch(() => null)`, which
+   fills the picker with nothing. But "this daemon offers no workflows" and
+   "the workflow list never arrived" look identical in a <select> that has
+   only its placeholder — and they are not the same thing at all. The first
+   is an answer; the second is a form quietly lying about what you may pick,
+   with the Spawn button armed over it. These two name the difference so the
+   note can say it out loud. */
+function spawnMissingSources(docs) {
+  return Object.keys(docs).filter((k) => !docs[k]);
+}
+
+function spawnSourceNote(missing) {
+  if (!missing.length) return "";
+  const many = missing.length > 1;
+  return `could not load ${missing.join(", ")} — ` +
+    `${many ? "those pickers are" : "that picker is"} empty because the ` +
+    `${many ? "lists" : "list"} never arrived, not because there is nothing ` +
+    "to offer; reload the page, or check the daemon is still up";
+}
+
 async function postSpawn(parent, body) {
   let resp, doc = {};
   try {
@@ -7109,7 +7131,21 @@ async function spawnModalLoad(st) {
     return;   // the form stands readable; the button stays dead
   }
   const verdict = spawnPreflightNote(ui.report);
-  if (verdict.ok && verdict.msg) st.noteShow(verdict.msg);
+  // Which of the six sources did not arrive. Said before the slot count,
+  // and in the warning colour: a picker that is empty because its fetch
+  // failed is the one thing this form cannot let the operator discover by
+  // pressing Spawn — the payload simply omits the field, and the child comes
+  // up without the role or workflow it was meant to have.
+  const srcNote = spawnSourceNote(spawnMissingSources({
+    "the spawn policy": report, roles, profiles: profDoc,
+    meshes: meshDoc, "the git state": gitDoc, workflows: wfDoc,
+  }));
+  const lines = [];
+  if (srcNote) lines.push(srcNote);
+  if (verdict.ok && verdict.msg) lines.push(verdict.msg);
+  if (lines.length) {
+    st.noteShow(lines.join(" · "), srcNote ? "wf-warning" : "wf-note");
+  }
 
   // The workflow picker's first fill: a seed names the workflow outright (the
   // quick-job default), otherwise the picked role's own default is offered.
@@ -7255,11 +7291,17 @@ function sessQuickJob(data) {
   sessQuickJobBox = form;
   box.appendChild(form);
 
+  // What this panel IS, now that the spawn wizard does the spawning: the
+  // hand on the quick_job block of ~/.claunch.yaml, plus the one button that
+  // hands those defaults to the wizard. It is deliberately NOT a second
+  // spawn form — every field a child can differ on lives in the wizard, and
+  // a panel that offered them too would be a second reading of the policy.
   form.appendChild(el(
     "p", "wf-note",
-    "spawn one worker under this leader: role, workflow and worktree are " +
-    "the quick_job defaults from ~/.claunch.yaml — the spawn wizard opens " +
-    "prefilled with them; type the task there, press Spawn worker"
+    "the quick_job defaults from ~/.claunch.yaml — role, workflow and " +
+    "worktree for the workers this leader dispatches. Save as defaults " +
+    "writes them back; Spawn worker hands them to the spawn wizard, where " +
+    "the task is typed and the spawn actually happens"
   ));
 
   const row = el("div", "sess-send-row");
@@ -7281,7 +7323,7 @@ function sessQuickJob(data) {
     "span", null, "cut it a worktree of its own (no collisions with siblings)"
   ));
 
-  const spawnBtn = el("button", "wf-btn approve", "Spawn worker");
+  const spawnBtn = el("button", "wf-btn approve", "Spawn worker…");
   spawnBtn.title = "open the spawn wizard prefilled with these defaults — " +
     "type the task there, then press Spawn worker";
   spawnBtn.disabled = true;
@@ -7363,6 +7405,16 @@ function sessQuickJob(data) {
     wtBox.checked = !!defaults.worktree;
     saveBtn.disabled = !canSave;
 
+    // Same rule as the wizard's: a picker emptied by a failed fetch says so.
+    // Here it matters twice over, because these two values are what gets
+    // WRITTEN BACK to ~/.claunch.yaml — saving an empty role over a good one
+    // because /api/roles was down is a silent edit of the user's config.
+    const srcNote = spawnSourceNote(spawnMissingSources({ roles, workflows: wfs }));
+    if (srcNote) {
+      say(srcNote, "wf-warning");
+      saveBtn.disabled = true;   // do not write a list we could not read
+    }
+
     // The policy's own verdict, before the button is pressed: a form that
     // lets you type a task and then refuses the press taught you nothing.
     const verdict = spawnPreflightNote(kids);
@@ -7370,7 +7422,10 @@ function sessQuickJob(data) {
       say(verdict.msg, verdict.cls);
       return; // spawnBtn stays disabled
     }
-    if (verdict.msg) say(verdict.msg);
+    // A source warning outranks the slot count: the slots are the happy
+    // news, and overwriting the warning with it would hide the only line
+    // that explains why a picker is blank.
+    if (verdict.msg && !srcNote) say(verdict.msg);
     spawnBtn.disabled = false;
   })();
 

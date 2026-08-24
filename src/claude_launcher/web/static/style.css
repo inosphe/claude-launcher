@@ -8,6 +8,26 @@ body {
   background: #14161a; color: #d8dbe0;
 }
 .hidden { display: none !important; }
+
+/* Every <select> in this app is dark: a light `color` on a near-black box.
+   The closed control obeys that pair, but the OPEN dropdown does not — the
+   popup is painted by the platform, and Windows Chrome/Edge fall back to the
+   system-white popup background while the options keep inheriting the
+   select's light colour. White text on a white popup is a list that reads as
+   EMPTY: the rows are there, the highlight bar still tracks the mouse, and
+   nothing can be read. Options therefore carry their own pair rather than
+   inheriting half of one — declared once, globally, because the failure is a
+   property of every dark select and not of any one form.
+   (Anchored to the app's base pair from `body`, so a select whose own box is
+   darker still opens onto a popup that matches the rest of the app.) */
+option, optgroup {
+  background-color: #14161a;
+  color: #d8dbe0;
+}
+/* A workspace that is not on disk, a harness the policy refuses: offered so
+   the entry stays visible, but not choosable. It must still be READABLE —
+   grey against the popup, not the popup's own colour. */
+option:disabled { color: #6b7280; }
 .error { color: #ff7b72; font-size: 12px; margin-top: 6px; }
 
 /* relative: the terminal header's `details` anchors to this box's right edge
