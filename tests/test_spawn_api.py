@@ -762,6 +762,64 @@ def test_a_taken_handle_is_refused_before_the_session_exists(home, tmp_path):
     asyncio.run(run())
 
 
+def test_a_second_live_leader_fails_the_create_not_just_the_join(home, tmp_path):
+    """An exclusive role already held live is refused at preflight — CLI and
+    web both read this as a failed create (400, nothing built), instead of a
+    session that came up outside its mesh with a join-failed footnote."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            mgr.create(SessionDef(name="boss", harness="py", cwd=str(tmp_path)))
+            await mm.join("team", "boss", handle="lead1")
+
+            # By handle inference (aliases included) on a plain create:
+            # refused with the holder named, and no session built.
+            # (An explicit `role:` on create is claude-harness-only — the
+            # spawn leg below is where it can be exercised.)
+            for wanted in ("mod2", "lead-b"):
+                resp = await client.post(
+                    "/api/sessions",
+                    json={"name": "l2", "harness": "py", "cwd": str(tmp_path),
+                          "mesh": "team", "handle": wanted},
+                    headers=BEARER,
+                )
+                assert resp.status == 400
+                err = (await resp.json())["error"]
+                assert "exclusive" in err and "lead1" in err
+                assert "l2" not in [s.sdef.name for s in mgr.list()]
+
+            # The same refusal guards spawn — the shared onboarding path —
+            # where an explicit mesh role is allowed for any harness.
+            resp = await client.post(
+                "/api/sessions/boss/children",
+                json={"harness": "py", "mesh": "team", "role": "leader"},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            assert "exclusive" in (await resp.json())["error"]
+            assert [s.sdef.name for s in mgr.list()] == ["boss"]
+
+            # A non-exclusive role sails through the same door.
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "w1", "harness": "py", "cwd": str(tmp_path),
+                      "mesh": "team", "handle": "w1"},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_identity_goes_to_the_system_prompt_but_the_roster_never_does(home, tmp_path):
     """The split the two channels are for: a handle holds for the session's
     life and belongs in the prompt; who it can reach is rewired mid-session
@@ -892,6 +950,9 @@ class _FakeMeshMgr:
 
             raise MeshError(f"no mesh named {name!r}")
         return self._Mesh()
+
+    def exclusive_holder(self, mesh, handle, role):
+        return None  # no live holder in the fake — preflight passes
 
     def list(self):
         return [self._Mesh()]
