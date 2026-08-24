@@ -97,10 +97,11 @@ body {
 
    The invariant the rest of this rail depends on: everything that belongs on
    the name's line keeps the default `order: 0` and declares no
-   `flex-basis: 100%`. Only the deliberate line-breakers below (.sess-cflow,
-   .sess-brief) are full-width, and they carry an `order` above the ▸ toggle's
-   so the toggle still lands at the end of the name line. A full-width child at
-   order 0 would break the line before the toggle got there.
+   `flex-basis: 100%`. Only the deliberate line-breakers below
+   (.rail-ctx-line, .sess-cflow, .sess-brief) are full-width, and they carry
+   an `order` above the ▸ toggle's so the toggle still lands at the end of the
+   name line. A full-width child at order 0 would break the line before the
+   toggle got there.
 
    `flex-basis: 0` is the load-bearing part, not tidiness: a flex line is
    wrapped on its items' BASE sizes and only shrunk afterwards, so a box that
@@ -177,7 +178,7 @@ body {
 /* off (no llm: block): still visible so the feature is discoverable, but
    plainly inert — the tooltip carries the how-to-enable */
 #session-list .sess-brief-toggle:disabled { color: #3d434d; cursor: default; }
-#session-list .sess-cflow { order: 2; }
+#session-list .sess-cflow { order: 3; }
 /* The card itself, wherever it is drawn — the row's fold, the pane under
    the header, the detail panel's section. Box and type are common; only the
    rail's flex-placement below is specific to the list it lives in. */
@@ -189,7 +190,7 @@ body {
 /* a refresh in flight: the old text stays readable underneath, dimmed */
 .sess-brief.refreshing { opacity: 0.6; }
 #session-list .sess-brief {
-  flex-basis: 100%; order: 3; margin: 6px 0 2px;
+  flex-basis: 100%; order: 4; margin: 6px 0 2px;
 }
 .sess-brief-head { display: flex; align-items: center; gap: 8px; }
 .sess-brief-head + * { margin-top: 6px; }
@@ -224,13 +225,37 @@ body {
   padding: 0 5px; line-height: 16px;
 }
 .sess-brief-ctx.unknown { color: #6e7681; font-style: italic; }
-/* The same count, on the rail row itself, slimmer for the rail's budget: the
-   name group takes every spare pixel, so this is the short count alone, with
-   no chip background — a grey monospace "155k" between the profile and the
-   ⓘ reads as data, and the story (model, age, why there is no percentage)
-   is one hover away on a row that already carries it. flex:none so it never
-   squeezes the name; the unknown form is the same greyed "?" stillness as
-   its card sibling. */
+/* The same fact on the rail row itself, as the one line each row spends on
+   it: a thin gauge bar with the short count beside it, indented like the
+   cflow line so it reads as belonging to the name above. A full-width
+   line-breaker (see the invariant on .rail-head), ordered between the ▸
+   toggle and the cflow line. Every bar spans the same fixed 0–1M domain (JS
+   sets the fill inline), and the tick is this session's auto-compact
+   window — the point the conversation compacts at, which is what the fill
+   is read against; the fill goes amber past 70% of that window and red past
+   90% — the "which of these is about to compact" glance. The tick overhangs
+   the 3px track by 2px each side so it reads as a mark on the scale, not a
+   sliver of fill — which is why the track cannot clip its overflow. The
+   unknown form keeps the empty track beside a greyed italic "?", so it
+   reads as absence rather than a very small measurement. */
+#session-list .rail-ctx-line {
+  flex-basis: 100%; order: 2; display: flex; align-items: center; gap: 6px;
+  min-width: 0; padding-left: 16px; margin-top: 2px;
+}
+#session-list .rail-ctx-bar {
+  flex: 1 1 auto; min-width: 0; height: 3px; border-radius: 2px;
+  background: #21262d; position: relative;
+}
+#session-list .rail-ctx-fill {
+  display: block; height: 100%; border-radius: 2px; background: #3d6fb4;
+  max-width: 100%;
+}
+#session-list .rail-ctx-fill.warm { background: #d29922; }
+#session-list .rail-ctx-fill.hot { background: #f85149; }
+#session-list .rail-ctx-tick {
+  position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px;
+  background: #8b949e; border-radius: 1px;
+}
 #session-list .rail-ctx {
   flex: none; font-family: SFMono-Regular, Consolas, monospace;
   font-size: 11px; color: #7d8590; line-height: 16px;

@@ -243,6 +243,71 @@ def test_attach_omits_the_key_rather_than_reporting_zero(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# the compact window: the one threshold worth drawing on the gauge
+# --------------------------------------------------------------------------- #
+def test_window_comes_from_the_sessions_own_env_first(home, monkeypatch):
+    """Spawn precedence, mirrored: sdef.env is applied last by build_command,
+    so it must win here too."""
+    monkeypatch.setenv(ctxsize.COMPACT_WINDOW_ENV, "111000")
+    sdef = SessionDef(name="s", harness="claude",
+                      env={ctxsize.COMPACT_WINDOW_ENV: "250000"})
+    assert ctxsize.compact_window_of(sdef) == 250_000
+
+
+def test_window_falls_back_to_the_daemons_environment(home, monkeypatch):
+    """A session whose profile cannot be resolved still inherited the daemon's
+    env at spawn, so that value is the honest floor — not None."""
+    monkeypatch.setenv(ctxsize.COMPACT_WINDOW_ENV, "111000")
+    assert ctxsize.compact_window_of(
+        SessionDef(name="s", harness="claude")) == 111_000
+
+
+def test_the_profile_chain_overrides_the_daemons_environment(home, monkeypatch):
+    from claude_launcher import profile as profile_mod, settings
+    prof = profile_mod.create("nc")
+    settings.set_env(prof, {ctxsize.COMPACT_WINDOW_ENV: "250000"})
+    monkeypatch.setenv(ctxsize.COMPACT_WINDOW_ENV, "111000")
+    sdef = SessionDef(name="s", harness="claude", profile="nc")
+    assert ctxsize.compact_window_of(sdef) == 250_000
+
+
+def test_garbage_and_absence_read_as_no_window(home, monkeypatch):
+    """An unset, garbled or zero value is "no window configured" — the gauge
+    must not grow a tick at zero, or at whatever int('lots') is not."""
+    monkeypatch.delenv(ctxsize.COMPACT_WINDOW_ENV, raising=False)
+    assert ctxsize.compact_window_of(SessionDef(name="s", harness="claude")) is None
+    assert ctxsize.compact_window_of(SessionDef(
+        name="s", harness="claude",
+        env={ctxsize.COMPACT_WINDOW_ENV: "lots"})) is None
+    assert ctxsize.compact_window_of(SessionDef(
+        name="s2", harness="claude",
+        env={ctxsize.COMPACT_WINDOW_ENV: "0"})) is None
+
+
+def test_another_harness_has_no_window(home, monkeypatch):
+    """The window is claude's knob; hanging it on a codex row would claim a
+    compaction that harness will never perform."""
+    monkeypatch.setenv(ctxsize.COMPACT_WINDOW_ENV, "111000")
+    assert ctxsize.compact_window_of(SessionDef(name="s", harness="codex")) is None
+
+
+def test_attach_hangs_the_window_beside_the_reading(home, tmp_path, monkeypatch):
+    monkeypatch.setenv(ctxsize.COMPACT_WINDOW_ENV, "200000")
+    sdef = _claude_session(tmp_path, turn(read=42_000))
+    info = ctxsize.attach(_Stub(sdef))
+    assert info["context"]["compact_window"] == 200_000
+    # attach copies the cached reading before annotating it — the shared cache
+    # entry must not accumulate a key the next caller did not resolve
+    assert "compact_window" not in ctxsize.for_session(sdef)
+
+
+def test_attach_does_not_fabricate_a_window(home, tmp_path, monkeypatch):
+    monkeypatch.delenv(ctxsize.COMPACT_WINDOW_ENV, raising=False)
+    sdef = _claude_session(tmp_path, turn(read=42_000))
+    assert "compact_window" not in ctxsize.attach(_Stub(sdef))["context"]
+
+
+# --------------------------------------------------------------------------- #
 # the endpoints: what the dashboard actually receives
 # --------------------------------------------------------------------------- #
 CHILD = "import time\nprint('READY')\ntime.sleep(60)\n"

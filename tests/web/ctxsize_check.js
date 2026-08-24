@@ -13,9 +13,9 @@
      harness that keeps no transcript, must not come out as 0 or as a blank
      that looks like one.
 
-   And the rail row gets none of this in pixels: it goes in the tooltip,
-   because twenty rows needing a glance is the problem being solved and a
-   line per row would be a worse one. */
+   The rail row's own gauge line (bar + short count) belongs to
+   railctx_check; here it is the wording — the sentence, the breakdown, the
+   tooltip they join into, and the briefing card's chip. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(

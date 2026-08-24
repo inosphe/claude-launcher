@@ -27,7 +27,12 @@ them:
   limit, and it is not guessable — a claude-opus-5 session in this very fleet
   was observed at 286,674 input tokens, so any hardcoded 200k would already be
   wrong. Absolute tokens only, with the model beside them; a wrong percentage
-  is worse than none.
+  is worse than none. What *is* knowable is the session's configured
+  ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` — the point claude will compact at,
+  resolved from the same env the child was spawned with — and
+  :func:`compact_window_of` hangs that beside the reading as
+  ``compact_window`` so the UI can draw it as a threshold, still never as a
+  percentage of a hard limit.
 * **Only claude sessions have one.** Another harness keeps no such file, and a
   claude session that has not answered yet has no turn to read. Both come back
   as ``None`` — "not known", never zero.
@@ -44,10 +49,13 @@ is a different question that happens to share a word.
 from __future__ import annotations
 
 import json
+import os
 import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+from .. import lineage, providers
+from .. import profile as profile_mod
 from .briefing import locate_transcript
 from .harness import CLAUDE_HARNESS
 
@@ -73,11 +81,26 @@ _reads: Dict[str, Tuple[float, int, Optional[dict]]] = {}
 #: (profile, conversation, cwd) -> (path or None, when it was looked up).
 _located: Dict[Tuple[str, str, str], Tuple[Optional[Path], float]] = {}
 
+#: The env var claude reads its auto-compact threshold from. The launcher
+#: sets it per profile (see template.py) and the dashboard draws it as the
+#: tick on each row's context gauge — the point the conversation compacts at,
+#: which is what "how full" is actually measured against.
+COMPACT_WINDOW_ENV = "CLAUDE_CODE_AUTO_COMPACT_WINDOW"
+
+#: How long a resolved window is trusted before the profile chain and the
+#: provider registry are consulted again. Resolution reads the config store,
+#: which is a file — fine once, a waste on every poll of every session.
+WINDOW_TTL = 15.0
+
+#: (profile, borrow, null_token) -> (window or None, when it was resolved).
+_windows: Dict[Tuple[str, str, bool], Tuple[Optional[int], float]] = {}
+
 
 def forget() -> None:
-    """Drop both caches. For tests, and for anything that moves a transcript."""
+    """Drop the caches. For tests, and for anything that moves a transcript."""
     _reads.clear()
     _located.clear()
+    _windows.clear()
 
 
 def _int(value) -> int:
@@ -200,14 +223,74 @@ def for_session(sdef) -> Optional[dict]:
     return reading
 
 
+def _window_value(raw) -> Optional[int]:
+    """``raw`` as a usable window, or ``None`` — an unset, empty or garbled
+    value means "no window is configured", never a window of zero."""
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def compact_window_of(sdef) -> Optional[int]:
+    """The ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` this session's child sees.
+
+    Resolved with the same precedence :func:`runner.child_env` and
+    ``build_command`` apply at spawn — the session's own env over the profile
+    chain over the provider's env over the daemon's environment — because the
+    number is only worth drawing if it is the one claude is actually acting
+    on. The profile/provider legs read the config store, so their answer is
+    remembered for ``WINDOW_TTL``; a session whose own env pins the var skips
+    all of that. Anything unresolvable (a deleted profile, an unknown
+    provider) degrades to the daemon's environment: that is what the spawn's
+    base env was, and a wrong extra leg must not turn into a wrong number.
+    """
+    if getattr(sdef, "harness", None) != CLAUDE_HARNESS:
+        return None
+    own = getattr(sdef, "env", None) or {}
+    if COMPACT_WINDOW_ENV in own:
+        return _window_value(own[COMPACT_WINDOW_ENV])
+    key = (str(getattr(sdef, "profile", "") or ""),
+           str(getattr(sdef, "borrow", "") or ""),
+           bool(getattr(sdef, "null_token", False)))
+    hit = _windows.get(key)
+    now = time.monotonic()
+    if hit is not None and now - hit[1] < WINDOW_TTL:
+        return hit[0]
+    raw = os.environ.get(COMPACT_WINDOW_ENV)
+    try:
+        prof = profile_mod.require(str(getattr(sdef, "profile", "") or ""))
+        if not getattr(sdef, "null_token", False):
+            borrow = getattr(sdef, "borrow", None)
+            auth = profile_mod.require(str(borrow)) if borrow else prof
+            raw = providers.provider_env(
+                providers.resolve_name(auth)).get(COMPACT_WINDOW_ENV, raw)
+        raw = lineage.effective_env(prof).get(COMPACT_WINDOW_ENV, raw)
+    except Exception:
+        pass
+    value = _window_value(raw)
+    _windows[key] = (value, now)
+    return value
+
+
 def attach(session) -> dict:
     """``session.info()`` with a ``context`` key when there is one to give.
 
     The key is absent rather than null when unknown, so a reader that draws it
-    cannot accidentally render "not known" as a number.
+    cannot accidentally render "not known" as a number. When a reading exists
+    it also carries ``compact_window`` (when one is configured): the reading
+    is the numerator, and the compact threshold is the one denominator-like
+    fact that actually exists — the point claude will compact at, not the
+    model's unknowable hard limit. Copied, not annotated in place: the
+    reading is a cache entry shared across polls.
     """
     info = session.info()
-    reading = for_session(getattr(session, "sdef", None))
+    sdef = getattr(session, "sdef", None)
+    reading = for_session(sdef)
     if reading:
-        info["context"] = reading
+        info["context"] = dict(reading)
+        window = compact_window_of(sdef)
+        if window:
+            info["context"]["compact_window"] = window
     return info

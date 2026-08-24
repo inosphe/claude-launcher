@@ -408,14 +408,13 @@ async function refreshSessions() {
     }
     // How full this session's context is, on the rail row itself. The story
     // lives in the tooltip (a note on both the row and its name — that is
-    // still the only place the model and the breakdown fit), but the count
-    // now also shows in a small chip between the profile and the ⓘ, so a
-    // row can be scanned without a hover. A line per row would make the rail
-    // the problem, so the chip is the one slot that costs it nothing: a
-    // flex:none element on the profile line, and nothing where a harness
-    // keeps no transcript.
+    // still the only place the model and the breakdown fit), but each row
+    // now also spends one deliberate full-width line on it: a thin gauge
+    // bar beside the short count, so twenty rows can be compared at a
+    // glance. The line is a flex line-breaker like the cflow badge below
+    // it, and nothing at all where a harness keeps no transcript.
     ctxNoteOnRow(li, label, s);
-    const railCtx = ctxRailChip(s);
+    const railCtx = ctxRailLine(s);
     // The row attaches — that is what the session is doing. This opens what
     // it *is* (definition, meshes, its cflow run) beside it, so the two are
     // not two places you have to travel between.
@@ -676,9 +675,9 @@ function ctxBreakdown(c) {
   ].join("\n");
 }
 
-/* What the rail row adds to its tooltip. The row itself gets no new pixels:
-   twenty rows are the problem this answers, and a second line on each of
-   them would be a different, worse one. */
+/* What the rail row adds to its tooltip — the full story behind the glance
+   the gauge line below gives it: the model, the age of the reading, and the
+   breakdown, none of which fit on the row itself. */
 function ctxTooltip(s) {
   const sentence = ctxSentence(s);
   if (!sentence) return "";
@@ -721,20 +720,57 @@ function ctxChip(name) {
   return chip;
 }
 
-/* The chip on a rail row itself — the same count the briefing card's head
-   shows, in the one slot a 260px row can afford without eating the name: the
-   bare short count ("155k"), greyed "?" where a claude session has not
-   answered yet, and nothing at all for a harness that keeps no transcript.
-   The story (model, age, breakdown, why there is no percentage) stays in the
-   tooltip, which the row already carries — this is the glance, not the
-   reading. */
-function ctxRailChip(s) {
+/* The gauge's fixed domain: every bar spans 0–1M tokens, whatever the model.
+   A shared domain is what makes twenty bars comparable — the same fill on
+   two rows means the same count — and 1M is the widest window any current
+   model offers, so nothing overruns it. This is a drawing domain, not a
+   claim about any model's limit; the fact worth marking on it is the
+   session's own auto-compact threshold, which the daemon resolves from the
+   child's env and hands over as `context.compact_window`. */
+const CTX_DOMAIN = 1_000_000;
+
+/* The dedicated line a rail row spends on context: a thin gauge bar with the
+   short count beside it ("155k"), right under the name line. The bar spans
+   the fixed 0–1M domain, with a tick where this session's
+   CLAUDE_CODE_AUTO_COMPACT_WINDOW sits — the point claude will compact at —
+   so "how close to compaction" is read as fill-against-tick, not
+   fill-against-the-end. The warm/hot colouring is judged against that same
+   window where one is configured (against the domain otherwise), because
+   compaction fires at the tick, not at 1M. Where a claude session has not
+   answered yet the track stays empty beside a greyed "?", and a harness
+   that keeps no transcript gets no line at all. The story (model, age,
+   breakdown) stays in the tooltip — this is the glance, not the reading. */
+function ctxRailLine(s) {
   if (!ctxKnowable(s)) return null;
   const c = s && s.context;
-  const chip = el("span", "rail-ctx" + (c ? "" : " unknown"),
-                  c ? ctxShort(c.tokens) : "?");
-  chip.title = ctxTooltip(s);
-  return chip;
+  const win = c && Number.isFinite(c.compact_window) && c.compact_window > 0
+    ? Math.min(c.compact_window, CTX_DOMAIN) : 0;
+  const line = el("span", "rail-ctx-line" + (c ? "" : " unknown"));
+  const bar = el("span", "rail-ctx-bar");
+  if (c) {
+    const level = c.tokens / (win || CTX_DOMAIN);
+    const fill = el("span", "rail-ctx-fill" +
+                    (level >= 0.9 ? " hot" : level >= 0.7 ? " warm" : ""));
+    fill.style.width = (Math.min(1, c.tokens / CTX_DOMAIN) * 100).toFixed(1) + "%";
+    bar.appendChild(fill);
+  }
+  if (win) {
+    const tick = el("span", "rail-ctx-tick");
+    tick.style.left = ((win / CTX_DOMAIN) * 100).toFixed(1) + "%";
+    tick.title = `auto-compact window: ${ctxShort(win)} tokens ` +
+                 "(CLAUDE_CODE_AUTO_COMPACT_WINDOW)";
+    bar.appendChild(tick);
+  }
+  const num = el("span", "rail-ctx" + (c ? "" : " unknown"),
+                 c ? ctxShort(c.tokens) : "?");
+  line.append(bar, num);
+  const note = ctxTooltip(s);
+  const scale = c
+    ? "bar spans 0–1M tokens" +
+      (win ? `; the tick is the auto-compact window at ${ctxShort(win)}` : "")
+    : "";
+  line.title = [note, scale].filter(Boolean).join("\n");
+  return line;
 }
 
 /* ------------------------------------------------------------------ */

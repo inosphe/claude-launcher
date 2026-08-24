@@ -8,8 +8,9 @@
    What has to hold: the name, the role it holds and the rooms it is in are
    ONE group in ONE container, so they share a line and shrink instead of
    wrapping; nothing that belongs on that line declares itself full-width; the
-   only full-width children are the two deliberate lines below (the cflow run
-   and the folded-open briefing card) and both sort AFTER the toggle; and the
+   only full-width children are the deliberate lines below (the context gauge,
+   the cflow run and the folded-open briefing card) and all sort AFTER the
+   toggle; and the
    tags still say which rooms, since a pill that can shrink to an empty
    capsule has lost the fact it was drawn for.
 
@@ -118,13 +119,13 @@ function ctxNoteOnRow(row, name, s) {
   if (row) row.title = join(row.title);
   if (name) name.title = join(name.title);
 }
-/* The chip the real code appends between the profile and the ⓘ. Fixed here
-   like the note above: this harness pin's the row's shape (that a chip sits
-   between meta and ⓘ and takes no line of its own), not what it says — the
-   reading's wording belongs to railctx_check. Returned for every session,
-   since the harness's sessions carry no harness field and so are all
-   "claude" to ctxKnowable. */
-function ctxRailChip(s) { return el("span", "rail-ctx unknown"); }
+/* The context gauge line the real code appends to each row. Fixed here like
+   the note above: this harness pins the row's shape (that the line is a
+   deliberate full-width line-breaker between the name line and the cflow
+   line), not what it says — the reading's wording belongs to railctx_check.
+   Returned for every session, since the harness's sessions carry no harness
+   field and so are all "claude" to ctxKnowable. */
+function ctxRailLine(s) { return el("span", "rail-ctx-line unknown"); }
 `;
 
 const ctx = {};
@@ -167,12 +168,12 @@ ctx.setMeshes([
      line has to be a full-width child, so counting the direct children is
      how many things are competing for that line. The name, its role and its
      rooms must not be three of them. */
-  check("the row's parts are the dot, the name group, the profile, the context chip and the ⓘ",
+  check("the row's parts are the dot, the name group, the profile, the context line and the ⓘ",
         kidClasses(row("s21")),
-        ["dot busy", "rail-head", "meta", "rail-ctx unknown", "sess-info"]);
+        ["dot busy", "rail-head", "meta", "rail-ctx-line unknown", "sess-info"]);
   check("a session with no role and one room keeps the same five parts",
         kidClasses(row("loner")),
-        ["dot idle", "rail-head", "meta", "rail-ctx unknown", "sess-info"]);
+        ["dot idle", "rail-head", "meta", "rail-ctx-line unknown", "sess-info"]);
 
   /* The point of the change: role and rooms are siblings inside one box, not
      loose on the row where they wrapped. */
@@ -265,15 +266,16 @@ ctx.setMeshes([
   }
   const decl = (sel, prop) => (rules.get(sel) || {})[prop];
 
-  /* A full-width child is a line break. Only the two deliberate ones may be,
-     and both must sort after the toggle — a breaker at the default order 0
+  /* A full-width child is a line break. Only the three deliberate ones may
+     be, and all must sort after the toggle — a breaker at the default order 0
      ends the line before the toggle can land on it, which is the bug. */
-  const BREAKERS = ["#session-list .sess-cflow", "#session-list .sess-brief"];
+  const BREAKERS = ["#session-list .rail-ctx-line", "#session-list .sess-cflow",
+                    "#session-list .sess-brief"];
   const fullWidth = [...rules].filter(([sel, d]) =>
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the cflow line and the briefing card break the row",
+  check("only the context line, the cflow line and the briefing card break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
   const toggleOrder = Number(decl("#session-list .sess-brief-toggle", "order"));
