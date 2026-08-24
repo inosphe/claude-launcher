@@ -265,6 +265,9 @@ def build_app(
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
     r.add_post("/api/sessions/{name}/reborrow", h_session_reborrow)
+    r.add_post(
+        "/api/sessions/{name}/skip-permissions", h_session_skip_permissions
+    )
     r.add_post("/api/sessions/{name}/keys", h_session_keys)
     r.add_post("/api/sessions/{name}/deliver", h_session_deliver)
     # One composition, two verbs: GET hands the text to whoever will read it
@@ -2324,6 +2327,30 @@ async def h_session_reborrow(request: web.Request) -> web.Response:
     session = await manager.reborrow(
         request.match_info["name"], borrow, null_token=null_token
     )
+    return web.json_response(session.info())
+
+
+async def h_session_skip_permissions(request: web.Request) -> web.Response:
+    """Restart a session with permission prompts off — or back on.
+
+    Body: ``{"skip": true|false}``. The toggle is
+    :meth:`SessionManager.skip_permissions` — the flag is added to (or
+    removed from) the definition's args and the session is relaunched, so
+    the new answer holds across daemon restarts like one given at creation.
+    Only that one flag is touched; the conversation, directory and auth are
+    untouched, so there is nothing to carry.
+
+    Operator-only, like reborrow: an agent does not get to switch off the
+    questions asked of it.
+    """
+    manager: SessionManager = request.app["manager"]
+    body = await _json_body(request)
+    skip = body.get("skip")
+    if not isinstance(skip, bool):
+        return json_error(
+            400, "pass 'skip': true to stop asking, false to ask again"
+        )
+    session = await manager.skip_permissions(request.match_info["name"], skip)
     return web.json_response(session.info())
 
 
