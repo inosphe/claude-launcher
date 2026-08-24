@@ -286,10 +286,15 @@ def test_the_leader_does_not_hide_a_human_decision_behind_an_agent_chooser():
     one thing such a select may not wait on. It did once, and a leader run
     sat on it for ninety minutes with six finished branches behind it.
 
-    The trigger is now evidence, and the gate that actually protects master
-    is the ``ask`` on the very next step — a pure user gate (no ``from``),
-    which the engine *does* surface. Both halves are pinned here: dropping
-    the second one would make the first one reckless.
+    The trigger is now evidence, and the master gate no longer routes to a
+    person: ``integrate``'s ``ask`` is ``otherwise: self`` with an empty
+    ``from`` — nobody is asked and the engine journals the entry as
+    *self-decided* (``ask_unanswered_proceeded``, never an ``approval``).
+    This is the user-approved reversal of the older pure-user gate: master
+    is guarded by the machine full-sweep verify on ``integrate`` (project
+    layer, pinned in ``test_project_layer_override``) and by the journaled
+    self-decision, not by a waiting human. Both halves are pinned here — the
+    evidence trigger, and that the leader genuinely self-decides the merge.
     """
     bundled = dict(state_mod.bundled_workflows())
     wf = model.load(bundled["improv-leader"])
@@ -301,13 +306,39 @@ def test_the_leader_does_not_hide_a_human_decision_behind_an_agent_chooser():
             "standby waits on a user instruction behind an agent chooser — "
             "nothing surfaces that wait to a human"
         )
-    # ...and what it waits on instead is the evidence the next gate judges.
+    # ...and what it waits on instead is the evidence the next step judges.
     assert "증거" in standby.select.options["integrate"].description
 
     gate = wf.steps["integrate"].ask
     assert gate is not None
-    assert not gate.delegate.candidates, "master's gate stopped being the user's"
-    assert gate.delegate.otherwise == model.OTHERWISE_HUMAN
+    assert not gate.delegate.candidates, "a self-decision must ask nobody"
+    assert gate.delegate.otherwise == model.OTHERWISE_SELF, (
+        "the merge gate must be the leader's self-decision, not a human gate"
+    )
+    # The deploy gate is self-decided alongside the merge...
+    assert wf.steps["reflect"].ask.delegate.otherwise == model.OTHERWISE_SELF
+    # ...and the reversal is scoped: the shift-end gate stays a human's call.
+    assert wf.steps["wrapup"].ask.delegate.otherwise == model.OTHERWISE_HUMAN
+
+
+def test_the_project_override_leader_gates_are_self_decided():
+    """The project-layer leader must carry the same gate reversal.
+
+    This repository's override shadows the bundled leader for every run here
+    (``PROJECT_OVERRIDES`` wins by layer precedence), so a repository that
+    drops the user approval from ``integrate``/``reflect`` only in the bundled
+    copy but keeps it in the override would run two different policies from
+    the same name. Mirror the contract: merge and deploy are the leader's
+    ``otherwise: self``, and the shift-end gate stays a human's call.
+    """
+    wf = model.load(PROJECT_OVERRIDES / "improv-leader.yaml")
+
+    integrate = wf.steps["integrate"].ask
+    assert integrate is not None
+    assert not integrate.delegate.candidates, "a self-decision must ask nobody"
+    assert integrate.delegate.otherwise == model.OTHERWISE_SELF
+    assert wf.steps["reflect"].ask.delegate.otherwise == model.OTHERWISE_SELF
+    assert wf.steps["wrapup"].ask.delegate.otherwise == model.OTHERWISE_HUMAN
 
 
 def test_a_global_install_seeds_the_global_layer(project, home):
