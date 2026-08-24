@@ -45,6 +45,16 @@ _FOCUS_IN = b"\x1b[I"
 _FOCUS_OUT = b"\x1b[O"
 
 
+def _herdr_agent_state(status: Optional[str]) -> str:
+    """The daemon's session status in Herdr's agent-state vocabulary.
+
+    ``busy`` is what the daemon calls working, ``starting`` has no Herdr
+    counterpart and reports unknown rather than pretending, and an exited or
+    absent status should never be attached anyway.
+    """
+    return {"busy": "working", "idle": "idle"}.get(status or "", "unknown")
+
+
 def split_detach(data: bytes) -> Tuple[bytes, bool]:
     """Payload up to the first detach byte, and whether it was pressed."""
     idx = data.find(DETACH_BYTE)
@@ -328,6 +338,19 @@ def attach(client, name: str) -> int:
     labelled = herdr.rename_pane(
         worktree.pane_label(name, info.get("cwd") or "", info.get("role") or "")
     )
+    # The pane does not run claude, it mirrors it — so Herdr's own agent
+    # detection never sees the agent (it sees this attach). Report it the
+    # official way so the pane reads as the session it is, and release it on
+    # the way out, on the same occupancy contract as the label.
+    agent_reported = (
+        herdr.report_agent(
+            "claude",
+            state=_herdr_agent_state(info.get("status")),
+            message=name,
+        )
+        if labelled
+        else False
+    )
 
     outcome = {"reason": "closed"}
     with _RawTerminal():
@@ -342,6 +365,8 @@ def attach(client, name: str) -> int:
             _write_text(FOCUS_OFF)
     if labelled:
         herdr.clear_pane_label()
+    if agent_reported:
+        herdr.release_agent("claude")
 
     reason = outcome.get("reason")
     if reason == "exit":
