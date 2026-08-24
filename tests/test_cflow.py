@@ -672,6 +672,29 @@ def test_user_chooser_blocks_agent_selection(flow_dir):
     assert confirmed[0]["by"] == "user"
 
 
+def test_user_chooser_is_one_open_decision_from_presentation(flow_dir):
+    """A user-owned select is the reader's move from the moment it is
+    presented — not a `select` (agent's move) awaiting a proposal that later
+    flips to `waiting_selection`. One status carries the whole decision; the
+    agent's recommendation is an annotation recorded into it."""
+    _write(flow_dir, "ub", USER_BRANCH)
+    payload = engine.start("ub")
+    assert payload["status"] == "waiting_selection"
+    assert payload["prompt"] == "risky?"
+    assert {o["name"] for o in payload["options"]} == {"auto", "human"}
+    assert "proposal" not in payload        # no recommendation yet
+    assert "select" in payload["note"]      # the driver still records one
+    assert "chooser" not in payload         # never presented as an agent move
+
+    # the agent's proposal annotates the same open state — no phase change
+    again = engine.status()
+    assert again["status"] == "waiting_selection"
+    proposed = engine.select("auto", "looks safe", by="agent")
+    assert proposed["status"] == "waiting_selection"
+    assert proposed["proposal"]["option"] == "auto"
+    assert proposed["prompt"] == "risky?"
+
+
 # --------------------------------------------------------------------------- #
 # engine: loops + guard
 # --------------------------------------------------------------------------- #

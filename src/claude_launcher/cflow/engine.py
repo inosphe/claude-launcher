@@ -895,6 +895,39 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
                     )
                 ),
             }
+        # A decision the USER owns is "your move" from the moment it is
+        # presented — there is no pre-proposal phase in which the run reads as
+        # still running. One state (waiting_selection) carries the whole
+        # decision; the driver's recommendation (pending above) lands in it as
+        # an annotation, not as a phase change. The engine still has to tell
+        # the driver to record one.
+        if chooser == "user":
+            if mutate and not state["delivered"]:
+                state["delivered"] = True
+                state_mod.journal(
+                    "select_presented",
+                    {"run": state["run_id"], "step": step.id, "visit": visit},
+                    cwd,
+                )
+                state_mod.save_state(state, cwd)
+            return {
+                **base,
+                "status": "waiting_selection",
+                "prompt": step.select.prompt,
+                "options": options,
+                "how_to_unblock": (
+                    f"a human must confirm with 'claunch cflow select "
+                    f"<option>' (inside a chat session: '! claunch cflow "
+                    f"select <option>'{_t_hint()}) or an option button on the "
+                    f"daemon web dashboard."
+                ),
+                "note": (
+                    "this decision is the user's, open from the moment it is "
+                    "presented — record your recommendation with the 'select' "
+                    "tool ({option, reason}) and the run stays here for the "
+                    "user to confirm"
+                ),
+            }
         payload = {
             **base,
             "status": "select",
