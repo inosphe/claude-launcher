@@ -5950,6 +5950,56 @@ function rolePanels(data) {
   return out;
 }
 
+/* ---- shared spawn plumbing ----
+   The one report, the one verdict and the one POST every spawn surface uses —
+   quick job and the spawn modal must not each grow their own reading of the
+   policy's answer, or they will drift apart in what they refuse. */
+async function spawnReport(parent) {
+  return api(`/api/sessions/${encodeURIComponent(parent)}/children`)
+    .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+}
+
+/* The policy's verdict as one line for a status element: blocked with the
+   daemon's own reasons, or the slots still open. `kids` may be null (an old
+   daemon, a failed fetch) — then there is nothing to say and nothing to
+   forbid; the POST is the backstop. */
+function spawnPreflightNote(kids) {
+  if (kids && kids.can_spawn === false) {
+    return {
+      ok: false,
+      msg: (kids.blocked_by || []).join("; ") || "this session may not spawn",
+      cls: "wf-warning",
+    };
+  }
+  if (kids && typeof kids.children_remaining === "number") {
+    return {
+      ok: true, cls: "wf-note",
+      msg: `${kids.children_remaining} child slot(s) left`,
+    };
+  }
+  return { ok: true, msg: "", cls: "wf-note" };
+}
+
+async function postSpawn(parent, body) {
+  let resp, doc = {};
+  try {
+    resp = await api(`/api/sessions/${encodeURIComponent(parent)}/children`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    doc = await resp.json().catch(() => ({}));
+  } catch {
+    return { ok: false, status: 0, doc: {},
+             error: "could not reach the daemon — nothing was spawned" };
+  }
+  if (!resp.ok) {
+    return { ok: false, status: resp.status, doc,
+             error: doc.error || `spawn refused (HTTP ${resp.status})` };
+  }
+  return { ok: true, status: resp.status, doc, error: "" };
+}
+
 /* ---- quick job: one form, one worker ----
    The wizard's spawn form shrunk to the child a leader actually dispatches:
    a worker-role session driving the worker workflow, in a checkout of its
@@ -6085,8 +6135,7 @@ function sessQuickJob(data) {
       api("/api/roles").then((r) => (r.ok ? r.json() : null)).catch(() => null),
       api(`/api/cflow/workflows?cwd=${encodeURIComponent(s.cwd || "")}`)
         .then((r) => (r.ok ? r.json() : null)).catch(() => null),
-      api(`/api/sessions/${encodeURIComponent(s.name)}/children`)
-        .then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      spawnReport(s.name),
     ]);
     if (sessQuickJobBox !== form) return; // the panel moved on mid-flight
 
@@ -6119,14 +6168,12 @@ function sessQuickJob(data) {
 
     // The policy's own verdict, before the button is pressed: a form that
     // lets you type a task and then refuses the press taught you nothing.
-    if (kids && kids.can_spawn === false) {
-      say((kids.blocked_by || []).join("; ") || "this session may not spawn",
-        "wf-warning");
+    const verdict = spawnPreflightNote(kids);
+    if (!verdict.ok) {
+      say(verdict.msg, verdict.cls);
       return; // spawnBtn stays disabled
     }
-    if (kids && typeof kids.children_remaining === "number") {
-      say(`${kids.children_remaining} child slot(s) left`);
-    }
+    if (verdict.msg) say(verdict.msg);
     spawnBtn.disabled = false;
   })();
 
@@ -6149,24 +6196,13 @@ function sessQuickJob(data) {
     }
     spawnBtn.disabled = true;
     say("spawning…");
-    let resp, doc = {};
-    try {
-      resp = await api(`/api/sessions/${encodeURIComponent(s.name)}/children`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      doc = await resp.json().catch(() => ({}));
-    } catch {
-      say("could not reach the daemon — nothing was spawned", "wf-warning");
-      spawnBtn.disabled = false;
-      return;
-    }
+    const res = await postSpawn(s.name, body);
     spawnBtn.disabled = false;
-    if (!resp.ok) {
-      say(doc.error || `spawn refused (HTTP ${resp.status})`, "wf-warning");
+    if (!res.ok) {
+      say(res.error, "wf-warning");
       return;
     }
+    const doc = res.doc;
     const child = (doc.session || {}).name || "(unnamed)";
     const joined = (doc.mesh || {}).ok ? ` — joined mesh '${doc.mesh.mesh}'` : "";
     say(`spawned '${child}'${joined}`);
