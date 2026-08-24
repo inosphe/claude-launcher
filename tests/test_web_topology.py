@@ -44,6 +44,10 @@ the picture is allowed to claim about where each message got to —
 the header's text-size knob — which sizes the session's grid and not merely
 this tab's view — ``reconnect_check`` on the terminal's link, the one thing
 here that is not a poll and so has to repair itself deliberately,
+``wheel_check`` on the terminal's virtual scroll — the wheel on the
+alternate screen (where xterm's own scrollback is empty and its fallback
+is arrow keys) becoming ``scroll`` controls answered with repaints over
+the daemon's history, and the chip that says so,
 ``briefcard_check`` on the rail's briefing card — the session summary a row
 folds open, and which of the daemon's answers (a briefing, unshaped prose,
 no LLM, no record) it is showing — ``spawnform_check`` on the create form
@@ -88,6 +92,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "sesssend_check.js",
         "sessrun_check.js",
         "wfstart_check.js",
+        "wheel_check.js",
         "sesslayout_check.js",
         "rolepanel_check.js",
         "queued_check.js",

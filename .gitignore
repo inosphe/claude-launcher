@@ -15,6 +15,7 @@ uv.lock
 # --basetemp lands here; the suffixed forms are what you reach for when a
 # previous run still holds a lock on the plain one, so ignore those too.
 .pytest-tmp*/
+.tmp-pytest/
 
 # cflow run state (per-directory, machine-local)
 .cflow/

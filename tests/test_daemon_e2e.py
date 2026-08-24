@@ -810,6 +810,86 @@ def test_ws_init_identifies_the_incarnation(home, tmp_path):
     asyncio.run(run())
 
 
+def test_ws_scroll_control_serves_history_and_freezes_data(home, tmp_path):
+    """The scroll control is answered with the clamped offset and a history
+    repaint; while frozen the socket gets no live data; scrolling far past
+    the bottom snaps back to live and the repaint shows the newest output."""
+    _register_py_harness()
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            # A small terminal, so even a short exchange scrolls real lines
+            # into the daemon's pyte history (SessionDef rows=10).
+            session = mgr.create(
+                SessionDef(name="wsc", harness="py", cwd=str(tmp_path), rows=10)
+            )
+            await _wait_screen(session, "READY")
+            await session.send_keys(
+                [key for i in range(30) for key in (f"l{i}", "Enter")]
+            )
+            await _wait_screen(session, "echo:l29")
+            assert session.screen.history_len > 0
+
+            async def next_json(pred):
+                while True:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=10)
+                    assert msg.type == aiohttp.WSMsgType.TEXT, msg.type
+                    data = json.loads(msg.data)
+                    if pred(data):
+                        return data
+
+            ws = await client.ws_connect("/api/sessions/wsc/ws", headers=bearer)
+            try:
+                msg = await ws.receive(timeout=10)
+                assert msg.type == aiohttp.WSMsgType.TEXT
+                init = json.loads(msg.data)
+                assert init["type"] == "init"
+                assert init["alt"] is False  # the echo harness lives in the main buffer
+                seed = await ws.receive(timeout=10)
+                assert seed.type == aiohttp.WSMsgType.BINARY
+
+                await ws.send_str(json.dumps({"type": "scroll", "lines": 5}))
+                scrolled = await next_json(lambda d: d.get("type") == "scrolled")
+                assert scrolled["offset"] == 5
+                repaint = await ws.receive(timeout=10)
+                assert repaint.type == aiohttp.WSMsgType.BINARY
+                assert repaint.data.startswith(b"\x1b[?1049l")
+
+                # Frozen: whatever the PTY says next must not reach the socket.
+                await session.send_keys(["fresh", "Enter"])
+                await _wait_screen(session, "echo:fresh")
+                try:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=1.0)
+                    # state/resize text may slip in; a data frame must not
+                    assert msg.type == aiohttp.WSMsgType.TEXT, msg.type
+                    assert not json.loads(msg.data).get("type") == "scrolled"
+                except asyncio.TimeoutError:
+                    pass
+
+                # Snap to live: the new offset is 0 and the repaint that
+                # answers carries the output that was suppressed while frozen.
+                await ws.send_str(json.dumps({"type": "scroll", "lines": -999}))
+                back = await next_json(lambda d: d.get("type") == "scrolled")
+                assert back["offset"] == 0
+                repaint0 = await ws.receive(timeout=10)
+                assert repaint0.type == aiohttp.WSMsgType.BINARY
+                assert b"echo:fresh" in repaint0.data
+            finally:
+                await ws.close()
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_shutdown_not_blocked_by_open_websocket(home, tmp_path):
     """A dashboard tab left open must not stall daemon teardown (it used to
     wait aiohttp's 60s shutdown timeout per lingering terminal socket)."""

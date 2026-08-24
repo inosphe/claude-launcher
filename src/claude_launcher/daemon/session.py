@@ -188,9 +188,19 @@ class Session:
         # event loop, where a flooding session used to stall accept() (see
         # ScreenFeeder). Logging and the viewer broadcast stay inline — both
         # are cheap, and attached terminals must not lag behind the PTY.
+        prev_alt = self.screen.alt_screen
         self._feeder.submit(chunk)
+        # ScreenFeeder.submit runs the mode tracker synchronously — only the
+        # render is deferred — so alt_screen is already current right here.
+        new_alt = self.screen.alt_screen
         self._append_log(chunk)
         self._broadcast(("data", chunk))
+        if new_alt != prev_alt:
+            # The program entered or left the alternate screen. Queued after
+            # the data frame that carried the mode change: live viewers learn
+            # the new buffer after their xterm has consumed the escape, and a
+            # viewer scrolled back into history is unfrozen against this.
+            self._broadcast(("buffer", new_alt))
 
     async def screen_synced(self) -> None:
         """Wait for the grid to catch up with the bytes received so far.
@@ -472,6 +482,13 @@ class Session:
     def resize(self, cols: int, rows: int) -> None:
         if self.exited or self.pty is None:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
+        if cols == self.sdef.cols and rows == self.sdef.rows:
+            # Same size, nothing changed — and a broadcast here has teeth now:
+            # a viewer that scrolled back into history treats a resize frame
+            # as "the grid shape changed", unfreezes, and loses its place.
+            # The web terminal re-asserts the size on focus regain, so this is
+            # not a rare corner; keep the no-op a no-op.
+            return
         self.pty.resize(cols, rows)
         self.screen.resize(cols, rows)
         self.sdef = dataclasses.replace(self.sdef, cols=cols, rows=rows)

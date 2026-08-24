@@ -112,13 +112,17 @@ function build(opts) {
   const winOn = {};
 
   const code = slice("/* ---- the link ----", "/* ---- text size ----");
+  // The link slice ends before the wheel block, so the wheel machinery lives
+  // outside this Function's scope: the wheel handlers are not what is being
+  // checked here, and a live handleFrame/detach still reaches for them, so
+  // they are injected as inert stand-ins rather than left to throw. (The link
+  // slice's own state — ws, term, the pids — is injected for the same reason,
+  // so the worlds these blocks build never share node's globals.)
   const api = new Function(
     "$", "url", "api", "fetch", "WebSocket", "window", "document", "location",
-    // `ws` and the rest are app.js globals declared above the slice. They are
-    // injected rather than left to leak into node's global object, where the
-    // worlds these blocks build would otherwise share one socket between them.
     "ws", "term", "fitAddon", "attachedPid", "applyingRemoteResize",
     "setStatusBadge", "refitSoon", "setTimeout", "clearTimeout", "Math", "Date",
+    "updateScrollChip", "wheelTimer", "wheelAccum", "altScreen", "scrollOffset",
     code +
     "\nreturn {openSocket, closeLink, detach, reconnectNow, tryReconnect," +
     " sendInput, handleFrame, syncLinkChip," +
@@ -151,6 +155,11 @@ function build(opts) {
     // jitter only ever stretches them (see LINK_JITTER).
     { random: () => 0, round: Math.round },
     { now: () => now.at },
+    () => {},   // updateScrollChip: the scroll chip is out of this slice's concern
+    null,       // wheelTimer
+    0,          // wheelAccum
+    false,      // altScreen
+    0,          // scrollOffset
   );
 
   return { api, nodes, sockets, health, apiCalls, term, written, statuses,

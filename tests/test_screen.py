@@ -133,6 +133,88 @@ def test_repaint_sequence_truecolor_and_bright():
 
 
 # --------------------------------------------------------------------------- #
+# virtual scroll: repaint_sequence(offset) browsing the daemon's history
+# --------------------------------------------------------------------------- #
+# xterm cannot scroll the alternate screen a TUI like claude draws in, and the
+# repaint seeds only the grid — so the wheel's scrollback is served by the
+# daemon: an offset repaint windows over `history + grid`. offset=0 must be
+# byte-identical to the long-standing behaviour, because every existing caller
+# keeps calling repaint_sequence().
+
+def test_repaint_default_offset_zero_is_current_behavior():
+    s = ScreenState(20, 5)
+    s.feed(b"hi there")
+    assert s.repaint_sequence() == s.repaint_sequence(0)
+
+
+def test_history_len_counts_scrolled_off_lines():
+    s = ScreenState(10, 3)
+    assert s.history_len == 0
+    s.feed(b"1\r\n2")
+    assert s.history_len == 0                      # still fits the grid
+    s.feed(b"\r\n3\r\n4\r\n5")
+    assert s.history_len == 2                      # 1 and 2 scrolled off
+
+
+def test_repaint_offset_windows_over_history_and_grid():
+    s = ScreenState(10, 3)
+    s.feed(b"1\r\n2\r\n3\r\n4\r\n5")
+    assert s.history_len == 2
+    seq = s.repaint_sequence(1)
+    # one line back: the window is [history[1], grid[0], grid[1]]
+    plain = seq.replace(b"\x1b[0m", b"")          # per-row default-SGR prefix
+    assert b"2\r\n3\r\n4" in plain
+    assert seq.count(b"\r\n") == 2                 # exactly rows-1 separators
+
+
+def test_repaint_offset_clamps_to_history_len():
+    s = ScreenState(10, 3)
+    s.feed(b"1\r\n2\r\n3\r\n4\r\n5")
+    deep = s.repaint_sequence(100)
+    assert deep == s.repaint_sequence(s.history_len)
+    plain = deep.replace(b"\x1b[0m", b"")
+    assert b"1\r\n2\r\n3" in plain                 # everything left on screen
+
+
+def test_repaint_offset_without_history_is_the_live_grid():
+    s = ScreenState(10, 3)
+    s.feed(b"live")
+    assert s.history_len == 0
+    assert s.repaint_sequence(5) == s.repaint_sequence()
+
+
+def test_repaint_offset_hides_the_cursor_live_restores_it():
+    s = ScreenState(10, 3)
+    s.feed(b"ab\r\ncd\r\nef\r\ngh\r\nij")
+    assert s.history_len == 2
+    live = s.repaint_sequence()
+    assert b"ij" in live and live.endswith(b"\x1b[3;3H")  # cursor at the tail
+    assert b"\x1b[?25l" not in live
+    back = s.repaint_sequence(1)
+    # a scrolled-away cursor position is meaningless; hide it
+    assert back.endswith(b"\x1b[0m\x1b[?25l")
+    assert b"\x1b[?25h" not in back
+
+
+def test_repaint_offset_preserves_attributes_on_history_lines():
+    s = ScreenState(40, 2)
+    s.feed(b"\x1b[31mred\x1b[0m\r\nblue\r\none")
+    assert s.history_len == 1
+    seq = s.repaint_sequence(1)
+    assert b"\x1b[0;31mred" in seq                 # colour rode the scroll
+
+
+def test_repaint_offset_leads_with_the_buffer_the_program_is_in():
+    s = ScreenState(10, 3)
+    s.feed(b"\x1b[?1049h")
+    s.feed(b"1\r\n2\r\n3\r\n4")
+    assert s.alt_screen is True and s.history_len == 1
+    seq = s.repaint_sequence(1)
+    assert seq.startswith(b"\x1b[?1049h\x1b[2J\x1b[H")
+    assert b"1\r\n2\r\n3" in seq.replace(b"\x1b[0m", b"")
+
+
+# --------------------------------------------------------------------------- #
 # ScreenFeeder: the same rendering, without owning the event loop
 # --------------------------------------------------------------------------- #
 # A flooding session used to stall the whole daemon: pyte renders at roughly
