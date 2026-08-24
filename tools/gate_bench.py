@@ -94,7 +94,20 @@ def _cpu_pct(samples: int = 3, gap: float = 2.0) -> float:
     return round(sum(vals) / len(vals), 1) if vals else -1.0
 
 
-def run_gate(cmd: list, cwd: Path, basetemp: str) -> dict:
+def _burners_alive(burners: list | None) -> tuple[int, int] | tuple[None, None]:
+    """How many of the burners this run started are still running.
+
+    Load seen directly: ``poll()`` is None exactly while a burner lives, so
+    the count needs no machine-wide filter and no baseline -- a python-proc
+    count against a pre-run baseline could never see the burners main()
+    starts before the gate, because they sat in the baseline itself.
+    """
+    if not burners:
+        return None, None
+    return sum(1 for b in burners if b.poll() is None), len(burners)
+
+
+def run_gate(cmd: list, cwd: Path, basetemp: str, burners: list | None = None) -> dict:
     """One gate run, reduced to the facts a verdict needs."""
     full = list(cmd) + [f"--basetemp={basetemp}"]
     # Before, so the count during the run can be read as "this gate's own
@@ -114,9 +127,11 @@ def run_gate(cmd: list, cwd: Path, basetemp: str) -> dict:
         mid = {
             "python_procs": procs,
             "python_procs_base": base_procs,
-            "python_procs_delta": (procs - base_procs) if procs >= 0 else None,
             "cpu_pct": _cpu_pct(),
         }
+        alive, total = _burners_alive(burners)
+        if total is not None:
+            mid["burners"] = {"alive": alive, "total": total}
     out, _ = proc.communicate()
     elapsed = time.monotonic() - started
 
@@ -210,7 +225,8 @@ def main() -> int:
             return 0
         results = []
         for i in range(args.repeats):
-            r = run_gate(cmd, cwd, f"{args.basetemp_root}{args.phase}{i}")
+            r = run_gate(cmd, cwd, f"{args.basetemp_root}{args.phase}{i}",
+                         burners or None)
             rec = {"phase": args.phase, "i": i, "load": load_desc, **r}
             results.append(rec)
             with open(args.out, "a", encoding="utf-8") as fh:
