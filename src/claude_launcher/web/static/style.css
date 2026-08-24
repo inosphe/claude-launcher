@@ -45,9 +45,14 @@ body {
 @keyframes spin { to { transform: rotate(360deg); } }
 
 #session-list { list-style: none; overflow-y: auto; flex: 1; }
+/* The gap and the right padding are tight on purpose: this row carries a
+   name, a role, the rooms it is in, its profile and two buttons inside about
+   260px, and every pixel spent between them is a pixel the mesh pill loses
+   to an ellipsis. */
 #session-list li {
-  padding: 10px 16px; cursor: pointer; border-bottom: 1px solid #22262d;
-  display: flex; align-items: center; gap: 8px; font-size: 13px;
+  padding: 10px 10px 10px 16px; cursor: pointer;
+  border-bottom: 1px solid #22262d;
+  display: flex; align-items: center; gap: 5px; font-size: 13px;
   flex-wrap: wrap;  /* the cflow badge is a full-width second line */
 }
 #session-list li:hover { background: #22262d; }
@@ -63,26 +68,71 @@ body {
 .dot.busy { background: #d29922; }
 .dot.starting { background: #58a6ff; }
 .dot.exited { background: #6e7681; }
-#session-list .meta { color: #7d8590; font-size: 11px; margin-left: auto; }
-/* The rooms a session is in, on the line under the name that is in them.
+#session-list .meta { color: #7d8590; font-size: 11px; margin-left: auto; flex: none; }
+/* The name and the two tags that qualify it, as one group.
+
+   The row (`li`) wraps, because the cflow line and the briefing card below it
+   are full-width lines. This box must NOT: a wrapping flex line breaks before
+   it shrinks, so anything loose on the row that did not fit took a line of its
+   own instead of giving up width — which is how one session came to occupy
+   four of them. `nowrap` leaves the children nothing to break to, so they
+   shrink and ellipse instead.
+
+   The invariant the rest of this rail depends on: everything that belongs on
+   the name's line keeps the default `order: 0` and declares no
+   `flex-basis: 100%`. Only the deliberate line-breakers below (.sess-cflow,
+   .sess-brief) are full-width, and they carry an `order` above the ▸ toggle's
+   so the toggle still lands at the end of the name line. A full-width child at
+   order 0 would break the line before the toggle got there.
+
+   `flex-basis: 0` is the load-bearing part, not tidiness: a flex line is
+   wrapped on its items' BASE sizes and only shrunk afterwards, so a box that
+   based itself on its content would still push the ⓘ and the ▸ onto the next
+   line before anyone got the chance to shrink. Basing at 0 and growing into
+   what is left means the fixed things on the row are placed first and the
+   name group takes the remainder. */
+#session-list .rail-head {
+  display: flex; align-items: center; gap: 4px; flex-wrap: nowrap;
+  flex: 1 1 0; min-width: 0; overflow: hidden;
+}
+/* Role and rooms share the squeeze rather than one of them absorbing all of
+   it. Left rigid, the role pill ("specialist" is 55px of a 114px budget)
+   pushed the whole shortfall onto the rooms beside it, which then shrank past
+   their own text to a bare 12px capsule — an erasure dressed as an ellipsis.
+   Both shrink now, each with a floor wide enough to keep a couple of letters
+   and the ellipsis, and both carry the full text as hover.
+   Scoped to the rail: .mesh-role is drawn in seven other places that are not
+   fighting for 260px. */
+#session-list .mesh-role {
+  flex: 0 1 auto; padding: 1px 5px; min-width: 3em;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+/* Long names lose their tail rather than the row losing its shape — the full
+   name is one hover away on the label's own title. */
+#session-list .rail-name {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  flex: 0 1 auto; min-width: 2.5em;
+}
+/* The rooms a session is in, beside the name that is in them.
    Same pill as .mesh-role so role and membership read as one set, but
    neutral: the blue says what the session IS, the grey only says where it
    belongs, which is not a state and so gets no saturation. Amber is spoken
    for on this rail — there it means the run wants the reader's keyboard. */
 #session-list .rail-mesh {
-  font-size: 11px; padding: 1px 7px; border-radius: 9px; flex: none;
+  font-size: 11px; padding: 1px 5px; border-radius: 9px; flex: 0 1 auto;
   background: #191d24; color: #6e7681; border: 1px solid #2a2e36;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  min-width: 0;
+  /* wide enough that what survives is a letter or two and the ellipsis — a
+     pill narrower than this is a capsule with nothing in it, which says
+     "some mesh" where it used to say which */
+  min-width: 2.4em;
 }
-/* Its own line, indented past the status dot like the cflow badge below it,
-   so the pills read as belonging to the name above rather than floating in
-   the list. On the name's line they would not fit: a wrapping flex line
-   breaks before it shrinks, so one pill there is enough to push the ⓘ off
-   the row. */
+/* The `+N` counter is the one pill that must not be shortened: "+2" clipped
+   to "+" is a lie about how many rooms are hiding behind it. */
+#session-list .rail-mesh-more { flex: none; }
 #session-list .rail-meshes {
-  flex-basis: 100%; display: flex; gap: 6px; min-width: 0;
-  padding-left: 16px; margin-top: 3px;
+  display: flex; gap: 4px; min-width: 0; flex: 0 1 auto; flex-wrap: nowrap;
+  overflow: hidden;
 }
 /* The session's cflow run, one line under the row. Indented past the status
    dot so it reads as belonging to the name above it. */
