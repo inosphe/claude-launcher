@@ -194,9 +194,12 @@ def test_spawn_remembers_its_own_shorter_list(home):
     # a child's harness, args and workspace are its parent's and the policy's
     # to offer, so they are not carried across parents; its mesh is the
     # parent's answer, not last launch's
-    assert not spawn_fields & {
-        "harness", "args", "workspace", "parent", "name", "mesh",
-    }
+    assert not spawn_fields & {"harness", "args", "workspace", "name", "mesh"}
+    # the PARENT is carried: it is the answer every other row is re-read
+    # from, and "spawn another child of the same parent" is the human's
+    # repeat action (a remembered parent that no longer stands is just not
+    # selected, so it cannot make the form lie)
+    assert "parent" in spawn_fields
     assert {"profile", "role"} <= spawn_fields
 
 
@@ -363,3 +366,51 @@ def test_spawn_recall_round_trips_and_stays_out_of_new_sessions_section(
         sources=FakeSpawnSources()
     ) is True
     assert made["forms"][-1].value("role") == "worker"
+
+
+def test_spawn_remembers_the_last_parent(home, monkeypatch):
+    """The parent is sticky: the next spawn form opens on the same one."""
+    sessions = [
+        {"name": "lead", "status": "idle", "harness": "claude",
+         "profile": "work", "cwd": "/work/repo"},
+        {"name": "solo", "status": "idle", "harness": "claude",
+         "profile": "work", "cwd": "/work/other"},
+    ]
+    made: dict = {}
+
+    class Scripted(wizard.SpawnWizard):
+        def __init__(self, sources, *, cwd="", defaults=None):
+            super().__init__(sources, cwd=cwd, defaults=defaults)
+            self.color = False
+            made.setdefault("forms", []).append(self)
+            if len(made["forms"]) == 1:
+                # move off the default (lead) on the first launch only
+                pick(self, "parent", "solo")
+
+    args = spawn_args()
+    assert drive(
+        monkeypatch, SUBMIT, args, form=Scripted,
+        sources=FakeSpawnSources(sessions=sessions),
+    ) is True
+    assert args.parent == "solo"
+    assert wizard_recall.load("spawn")["parent"] == "solo"
+
+    # the next form opens on the same parent, untouched
+    assert drive(
+        monkeypatch, SUBMIT, spawn_args(), form=Scripted,
+        sources=FakeSpawnSources(sessions=sessions),
+    ) is True
+    assert made["forms"][-1].value("parent") == "solo"
+
+
+def test_a_remembered_parent_that_can_no_longer_take_a_child_is_not_selected(home):
+    """Exited (or gone) since the last launch: `select` falls back to the
+    first parent that can actually take a child rather than standing on a
+    row the form would grey out."""
+    wizard_recall.save("spawn", {"parent": "old"})  # exited in the fixture
+    wiz = wizard.SpawnWizard(
+        FakeSpawnSources(), cwd="/work/repo",
+        defaults=wizard_recall.defaults(spawn_args(), wizard_recall.load("spawn")),
+    )
+    wiz.color = False
+    assert wiz.value("parent") == "lead"
