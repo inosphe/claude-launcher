@@ -421,10 +421,13 @@ function sessCflowRun(name) {
 }
 
 /* Whether the run has stopped on something only a HUMAN resolves — a gate
-   approval or a branch choice. waiting_answer is deliberately excluded: that
-   one is with another agent, not with the person reading the rail. */
+   approval or a branch choice. waiting_answer is excluded only while it is
+   genuinely with another agent: one that reached nobody is the reader's to
+   clear (see answerFellToUs), and leaving it out is what let a stranded run
+   sit in the rail looking like somebody else's problem. */
 function sessCflowGated(r) {
-  return r.status === "waiting_approval" || r.status === "waiting_selection";
+  return r.status === "waiting_approval" || r.status === "waiting_selection" ||
+         answerFellToUs(r);
 }
 
 function sessCflowLabel(r) {
@@ -433,7 +436,9 @@ function sessCflowLabel(r) {
     return r.reason === "loop_limit" ? "loop limit — approve to continue"
          : r.reason === "declined" ? "declined — decide"
          : "approval needed";
-  if (r.status === "waiting_answer") return `with ${askWho(r.ask)}`;
+  if (r.status === "waiting_answer")
+    return answerFellToUs(r) ? "asked of nobody — approve to continue"
+                             : `with ${askWho(r.ask)}`;
   if (r.status === "report_required") return "report required";
   if (r.status === "done" || r.status === "error" || r.status === "aborted")
     return r.status;
@@ -468,7 +473,7 @@ function applyCflowBadges() {
     line.className = `sess-cflow${gated ? " gated" : ""}`;
     line.textContent = "";
     const dot = document.createElement("span");
-    dot.className = `dot ${wfDotClass(r.status)}`;
+    dot.className = `dot ${wfDotClass(r.status, r)}`;
     const txt = document.createElement("span");
     txt.className = "sess-cflow-text";
     txt.textContent =
@@ -636,12 +641,15 @@ function applyBriefingCards() {
 /* ------------------------------------------------------------------ */
 /* cflow workflow monitoring                                          */
 /* ------------------------------------------------------------------ */
-function wfDotClass(status) {
+function wfDotClass(status, run) {
   if (status === "step" || status === "select" || status === "reported") return "wf-running";
   // Delegated: stopped, but not on anything the operator has to do. Its own
   // colour, because painting it the same amber as a gate would grow a queue
-  // of things that look like work and are not.
-  if (status === "waiting_answer") return "wf-delegated";
+  // of things that look like work and are not. An ask that reached nobody is
+  // not one of those — it IS the operator's — so it takes the gate's amber.
+  if (status === "waiting_answer") {
+    return answerFellToUs(run) ? "wf-waiting" : "wf-delegated";
+  }
   if (status === "waiting_approval" || status === "waiting_selection" || status === "report_required") return "wf-waiting";
   if (status === "done") return "wf-done";
   if (status === "error" || status === "aborted") return "wf-error";
@@ -653,6 +661,25 @@ function askWho(ask) {
   const asked = (ask && ask.asked) || [];
   if (!asked.length) return "nobody — it fell to you";
   return asked.map((e) => e.handle || e.kind).join(", ");
+}
+
+/* A `waiting_answer` whose question reached NOBODY.
+
+   The status word says the run is with another agent; the payload says
+   otherwise — `asked` is empty, or there is no ask at all, which is
+   exactly what forcing the run onto an asking step with `goto` leaves
+   behind (goto moves the step deliberately without delivering it). A
+   consumer that reads the status alone then tells the reader some peer
+   has it, and the run stands for ever: no reminder is due, no gate event
+   fires, and the panel offers nothing that would clear it.
+
+   So the discriminator lives here, once, and the consumers ask it rather
+   than the status. The daemon already treats this case as the human's —
+   engine.approve() handles an ask that reached nobody — so the ordinary
+   gate press is what clears it. */
+function answerFellToUs(r) {
+  if (!r || r.status !== "waiting_answer") return false;
+  return !r.ask || !((r.ask.asked || []).length);
 }
 
 function shortenPath(p) {
@@ -764,7 +791,7 @@ async function refreshCflow() {
     const head = document.createElement("div");
     head.className = "cflow-head";
     const dot = document.createElement("span");
-    dot.className = `dot ${wfDotClass(r.status)}`;
+    dot.className = `dot ${wfDotClass(r.status, r)}`;
     const name = document.createElement("span");
     // A run is keyed by (directory, session), so a team working one workflow
     // in one tree makes cards that differ ONLY by the session. That makes the
@@ -782,7 +809,7 @@ async function refreshCflow() {
         : r.status === "waiting_approval" && r.reason === "declined"
         ? "declined"
         : r.status === "waiting_answer"
-        ? `with ${askWho(r.ask)}`
+        ? (answerFellToUs(r) ? "asked of nobody" : `with ${askWho(r.ask)}`)
         : r.status;
     head.append(dot, name, st);
     li.appendChild(head);
@@ -842,9 +869,16 @@ async function refreshCflow() {
     }
 
     if (r.status === "waiting_answer") {
-      li.appendChild(cflowLine(`waiting on ${askWho(r.ask)} to decide`));
-      if (r.ask && r.ask.deadline) {
-        li.appendChild(cflowLine(`moves on after ${r.ask.deadline}`));
+      if (answerFellToUs(r)) {
+        // Nobody holds this one, so the rail names the press that clears
+        // it — the same hint a gate gets, because that is what it is.
+        li.appendChild(cflowLine("put to nobody — it is yours to approve"));
+        li.appendChild(cflowHint("claunch cflow approve"));
+      } else {
+        li.appendChild(cflowLine(`waiting on ${askWho(r.ask)} to decide`));
+        if (r.ask && r.ask.deadline) {
+          li.appendChild(cflowLine(`moves on after ${r.ask.deadline}`));
+        }
       }
     } else if (r.status === "waiting_approval") {
       if (r.reason === "declined" && r.declined) {
@@ -3156,7 +3190,7 @@ function renderWfInto(view, data, ui) {
   head.appendChild(el("h2", null, wf.name || run.workflow || "workflow"));
   head.appendChild(el(
     "span",
-    `badge ${wfDotClass(run.status)}`,
+    `badge ${wfDotClass(run.status, run)}`,
     run.status === "waiting_approval" && run.reason === "loop_limit"
       ? "loop limit" : run.status
   ));
@@ -3325,6 +3359,17 @@ function wfActions(data, opts = {}) {
   const run = data.run || {};
   const after = opts.after;
   const box = el("div", "wf-actions");
+  // Three homes inside the one box, so prose and presses stop interleaving:
+  // everything to read (msgs), the presses that answer the gate (main), and
+  // the run-management presses (tools). The bar lays main and tools out on
+  // one line, decisions left and management right; the fold stacks them.
+  // An empty home takes no row (CSS :empty).
+  const msgs = el("div", "wf-act-msgs");
+  const main = el("div", "wf-act-main");
+  const tools = el("div", "wf-act-tools");
+  box.appendChild(msgs);
+  box.appendChild(main);
+  box.appendChild(tools);
   // Leads, because it changes how everything below it reads: a run whose
   // session is not running is not being worked on, whatever position it
   // recorded before it stopped. Said after "agent is working on 'survey'",
@@ -3332,7 +3377,7 @@ function wfActions(data, opts = {}) {
   const homeless = !(data.sessions || []).length;
   const scoped = data.scope && data.scope !== "default";
   if (homeless && run.status !== "done" && run.status !== "aborted") {
-    box.appendChild(el(
+    msgs.appendChild(el(
       "p", scoped ? "wf-warning" : "wf-note",
       scoped
         ? `session '${data.scope}' is not running — nothing is driving this run`
@@ -3343,21 +3388,46 @@ function wfActions(data, opts = {}) {
   // for every ask, answered by an agent or fallen to us: "no leader above
   // this run" is the whole explanation for why a question is on this screen.
   if (run.ask) {
-    box.appendChild(el("p", "wf-note", `asked: ${askWho(run.ask)}`));
+    msgs.appendChild(el("p", "wf-note", `asked: ${askWho(run.ask)}`));
     for (const s of run.ask.skipped || []) {
-      box.appendChild(el("p", "wf-note", `skipped ${s.candidate} — ${s.reason}`));
+      msgs.appendChild(el("p", "wf-note", `skipped ${s.candidate} — ${s.reason}`));
     }
     if (run.ask.deadline) {
-      box.appendChild(el("p", "wf-note", `moves on after ${run.ask.deadline}`));
+      msgs.appendChild(el("p", "wf-note", `moves on after ${run.ask.deadline}`));
     }
     if (run.ask.undelivered) {
-      box.appendChild(el("p", "wf-warning",
+      msgs.appendChild(el("p", "wf-warning",
         `recorded, but not announced: ${run.ask.undelivered}`));
     }
   }
-  if (run.status === "waiting_answer") {
-    box.appendChild(el("p", "wf-gate", run.ask ? run.ask.prompt : "waiting for a decision"));
-    box.appendChild(el("p", "wf-note",
+  if (answerFellToUs(run)) {
+    // The question reached nobody, so there is no peer to wait for and
+    // "you do not have to do anything" would be a lie that stops the run
+    // for good. Read it as the gate it actually is: say who it is with
+    // (nobody), and offer the press that clears it. The daemon accepts
+    // that press — engine.approve() handles an ask that reached nobody.
+    msgs.appendChild(el("p", "wf-gate", run.ask ? run.ask.prompt : "waiting for a decision"));
+    msgs.appendChild(el("p", "wf-warning",
+      "this was put to nobody — no agent is going to answer it. Only you " +
+      "can let the run continue."));
+    const btn = el("button", "wf-btn approve", "Approve gate");
+    btn.addEventListener("click", () => {
+      if (run.ask && run.ask.kind === "branch") {
+        // Same reason as below: a branch needs an option, not an approval.
+        alert("Use 'claunch cflow select <option>' to pick the branch.");
+        return;
+      }
+      if (confirm(
+        `Answer '${run.step_id}' yourself?\n\nIt was put to nobody, so ` +
+        "nothing else will."
+      )) {
+        cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
+      }
+    });
+    main.appendChild(btn);
+  } else if (run.status === "waiting_answer") {
+    msgs.appendChild(el("p", "wf-gate", run.ask ? run.ask.prompt : "waiting for a decision"));
+    msgs.appendChild(el("p", "wf-note",
       "this is with another agent; you do not have to do anything. Take it " +
       "over only if it is stuck."));
     const btn = el("button", "wf-btn", "Decide it myself");
@@ -3373,14 +3443,14 @@ function wfActions(data, opts = {}) {
       }
       cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
     });
-    box.appendChild(btn);
+    main.appendChild(btn);
   } else if (run.status === "waiting_approval") {
     const isLoop = run.reason === "loop_limit";
     if (run.reason === "declined" && run.declined) {
-      box.appendChild(el("p", "wf-warning",
+      msgs.appendChild(el("p", "wf-warning",
         `${run.declined.by} declined: ${run.declined.reason || "no reason given"}`));
     }
-    box.appendChild(el("p", "wf-gate", run.gate || "waiting for approval"));
+    msgs.appendChild(el("p", "wf-gate", run.gate || "waiting for approval"));
     const btn = el("button", "wf-btn approve",
       isLoop ? "Extend loop limit"
         : run.reason === "declined" ? "Override the refusal" : "Approve gate");
@@ -3392,11 +3462,11 @@ function wfActions(data, opts = {}) {
         cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
       }
     });
-    box.appendChild(btn);
+    main.appendChild(btn);
   } else if (run.status === "waiting_selection" || run.status === "select") {
-    box.appendChild(el("p", "wf-gate", run.prompt || "decision point"));
+    msgs.appendChild(el("p", "wf-gate", run.prompt || "decision point"));
     if (run.proposal) {
-      box.appendChild(el(
+      msgs.appendChild(el(
         "p", "wf-proposal",
         `agent proposes: ${run.proposal.option} — ${run.proposal.reason || ""}`
       ));
@@ -3412,17 +3482,18 @@ function wfActions(data, opts = {}) {
             }, after);
           }
         });
-        box.appendChild(btn);
+        main.appendChild(btn);
       }
-      box.appendChild(el("p", "wf-note",
+      // Beside the presses it explains, not among the prose above them.
+      main.appendChild(el("p", "wf-note",
         "confirming unblocks the agent; its managed session is nudged automatically"));
     } else {
-      box.appendChild(el("p", "wf-note", "the agent decides this branch on its own"));
+      msgs.appendChild(el("p", "wf-note", "the agent decides this branch on its own"));
     }
   } else if (run.status === "done" || run.status === "aborted") {
-    box.appendChild(el("p", "wf-note", `workflow ${run.status}`));
+    msgs.appendChild(el("p", "wf-note", `workflow ${run.status}`));
   } else {
-    box.appendChild(el(
+    msgs.appendChild(el(
       "p", "wf-note",
       homeless
         ? `recorded position: step '${run.step_id}' — stopped here`
@@ -3448,7 +3519,7 @@ function wfActions(data, opts = {}) {
       btn.disabled = true;
       btn.title = "nothing to nudge: this run has no live session of its own";
     }
-    box.appendChild(btn);
+    tools.appendChild(btn);
     // The run page and the pane pull the reminder out (reminder: false) and
     // seat it in their text column; the fold keeps it here, in the one box.
     if (opts.reminder !== false) {
@@ -3479,7 +3550,7 @@ function wfActions(data, opts = {}) {
         cflowAction("/api/cflow/skip", { cwd: data.cwd, scope: data.scope }, after);
       }
     });
-    box.appendChild(skp);
+    tools.appendChild(skp);
   }
 
   if (opts.archive === false) return box;
@@ -3502,7 +3573,7 @@ function wfActions(data, opts = {}) {
       cflowAction("/api/cflow/archive", { cwd: data.cwd, scope: data.scope });
     }
   });
-  box.appendChild(arch);
+  tools.appendChild(arch);
   return box;
 }
 
@@ -4864,7 +4935,7 @@ function sessWorkflow(data) {
 
   if (flow.status && flow.status !== "idle") {
     const line = el("div", "sess-wf-run");
-    line.appendChild(el("span", `dot ${wfDotClass(flow.status)}`));
+    line.appendChild(el("span", `dot ${wfDotClass(flow.status, flow)}`));
     line.appendChild(el("span", "sess-wf-name", flow.workflow || "(workflow)"));
     line.appendChild(el("span", "meta",
       flow.status +
@@ -7869,6 +7940,10 @@ function flowTrack(wf, run) {
 function flowNeedsHuman(f) {
   if (!f || f.remote || f.stopped) return false;
   if (f.status === "waiting_approval" || f.status === "waiting_selection") return true;
+  // ...and the ask that reached nobody, which is a gate wearing another
+  // status word. flowState asks this before it says "delegated", so the
+  // card reads "waiting on you" rather than "waiting on a peer".
+  if (answerFellToUs(f)) return true;
   return f.status === "select" && f.chooser === "user";
 }
 

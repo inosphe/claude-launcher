@@ -124,7 +124,8 @@ new Function(
   sliceLine("const SESS_RUN_REPORTS") + sliceLine("const SESS_RUN_JOURNAL") +
   [slice("flowOrder"), slice("flowTrack"), slice("flowNeedsHuman"),
    slice("flowState"), slice("flowMetrics"), slice("flowPipShape"),
-   slice("flowTrackSvg"), slice("svg"), slice("wfActions"),
+   slice("flowTrackSvg"), slice("svg"), slice("askWho"),
+   slice("answerFellToUs"), slice("wfActions"),
    slice("reminderControl"), slice("pendingBanner"),
    slice("sessRunFoldFor"), slice("stopSessRun"), slice("refreshSessRun"),
    slice("renderSessRun"), slice("sessRunTrack")].join("\n") +
@@ -282,6 +283,80 @@ const human = ctx.pendingBanner({
 check("a human's request still reads as one",
       texts(human).includes("start requested") &&
       walk(human).some((k) => k.text === "Withdraw request"), texts(human));
+
+/* ---- the actions box keeps prose and presses apart ---- */
+/* One box, three homes (wf-act-msgs / wf-act-main / wf-act-tools): the CSS
+   lays the bar out from those groups, so a button that lands in the wrong
+   one is a layout regression the styles cannot see. */
+const grp = (root, cls) => walk(root).find((k) => classOf(k).has(cls));
+const SEL = { ...DATA, run: {
+  ...RUN, status: "waiting_selection", step_id: "check", recur: true, round: 2,
+  workflow: "ecs-change", prompt: "ship it?",
+  proposal: { option: "ship", reason: "suite green" },
+  options: [{ name: "ship" }, { name: "again" }],
+} };
+const sel = ctx.wfActions(SEL);
+for (const c of ["wf-act-msgs", "wf-act-main", "wf-act-tools"]) {
+  check(`the box builds ${c}`, !!grp(sel, c));
+}
+check("the prompt and the proposal live among the prose",
+      has(grp(sel, "wf-act-msgs"), "wf-gate") &&
+      has(grp(sel, "wf-act-msgs"), "wf-proposal"));
+check("the option presses answer it from the main group",
+      walk(grp(sel, "wf-act-main")).filter((k) => classOf(k).has("option")).length === 2);
+check("...with their explainer beside them, not among the prose",
+      has(grp(sel, "wf-act-main"), "wf-note") &&
+      !has(grp(sel, "wf-act-msgs"), "wf-note"));
+check("run management is its own group: nudge, skip and archive",
+      has(grp(sel, "wf-act-tools"), "nudge") &&
+      has(grp(sel, "wf-act-tools"), "skip") &&
+      has(grp(sel, "wf-act-tools"), "archive"));
+check("no press strays into the prose", !has(grp(sel, "wf-act-msgs"), "wf-btn"));
+
+/* ---- waiting_answer: delivered, versus put to nobody ------------------ */
+/* The status word is the same in both, so only the payload tells them
+   apart: a delivered ask names its holder, one that reached nobody is a
+   gate wearing another word — and saying "you do not have to do anything"
+   about THAT is what let a run stand for ever. */
+const answerRun = (ask) => ({
+  ...DATA,
+  run: { ...RUN, status: "waiting_answer", step_id: "plan", ask,
+         prompt: undefined },
+});
+
+const withPeer = ctx.wfActions(answerRun({ prompt: "ship it?", asked: [{ handle: "lead" }] }));
+check("a delivered ask still reads as somebody else's",
+      texts(withPeer).includes("this is with another agent"), texts(withPeer));
+check("...and offers no gate press, only the takeover",
+      !has(withPeer, "approve") &&
+      walk(withPeer).some((k) => k.text === "Decide it myself"));
+
+for (const [what, ask] of [
+  ["an ask that reached nobody", { prompt: "ship it?", asked: [] }],
+  ["a step forced onto an asking step (no ask at all)", undefined],
+]) {
+  const box = ctx.wfActions(answerRun(ask));
+  check(`${what} does not claim a peer has it`,
+        !texts(box).includes("you do not have to do anything"), texts(box));
+  check(`${what} says nobody was asked`,
+        texts(box).includes("put to nobody"), texts(box));
+  check(`${what} warns rather than reassures`, has(box, "wf-warning"));
+  const btn = walk(box).find((k) => classOf(k).has("approve"));
+  check(`${what} offers the gate press`, !!btn && btn.text === "Approve gate",
+        btn && btn.text);
+  /* ...and the press is the ordinary approve the daemon already handles for
+     "an ask that reached nobody" — not a second endpoint invented here. */
+  if (btn) btn.fire("click");
+  const posted = ctx.posted().filter((p) => p.path === "/api/cflow/approve");
+  check(`${what} clears through /api/cflow/approve`,
+        posted.length > 0 &&
+        posted[posted.length - 1].body.cwd === DATA.cwd &&
+        posted[posted.length - 1].body.scope === "coder3",
+        posted[posted.length - 1]);
+  check(`${what} puts the press with the decisions, not the prose`,
+        has(grp(box, "wf-act-main"), "approve") &&
+        !has(grp(box, "wf-act-msgs"), "wf-btn"));
+}
 
 /* ---- the run ends ---- */
 const gone = node("div");

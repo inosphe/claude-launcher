@@ -76,7 +76,8 @@ const ctx = {};
    which the sliced functions and setRuns share as one binding. */
 new Function(
   "exports", "$", "document", "location", "cflowCache",
-  [slice("wfDotClass"), slice("askWho"), slice("sessCflowRun"),
+  [slice("wfDotClass"), slice("askWho"), slice("answerFellToUs"),
+   slice("sessCflowRun"),
    slice("sessCflowGated"), slice("sessCflowLabel"),
    slice("applyCflowBadges")].join("\n") + `
 exports.apply = applyCflowBadges;
@@ -188,6 +189,36 @@ ctx.setRuns([]);
 ctx.apply();
 check("no runs, no badges",
       Object.values(rows).map((li) => badge(li)), [null, null, null]);
+
+/* ---- waiting_answer: with a peer, versus put to nobody ---------------- */
+/* Same status word, opposite meaning for the person reading the rail. The
+   delivered one must stay quiet (its own colour, not the gate's amber, or
+   the rail grows a queue of things that are not the reader's); the stranded
+   one must show up as theirs, because nobody else will ever clear it. */
+const answerRow = (ask) => [{
+  scope: "s19", cwd: "F:/repo", status: "waiting_answer", workflow: "ship",
+  step_id: "plan", sessions: ["s19"], ask,
+}];
+
+ctx.setRuns(answerRow({ prompt: "ship?", asked: [{ handle: "lead" }] }));
+ctx.apply();
+check("a delivered ask names its holder", badgeText(rows.s19), "ship · with lead");
+check("...and keeps the delegated colour, not the gate's amber",
+      badge(rows.s19).children[0].className, "dot wf-delegated");
+
+ctx.setRuns(answerRow({ prompt: "ship?", asked: [] }));
+ctx.apply();
+/* The flag is the whole point: sessCflowGated now counts this as the
+   reader's move, so the rail marks it like any other gate. */
+check("an ask that reached nobody says so, and is flagged as yours", badgeText(rows.s19),
+      "ship · ⚑ asked of nobody — approve to continue");
+check("...and takes the gate's amber, because it IS the reader's",
+      badge(rows.s19).children[0].className, "dot wf-waiting");
+
+ctx.setRuns(answerRow(undefined));
+ctx.apply();
+check("no ask at all reads the same way (a forced goto leaves this)",
+      badgeText(rows.s19), "ship · ⚑ asked of nobody — approve to continue");
 
 if (failures) {
   console.error(`${failures} check(s) failed`);
