@@ -769,10 +769,21 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         # daemon is listening. A wedged one cannot be asked anything -- say so
         # here rather than leaving the operator with "did not come up in 15s",
         # which reads as a broken install instead of a daemon to replace.
-        report = daemon_client.diagnose(probes=2)
+        # One full-budget round of silence buys a second look, not a verdict:
+        # the brief -- the only place --force is ever recommended -- prints
+        # after two consecutive rounds agree.
+        report = daemon_client.diagnose()
         if report["state"] == daemon_client.WEDGED:
-            _print_wedged(report)
-            return 1
+            print(
+                f"no answer in {report['budget']:.0f}s (pid {report['pid']} "
+                f"alive) — looking once more before judging",
+                file=sys.stderr,
+            )
+            confirm = daemon_client.diagnose()
+            if confirm["state"] == daemon_client.WEDGED:
+                _print_wedged(report, confirm)
+                return 1
+            report = confirm  # it moved between looks — busy, not wedged
         daemon_client.stop()
         time.sleep(0.3)
         client = daemon_client.ensure_running()
@@ -785,9 +796,15 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             # reporting them as one is what makes a wedged daemon look like an
             # absent one -- the operator then starts a replacement that stands
             # down against a lock the absent daemon is still holding.
-            report = daemon_client.diagnose(probes=3)
-            if report["state"] == daemon_client.WEDGED:
-                _print_wedged(report)
+            # status is a quick command, so it gets a quick budget -- and a
+            # quick budget only earns an observation. The WEDGED verdict (and
+            # any mention of --force) belongs to the full-budget path in
+            # restart, which can afford to out-wait a busy daemon.
+            report = daemon_client.diagnose(
+                budget=daemon_client.OBSERVATION_BUDGET
+            )
+            if report["state"] == daemon_client.UNRESPONSIVE:
+                _print_unanswered(report)
                 return 1
             if report["state"] == daemon_client.STALE_RECORD:
                 print(f"daemon is not running ({report['why']})")
@@ -812,17 +829,89 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
     raise AssertionError(f"unknown daemon action {action!r}")
 
 
-def _print_wedged(report: dict) -> None:
-    """Say what a wedged daemon is, and what the one way out of it is."""
+def _print_unanswered(report: dict) -> None:
+    """An unanswered short look, said as an observation and nothing more.
+
+    Seconds cannot tell a busy daemon from a wedged one -- ensure_running
+    itself sits out START_TIMEOUT of the same silence for a starting daemon.
+    So no verdict and no --force here: just what was seen, and where the
+    verdict-grade look lives.
+    """
+    print(
+        f"daemon is announced but did not answer: {report['why']}",
+        file=sys.stderr,
+    )
+    print(
+        f"  a look this short cannot tell busy from stuck; "
+        f"'claunch daemon restart' watches for "
+        f"{daemon_client.VERDICT_BUDGET:.0f}s before judging",
+        file=sys.stderr,
+    )
+
+
+def _log_progress_line() -> str:
+    """Whether daemon.log has grown lately -- reported, never judged.
+
+    A wedged event loop takes the daemon's logging down with it, so recent
+    growth argues "alive but starving". The converse is weak and the line
+    says so: a relay that is reconnecting logs a retry at least every
+    BACKOFF_MAX seconds, but a connected, idle daemon may legitimately write
+    nothing at all -- silence in the log must not be read as death.
+    """
+    log = daemon_paths.log_file()
+    try:
+        age = max(0.0, time.time() - log.stat().st_mtime)
+    except OSError:
+        return "daemon.log: missing or unreadable — no progress signal to read"
+    line = f"daemon.log last grew {age:.0f}s ago"
+    try:  # the bound lives with the relay; its aiohttp import stays lazy here
+        from .daemon.relay_uplink import BACKOFF_MAX
+    except ImportError:
+        return line
+    return line + (
+        f" (a reconnecting relay logs at least every {BACKOFF_MAX:.0f}s; an "
+        f"idle connected daemon may write nothing — weak evidence either way)"
+    )
+
+
+def _print_wedged(report: dict, confirm: dict) -> None:
+    """The WEDGED verdict, and the decision brief that has to go with it.
+
+    Printed only after two consecutive full-budget rounds answered nothing --
+    and even then --force stays a recommendation carrying its evidence, its
+    cost and its alternative, because from out here the tool cannot prove
+    the daemon will never answer again. The tool judges; the person decides.
+    """
     print(f"daemon is WEDGED: {report['why']}", file=sys.stderr)
+    print(
+        f"  confirmed twice: {report['probes'] + confirm['probes']} probes "
+        f"across {report['budget'] + confirm['budget']:.0f}s in two "
+        f"consecutive rounds, 0 answered",
+        file=sys.stderr,
+    )
     print(
         "  it still holds the singleton lock, so a replacement cannot start "
         "while it lives",
         file=sys.stderr,
     )
+    print(f"  {_log_progress_line()}", file=sys.stderr)
     print(
-        "  recover with: claunch daemon restart --force  "
-        "(ends that process and its sessions, then starts a fresh daemon)",
+        "  caveat: from the outside this tool cannot tell a permanently "
+        "stalled daemon from one starving under load — daemons have been "
+        "observed to answer nothing for minutes at a stretch and then "
+        "recover on their own",
+        file=sys.stderr,
+    )
+    print(
+        "  recover with: claunch daemon restart --force  (ends that process "
+        "tree and every live session in it; the new daemon restores only "
+        "the sessions marked for restore)",
+        file=sys.stderr,
+    )
+    print(
+        "  or wait: a starving daemon may come back by itself — re-run "
+        "'claunch daemon status' in a few minutes and force only if it "
+        "stays silent",
         file=sys.stderr,
     )
 
@@ -833,10 +922,20 @@ def _force_replace() -> int:
     Reserved for the wedged case and never automatic: ending the process
     skips the drain a graceful shutdown does, and a single missed health
     check is a normal thing on a loaded machine. So the state is re-checked
-    here -- with several probes -- and anything that is merely serving is
-    sent down the ordinary path instead.
+    here -- two consecutive rounds of the full verdict budget -- and anything
+    that answers even once is sent down the ordinary path instead.
     """
-    report = daemon_client.diagnose(probes=3)
+    report = daemon_client.diagnose()
+    if report["state"] == daemon_client.WEDGED:
+        print(
+            f"no answer in {report['budget']:.0f}s (pid {report['pid']} "
+            f"alive) — confirming once more before ending anything",
+            file=sys.stderr,
+        )
+        # Acting on the fresher look makes two consecutive full-budget
+        # rounds of silence the price of ending anything; a daemon that
+        # answers (or dies) between the looks takes its own branch below.
+        report = daemon_client.diagnose()
     state = report["state"]
     if state == daemon_client.SERVING:
         print(

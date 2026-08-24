@@ -25,6 +25,25 @@ from .daemon import paths, runtime_state
 #: How long auto-start waits for the daemon to come up.
 START_TIMEOUT = 15.0
 
+#: One health probe's timeout. Every other diagnosis duration derives from
+#: this (the tests' too), so "how slow is too slow" lives in exactly one place.
+HEALTH_TIMEOUT = 1.0
+
+#: How long :func:`diagnose` must watch before it may say WEDGED. Tied to
+#: START_TIMEOUT by internal consistency rather than by measurement:
+#: ``ensure_running`` grants a starting daemon this long to answer its first
+#: health check, so a diagnosis that judged sooner would be calling daemons
+#: wedged in situations claunch's own start path waits out as normal.
+VERDICT_BUDGET = START_TIMEOUT
+
+#: Default gap between two probes of one diagnosis.
+PROBE_GAP = 0.5
+
+#: Budget for callers that only want an observation ("did it answer just
+#: now?"): two probes' worth. More time would buy nothing an observation is
+#: allowed to claim -- anything longer is the verdict path's job.
+OBSERVATION_BUDGET = 2 * (HEALTH_TIMEOUT + PROBE_GAP)
+
 
 class DaemonClientError(Exception):
     """Raised for daemon-unreachable and API-error conditions."""
@@ -109,7 +128,7 @@ def _base_url(doc: dict) -> str:
 def _health_ok(base_url: str) -> bool:
     try:
         req = urllib.request.Request(base_url + "/api/health")
-        with urllib.request.urlopen(req, timeout=1.0) as resp:
+        with urllib.request.urlopen(req, timeout=HEALTH_TIMEOUT) as resp:
             return resp.status == 200
     except Exception:
         return False
@@ -236,6 +255,10 @@ WEDGED = "wedged"              # the process is alive and holds the lock, but
                                # answers nothing — an event loop that stopped
                                # turning takes the whole HTTP surface with it
 SERVING = "serving"            # answering health checks
+UNRESPONSIVE = "unresponsive"  # answered nothing inside a SHORT budget while
+                               # the process lives -- an observation, not a
+                               # verdict: from the outside a merely busy
+                               # daemon looks exactly like this
 
 
 def process_alive(pid: int) -> Optional[bool]:
@@ -278,7 +301,7 @@ def process_alive(pid: int) -> Optional[bool]:
     return True
 
 
-def diagnose(*, probes: int = 1, gap: float = 0.5) -> dict:
+def diagnose(*, budget: Optional[float] = None, gap: float = PROBE_GAP) -> dict:
     """What the daemon is doing, from the outside, with the evidence for it.
 
     Exists because "cannot connect" has two very different causes and the
@@ -287,10 +310,29 @@ def diagnose(*, probes: int = 1, gap: float = 0.5) -> dict:
     without help — its singleton lock, so every attempt to start a replacement
     stands down for a predecessor that is never coming back.
 
-    ``probes`` health checks spaced ``gap`` apart, because the honest reading
-    of a single failed check on a loaded machine is "busy", not "wedged": one
-    timeout during a test sweep must not be evidence for killing anything.
+    The judgment is budget-based, not count-based. Probes run ``gap`` apart
+    until one answers or ``budget`` seconds are spent; a count of consecutive
+    failures says how often we looked, not how long the daemon was silent —
+    and it was exactly that (2–3 probes, ≈4.5s) that once let this function
+    call a daemon wedged while ``ensure_running`` would have sat out the same
+    silence as a normal start. So:
+
+    - one answered probe anywhere inside the budget → SERVING;
+    - zero answers across a budget of at least ``VERDICT_BUDGET``, from a
+      process that still lives → WEDGED, the verdict, with budget, probe
+      count and answer count in the report (the probe count is a phase clue
+      only: a wedged daemon flips between timing probes out and refusing
+      them outright, which swings how many probes fit the same budget);
+    - zero answers across anything shorter → UNRESPONSIVE, the same facts
+      named as an observation, because no short look can tell busy from
+      stuck.
+
+    A dead pid short-circuits to STALE_RECORD after the first failed probe —
+    the budget is patience for a live process, and that one is gone.
     """
+    verdict_budget = VERDICT_BUDGET
+    if budget is None:
+        budget = verdict_budget
     doc = runtime_state.read_daemon_json()
     if not doc:
         return {
@@ -298,40 +340,80 @@ def diagnose(*, probes: int = 1, gap: float = 0.5) -> dict:
             "pid": None,
             "base_url": None,
             "lock_free": runtime_state.lock_is_free(),
+            "budget": budget,
+            "probes": 0,
+            "successes": 0,
             "why": "no daemon.json — nothing has announced itself",
         }
     base_url = _base_url(doc)
     pid = int(doc.get("pid") or 0)
-    for attempt in range(max(1, probes)):
+
+    def _stale(probes: int) -> dict:
+        return {
+            "state": STALE_RECORD,
+            "pid": pid,
+            "base_url": base_url,
+            "lock_free": runtime_state.lock_is_free(),
+            "budget": budget,
+            "probes": probes,
+            "successes": 0,
+            "why": f"daemon.json names pid {pid}, which is gone",
+        }
+
+    deadline = time.monotonic() + max(0.0, budget)
+    probes = 0
+    while True:
+        probes += 1
         if _health_ok(base_url):
             return {
                 "state": SERVING,
                 "pid": pid,
                 "base_url": base_url,
                 "lock_free": False,
-                "why": "answering /api/health",
+                "budget": budget,
+                "probes": probes,
+                "successes": 1,
+                "why": f"answering /api/health (probe {probes})",
             }
-        if attempt + 1 < max(1, probes):
-            time.sleep(gap)
-    alive = process_alive(pid)
-    if alive is False:
+        if probes == 1 and process_alive(pid) is False:
+            return _stale(probes)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        time.sleep(min(max(gap, 0.0), remaining))
+    if process_alive(pid) is False:
+        return _stale(probes)
+    if budget >= verdict_budget:
         return {
-            "state": STALE_RECORD,
+            "state": WEDGED,
             "pid": pid,
             "base_url": base_url,
+            # Reported rather than assumed: a wedged daemon normally still
+            # holds the lock, and whether it does decides if a replacement
+            # can start.
             "lock_free": runtime_state.lock_is_free(),
-            "why": f"daemon.json names pid {pid}, which is gone",
+            "budget": budget,
+            "probes": probes,
+            "successes": 0,
+            "why": (
+                f"pid {pid} is alive and {base_url} is announced, yet "
+                f"{probes} health probe(s) across {budget:.0f}s got "
+                f"0 answers"
+            ),
         }
     return {
-        "state": WEDGED,
+        "state": UNRESPONSIVE,
         "pid": pid,
         "base_url": base_url,
-        # Reported rather than assumed: a wedged daemon normally still holds
-        # the lock, and whether it does decides if a replacement can start.
         "lock_free": runtime_state.lock_is_free(),
+        "budget": budget,
+        "probes": probes,
+        "successes": 0,
         "why": (
-            f"pid {pid} is alive and {base_url} is announced, but "
-            f"{max(1, probes)} health check(s) went unanswered"
+            f"pid {pid} is alive and {base_url} is announced, but nothing "
+            f"answered within {budget:.1f}s ({probes} probe(s)) — an "
+            f"observation, not a verdict: a merely busy daemon can look "
+            f"exactly like this"
         ),
     }
 
