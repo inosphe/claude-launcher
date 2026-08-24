@@ -24,6 +24,7 @@ from collections import deque
 from typing import Deque, List, Optional, Tuple
 
 import pyte
+from wcwidth import wcwidth
 
 _PRIVATE_MODE_RE = re.compile(rb"\x1b\[\?([0-9;]+)([hl])")
 
@@ -174,6 +175,32 @@ class ScreenState:
     def line_hashes(self) -> Tuple[int, ...]:
         """A cheap per-row fingerprint of the visible grid (for idle detection)."""
         return tuple(hash(line) for line in self._screen.display)
+
+    def bottom_line(self) -> str:
+        """The bottom row of the visible grid, right-trimmed.
+
+        A TUI's footer / status line lives here. Read straight from the
+        emulator buffer — only this one row is materialized, mirroring pyte's
+        own ``display`` render for ``self.lines - 1`` — where
+        :meth:`render_screen` would rebuild every cell of the whole grid. The
+        claude in-turn marker check reads only the footer, so a marker phrase
+        that appears anywhere above (in transcript content) cannot be mistaken
+        for a footer signal.
+        """
+        screen = self._screen
+        line = screen.buffer.get(screen.lines - 1)
+        if not line:
+            return ""
+        chips: List[str] = []
+        is_wide = False
+        for x in range(screen.columns):
+            if is_wide:
+                is_wide = False
+                continue
+            char = line[x].data
+            is_wide = wcwidth(char[0]) == 2  # pyte's own stub-skip
+            chips.append(char)
+        return "".join(chips).rstrip()
 
     def repaint_sequence(self, offset: int = 0) -> bytes:
         """An ANSI sequence that repaints the current grid on a fresh terminal.

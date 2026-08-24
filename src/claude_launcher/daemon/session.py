@@ -153,9 +153,10 @@ STATUS_EXITED = "exited"
 #:
 #: VERSION-FRAGILE: this is an upstream UI string and *will* change across
 #: claude versions. It is only consulted as an override when the quiescence
-#: heuristic already reads idle, so a changed or missing marker degrades to
-#: the old heuristic behaviour — never to a false "busy". See
-#: :meth:`_claude_turn_in_flight`.
+#: heuristic already reads idle, and then only on the *footer* row (the
+#: bottom of the grid — see :meth:`_claude_turn_in_flight`), so a changed or
+#: missing marker — or one that appears only in transcript content — degrades
+#: to the old heuristic behaviour, never to a false "busy".
 _CLAUDE_TURN_MARKER = "esc to interrupt"
 
 
@@ -400,20 +401,28 @@ class Session:
         return STATUS_BUSY
 
     def _claude_turn_in_flight(self) -> bool:
-        """True iff the claude footer is carrying the in-turn marker.
+        """True iff the claude *footer* is carrying the in-turn marker.
+
+        The marker is an ordinary English phrase, so it legitimately appears
+        in transcript content — a commit subject, a quoted docstring, this
+        very marker's documentation. Only the footer row counts, and the
+        footer is the bottom row of claude's TUI (verified on live panes);
+        a phrase anywhere above it is content, not a turn, and must never pin
+        a genuinely idle session "busy" forever. :meth:`ScreenState.bottom_line`
+        reads exactly that row without materializing the whole grid.
 
         Only meaningful for the claude harness, and only consulted when the
         quiescence heuristic already reads idle — the one case where the
         marker changes the answer. Never let a missing marker alone mean
         busy, and never apply this to a non-claude harness: both fall back to
         :meth:`_heuristic_status`. See :data:`_CLAUDE_TURN_MARKER` for the
-        version-fragility caveat.
+        version-fragility caveat (a claude version that moves the footer off
+        the bottom row silently degrades to the heuristic — never to a false
+        "busy").
         """
         if self.sdef.harness != CLAUDE_HARNESS:
             return False
-        return any(
-            _CLAUDE_TURN_MARKER in row for row in self.screen.render_screen()
-        )
+        return _CLAUDE_TURN_MARKER in self.screen.bottom_line()
 
     def _compute_status(self, threshold: float) -> str:
         heur = self._heuristic_status(threshold)
@@ -428,9 +437,16 @@ class Session:
         return self._compute_status(self.idle_threshold if threshold is None else threshold)
 
     def idle_since(self) -> Optional[float]:
-        """Seconds the session has been idle (None when not idle)."""
+        """Seconds the session has been idle (None when not idle).
+
+        Agrees with :meth:`status`: a mid-turn session (footer marker present)
+        is not idle even though the transient heuristic has been quiet for a
+        while, so it reports None — one answer for both callers.
+        """
+        if self.exited or self._claude_turn_in_flight():
+            return None
         idle_for = self.tracker.idle_for(time.monotonic())
-        if idle_for is None or idle_for < self.idle_threshold or self.exited:
+        if idle_for is None or idle_for < self.idle_threshold:
             return None
         return idle_for
 

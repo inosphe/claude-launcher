@@ -43,18 +43,33 @@ def test_marker_overrides_heuristic_idle_to_busy(home, tmp_path, monkeypatch):
     async def run():
         s = _idle_session(CLAUDE_HARNESS, tmp_path, monkeypatch)
         assert s._heuristic_status(s.idle_threshold) == STATUS_IDLE  # precondition
-        # Mid-turn: only the spinner row moves (heuristic idle), footer carries
-        # the in-turn marker -> the dot must read busy.
-        s.screen.render_screen = lambda: [
-            "Whisking... (9m 54s / 16.2k tokens)",
-            "  auto mode on  ·  esc to interrupt  ·  1 agent",
-        ]
+        # Mid-turn: only the spinner row moves (heuristic idle), the footer
+        # carries the in-turn marker -> the dot must read busy.
+        s.screen.bottom_line = lambda: "  auto mode on  ·  esc to interrupt  ·  1 agent"
         assert s.status() == STATUS_BUSY
-        # Marker absent (awaiting input) -> falls back to the heuristic, idle.
+        # Marker absent from the footer (awaiting input) -> heuristic idle.
+        s.screen.bottom_line = lambda: "  auto mode on  ·  install gh for PR status  ·  1 agent"
+        assert s.status() == STATUS_IDLE
+        s._log.close()
+
+    asyncio.run(run())
+
+
+def test_marker_in_content_does_not_make_busy(home, tmp_path, monkeypatch):
+    # The marker is an ordinary English phrase that legitimately shows up in
+    # transcript content (a commit subject, a quoted docstring). Only the
+    # FOOTER row counts: a whole-grid scan pinned a genuinely idle session
+    # busy forever the moment such a row rendered.
+    async def run():
+        s = _idle_session(CLAUDE_HARNESS, tmp_path, monkeypatch)
+        # A transcript row renders the phrase; the footer (bottom row) does not.
         s.screen.render_screen = lambda: [
+            "Whisking... c8ab950: claude footer의 esc to interrupt 마커로 busy 판정 ...",
             "  auto mode on  ·  install gh for PR status  ·  1 agent",
         ]
-        assert s.status() == STATUS_IDLE
+        assert s.screen.render_screen()[-1].count("esc to interrupt") == 0
+        s.screen.bottom_line = lambda: s.screen.render_screen()[-1]
+        assert s.status() == STATUS_IDLE  # footer clean -> not a turn -> idle
         s._log.close()
 
     asyncio.run(run())
@@ -63,7 +78,7 @@ def test_marker_overrides_heuristic_idle_to_busy(home, tmp_path, monkeypatch):
 def test_marker_not_applied_to_non_claude_harness(home, tmp_path, monkeypatch):
     async def run():
         s = _idle_session("py", tmp_path, monkeypatch)
-        s.screen.render_screen = lambda: ["esc to interrupt"]  # marker present
+        s.screen.bottom_line = lambda: "esc to interrupt"  # marker present
         assert s.status() == STATUS_IDLE  # a non-claude harness ignores it
         s._log.close()
 
@@ -77,7 +92,7 @@ def test_await_readable_ignores_marker(home, tmp_path, monkeypatch):
     # starting session that has not painted the footer is not stalled.
     async def run():
         s = _idle_session(CLAUDE_HARNESS, tmp_path, monkeypatch)
-        s.screen.render_screen = lambda: ["esc to interrupt"]
+        s.screen.bottom_line = lambda: "  auto mode on  ·  esc to interrupt  ·  1 agent"
         s.screen.bracketed_paste = True
         assert s.status() == STATUS_BUSY
         await asyncio.wait_for(s._await_readable(), timeout=5)
