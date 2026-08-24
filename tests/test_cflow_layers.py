@@ -321,6 +321,26 @@ def test_the_leader_does_not_hide_a_human_decision_behind_an_agent_chooser():
     assert wf.steps["wrapup"].ask.delegate.otherwise == model.OTHERWISE_HUMAN
 
 
+def test_the_project_override_leader_gates_are_self_decided():
+    """The project-layer leader must carry the same gate reversal.
+
+    This repository's override shadows the bundled leader for every run here
+    (``PROJECT_OVERRIDES`` wins by layer precedence), so a repository that
+    drops the user approval from ``integrate``/``reflect`` only in the bundled
+    copy but keeps it in the override would run two different policies from
+    the same name. Mirror the contract: merge and deploy are the leader's
+    ``otherwise: self``, and the shift-end gate stays a human's call.
+    """
+    wf = model.load(PROJECT_OVERRIDES / "improv-leader.yaml")
+
+    integrate = wf.steps["integrate"].ask
+    assert integrate is not None
+    assert not integrate.delegate.candidates, "a self-decision must ask nobody"
+    assert integrate.delegate.otherwise == model.OTHERWISE_SELF
+    assert wf.steps["reflect"].ask.delegate.otherwise == model.OTHERWISE_SELF
+    assert wf.steps["wrapup"].ask.delegate.otherwise == model.OTHERWISE_HUMAN
+
+
 def test_a_global_install_seeds_the_global_layer(project, home):
     lines = install_mod.install_into_user()
     assert [line for line in lines if line.startswith("workflow ->")]
