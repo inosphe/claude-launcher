@@ -312,10 +312,16 @@ async function refreshSessions() {
     if (s.status === "exited") {
       li.title = [li.title, "exited — open it to resume"].filter(Boolean).join(" · ");
     }
-    // How full this session's context is, in the one place on a rail row that
-    // costs nothing to fill: the tooltip. Twenty rows is the question being
-    // answered, and a line per row would make the rail itself the problem.
+    // How full this session's context is, on the rail row itself. The story
+    // lives in the tooltip (a note on both the row and its name — that is
+    // still the only place the model and the breakdown fit), but the count
+    // now also shows in a small chip between the profile and the ⓘ, so a
+    // row can be scanned without a hover. A line per row would make the rail
+    // the problem, so the chip is the one slot that costs it nothing: a
+    // flex:none element on the profile line, and nothing where a harness
+    // keeps no transcript.
     ctxNoteOnRow(li, label, s);
+    const railCtx = ctxRailChip(s);
     // The row attaches — that is what the session is doing. This opens what
     // it *is* (definition, meshes, its cflow run) beside it, so the two are
     // not two places you have to travel between.
@@ -340,7 +346,7 @@ async function refreshSessions() {
     const head = document.createElement("span");
     head.className = "rail-head";
     head.append(label, ...(role ? [role] : []), ...(meshBox ? [meshBox] : []));
-    li.append(dot, head, meta, info);
+    li.append(dot, head, meta, ...(railCtx ? [railCtx] : []), info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
@@ -617,6 +623,22 @@ function ctxChip(name) {
     "span", "sess-brief-ctx" + (c ? "" : " unknown"),
     c ? `${ctxShort(c.tokens)} ctx` : "ctx ?"
   );
+  chip.title = ctxTooltip(s);
+  return chip;
+}
+
+/* The chip on a rail row itself — the same count the briefing card's head
+   shows, in the one slot a 260px row can afford without eating the name: the
+   bare short count ("155k"), greyed "?" where a claude session has not
+   answered yet, and nothing at all for a harness that keeps no transcript.
+   The story (model, age, breakdown, why there is no percentage) stays in the
+   tooltip, which the row already carries — this is the glance, not the
+   reading. */
+function ctxRailChip(s) {
+  if (!ctxKnowable(s)) return null;
+  const c = s && s.context;
+  const chip = el("span", "rail-ctx" + (c ? "" : " unknown"),
+                  c ? ctxShort(c.tokens) : "?");
   chip.title = ctxTooltip(s);
   return chip;
 }
