@@ -577,6 +577,7 @@ def test_update_with_force_backs_up_then_replaces(project, home, tmp_path, monke
 def test_update_an_unknown_copy_refuses_without_force(project, home, tmp_path, monkeypatch):
     """A file with no seed record is not provably stale — leave it alone."""
     _fake_bundle(tmp_path, monkeypatch, {"tiny.yaml": TINY.format(name="tiny", desc="v1")})
+    (home / "workflows").mkdir(parents=True, exist_ok=True)
     (home / "workflows" / "tiny.yaml").write_text(
         TINY.format(name="tiny", desc="pre-sidecar"), encoding="utf-8"
     )
