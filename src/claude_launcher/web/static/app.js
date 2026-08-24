@@ -4282,6 +4282,7 @@ let sessStartBox = null;  // reused across polls: it holds the user's typing
 let sessSendBox = null;   // and so does the message box — same reason
 let sessMigrateBox = null; // and the migrate picker — same reason again
 let sessReborrowBox = null; // and the borrow picker — same reason again
+let sessPermsBox = null;    // and the permissions toggle — same reason again
 let sessRunFold = null;   // reused across polls too: it holds open/shut
 let sessRunTimer = null;  // the fold's own poll, alive only while it is open
 let sessQuickJobBox = null; // the quick-job form — it holds a typed task
@@ -4299,6 +4300,7 @@ function dropDetail() {
   sessSendBox = null;
   sessMigrateBox = null;
   sessReborrowBox = null;
+  sessPermsBox = null;
   sessQuickJobBox = null;
   sessKidsBox = null;
   sessRunFold = null;
@@ -4332,6 +4334,7 @@ function repointDetail(name) {
   sessSendBox = null;
   sessMigrateBox = null;
   sessReborrowBox = null;
+  sessPermsBox = null;
   sessQuickJobBox = null;
   sessKidsBox = null;
   sessRunFold = null;
@@ -4581,6 +4584,7 @@ function renderSession(data) {
   for (const build of rolePanels(data)) view.appendChild(build(data));
 
   view.appendChild(sessReborrow(data));
+  view.appendChild(sessPerms(data));
   view.appendChild(sessMigrate(data));
 }
 
@@ -4722,6 +4726,110 @@ function sessReborrow(data) {
         : doc.null_token
           ? "restarted — now running with no token (--null)"
           : `restarted — back on ${doc.profile}'s own token`
+    );
+    // The restart relaunched a fresh PTY under the same name; a terminal
+    // attached to the old one is watching a socket that just died.
+    if (currentName === name) {
+      detach();
+      await refreshSessions();
+      attach(name);
+    } else {
+      refreshSessions();
+    }
+  });
+
+  return box;
+}
+
+/* ---- restart this session with permission prompts off — or back on ----
+   `claunch skip-permissions`, from the panel that names it. The flag lives
+   in the definition's args, so toggling it is the same kind of restart as
+   the auth picker's: stop, relaunch with the flag added or removed — same
+   name, same conversation, same directory. Binary, so one button rather
+   than a picker: it always offers the opposite of the current state. */
+function sessPerms(data) {
+  const s = data.session || {};
+  const box = el("div", "sess-perms");
+  box.appendChild(el("h3", null, "Permissions"));
+
+  if (s.harness !== "claude") {
+    sessPermsBox = null;
+    box.appendChild(el(
+      "p", "wf-note",
+      "--dangerously-skip-permissions is a claude-harness flag — " +
+      `this session runs ${s.harness || "?"}`
+    ));
+    return box;
+  }
+
+  // Rebuilt only when the toggle's state changes — same keep-the-node rule
+  // as the other restart pickers; a successful restart flips the key.
+  const skipping = (s.args || []).includes("--dangerously-skip-permissions");
+  const key = `${s.name}|${skipping ? 1 : 0}`;
+  if (sessPermsBox && sessPermsBox.dataset.slot === key) {
+    box.appendChild(sessPermsBox);   // appending moves the live node here
+    return box;
+  }
+  const form = el("div", "sess-perms-form");
+  form.dataset.slot = key;
+  sessPermsBox = form;
+  box.appendChild(form);
+
+  form.appendChild(el(
+    "p", "wf-note",
+    skipping
+      ? "never asks before it acts (--dangerously-skip-permissions). " +
+        "Turning the asks back on stops the session and relaunches it — " +
+        "same name, same conversation"
+      : "asks before it acts. Skipping the asks " +
+        "(--dangerously-skip-permissions) stops the session and relaunches " +
+        "it — same name, same conversation"
+  ));
+  const btn = el(
+    "button", "wf-btn option", skipping ? "Ask again" : "Skip permissions"
+  );
+  btn.title = skipping
+    ? "restart with the flag removed — claude asks before it acts"
+    : "restart with --dangerously-skip-permissions — claude stops asking";
+  const status = el("p", "wf-note hidden");
+  form.append(btn, status);
+
+  const say = (msg, cls) => {
+    status.className = cls || "wf-note";
+    status.textContent = msg;
+  };
+
+  btn.addEventListener("click", async () => {
+    if (btn.disabled) return;
+    const name = s.name;
+    btn.disabled = true;
+    say("restarting… (stopping it, relaunching with the flag toggled)");
+    let doc = {};
+    let resp;
+    try {
+      resp = await api(
+        `/api/sessions/${encodeURIComponent(name)}/skip-permissions`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ skip: !skipping }),
+        }
+      );
+      doc = await resp.json().catch(() => ({}));
+    } catch {
+      say("could not reach the daemon — nothing was changed", "wf-warning");
+      btn.disabled = false;
+      return;
+    }
+    btn.disabled = false;
+    if (!resp.ok) {
+      say(doc.error || `HTTP ${resp.status}`, "wf-warning");
+      return;
+    }
+    say(
+      (doc.args || []).includes("--dangerously-skip-permissions")
+        ? "restarted — now acting without asking"
+        : "restarted — asking before it acts again"
     );
     // The restart relaunched a fresh PTY under the same name; a terminal
     // attached to the old one is watching a socket that just died.

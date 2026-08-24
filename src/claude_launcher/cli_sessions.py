@@ -657,6 +657,32 @@ def _cmd_reborrow(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_skip_permissions(args: argparse.Namespace) -> int:
+    """Restart a session with permission prompts off (or back on)."""
+    client = daemon_client.ensure_running()
+    # Roomy like a migrate: a graceful shutdown plus a relaunch.
+    info = client.post(
+        f"/api/sessions/{args.session}/skip-permissions",
+        {"skip": args.mode == "on"},
+        timeout=120.0,
+    )
+    skipping = "--dangerously-skip-permissions" in (info.get("args") or [])
+    print(
+        f"session {info['name']!r} restarted, "
+        + (
+            "now skipping permission prompts — claude acts without asking "
+            "(pid {})".format(info.get("pid"))
+            if skipping
+            else "asking before it acts again (pid {})".format(info.get("pid"))
+        )
+    )
+    if args.attach:
+        from . import attach as attach_mod
+
+        return attach_mod.attach(client, info["name"])
+    return 0
+
+
 def _cmd_clear_sessions(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     doc = client.delete("/api/sessions" + ("?logs=1" if args.logs else ""))
@@ -1337,6 +1363,21 @@ def register(sub) -> None:
     )
     p_reborrow.set_defaults(func=_cmd_reborrow_dispatch)
 
+    p_skip = sub.add_parser(
+        "skip-permissions",
+        help="restart a session with claude's "
+             "--dangerously-skip-permissions added (on) or removed (off) — "
+             "stop it, relaunch it with the flag toggled: same name, same "
+             "conversation, same directory",
+    )
+    p_skip.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
+    p_skip.add_argument("session", nargs="?")
+    p_skip.add_argument("mode", nargs="?", choices=("on", "off"))
+    p_skip.add_argument(
+        "-a", "--attach", action="store_true", help="attach once restarted"
+    )
+    p_skip.set_defaults(func=_cmd_skip_permissions_dispatch)
+
     p_kill = sub.add_parser(
         "kill-session", help="kill a running session (or remove an exited one)"
     )
@@ -1459,6 +1500,22 @@ def _cmd_reborrow_dispatch(args: argparse.Namespace) -> int:
     if args.none:
         args.borrow = None
     return _cmd_reborrow(args)
+
+
+def _cmd_skip_permissions_dispatch(args: argparse.Namespace) -> int:
+    # ``-t S on``: with -t given, the first positional is the mode, not the
+    # session — argparse cannot tell them apart, so shift by hand.
+    if getattr(args, "session_t", None):
+        if args.session is not None and args.mode is None:
+            args.mode = args.session
+        args.session = args.session_t
+    if not args.session:
+        print("error: no session given", file=sys.stderr)
+        return 1
+    if not args.mode:
+        print("error: pass 'on' or 'off'", file=sys.stderr)
+        return 1
+    return _cmd_skip_permissions(args)
 
 
 def _cmd_kill_session_dispatch(args: argparse.Namespace) -> int:
