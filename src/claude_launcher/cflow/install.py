@@ -17,9 +17,12 @@ the other teaching ``ask:``. One file, read by everything, is the fix.
 from __future__ import annotations
 
 import filecmp
+import hashlib
+import json
+import os
 import shutil
 from pathlib import Path
-from typing import List, Tuple
+from typing import Dict, List, Tuple
 
 from . import state
 
@@ -280,6 +283,74 @@ SEEDED = "seeded"  #: nothing was there; the packaged copy is now
 UNCHANGED = "unchanged"  #: what is there is byte-for-byte the packaged copy
 KEPT = "kept"  #: something different is there, and it was left alone
 
+#: What ``claunch cflow update`` distinguishes beyond the seed itself. Two of
+#: them are not contradictory to ``KEPT`` — KEPT is what seeding *did* (left it
+#: alone), these are why, so KEPT is refined into one of them before a human
+#: sees it.
+STALE = "stale"  #: exactly the bytes we seeded; the packaged copy has moved on
+EDITED = "edited"  #: differs from both the packaged copy and what we seeded
+UNKNOWN = "unknown"  #: no seed record, so stale and edited are indistinguishable
+
+#: The sidecar that remembers, per global workflow file, the sha256 of the
+#: packaged bytes it was seeded from. File *names*, not workflow names — a
+#: sidecar of stems would collide the moment two workflows share a stem.
+SEED_RECORD_NAME = ".seeded.json"
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def seed_record(workflows_dir: Path) -> Dict[str, str]:
+    """The file-name -> sha256 map recording what was last seeded.
+
+    Absent or unreadable means there is no record, not that there is nothing
+    to remember: a layer seeded before the sidecar existed comes back empty,
+    and every file in it is then ``UNKNOWN`` — the honest answer, because
+    nothing can tell stale from edited without the memory.
+    """
+    path = workflows_dir / SEED_RECORD_NAME
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def write_seed_record(workflows_dir: Path, record: Dict[str, str]) -> None:
+    """Write the sidecar atomically — a torn half-JSON is a trashed memory
+    that turns every future file ``UNKNOWN`` for no good reason."""
+    path = workflows_dir / SEED_RECORD_NAME
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(
+        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    os.replace(tmp, path)
+
+
+def worktree_state(src: Path, dest: Path, record: Dict[str, str]) -> str:
+    """How a file in a layer relates to the packaged copy, given the record.
+
+    ``STALE`` is the case ``cflow update`` exists for: the layer copy is
+    exactly what we seeded (it equals the recorded hash) and the packaged
+    copy has since moved — replacing it loses nothing a human wrote. ``EDITED``
+    is the dangerous one: it matches neither the package nor the record, so a
+    person changed it since seeding, and a refresh must not be silent about
+    it. ``UNKNOWN`` is EDITED's twin without proof — no record at all.
+    """
+    if dest.is_file() and filecmp.cmp(src, dest, shallow=False):
+        return UNCHANGED
+    recorded = record.get(dest.name)
+    if recorded is None:
+        return UNKNOWN
+    return STALE if _sha256(dest) == recorded else EDITED
+
 
 def example_workflow() -> Path:
     """The packaged workflow ``claunch cflow example`` scaffolds from."""
@@ -308,6 +379,12 @@ def seed_global_workflows(force: bool = False) -> List[Tuple[str, Path, str]]:
     package is reported and left alone unless ``force``. That is the whole
     price of copying rather than reading the package at resolve time, and it
     is the deliberate one: the global layer is meant to be yours.
+
+    Each seed also writes the sha256 of the *packaged* bytes into
+    `.seeded.json` — the memory ``cflow update`` needs to tell a stale copy
+    (still byte-for-byte what we seeded, package moved on) from an edited one
+    (a person changed it since). A file left alone gets no record entry: an
+    edit is not a seed.
     """
     dest_dir = state.global_workflows_dir()
     sources = list(state.bundled_workflows())
@@ -315,9 +392,119 @@ def seed_global_workflows(force: bool = False) -> List[Tuple[str, Path, str]]:
     # rules — a workflow whose verify command looks them up in this layer is
     # broken without them.
     sources += [(src.stem, src) for src in state.bundled_workflow_assets()]
-    return [
-        (name, dest_dir / src.name, install_workflow(src, dest_dir / src.name, force))
-        for name, src in sources
+
+    record = seed_record(dest_dir)
+    outcomes = []
+    for name, src in sources:
+        dest = dest_dir / src.name
+        outcome = install_workflow(src, dest, force)
+        # A seed (or an identical re-seed) is the moment the record is made:
+        # the packaged bytes are what the layer is now seeded from. An edit is
+        # deliberately not recorded, so it stays "edited" to update.
+        if outcome in (SEEDED, UNCHANGED):
+            record[dest.name] = _sha256(src)
+        outcomes.append((name, dest, outcome))
+    write_seed_record(dest_dir, record)
+    return outcomes
+
+
+def update_global_workflows(
+    names: List[str],
+    force: bool = False,
+    can_ask: bool = False,
+) -> List[Tuple[str, str, bool, str]]:
+    """Bring stale global workflows up to the packaged copy — ``cflow update``.
+
+    Returns ``(name, outcome, applied, detail)`` per bundled workflow (or only
+    the requested ``names``). The states are the seed outcomes plus
+    ``worktree_state``: an ``UNCHANGED`` file is left alone, a ``STALE`` one is
+    overwritten (it is still the bytes we seeded, so nothing a human wrote is
+    lost), and an ``EDITED`` or ``UNKNOWN`` one is copied aside to a single
+    ``.bak`` slot and then overwritten — but only with ``--force``, or after a
+    live person accepted the prompt. ``applied`` records which actually
+    happened, so the caller reports the real outcome rather than assuming.
+
+    ``can_ask`` is the isatty guard, not a silent yes: when a real person is
+    at a terminal, the overwrite of an edited file is offered as a question
+    and only proceeds on an explicit answer. A script or an agent session
+    (which sets ``$CLAUNCH_SESSION``) cannot be asked, and must pass
+    ``--force`` explicitly. That is the whole distinction — an agent's "yes"
+    is not the operator's.
+    """
+    dest_dir = state.global_workflows_dir()
+    sources = list(state.bundled_workflows()) + [
+        (src.stem, src) for src in state.bundled_workflow_assets()
     ]
+
+    record = seed_record(dest_dir)
+    outcomes = []
+    for name, src in sources:
+        if names and name not in names:
+            continue
+        dest = dest_dir / src.name
+
+        if not dest.is_file():
+            outcome = SEEDED
+            detail = "installed from the packaged copy"
+        elif filecmp.cmp(src, dest, shallow=False):
+            outcome = UNCHANGED
+            detail = "already current"
+        else:
+            recorded = record.get(dest.name)
+            if recorded is None:
+                outcome = UNKNOWN
+                detail = "no seed record — cannot prove stale from edited"
+            elif _sha256(dest) == recorded:
+                outcome = STALE
+                detail = "replacing the previously seeded copy"
+            else:
+                outcome = EDITED
+                detail = "differs from both the package and the seed record"
+
+        applied = False
+        if outcome in (STALE, SEEDED):
+            install_workflow(src, dest, force=True)
+            record[dest.name] = _sha256(src)
+            applied = True
+        elif outcome in (EDITED, UNKNOWN):
+            if force or (can_ask and _confirm_replace(name)):
+                _backup_one(dest)
+                install_workflow(src, dest, force=True)
+                record[dest.name] = _sha256(src)
+                detail = "replaced from the package (previous kept as .bak)"
+                applied = True
+            elif not force:
+                detail = f"{detail}; pass --force to replace (kept as .bak)"
+        outcomes.append((name, outcome, applied, detail))
+
+    write_seed_record(dest_dir, record)
+    return outcomes
+
+
+def _confirm_replace(name: str) -> bool:
+    """Ask the person at the terminal whether an edited copy may be replaced.
+
+    ``can_ask`` only means a person might be reached; this is where they are
+    actually reached. A refused answer (or EOF) is a refusal — never a
+    default-yes.
+    """
+    try:
+        answer = input(f"overwrite edited workflow {name!r}? [y/N]: ").strip().lower()
+    except EOFError:
+        return False
+    return answer in ("y", "yes")
+
+
+def _backup_one(dest: Path) -> Path:
+    """Copy ``dest`` to a single ``.bak`` slot, replacing any earlier one.
+
+    One slot, not a numbered sequence: the previous backup is a stale snapshot
+    of an already-replaced file, and keeping it would make a pile of versions
+    nobody can tell apart. The one before the current overwrite is the one
+    that matters.
+    """
+    bak = dest.with_name(dest.name + ".bak")
+    shutil.copyfile(dest, bak)
+    return bak
 
 

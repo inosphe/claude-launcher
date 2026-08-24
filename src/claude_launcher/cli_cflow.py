@@ -575,6 +575,34 @@ def _report_shadowing(name: str, layer: str) -> None:
         print(f"  note: here, {winner.origin} wins — {winner.path}")
 
 
+def _cmd_update(args: argparse.Namespace) -> int:
+    from . import worktree
+
+    # The isatty guard, shared with worktree pruning: a real terminal gets a
+    # prompt for edited files, a script or an agent session
+    # (``$CLAUNCH_SESSION`` set) cannot and must say --force instead.
+    can_ask = worktree.interactive()
+    outcomes = install.update_global_workflows(
+        list(args.name),
+        force=args.force,
+        can_ask=can_ask,
+    )
+    failed = False
+    for name, outcome, applied, detail in outcomes:
+        if applied:
+            print(f"{name}: {detail}")
+        else:
+            # refused (an edited/unknown file without --force, or a "no")
+            print(f"{name}: kept — {detail}", file=sys.stderr)
+            failed = True
+    if failed and not can_ask:
+        print(
+            "run with --force to replace edited files (each kept as .bak)",
+            file=sys.stderr,
+        )
+    return 1 if failed else 0
+
+
 def _cmd_mcp(_args: argparse.Namespace) -> int:
     from .cflow import mcp
 
@@ -716,6 +744,23 @@ def register(sub) -> None:
         "--force", action="store_true", help="replace a different file already there"
     )
     q.set_defaults(func=_cmd_add)
+
+    q = csub.add_parser(
+        "update",
+        help="bring stale global workflows up to the packaged copies "
+        "(edited ones are kept unless --force)",
+    )
+    q.add_argument(
+        "name",
+        nargs="*",
+        help="workflow(s) to update; without names, every packaged workflow",
+    )
+    q.add_argument(
+        "--force",
+        action="store_true",
+        help="replace edited/unknown files without asking (each kept as one .bak)",
+    )
+    q.set_defaults(func=_cmd_update)
 
     q = csub.add_parser("mcp", help="run the stdio MCP server (spawned by claude)")
     q.set_defaults(func=_cmd_mcp)
