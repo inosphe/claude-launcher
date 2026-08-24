@@ -28,7 +28,7 @@ from . import keys as keys_mod
 from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
 from .idle import IdleTracker
-from .screen import ScreenState
+from .screen import ScreenFeeder, ScreenState
 
 #: Screen sampling cadence for idle detection (seconds).
 SAMPLE_INTERVAL = 0.4
@@ -122,6 +122,7 @@ class Session:
         self.pid: Optional[int] = None
         self.idle_threshold = idle_threshold
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
+        self._feeder = ScreenFeeder(self.screen)
         self.tracker = IdleTracker()
         self.created_at = _utcnow()
         self.last_output_at: Optional[str] = None
@@ -183,9 +184,21 @@ class Session:
             return
         self._saw_output = True
         self.last_output_at = _utcnow()
-        self.screen.feed(chunk)
+        # Queued, not rendered here: pyte is CPU-bound and this runs on the
+        # event loop, where a flooding session used to stall accept() (see
+        # ScreenFeeder). Logging and the viewer broadcast stay inline — both
+        # are cheap, and attached terminals must not lag behind the PTY.
+        self._feeder.submit(chunk)
         self._append_log(chunk)
         self._broadcast(("data", chunk))
+
+    async def screen_synced(self) -> None:
+        """Wait for the grid to catch up with the bytes received so far.
+
+        For the readers that must be exact rather than merely current — a
+        capture, the repaint an attaching viewer gets.
+        """
+        await self._feeder.drained()
 
     def _append_log(self, chunk: bytes) -> None:
         try:
@@ -211,6 +224,11 @@ class Session:
         self.exit_code = self.pty.exit_code()
         self.exited_at = _utcnow()
         self._status = STATUS_EXITED
+        # The last words of a session are the ones somebody reads afterwards,
+        # so the queue is rendered out (synchronously — the loop has nothing
+        # left to starve for this session) rather than dropped with the pump.
+        self._feeder.drain_now()
+        self._feeder.close()
         if self._sampler:
             self._sampler.cancel()
         try:
