@@ -61,7 +61,10 @@ harnesses: ``ctxsize_check`` on how full a session's conversation is said to
 be (a count with no percentage beside it, because no denominator exists to
 make one from, and an absence that must never be drawn as a zero) and
 ``railctx_check`` on where that ends up on a rail row, which is a separate
-failure — a note that stops being hung on anything leaves no trace at all.
+failure — a note that stops being hung on anything leaves no trace at all,
+and ``railhome_check`` on the rail's own wordmark, which doubles as the link
+back to the root route ("#/") and so has to look like a title and not like
+a browser's default link.
 This wrapper is what makes them run with everything else.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
@@ -111,6 +114,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "ctxsize_check.js",
         "railctx_check.js",
         "wfscroll_check.js",
+        "railhome_check.js",
     ],
 )
 def test_topology_diagram_logic(script):
