@@ -34,10 +34,15 @@ cannot drag the native popup past the viewport edge — ``sesslayout_check``
 on the per-session layout — the Details/Workflow radio, the run pane halved
 into the terminal's column, and the localStorage both are remembered in —
 ``rolepanel_check`` on the panels a session gets for its ROLE — which roles
-claim which panels, the leader's quick-job spawn (what its pickers put in the
-request, and how a refused policy reads) and its reaping nudge, which reports
-idle children into the leader's own terminal rather than killing anything —
-``queued_check`` on
+claim which panels, the leader's quick-job dispatch (its pickers now seed the
+spawn wizard rather than POSTing, and how a refused policy keeps the button
+dead) and its reaping nudge, which reports idle children into the leader's own
+terminal rather than killing anything — ``spawnmodal_check`` on the spawn
+wizard as a dialog — the rail's +, the detail panel's Spawn button and the
+leader's quick job all landing in it with the opener pinned as the parent; the
+brain's gating (a policy-locked row greys with the key that opens it) and the
+payload it emits reading through the disables, plus what the modal remembers
+between spawns — ``queued_check`` on
 the queued-deliveries banner — the backlog the daemon is holding for the
 attached session, and whose keyboard it blames for the hold — ``seq_check`` on the
 message trace's event list — the order a mesh's traffic is read in, and what
@@ -109,6 +114,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "wheel_check.js",
         "sesslayout_check.js",
         "rolepanel_check.js",
+        "spawnmodal_check.js",
         "queued_check.js",
         "seq_check.js",
         "seqrender_check.js",

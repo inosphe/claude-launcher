@@ -1887,3 +1887,46 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
      path is enough to push the panel off the side of the screen */
   #mesh-view select, #wf-view select, #sess-view select { max-width: 100%; }
 }
+
+/* The spawn wizard as a dialog: every session's fleet-growing verb. The
+   confirm dialogs the overlay normally holds are 460px of prose; a form is
+   neither — the overlay gets a class while the spawn modal owns it, and the
+   box widens. */
+#modal-overlay.spawn-open .modal-box { width: 700px; }
+#modal-overlay.spawn-open #modal-body { white-space: normal; }
+.sess-spawn-parent { margin: 0 0 12px; color: #9da5b0; font: inherit; }
+.sess-spawn {
+  display: flex; flex-direction: column; gap: 9px;
+  max-height: 58vh; overflow-y: auto; padding-right: 4px;
+}
+.sess-spawn-row {
+  display: grid; grid-template-columns: 130px minmax(0, 1fr);
+  gap: 3px 14px; align-items: center;
+}
+.sess-spawn-label { color: #7d8590; font-size: 12px; }
+.sess-spawn select, .sess-spawn input, .sess-spawn textarea {
+  color: #e6edf3; background: #101318; border: 1px solid #333b45;
+  border-radius: 5px; padding: 4px 6px; font-size: 12.5px; min-width: 0;
+  box-sizing: border-box;
+}
+.sess-spawn textarea { resize: vertical; }
+.sess-spawn input[type=checkbox] { width: auto; accent-color: #238636; }
+.sess-spawn label.check {
+  grid-column: 1 / -1; justify-self: start; align-items: baseline;
+}
+.sess-spawn .check + .sess-spawn-note {
+  grid-column: 1 / -1; padding-left: 22px;
+}
+.sess-spawn-note { grid-column: 2; color: #7d8590; font-size: 11.5px; }
+.sess-spawn-connect {
+  display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: center;
+}
+.sess-spawn-connect .sess-spawn-label { flex-basis: 100%; }
+.sess-spawn-connect label.check { grid-column: auto; }
+/* The rail's '+', the sibling of the details 'ⓘ' that CREATES rather than
+   describes — so it wears the green of an approved action on hover. */
+#session-list .sess-plus {
+  flex: none; background: none; border: none; color: #6e7681;
+  font-size: 15px; line-height: 1; padding: 1px 6px; cursor: pointer;
+}
+#session-list .sess-plus:hover { color: #3fb950; }

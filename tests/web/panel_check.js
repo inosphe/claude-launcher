@@ -300,19 +300,19 @@ check("...and no Open terminal that opens what is open",
 check("...but still says which session", h.kids[0].text === "coder3");
 
 h = headOf("s7");
-check("aimed elsewhere it keeps both", kidsOf(h, "sess-close").length === 1 &&
-      kidsOf(h, "wf-btn").length === 1);
+check("aimed elsewhere it keeps both ways out and the spawn verb",
+      kidsOf(h, "sess-close").length === 1 && kidsOf(h, "wf-btn").length === 2);
 check("...and says it is elsewhere", kidsOf(h, "sess-elsewhere").length === 1);
 
 termUp = false;                                // a page is over the terminal
 h = headOf("coder3");
 check("with the terminal covered both come back — there is no chip on screen",
-      kidsOf(h, "sess-close").length === 1 && kidsOf(h, "wf-btn").length === 1);
+      kidsOf(h, "sess-close").length === 1 && kidsOf(h, "wf-btn").length === 2);
 
 termUp = true; narrow = true;                  // and a phone has no header at all
 h = headOf("coder3");
 check("on a phone both stay", kidsOf(h, "sess-close").length === 1 &&
-      kidsOf(h, "wf-btn").length === 1);
+      kidsOf(h, "wf-btn").length === 2);
 narrow = false;
 ctx.setCur("coder2");
 
