@@ -905,6 +905,55 @@ function applyBriefingCards() {
     if (old) old.remove();
     if (open) li.appendChild(renderBriefingCard(name, briefingCache.get(name)));
   }
+  // And the current session's top-bar button + pane, now the rail exists.
+  applyBriefingTop();
+}
+
+/* The top header's briefing control: the same feature the row ▸ carries,
+   sized up so it is discoverable from the strip below the header instead of
+   a glyph in a 260px rail. The button owns the current session's card —
+   opening it here opens the row's too, and vice versa — and, without an
+   llm: block, goes inert with a tooltip that says how to turn it on, a
+   louder echo of the disabled row toggle. Safe to call any time; the pane
+   and button are hidden by the view system when no terminal is up. */
+function applyBriefingTop() {
+  const btn = $("term-brief");
+  if (!btn) return;
+  const open = briefingLLM && currentName && briefingOpen.has(currentName);
+  btn.disabled = !briefingLLM || !currentName;
+  btn.setAttribute("aria-pressed", open ? "true" : "false");
+  btn.title = briefingLLM
+    ? "briefing: goal, current work, state — summarised"
+    : "briefing off — set the llm section (endpoint, model, api_key)"
+      + " in ~/.claunch.yaml to enable";
+  btn.textContent = (open ? "▾ " : "▸ ") + "briefing";
+  const pane = $("term-brief-pane");
+  if (!pane) return;
+  pane.innerHTML = "";
+  if (open) pane.appendChild(renderBriefingCard(currentName, briefingCache.get(currentName)));
+  pane.classList.toggle("hidden", !open);
+}
+
+/* The detail panel's copy of the summary: the same card the ▸ toggles open,
+   drawn under the session's facts so the panel says what the session is
+   DOING instead of only what it is. Fetches on first open — the 2s poll
+   repaints from the cache, and the card's own ⟳ still refreshes it. Without
+   an llm: block the drawer is a static pointer at the config to write, so
+   someone who just set the section sees it acknowledged. */
+function sessBriefSection(name) {
+  const box = el("div", "sess-brief-section");
+  box.appendChild(el("h3", null, "Briefing"));
+  if (!briefingLLM) {
+    box.appendChild(el(
+      "p", "sess-brief-note",
+      "briefing off — set the llm section (endpoint, model, api_key)"
+        + " in ~/.claunch.yaml to enable"
+    ));
+    return box;
+  }
+  if (!briefingCache.has(name)) fetchBriefing(name, false);
+  box.appendChild(renderBriefingCard(name, briefingCache.get(name)));
+  return box;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1749,6 +1798,13 @@ $("term-resume").addEventListener("click", async () => {
     attach(info.name || name);
   } catch { /* auth overlay is up */ }
   finally { btn.disabled = false; }
+});
+
+/* The top briefing button: fold open (or shut) the current session's summary
+   card in the pane under the header. Same ownership as the row ▸, so the two
+   stay in step — opening from the header also opens it on the row. */
+$("term-brief").addEventListener("click", () => {
+  if (currentName) toggleBriefing(currentName);
 });
 
 /* Rebrief: have the daemon re-derive this session's briefing (mesh roster,
@@ -5032,6 +5088,12 @@ function renderSession(data) {
     metaRow(dl, "exited", `${(s.exited_at || "").replace("T", " ")} (code ${s.exit_code ?? "?"})`);
   }
   view.appendChild(dl);
+
+  // What this session is DOING, next to the facts above: the llm summary,
+  // fetched on first open and repainted by the 2s poll, with the card's own
+  // ⟳ for a fresh read. Here, high up, because it is the reason the panel
+  // gets opened more often than the metadata is.
+  if (s.name) view.appendChild(sessBriefSection(s.name));
 
   // Above the memberships, because it is what they are FOR: the list says
   // which rooms this session can be spoken to in, this says something in one.

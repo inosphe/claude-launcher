@@ -124,6 +124,12 @@
            because that is where it appears. -->
       <span class="term-actions">
         <button id="term-resume" class="term-btn hidden">resume</button>
+        <!-- The summary card, at top height: the row ▸ on the rail is the same
+             feature, but it hides in a 260px rail next to the name; people who
+             set the llm section and see nothing change are looking here. The
+             glyph and the disabled state are owned by applyBriefingTop. -->
+        <button id="term-brief" class="term-btn"
+                title="briefing: goal, current work, state — summarised">briefing</button>
         <button id="term-rebrief" class="term-btn"
                 title="re-type this session's briefing (mesh, run, parent, task) into its terminal — for an agent whose context was cleared or compacted">rebrief</button>
         <button id="term-kill" class="term-btn">kill</button>
@@ -154,6 +160,11 @@
          keystrokes keep the keyboard busy). Rendered by renderTermQueued();
          hidden whenever the backlog is empty. -->
     <div id="term-queued" class="hidden"></div>
+    <!-- The briefing card the top toggle folds open: the strip that belongs to
+         the summary, between the header and the terminal, so the answer sits
+         on top of the thing it is about. Empty and hidden except while the
+         current session's briefing is open. -->
+    <div id="term-brief-pane" class="hidden"></div>
     <div id="terminal"></div>
     <!-- Split mode's bar and pane, under the terminal they halve. The pane
          renders the same material as #/wf/<scope|cwd>; both stay hidden

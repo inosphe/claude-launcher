@@ -52,7 +52,10 @@ is arrow keys) becoming ``scroll`` controls answered with repaints over
 the daemon's history, and the chip that says so,
 ``briefcard_check`` on the rail's briefing card — the session summary a row
 folds open, and which of the daemon's answers (a briefing, unshaped prose,
-no LLM, no record) it is showing — ``spawnform_check`` on the create form
+no LLM, no record) it is showing — ``briefingtop_check`` on the same card's
+two other homes, the top header's toggle (whose pane sits between the
+header and the terminal) and the detail panel's section, bound to the same
+open-set and off-state — ``spawnform_check`` on the create form
 turned into a spawn — what a child may be asked once a parent is named, and
 when the parent's conversation is on offer to fork — and the two
 ``flow*_check`` harnesses on the flow view — one on the track a workflow
@@ -105,6 +108,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "zoom_check.js",
         "reconnect_check.js",
         "briefcard_check.js",
+        "briefingtop_check.js",
         "spawnform_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
