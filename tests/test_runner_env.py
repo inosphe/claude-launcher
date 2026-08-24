@@ -240,3 +240,41 @@ def test_borrow_keeps_running_profile_env_over_lender_provider(home):
     store.set_profile_field("lender", "provider", "backend")
     env = runner.child_env(runner_p, with_token=True, borrow=lender)
     assert env["ANTHROPIC_MODEL"] == "runner-model"
+
+
+def test_borrow_lends_profile_env_above_provider_below_runner(home):
+    # Borrow carries the lender's provider *and* its env: the lender's env is a
+    # fill layer above the provider's defaults, so a key the runner never sets
+    # shows through the way the lender's own backend would use it natively —
+    # while the runner's env still wins for any key it does set, and a key
+    # neither profile sets falls through to the provider.
+    runner_p = profile.create("work")
+    settings.set_env(runner_p, {"ANTHROPIC_MODEL": "runner-model"})
+    lender = profile.create("glmprof")
+    settings.set_env(
+        lender,
+        {
+            "ANTHROPIC_MODEL": "lender-model",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "lender-opus",
+        },
+    )
+    store.update(
+        lambda doc: doc.update(
+            {
+                "providers": {
+                    "backend": {
+                        "env": {
+                            "ANTHROPIC_MODEL": "provider-model",
+                            "ANTHROPIC_DEFAULT_OPUS_MODEL": "provider-opus",
+                            "ANTHROPIC_DEFAULT_SONNET_MODEL": "provider-sonnet",
+                        }
+                    }
+                }
+            }
+        )
+    )
+    store.set_profile_field("glmprof", "provider", "backend")
+    env = runner.child_env(runner_p, with_token=True, borrow=lender)
+    assert env["ANTHROPIC_MODEL"] == "runner-model"  # runner's own key still wins
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "lender-opus"  # lender fills the gap
+    assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "provider-sonnet"  # provider falls through
