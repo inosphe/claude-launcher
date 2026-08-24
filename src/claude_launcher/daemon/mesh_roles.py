@@ -96,6 +96,11 @@ class Role:
     task_poll: str = ""
     #: Whether members of this role receive stall warnings about others.
     stall_watch: bool = False
+    #: At most one LIVE member of this role per mesh. Enforced at join, on
+    #: the authority, against the roster's liveness — a holder whose session
+    #: has exited does not block a successor. Never retroactive: two holders
+    #: enrolled before the flag (or while one looked dead) both keep the role.
+    exclusive: bool = False
 
     def to_dict(self) -> dict:
         """The document form, with empty/default fields omitted."""
@@ -104,6 +109,8 @@ class Role:
             out["aliases"] = list(self.aliases)
         if self.stall_watch:
             out["stall_watch"] = True
+        if self.exclusive:
+            out["exclusive"] = True
         if self.task_poll:
             out["task_poll"] = self.task_poll
         if self.stance:
@@ -318,9 +325,19 @@ roles:
   leader:
     aliases: [lead, moderator, mod, chair]
     stall_watch: true
+    # One live leader per mesh. Integration authority over shared resources
+    # (the repo's main branch, the test window, the live daemon) cannot be
+    # held twice without the holders spending their time coordinating with
+    # each other; a second command line becomes a nested worker instead.
+    exclusive: true
     stance: |
       You set direction and OWN the decisions: scope, priority, tradeoffs,
-      tie-breaks. Break a circling impasse with an explicit, recorded call.
+      tie-breaks. You are this mesh's ONLY leader: integration of shared
+      resources (main branch, full-sweep window, live services) is yours
+      alone. A member running its own crew is a nested worker — it collects
+      its children's work into its own branch and requests integration from
+      the chain above; it never lands shared state itself.
+      Break a circling impasse with an explicit, recorded call.
       Fan work out as ONE batch send so each member reads only its own slice;
       broadcast only what genuinely binds everyone. Audit a consensus before
       certifying it — a peer caving to end the thread is not agreement.
@@ -404,11 +421,13 @@ def _text(value, cap: int, what: str) -> str:
 def _parse_role(name: str, body) -> Role:
     if not isinstance(body, dict):
         raise RoleError(f"role {name!r} must be a mapping, got {body!r}")
-    unknown = sorted(set(body) - {"aliases", "stance", "task_poll", "stall_watch"})
+    unknown = sorted(
+        set(body) - {"aliases", "stance", "task_poll", "stall_watch", "exclusive"}
+    )
     if unknown:
         raise RoleError(
             f"role {name!r} has unknown key(s): {', '.join(unknown)} "
-            "(allowed: aliases, stance, task_poll, stall_watch)"
+            "(allowed: aliases, stance, task_poll, stall_watch, exclusive)"
         )
     raw_aliases = body.get("aliases") or []
     if not isinstance(raw_aliases, list):
@@ -431,6 +450,7 @@ def _parse_role(name: str, body) -> Role:
             ).split()
         ),
         stall_watch=bool(body.get("stall_watch")),
+        exclusive=bool(body.get("exclusive")),
     )
 
 
@@ -642,6 +662,15 @@ def resolve(override: Optional[dict] = None) -> RoleSet:
         raise RoleError(
             f"default role {default!r} is not defined (roles: "
             f"{', '.join(sorted(roles))})"
+        )
+    if roles[default].exclusive:
+        # The default is what an unlabelled handle falls into; an exclusive
+        # default would make the SECOND plain join of a mesh's life an error
+        # nobody asked for.
+        raise RoleError(
+            f"default role {default!r} cannot be exclusive — every unlabelled "
+            f"member falls into the default, and an exclusive one would refuse "
+            f"the second of them"
         )
     return RoleSet(
         roles=roles,

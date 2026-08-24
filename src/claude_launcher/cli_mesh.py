@@ -616,11 +616,17 @@ def _cmd_roles(args: argparse.Namespace) -> int:
               f"forwarded there, then comes back to every daemon")
     print()
     print(f"{'role':<12} {'aliases':<44} members")
+    legend = False
     for role in payload.get("roles", []):
         aliases = ", ".join(role.get("aliases") or []) or "-"
         held = ", ".join(role.get("members") or []) or "-"
-        flag = " *" if role.get("stall_watch") else ""
+        flag = (" *" if role.get("stall_watch") else "") + (
+            "!" if role.get("exclusive") else ""
+        )
+        legend = legend or bool(role.get("exclusive"))
         print(f"{role['name'] + flag:<12} {aliases[:43]:<44} {held}")
+    if legend:
+        print("  (! = exclusive: at most one live holder per mesh)")
     if payload.get("orphans"):
         print()
         print("roles held by a member but no longer defined (uploads are not "

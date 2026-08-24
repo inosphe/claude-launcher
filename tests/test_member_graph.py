@@ -347,9 +347,12 @@ def test_a_role_rule_connects_across_the_tree(home, tmp_path):
         mm = MeshManager(mgr, root=tmp_path / "mesh")
         mm.create("team")
         await mm.set_roles("team", RULES_WORKER_REVIEWER)
+        # The second fleet's root is a plain (reviewer) root, not a second
+        # leader — the packaged leader is exclusive per mesh, and this test
+        # is about the tree boundary, which any root provides.
         for name, parent in (
             ("lead", None), ("coder1", "lead"), ("qa1", "lead"),
-            ("lead2", None), ("coder2", "lead2"),
+            ("root2", None), ("coder2", "root2"),
         ):
             mgr.create(SessionDef(name=name, harness="py", parent=parent))
             await mm.join("team", name)
