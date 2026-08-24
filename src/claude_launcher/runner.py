@@ -57,16 +57,21 @@ def child_env(
     ``null_token`` (``run --null``) launches with no OAuth token at all: the
     profile's stored token is not injected, and any value inherited from the
     shell or pinned by profile/provider env is dropped, so claude starts
-    unauthenticated (log in with /login).
+    unauthenticated (log in with /login). ``borrow`` (``run --borrow``)
+    swaps auth — and the backend it talks to — to another profile: the
+    lender's provider token *and* its env come along, its env as a fill layer
+    below the runner's own env, which keeps final responsibility for every key.
     """
     env = dict(os.environ if base_env is None else base_env)
     env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
     provider_env: dict = {}
+    lender_env: dict = {}
     if with_token:
-        # A `--borrow` swaps both the token *and* the provider: the running
-        # profile's config dir, env and skills stay put, but auth (and the
-        # backend it talks to) comes from the borrowed profile. An explicit
-        # --provider beats both.
+        # A `--borrow` swaps auth, and the backend it talks to, to the lender:
+        # the running profile's config dir and skills stay put, but the lender's
+        # provider *and* its own env arrive as backend defaults — the lender's
+        # env fills keys the runner never set, while the runner's env below
+        # keeps final say over every key. An explicit --provider beats both.
         auth_source = borrow if borrow is not None else profile
         provider = provider_override or providers.resolve_name(auth_source)
         # Provider env is a low-priority backend default: it sits above the
@@ -74,9 +79,16 @@ def child_env(
         # override any provider key (e.g. CLAUDE_CODE_AUTO_COMPACT_WINDOW).
         provider_env = providers.provider_env(provider)
         env.update(provider_env)
+        if borrow is not None:
+            # The lender's profile env is one more fill layer: above the
+            # provider's defaults (borrowing a profile should behave like that
+            # profile's backend natively) but below the runner's own env
+            # (borrowing never surrenders a key the runner sets itself).
+            lender_env = lineage.effective_env(borrow)
+            env.update(lender_env)
     # Per-profile env vars (inherited from any parent, then the profile's own)
-    # take precedence over the shell and the provider — that is the point of an
-    # isolated profile.
+    # take precedence over the shell, the provider and a borrow's env — that is
+    # the point of an isolated profile.
     profile_env = lineage.effective_env(profile)
     env.update(profile_env)
     if with_token:
@@ -92,7 +104,7 @@ def child_env(
             # A custom backend never uses the Anthropic OAuth var; drop any
             # shell leftover unless the config file set it explicitly (the
             # provider pattern pins it to "").
-            if OAUTH_TOKEN_ENV not in {**provider_env, **profile_env}:
+            if OAUTH_TOKEN_ENV not in {**provider_env, **lender_env, **profile_env}:
                 env.pop(OAUTH_TOKEN_ENV, None)
         else:
             # Plain Anthropic: inject the (own/inherited/borrowed) OAuth token.
