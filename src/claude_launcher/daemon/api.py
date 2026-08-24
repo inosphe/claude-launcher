@@ -22,7 +22,7 @@ from aiohttp import web
 from .. import __version__, harnesses as harness_registry
 from .. import profile as profile_mod, quickjob, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
-from . import briefing, cflow_clock, onboard, rebrief
+from . import briefing, cflow_clock, ctxsize, onboard, rebrief
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
@@ -1692,7 +1692,12 @@ async def h_peer_deliver(request: web.Request) -> web.Response:
 
 async def h_sessions_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
-    return web.json_response({"sessions": [s.info() for s in manager.list()]})
+    # ``attach`` rather than ``info`` — every reader of this list wants to know
+    # which session is filling up, and the reading is cached against the
+    # transcript's own mtime, so a poll where nothing was said costs one stat.
+    return web.json_response(
+        {"sessions": [ctxsize.attach(s) for s in manager.list()]}
+    )
 
 
 async def h_sessions_create(request: web.Request) -> web.Response:
@@ -1994,7 +1999,7 @@ async def h_session_meta(request: web.Request) -> web.Response:
     """
     manager: SessionManager = request.app["manager"]
     session = manager.get(request.match_info["name"])
-    info = session.info()
+    info = ctxsize.attach(session)
     name = info["name"]
     cwd = _session_cwd(session)
 

@@ -187,6 +187,18 @@ body {
 .sess-brief-state.st-done { background: #12261e; color: #3fb950; }
 .sess-brief-state.st-other { background: #191d24; color: #7d8590; }
 .sess-brief-age { color: #7d8590; font-size: 11px; }
+/* How full the conversation is, on the card's head line. Monospace because
+   it is a number read against other rows' numbers, and deliberately quiet:
+   nothing here knows the limit, so it must not look like a warning against
+   one. The unknown form is greyed and italic so it reads as an absence
+   rather than a very small measurement. */
+.sess-brief-ctx {
+  flex: none; font-family: SFMono-Regular, Consolas, monospace;
+  font-size: 11px; color: #8b949e; background: #161b22;
+  border: 1px solid #21262d; border-radius: 4px;
+  padding: 0 5px; line-height: 16px;
+}
+.sess-brief-ctx.unknown { color: #6e7681; font-style: italic; }
 .sess-brief-refresh {
   margin-left: auto; flex: none; background: none; border: none;
   color: #6e7681; font-size: 13px; line-height: 1; padding: 0 2px;

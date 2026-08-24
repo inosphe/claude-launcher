@@ -50,8 +50,13 @@ no LLM, no record) it is showing — ``spawnform_check`` on the create form
 turned into a spawn — what a child may be asked once a parent is named, and
 when the parent's conversation is on offer to fork — and the two
 ``flow*_check`` harnesses on the flow view — one on the track a workflow
-becomes, one on the page those tracks are drawn into. This wrapper is what
-makes them run with everything else.
+becomes, one on the page those tracks are drawn into — and the two context
+harnesses: ``ctxsize_check`` on how full a session's conversation is said to
+be (a count with no percentage beside it, because no denominator exists to
+make one from, and an absence that must never be drawn as a zero) and
+``railctx_check`` on where that ends up on a rail row, which is a separate
+failure — a note that stops being hung on anything leaves no trace at all.
+This wrapper is what makes them run with everything else.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
 testing this project, never a requirement for using it.
@@ -94,6 +99,8 @@ WEB = Path(__file__).resolve().parent / "web"
         "spawnform_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
+        "ctxsize_check.js",
+        "railctx_check.js",
     ],
 )
 def test_topology_diagram_logic(script):
