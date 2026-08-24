@@ -415,9 +415,8 @@ steps:
         마감하는가? 어느 쪽이든 머지 실행은 상위 세션의 몫이고, master
         머지는 그중 리더의 통합 단계에서만 일어난다 — 이 워커가 하지
         않는다.
-        워커에게: 제안은 select 도구로 남기되 확정은 사용자의 것이다 —
-        CLI(claunch cflow select)로 스스로 확정하지 않는다. 결정까지
-        대기가 프로토콜이다.
+      # 사용자 결정 — 워커의 select 제안은 같은 열린 결정에 얹힌다(상태가
+      # 바뀌지 않는다), 확정은 CLI(claunch cflow select)/대시보드에서 사용자가.
       chooser: user
       options:
         request:
