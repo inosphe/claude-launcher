@@ -170,6 +170,7 @@ function stopWfPoll() {}
 function stopMeshPoll() {}
 function linkDown() {}
 function sendInput() {}
+function watchComposer() {}   // the typing marks belong to typing_check.js
 function handleWheel() {}
 `;
 
