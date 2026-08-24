@@ -101,6 +101,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "flowrender_check.js",
         "ctxsize_check.js",
         "railctx_check.js",
+        "wfscroll_check.js",
     ],
 )
 def test_topology_diagram_logic(script):

@@ -3400,6 +3400,45 @@ function renderWf(data) {
   renderWfInto($("wf-view"), data, wfPageUi);
 }
 
+/* The workflow view rebuilds itself on every 2s poll (renderWfInto wipes the
+   container), and that rebuild was costing the reader's place: the diagram,
+   the reports column and a long gate's prose all came back scrolled to the
+   top two seconds after they moved it. Capture the run view's scrollers
+   before the wipe and put them back after, so a poll lets the run progress
+   without dragging the reader with it. The near-end rule is the seq-scroll
+   one: whoever is riding the tail keeps riding it as new content lands,
+   anywhere else a poll leaves the position alone. .wf-cols carries only the
+   sideways travel (the columns scroll beneath it), so it is restored exactly
+   and never follows width growth. */
+function captureWfScrolls(view) {
+  const at = (sel) => {
+    const n = view.querySelector(sel);
+    return n && {
+      top: n.scrollTop,
+      left: n.scrollLeft,
+      nearEnd: n.scrollHeight - n.scrollTop - n.clientHeight < 8,
+    };
+  };
+  return {
+    cols: at(".wf-cols"),
+    side: at(".wf-side"),
+    diagram: at(".wf-diagram"),
+    bar: at(".wf-bar"),
+  };
+}
+
+function restoreWfScrolls(view, keep) {
+  if (!keep) return;
+  const cols = view.querySelector(".wf-cols");
+  if (cols && keep.cols) cols.scrollLeft = keep.cols.left;
+  for (const [sel, key] of [[".wf-side", "side"], [".wf-diagram", "diagram"],
+                            [".wf-bar", "bar"]]) {
+    const el = view.querySelector(sel);
+    const s = keep[key];
+    if (el && s) el.scrollTop = s.nearEnd ? el.scrollHeight : s.top;
+  }
+}
+
 /* One renderer, two homes: the #/wf page, and the split pane halved into the
    terminal's column. `ui` says which home this is — where its step selection
    lives, how it redraws, how it re-fetches after an action — so the pane is
@@ -3415,6 +3454,10 @@ function renderWfInto(view, data, ui) {
     if (!view.querySelector(".wf-start")) renderWfIdle(view, data, ui);
     return;
   }
+  // The rebuild below wipes every scroller's place in the DOM; take theirs
+  // now and give it back once the fresh tree is in (the idle path above is
+  // exempt — the picker is built once and then left alone).
+  const keep = captureWfScrolls(view);
   view.innerHTML = "";
   const run = data.run || {};
   const wf = data.workflow || { steps: [] };
@@ -3569,6 +3612,8 @@ function renderWfInto(view, data, ui) {
     journal.appendChild(el("div", "wf-journal-line mono", line));
   }
   side.appendChild(journal);
+
+  restoreWfScrolls(view, keep);
 }
 
 /* The way from the half to the whole: the split pane renders the run page's
