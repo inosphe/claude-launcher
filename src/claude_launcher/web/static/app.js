@@ -11,6 +11,13 @@ let sessionsCache = [];
 let attachedPid = null;           // pid of the incarnation this socket is bound to
 let applyingRemoteResize = false; // guards against echoing a server-driven resize
 let fitTimer = null;              // debounces viewport-driven fit() calls
+let altScreen = false;      // the program is drawing the alternate screen
+let scrollOffset = 0;       // daemon history offset this viewer is reading (0 = live)
+let wheelAccum = 0;         // unflushed wheel delta, accumulated in lines
+let wheelTimer = null;      // debounce timer for wheel -> scroll control
+// Rough pixels per terminal line, for converting pixel-mode wheel deltas;
+// a scalar, coarse enough that the daemon's clamped offset absorbs the error.
+const WHEEL_LINE_PX = 20;
 
 /* Base path of the current page: "/" when served directly, "/t/<name>/" when
  * reached through a relay tunnel. All API/WS/static requests are resolved
@@ -1820,6 +1827,24 @@ function handleFrame(msg) {
     flushInput(same);
     // Adopt the viewer's size once attached.
     refitSoon(50);
+    // A fresh socket always starts live, in whatever buffer the program is
+    // drawing.
+    altScreen = !!msg.alt;
+    scrollOffset = 0;
+    updateScrollChip();
+  } else if (msg.type === "buffer") {
+    altScreen = !!msg.alt;
+    if (!altScreen) {
+      // The TUI left the alternate screen: xterm's own scrollback takes over
+      // for the wheel, and the daemon has already unfrozen us (ws.py).
+      scrollOffset = 0;
+      updateScrollChip();
+    }
+  } else if (msg.type === "scrolled") {
+    // The daemon's clamped answer to a scroll control — the truth for the
+    // chip and for sendInput's snap-to-live.
+    scrollOffset = msg.offset || 0;
+    updateScrollChip();
   } else if (msg.type === "state") {
     setStatusBadge(msg.status);
   } else if (msg.type === "resize") {
@@ -1840,6 +1865,9 @@ function handleFrame(msg) {
     linkQueue = [];
     setLink("idle");
     setStatusBadge("exited");
+    altScreen = false;
+    scrollOffset = 0;
+    updateScrollChip();
     term.write(
       `\r\n\x1b[90m[session exited (code ${msg.code})] ` +
       `- press "resume" above to relaunch it\x1b[0m\r\n`
@@ -1859,6 +1887,14 @@ function sendInput(data) {
   // waits in linkQueue: the queued-deliveries banner uses this to tell "YOUR
   // typing is holding delivery" apart from some other viewer's keyboard.
   lastLocalKey = Date.now();
+  // Typing while scrolled back into history goes to a session the viewer is
+  // not watching — and the response would be frozen with it. Snap to live
+  // first, as every terminal does when the wheel returns to the bottom.
+  if (scrollOffset > 0) {
+    scrollOffset = 0;
+    sendScroll(-999999);   // server clamps to 0
+    updateScrollChip();
+  }
   if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(linkEncoder.encode(data));
     return;
@@ -1962,7 +1998,13 @@ function closeLink() {
 
 function detach() {
   closeLink();
+  // The wheel handler and its debounce belong to the terminal being torn down.
+  if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; }
+  wheelAccum = 0;
+  scrollOffset = 0;
+  altScreen = false;
   if (term) { term.dispose(); term = null; fitAddon = null; }
+  updateScrollChip();
 }
 
 $("term-link").addEventListener("click", () => reconnectNow(true));
@@ -2265,6 +2307,62 @@ function setSessLayout(name, patch) {
   syncSplitPane();
 }
 
+/* ---- virtual scroll ----
+   xterm cannot scroll its alternate screen: on that buffer its wheel handler
+   turns wheel events into arrow keys, which navigate claude's own history —
+   and its scrollback is empty anyway, because the repaint seeds only the
+   grid. The session's real scrollback lives in the daemon's pyte history
+   (ScreenState.render_history), so on the alt screen the wheel is converted
+   into `scroll` controls and the daemon repaints a window over that history.
+   On the main buffer xterm's own scrollback just works, and this handler
+   stays out of the way (returns true = let xterm handle it). */
+function handleWheel(e) {
+  if (!altScreen) return true;
+  e.preventDefault();
+  let delta = e.deltaY;
+  if (e.deltaMode === 2) {                 // DOM_DELTA_PAGE
+    delta = e.deltaY * (term ? term.rows : 24);
+  } else if (e.deltaMode !== 1) {          // DOM_DELTA_PIXEL (mouse/touchpad)
+    delta = e.deltaY / WHEEL_LINE_PX;
+  }
+  // Coalesce bursts (touchpads emit many small deltas) into one control.
+  wheelAccum += delta;
+  clearTimeout(wheelTimer);
+  wheelTimer = setTimeout(flushWheel, 50);
+  return false;                            // xterm's arrow-key fallback: skipped
+}
+
+function flushWheel() {
+  const lines = Math.round(wheelAccum);
+  wheelAccum = 0;
+  wheelTimer = null;
+  if (!lines) return;
+  // Wheel down (deltaY > 0) moves toward the live bottom, which is a
+  // negative offset motion; the daemon clamps at 0 either way.
+  sendScroll(-lines);
+}
+
+function sendScroll(lines) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "scroll", lines }));
+  }
+}
+
+/* The header says why the terminal is not advancing while the session keeps
+   running: the viewer scrolled into history, and the wheel below it (or a
+   keystroke) is the way back to live. */
+function updateScrollChip() {
+  const chip = $("term-scroll");
+  if (!chip) return;
+  if (scrollOffset > 0) {
+    chip.textContent = "history";
+    chip.title = "scrolled back — wheel down, or type, to return to live";
+    chip.classList.remove("hidden");
+  } else {
+    chip.classList.add("hidden");
+  }
+}
+
 /* Bind the terminal to a session. Called only by the #/s/<name> route, so
    the attached session is in the URL: a reload, a bookmark or a shared link
    lands back on the same terminal instead of on an empty slot. */
@@ -2311,6 +2409,10 @@ function attach(name) {
       ws.send(JSON.stringify({ type: "resize", cols, rows }));
     }
   });
+
+  // The wheel handler belongs to this Terminal instance — attach() builds a
+  // fresh one every time, and the previous instance is disposed by detach().
+  term.attachCustomWheelEventHandler(handleWheel);
 
   openSocket(name);
 }

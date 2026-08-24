@@ -91,6 +91,45 @@ def clear_pane_label(pane: Optional[str] = None) -> bool:
     return _run(["pane", "rename", target, "--clear"])
 
 
+def report_agent(
+    agent: str = "claude",
+    *,
+    pane: Optional[str] = None,
+    state: str = "unknown",
+    message: str = "",
+) -> bool:
+    """Tell Herdr that this pane is hosting ``agent`` (an attach bridge).
+
+    A pane running ``claunch attach`` does not run the agent itself, so
+    Herdr's own detection sees a shell and reports ``unknown``.
+    ``report-agent`` is Herdr's official hook for an external source — here,
+    the attach that makes the pane that session's mirror — to name the
+    agent that actually owns it. Same liveness contract as the label:
+    reported on entry, released on exit, silent on failure.
+    """
+    target = pane or pane_id()
+    if not target:
+        return False
+    args = ["pane", "report-agent", target, "--source", "claunch",
+            "--agent", agent, "--state", state]
+    if message:
+        args += ["--message", message]
+    return _run(args)
+
+
+def release_agent(agent: str = "claude", *, pane: Optional[str] = None) -> bool:
+    """Withdraw an agent report from :func:`report_agent`.
+
+    The counterpart to :func:`report_agent`: an attach that has ended must
+    not leave Herdr believing an agent still occupies the pane.
+    """
+    target = pane or pane_id()
+    if not target:
+        return False
+    return _run(["pane", "release-agent", target, "--source", "claunch",
+                 "--agent", agent])
+
+
 def launch_label(
     identity: str,
     branch: str = "",

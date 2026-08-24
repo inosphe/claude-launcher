@@ -92,6 +92,10 @@
            reason it is a button — the automatic retries are bounded, and after
            they are spent this is how a person says "now". -->
       <button id="term-link" class="term-btn link-chip hidden" type="button"></button>
+      <!-- Up only while this viewer is scrolled back into history: the session
+           is still running underneath, and this is the reason its terminal is
+           not advancing. -->
+      <span id="term-scroll" class="term-btn scroll-chip hidden"></span>
       <!-- The two that change the session keep to the left, in with the name
            and the badge they act on. `details` holds the far right on its
            own — the handle of the rail that opens along that edge, and while

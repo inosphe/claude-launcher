@@ -154,8 +154,17 @@ class ScreenState:
         cols = self._screen.columns
         out: List[str] = []
         for line in self._screen.history.top:
-            out.append("".join(line[x].data for x in range(cols)).rstrip())
+            # History lines keep the width they had when they scrolled off, so
+            # a resize that grew the screen can leave them shorter than cols.
+            out.append(
+                "".join(line[x].data for x in range(min(len(line), cols))).rstrip()
+            )
         return out
+
+    @property
+    def history_len(self) -> int:
+        """Scrolled-off lines available for virtual scroll (oldest first)."""
+        return len(self._screen.history.top)
 
     def cursor(self) -> Tuple[int, int]:
         """Cursor position as (x, y), zero-based."""
@@ -166,7 +175,7 @@ class ScreenState:
         """A cheap per-row fingerprint of the visible grid (for idle detection)."""
         return tuple(hash(line) for line in self._screen.display)
 
-    def repaint_sequence(self) -> bytes:
+    def repaint_sequence(self, offset: int = 0) -> bytes:
         """An ANSI sequence that repaints the current grid on a fresh terminal.
 
         Used to seed newly attached viewers (WebSocket / ``claunch attach``)
@@ -174,6 +183,14 @@ class ScreenState:
         and text attributes are reconstructed from the pyte grid — TUIs only
         redraw what changes, so a plain-text seed would leave the viewer
         mostly monochrome until the next full redraw.
+
+        ``offset`` scrolls the same repaint back into history: the window is
+        composed from the virtual stream ``history + grid``, so ``offset=0``
+        paints the live grid (current behaviour) and ``offset=N`` paints the
+        ``rows``-tall window that ends N lines above the grid bottom.
+        Clamped to :attr:`history_len`. While a viewer looks at history the
+        live cursor's position is meaningless, so it is hidden; ``offset=0``
+        restores it.
 
         The sequence leads with the buffer the program is actually in. A
         full-screen TUI (claude, the wizard) lives in the alternate screen,
@@ -185,23 +202,37 @@ class ScreenState:
         Leaving the alternate screen (or re-entering it, idempotently) makes
         the seeded grid land where the program is drawing.
         """
-        buffer = self._screen.buffer
+        history = self._screen.history.top
+        rows = self._screen.lines
+        hlen = len(history)
+        offset = max(0, min(offset, hlen))
+
         parts = [
             "\x1b[?1049h" if self.alt_screen else "\x1b[?1049l",
             "\x1b[2J\x1b[H",
         ]
-        for y in range(self._screen.lines):
-            if y:
+        start = hlen - offset
+        for i in range(rows):
+            if i:
                 parts.append("\r\n")
-            parts.append(self._row_with_attrs(buffer[y]))
-        x, y = self.cursor()
-        parts.append("\x1b[0m")
-        parts.append("\x1b[%d;%dH" % (y + 1, x + 1))
+            vpos = start + i
+            if vpos < hlen:
+                parts.append(self._row_with_attrs(history[vpos]))
+            else:
+                parts.append(self._row_with_attrs(self._screen.buffer[vpos - hlen]))
+        if offset > 0:
+            parts.append("\x1b[0m\x1b[?25l")
+        else:
+            x, y = self.cursor()
+            parts.append("\x1b[0m")
+            parts.append("\x1b[%d;%dH" % (y + 1, x + 1))
         return "".join(parts).encode("utf-8")
 
     def _row_with_attrs(self, row) -> str:
         cols = self._screen.columns
-        end = cols
+        # History lines keep the width they scrolled off with, so a resize
+        # that grew the screen can leave them shorter than cols.
+        end = min(cols, len(row))
         while end and row[end - 1].data in ("", " ") and _sgr(row[end - 1]) == "0":
             end -= 1
         out: List[str] = []

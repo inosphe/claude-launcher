@@ -487,6 +487,9 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    means the same thing — this end is on its own until someone acts. */
 .link-chip.lost { background: #442022; color: #ff7b72; }
 .link-chip:hover { color: #fff; }
+/* A viewer scrolled back into history (virtual scroll). Informational, so a
+   quiet blue like the resume button — it explains why the grid is frozen. */
+.scroll-chip { color: #9ecbff; border-color: #1f4272; cursor: default; }
 /* Queued deliveries: the strip between the header and the terminal saying
    the daemon is holding messages for this session. Amber like the busy
    badge — it is the same fact (something must finish before the next thing

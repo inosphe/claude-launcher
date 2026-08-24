@@ -9,6 +9,7 @@ a real PTY child through the daemon app.
 from __future__ import annotations
 
 import asyncio
+import sys
 import threading
 import time
 
@@ -200,3 +201,133 @@ def test_attach_reports_daemon_shutdown(home, tmp_path, monkeypatch):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_herdr_agent_state_mapping():
+    """The daemon's status in Herdr's vocabulary; nothing guessed."""
+    assert attach_mod._herdr_agent_state("busy") == "working"
+    assert attach_mod._herdr_agent_state("idle") == "idle"
+    assert attach_mod._herdr_agent_state("starting") == "unknown"
+    assert attach_mod._herdr_agent_state("exited") == "unknown"
+    assert attach_mod._herdr_agent_state(None) == "unknown"
+    assert attach_mod._herdr_agent_state("") == "unknown"
+
+
+def test_attach_reports_agent_to_herdr_and_releases_on_detach(
+    home, tmp_path, monkeypatch
+):
+    """Inside Herdr, the attach tells it the pane mirrors claude — reported on
+    entry with the daemon's status, released on the way out like the label."""
+    class FakeStream:
+        def isatty(self):
+            return True
+
+        def write(self, text):
+            pass
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(sys, "stdin", FakeStream())
+    monkeypatch.setattr(sys, "stdout", FakeStream())
+
+    calls = []
+
+    class FakeHerdr:
+        def rename_pane(self, label):
+            calls.append(("rename_pane", label))
+            return True
+
+        def report_agent(self, agent, *, state, message):
+            calls.append(("report_agent", agent, state, message))
+            return True
+
+        def clear_pane_label(self):
+            calls.append(("clear_pane_label",))
+            return True
+
+        def release_agent(self, agent, *, pane=None):
+            calls.append(("release_agent", agent))
+            return True
+
+    monkeypatch.setattr(attach_mod, "herdr", FakeHerdr())
+    monkeypatch.setattr(attach_mod, "_RawTerminal", _NoopRawTerminal)
+
+    async def fake_attach(base_url, token, name):
+        return {"reason": "detach"}
+
+    monkeypatch.setattr(attach_mod, "_attach_async", fake_attach)
+
+    class FakeClient:
+        base_url = "http://daemon"
+        token = "t"
+
+        def get(self, url):
+            return {"status": "busy", "cwd": str(tmp_path), "role": "worker"}
+
+    code = attach_mod.attach(FakeClient(), "att-herdr")
+    assert code == 0
+    assert calls[0][0] == "rename_pane"
+    assert ("report_agent", "claude", "working", "att-herdr") in calls
+    assert calls.count(("release_agent", "claude")) == 1
+
+
+def test_attach_reports_unknown_when_daemon_status_is_absent(
+    home, tmp_path, monkeypatch
+):
+    """A status the daemon does not name must not be guessed at."""
+    class FakeStream:
+        def isatty(self):
+            return True
+
+        def write(self, text):
+            pass
+
+        def flush(self):
+            pass
+
+    monkeypatch.setattr(sys, "stdin", FakeStream())
+    monkeypatch.setattr(sys, "stdout", FakeStream())
+
+    states = []
+
+    class FakeHerdr:
+        def rename_pane(self, label):
+            return True
+
+        def report_agent(self, agent, *, state, message):
+            states.append(state)
+            return True
+
+        def clear_pane_label(self):
+            return True
+
+        def release_agent(self, agent, *, pane=None):
+            return True
+
+    monkeypatch.setattr(attach_mod, "herdr", FakeHerdr())
+    monkeypatch.setattr(attach_mod, "_RawTerminal", _NoopRawTerminal)
+
+    async def fake_attach(base_url, token, name):
+        return {"reason": "detach"}
+
+    monkeypatch.setattr(attach_mod, "_attach_async", fake_attach)
+
+    class FakeClient:
+        base_url = "http://daemon"
+        token = "t"
+
+        def get(self, url):
+            return {"cwd": str(tmp_path)}  # no "status" key
+
+    code = attach_mod.attach(FakeClient(), "att-nostatus")
+    assert code == 0
+    assert states == ["unknown"]
+
+
+class _NoopRawTerminal:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
