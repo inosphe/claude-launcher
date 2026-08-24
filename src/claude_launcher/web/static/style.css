@@ -178,14 +178,19 @@ body {
    plainly inert — the tooltip carries the how-to-enable */
 #session-list .sess-brief-toggle:disabled { color: #3d434d; cursor: default; }
 #session-list .sess-cflow { order: 2; }
-#session-list .sess-brief {
-  flex-basis: 100%; order: 3; min-width: 0; margin: 6px 0 2px;
-  padding: 8px 10px; background: #1b1e24; border: 1px solid #2a2e36;
-  border-radius: 6px; font-size: 12px; color: #c6cdd5; cursor: default;
-  font-weight: 400;
+/* The card itself, wherever it is drawn — the row's fold, the pane under
+   the header, the detail panel's section. Box and type are common; only the
+   rail's flex-placement below is specific to the list it lives in. */
+.sess-brief {
+  min-width: 0; padding: 8px 10px; background: #1b1e24;
+  border: 1px solid #2a2e36; border-radius: 6px; font-size: 12px;
+  color: #c6cdd5; cursor: default; font-weight: 400;
 }
 /* a refresh in flight: the old text stays readable underneath, dimmed */
-#session-list .sess-brief.refreshing { opacity: 0.6; }
+.sess-brief.refreshing { opacity: 0.6; }
+#session-list .sess-brief {
+  flex-basis: 100%; order: 3; margin: 6px 0 2px;
+}
 .sess-brief-head { display: flex; align-items: center; gap: 8px; }
 .sess-brief-head + * { margin-top: 6px; }
 .sess-brief-state {
@@ -455,6 +460,17 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 }
 /* the buttons that change the session, held together beside its name */
 .term-actions { display: flex; align-items: center; gap: 8px; }
+/* The top briefing toggle: quiet blue like resume (it opens a panel, it does
+   not destroy), lit while the card under the header is open, inert to a
+   greyed load for the two states where there is nothing to open — no current
+   session, or no llm: block to summarise with. */
+#term-brief { color: #9ecbff; border-color: #1f4272; }
+#term-brief:hover { background: #10203a; color: #c6cdd5; border-color: #388bfd; }
+#term-brief[aria-pressed="true"] {
+  background: #10203a; color: #58a6ff; border-color: #1f6feb;
+}
+#term-brief:disabled { opacity: 0.5; cursor: not-allowed; }
+#term-brief:disabled:hover { background: none; border-color: #1f4272; }
 #term-resume { color: #58a6ff; border-color: #1f4272; }
 #term-resume:hover { background: #10203a; border-color: #1f6feb; }
 #term-resume:disabled { opacity: 0.5; cursor: not-allowed; }
@@ -510,6 +526,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* A viewer scrolled back into history (virtual scroll). Informational, so a
    quiet blue like the resume button — it explains why the grid is frozen. */
 .scroll-chip { color: #9ecbff; border-color: #1f4272; cursor: default; }
+/* The briefing card's strip, between the header and the terminal: padding
+   and a rule like the queued strip's, in the panel's own grey so a summary
+   reads as something to read, not as a wait the reader caused. */
+#term-brief-pane {
+  flex: none; padding: 10px 14px; border-bottom: 1px solid #2a2e36;
+  background: #161b22;
+}
+#term-brief-pane .sess-brief { margin: 0; max-width: 760px; }
 /* Queued deliveries: the strip between the header and the terminal saying
    the daemon is holding messages for this session. Amber like the busy
    badge — it is the same fact (something must finish before the next thing
@@ -636,13 +660,16 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-meta dt { color: #7d8590; }
 .sess-meta dd { color: #c6cdd5; overflow-wrap: anywhere; }
 .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-migrate,
-.sess-reborrow, .sess-perms {
+.sess-reborrow, .sess-perms, .sess-brief-section {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
 }
 .sess-meshes h3, .sess-wf h3, .sess-send h3, .sess-queued h3,
-.sess-migrate h3, .sess-reborrow h3, .sess-perms h3 {
+.sess-migrate h3, .sess-reborrow h3, .sess-perms h3, .sess-brief-section h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
+}
+.sess-brief-section .sess-brief, .sess-brief-section .sess-brief-note {
+  margin: 0;
 }
 /* the backlog box wears the hold's color when the hold is a human's keyboard
    — the case the reader caused and can end */

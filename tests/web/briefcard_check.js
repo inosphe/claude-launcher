@@ -99,7 +99,8 @@ new Function(
   "exports", "$", "document", "api", "ctxChip",
   [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
    slice("fetchBriefing"), slice("toggleBriefing"),
-   slice("renderBriefingCard"), slice("applyBriefingCards")].join("\n") + `
+   slice("renderBriefingCard"), slice("applyBriefingTop"),
+   slice("applyBriefingCards")].join("\n") + `
 const briefingOpen = new Set();
 const briefingCache = new Map();
 let briefingLLM = true;
