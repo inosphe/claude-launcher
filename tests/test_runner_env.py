@@ -23,6 +23,22 @@ def _provider_glm(doc: dict) -> None:
     }
 
 
+@pytest.fixture(autouse=True)
+def _scrub_ambient_auth(monkeypatch):
+    """Make the "not in env" assertions immune to the harness's own token.
+
+    A managed claude session runs with ``ANTHROPIC_AUTH_TOKEN`` set for the
+    harness, and :func:`runner.child_env` copies ``os.environ`` — so running
+    this module inside such a session leaks the ambient token into the very
+    dict the default-provider tests assert it is absent from, and they fail
+    wherever the gate happens to run. The profile/provider env under test is
+    built fresh by each test; the ambient token is noise, so this module
+    scrubs it. Scoped here (a fixture defined in this test file), not in the
+    global conftest, because other tests may deliberately examine ambient env.
+    """
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
+
+
 def test_default_provider_still_injects_oauth(home):
     p = profile.create("work")
     credentials.save_token(p, "sk-ant-oat01-abc")
