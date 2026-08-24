@@ -120,6 +120,7 @@ new Function(
   "exports", "document", "el", "api",
   stubs
   + sliceConst("const QUICKJOB_FALLBACK = {")
+  + slice("spawnReport") + slice("spawnPreflightNote") + slice("postSpawn")
   + slice("qjStamp") + slice("idleNudgeText")
   + slice("sessQuickJob") + slice("renderSessKids")
   + slice("sessRoleNames") + slice("rolePanels") + slice("sessChildren")
