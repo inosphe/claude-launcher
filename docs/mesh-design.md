@@ -948,6 +948,7 @@ roles:
   leader:
     aliases: [lead, moderator, mod, chair]
     stall_watch: true          # hears about stalled members
+    exclusive: true            # at most one live holder per mesh
     stance: |                  # handed to the member on join
       You hold this mesh's direction and own its decisions. ...
   worker:
@@ -988,12 +989,34 @@ join time, so every later upload would leave that member acting on a
 vocabulary the mesh no longer has. The same command is the recovery path
 after a compaction drops the briefing.
 
+**Exclusive roles.** A role may declare `exclusive: true`: at most one **live**
+holder per mesh, enforced at join on the authority (`_resolve_role`, the one
+funnel all three join paths — local, guest, establishment — resolve through).
+The packaged `leader` is exclusive. The rationale is resource ownership, not
+hierarchy: integration authority over shared state (the repo's main branch,
+the full-sweep window, the live daemon) held twice turns into leader↔leader
+coordination traffic that grows with every landing — observed in practice as
+message bursts, master-ref races and preview rebases. A second command line
+belongs in the spawn tree instead: a worker that runs its own crew collects
+its children's branches into its own and requests integration upward
+(improv-worker's nested formation), so landings reach shared state through
+exactly one member. Three deliberate edges: the check reads **liveness**, so
+a holder whose session exited never blocks a successor (a remote holder
+counts as alive — its daemon is the only witness to its death, and refusing
+is the safe reading of silence); it is **not retroactive**, so holders
+enrolled before the flag keep their role and a respawned dead holder can
+put two live holders back on the roster (the flag guards joins, not
+history); and the **default role may not be exclusive** — an upload that
+tries is refused whole, since the second unlabelled join of a mesh's life
+must not be an error nobody asked for.
+
 **What a role actually drives** today: the stance pointer in the join
-briefing, `stall_watch` (who hears about a stuck member), and `task_poll`
-wording. Role-based **routing bans** (worker↔worker, the operator pipe) are
-still not implemented — the schema leaves room, but turning them on would make
-a `send` that works today start failing on an upload alone, so that stays a
-separate, explicit decision.
+briefing, `stall_watch` (who hears about a stuck member), `exclusive`
+(at most one live holder), and `task_poll` wording. Role-based **routing
+bans** (worker↔worker, the operator pipe) are still not implemented — the
+schema leaves room, but turning them on would make a `send` that works today
+start failing on an upload alone, so that stays a separate, explicit
+decision.
 
 ## Agent conveniences (phase 4)
 

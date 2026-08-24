@@ -2043,11 +2043,52 @@ class MeshManager:
         Resolved once, here, and kept as a plain string: a later role-set
         upload never rewrites it (uploads are not retroactive). A member whose
         role the vocabulary later drops simply matches no rule.
+
+        This is also where an ``exclusive`` role is enforced — every join
+        funnel (local, guest, establishment) resolves through here on the
+        authority, so a second live holder is refused in exactly one place.
         """
         try:
-            return mesh.roleset.resolve(handle, role)
+            resolved = mesh.roleset.resolve(handle, role)
         except mesh_roles.RoleError as exc:
             raise MeshError(str(exc)) from None
+        role_def = mesh.roleset.get(resolved)
+        if role_def is not None and role_def.exclusive:
+            holder = self._live_holder(mesh, resolved)
+            if holder is not None:
+                raise MeshConflict(
+                    f"role {resolved!r} is exclusive in mesh {mesh.name!r} and "
+                    f"{holder.handle!r} already holds it — join under another "
+                    f"role (a crew of your own makes you a worker that "
+                    f"integrates upward), or have {holder.handle!r} leave "
+                    f"first"
+                )
+        return resolved
+
+    def _live_holder(self, mesh: Mesh, role_name: str) -> Optional[Member]:
+        """The member holding ``role_name`` whose session is still alive.
+
+        A LOCAL holder whose session exited or was removed does not block a
+        successor — succession is the whole reason exclusivity is checked
+        against liveness rather than the roster alone. A REMOTE holder counts
+        as alive unconditionally: its daemon is the only witness to its death,
+        and refusing is the safe reading of silence. Not retroactive in the
+        other direction either: a dead holder KEEPS its role (uploads and
+        successions never rewrite members), so respawning it can put two live
+        holders on the roster — the flag guards joins, not history.
+        """
+        for member in mesh.members.values():
+            if member.role != role_name:
+                continue
+            if not self._is_local(mesh, member):
+                return member
+            try:
+                session = self.manager.get(member.session)
+            except ManagerError:
+                continue
+            if not session.exited:
+                return member
+        return None
 
     def roles_view(self, name: str) -> dict:
         """This mesh's vocabulary, for the API/CLI/web."""
@@ -2068,6 +2109,7 @@ class MeshManager:
                     "name": r.name,
                     "aliases": list(r.aliases),
                     "stall_watch": r.stall_watch,
+                    "exclusive": r.exclusive,
                     "task_poll": r.task_poll,
                     "stance": r.stance,
                     # How many members currently hold it — the roster is the

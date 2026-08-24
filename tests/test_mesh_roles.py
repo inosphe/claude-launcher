@@ -49,6 +49,17 @@ G. The wiring rules (`auto_link`), which ride the same document
    G5 a malformed rule is refused with the offending rule named
    G6 auto_link replaces wholesale, and survives `replace: true` (which is
       about the vocabulary, not the wiring)
+
+H. Exclusive roles (at most one live holder)
+   H1 the packaged leader is exclusive: a second leader join is refused
+      with the current holder named, whichever join funnel it came through
+   H2 a holder whose session exited does not block a successor — the check
+      is liveness, not the roster
+   H3 not retroactive: a dead holder keeps its role; enforcement guards
+      joins, never rewrites members
+   H4 the default role may not be exclusive — an upload that tries is
+      refused whole
+   H5 the flag rides the document round trip (to_dict / yaml / view)
 """
 
 from __future__ import annotations
@@ -677,3 +688,105 @@ def test_auto_link_replaces_wholesale_and_outlives_replace():
         "replace: true\ndefault: hand\nroles: {hand: {}}\n"
     )).auto_link
     assert kept.decide(_facts("hand", 0, "a"), _facts("hand", 0, "b")) is True
+
+
+# --------------------------------------------------------------------------- #
+# H. exclusive roles
+# --------------------------------------------------------------------------- #
+def test_a_second_live_leader_is_refused_and_the_holder_named(home, tmp_path):
+    """H1/H2/H3: the packaged leader is exclusive per mesh — against the
+    LIVING roster, not the historical one."""
+    _register_py_harness()
+
+    async def run():
+        from claude_launcher.daemon.mesh import MeshConflict
+
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, root=tmp_path / "mesh")
+        for s in ("s1", "s2", "s3"):
+            mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
+        mm.create("m")
+        await mm.join("m", "s1", handle="lead1")
+        mesh = mm.get("m")
+        assert mesh.members["lead1"].role == "leader"
+
+        # H1: a second live leader is refused, whichever spelling asks —
+        # the alias, the leading word, or an explicit --role.
+        with pytest.raises(MeshConflict) as exc:
+            await mm.join("m", "s2", handle="mod2")
+        assert "lead1" in str(exc.value)
+        with pytest.raises(MeshConflict):
+            await mm.join("m", "s2", handle="anything", role="leader")
+
+        # The refusal is about that role only: the same session joins fine
+        # under a non-exclusive one.
+        await mm.join("m", "s2", handle="worker2")
+        assert mesh.members["worker2"].role == "worker"
+
+        # H2: succession. The holder's session dies; the next leader join
+        # goes through, because the check reads liveness rather than roster.
+        # `exited` flips on the PTY's EOF, not on the kill call — wait for it.
+        mgr.kill("s1", force=True)
+        for _ in range(100):
+            if mgr.get("s1").exited:
+                break
+            await asyncio.sleep(0.05)
+        assert mgr.get("s1").exited
+        await mm.join("m", "s3", handle="lead3")
+        assert mesh.members["lead3"].role == "leader"
+
+        # H3: the dead holder was not rewritten — the roster now holds two
+        # leader records, one dead. Enforcement guards joins, not history.
+        assert mesh.members["lead1"].role == "leader"
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_an_exclusive_default_role_is_refused_whole():
+    # H4: the default is what an unlabelled handle falls into; an exclusive
+    # default would refuse the second plain join of the mesh's life.
+    with pytest.raises(mesh_roles.RoleError) as exc:
+        mesh_roles.resolve(mesh_roles.parse(
+            "replace: true\ndefault: boss\n"
+            "roles: {boss: {exclusive: true}, crew: {}}\n"
+        ))
+    assert "exclusive" in str(exc.value)
+
+    # ...but a non-default exclusive role in the same shape is fine.
+    rs = mesh_roles.resolve(mesh_roles.parse(
+        "replace: true\ndefault: crew\n"
+        "roles: {boss: {exclusive: true}, crew: {}}\n"
+    ))
+    assert rs.roles["boss"].exclusive is True
+    assert rs.roles["crew"].exclusive is False
+
+
+def test_exclusive_rides_the_document_round_trip(home, tmp_path):
+    # H5: to_dict keeps the flag, the YAML view re-parses to the same set,
+    # and the HTTP-facing roles_view reports it per role.
+    rs = mesh_roles.resolve()
+    assert rs.roles["leader"].exclusive is True
+    assert rs.roles["worker"].exclusive is False
+    doc = rs.to_doc()
+    assert doc["roles"]["leader"]["exclusive"] is True
+    assert "exclusive" not in doc["roles"]["worker"]
+    again = mesh_roles.resolve(mesh_roles.parse(mesh_roles.to_yaml(doc)))
+    assert again.roles["leader"].exclusive is True
+
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, root=tmp_path / "mesh")
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+        mm.create("m")
+        await mm.join("m", "s1", handle="lead1")
+        view = mm.roles_view("m")
+        by_name = {r["name"]: r for r in view["roles"]}
+        assert by_name["leader"]["exclusive"] is True
+        assert by_name["worker"]["exclusive"] is False
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
