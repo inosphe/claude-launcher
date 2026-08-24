@@ -123,6 +123,7 @@ function build(opts) {
     "ws", "term", "fitAddon", "attachedPid", "applyingRemoteResize",
     "setStatusBadge", "refitSoon", "setTimeout", "clearTimeout", "Math", "Date",
     "updateScrollChip", "wheelTimer", "wheelAccum", "altScreen", "scrollOffset",
+    "fitView", "resyncTerminal", "terminalOnScreen",
     code +
     "\nreturn {openSocket, closeLink, detach, reconnectNow, tryReconnect," +
     " sendInput, handleFrame, syncLinkChip," +
@@ -140,7 +141,7 @@ function build(opts) {
     fetchStub,
     FakeSocket,
     { addEventListener: (ev, fn) => { winOn[ev] = fn; } },
-    { hidden: false },
+    { hidden: false, hasFocus: () => false },
     { protocol: "http:", host: "d09:8377" },
     null,     // ws: the link is the only thing that ever assigns it
     term,
@@ -160,6 +161,9 @@ function build(opts) {
     0,          // wheelAccum
     false,      // altScreen
     0,          // scrollOffset
+    () => {},   // fitView: glyph shrinking is the view-fit harness's concern
+    () => {},   // resyncTerminal: handleFrame's resize branch reaches for it
+    () => false, // terminalOnScreen: with hasFocus below, resize frames adopt
   );
 
   return { api, nodes, sockets, health, apiCalls, term, written, statuses,

@@ -1814,6 +1814,11 @@ function handleFrame(msg) {
     applyingRemoteResize = true;
     try { term.resize(msg.cols, msg.rows); }
     finally { applyingRemoteResize = false; }
+    // The seeded grid may be another viewer's (an attach in a maximized
+    // terminal): render it whole right now, before the refit below claims
+    // the size — a 50ms flash of a grid overflowing its box is still a
+    // scrollbar someone can see.
+    fitView();
     // Is this the same program we were talking to before the link dropped? A
     // respawn — or a daemon restart that relaunched the session — keeps the
     // name and replaces the child, and the pid alone cannot say so across a
@@ -1848,14 +1853,28 @@ function handleFrame(msg) {
   } else if (msg.type === "state") {
     setStatusBadge(msg.status);
   } else if (msg.type === "resize") {
-    // Only a background viewer adopts another viewer's size; a visible
-    // viewer's own fit stays authoritative. Otherwise a stale echo arriving
-    // late over the relay fights the local fit and the grid churns. On focus
-    // regain, resyncTerminal() re-asserts this viewer's size.
-    if (document.hidden && (term.cols !== msg.cols || term.rows !== msg.rows)) {
+    if (term.cols === msg.cols && term.rows === msg.rows) {
+      // This viewer's own claim echoing back, or no news. Filtering on the
+      // dims (rather than on visibility, as this used to) is also what keeps
+      // a stale echo over the relay from churning the grid.
+    } else if (document.hasFocus() && terminalOnScreen()) {
+      // Another viewer claimed the size out from under the one actually
+      // being looked at (an attach entering, a daemon restart): take it
+      // back. No ping-pong hides here — the other side re-asserts only on
+      // its own focus events, and it cannot be focused while this is.
+      resyncTerminal();
+    } else {
+      // Not the viewer in use: mirror the claimed grid — it is the daemon's
+      // truth, and a grid that disagrees with the PTY wraps every long line
+      // into garble — then shrink the glyphs until the whole of it fits
+      // this box (fitView), and ask for a repaint to fill the new shape.
       applyingRemoteResize = true;
       try { term.resize(msg.cols, msg.rows); }
       finally { applyingRemoteResize = false; }
+      fitView();
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "repaint" }));
+      }
     }
   } else if (msg.type === "exit") {
     // Not a broken link: the program finished. There is nothing to reconnect
@@ -2223,13 +2242,54 @@ function setFontSize(px) {
   fontSize = clampFont(px);
   localStorage.setItem(FONT_KEY, String(fontSize));
   if (term) {
-    term.options.fontSize = fontSize;
+    setRenderFont(fontSize);
     // The cell got bigger or smaller, so the grid the box holds did too —
     // refit rather than leave the session sized for the old glyph. Straight
     // away, not debounced: this one came from a deliberate press.
-    if (canFit()) fitAddon.fit();
+    if (canFit()) localFit();
   }
   syncZoomControls();
+}
+
+/* The floor for fitView's shrinking, well below FONT_MIN: FONT_MIN is where
+   reading stops being comfortable, this is where a 384-column attach grid
+   still fits a browser panel whole. Unreadably small beats a scrollbar —
+   the grid this size is another viewer's, and this box only surveys it. */
+const VIEW_FONT_MIN = 4;
+
+/* What xterm renders with, as distinct from `fontSize`, the size the reader
+   chose: fitView may take the rendering below the choice to fit a foreign
+   grid, and localFit restores the choice before measuring the box. */
+function setRenderFont(px) {
+  if (term && term.options.fontSize !== px) term.options.fontSize = px;
+}
+
+/* Make the grid as it IS fit the box as it is — by shrinking glyphs, never
+   by resizing the session. This is the viewer's move when the grid belongs
+   to someone else (another viewer claimed the size); the promise it keeps is
+   that the terminal never draws outside its box, so the web page never
+   grows a scrollbar. When the grid already fits at the reader's chosen font
+   size, this is a no-op at that size. */
+function fitView() {
+  if (!term || !fitAddon || !terminalOnScreen()) return;
+  let size = fontSize;
+  setRenderFont(size);
+  let p = fitAddon.proposeDimensions();
+  while (p && size > VIEW_FONT_MIN && (p.cols < term.cols || p.rows < term.rows)) {
+    size -= 1;
+    setRenderFont(size);
+    p = fitAddon.proposeDimensions();
+  }
+}
+
+/* The opposite move: size the SESSION to this box, at the reader's chosen
+   font size. Every fit() must pass through here — a fit measured while
+   fitView has the glyphs shrunk would claim a grid far wider than the
+   reader can read. */
+function localFit() {
+  if (!canFit()) return;
+  setRenderFont(fontSize);
+  fitAddon.fit();
 }
 
 function syncZoomControls() {
@@ -2308,16 +2368,16 @@ function setSessLayout(name, patch) {
 }
 
 /* ---- virtual scroll ----
-   xterm cannot scroll its alternate screen: on that buffer its wheel handler
-   turns wheel events into arrow keys, which navigate claude's own history —
-   and its scrollback is empty anyway, because the repaint seeds only the
-   grid. The session's real scrollback lives in the daemon's pyte history
-   (ScreenState.render_history), so on the alt screen the wheel is converted
-   into `scroll` controls and the daemon repaints a window over that history.
-   On the main buffer xterm's own scrollback just works, and this handler
-   stays out of the way (returns true = let xterm handle it). */
+   The session's real scrollback lives in the daemon's pyte history
+   (ScreenState.render_history) — xterm's own never holds it. On the alt
+   screen xterm turns wheel events into arrow keys and its scrollback is
+   empty by construction; on the main buffer it only hoards what scrolled
+   past while THIS socket was open, which for a viewer that just attached
+   (whose seed is a repaint of the grid alone) is nothing — the wheel spun
+   and nothing moved, on either buffer. So the wheel always becomes `scroll`
+   controls, and the daemon repaints a window over the one history that is
+   actually whole. */
 function handleWheel(e) {
-  if (!altScreen) return true;
   e.preventDefault();
   let delta = e.deltaY;
   if (e.deltaMode === 2) {                 // DOM_DELTA_PAGE
@@ -2391,12 +2451,15 @@ function attach(name) {
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
     fontSize: fontSize,
     theme: { background: "#14161a" },
-    scrollback: 5000,
+    // No local scrollback: the wheel always browses the daemon's history
+    // (handleWheel), so lines xterm would hoard here are unreachable — and a
+    // hoard it cannot show is a scrollbar it must not grow.
+    scrollback: 0,
   });
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.open($("terminal"));
-  fitAddon.fit();
+  localFit();
 
   // Wired once, for the life of this terminal object: the link swaps sockets
   // underneath these, and a reconnect must not leave a second pair behind.
@@ -2435,7 +2498,7 @@ function canFit() {
 function refitSoon(delay = 150) {
   if (!fitAddon) return;
   clearTimeout(fitTimer);
-  fitTimer = setTimeout(() => { if (canFit()) fitAddon.fit(); }, delay);
+  fitTimer = setTimeout(localFit, delay);
 }
 window.addEventListener("resize", () => refitSoon());
 
@@ -2449,7 +2512,7 @@ function resyncTerminal() {
   // suspends its sockets the moment the screen goes off.
   if (linkState === "reconnecting" || linkState === "lost") { reconnectNow(); return; }
   if (!term || !ws || ws.readyState !== WebSocket.OPEN) return;
-  if (canFit()) fitAddon.fit(); // fires term.onResize -> server resize when dims changed
+  localFit(); // fires term.onResize -> server resize when dims changed
   ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
   ws.send(JSON.stringify({ type: "repaint" }));
 }

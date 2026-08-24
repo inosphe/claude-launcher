@@ -537,7 +537,10 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   color: #c6cdd5; white-space: pre-wrap; overflow-wrap: anywhere;
   max-height: 9em; overflow-y: auto; font-size: 12px;
 }
-#terminal { flex: 1; padding: 6px; min-height: 0; }
+/* overflow hidden is the backstop for fitView (app.js): the grid is kept
+   inside the box by shrinking glyphs, and whatever a mid-adjustment frame
+   still hangs over the edge must clip, not become a scrollbar. */
+#terminal { flex: 1; padding: 6px; min-height: 0; overflow: hidden; }
 #terminal .xterm { height: 100%; }
 /* xterm's viewport is the session's scrollback. Keep a flick that runs off
    its end there rather than chaining out to the document. */

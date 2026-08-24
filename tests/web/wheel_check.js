@@ -1,13 +1,14 @@
 /* The terminal's virtual scroll, run against a stub socket.
 
-   xterm cannot scroll its alternate screen — the way its wheel event becomes
-   arrow keys and its scrollback stays empty, a full-screen TUI (claude) reads
-   as unscrollable in the dashboard. The fix is a contract, not a style: on
-   the alt screen the wheel must become `scroll` controls the daemon answers
-   with history repaints, and on the main buffer it must not touch xterm's own
-   wheel at all. The real functions are sliced out of the shipped app.js and
-   driven here with stub events, a stub socket and a fake timer wheel, exactly
-   like reconnect_check does for the link. */
+   The session's history lives in the daemon's pyte scrollback and nowhere
+   else: xterm's alt-screen wheel becomes arrow keys over an empty local
+   scrollback, and on the main buffer a freshly attached socket's local
+   scrollback is just as empty (its seed is a repaint of the grid alone). The
+   contract is therefore buffer-blind: the wheel always becomes `scroll`
+   controls the daemon answers with history repaints. The real functions are
+   sliced out of the shipped app.js and driven here with stub events, a stub
+   socket and a fake timer wheel, exactly like reconnect_check does for the
+   link. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -107,6 +108,7 @@ function build(opts) {
     "$", "url", "api", "fetch", "WebSocket", "window", "document", "location",
     "ws", "term", "fitAddon", "attachedPid", "applyingRemoteResize",
     "setStatusBadge", "refitSoon", "setTimeout", "clearTimeout", "Math", "Date",
+    "fitView", "resyncTerminal", "terminalOnScreen",
     "let altScreen = false;\n" +
     "let scrollOffset = 0;\n" +
     "let wheelAccum = 0;\n" +
@@ -129,7 +131,7 @@ function build(opts) {
     fetchStub,
     FakeSocket,
     { addEventListener: (ev, fn) => { winOn[ev] = fn; } },
-    { hidden: false },
+    { hidden: false, hasFocus: () => false },
     { protocol: "http:", host: "d09:8377" },
     null,
     term,
@@ -142,6 +144,9 @@ function build(opts) {
     clearTimeoutStub,
     { random: () => 0, round: Math.round },
     { now: () => 0 },
+    () => {},    // fitView: glyph shrinking is out of this harness's scope
+    () => {},    // resyncTerminal: the resize branch's take-it-back move
+    () => false, // terminalOnScreen: resize frames take the adopt branch
   );
 
   return { api, nodes, sockets, statuses, term, pending, fire, settle,
@@ -161,16 +166,20 @@ function wheel(dy, dm) {
   return { deltaY: dy, deltaMode: dm, preventDefault: () => {} };
 }
 
-/* --- the main buffer keeps xterm's own wheel ---------------------------- */
+/* --- the main buffer drives the daemon's history too --------------------- */
 {
   const w = build();
   (async () => {
     const s = await w.live();
     check("a fresh socket knows the main buffer", w.api.alt === false, w.api.alt);
-    check("the wheel passes through untouched",
-          w.api.handleWheel(wheel(100, 0)) === true);
-    check("nothing was accumulated, nothing asked of the daemon",
-          w.api.accum === 0 && s.sent.length === 0, w.api.accum);
+    check("the wheel is taken over even here — xterm's local scrollback never"
+          + " holds the history a fresh attach missed",
+          w.api.handleWheel(wheel(-100, 0)) === false);
+    check("and the delta banks as lines", Math.abs(w.api.accum + 5) < 1e-9,
+          w.api.accum);
+    w.api.flushWheel();
+    check("asking the daemon exactly as the alt screen does",
+          JSON.parse(s.sent[s.sent.length - 1]).lines === 5, s.sent);
   })();
 }
 
