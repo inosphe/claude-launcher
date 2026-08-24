@@ -10,6 +10,8 @@ resolution, and the reporting of what resolution passed over.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from claude_launcher import cli, install as install_mod
@@ -19,6 +21,10 @@ from claude_launcher.cflow import (
     model,
     state as state_mod,
 )
+
+#: This repository's own project-layer overrides — the files that shadow the
+#: bundled improv pair for every run in this checkout.
+PROJECT_OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
 
 TINY = """
 name: {name}
@@ -189,6 +195,85 @@ def test_the_bundled_improv_worker_teaches_the_nested_merge_contract():
     request = wf.steps["integration-request"].instructions
     assert "상위 세션" in request and "--no-ff" in request
     assert "master를 직접 머지하지 않는다" in request
+
+
+def test_the_worker_rebases_onto_the_target_before_a_request():
+    """A merge request follows a rebase onto the integration target.
+
+    The request path routes through a dedicated ``rebase`` step (a normal
+    pull-request flow: rebase, then request). The step must say how to detect
+    divergence (``git merge-base`` / ``git rev-list``), that a rebased branch
+    re-runs the simplified suite before asking, and that rebasing is not an
+    exception to the master prohibition.
+    """
+    bundled = dict(state_mod.bundled_workflows())
+    wf = model.load(bundled["improv-worker"])
+
+    request = wf.steps["landing"].select.options["request"]
+    assert request.next == "rebase"
+
+    rebase = wf.steps["rebase"]
+    assert rebase.next == "integration-request"
+    for anchor in (
+        "pull request",
+        "merge-base",
+        "git rev-list",
+        "다시 돌려",  # rebase 후 간소화 스위트 재확인
+        "master를 직접 머지하지 않는다",
+    ):
+        assert anchor in rebase.instructions, f"rebase lost its {anchor!r} rule"
+
+    for anchor in ("rebase", "재요청"):
+        assert anchor in wf.steps["integration-request"].instructions, (
+            f"integration-request lost its {anchor!r} rule"
+        )
+
+
+def test_the_project_override_worker_requests_through_a_rebase():
+    """This repository's override must carry the rebase-before-request
+    routing of the bundled worker it shadows — a run here that follows the
+    project file must hit the same regardless of layer."""
+    wf = model.load(PROJECT_OVERRIDES / "improv-worker.yaml")
+
+    request = wf.steps["landing"].select.options["request"]
+    assert request.next == "rebase"
+    assert wf.steps["rebase"].next == "integration-request"
+    for anchor in ("rebase", "merge-base", "다시 돌려"):
+        assert anchor in wf.steps["rebase"].instructions, (
+            f"project worker rebase lost its {anchor!r} rule"
+        )
+    assert "재요청" in wf.steps["integration-request"].instructions
+
+
+def test_the_leader_requests_a_rebase_when_a_branch_has_drifted():
+    """A merge request whose branch has drifted far from master is not merged
+    — the leader sends it back for a rebase, like a PR that needs an update.
+    The screening is on the divergence (``git rev-list --count`` /
+    ``git merge-tree``), and the refusal names the escape (rebase and then
+    re-request) instead of silently merging."""
+    bundled = dict(state_mod.bundled_workflows())
+    leader = model.load(bundled["improv-leader"])
+
+    preflight = leader.steps["integrate-preflight"]
+    for anchor in ("rebase 재요청", "rev-list --count", "merge-tree", "재요청"):
+        assert anchor in preflight.instructions, (
+            f"integrate-preflight lost its {anchor!r} rule"
+        )
+    assert "재요청" in leader.steps["standby"].instructions
+    assert "재요청" in leader.steps["integrate"].instructions
+
+
+def test_the_project_override_leader_requests_a_rebase_for_stale_branches():
+    """The project-layer leader override screens the same way — a repository
+    that shadows the bundled leader must not merge a drifted branch either."""
+    wf = model.load(PROJECT_OVERRIDES / "improv-leader.yaml")
+
+    integrate = wf.steps["integrate"]
+    for anchor in ("재요청", "rev-list --count", "merge-tree"):
+        assert anchor in integrate.instructions, (
+            f"project leader integrate lost its {anchor!r} rule"
+        )
+    assert "재요청" in wf.steps["standby"].instructions
 
 
 def test_the_leader_does_not_hide_a_human_decision_behind_an_agent_chooser():
