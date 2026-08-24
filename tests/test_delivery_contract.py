@@ -138,11 +138,12 @@ def _fake_session(*, bracketed: bool, ready: bool = True):
         screen = ScreenState(80, 24)
         idle_threshold = 0.0
         _last_human_input = 0.0
+        _last_terminal_input = 0.0
         paste = session_mod.Session.paste
         deliver = session_mod.Session.deliver
         send_keys = session_mod.Session.send_keys
         _await_readable = session_mod.Session._await_readable
-        _await_keyboard_quiet = session_mod.Session._await_keyboard_quiet
+        await_keyboard_quiet = session_mod.Session.await_keyboard_quiet
         note_human_input = session_mod.Session.note_human_input
         keyboard_busy = session_mod.Session.keyboard_busy
 
@@ -335,6 +336,69 @@ def test_delivery_stamp_is_local_wall_clock_with_offset():
     )
     assert m, f"unexpected stamp format: {stamp!r}"
     assert m.group(1) == datetime.now().astimezone().strftime("%z")
+
+
+# --------------------------------------------------------------------------- #
+# The raw passthrough is also how one agent hands another a line ('claunch
+# send-keys child "do X" Enter'), and that line splicing itself into a human's
+# half-written one at the web terminal is the same corruption a delivery
+# causes. So TEXT queues behind the keyboard like a delivery does; bare keys
+# (an interrupt, a submit) never do.
+# --------------------------------------------------------------------------- #
+def test_send_keys_with_text_holds_while_a_human_is_typing(monkeypatch):
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, writes = _fake_session(bracketed=True)
+    s.note_human_input(at_terminal=True)  # a keystroke just landed from attach/web
+
+    async def run():
+        sending = asyncio.ensure_future(s.send_keys(["do X", "Enter"]))
+        await asyncio.sleep(0.3)
+        assert writes == [], "typed into a line a human was composing"
+        s._last_terminal_input = time.monotonic() - session_mod.TYPING_GUARD
+        await asyncio.wait_for(sending, timeout=5)
+
+    asyncio.run(run())
+    assert writes == [b"do X", b"\r"]
+    # ...and having typed, it is itself the keyboard the next sender waits on
+    assert s.keyboard_busy() is True
+
+
+def test_send_keys_hold_is_bounded_like_a_delivery(monkeypatch):
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "TYPING_HOLD_TIMEOUT", 0.2)
+    s, writes = _fake_session(bracketed=False)
+    s.note_human_input(at_terminal=True)
+    asyncio.run(s.send_keys(["do X", "Enter"]))
+    assert writes == [b"do X\r"]
+
+
+@pytest.mark.parametrize("args", [["Enter"], ["C-c"], ["Escape"], ["Up"]])
+def test_send_keys_bare_keys_are_never_held(monkeypatch, args):
+    monkeypatch.setattr(session_mod, "TYPING_HOLD_TIMEOUT", 30.0)
+    s, writes = _fake_session(bracketed=True)
+    s.note_human_input(at_terminal=True)  # keyboard busy right now
+
+    async def run():
+        await asyncio.wait_for(s.send_keys(args), timeout=1)
+
+    asyncio.run(run())
+    assert len(writes) == 1
+
+
+def test_send_keys_does_not_wait_behind_an_earlier_send_keys(monkeypatch):
+    """A script driving a session line by line ('send-keys ... Enter' twice
+    in a row) is not paced to TYPING_GUARD: send-keys counts as a human for
+    a *delivery* (below) but not for the next send-keys."""
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, writes = _fake_session(bracketed=False)
+
+    async def run():
+        await s.send_keys(["one", "Enter"])
+        assert s.keyboard_busy() is True   # a delivery would wait now...
+        await asyncio.wait_for(s.send_keys(["two", "Enter"]), timeout=1)  # ...this does not
+
+    asyncio.run(run())
+    assert writes == [b"one\r", b"two\r"]
 
 
 def test_send_keys_counts_as_human_typing(monkeypatch):

@@ -2433,6 +2433,10 @@ async def h_session_keys(request: web.Request) -> web.Response:
     if paste is not None:
         if not isinstance(paste, str):
             return json_error(400, "'paste' must be a string")
+        # A paste is text by definition: like send_keys with text, it queues
+        # behind a human typing at this terminal rather than splicing into
+        # their half-written line (see Session.send_keys).
+        await session.await_keyboard_quiet(terminal_only=True)
         data = await session.paste(paste, enter=bool(body.get("enter")))
         return web.json_response({"ok": True, "bytes": len(data)})
     keys = body.get("keys")

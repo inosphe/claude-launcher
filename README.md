@@ -1697,7 +1697,12 @@ claunch install                   # MCP tools + the /mesh and /cflow skills
   Delivery waits for the recipient's turn to end — and for its *keyboard* to
   go quiet: a human typing in that terminal (attach, web) parks the injection
   until no keystroke has landed for `CLAUNCH_TYPING_GUARD` seconds (default
-  5), so a delivery never submits a message someone was mid-composing.
+  5), so a delivery never submits a message someone was mid-composing. The
+  web terminal reports keys an IME is still composing (Hangul, a phone
+  keyboard mid-word) as well, so the hold covers typing that has not become
+  bytes yet; and `send-keys` with *text* (`claunch send-keys s "do X" Enter`
+  from a script or another agent) queues behind the keyboard the same way —
+  bare keys (`Enter`, `C-c`, `Escape`, arrows) never wait.
 - The web UI has a **Mesh** panel. Sidebar: create a mesh, or type
   `mesh@machine` (or paste an invite code — it is decoded in place) to join
   a remote one with a session/handle picker; meshes carry a `mirror` badge
@@ -2171,7 +2176,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/{name}/migrate` | move to another checkout: exactly one of `{worktree: NAME-or-""}` / `{cwd: DIR}`; `{children: true}` moves the descendants standing in the same directory. The claude transcript is carried to the new directory's slug |
 | POST   | `/api/sessions/{name}/reborrow` | restart on another answer to "whose token": `{borrow: NAME-or-null, null_token?}` — picking one clears the others; the session is relaunched with the definition's auth swapped, the directory untouched |
 | POST   | `/api/sessions/{name}/skip-permissions` | restart with permission prompts toggled: `{skip: true|false}` adds/removes `--dangerously-skip-permissions` in the definition's args and relaunches |
-| POST   | `/api/sessions/{name}/keys`    | raw keyboard: `{keys: [...], literal}` — send-keys; or `{paste, enter}` — one bracketed paste (multiline-safe) |
+| POST   | `/api/sessions/{name}/keys`    | raw keyboard: `{keys: [...], literal}` — send-keys; or `{paste, enter}` — one bracketed paste (multiline-safe). Text (and any paste) waits out a human typing at that terminal (`CLAUNCH_TYPING_GUARD` quiet, bounded by `CLAUNCH_TYPING_HOLD_TIMEOUT`); bare keys go through at once |
 | POST   | `/api/sessions/{name}/deliver` | `{text}` — hand the agent a message (paste + separately-written Enter). What every automated sender uses; `/keys` is for a human at a keyboard |
 | GET    | `/api/sessions/{name}/capture` | `?history=1&format=json&trim=0` |
 | GET    | `/api/sessions/{name}/wait`    | long-poll `?state=idle\|exited&timeout=&threshold=` |

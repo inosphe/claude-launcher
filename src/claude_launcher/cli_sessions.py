@@ -708,6 +708,16 @@ def _cmd_clear_sessions(args: argparse.Namespace) -> int:
     return 0
 
 
+def _keys_timeout() -> float:
+    """How long ``send-keys`` waits on the daemon. Text (and a paste) may be
+    held while a human types at that terminal — up to the daemon's
+    ``CLAUNCH_TYPING_HOLD_TIMEOUT`` (see ``Session.send_keys``) — and the
+    request must outlive that hold, or the CLI reports a failure for keys
+    the daemon then goes on to type."""
+    hold = float(os.environ.get("CLAUNCH_TYPING_HOLD_TIMEOUT") or 30.0)
+    return hold + 15.0
+
+
 def _cmd_send_keys(args: argparse.Namespace) -> int:
     keys: List[str] = list(args.keys)
     if keys and keys[0] == "--":
@@ -723,6 +733,7 @@ def _cmd_send_keys(args: argparse.Namespace) -> int:
         client.post(
             f"/api/sessions/{args.session}/keys",
             {"paste": text, "enter": bool(args.enter)},
+            timeout=_keys_timeout(),
         )
         return 0
     if not keys:
@@ -732,6 +743,7 @@ def _cmd_send_keys(args: argparse.Namespace) -> int:
     client.post(
         f"/api/sessions/{args.session}/keys",
         {"keys": keys, "literal": bool(args.literal)},
+        timeout=_keys_timeout(),
     )
     return 0
 

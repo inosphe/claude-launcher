@@ -77,3 +77,32 @@ def test_unknown_multichar_is_literal_text():
 def test_bad_control_key_raises():
     with pytest.raises(keys.KeyError_):
         enc("C-Enter")
+
+
+# --------------------------------------------------------------------------- #
+# has_text: keys vs. typed text — what decides whether a send-keys queues
+# behind a human typing at that terminal (see Session.send_keys).
+# --------------------------------------------------------------------------- #
+@pytest.mark.parametrize(
+    "args, literal, expected",
+    [
+        (["Enter"], False, False),
+        (["C-c"], False, False),
+        (["Escape", "Up", "Down", "Tab", "F5"], False, False),
+        (["M-x"], False, False),
+        ([], False, False),
+        (["hello"], False, True),
+        (["a"], False, True),          # single chars are themselves, i.e. text
+        (["fix it", "Enter"], False, True),
+        (["Enter", "y"], False, True),
+        (["Enter"], True, True),       # -l: the word "Enter" IS the text
+        ([""], True, False),           # -l with nothing to type
+    ],
+)
+def test_has_text(args, literal, expected):
+    assert keys.has_text(args, literal=literal) is expected
+
+
+def test_has_text_ignores_an_unencodable_key_it_would_not_send_anyway():
+    # encode_keys raises for this; has_text merely says it is not text
+    assert keys.has_text(["C-up"]) is False

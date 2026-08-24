@@ -748,7 +748,11 @@ entries addressed to it:
    like claude queue typed input during a turn). `Session.deliver` re-checks
    the keyboard right before pasting, bounded by `CLAUNCH_TYPING_HOLD_TIMEOUT`
    (default 30s), so the guard also covers briefing/nudge/cflow injections
-   that never pass through this worker;
+   that never pass through this worker — and `send-keys` text / `--paste`
+   through `/keys`, which hold the same way (bare keys never do). The web
+   terminal marks the keyboard on keydown/IME-composition events too (a
+   `typing` control frame, throttled to one a second), since a Hangul
+   syllable or a phone keyboard's word sends no bytes until it commits;
 3. **inject** — one fenced YAML block, control-characters stripped and bodies
    clipped, sent via bracketed paste + Enter:
 

@@ -124,7 +124,7 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                     # A binary frame is a human at a keyboard (attach or the
                     # web terminal); the mark parks automated deliveries so
                     # they don't type into a message being composed.
-                    session.note_human_input()
+                    session.note_human_input(at_terminal=True)
                     try:
                         await session.write_bytes(msg.data)
                     except SessionGone:
@@ -231,3 +231,12 @@ async def _handle_control(
         await ws.send_bytes(session.screen.repaint_sequence(state.offset))
     elif kind == "ping":
         await ws.send_str(json.dumps({"type": "pong"}))
+    elif kind == "typing":
+        # The web terminal's "a human is at this keyboard" mark for keys that
+        # have not produced bytes: an IME composing a Hangul syllable, a
+        # phone keyboard mid-word, a modifier held. Those keep the composer
+        # changing while no BINARY frame arrives, so without this mark a
+        # delivery sees a quiet keyboard and types into the half-written
+        # line. Same mark as a keystroke frame — it only restarts the
+        # TYPING_GUARD window, never writes anything.
+        session.note_human_input(at_terminal=True)

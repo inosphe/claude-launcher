@@ -163,6 +163,31 @@ def split_submit(data: bytes) -> Tuple[bytes, bytes]:
     return data, b""
 
 
+def has_text(args: Iterable[str], *, literal: bool = False) -> bool:
+    """Whether any ``send-keys`` argument is *typed text* rather than a key.
+
+    ``["Enter"]``, ``["C-c"]``, ``["Escape", "Up"]`` are keypresses; ``["hi"]``,
+    ``["fix it", "Enter"]`` and anything sent with the literal flag carry text
+    that lands in the recipient's composer. The distinction decides whether
+    :meth:`~claude_launcher.daemon.session.Session.send_keys` waits for a
+    human at that terminal to stop typing first: text interleaved into a
+    half-written line corrupts it, while a bare key (an interrupt, a submit)
+    is wanted exactly when it was sent.
+    """
+    for arg in args:
+        if literal:
+            if arg:
+                return True
+            continue
+        try:
+            _encode_key(arg, False)
+        except LookupError:
+            return True
+        except KeyError_:
+            continue  # unencodable modifier combo: encode_keys reports it
+    return False
+
+
 def encode_keys(args: Iterable[str], *, literal: bool = False, app_cursor: bool = False) -> bytes:
     """Translate ``send-keys`` arguments into the byte stream to write to a PTY.
 
