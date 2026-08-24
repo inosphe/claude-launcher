@@ -64,7 +64,10 @@ folds open, and which of the daemon's answers (a briefing, unshaped prose,
 no LLM, no record) it is showing — ``briefingtop_check`` on the same card's
 two other homes, the top header's toggle (whose pane sits between the
 header and the terminal) and the detail panel's section, bound to the same
-open-set and off-state — ``spawnform_check`` on the create form
+open-set and off-state — ``briefrow_check`` on the row's always-on face —
+the one-line job description the /api/sessions poll pours into every row
+(digest first, the opening task as fallback) and the collapsed ⟳ that
+refreshes without opening — ``spawnform_check`` on the create form
 turned into a spawn — what a child may be asked once a parent is named, and
 when the parent's conversation is on offer to fork — and the two
 ``flow*_check`` harnesses on the flow view — one on the track a workflow
@@ -127,6 +130,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "termcache_check.js",
         "briefcard_check.js",
         "briefingtop_check.js",
+        "briefrow_check.js",
         "spawnform_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",

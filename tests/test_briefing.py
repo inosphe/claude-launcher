@@ -211,11 +211,43 @@ def test_gather_cflow_maps_status_and_last_report(monkeypatch, tmp_path):
 # lenient answer parsing
 # --------------------------------------------------------------------------- #
 def test_parse_briefing_plain_fenced_and_embedded():
-    body = {"goal": "g", "now": "n", "state": "working", "progress": "p"}
+    body = {
+        "goal": "g", "now": "n", "state": "working", "progress": "p",
+        "one-line-job-description": "한 줄 설명",
+    }
     expect = dict(body)
     assert briefing.parse_briefing(json.dumps(body)) == expect
     assert briefing.parse_briefing(f"```json\n{json.dumps(body)}\n```") == expect
     assert briefing.parse_briefing(f"Sure! Here it is:\n{json.dumps(body)}\nDone.") == expect
+
+
+def test_parse_briefing_absent_one_line_is_empty(home):
+    # the one-line is optional input — absent, it parses to "" rather than
+    # erroring, so an older model's shape still yields a usable briefing
+    parsed = briefing.parse_briefing(
+        '{"goal": "g", "now": "n", "state": "working", "progress": "p"}'
+    )
+    assert parsed["one-line-job-description"] == ""
+    assert parsed["goal"] == "g"
+
+
+def test_digest_serves_the_cached_one_line_only(home):
+    """digest() is the list's cheap read: nothing composed -> None, and only a
+    parsed one-line makes it into the digest — a raw/unshaped result or an
+    empty one-line yields no digest (the rail falls back to the record)."""
+    assert briefing.digest("s1") is None
+    briefing._cache["s1"] = (
+        ("key",),
+        {"briefing": {"goal": "g", "state": "working",
+                       "one-line-job-description": "한 줄"}},
+    )
+    assert briefing.digest("s1") == {"one_line": "한 줄", "state": "working"}
+    # a raw (unshaped) result: no parsed briefing, hence no digest
+    briefing._cache["s2"] = (("key",), {"briefing": None, "raw": "prose"})
+    assert briefing.digest("s2") is None
+    # a parsed briefing with no one-line: nothing to put on the row
+    briefing._cache["s3"] = (("key",), {"briefing": {"goal": "g", "state": "idle"}})
+    assert briefing.digest("s3") is None
 
 
 def test_parse_briefing_bad_state_and_garbage():
@@ -343,7 +375,10 @@ def test_briefing_endpoint_contract_cache_and_refresh(home, tmp_path):
 
     _register_py_harness()
     hits = []
-    answer = {"goal": "목표", "now": "작업 중", "state": "working", "progress": "70%"}
+    answer = {
+        "goal": "목표", "now": "작업 중", "state": "working", "progress": "70%",
+        "one-line-job-description": "브리핑 백엔드",
+    }
 
     async def handler(request):
         hits.append(await request.json())
@@ -469,6 +504,53 @@ def test_sessions_list_says_whether_llm_is_configured(home, tmp_path):
             _set_llm("http://llm.example/v1/chat/completions")
             resp = await client.get("/api/sessions", headers=BEARER)
             assert (await resp.json())["llm_configured"] is True
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_sessions_list_attaches_the_cached_briefing_digest(home, tmp_path):
+    """The list poll pours each session's cached one-liner: a rail row can
+    show it folded or open, and a browser refresh repaints it from the
+    daemon's session state instead of regenerating — the list itself never
+    calls the LLM, it only reads what compose() already left."""
+
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            cwd = str(tmp_path / "work")
+            (tmp_path / "work").mkdir()
+            mgr.create(
+                SessionDef(
+                    name="s1", harness="py", cwd=cwd,
+                    task="브리핑을 한 줄로 담기",
+                )
+            )
+            # nothing composed yet: no digest, but the recorded task is there
+            # for the row to fall back on
+            resp = await client.get("/api/sessions", headers=BEARER)
+            row = (await resp.json())["sessions"][0]
+            assert "briefing" not in row
+            assert row["task"] == "브리핑을 한 줄로 담기"
+
+            # what one compose() would have left in the cache — the very next
+            # poll carries it as the digest, with no LLM call involved
+            briefing._cache["s1"] = (
+                ("key",),
+                {"session": "s1", "briefing": {
+                    "goal": "g", "state": "waiting",
+                    "one-line-job-description": "한 줄",
+                }},
+            )
+            resp = await client.get("/api/sessions", headers=BEARER)
+            row = (await resp.json())["sessions"][0]
+            assert row["briefing"] == {"one_line": "한 줄", "state": "waiting"}
+
+            await mgr.shutdown_all()
         finally:
             await client.close()
 

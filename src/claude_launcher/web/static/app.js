@@ -466,6 +466,8 @@ async function refreshSessions() {
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
+    // The briefing's one-line and the collapsed ⟳, always on the row.
+    decorateBriefingRow(li, s);
     list.appendChild(li);
   }
   refreshResumeChoices();  // the spawn form offers these same conversations
@@ -912,6 +914,12 @@ function renderBriefingCard(name, entry) {
   } else if (entry.phase === "error") {
     card.appendChild(el("div", "sess-brief-note error", entry.error || "briefing failed"));
   } else if (brief) {
+    // The one line that says what this session is FOR sits at the top of the
+    // card too — the row's under-name line shows it always, this is the same
+    // fact where the rest of the summary is read.
+    if (brief["one-line-job-description"]) {
+      card.appendChild(el("div", "sess-brief-one", brief["one-line-job-description"]));
+    }
     for (const [key, val] of [
       ["goal", brief.goal], ["now", brief.now], ["progress", brief.progress],
     ]) {
@@ -991,6 +999,51 @@ function applyBriefingTop() {
   pane.innerHTML = "";
   if (open) pane.appendChild(renderBriefingCard(currentName, briefingCache.get(currentName)));
   pane.classList.toggle("hidden", !open);
+}
+
+/* What a rail row says whether folded or open: the briefing's one-line job
+   description, or the recorded opening task until a briefing exists. The
+   digest rides the /api/sessions poll (see briefing.digest), so a browser
+   refresh repaints it from the daemon's session state instead of asking the
+   LLM again. The row's ⟳ refresh sits beside it as the collapsed-state
+   handle — same fetch as the card's, but it never opens the card. Built here
+   on every row rebuild; the ▸ toggle and the card are applyBriefingCards'. */
+function decorateBriefingRow(li, s) {
+  const one = (s.briefing && s.briefing.one_line) || s.task || "";
+  let oline = li.querySelector(".rail-brief");
+  if (one) {
+    if (!oline) {
+      oline = el("div", "rail-brief");
+      oline.title = "one-line job description — ▸ opens the full briefing";
+      li.appendChild(oline);
+    }
+    oline.textContent = one;
+  } else if (oline) {
+    oline.remove();
+  }
+  let refresh = li.querySelector(".sess-brief-rowref");
+  if (!refresh) {
+    refresh = el("button", "sess-brief-rowref");
+    refresh.type = "button";
+    refresh.addEventListener("click", (e) => {
+      e.stopPropagation();   // the row navigates; this button only refreshes
+      refreshBriefingRow(s.name);
+    });
+    li.appendChild(refresh);
+  }
+  refresh.disabled = !briefingLLM;
+  refresh.title = briefingLLM
+    ? "refresh the summary without opening it"
+    : "briefing off — set the llm section (endpoint, model, api_key)"
+      + " in ~/.claunch.yaml to enable";
+  refresh.textContent = "⟳";
+}
+
+/* The collapsed row's refresh: re-ask the daemon (bypassing its cache) and
+   leave the card folded — the one-line and state repaint on the next poll,
+   which is what "without opening" means. */
+function refreshBriefingRow(name) {
+  fetchBriefing(name, true);
 }
 
 /* The detail panel's copy of the summary: the same card the ▸ toggles open,

@@ -8,11 +8,11 @@
    What has to hold: the name, the role it holds and the rooms it is in are
    ONE group in ONE container, so they share a line and shrink instead of
    wrapping; nothing that belongs on that line declares itself full-width; the
-   only full-width children are the deliberate lines below (the context gauge,
-   the cflow run and the folded-open briefing card) and all sort AFTER the
-   toggle; and the
-   tags still say which rooms, since a pill that can shrink to an empty
-   capsule has lost the fact it was drawn for.
+   only full-width children are the four deliberate lines below (the briefing
+   one-liner, the context gauge, the cflow run and the folded-open briefing
+   card) and all sort AFTER the toggle; and the tags still say which rooms,
+   since a pill that can shrink to an empty capsule has lost the fact it was
+   drawn for.
 
    The real refreshSessions builds the rows here, against a stub DOM. */
 const fs = require("fs");
@@ -130,6 +130,12 @@ function ctxNoteOnRow(row, name, s) {
    Returned for every session, since the harness's sessions carry no harness
    field and so are all "claude" to ctxKnowable. */
 function ctxRailLine(s) { return el("span", "rail-ctx-line unknown"); }
+/* The briefing's per-row decoration (the one-line and the collapsed ⟳) is
+   its own harness (briefrow_check); here, like applyBriefingCards, it is a
+   no-op so what this harness pins — the row's own parts — stays about the
+   name-line layout. The one-line's stylesheet contract is still asserted
+   below (it is one of the deliberate full-width breakers). */
+function decorateBriefingRow(li, s) {}
 `;
 
 const ctx = {};
@@ -270,16 +276,19 @@ ctx.setMeshes([
   }
   const decl = (sel, prop) => (rules.get(sel) || {})[prop];
 
-  /* A full-width child is a line break. Only the three deliberate ones may
-     be, and all must sort after the toggle — a breaker at the default order 0
-     ends the line before the toggle can land on it, which is the bug. */
-  const BREAKERS = ["#session-list .rail-ctx-line", "#session-list .sess-cflow",
-                    "#session-list .sess-brief"];
+  /* A full-width child is a line break. Only the four deliberate ones may
+     be, and each must sort after the toggle — a breaker at the default
+     order 0 ends the line before the toggle can land on it, which is the
+     bug. (.rail-brief and .rail-ctx-line are the two always-on one-liners.) */
+  const BREAKERS = [
+    "#session-list .rail-brief", "#session-list .rail-ctx-line",
+    "#session-list .sess-cflow", "#session-list .sess-brief",
+  ];
   const fullWidth = [...rules].filter(([sel, d]) =>
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the context line, the cflow line and the briefing card break the row",
+  check("only the one-line, the context line, the cflow line and the briefing card break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
   const toggleOrder = Number(decl("#session-list .sess-brief-toggle", "order"));

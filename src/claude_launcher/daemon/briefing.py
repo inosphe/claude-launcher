@@ -263,9 +263,12 @@ def build_prompt(sdef, cflow_info: Optional[dict], events: List[str]) -> str:
         "(코드펜스·설명·다른 텍스트 금지):",
         '{"goal": "작업 목표 1~2문장", "now": "지금 하는 일 1~2문장",'
         ' "state": "working|blocked|waiting|idle|done|unknown",'
-        ' "progress": "진행 정도 한 문장"}',
+        ' "progress": "진행 정도 한 문장",'
+        ' "one-line-job-description": "이 세션이 맡은 일을 한 줄로"}',
         "자료에 없는 내용은 지어내지 않는다. 판단 근거가 없으면 state는",
         '"unknown"으로 둔다. 문장은 자료의 언어(한국어면 한국어)를 따른다.',
+        "one-line-job-description은 세션이 맡은 작업 전체를 한 줄에 담는다"
+        "(목표와 달라도 좋다 — 리더가 볼 한 줄짜리 설명).",
         "",
         "[세션]",
         f"이름: {sdef.name}",
@@ -359,6 +362,9 @@ def parse_briefing(text: str) -> Optional[dict]:
             "now": str(data.get("now") or "").strip(),
             "state": state if state in _STATES else "unknown",
             "progress": str(data.get("progress") or "").strip(),
+            "one-line-job-description": str(
+                data.get("one-line-job-description") or ""
+            ).strip(),
         }
     return None
 
@@ -413,3 +419,26 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
     }
     _cache[name] = (cache_key, result)
     return result
+
+
+def digest(name: str) -> Optional[dict]:
+    """The cached one-liner (+ state) for the session list, never composed.
+
+    Served on the ``/api/sessions`` poll so a rail row can show the briefing's
+    one-line without opening the card — and without an LLM call. Reading the
+    cache is what makes the one-line survive a browser refresh without
+    regeneration: the browser loses its in-memory copy, the daemon does not,
+    and the list poll pours the digest straight back. ``None`` when nothing
+    has been composed for this session since the daemon started (the row then
+    falls back to the recorded opening task).
+    """
+    hit = _cache.get(name)
+    if hit is None:
+        return None
+    brief = (hit[1] or {}).get("briefing")
+    if not isinstance(brief, dict):
+        return None
+    one = str(brief.get("one-line-job-description") or "").strip()
+    if not one:
+        return None
+    return {"one_line": one, "state": str(brief.get("state") or "").strip()}
