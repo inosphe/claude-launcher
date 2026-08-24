@@ -111,7 +111,11 @@ function build(opts) {
   const statuses = [];
   const winOn = {};
 
-  const code = slice("/* ---- the link ----", "/* ---- text size ----");
+  // detach() reaches for the keep-alive cache map and the attached session's
+  // name; this slice is below the block that declares them, so the harness
+  // provides stand-ins the sliced detach() can safely no-op against.
+  const code = "let keptTerms = new Map();\nlet currentName = null;\n"
+    + slice("/* ---- the link ----", "/* ---- text size ----");
   // The link slice ends before the wheel block, so the wheel machinery lives
   // outside this Function's scope: the wheel handlers are not what is being
   // checked here, and a live handleFrame/detach still reaches for them, so
