@@ -44,6 +44,18 @@ def project(tmp_path, monkeypatch, home):
     return proj
 
 
+@pytest.fixture
+def monkeypatch_stdin(monkeypatch):
+    """Feed a string (or EOF) to ``input``, the way a live prompt would read it."""
+    holder = {}
+
+    def feed(text):
+        holder["text"] = text
+
+    monkeypatch.setattr("builtins.input", lambda prompt="": holder.get("text", ""))
+    return feed
+
+
 # --------------------------------------------------------------------------- #
 # resolution
 # --------------------------------------------------------------------------- #
@@ -481,3 +493,128 @@ def test_the_leader_treats_a_clean_merge_as_unproven():
     integrate = _bundled("improv-leader").steps["integrate"]
     for anchor in ("충돌 없음은 안전 판정이 아니다", "같은 모듈", "스텁", "프리뷰"):
         assert anchor in integrate.instructions, f"integrate lost {anchor!r}"
+
+
+# --------------------------------------------------------------------------- #
+# claunch cflow update — bring stale global copies up to the package
+# --------------------------------------------------------------------------- #
+def _fake_bundle(tmp_path, monkeypatch, files):
+    """Point the packaged-workflow source at a throwaway directory.
+
+    ``bundled_workflows()`` resolves through ``bundled_workflows_dir()`` alone
+    (the package directory), so seeding and update read the fake copy and the
+    tests never touch the real package.
+    """
+    pkg = tmp_path / "bundle"
+    pkg.mkdir()
+    for name, body in files.items():
+        (pkg / name).write_text(body, encoding="utf-8")
+    monkeypatch.setattr(state_mod, "bundled_workflows_dir", lambda: pkg)
+    return pkg
+
+
+def test_update_replaces_a_stale_global_copy(project, home, tmp_path, monkeypatch):
+    pkg = _fake_bundle(tmp_path, monkeypatch, {"tiny.yaml": TINY.format(name="tiny", desc="v1")})
+    cflow_install.seed_global_workflows()
+    # The package moves on; the layer still holds the seeded bytes.
+    (pkg / "tiny.yaml").write_text(TINY.format(name="tiny", desc="v2"), encoding="utf-8")
+
+    outcomes = cflow_install.update_global_workflows([], can_ask=False)
+    states = {name: outcome for name, outcome, applied, _ in outcomes}
+    assert states["tiny"] == cflow_install.STALE
+    assert "v2" in (home / "workflows" / "tiny.yaml").read_text("utf-8")
+
+
+def test_update_seeds_a_missing_global_copy(project, home, tmp_path, monkeypatch):
+    _fake_bundle(tmp_path, monkeypatch, {"tiny.yaml": TINY.format(name="tiny", desc="v1")})
+    outcomes = cflow_install.update_global_workflows([], can_ask=False)
+    states = {name: outcome for name, outcome, applied, _ in outcomes}
+    assert states["tiny"] == cflow_install.SEEDED
+    assert (home / "workflows" / "tiny.yaml").is_file()
+
+
+def test_update_leaves_an_unchanged_copy_alone(project, home, tmp_path, monkeypatch):
+    _fake_bundle(tmp_path, monkeypatch, {"tiny.yaml": TINY.format(name="tiny", desc="v1")})
+    cflow_install.seed_global_workflows()
+    outcomes = cflow_install.update_global_workflows([], can_ask=False)
+    states = {name: outcome for name, outcome, applied, _ in outcomes}
+    assert states["tiny"] == cflow_install.UNCHANGED
+
+
+def test_update_refuses_an_edited_copy_without_force(project, home, tmp_path, monkeypatch):
+    _fake_bundle(tmp_path, monkeypatch, {"tiny.yaml": TINY.format(name="tiny", desc="v1")})
+    cflow_install.seed_global_workflows()
+    # A human edits the layer copy; the package does not move.
+    (home / "workflows" / "tiny.yaml").write_text(
+        TINY.format(name="tiny", desc="mine"), encoding="utf-8"
+    )
+
+    outcomes = cflow_install.update_global_workflows([], can_ask=False)
+    states = {name: (outcome, applied) for name, outcome, applied, _ in outcomes}
+    assert states["tiny"] == (cflow_install.EDITED, False)
+    # Not applied: no --force, no live terminal.
+    assert "mine" in (home / "workflows" / "tiny.yaml").read_text("utf-8")
+    assert not (home / "workflows" / "tiny.yaml").with_name("tiny.yaml.bak").exists()
+
+
+def test_update_with_force_backs_up_then_replaces(project, home, tmp_path, monkeypatch):
+    _fake_bundle(tmp_path, monkeypatch, {"tiny.yaml": TINY.format(name="tiny", desc="v1")})
+    cflow_install.seed_global_workflows()
+    edited = home / "workflows" / "tiny.yaml"
+    edited.write_text(TINY.format(name="tiny", desc="mine"), encoding="utf-8")
+
+    outcomes = cflow_install.update_global_workflows([], force=True, can_ask=False)
+    states = {name: (outcome, applied) for name, outcome, applied, _ in outcomes}
+    assert states["tiny"] == (cflow_install.EDITED, True)
+    # The edit is what the .bak keeps; the layer copy is the package again.
+    assert (home / "workflows" / "tiny.yaml").is_file()
+    assert "v1" in (home / "workflows" / "tiny.yaml").read_text("utf-8")
+    bak = home / "workflows" / "tiny.yaml.bak"
+    assert bak.is_file()
+    assert "mine" in bak.read_text("utf-8")
+
+
+def test_update_an_unknown_copy_refuses_without_force(project, home, tmp_path, monkeypatch):
+    """A file with no seed record is not provably stale — leave it alone."""
+    _fake_bundle(tmp_path, monkeypatch, {"tiny.yaml": TINY.format(name="tiny", desc="v1")})
+    (home / "workflows" / "tiny.yaml").write_text(
+        TINY.format(name="tiny", desc="pre-sidecar"), encoding="utf-8"
+    )
+    outcomes = cflow_install.update_global_workflows([], can_ask=False)
+    states = {name: (outcome, applied) for name, outcome, applied, _ in outcomes}
+    assert states["tiny"] == (cflow_install.UNKNOWN, False)
+    assert "pre-sidecar" in (home / "workflows" / "tiny.yaml").read_text("utf-8")
+
+
+def test_update_can_ask_defers_to_the_person(project, home, tmp_path, monkeypatch, monkeypatch_stdin):
+    """A live terminal is asked — a 'no' (or EOF) is a refusal, not assent."""
+    _fake_bundle(tmp_path, monkeypatch, {"tiny.yaml": TINY.format(name="tiny", desc="v1")})
+    cflow_install.seed_global_workflows()
+    (home / "workflows" / "tiny.yaml").write_text(
+        TINY.format(name="tiny", desc="mine"), encoding="utf-8"
+    )
+
+    # EOF (no answer) must not become a default-yes.
+    monkeypatch_stdin("")
+    outcomes = cflow_install.update_global_workflows([], can_ask=True)
+    states = {name: (outcome, applied) for name, outcome, applied, _ in outcomes}
+    assert states["tiny"] == (cflow_install.EDITED, False)
+    assert "mine" in (home / "workflows" / "tiny.yaml").read_text("utf-8")
+
+    # An explicit yes replaces it, with the edit preserved in .bak.
+    monkeypatch_stdin("y\n")
+    outcomes = cflow_install.update_global_workflows([], can_ask=True)
+    states = {name: (outcome, applied) for name, outcome, applied, _ in outcomes}
+    assert states["tiny"] == (cflow_install.EDITED, True)
+    assert "v1" in (home / "workflows" / "tiny.yaml").read_text("utf-8")
+    assert "mine" in (home / "workflows" / "tiny.yaml.bak").read_text("utf-8")
+
+
+def test_seed_writes_a_record_loaded_by_update(project, home, tmp_path, monkeypatch):
+    """The sidecar is what lets update tell stale from edited — it must
+    survive a re-read."""
+    _fake_bundle(tmp_path, monkeypatch, {"tiny.yaml": TINY.format(name="tiny", desc="v1")})
+    cflow_install.seed_global_workflows()
+    assert (home / "workflows" / ".seeded.json").is_file()
+    record = cflow_install.seed_record(home / "workflows")
+    assert "tiny.yaml" in record and len(record["tiny.yaml"]) == 64

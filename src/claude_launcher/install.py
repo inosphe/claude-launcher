@@ -54,6 +54,7 @@ from typing import List
 
 from . import commit_stamp, config, mesh_install, settings
 from .cflow import authoring as cflow_authoring, install as cflow_install
+from .cflow import state as cflow_state
 from .profile import Profile
 
 #: The server's key in ``.claude.json`` / ``.mcp.json`` — the name the agent
@@ -134,15 +135,47 @@ def _workflow_lines() -> List[str]:
     lines = []
     unchanged = 0
     for _, dest, outcome in cflow_install.seed_global_workflows():
-        if outcome == cflow_install.KEPT:
-            lines.append(f"workflow -> {dest} (kept; yours differs from the packaged one)")
-        elif outcome == cflow_install.SEEDED:
+        if outcome == cflow_install.SEEDED:
             lines.append(f"workflow -> {dest}")
+        elif outcome == cflow_install.KEPT:
+            # KEPT is what seeding did; say why, and how to act on it. Only a
+            # stale copy — still exactly what we seeded — offers a next step,
+            # and the next step is printed so it can be pasted, not guessed.
+            why = cflow_install.worktree_state(
+                _bundled_src_for(dest), dest, cflow_install.seed_record(dest.parent)
+            )
+            if why == cflow_install.STALE:
+                lines.append(
+                    f"workflow -> {dest} (stale; refresh with: "
+                    f"claunch cflow update {dest.stem})"
+                )
+            elif why == cflow_install.EDITED:
+                lines.append(f"workflow -> {dest} (kept; yours differs from the packaged one)")
+            else:
+                lines.append(
+                    f"workflow -> {dest} (kept; not ours to tell whether edited — "
+                    f"see 'claunch cflow update --help')"
+                )
         else:
             unchanged += 1
     if not lines and unchanged:
         lines.append(f"workflow layer -> up to date ({unchanged} workflows)")
     return lines
+
+
+def _bundled_src_for(dest: Path) -> Path:
+    """The packaged file a global-layer copy of ``dest`` came from.
+
+    Seeding copies both ``*.y*ml`` and their ``*_assets```, so the packaged
+    counterpart is the same filename under the bundled directory — which is
+    the only non-stable mapping (a name that exists in the layer but not in
+    the bundle is not a seed at all, and the comparison falls back to the
+    copy itself so it reads "unchanged" rather than crashing).
+    """
+    cand = cflow_state.bundled_workflows_dir() / dest.name
+    if cand.exists():
+        return cand
+    return dest
 
 
 def install_into_user() -> List[str]:
