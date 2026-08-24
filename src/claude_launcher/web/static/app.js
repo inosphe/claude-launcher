@@ -2145,6 +2145,42 @@ function handleFrame(msg) {
   }
 }
 
+/* ---- typing marks ----
+   Keystrokes that reach the daemon as bytes mark its keyboard busy on
+   arrival (the BINARY frame sendInput sends), and that mark is what parks a
+   mesh delivery or a send-keys from another agent until the human here stops
+   typing. But not every key becomes bytes right away: an IME composing Hangul
+   keeps the syllable in xterm's textarea until it commits, a phone keyboard
+   keeps the whole word, and while that goes on the daemon sees a keyboard
+   that has been quiet for seconds — its guard is 5s (TYPING_GUARD) — and
+   types the delivery straight into the half-written line. So the textarea
+   reports the keys themselves, as a `typing` control frame: at most one per
+   TYPING_MARK_MS, which against a 5s guard is plenty, and never a byte into
+   the PTY. Bare keydowns (a modifier, an arrow) mark too; a spurious mark
+   only delays a delivery by the guard, a missed one corrupts a line. */
+const TYPING_MARK_MS = 1000;
+let lastTypingMark = 0;
+function noteTyping() {
+  // Same bookkeeping as a keystroke: the queued-deliveries banner says "your
+  // typing" for a hold this tab is causing, composing included.
+  lastLocalKey = Date.now();
+  if (Date.now() - lastTypingMark < TYPING_MARK_MS) return;
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  lastTypingMark = Date.now();
+  ws.send(JSON.stringify({ type: "typing" }));
+}
+/* Wired once per Terminal object, like onData: xterm owns one hidden textarea
+   for the life of the terminal and every key — composed or not — passes
+   through it. `input` covers virtual keyboards that fire no keydown, the
+   composition events cover an IME that swallows both. */
+function watchComposer(t) {
+  const ta = t && t.textarea;
+  if (!ta) return;
+  for (const ev of ["keydown", "compositionstart", "compositionupdate", "input"]) {
+    ta.addEventListener(ev, noteTyping);
+  }
+}
+
 /* Everything typed into the terminal goes through here. While the link is down
    the keystrokes are held rather than dropped on the floor: dropping them
    silently is how a phone user — who has no local echo to tell them otherwise
@@ -2923,6 +2959,7 @@ function freshAttach(name) {
   // Wired once, for the life of this terminal object: the link swaps sockets
   // underneath these, and a reconnect must not leave a second pair behind.
   term.onData(sendInput);
+  watchComposer(term);
   term.onResize(({ cols, rows }) => {
     // A resize we applied from a server broadcast must not be echoed back, or
     // two viewers (or a stale echo over a high-latency relay) ping-pong forever.
