@@ -450,3 +450,26 @@ def test_briefing_endpoint_unconfigured_unknown_and_raw(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_sessions_list_says_whether_llm_is_configured(home, tmp_path):
+    """The session list carries ``llm_configured`` so the web rail can show
+    the briefing toggles disabled (with the why) before anyone clicks one."""
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            # no llm: block -> the rail is told the feature is off
+            resp = await client.get("/api/sessions", headers=BEARER)
+            assert resp.status == 200
+            assert (await resp.json())["llm_configured"] is False
+
+            # writing the config flips the very next poll, no restart
+            _set_llm("http://llm.example/v1/chat/completions")
+            resp = await client.get("/api/sessions", headers=BEARER)
+            assert (await resp.json())["llm_configured"] is True
+        finally:
+            await client.close()
+
+    asyncio.run(run())

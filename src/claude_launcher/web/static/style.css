@@ -173,7 +173,10 @@ body {
   flex: none; order: 1; background: none; border: none; color: #6e7681;
   font-size: 11px; line-height: 1; padding: 2px 4px; cursor: pointer;
 }
-#session-list .sess-brief-toggle:hover { color: #58a6ff; }
+#session-list .sess-brief-toggle:hover:not(:disabled) { color: #58a6ff; }
+/* off (no llm: block): still visible so the feature is discoverable, but
+   plainly inert — the tooltip carries the how-to-enable */
+#session-list .sess-brief-toggle:disabled { color: #3d434d; cursor: default; }
 #session-list .sess-cflow { order: 2; }
 #session-list .sess-brief {
   flex-basis: 100%; order: 3; min-width: 0; margin: 6px 0 2px;

@@ -343,6 +343,7 @@ async function refreshSessions() {
     return;
   }
   sessionsCache = data.sessions || [];
+  briefingLLM = data.llm_configured !== false;
   const list = $("session-list");
   list.innerHTML = "";
   for (const [s, depth] of byLineage(sessionsCache)) {
@@ -747,6 +748,12 @@ function ctxRailChip(s) {
    same idempotent shape as the cflow badge above. */
 const briefingOpen = new Set();     // session names whose card is folded open
 const briefingCache = new Map();    // name -> {phase, data?, error?}
+/* Whether the daemon has an llm: block to summarise with — said by the
+   session-list response the rail already polls. Optimistic until the first
+   poll answers; a daemon too old to say is treated as configured, so the
+   worst case is the old behaviour (the card explains), never a feature
+   locked away by a missing key. */
+let briefingLLM = true;
 
 /* The states the summariser is allowed to claim. blocked and waiting are
    the two where the reader may BE the unblock, so they carry the loud
@@ -877,14 +884,22 @@ function applyBriefingCards() {
     if (!btn) {
       btn = el("button", "sess-brief-toggle");
       btn.type = "button";
-      btn.title = "briefing: goal, current work, state — summarised";
       btn.addEventListener("click", (e) => {
         e.stopPropagation();   // the row itself attaches; this button does not
         toggleBriefing(name);
       });
       li.appendChild(btn);
     }
-    const open = briefingOpen.has(name);
+    // The toggle is the feature's one always-visible handle, so it is also
+    // where "this exists but is off" is said: without an llm: block the
+    // button stays put but inert, and its tooltip points at the config to
+    // write — better than a live-looking button opening onto that sentence.
+    btn.disabled = !briefingLLM;
+    btn.title = briefingLLM
+      ? "briefing: goal, current work, state — summarised"
+      : "briefing off — set the llm section (endpoint, model, api_key)"
+        + " in ~/.claunch.yaml to enable";
+    const open = briefingLLM && briefingOpen.has(name);
     btn.textContent = open ? "▾" : "▸";
     const old = li.querySelector(".sess-brief");
     if (old) old.remove();

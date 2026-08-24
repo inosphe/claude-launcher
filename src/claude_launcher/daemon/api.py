@@ -1699,8 +1699,14 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     # ``attach`` rather than ``info`` — every reader of this list wants to know
     # which session is filling up, and the reading is cached against the
     # transcript's own mtime, so a poll where nothing was said costs one stat.
+    # Whether the briefing summariser is usable rides the list the UI already
+    # polls, so the rail can disable the briefing toggles (and say why) up
+    # front instead of every click discovering the 400 for itself.
     return web.json_response(
-        {"sessions": [ctxsize.attach(s) for s in manager.list()]}
+        {
+            "sessions": [ctxsize.attach(s) for s in manager.list()],
+            "llm_configured": briefing.llm_configured(briefing.llm_config()),
+        }
     )
 
 

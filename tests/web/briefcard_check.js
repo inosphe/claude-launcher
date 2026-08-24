@@ -102,7 +102,9 @@ new Function(
    slice("renderBriefingCard"), slice("applyBriefingCards")].join("\n") + `
 const briefingOpen = new Set();
 const briefingCache = new Map();
+let briefingLLM = true;
 exports.apply = applyBriefingCards;
+exports.setLLM = (v) => { briefingLLM = v; };
 `)(ctx, (id) => (id === "session-list" ? list : null),
    { createElement: mkel }, api, noChip);
 
@@ -263,6 +265,27 @@ const kv = (li) => {
         card(s6).querySelector(".sess-brief-state").className,
         "sess-brief-state st-other");
   check("an empty progress grows no row", kv(s6), { goal: "g", now: "n" });
+
+  /* No llm: block — the session poll says so and every toggle goes inert:
+     disabled, its tooltip pointing at the config to write, and any open
+     card folded away. Writing the config brings it all back on the next
+     poll, the open-set intact, without anyone reloading. */
+  ctx.setLLM(false);
+  ctx.apply();
+  check("without an llm the toggle is disabled, closed",
+        [toggle(s6).disabled, toggle(s6).textContent], [true, "▸"]);
+  check("its tooltip points at the config to write",
+        toggle(s6).title,
+        "briefing off — set the llm section (endpoint, model, api_key)"
+        + " in ~/.claunch.yaml to enable");
+  check("the open card is folded away while off", card(s6), null);
+  ctx.setLLM(true);
+  ctx.apply();
+  check("configuring brings the toggle and the open card back",
+        [toggle(s6).disabled, toggle(s6).textContent, kv(s6).goal],
+        [false, "▾", "g"]);
+  check("and the tooltip reads as the feature again",
+        toggle(s6).title, "briefing: goal, current work, state — summarised");
 
   if (failures) {
     console.error(`${failures} check(s) failed`);
