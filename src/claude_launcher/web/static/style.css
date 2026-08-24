@@ -808,12 +808,29 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
    width and gives the rest back to the terminal, so nothing inside may size
    itself from its content — one long path would push #main narrower than
    the session it is showing can be read in. */
+/* The width is a preference, not a constant: the drag bar beside it writes
+   --detail-w (remembered by the browser), 300px until someone moves it.
+   flex: none is what min-width used to do — a narrow window squeezes #main,
+   never the rail. */
 #sess-view.docked {
-  flex: 0 0 clamp(260px, 26vw, 340px); min-height: 0;
+  width: var(--detail-w, 300px); flex: none; min-height: 0;
   /* no top padding: the head below owns it, so it can stick flush */
   padding: 0 16px 14px; overflow-y: auto; overscroll-behavior: contain;
   background: #1b1e24; border-left: 1px solid #2a2e36;
 }
+/* The bar between #main and the docked rail: #rail-split's mirror, wearing
+   its border on the other edge because it sits to the rail's left. Dragging
+   it resizes the rail; the phone breakpoint removes it outright, because
+   there the detail is a page, not a column. */
+#detail-split {
+  flex: none; width: 8px; cursor: col-resize; touch-action: none;
+  display: flex; align-items: center; justify-content: center;
+  background: #1b1e24; border-left: 1px solid #2a2e36;
+}
+#detail-split::after {
+  content: ""; height: 44px; width: 2px; border-radius: 2px; background: #4d5566;
+}
+#detail-split:hover::after, #detail-split.dragging::after { background: #58a6ff; }
 /* The head stays while the rest scrolls — it is the line that says which
    session all of this belongs to, and the rail got long enough (the run folds
    out inside it) to scroll that answer off the top. Its right end is kept
@@ -1755,6 +1772,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   body:not(.rail-open) #sidebar, body:not(.rail-open) #mobile-bottom { display: none; }
   /* full-screen modes leave nothing beside the rail to trade width with */
   #rail-split { display: none; }
+  /* ...and the detail is a page here, so its resize handle has no column to
+     sit beside */
+  #detail-split { display: none; }
 
   #sidebar {
     width: auto; min-width: 0; flex: 1 1 auto; min-height: 0;

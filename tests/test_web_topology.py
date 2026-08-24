@@ -64,7 +64,10 @@ harnesses: ``ctxsize_check`` on how full a session's conversation is said to
 be (a count with no percentage beside it, because no denominator exists to
 make one from, and an absence that must never be drawn as a zero) and
 ``railctx_check`` on where that ends up on a rail row, which is a separate
-failure — a note that stops being hung on anything leaves no trace at all.
+failure — a note that stops being hung on anything leaves no trace at all —
+and ``detailsplit_check`` on the docked detail rail's width: the drag bar
+opposite the session list's, which resizes the ``#sess-view`` column once it
+docks and is carried with it and hidden on a phone.
 This wrapper is what makes them run with everything else.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
@@ -92,6 +95,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "sessmesh_check.js",
         "raillayout_check.js",
         "railsplit_check.js",
+        "detailsplit_check.js",
         "bulk_check.js",
         "forceclear_check.js",
         "owed_check.js",

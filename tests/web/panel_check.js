@@ -61,14 +61,17 @@ function el(tag, cls, text) {
 }
 const kidsOf = (n, cls) => n.kids.filter((k) => k.classes.has(cls));
 const ids = {};
-for (const id of ["layout", "sidebar", "main", "mobile-bottom", "sess-view"]) {
+for (const id of ["layout", "sidebar", "main", "mobile-bottom",
+                  "detail-split", "sess-view"]) {
   ids[id] = node(id);
 }
 // as index.html declares them: the rail, the page slot, the phone's bottom
-// bar — and the detail sitting in the page slot until the layout moves it
+// bar — and the detail, with its resize handle beside it, sitting in the
+// page slot until the layout moves the pair
 ids.layout.appendChild(ids.sidebar);
 ids.layout.appendChild(ids.main);
 ids.layout.appendChild(ids["mobile-bottom"]);
+ids.main.appendChild(ids["detail-split"]);
 ids.main.appendChild(ids["sess-view"]);
 const $ = (id) => ids[id] || (ids[id] = node(id));
 const document = { querySelectorAll: () => [] };
@@ -161,8 +164,10 @@ const check = (name, cond, extra) => {
   console.log(`FAIL ${name}${extra === undefined ? "" : " — " + JSON.stringify(extra)}`);
 };
 const view = ids["sess-view"];
+const split = ids["detail-split"];   // its resize handle, carried along
 const where = () => (view.parentNode || {}).id;
 const up = () => !view.classes.has("hidden");
+const handleUp = () => !split.classes.has("hidden");
 
 /* ---- routing: /info is gone ---- */
 check("info link lands on the terminal",
@@ -178,12 +183,14 @@ check("no session page in the router",
 narrow = false;
 ctx.syncDetailPanel();
 check("wide: it docks in #layout, not in a page", where() === "layout", where());
-check("wide: to the right of #main, left of the phone bar",
+check("wide: to the right of #main, left of the phone bar — its resize handle between them",
       ids.layout.kids.map((k) => k.id).join(",") ===
-        "sidebar,main,sess-view,mobile-bottom",
+        "sidebar,main,detail-split,sess-view,mobile-bottom",
       ids.layout.kids.map((k) => k.id));
 check("wide: closed by default", !up());
 check("wide: carries .docked", view.classes.has("docked"));
+check("wide: the resize handle is down with it",
+      !handleUp() && split.parentNode === ids.layout);
 
 const fitsBefore = ctx.fits();
 ctx.openDetail("coder2");
@@ -192,6 +199,7 @@ check("wide: the rail is up", up() && where() === "layout");
 check("wide: it polls", ctx.polls() === 1, ctx.polls());
 // it just took a column off #main, and no resize event says so
 check("wide: opening re-fits the terminal", ctx.fits() === fitsBefore + 1);
+check("wide: the handle is up beside it", handleUp() && split.parentNode === ids.layout);
 
 ctx.setPage("flows"); ctx.syncDetailPanel();   // navigating away must not close it
 check("wide: survives navigation", up() && ctx.open() === "coder2");
@@ -202,6 +210,7 @@ const fitsOpen = ctx.fits();
 ctx.openDetail("coder2");                      // the same button closes it
 check("wide: the button toggles it off", !up() && ctx.open() === null);
 check("wide: closing gives the width back", ctx.fits() === fitsOpen + 1);
+check("wide: the handle goes down with it", !handleUp());
 
 /* ---- wide: the rail describes the session on screen ---- */
 /* The rail is not in the URL, so nothing re-aims it when the terminal
@@ -314,6 +323,7 @@ check("narrow: it moves into the page slot", where() === "main", where());
 check("narrow: and takes the page", ctx.page() === "session", ctx.page());
 check("narrow: it is up", up());
 check("narrow: drops .docked", !view.classes.has("docked"));
+check("narrow: the handle is a page sign, not a column", !handleUp());
 
 ctx.showView("home");                          // leaving the page closes it
 check("narrow: leaving the page closes it", ctx.open() === null && !up());
@@ -340,7 +350,8 @@ ctx.setCur("coder2");
 ctx.openDetail("coder2");
 check("re-widening puts it back on the right, once",
       where() === "layout" && ids.main.kids.length === 0 &&
-      ids.layout.kids.filter((k) => k.id === "sess-view").length === 1,
+      ids.layout.kids.filter((k) => k.id === "sess-view").length === 1 &&
+      ids.layout.kids.filter((k) => k.id === "detail-split").length === 1,
       { main: ids.main.kids.length, layout: ids.layout.kids.map((k) => k.id) });
 
 console.log(failures ? `\n${failures} failure(s)` : "all panel checks passed");

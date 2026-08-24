@@ -2775,6 +2775,7 @@ let detailWasUp = false;
 
 function syncDetailPanel() {
   const view = $("sess-view");
+  const split = $("detail-split");
   const narrow = MOBILE_MQ.matches;
   const host = narrow ? $("main") : $("layout");
   if (view.parentNode !== host) {
@@ -2782,10 +2783,17 @@ function syncDetailPanel() {
     // rail goes before it: #main keeps the middle, this takes the right edge.
     if (narrow) host.appendChild(view);
     else host.insertBefore(view, $("mobile-bottom"));
+    // The resize handle goes with it, as the pair's left half — the same
+    // reason it is declared beside the rail in the markup: the two nodes
+    // must never be split across homes, or one docks while the other page.
+    host.insertBefore(split, view);
   }
   view.classList.toggle("docked", !narrow);
   const up = !!sessName && (!narrow || currentPage === "session");
   view.classList.toggle("hidden", !up);
+  // The handle is the docked rail's, so it is only up while the rail is the
+  // right column: a phone never shows it even when the detail page does.
+  split.classList.toggle("hidden", !(up && !narrow));
   // Docking and undocking take width off #main and give it back, and no
   // resize event announces that — a sibling changing width is not a viewport
   // change. Without this the terminal keeps the columns it had and the
@@ -3260,6 +3268,63 @@ $("rail-split").addEventListener("pointercancel", endRailDrag);
 $("rail-split").addEventListener("dblclick", () => {
   applyRailW(RAIL_W_DEFAULT);
   localStorage.setItem(RAIL_W_KEY, String(RAIL_W_DEFAULT));
+  refitSoon(60);
+});
+
+/* ------------------------------------------------------------------ */
+/* the docked detail's width: the bar beside the right-hand rail       */
+/* ------------------------------------------------------------------ */
+/* #rail-split's mirror, sitting between #main and the session detail
+   once it docks. Same contract: applied live while the hand moves, written
+   down once at release, reset by a double click, remembered per browser by
+   its own key (scoped by BASE like the rail's) — and the phone hides the
+   bar entirely, because there the detail is a page, not a column. */
+const DETAIL_W_KEY = `claunch_detailw:${BASE}`;
+const DETAIL_W_DEFAULT = 300;   // what the stylesheet ships
+const DETAIL_W_MIN = 220;       // narrower and the run page chokes two columns
+// the ceiling moves with the window: half the screen is the most a second
+// panel should ever take from a terminal
+const detailWMax = () => Math.max(DETAIL_W_MIN, Math.round(window.innerWidth / 2));
+
+function clampDetailW(px) {
+  if (!Number.isFinite(px)) return DETAIL_W_DEFAULT;
+  return Math.min(detailWMax(), Math.max(DETAIL_W_MIN, Math.round(px)));
+}
+
+function applyDetailW(px) {
+  $("layout").style.setProperty("--detail-w", `${px}px`);
+}
+applyDetailW(clampDetailW(Number(localStorage.getItem(DETAIL_W_KEY)) || DETAIL_W_DEFAULT));
+
+let detailDragW = null;   // non-null only mid-drag
+
+$("detail-split").addEventListener("pointerdown", (e) => {
+  e.preventDefault();   // a drag must not start selecting detail text
+  $("detail-split").setPointerCapture(e.pointerId);
+  $("detail-split").classList.add("dragging");
+  detailDragW = $("sess-view").getBoundingClientRect().width;
+});
+$("detail-split").addEventListener("pointermove", (e) => {
+  if (detailDragW === null) return;
+  // The bar is the rail's left edge: dragging it away from the rail's right
+  // edge narrows the rail, towards it widens it.
+  detailDragW = clampDetailW($("sess-view").getBoundingClientRect().right - e.clientX);
+  applyDetailW(detailDragW);
+  refitSoon();   // debounced: the real refit lands when the hand pauses
+});
+const endDetailDrag = () => {
+  if (detailDragW === null) return;
+  $("detail-split").classList.remove("dragging");
+  localStorage.setItem(DETAIL_W_KEY, String(detailDragW));
+  detailDragW = null;
+  refitSoon(60);
+};
+$("detail-split").addEventListener("pointerup", endDetailDrag);
+$("detail-split").addEventListener("pointercancel", endDetailDrag);
+/* back to the stylesheet's width, the way the rail's bar resets its own */
+$("detail-split").addEventListener("dblclick", () => {
+  applyDetailW(DETAIL_W_DEFAULT);
+  localStorage.setItem(DETAIL_W_KEY, String(DETAIL_W_DEFAULT));
   refitSoon(60);
 });
 
