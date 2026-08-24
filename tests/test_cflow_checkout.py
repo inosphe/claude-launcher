@@ -9,6 +9,7 @@ quiet about it: these tests pin the detection and the two places it surfaces.
 
 from __future__ import annotations
 
+import argparse
 import sys
 
 import pytest
@@ -181,3 +182,55 @@ def test_an_isolated_run_carries_no_such_note(flow_dir, monkeypatch):
     assert "checkout" not in engine.next_step()
     events = [e for e in state_mod.read_journal() if e["event"] == "verify_passed"]
     assert "checkout" not in events[0]
+
+
+# --------------------------------------------------------------------------- #
+# the CLI surface the leader workflow calls
+# --------------------------------------------------------------------------- #
+def _run_cli(monkeypatch, capsys, *, session="kid"):
+    from claude_launcher import cli_cflow
+
+    monkeypatch.setenv(state_mod.SESSION_ENV, session)
+    args = argparse.Namespace(session=None)
+    code = cli_cflow._cmd_checkout(args)
+    return code, capsys.readouterr().out
+
+
+def test_the_command_names_the_neighbours_and_still_exits_zero(
+    flow_dir, monkeypatch, capsys
+):
+    """It reports; it does not gate.
+
+    A leader cannot move sessions outside its own subtree, so a non-zero exit
+    here would block every integration on something the decider cannot fix —
+    and a gate that blocks forever is bypassed on day one. The decision belongs
+    to the user gate that already exists; this command only makes sure nobody
+    reaches it unknowingly.
+    """
+    _sessions(monkeypatch, _row("kid", flow_dir), _row("parent", flow_dir))
+    code, out = _run_cli(monkeypatch, capsys)
+    assert code == 0
+    assert "parent" in out
+    assert "warning" in out
+
+
+def test_the_command_is_quiet_when_the_checkout_is_the_sessions_own(
+    flow_dir, monkeypatch, capsys
+):
+    _sessions(monkeypatch, _row("kid", flow_dir), _row("parent", flow_dir / "own"))
+    code, out = _run_cli(monkeypatch, capsys)
+    assert code == 0
+    assert "(none)" in out
+    assert "warning" not in out
+
+
+def test_the_command_says_it_could_not_ask_rather_than_reporting_all_clear(
+    flow_dir, monkeypatch, capsys
+):
+    """"Could not ask" and "nobody is there" are different answers, and a
+    reader who cannot tell them apart reads silence as an all-clear."""
+    monkeypatch.setattr(daemon_client, "connect", lambda: None)
+    code, out = _run_cli(monkeypatch, capsys)
+    assert code == 0
+    assert "unknown" in out
+    assert "(none)" not in out
