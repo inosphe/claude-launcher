@@ -95,6 +95,11 @@
     </nav>
   </aside>
 
+  <!-- Desktop only: the bar between the rail and #main. Dragging it resizes
+       the rail, and the width is remembered by this browser. A phone never
+       shows it — there the rail and a page are modes, not columns. -->
+  <div id="rail-split"></div>
+
   <main id="main">
     <!-- The terminal is never rebuilt by navigation: it holds a live PTY
          socket and 5000 lines of scrollback, so pages are laid over it. -->

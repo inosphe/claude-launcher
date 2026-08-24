@@ -3138,6 +3138,61 @@ $("term-split").addEventListener("pointerup", endSplitDrag);
 $("term-split").addEventListener("pointercancel", endSplitDrag);
 
 /* ------------------------------------------------------------------ */
+/* the rail's width: the bar between the sidebar and #main             */
+/* ------------------------------------------------------------------ */
+/* The split bar's shape, turned upright: applied live while the hand moves,
+   written down once at release. Scoped by BASE for the same reason the font
+   size is — daemons behind one relay share this localStorage. The phone
+   breakpoint hides the bar entirely (the rail is a mode there, not a
+   column), so none of this runs on a phone. */
+const RAIL_W_KEY = `claunch_railw:${BASE}`;
+const RAIL_W_DEFAULT = 260;   // what the stylesheet ships
+const RAIL_W_MIN = 180;       // narrower and every session row is ellipsis
+// the ceiling moves with the window: half the screen is the most a list
+// should ever take from a terminal
+const railWMax = () => Math.max(RAIL_W_MIN, Math.round(window.innerWidth / 2));
+
+function clampRailW(px) {
+  if (!Number.isFinite(px)) return RAIL_W_DEFAULT;
+  return Math.min(railWMax(), Math.max(RAIL_W_MIN, Math.round(px)));
+}
+
+function applyRailW(px) {
+  $("layout").style.setProperty("--rail-w", `${px}px`);
+}
+applyRailW(clampRailW(Number(localStorage.getItem(RAIL_W_KEY)) || RAIL_W_DEFAULT));
+
+let railDragW = null;   // non-null only mid-drag
+
+$("rail-split").addEventListener("pointerdown", (e) => {
+  e.preventDefault();   // a drag must not start selecting list text
+  $("rail-split").setPointerCapture(e.pointerId);
+  $("rail-split").classList.add("dragging");
+  railDragW = $("sidebar").getBoundingClientRect().width;
+});
+$("rail-split").addEventListener("pointermove", (e) => {
+  if (railDragW === null) return;
+  railDragW = clampRailW(e.clientX - $("sidebar").getBoundingClientRect().left);
+  applyRailW(railDragW);
+  refitSoon();   // debounced: the real refit lands when the hand pauses
+});
+const endRailDrag = () => {
+  if (railDragW === null) return;
+  $("rail-split").classList.remove("dragging");
+  localStorage.setItem(RAIL_W_KEY, String(railDragW));
+  railDragW = null;
+  refitSoon(60);
+};
+$("rail-split").addEventListener("pointerup", endRailDrag);
+$("rail-split").addEventListener("pointercancel", endRailDrag);
+/* back to the stylesheet's width, the way the zoom readout resets the text */
+$("rail-split").addEventListener("dblclick", () => {
+  applyRailW(RAIL_W_DEFAULT);
+  localStorage.setItem(RAIL_W_KEY, String(RAIL_W_DEFAULT));
+  refitSoon(60);
+});
+
+/* ------------------------------------------------------------------ */
 /* router: hash -> page. Knows nothing about screen width.             */
 /* ------------------------------------------------------------------ */
 /*   #/                  home — the dashboard, and the rail itself on a phone
