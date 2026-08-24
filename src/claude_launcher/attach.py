@@ -344,7 +344,7 @@ def attach(client, name: str) -> int:
     # the way out, on the same occupancy contract as the label.
     agent_reported = (
         herdr.report_agent(
-            "claude",
+            herdr.MIRROR_AGENT_LABEL,
             state=_herdr_agent_state(info.get("status")),
             message=name,
         )
@@ -366,7 +366,7 @@ def attach(client, name: str) -> int:
     if labelled:
         herdr.clear_pane_label()
     if agent_reported:
-        herdr.release_agent("claude")
+        herdr.release_agent(herdr.MIRROR_AGENT_LABEL)
 
     reason = outcome.get("reason")
     if reason == "exit":

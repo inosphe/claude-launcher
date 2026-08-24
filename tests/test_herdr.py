@@ -11,6 +11,16 @@ from __future__ import annotations
 from claude_launcher import herdr
 
 
+def test_mirror_label_is_not_a_canonical_herdr_agent():
+    """Herdr silently drops an external report of a canonical agent on any
+    pane where that agent's process once exited, and only a real agent
+    process — which a mirror pane never produces — makes it forget. The
+    mirror label must therefore stay outside Herdr's canon ("claude",
+    "claude-code", ...), or reattaching in a previously-used pane reports
+    into the void."""
+    assert herdr.MIRROR_AGENT_LABEL.lower() not in {"claude", "claude-code"}
+
+
 def test_report_agent_composes_the_cli(monkeypatch):
     monkeypatch.setenv("HERDR_ENV", "1")
     monkeypatch.setenv("HERDR_PANE_ID", "w4:p7")
@@ -21,10 +31,10 @@ def test_report_agent_composes_the_cli(monkeypatch):
         return True
 
     monkeypatch.setattr(herdr, "_run", fake_run)
-    assert herdr.report_agent("claude", state="working", message="s38")
+    assert herdr.report_agent("claude-mirror", state="working", message="s38")
     assert calls == [
         ["pane", "report-agent", "w4:p7", "--source", "claunch",
-         "--agent", "claude", "--state", "working", "--message", "s38"]
+         "--agent", "claude-mirror", "--state", "working", "--message", "s38"]
     ]
 
 
@@ -38,10 +48,10 @@ def test_report_agent_omits_message_when_empty(monkeypatch):
         return True
 
     monkeypatch.setattr(herdr, "_run", fake_run)
-    assert herdr.report_agent("claude")
+    assert herdr.report_agent()
     assert calls == [
         ["pane", "report-agent", "w4:p7", "--source", "claunch",
-         "--agent", "claude", "--state", "unknown"]
+         "--agent", herdr.MIRROR_AGENT_LABEL, "--state", "unknown"]
     ]
 
 
@@ -55,10 +65,10 @@ def test_release_agent_composes_the_cli(monkeypatch):
         return True
 
     monkeypatch.setattr(herdr, "_run", fake_run)
-    assert herdr.release_agent("claude")
+    assert herdr.release_agent()
     assert calls == [
         ["pane", "release-agent", "w4:p7", "--source", "claunch",
-         "--agent", "claude"]
+         "--agent", herdr.MIRROR_AGENT_LABEL]
     ]
 
 
@@ -71,6 +81,6 @@ def test_no_herdr_no_report(monkeypatch):
         return True
 
     monkeypatch.setattr(herdr, "_run", fake_run)
-    assert herdr.report_agent("claude") is False
-    assert herdr.release_agent("claude") is False
+    assert herdr.report_agent() is False
+    assert herdr.release_agent() is False
     assert called["n"] == 0

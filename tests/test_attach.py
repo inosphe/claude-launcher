@@ -14,6 +14,7 @@ import threading
 import time
 
 from claude_launcher import attach as attach_mod
+from claude_launcher import herdr as herdr_mod
 from claude_launcher.daemon.api import build_app, notify_shutdown
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -234,6 +235,8 @@ def test_attach_reports_agent_to_herdr_and_releases_on_detach(
     calls = []
 
     class FakeHerdr:
+        MIRROR_AGENT_LABEL = herdr_mod.MIRROR_AGENT_LABEL
+
         def rename_pane(self, label):
             calls.append(("rename_pane", label))
             return True
@@ -268,8 +271,10 @@ def test_attach_reports_agent_to_herdr_and_releases_on_detach(
     code = attach_mod.attach(FakeClient(), "att-herdr")
     assert code == 0
     assert calls[0][0] == "rename_pane"
-    assert ("report_agent", "claude", "working", "att-herdr") in calls
-    assert calls.count(("release_agent", "claude")) == 1
+    assert (
+        "report_agent", herdr_mod.MIRROR_AGENT_LABEL, "working", "att-herdr"
+    ) in calls
+    assert calls.count(("release_agent", herdr_mod.MIRROR_AGENT_LABEL)) == 1
 
 
 def test_attach_reports_unknown_when_daemon_status_is_absent(
@@ -292,6 +297,8 @@ def test_attach_reports_unknown_when_daemon_status_is_absent(
     states = []
 
     class FakeHerdr:
+        MIRROR_AGENT_LABEL = herdr_mod.MIRROR_AGENT_LABEL
+
         def rename_pane(self, label):
             return True
 
