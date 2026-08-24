@@ -21,6 +21,10 @@ filter_roles:
   type: whitelist
   roles: [worker]
 
+# 위저드의 Role 행이 worker를 고르면 이 워크플로를 자동 선택한다 —
+# own filter_roles가 whitelist로 worker를 받으므로 모순이 없다.
+default_role: worker
+
 steps:
   intake:
     title: 목표 수립

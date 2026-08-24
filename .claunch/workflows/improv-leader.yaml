@@ -17,6 +17,10 @@ filter_roles:
   type: whitelist
   roles: [leader]
 
+# 위저드의 Role 행이 leader를 고르면 이 워크플로를 자동 선택한다 — own
+# filter_roles가 whitelist로 leader를 받으므로 모순이 없다.
+default_role: leader
+
 steps:
   intake:
     title: 운영 확인
