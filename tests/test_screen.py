@@ -76,8 +76,41 @@ def test_repaint_sequence_contains_content():
     s = ScreenState(20, 5)
     s.feed(b"hi there")
     seq = s.repaint_sequence()
-    assert seq.startswith(b"\x1b[2J\x1b[H")
+    # Defaults to the main buffer, asserted explicitly so a viewer never has
+    # to guess which buffer a plain program is drawing in.
+    assert seq.startswith(b"\x1b[?1049l\x1b[2J\x1b[H")
     assert b"hi there" in seq
+
+
+def test_alt_screen_tracking():
+    s = ScreenState(20, 5)
+    assert s.alt_screen is False
+    s.feed(b"\x1b[?1049h")
+    assert s.alt_screen is True
+    s.feed(b"\x1b[?1049l")
+    assert s.alt_screen is False
+
+
+def test_alt_screen_split_across_chunks():
+    s = ScreenState(20, 5)
+    s.feed(b"\x1b[?")
+    s.feed(b"1049h")
+    assert s.alt_screen is True
+
+
+def test_repaint_sequence_leads_with_the_buffer_the_program_is_in():
+    # A full-screen TUI re-asserts the alternate screen on every full redraw;
+    # the seed must put the viewer in that same buffer, or its wheel has an
+    # empty scrollback to shuffle. And the leave sequence stays idempotent
+    # for a viewer already on the main buffer.
+    s = ScreenState(20, 5)
+    s.feed(b"\x1b[?1049h")
+    s.feed(b"tui grid")
+    seq = s.repaint_sequence()
+    assert seq.startswith(b"\x1b[?1049h\x1b[2J\x1b[H")
+    assert b"tui grid" in seq
+    s.feed(b"\x1b[?1049l")
+    assert s.repaint_sequence().startswith(b"\x1b[?1049l\x1b[2J\x1b[H")
 
 
 def test_repaint_sequence_restores_colors():

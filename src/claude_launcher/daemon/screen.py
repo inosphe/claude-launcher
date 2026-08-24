@@ -9,7 +9,11 @@ capture and idle-detection features read.
 pyte does not track DECCKM (application cursor keys, private mode 1), which
 ``send-keys`` needs to encode arrow keys the way the running program expects,
 nor bracketed paste (private mode 2004), which paste injection needs — so this
-module watches the byte stream for ``CSI ? Pm h/l`` itself.
+module watches the byte stream for ``CSI ? Pm h/l`` itself. It also tracks the
+alternate screen (private mode 1049) for the same reason pyte is blind to it:
+a repaint that does not say which buffer the program is in leaves a viewer
+attached mid-session stuck in xterm's main buffer, where a full-screen TUI
+only ever overwrites in place and the wheel has nothing to scroll.
 """
 
 from __future__ import annotations
@@ -78,6 +82,7 @@ class ScreenState:
         self._mode_tail = b""
         self.app_cursor_keys = False
         self.bracketed_paste = False
+        self.alt_screen = False
 
     @property
     def cols(self) -> int:
@@ -99,6 +104,8 @@ class ScreenState:
                 self.app_cursor_keys = match.group(2) == b"h"
             if b"2004" in params:
                 self.bracketed_paste = match.group(2) == b"h"
+            if b"1049" in params:
+                self.alt_screen = match.group(2) == b"h"
         self._mode_tail = window[-_TAIL:]
 
     def resize(self, cols: int, rows: int) -> None:
@@ -141,9 +148,22 @@ class ScreenState:
         and text attributes are reconstructed from the pyte grid — TUIs only
         redraw what changes, so a plain-text seed would leave the viewer
         mostly monochrome until the next full redraw.
+
+        The sequence leads with the buffer the program is actually in. A
+        full-screen TUI (claude, the wizard) lives in the alternate screen,
+        re-asserting ``?1049h`` on every full redraw; a viewer that attaches
+        after that first assertion has only this grid to learn the mode from.
+        Painted into xterm's main buffer instead, the screen scrolls in place
+        and its scrollback stays empty — the wheel has nothing to scroll and
+        the session reads as unscrollable until the program's next redraw.
+        Leaving the alternate screen (or re-entering it, idempotently) makes
+        the seeded grid land where the program is drawing.
         """
         buffer = self._screen.buffer
-        parts = ["\x1b[2J\x1b[H"]
+        parts = [
+            "\x1b[?1049h" if self.alt_screen else "\x1b[?1049l",
+            "\x1b[2J\x1b[H",
+        ]
         for y in range(self._screen.lines):
             if y:
                 parts.append("\r\n")
