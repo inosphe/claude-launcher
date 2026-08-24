@@ -123,10 +123,15 @@ yours to carry out, with `spawn`.
 - **Spawning more than one child that edits code? Give each a `worktree`.**
   Two agents in one checkout overwrite each other's edits mid-edit; a named
   `worktree` gives the child a second checkout of your repository on its own
-  branch (`worktree: helper-auth`, or `--worktree helper-auth`). Naming one
-  that already exists returns to that checkout — add `rebase_onto` with your
-  branch to bring it up to date first; if the rebase cannot apply cleanly the
-  spawn is refused with nothing created, so say so instead of retrying.
+  branch. **Always prefix the worktree name with a session name** — the
+  branch the checkout sits on shares the name: the child's session when you
+  set one (`worktree: s54-detail-split`), otherwise your own ($CLAUNCH_SESSION,
+  e.g. `s45-detail-split`). A bare word like `helper-auth` says nothing about
+  whose checkout it is and can collide with another session's branch. Naming
+  one that already exists returns to that checkout — add `rebase_onto` with
+  your branch to bring it up to date first; if the rebase cannot apply
+  cleanly the spawn is refused with nothing created, so say so instead of
+  retrying.
 - **A different directory is a `workspace`, not a path**: `workspace: NAME`
   (`-w NAME`), one of the names `children` lists. A bare path is refused by
   policy, and reaching for `new-session -c DIR` because of that is exactly the

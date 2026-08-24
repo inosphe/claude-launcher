@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher.cflow import model
+from claude_launcher.cflow import model, state as state_mod
 
 OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
 
@@ -169,3 +169,26 @@ def test_the_verify_runs_bounded_parallel(stem):
         "flaky with it — see this test's docstring"
     )
     assert 2 <= int(width.group(1)) <= MAX_USEFUL_WORKERS
+
+
+# --------------------------------------------------------------------------- #
+# The naming rule an agent reads: a worker prefixes its own worktree/branch
+# names with its session. The wizard path already does (``default_name``
+# falls back to $CLAUNCH_SESSION), so the convention is prompting — it has to
+# live where an agent learns it when it names a checkout itself: the intake
+# of the worker workflow. A bare name like ``worktree-session-click-cache``
+# minted inside a fleet of sessions is the accident these pin.
+# --------------------------------------------------------------------------- #
+def test_worker_override_intake_insists_on_session_prefixed_names():
+    """The override this repo runs tells a worker to prefix its own names."""
+    text = model.load(OVERRIDES / "improv-worker.yaml").steps["intake"].instructions
+    assert "$CLAUNCH_SESSION" in text    # the prefix source is named
+    assert "<세션>-<요지>" in text         # and its shape is spelled out
+
+
+def test_bundled_worker_workflow_intake_insists_on_session_prefixed_names():
+    """A repo with no project override runs the bundled copy — same rule."""
+    bundled = dict(state_mod.bundled_workflows())["improv-worker"]
+    text = model.load(bundled).steps["intake"].instructions
+    assert "$CLAUNCH_SESSION" in text
+    assert "<세션>-<요지>" in text

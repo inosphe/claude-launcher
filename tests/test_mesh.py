@@ -1192,6 +1192,7 @@ def test_mesh_install_project(tmp_path, home):
     assert "--section" in skill                # batch fan-out discipline
     assert "--reply-to" in skill               # threading
     assert "Recovery" in skill                 # compaction recovery
+    assert "prefix the worktree name" in skill # spawn worktrees get a session prefix
     # the cflow skills land from the same install
     assert (tmp_path / ".claude" / "skills" / "cflow" / "SKILL.md").is_file()
     assert (tmp_path / ".claude" / "skills" / "cflow-author" / "SKILL.md").is_file()
