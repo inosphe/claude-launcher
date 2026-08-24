@@ -1962,6 +1962,10 @@ $("m-link").addEventListener("click", () => $("term-link").click());
    old to have the route just never shows it. */
 let lastLocalKey = 0;   // when THIS tab last typed into the attached terminal
 let tqOpen = false;     // the banner's fold; survives every repaint
+/* Why the last "deliver now" changed nothing, shown in place of the standard
+   reason line. Cleared the moment the backlog does, so a stale complaint
+   never outlives the thing it was about. */
+let tqNote = "";
 
 /* Could the keyboard the daemon is waiting out be ours? The daemon's guard
    is 5s of quiet (TYPING_GUARD); claim the hold a little longer than that so
@@ -1991,6 +1995,45 @@ function queuedReason(q, mine) {
   }
 }
 
+/* Ask the daemon to type the backlog in NOW. The delivery worker holds a
+   message while the agent is mid-turn; this is the operator overruling that
+   wait — the one judgement the daemon cannot make for itself, because only a
+   person knows whether interrupting this particular turn is fine.
+
+   `flushed: 0` is a normal answer, not a failure: the session may have
+   exited, or its terminal may not be able to take a paste yet. The caller
+   gets the whole response so it can say which happened instead of leaving a
+   button that looks like it did nothing. */
+async function flushQueued(name, btn) {
+  const label = btn ? btn.textContent : "";
+  if (btn) { btn.disabled = true; btn.textContent = "delivering…"; }
+  let doc = null, resp = null;
+  try {
+    resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/queued/flush`,
+      { method: "POST" }
+    );
+    doc = await resp.json().catch(() => ({}));
+  } catch {
+    if (btn) { btn.disabled = false; btn.textContent = label; }
+    return { note: "could not reach the daemon — nothing was delivered" };
+  }
+  if (btn) { btn.disabled = false; btn.textContent = label; }
+  if (!resp.ok) {
+    return { note: (doc && doc.error) || `HTTP ${resp.status}` };
+  }
+  if (doc.flushed > 0) return { doc, note: "" };
+  // Nothing moved: the reason the backlog still has is the reason why.
+  const q = doc.queued || {};
+  return {
+    doc,
+    note: q.reason === "exited"
+      ? "nothing delivered — the session has exited"
+      : "nothing delivered — the terminal cannot take a paste yet; it will " +
+        "land on its own",
+  };
+}
+
 function queuedMsgRow(m) {
   const row = el("div", "tq-msg");
   const meta = el(
@@ -2017,14 +2060,18 @@ function renderTermQueued(q) {
   const changed = box.dataset.sig !== sig;
   box.dataset.sig = sig;
   if (!show) {
+    tqNote = "";   // the backlog is gone; so is anything said about it
     box.classList.add("hidden");
     box.innerHTML = "";
     if (changed) refitSoon(60);
     return;
   }
   box.innerHTML = "";
-  // The whole strip is one button: there is nothing else to do to it but
-  // open it, and a target the full width wide works on a phone.
+  // Opening the strip is still a full-width target (it works on a phone),
+  // but it can no longer BE the whole strip: "deliver now" is a second,
+  // differently-consequenced action and must not be reachable by the tap
+  // that only meant "let me look". Siblings in a row, never nested.
+  const row = el("div", "tq-head-row");
   const head = el("button", "tq-head");
   head.type = "button";
   head.title =
@@ -2034,13 +2081,25 @@ function renderTermQueued(q) {
     "span", "tq-count",
     `⏸ ${msgs.length} queued message${msgs.length === 1 ? "" : "s"}`
   ));
-  head.appendChild(el("span", "tq-reason", queuedReason(q, true)));
+  head.appendChild(el("span", "tq-reason", tqNote || queuedReason(q, true)));
   head.appendChild(el("span", "tq-toggle", tqOpen ? "hide ▴" : "show ▾"));
   head.addEventListener("click", () => {
     tqOpen = !tqOpen;
     renderTermQueued(q);
   });
-  box.appendChild(head);
+  row.appendChild(head);
+  const flush = el("button", "tq-flush", "deliver now");
+  flush.type = "button";
+  flush.title =
+    "type these in immediately instead of waiting for the agent's turn to " +
+    "end — the paste still waits for the terminal to be able to take it";
+  flush.addEventListener("click", async () => {
+    const { note } = await flushQueued(currentName, flush);
+    tqNote = note;
+    refreshTermQueued();
+  });
+  row.appendChild(flush);
+  box.appendChild(row);
   if (tqOpen) {
     const list = el("div", "tq-list");
     for (const m of msgs) list.appendChild(queuedMsgRow(m));
@@ -5160,6 +5219,24 @@ function sessQueued(data) {
     "accepted by the mesh, not yet typed into the terminal — " +
     queuedReason(q, s.name === currentName)
   ));
+  // Named, because this panel is often about a session the reader is not
+  // looking at: "deliver now" alone would not say where the paste lands.
+  if (s.name) {
+    const status = el("p", "wf-note", "");
+    const flush = el("button", "wf-btn", `deliver to ${s.name} now`);
+    flush.type = "button";
+    flush.title =
+      "stop waiting for the agent's turn to end and type these in — the " +
+      "paste still waits for the terminal to be able to take it";
+    flush.addEventListener("click", async () => {
+      const { note } = await flushQueued(s.name, flush);
+      status.textContent = note;
+      status.className = note ? "wf-warning" : "wf-note";
+      refreshSession();
+    });
+    box.appendChild(flush);
+    box.appendChild(status);
+  }
   for (const m of q.messages) box.appendChild(queuedMsgRow(m));
   return box;
 }

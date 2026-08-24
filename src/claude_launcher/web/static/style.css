@@ -486,11 +486,26 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* Loud exactly when the reader's own keystrokes are the hold: the one case
    where nothing else on screen could possibly explain the silence. */
 #term-queued.focus-hold { background: #2e2408; border-bottom-color: #6e5000; }
+/* The strip is a row of two actions now: open the fold, or deliver. The
+   toggle keeps the width so tapping anywhere still means "let me look". */
+#term-queued .tq-head-row { display: flex; align-items: center; }
 #term-queued .tq-head {
-  display: flex; align-items: baseline; gap: 12px; width: 100%;
+  display: flex; align-items: baseline; gap: 12px; flex: 1; min-width: 0;
   background: none; border: none; color: inherit; font: inherit;
   padding: 6px 14px; cursor: pointer; text-align: left;
 }
+/* Deliberately quiet for an amber strip: this interrupts a running turn, so
+   it should read as available, not as the thing to do. */
+#term-queued .tq-flush {
+  flex: none; margin: 0 14px 0 0; padding: 3px 10px;
+  background: #2e2408; border: 1px solid #6e5000; border-radius: 6px;
+  color: #e3b341; font: inherit; font-size: 11px; cursor: pointer;
+  white-space: nowrap;
+}
+#term-queued .tq-flush:hover:not(:disabled) {
+  background: #4d3800; color: #fff;
+}
+#term-queued .tq-flush:disabled { opacity: 0.6; cursor: default; }
 #term-queued .tq-count { font-weight: 600; white-space: nowrap; }
 #term-queued .tq-reason { flex: 1; min-width: 0; color: #c69026; }
 #term-queued.focus-hold .tq-reason { color: #e3b341; }

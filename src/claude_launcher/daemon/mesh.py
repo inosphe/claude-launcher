@@ -934,6 +934,49 @@ class MeshManager:
         out.sort(key=lambda e: str(e.get("ts") or ""))
         return out
 
+    async def flush_session(self, session: str) -> dict:
+        """Type ``session``'s held backlog in now, at a human's say-so.
+
+        The write half of :meth:`queued_for_session`, and the answer to the
+        one thing the queued banner could previously only describe: a message
+        is sitting there because the agent is mid-turn (or a keyboard is
+        live), and the operator can see it is not going to matter — but the
+        daemon still waits out ``busy_hold`` because it cannot know that.
+
+        What this drops is the idle-gate in :meth:`_deliver_to` and nothing
+        else. The paste still goes through :meth:`Session.deliver`, which
+        waits for a starting TUI to actually accept input and for the
+        keyboard to fall quiet — skipping those does not deliver a message
+        sooner, it delivers a broken one (typed but never submitted, or
+        folded into someone's half-written line). Both are bounded and
+        release seconds after typing stops, so a person who clicked the
+        button gets their delivery without anyone's line being eaten.
+
+        Returns ``{"flushed": n, "handles": [...]}`` — how many messages went
+        in and to which handles, so the caller can say what happened rather
+        than assert that something did. An exited or busy-forever session
+        simply flushes nothing, which is the honest answer.
+        """
+        flushed = 0
+        handles: List[str] = []
+        for mesh in self.list():
+            for handle in sorted(mesh.members):
+                member = mesh.members[handle]
+                if member.session != session or not self._is_local(mesh, member):
+                    continue
+                waiting = len(mesh.pending(handle))
+                if not waiting:
+                    continue
+                await self._deliver_to(mesh, member, force=True)
+                # Delivery is best-effort: it advances the cursor only when
+                # the paste landed, so re-reading the backlog is what tells
+                # us whether it did — never the fact that we asked.
+                went = waiting - len(mesh.pending(handle))
+                if went > 0:
+                    flushed += went
+                    handles.append(f"{handle}@{mesh.name}")
+        return {"flushed": flushed, "handles": handles}
+
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
@@ -4653,7 +4696,9 @@ class MeshManager:
         except asyncio.CancelledError:
             pass
 
-    async def _deliver_to(self, mesh: Mesh, member: Member) -> None:
+    async def _deliver_to(
+        self, mesh: Mesh, member: Member, *, force: bool = False
+    ) -> None:
         pending = mesh.pending(member.handle)
         if not pending:
             mesh._first_pending.pop(member.handle, None)
@@ -4664,10 +4709,19 @@ class MeshManager:
             return  # session removed; hold the cursor, deliver on rejoin/respawn
         if session.exited:
             return  # hold until respawn (same name, same cursor)
+        # ``force`` is a human at the dashboard saying "type it in now" (see
+        # :meth:`flush_session`). It drops THIS gate and nothing below it: the
+        # gate exists to keep an automated paste out of a running turn, and
+        # waiting that out is exactly what the operator is declining to do.
+        # The holds inside Session.deliver stay — they are about the paste
+        # arriving intact, which no impatience makes safe to skip.
+        #
         # A live keyboard is held exactly like a running turn: the human is
         # mid-composition, and their thinking pauses outlast the idle
         # threshold, so the screen alone would call this moment deliverable.
-        if session.status() != STATUS_IDLE or session.keyboard_busy():
+        if not force and (
+            session.status() != STATUS_IDLE or session.keyboard_busy()
+        ):
             held = time.monotonic() - mesh._first_pending.get(
                 member.handle, time.monotonic()
             )

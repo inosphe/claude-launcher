@@ -258,6 +258,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_get("/api/sessions/{name}/briefing", h_session_briefing)
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
+    r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
     r.add_get("/api/sessions/{name}/children", h_session_children)
     r.add_post("/api/sessions/{name}/children", h_session_spawn)
     r.add_delete("/api/sessions/{name}/children/{child}", h_session_child_kill)
@@ -2092,6 +2093,28 @@ async def h_session_queued(request: web.Request) -> web.Response:
     went — most often: it is held because their own focus keeps the keyboard
     busy. The same payload rides inside ``/meta`` for the detail panel."""
     return web.json_response(_session_queued(request, _session(request)))
+
+
+async def h_session_queued_flush(request: web.Request) -> web.Response:
+    """Deliver this session's held backlog now, because a human said so.
+
+    The button beside the banner :func:`h_session_queued` feeds. It drops the
+    delivery worker's idle-gate for one pass (see
+    :meth:`MeshManager.flush_session`) — the operator has decided that
+    interleaving with the running turn is fine, which is a judgement the
+    daemon is not in a position to make on its own.
+
+    Answers with the flush result *and* the re-read backlog, so a caller can
+    render the truth after the attempt in one round trip instead of racing
+    its own poll. ``flushed: 0`` is a real outcome, not an error: a session
+    that has exited, or whose terminal is not yet able to take a paste, keeps
+    its backlog and says so.
+    """
+    session = _session(request)
+    result = await _mesh_mgr(request).flush_session(session.sdef.name)
+    return web.json_response(
+        {**result, "queued": _session_queued(request, session)}
+    )
 
 
 def _mesh_holds(request: web.Request, name: str) -> List[dict]:

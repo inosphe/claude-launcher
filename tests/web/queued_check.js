@@ -77,13 +77,27 @@ function el(tag, cls, text) {
   return n;
 }
 
+/* app.js's module-level state, declared here the way the real module
+   declares it. tqNote must be among them: renderTermQueued READS it, and a
+   free read throws — the only reason it survived before being that the
+   hidden branch assigns it first, which is an accident of call order, not a
+   declaration. */
 const stubs = `
 let currentPage = "terminal";
 let currentName = "s16";
 let tqOpen = false;
+let tqNote = "";
 let lastLocalKey = 0;
 let refits = 0;
 function refitSoon() { refits++; }
+let posted = [];
+let flushReply = { flushed: 1, queued: { messages: [], reason: null } };
+async function api(url, opts) {
+  posted.push([url, (opts || {}).method || "GET"]);
+  return { ok: true, json: async () => flushReply };
+}
+function refreshTermQueued() {}
+function refreshSession() {}
 `;
 
 const ctx = {};
@@ -91,6 +105,7 @@ new Function(
   "exports", "$", "el",
   stubs
   + slice("fmtAge") + slice("localTyping") + slice("queuedReason")
+  + slice("flushQueued")
   + slice("queuedMsgRow") + slice("renderTermQueued") + slice("sessQueued") + `
 Object.assign(exports, {
   renderTermQueued, sessQueued,
@@ -98,6 +113,9 @@ Object.assign(exports, {
   typeNow: () => { lastLocalKey = Date.now(); },
   typeLongAgo: () => { lastLocalKey = Date.now() - 60000; },
   setPage: (p) => { currentPage = p; },
+  posted: () => posted,
+  note: () => tqNote,
+  setFlushReply: (r) => { flushReply = r; },
 });`
 )(ctx, $, el);
 
@@ -205,5 +223,60 @@ box = ctx.sessQueued({ session: { name: "s16" }, queued: Q("busy", [MSG]) });
 check("a busy hold is a note, not a warning",
       !!byClass(box, "wf-note") && !box.classes.has("held"));
 
-if (failures) { console.log(`${failures} failure(s)`); process.exit(1); }
-console.log("queued_check ok");
+/* ---- "deliver now": the operator ending the wait ----
+   The strip used to be one button, so the fold and the delivery would have
+   been the same tap. They are separate now, and separate is the property
+   worth pinning: a button inside a button is invalid HTML, and the tap that
+   meant "let me look" must never type a message into a running turn. */
+/* The click handlers are async, so this tail is too — plain CommonJS here,
+   no top-level await. */
+(async () => {
+  ctx.setPage("terminal");
+  ctx.renderTermQueued(Q("busy", [MSG]));
+  const flush = byClass(banner, "tq-flush");
+  check("the strip offers a way to deliver now",
+        !!flush && flush.tag === "button");
+  check("it is not nested inside the fold toggle",
+        !walk(byClass(banner, "tq-head")).some((k) => k.classes.has("tq-flush")));
+  check("it says what it does", (flush.text || "").includes("deliver now"));
+
+  await flush.fire("click");
+  check("clicking it posts to this session's flush route",
+        ctx.posted().some(([u, m]) =>
+          u === "/api/sessions/s16/queued/flush" && m === "POST"),
+        ctx.posted());
+  check("a flush that delivered says nothing extra", ctx.note() === "");
+
+  /* A flush that moved nothing must say so where the reason line was — a
+     button that silently does nothing is the bug this whole strip exists to
+     prevent. */
+  ctx.setFlushReply({ flushed: 0, queued: { messages: [MSG], reason: "exited" } });
+  await flush.fire("click");
+  check("a flush that delivered nothing explains itself",
+        ctx.note().includes("exited"), ctx.note());
+  ctx.renderTermQueued(Q("busy", [MSG]));
+  check("...in place of the standard reason line",
+        texts(banner).includes("exited") && !texts(banner).includes("mid-turn"),
+        texts(banner));
+  /* and it must not outlive the backlog it was about */
+  ctx.renderTermQueued(Q(null, []));
+  check("the note dies with the backlog", ctx.note() === "");
+
+  /* the panel twin flushes the session it names, not the one on screen */
+  ctx.setFlushReply({ flushed: 1, queued: { messages: [], reason: null } });
+  const pbox = ctx.sessQueued({
+    session: { name: "other" }, queued: Q("busy", [MSG]),
+  });
+  const panelFlush = walk(pbox).find((k) => (k.text || "").includes("deliver to"));
+  check("the panel names whose terminal the paste lands in",
+        !!panelFlush && panelFlush.text.includes("other"),
+        panelFlush && panelFlush.text);
+  await panelFlush.fire("click");
+  check("and posts to that session, not the attached one",
+        ctx.posted().some(([u, m]) =>
+          u === "/api/sessions/other/queued/flush" && m === "POST"),
+        ctx.posted());
+
+  if (failures) { console.log(`${failures} failure(s)`); process.exit(1); }
+  console.log("queued_check ok");
+})();
