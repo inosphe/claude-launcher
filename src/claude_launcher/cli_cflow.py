@@ -12,6 +12,7 @@ import argparse
 import json
 import os
 import sys
+import textwrap
 from pathlib import Path
 
 from . import daemon_client
@@ -252,21 +253,82 @@ def _cmd_status(args: argparse.Namespace) -> int:
         pairs = ", ".join(f"{s}x{n}" for s, n in sorted(revisited.items()))
         print(f"loops:    {pairs}")
     if status == "waiting_approval":
-        print(f"gate:     {payload.get('gate')}")
+        _print_block("gate", payload.get("gate"))
         print("unblock:  claunch cflow approve")
     if status == "waiting_selection":
+        # Everything a person needs to answer this, in the order they need
+        # it: the question, what each answer means, and only then what the
+        # agent would do. Its proposal read first for a while, which is the
+        # wrong way round — the recommendation is the part being checked.
+        _print_block("decision", payload.get("prompt"))
+        _print_options(payload.get("options", []))
         proposal = payload.get("proposal") or {}
-        print(
-            f"agent proposes: {proposal.get('option')!r} — {proposal.get('reason')}"
+        _print_block(
+            "proposed",
+            f"{proposal.get('option')!r} — "
+            f"{proposal.get('reason') or 'no reasoning recorded'}",
         )
-        options = ", ".join(o["name"] for o in payload.get("options", []))
-        print(f"confirm:  claunch cflow select <{options}>")
+        names = ", ".join(o["name"] for o in payload.get("options", []))
+        print(f"confirm:  claunch cflow select <{names}>")
+        print("          any of them — the proposal is a recommendation only")
     if status == "select":
-        options = ", ".join(o["name"] for o in payload.get("options", []))
-        print(f"decision pending ({payload.get('chooser')}): {options}")
+        _print_block("decision", payload.get("prompt"))
+        _print_options(payload.get("options", []))
+        print(f"pending:  {payload.get('chooser')} decides this one")
     if pending:
         _print_pending(pending)
     return 0
+
+
+#: Width of the ``label:`` column this report lines its values up on.
+_LABEL = 10
+
+#: Wrap width. Narrow enough for a half-screen terminal, which is where a
+#: dashboard-watching human usually keeps this.
+_WIDTH = 78
+
+
+def _print_block(label: str, text) -> None:
+    """A label and a value that may run to several lines.
+
+    Workflow prompts are written as paragraphs — the question a person is
+    being asked rarely fits in one line, and printing only its first would
+    hide the half that says what the choice costs.
+    """
+    body = (text or "").strip()
+    if not body:
+        return
+    head = f"{label + ':':<{_LABEL}}"
+    pad = " " * _LABEL
+    first = True
+    for para in body.splitlines():
+        for line in textwrap.wrap(para.strip(), _WIDTH - _LABEL) or [""]:
+            print(f"{head if first else pad}{line}")
+            first = False
+
+
+def _print_options(options: list) -> None:
+    """Each option with the description its workflow gave it.
+
+    The names alone are what this printed before, and a name is not a
+    decision: ``<request, hold>`` says nothing about what either one does to
+    the run. The descriptions were already in the payload — the person
+    confirming simply never got shown them, and had to reconstruct the
+    choice from whatever the agent happened to say in its terminal.
+    """
+    if not options:
+        return
+    print("options:")
+    width = max(len(o["name"]) for o in options)
+    for opt in options:
+        desc = " ".join((opt.get("description") or "").split())
+        name = f"  {opt['name']:<{width}}"
+        if not desc:
+            print(name.rstrip())
+            continue
+        indent = " " * (len(name) + 3)
+        for i, line in enumerate(textwrap.wrap(desc, _WIDTH - len(indent))):
+            print(f"{name} — {line}" if i == 0 else f"{indent}{line}")
 
 
 def _print_pending(pending: dict) -> None:
