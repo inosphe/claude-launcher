@@ -49,8 +49,12 @@ here that is not a poll and so has to repair itself deliberately,
 ``wheel_check`` on the terminal's virtual scroll — the wheel on the
 alternate screen (where xterm's own scrollback is empty and its fallback
 is arrow keys) becoming ``scroll`` controls answered with repaints over
-the daemon's history, and the chip that says so,
-``briefcard_check`` on the rail's briefing card — the session summary a row
+the daemon's history, and the chip that says so, ``termcache_check`` on the
+keep-alive that makes switching between sessions cheap — the terminal you
+walk away from stays up with its socket shimmed to buffer-only, and
+returning to it is a swap of state and a re-fit rather than a new socket
+and a full-screen repaint —, ``briefcard_check`` on the rail's briefing
+card — the session summary a row
 folds open, and which of the daemon's answers (a briefing, unshaped prose,
 no LLM, no record) it is showing — ``spawnform_check`` on the create form
 turned into a spawn — what a child may be asked once a parent is named, and
@@ -104,6 +108,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "seqrender_check.js",
         "zoom_check.js",
         "reconnect_check.js",
+        "termcache_check.js",
         "briefcard_check.js",
         "spawnform_check.js",
         "flowtrack_check.js",

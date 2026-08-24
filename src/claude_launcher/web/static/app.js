@@ -344,6 +344,12 @@ async function refreshSessions() {
   }
   sessionsCache = data.sessions || [];
   briefingLLM = data.llm_configured !== false;
+  // A session that stops existing drops its parked terminal with it — killing
+  // or clearing one must not leave a stale terminal in the cache to be
+  // re-shown, frozen, next time its old name is clicked.
+  for (const parked of [...keptTerms.keys()]) {
+    if (!sessionsCache.some((s) => s.name === parked)) dropKept(parked);
+  }
   const list = $("session-list");
   list.innerHTML = "";
   for (const [s, depth] of byLineage(sessionsCache)) {
@@ -2152,6 +2158,9 @@ function closeLink() {
 }
 
 function detach() {
+  // A full tear-down supersedes whatever parked copy of this session exists —
+  // the stale child the respawn-follow path leaves behind is exactly that.
+  if (currentName) keptTerms.delete(currentName);
   closeLink();
   // The wheel handler and its debounce belong to the terminal being torn down.
   if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; }
@@ -2559,14 +2568,219 @@ function updateScrollChip() {
   }
 }
 
-/* Bind the terminal to a session. Called only by the #/s/<name> route, so
-   the attached session is in the URL: a reload, a bookmark or a shared link
-   lands back on the same terminal instead of on an empty slot. */
-function attach(name) {
-  detach();
+/* ---- kept-alive terminals ----
+
+   Binding the terminal to a session used to mean tearing the old one down
+   and building the new one up — a new xterm object, a new WebSocket, and the
+   daemon repainting its whole screen over the line — and the reader toggling
+   between two sessions paid that cost on every hop. Now the terminals you
+   have visited are kept alive and simply parked: the xterm object, its
+   element (hidden in place, never moved) and the socket underneath all stay
+   up, and the socket's handler is swapped for a passive shim that keeps the
+   hidden buffer current without letting any of its frames speak for the
+   viewer actually looking. Coming back to a parked session is a swap of
+   state and a re-fit — no socket, no repaint — and costs this browser
+   nothing it was not already spending, since the daemon broadcasts every
+   terminal's output to all of its viewers anyway. The one thing that still
+   pays the old cost is a socket that died while parked: it reconnects (and
+   repaints) exactly once, on the way back in.
+
+   One copy per session, and the least recently visited is dropped when the
+   cache fills — a parked terminal is a pair of eyes the user is not wearing,
+   so it gets a budget. A session that stops existing (killed, cleared) drops
+   its parked terminal on the next poll, and a session respawned under the
+   same name is re-followed by the same pid test the live link already uses. */
+const TERM_CACHE_MAX = 3;      // the on-screen terminal plus this many parked
+const keptTerms = new Map();   // session name -> parked {term, fitAddon, ws, ...}
+
+function park(b) {
+  if (b.term && b.term.element) b.term.element.style.display = "none";
+}
+function unpark(b) {
+  if (b.term && b.term.element) b.term.element.style.display = "";
+}
+
+/* Park the active terminal. The socket's handlers are swapped for the shim
+   so nothing it says — a status change, an exit, a late `close` — can touch
+   the live machine, the element hides, and the live globals reset to nil.
+   The terminal and socket stay up, which is what makes the return cheap. */
+function suspendActive() {
+  if (!term) return;
+  const b = {
+    name: currentName, term, fitAddon, ws,
+    pid: attachedPid, boot: attachedBoot,
+    alt: altScreen, scroll: scrollOffset, exited: sessionEnded,
+  };
+  if (ws) {
+    ws.onopen = null;
+    ws.onclose = null;
+    ws.onmessage = (ev) => shimFrame(b, ev);
+  }
+  if (keptTerms.has(b.name)) dropKept(b.name);   // one parked copy per session
+  keptTerms.set(b.name, b);
+  while (keptTerms.size > TERM_CACHE_MAX - 1) {
+    dropKept(keptTerms.keys().next().value);     // the least recently parked
+  }
+  park(b);
+  resetLive();
+}
+
+/* The live machine, emptied. Everything the non-terminal code reads is
+   still a global, so it needs to point at nothing at all between terminals
+   rather than at the one being parked. */
+function resetLive() {
+  if (wheelTimer) { clearTimeout(wheelTimer); wheelTimer = null; }
+  wheelAccum = 0;
+  linkTimer = null;
+  linkTry = 0;
+  linkTicket += 1;               // sockets opened before are no one's link now
+  linkName = null;
+  linkQueue = [];
+  sessionEnded = false;
+  lastLocalKey = 0;
+  attachedPid = null;
+  attachedBoot = null;
+  scrollOffset = 0;
+  altScreen = false;
+  applyingRemoteResize = false;
+  currentName = null;
+  term = null;
+  fitAddon = null;
+  ws = null;
+  setLink("idle");
+  updateScrollChip();
+}
+
+/* Dispose a parked terminal for good. The party it belonged to has gone
+   away, so neither its socket nor its xterm object may speak again. */
+function dropKept(name) {
+  const b = keptTerms.get(name);
+  if (!b) return;
+  keptTerms.delete(name);
+  if (b.ws) {
+    b.ws.onopen = null;
+    b.ws.onmessage = null;
+    b.ws.onclose = null;
+    try { b.ws.close(); } catch { /* already closed */ }
+  }
+  if (b.term) {
+    const el = b.term.element;
+    if (el && el.parentNode) el.parentNode.removeChild(el);
+    b.term.dispose();
+  }
+}
+
+/* The passive handler a parked terminal's socket runs. Binary output keeps
+   refreshing the hidden buffer — that is the whole point of leaving the
+   socket up — and the control frames update only the parked state so the
+   terminal is correct when it comes back. Nothing here touches the live
+   machine: the badge, the chip, the scroll affordance and the retry belong
+   to the viewer that is actually looking. */
+function shimFrame(b, ev) {
+  if (typeof ev.data === "string") {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === "init") {
+      b.pid = msg.pid || null;
+      b.boot = msg.boot_id || null;
+      b.alt = !!msg.alt;
+    } else if (msg.type === "buffer") {
+      b.alt = !!msg.alt;
+    } else if (msg.type === "scrolled") {
+      b.scroll = msg.offset || 0;
+    } else if (msg.type === "resize") {
+      if (b.term) b.term.resize(msg.cols, msg.rows);
+    } else if (msg.type === "exit") {
+      b.exited = true;
+      b.alt = false;
+      b.scroll = 0;
+      if (b.term) {
+        b.term.write(
+          `\r\n\x1b[90m[session exited (code ${msg.code})] ` +
+          `- press "resume" above to relaunch it\x1b[0m\r\n`
+        );
+      }
+    }
+    // state and pong: the badge is the viewer's, and there is nothing to
+    // acknowledge for a terminal nobody is watching.
+  } else if (b.term) {
+    b.term.write(new Uint8Array(ev.data));
+  }
+}
+
+/* The handlers a live socket runs, bound by identity rather than the ticket
+   the fresh-connect path uses: a socket that was parked and has come back
+   keeps its old ticket number, so each event instead asks "am I still the
+   socket being looked at?". Same shape as openSocket's wiring, so a restored
+   link heals exactly the way a fresh one does. */
+function wireActive(b) {
+  const sock = b.ws;
+  sock.onopen = () => {
+    if (ws !== sock) return;
+    linkTry = 0;
+    setLink("live");
+  };
+  sock.onmessage = (ev) => {
+    if (ws !== sock) return;
+    if (typeof ev.data === "string") {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      handleFrame(msg);
+    } else if (term) {
+      term.write(new Uint8Array(ev.data));
+    }
+  };
+  sock.onclose = () => {
+    if (ws !== sock) return;
+    ws = null;
+    if (linkState === "idle" || sessionEnded) { setLink("idle"); return; }
+    linkDown();
+  };
+}
+
+/* Bring a parked terminal back. The swap happens in the globals, which every
+   other part of the page already reads, so the header, the badge, the wheel
+   and the link all see this terminal without knowing a swap happened. A
+   socket still open is re-wired to the live machine; one that died while
+   parked connects fresh, paying the old reconnect cost exactly once. */
+function restoreTerminal(b) {
+  keptTerms.delete(b.name);
+  currentName = b.name;
+  term = b.term;
+  fitAddon = b.fitAddon;
+  ws = b.ws;
+  attachedPid = b.pid;
+  attachedBoot = b.boot;
+  scrollOffset = b.scroll;
+  altScreen = b.alt;
+  sessionEnded = b.exited;
+  // The same header seeding a fresh attach does, so the previous session's
+  // controls never linger on this one.
+  showView("terminal");
+  $("term-title").textContent = b.name;
+  setStatusBadge((sessionsCache.find((s) => s.name === b.name) || {}).status || "starting");
+  document.querySelectorAll("#session-list li").forEach((li) =>
+    li.classList.toggle("active", li.dataset.name === b.name)
+  );
+  markDetailRow();
+  unpark(b);
+  if (ws && ws.readyState === WebSocket.OPEN && !sessionEnded) {
+    wireActive(b);
+    linkName = b.name;          // resetLive cleared it; a live socket's retries need it
+    setLink("live");
+  } else if (!sessionEnded) {
+    openSocket(b.name);
+  } else {
+    setLink("idle");
+  }
+  refitSoon(50);
+}
+
+/* Build a new terminal for a session that has not been up before (or whose
+   parked copy was evicted). This is the pre-cache attach() body — the cost a
+   session switch used to always pay. */
+function freshAttach(name) {
   currentName = name;
-  stopWfPoll();
-  stopMeshPoll();
   // showView first, and before the terminal is opened: on mobile #main is
   // display:none while the rail is up, and a terminal opened into a
   // zero-height box fits to nothing.
@@ -2609,11 +2823,42 @@ function attach(name) {
     }
   });
 
-  // The wheel handler belongs to this Terminal instance — attach() builds a
-  // fresh one every time, and the previous instance is disposed by detach().
+  // The wheel handler belongs to this Terminal instance — freshAttach()
+  // builds a new one every time, and the parked copy it replaced keeps its
+  // own, hidden with it.
   term.attachCustomWheelEventHandler(handleWheel);
 
   openSocket(name);
+}
+
+/* Bind the terminal to a session. Called only by the #/s/<name> route, so
+   the attached session is in the URL: a reload, a bookmark or a shared link
+   lands back on the same terminal instead of on an empty slot. A session we
+   have parked comes back by swap; anything else is a fresh attach. */
+function attach(name) {
+  stopWfPoll();
+  stopMeshPoll();
+  // The common hop: this session has been up before, so bring its parked
+  // terminal back instead of building a new one — no socket, no repaint.
+  if (name !== currentName) {
+    const kept = keptTerms.get(name);
+    if (kept) {
+      // Out of the cache first: parking the session we are leaving may have to
+      // evict the least recently parked to stay in budget, and tonight that
+      // oldest one is exactly the terminal about to come back. Take it out of
+      // reach before the park, bring it back after.
+      keptTerms.delete(name);
+      suspendActive();
+      restoreTerminal(kept);
+      return;
+    }
+  }
+  suspendActive();
+  // A fresh attach supersedes any parked copy of the same name — a respawn-
+  // follow reattaching the very session being watched does this, so the old
+  // child's parked terminal does not come back in its place.
+  dropKept(name);
+  freshAttach(name);
 }
 
 /* Not merely "the terminal isn't hidden": on mobile the rail takes the whole

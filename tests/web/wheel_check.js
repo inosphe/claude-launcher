@@ -113,6 +113,10 @@ function build(opts) {
     "let scrollOffset = 0;\n" +
     "let wheelAccum = 0;\n" +
     "let wheelTimer = null;\n" +
+    // detach() reaches for the attached session's name; the slice below also
+    // carries the keep-alive block (which declares keptTerms itself), so only
+    // currentName needs a stand-in here.
+    "let currentName = null;\n" +
     "const WHEEL_LINE_PX = 20;\n" +
     code +
     "\nreturn {openSocket, handleFrame, sendInput, detach, handleWheel," +
@@ -338,9 +342,12 @@ check("it sits in the terminal header, beside the socket chip",
       && html.indexOf('id="term-scroll"') < html.indexOf('id="terminal"'));
 check("it starts hidden — up only while someone is scrolled back",
       /id="term-scroll"[^>]*class="[^"]*hidden/.test(html));
-check("the wheel handler is wired to the terminal inside attach()",
-      src.indexOf("attachCustomWheelEventHandler(handleWheel)")
-        > src.indexOf("function attach(name)"));
+check("the wheel handler is wired to the terminal by the builder freshAttach " +
+      "constructs, and attach() routes new terminals through that builder",
+      src.indexOf("function freshAttach(name)") > 0
+      && src.indexOf("attachCustomWheelEventHandler(handleWheel)")
+         > src.indexOf("function freshAttach(name)")
+      && src.indexOf("freshAttach(name);") > src.indexOf("function attach(name)"));
 
 /* The checks run in async blocks, so the tally is only complete once the
    microtask queue has drained — and a throw inside one of them must not be

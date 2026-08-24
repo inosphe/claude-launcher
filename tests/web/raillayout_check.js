@@ -95,6 +95,10 @@ const api = async () => ({ ok: true, json: async () => served });
 const stubs = `
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null;
+// refreshSessions prunes the keep-alive cache of vanished sessions; the
+// cache and its disposer are stubs here (the build owns no terminals).
+let keptTerms = new Map();
+function dropKept() {}
 function refreshResumeChoices() {}
 function renderHome() {}
 function syncBulkActions() {}
