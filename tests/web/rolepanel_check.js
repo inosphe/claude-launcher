@@ -110,9 +110,11 @@ let sessKidsBox = null;
 let sessKidsTimer = null;
 let sessName = null;
 let kidsRefreshed = 0, railRefreshed = 0;
+let spawnModalOpens = [];
 function refreshSessKids() { kidsRefreshed++; }
 function refreshSessions() { railRefreshed++; }
 function stopSessKids() { if (sessKidsTimer) sessKidsTimer = null; }
+function openSpawnModal(parent, opts) { spawnModalOpens.push({ parent, opts }); }
 `;
 
 const ctx = {};
@@ -131,6 +133,8 @@ Object.assign(exports, {
   qjStamp, ROLE_PANELS,
   qjBox: () => sessQuickJobBox,
   drop: () => { sessQuickJobBox = null; sessKidsBox = null; },
+  opens: () => spawnModalOpens,
+  resetOpens: () => { spawnModalOpens = []; },
   counters: () => ({ kids: kidsRefreshed, rail: railRefreshed }),
 });`
 )(ctx, document, el, api);
@@ -160,8 +164,6 @@ const qjParts = (box) => {
   return {
     role: sel[0], wf: sel[1],
     wt: inputs.find((i) => i.type === "checkbox"),
-    name: inputs.find((i) => i.type !== "checkbox"),
-    task: tags(box, "textarea")[0],
     spawn: buttons(box).find((b) => b.text.startsWith("Spawn")),
     save: buttons(box).find((b) => b.text.startsWith("Save")),
   };
@@ -187,7 +189,7 @@ async function main() {
     ctx.rolePanels({ session: { role: "" }, role: { name: "leader" } })
       .length === 2);
 
-  /* ---- quick job: defaults in, one worker out ----------------------------- */
+  /* ---- quick job: defaults in, one wizard out ---------------------------- */
   ctx.drop();
   sent = [];
   routes = QJ_ROUTES();
@@ -208,43 +210,22 @@ async function main() {
   check("same session, same live node", ctx.qjBox() &&
     walk(again).includes(ctx.qjBox()));
 
-  /* a taskless worker is refused before the daemon is asked */
-  sent = [];
+  /* The worker dispatch is the wizard's now: the pickers seed it, the leader
+     is pinned as the parent, and the wizard does the POST (its own harness
+     checks the body). */
+  ctx.resetOpens();
   await p.spawn.fire("click");
   await settle();
-  check("no task, no spawn", !sent.some((s) => s.method === "POST"));
-
-  routes["POST /api/sessions/lead1/children"] = {
-    status: 201,
-    doc: { session: { name: "job-77" }, mesh: { ok: true, mesh: "m0" } },
-  };
-  p.task.value = "fix the flaky test";
-  sent = [];
-  await p.spawn.fire("click");
-  await settle();
-  const post = sent.find((s) => s.method === "POST");
-  check("spawn posts to the leader's children", post &&
-    post.path === "/api/sessions/lead1/children", post && post.path);
-  check("the body carries the picked role", post && post.body.role === "worker");
-  check("...and the picked workflow", post && post.body.workflow === "improv-worker");
-  check("...and the typed task", post && post.body.task === "fix the flaky test");
-  check("the worktree is stamped after the prefix", post &&
-    /^job-\d{8}-\d{6}$/.test(post.body.worktree || ""), post && post.body.worktree);
-  check("success names the child and its mesh",
-    texts(box).includes("spawned 'job-77'") && texts(box).includes("m0"),
-    texts(box).slice(-120));
-  const counted = ctx.counters();
-  check("a spawn refreshes the roster and the rail",
-    counted.kids >= 1 && counted.rail >= 1, counted);
-
-  /* a refusal is shown, not swallowed */
-  routes["POST /api/sessions/lead1/children"] = {
-    ok: false, status: 403, doc: { error: "child limit reached (4/4)" },
-  };
-  p.task.value = "one more";
-  await p.spawn.fire("click");
-  await settle();
-  check("the policy's refusal is quoted", texts(box).includes("child limit reached"));
+  const open = ctx.opens()[0];
+  check("the quick-job button opens the wizard", !!open, open);
+  check("...with this leader as the parent", open && open.parent === "lead1",
+    open && open.parent);
+  check("...and the pickers as the seed",
+    open && open.opts && open.opts.seed &&
+      open.opts.seed.role === "worker" &&
+      open.opts.seed.workflow === "improv-worker" &&
+      open.opts.seed.worktree === true,
+    open && open.opts && open.opts.seed);
 
   /* save writes the three defaults back, and says where they went */
   routes["PUT /api/quickjob"] = { doc: { quick_job: { role: "worker" } } };
@@ -258,17 +239,22 @@ async function main() {
     JSON.stringify(["role", "workflow", "worktree"]), put && put.body);
   check("save names the yaml it wrote", texts(box).includes("~/.claunch.yaml"));
 
-  /* a leader that may not spawn is told so before typing anything */
+  /* a leader that may not spawn is told so before anything is dispatched */
   ctx.drop();
   routes = QJ_ROUTES();
   routes["GET /api/sessions/lead1/children"] = {
     doc: { can_spawn: false, blocked_by: ["depth limit reached (3/3)"] },
   };
+  ctx.resetOpens();
   const blocked = ctx.sessQuickJob(data);
   await settle();
   check("a blocked spawn keeps the button dead",
     qjParts(blocked).spawn.disabled === true);
   check("...and quotes the policy", texts(blocked).includes("depth limit reached"));
+  await qjParts(blocked).spawn.fire("click");
+  await settle();
+  check("a blocked spawn opens no wizard", ctx.opens().length === 0,
+    ctx.opens().length);
 
   /* ---- the reaping nudge: reported idleness, leader's judgement ---------- */
   const KIDS = { children: [

@@ -430,6 +430,22 @@ async function refreshSessions() {
       e.stopPropagation();   // the row itself attaches; this button does not
       openDetail(s.name);
     });
+    // Spawn beside it, same row-action pattern, but for creating. An exited
+    // session has nothing to spawn from ("an exited session cannot spawn
+    // children"), so the + is the one action that row's state denies.
+    let plus = null;
+    if (s.status !== "exited") {
+      plus = document.createElement("button");
+      plus.className = "sess-plus";
+      plus.type = "button";
+      plus.textContent = "+";
+      plus.title = "spawn a child of this session — same wizard the Spawn " +
+        "button and quick job open";
+      plus.addEventListener("click", (e) => {
+        e.stopPropagation();
+        openSpawnModal(s.name);
+      });
+    }
     // The name and the two things that qualify it travel together, in a box
     // that shrinks instead of wrapping. That is the whole trick: the row
     // itself must wrap (the cflow line and the briefing card are full-width
@@ -440,7 +456,8 @@ async function refreshSessions() {
     const head = document.createElement("span");
     head.className = "rail-head";
     head.append(label, ...(role ? [role] : []), ...(meshBox ? [meshBox] : []));
-    li.append(dot, head, meta, ...(railCtx ? [railCtx] : []), info);
+    li.append(dot, head, meta, ...(railCtx ? [railCtx] : []),
+              ...(plus ? [plus] : []), info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
@@ -4914,6 +4931,17 @@ function sessHead(s) {
   }
   if (mine && terminalOnScreen() && !MOBILE_MQ.matches) return head;
 
+  // The spawn wizard, aimed at this session: the panel's verb for growing a
+  // fleet under whatever this session is. An exited session has nothing to
+  // spawn from, so its button is the one head action that state denies.
+  const spawn = el("button", "wf-btn approve", "Spawn");
+  spawn.title = s.status === "exited"
+    ? "an exited session cannot spawn children"
+    : "the spawn wizard, with this session as the parent";
+  if (s.status === "exited") spawn.disabled = true;
+  spawn.addEventListener("click", () => openSpawnModal(s.name));
+  head.appendChild(spawn);
+
   // Through the router, so the terminal it opens is the one the URL names —
   // and via go(), because on a phone this panel is laid over the very route
   // that terminal lives at, where assigning the same hash would do nothing.
@@ -6015,6 +6043,669 @@ async function postSpawn(parent, body) {
   return { ok: true, status: resp.status, doc, error: "" };
 }
 
+/* ---- the spawn modal's brain ----
+   The CLI wizard (SpawnWizard) rebuilt in the browser: the same fields, the
+   same gating, the same payload. Split from the DOM so a test can drive the
+   rules with stub nodes — everything below reads a `ui` bag of controls
+   (each with .value/.checked/.disabled/.hidden) plus the fetched data
+   (`report`, `parentSess`, `parentMesh`, `git`, `stamp`) and never touches
+   the document. */
+
+/* What the modal remembers between spawns — the CLI wizard's recall_fields,
+   minus attach (the web has no terminal to take over). BASE-scoped like the
+   auth token: daemons behind one relay share this localStorage. */
+const SPAWN_RECALL_FIELDS = ["parent", "profile", "borrow", "null_token", "role"];
+const SPAWN_RECALL_KEY = `claunch_spawn_recall:${BASE}`;
+
+function spawnRecall() {
+  try {
+    return JSON.parse(localStorage.getItem(SPAWN_RECALL_KEY) || "{}") || {};
+  } catch { return {}; }
+}
+
+function saveSpawnRecall(picks) {
+  const keep = {};
+  for (const k of SPAWN_RECALL_FIELDS) {
+    if (picks[k] !== undefined) keep[k] = picks[k];
+  }
+  try { localStorage.setItem(SPAWN_RECALL_KEY, JSON.stringify(keep)); } catch {}
+}
+
+/* The mesh the child would land in: the one picked, or the parent's own.
+   "-" is the API's own spelling for "none at all". */
+function spawnMeshNow(ui) {
+  const picked = ui.mesh.value || "";
+  if (picked === "-") return "";
+  return picked || ui.parentMesh || "";
+}
+
+/* SpawnWizard.auto_worktree_name in the browser: the child's own name, or
+   its parent's, plus a stamp fixed once at build — a name that ticked over
+   between being shown and being sent would cut a worktree nobody read. */
+function spawnAutoWorktree(ui) {
+  const base = ((ui.name.value || "").trim() || ui.parent.value || "child")
+    .replace(/[^\w.-]+/g, "-");
+  return `${base}-${ui.stamp}`;
+}
+
+/* One workflow the daemon offered, normalized — a bare name (an older
+   daemon) reads as a workflow that volunteers for nobody. */
+function spawnWorkflowEntry(raw) {
+  if (raw && typeof raw === "object") {
+    let priority = parseInt(raw.priority, 10);
+    if (!Number.isFinite(priority)) priority = 0;
+    return {
+      name: String(raw.name || ""),
+      default_role: String(raw.default_role || "").trim().toLowerCase(),
+      priority,
+      filter_roles: raw.filter_roles || null,
+    };
+  }
+  return {
+    name: String(raw || ""), default_role: "", priority: 0, filter_roles: null,
+  };
+}
+
+/* Would this workflow's filter_roles let `role` drive it? True with no
+   filter or no role. The filter is enforced at start by the daemon; this
+   only decides what the form volunteers, exactly like the CLI wizard —
+   including refusing to volunteer on a `type` outside the vocabulary. */
+function spawnWorkflowAdmits(entry, role) {
+  const f = entry.filter_roles;
+  if (!f || typeof f !== "object" || !role) return true;
+  const kind = String(f.type || "").trim().toLowerCase();
+  if (kind !== "whitelist" && kind !== "blacklist") return false;
+  const roles = (f.roles || []).map((r) => String(r).trim().toLowerCase());
+  const held = roles.includes(String(role).trim().toLowerCase());
+  return kind === "whitelist" ? held : !held;
+}
+
+/* The wizard's workflow ranking: the picked role's own candidates first,
+   then the rest, the ones its filter refuses last — each band by descending
+   priority. Returns the ordered options and the auto-pick (the role's
+   highest-priority default), for the caller to apply over a value only the
+   auto-pick itself set last time. */
+function spawnRankWorkflows(raws, role) {
+  role = String(role || "").trim().toLowerCase();
+  const entries = (raws || []).map(spawnWorkflowEntry).filter((e) => e.name);
+  const band = (e) => {
+    if (role && e.default_role === role && spawnWorkflowAdmits(e, role)) return 0;
+    return spawnWorkflowAdmits(e, role) ? 1 : 2;
+  };
+  entries.sort((a, b) =>
+    band(a) - band(b) || b.priority - a.priority ||
+    (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  const options = entries.map((e) => {
+    const d = [];
+    if (e.default_role) d.push(`default for ${e.default_role}`);
+    if (e.priority) d.push(`priority ${e.priority}`);
+    if (role && !spawnWorkflowAdmits(e, role)) {
+      d.push(`filter_roles turns '${role}' away`);
+    }
+    return { name: e.name, detail: d.join(", ") };
+  });
+  const auto = entries.find((e) => band(e) === 0);
+  return { options, auto: auto ? auto.name : "" };
+}
+
+/* The wizard's _sync: every dependency between rows, re-derived on every
+   change. Locks carry the wizard's own wording — a greyed row says which
+   policy key opens it, not just that it is shut. */
+function syncSpawnGates(ui) {
+  const report = ui.report || {};
+  const may = report.may_choose || [];
+  const sess = ui.parentSess || {};
+  const lock = (field, note, why) => {
+    field.disabled = !!why;
+    if (note) { note.hidden = !why; note.textContent = why || ""; }
+  };
+
+  ui.overRow.hidden = !(report.soft_blocked_by || []).length;
+
+  lock(ui.harness, ui.harnessNote,
+    (report.spawnable_harnesses || []).length ? "" :
+      "the child runs what its parent runs (spawn.allow_harness)");
+  lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
+    "the child runs under its parent's profile (spawn.allow_profile)");
+
+  // Auth is claude's token machinery: for a child on another harness both
+  // rows are moot however the policy is set, and a yes on null greys the
+  // borrow row rather than provoking the daemon's refusal of the pair.
+  const childHarness = ui.harness.value || sess.harness || "";
+  const nonClaude = !!childHarness && childHarness !== "claude";
+  if (nonClaude) {
+    lock(ui.nullTok, ui.nullNote, "the claude harness only");
+    lock(ui.borrow, ui.borrowNote, "the claude harness only");
+  } else {
+    lock(ui.nullTok, ui.nullNote, "");
+    if (ui.nullTok.checked) {
+      ui.borrow.value = "";
+      lock(ui.borrow, ui.borrowNote, "--null launches without any token");
+    } else {
+      lock(ui.borrow, ui.borrowNote, may.includes("borrow") ? "" :
+        "the child authenticates as its parent does (spawn.allow_profile)");
+    }
+  }
+
+  // Absent, not empty, when the policy has it locked: the report only
+  // lists workspaces when a child may be sent to one.
+  lock(ui.workspace, ui.workspaceNote, report.workspaces != null ? "" :
+    "the child inherits its parent's directory (spawn.allow_workspace)");
+  lock(ui.args, ui.argsNote, may.includes("args") ? "" :
+    "the child runs its parent's args (spawn.allow_args)");
+
+  // The worktree rows: a locked row is greyed with the key that opens it,
+  // while a directory that is no repository takes the rows away entirely.
+  const git = ui.git || {};
+  if (!may.includes("worktree")) {
+    ui.wtRow.hidden = false;
+    lock(ui.worktree, ui.worktreeNote,
+      "a child inherits its parent's directory (spawn.allow_worktree)");
+  } else {
+    ui.wtRow.hidden = !git.repo;
+    lock(ui.worktree, ui.worktreeNote, "");
+  }
+  const choice = ui.worktree.value || "";
+  const wtDead = ui.wtRow.hidden || ui.worktree.disabled;
+  const reusing = !!choice && choice !== "@auto" && choice !== "@named";
+  ui.wtNameRow.hidden = wtDead || choice !== "@named";
+  // Only a REUSED checkout can be behind: a new one is cut from the
+  // repository as it stands, so there is nothing to catch up on.
+  ui.updateRow.hidden = wtDead || !reusing;
+  ui.rebaseRow.hidden = ui.updateRow.hidden || !ui.update.checked;
+
+  // Forking needs a parent holding a claude conversation AND a child that
+  // stays in the directory it was held in — claude keeps transcripts per
+  // directory, so a workspace or a worktree of its own would leave the
+  // child opening a conversation that is not there.
+  const elsewhere =
+    (!ui.workspace.disabled && ui.workspace.value) ? "a workspace"
+      : (!wtDead && choice) ? "a worktree of its own" : "";
+  if (nonClaude) {
+    lock(ui.fork, ui.forkNote, "the claude harness only");
+  } else if (!may.includes("fork")) {
+    lock(ui.fork, ui.forkNote, "the parent has no claude conversation to copy");
+  } else if (elsewhere) {
+    lock(ui.fork, ui.forkNote,
+      `the child runs in ${elsewhere}, and claude keeps transcripts per directory`);
+  } else {
+    lock(ui.fork, ui.forkNote, "");
+  }
+
+  const noMesh = ui.mesh.value === "-";
+  ui.handleRow.hidden = noMesh;
+  ui.connectRow.hidden = noMesh || !(ui.connectHandles || []).length;
+  ui.contextRow.hidden = !ui.workflow.value;
+}
+
+/* The POST body, in the CLI's spelling: non-falsy keys only, and read
+   THROUGH the disables like SpawnWizard.apply — a value standing on a
+   greyed row is not an answer the user gave, and sending it provokes a 403
+   naming a field nobody in this form could still choose. */
+function spawnPayload(ui) {
+  const body = {};
+  const put = (k, v) => { if (v) body[k] = v; };
+  put("name", (ui.name.value || "").trim());
+  // Read through the hidden flag: a yes given while the row was shown, on a
+  // parent that then changed to one with slots free, must not travel.
+  if (!ui.overRow.hidden && ui.over.checked) body.over_limit = true;
+  if (!ui.harness.disabled) put("harness", ui.harness.value);
+  if (!ui.profile.disabled) put("profile", ui.profile.value);
+  if (!ui.borrow.disabled) put("borrow", ui.borrow.value);
+  if (!ui.nullTok.disabled && ui.nullTok.checked) body.null_token = true;
+  if (!ui.fork.disabled && ui.fork.checked) body.fork = true;
+  if (!ui.args.disabled && (ui.args.value || "").trim()) {
+    body.args = ui.args.value.trim().split(/\s+/);
+  }
+  // Both travel as NAMES, never paths: the workspace is what the API
+  // resolves, and the child's worktree is cut by the daemon from the
+  // parent's own repository.
+  if (!ui.workspace.disabled) put("workspace", ui.workspace.value);
+  const choice = ui.worktree.value || "";
+  if (!ui.wtRow.hidden && !ui.worktree.disabled && choice) {
+    const auto = spawnAutoWorktree(ui);
+    body.worktree =
+      choice === "@auto" ? auto
+        : choice === "@named" ? ((ui.wtName.value || "").trim() || auto)
+          : choice;
+    if (!ui.rebaseRow.hidden && ui.rebase.value) {
+      body.rebase_onto = ui.rebase.value;
+    }
+  }
+  const mesh = ui.mesh.value || "";
+  put("mesh", mesh);   // "" = inherit the parent's; "-" travels, meaning none
+  if (mesh !== "-") {
+    put("handle", (ui.handle.value || "").trim());
+    const conn = (ui.connect ? ui.connect() : []).filter(Boolean);
+    if (conn.length) body.connect = conn;
+  }
+  put("role", ui.role.value);
+  put("workflow", ui.workflow.value);
+  if (body.workflow) put("context", (ui.context.value || "").trim());
+  put("task", (ui.task.value || "").trim());
+  return body;
+}
+
+/* ---- the spawn modal itself ----
+   The wizard as a dialog. Any session may be a parent, and the three ways a
+   spawn starts — the rail's +, the detail panel's Spawn button, and the
+   leader's quick job — all land here. The modal owns the fetch and the POST;
+   the brain above owns the rules. Built as DOM over the shared #modal-overlay
+   (showModal's body is text; a form is not), and closed the same way it is
+   opened: the backdrop, Escape, or the Cancel button. */
+
+function spawnRow(label, control, note) {
+  const wrap = el("div", "sess-spawn-row");
+  wrap.appendChild(el("label", "sess-spawn-label", label));
+  wrap.appendChild(control);
+  if (note) {
+    // THE note element, not a fresh one: syncSpawnGates writes the policy's
+    // "which key unlocks this" line straight onto it, so the caller hands the
+    // element in and keeps its reference for exactly that purpose. A plain
+    // string is tolerated — it becomes a span, read but not referenced.
+    const n = typeof note === "string" ? el("span", "sess-spawn-note", note) : note;
+    n.hidden = true;
+    wrap.appendChild(n);
+  }
+  return wrap;
+}
+
+function spawnCheckRow(label, note) {
+  const inp = document.createElement("input");
+  inp.type = "checkbox";
+  const lab = el("label", "check sess-spawn-check");
+  lab.append(inp, el("span", null, label));
+  const wrap = el("div", "sess-spawn-row");
+  wrap.appendChild(lab);
+  if (note) {
+    const n = el("span", "sess-spawn-note");
+    n.hidden = true;
+    wrap.appendChild(n);
+  }
+  return wrap;
+}
+
+function fillSpawnSelect(sel, pairs, noneLabel, want) {
+  sel.innerHTML = "";
+  if (noneLabel !== null) {
+    const o = document.createElement("option");
+    o.value = "";
+    o.textContent = noneLabel;
+    sel.appendChild(o);
+  }
+  for (const [v, t, disabled] of pairs) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = t;
+    if (disabled) o.disabled = true;
+    sel.appendChild(o);
+  }
+  if (want === undefined || want === null) want = "";
+  const present = [...sel.options].some((o) => o.value === want);
+  if (present) sel.value = want;
+  else if (want) {
+    const o = document.createElement("option");
+    o.value = want;
+    o.textContent = `${want} (not found here)`;
+    sel.appendChild(o);
+    sel.value = want;
+  }
+  return sel;
+}
+
+/* The workflow picker, ranked by the picked role the way the CLI wizard
+   ranks it: the role's own defaults first, then the rest, the ones its filter
+   refuses last. The current selection is carried over UNLESS it was the
+   auto-pick — then it follows the role, so a role switch re-homes the auto
+   without trampling a pick the operator made. `last` is the auto value the
+   caller last applied; it is returned so the caller can remember it. */
+function refillSpawnWorkflows(ui, role, last) {
+  const { options, auto } = spawnRankWorkflows(
+    ui._wfs || [], role
+  );
+  const want = ui.workflow.value === last ? auto
+    : (ui.workflow.value || auto);
+  fillSpawnSelect(ui.workflow,
+    options.map((o) => [o.name, o.detail ? `${o.name} — ${o.detail}` : o.name]),
+    "(no workflow)", want);
+  return { auto };
+}
+
+/* The field the child would be its own name in the picked mesh — excluded
+   from the connect list along with the parent's own handle, both of which are
+   wired by the mesh join itself. */
+function spawnConnectNow(ui, handles) {
+  const mine = (ui.handle.value || "").trim();
+  return handles.filter(
+    (h) => h !== mine && h !== ui.parentSess._meshHandle
+  );
+}
+
+function buildSpawnForm(parentName, seed) {
+  seed = seed || {};
+  const rec = spawnRecall();
+  const box = el("div", "sess-spawn");
+  const st = {
+    parent: parentName,
+    parentSess: {}, parentMesh: "", report: {}, git: {},
+    _meshHandle: null, _wfs: [], stamp: qjStamp(),
+    connectHandles: [], lastWfAuto: "",
+  };
+  const ui = st;
+
+  // The parent is not a control: every entry point pins it, and relocating
+  // the child means reopening from another row. Its facts open the form.
+  ui.parent = { value: parentName };
+  const parentLine = el("p", "sess-spawn-parent",
+    `child of ${parentName} — inherits its harness, profile, directory and args`);
+  box.appendChild(parentLine);
+
+  ui.note = el("p", "wf-note hidden");
+  box.appendChild(ui.note);
+  const noteShow = (msg, cls) => {
+    ui.note.className = cls || "wf-note";
+    ui.note.textContent = msg;
+  };
+  ui.noteShow = noteShow;
+
+  ui.name = document.createElement("input");
+  ui.name.placeholder = "child name (blank = auto)";
+  box.appendChild(spawnRow("Name", ui.name, null));
+
+  ui.role = document.createElement("select");
+  box.appendChild(spawnRow("Role", ui.role, null));
+
+  /* start it working, in the order the child experiences them */
+  ui.workflow = document.createElement("select");
+  box.appendChild(spawnRow("Workflow", ui.workflow, null));
+  ui.contextRow = spawnRow("Context", (ui.context = document.createElement("input")), null);
+  ui.contextRow.hidden = true;
+  box.appendChild(ui.contextRow);
+
+  ui.mesh = document.createElement("select");
+  box.appendChild(spawnRow("Mesh", ui.mesh, null));
+  ui.handleRow = spawnRow("Handle", (ui.handle = document.createElement("input")), null);
+  ui.handleRow.hidden = true;
+  box.appendChild(ui.handleRow);
+  ui.connectRow = el("div", "sess-spawn-row sess-spawn-connect");
+  box.appendChild(ui.connectRow);
+  ui.connect = () => spawnConnectNow(ui, ui._connectChecked || []);
+
+  ui.task = document.createElement("textarea");
+  ui.task.rows = 3;
+  ui.task.placeholder = "opened with this once it has booted — what it is for";
+  box.appendChild(spawnRow("Opening task", ui.task, null));
+
+  /* the inherited rows: what a child may be told to differ on */
+  ui.harness = document.createElement("select");
+  box.appendChild(spawnRow("Harness", ui.harness, (ui.harnessNote = el("span", "sess-spawn-note"))));
+  ui.profile = document.createElement("select");
+  box.appendChild(spawnRow("Profile", ui.profile, (ui.profileNote = el("span", "sess-spawn-note"))));
+  ui.borrow = document.createElement("select");
+  box.appendChild(spawnRow("Borrow", ui.borrow, (ui.borrowNote = el("span", "sess-spawn-note"))));
+  ui.nullTok = null; ui.nullNote = null;
+  const nullRow = spawnCheckRow("run with no token (--null — log in inside)", null);
+  ui.nullTok = nullRow.querySelector("input");
+  ui.nullNote = nullRow.querySelector(".sess-spawn-note");
+  box.appendChild(nullRow);
+  ui.args = document.createElement("input");
+  ui.args.placeholder = "extra harness flags";
+  box.appendChild(spawnRow("Args", ui.args, (ui.argsNote = el("span", "sess-spawn-note"))));
+  ui.workspace = document.createElement("select");
+  box.appendChild(spawnRow("Directory", ui.workspace, (ui.workspaceNote = el("span", "sess-spawn-note"))));
+
+  /* worktree: the daemon cuts it from the parent's repository */
+  ui.worktreeNote = el("span", "sess-spawn-note");
+  ui.worktree = document.createElement("select");
+  ui.wtRow = spawnRow("Worktree", ui.worktree, ui.worktreeNote);
+  ui.rebase = document.createElement("input");
+  ui.rebase.placeholder = "branch to fold this reused checkout onto";
+  ui.rebaseRow = spawnRow("Rebase onto", ui.rebase, null);
+  ui.rebaseRow.hidden = true;
+  ui.update = null; ui.updateRow = null;
+  const updRow = spawnCheckRow("bring the reused checkout up to date", null);
+  ui.update = updRow.querySelector("input");
+  ui.updateRow = updRow;
+  ui.updateRow.hidden = true;
+  ui.wtName = document.createElement("input");
+  ui.wtNameRow = spawnRow("Worktree name", ui.wtName, null);
+  ui.wtNameRow.hidden = true;
+  box.append(ui.wtRow, ui.wtNameRow, ui.rebaseRow, updRow);
+
+  ui.fork = null; ui.forkNote = null;
+  const forkRow = spawnCheckRow("start from a copy of the parent's conversation", null);
+  ui.fork = forkRow.querySelector("input");
+  ui.forkNote = forkRow.querySelector(".sess-spawn-note");
+  box.appendChild(forkRow);
+
+  ui.overRow = spawnCheckRow("spawn over the child limit (the daemon counts it against you)", null);
+  ui.over = ui.overRow.querySelector("input");
+  box.appendChild(ui.overRow);
+
+  // Seed: a quick-job launch fingers role/workflow/worktree/task; everything
+  // else falls back to what the browser used last, then the wizard's defaults.
+  if (seed.stamp) ui.stamp = seed.stamp;
+  ui.name.value = seed.name || "";
+  ui.task.value = seed.task || "";
+  ui.args.value = (seed.args || []).join(" ");
+  ui.nullTok.checked = !!(seed.null_token ?? rec.null_token);
+  return { box, ui, noteShow };
+}
+
+/* ---- open / load / go / close ---------------------------------------- */
+let spawnModal = null;
+
+function spawnModalKey(e) { if (e.key === "Escape") spawnModalClose(); }
+
+function spawnModalClose() {
+  if (!spawnModal) return;
+  spawnModal = null;
+  const overlay = $("modal-overlay");
+  overlay.classList.add("hidden");
+  overlay.classList.remove("spawn-open");
+  const body = $("modal-body");
+  body.innerText = "";
+  $("modal-actions").innerHTML = "";
+  document.removeEventListener("keydown", spawnModalKey);
+}
+
+async function openSpawnModal(parentName, opts = {}) {
+  if (!parentName) return;
+  const { box, ui, noteShow } = buildSpawnForm(parentName, opts.seed || null);
+  const overlay = $("modal-overlay");
+  $("modal-title").textContent = `Spawn a child of ${parentName}`;
+  const body = $("modal-body");
+  body.innerText = "";
+  body.appendChild(box);
+  const actions = $("modal-actions");
+  actions.innerHTML = "";
+  const spawnBtn = el("button", "wf-btn approve",
+                      (opts.seed && opts.seed.quick) ? "Spawn worker" : "Spawn child");
+  const cancel = el("button", "wf-btn option", "Cancel");
+  spawnBtn.disabled = true;
+  actions.append(cancel, spawnBtn);
+  const st = { ui, parent: parentName, seed: opts.seed || null,
+               spawnBtn, noteShow, busy: false };
+  cancel.addEventListener("click", spawnModalClose);
+  spawnBtn.addEventListener("click", () => spawnModalGo(st));
+  overlay.onclick = (e) => { if (e.target === overlay) spawnModalClose(); };
+  document.addEventListener("keydown", spawnModalKey);
+  overlay.classList.remove("hidden");
+  overlay.classList.add("spawn-open");
+  spawnModal = st;
+  await spawnModalLoad(st);
+}
+
+/* Everything the form can be, fetched in two rounds: the parent's own facts
+   first (its cwd is what the workflow and git questions are about), then the
+   daemon-wide option sets in parallel. Each failure degrades its own field,
+   exactly like the quick job's. */
+async function spawnModalLoad(st) {
+  const ui = st.ui, parent = st.parent;
+  const meta = await api(`/api/sessions/${encodeURIComponent(parent)}/meta`)
+    .then((r) => (r.ok ? r.json() : null)).catch(() => null);
+  if (spawnModal !== st) return;
+  const sess = (meta && meta.session) || sessionsCache.find((s) => s.name === parent) || {};
+  ui.parentSess = sess;
+  const ms = (meta && meta.meshes) || [];
+  // The parent's own handle in its mesh, for the connect list to leave out.
+  ui.parentSess._meshHandle = ms.length ? ms[0].handle : null;
+  ui.parentMesh = ms.length ? ms[0].mesh : "";
+  const cwd = sess.cwd || "";
+  const [report, roles, profDoc, meshDoc, gitDoc, wfDoc] = await Promise.all([
+    spawnReport(parent),
+    api("/api/roles").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    api("/api/profiles").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    api("/api/mesh").then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    api(`/api/git?cwd=${encodeURIComponent(cwd)}`)
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    api(`/api/cflow/workflows?cwd=${encodeURIComponent(cwd)}`)
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null),
+  ]);
+  if (spawnModal !== st) return;
+  ui.report = report || {};
+  ui.git = gitDoc || { repo: false, worktrees: [] };
+  ui._wfs = (wfDoc && wfDoc.workflows) || [];
+  const roleNames = ((roles && roles.roles) || []).map((r) => r.name).filter(Boolean);
+  const profileNames = (ui.report.profiles) ||
+    (profDoc && profDoc.profiles) || [];
+  const meshNames = (meshDoc && meshDoc.meshes || []).map((m) => (m && m.name) || "");
+  const seed = st.seed || {};
+  const re = spawnRecall();
+
+  const hn = ui.report.spawnable_harnesses || [];
+  fillSpawnSelect(ui.harness, hn.map((n) => [n, n]), hn.length ? null : "the parent's own",
+    seed.harness || (hn.includes(sess.harness) ? sess.harness : hn[0]) || "");
+  fillSpawnSelect(ui.profile, profileNames.map((n) => [n, n]), "(inherit the parent's profile)",
+    (seed.profile !== undefined && seed.profile !== null) ? seed.profile :
+      (re.profile || ""));
+  fillSpawnSelect(ui.borrow, profileNames.map((n) => [n, n]), "(runs its own token)",
+    (seed.borrow !== undefined && seed.borrow !== null) ? seed.borrow :
+      (re.borrow || ""));
+  fillSpawnSelect(ui.role, roleNames.map((r) => [r, r]), "(no role)",
+    (seed.role !== undefined && seed.role !== null) ? seed.role :
+      (re.role || ""));
+  fillSpawnSelect(ui.mesh,
+    [].concat(meshNames.map((n) => [n, n]), [["-", "(none) — no mesh"]]),
+    "(inherit the parent's mesh)",
+    seed.mesh !== undefined ? seed.mesh : (ui.parentMesh || ""));
+  const wsp = ui.report.workspaces;   // absent when the policy locks the row
+  fillSpawnSelect(ui.workspace,
+    (wsp || []).map((w) => [w.name, w.exists ? `${w.name} — ${w.path}` : `${w.name} (missing)`, !w.exists]),
+    "(inherit the parent's directory)", seed.workspace || "");
+  const wt = seed.worktree;
+  const wtVal = wt === true ? "@auto"
+    : (typeof wt === "string" && wt ? wt : "");
+  fillSpawnSelect(ui.worktree,
+    [["@auto", "@auto — a worktree of its own, so siblings never collide"],
+     ["@named", "@named — I will name it"]]
+      .concat((ui.git.worktrees || []).map((n) => [n, `reuse ${n}`])),
+    "(no worktree — the parent's directory)", wtVal);
+  if (seed.wtName) ui.wtName.value = seed.wtName;
+  if (seed.context) ui.context.value = seed.context;
+  if (seed.rebase) ui.rebase.value = seed.rebase;
+
+  if (ui.report.can_spawn === false) {
+    st.noteShow(ui.report.blocked_by.join("; ") || "this session may not spawn",
+      "wf-warning");
+    return;   // the form stands readable; the button stays dead
+  }
+  const verdict = spawnPreflightNote(ui.report);
+  if (verdict.ok && verdict.msg) st.noteShow(verdict.msg);
+
+  // The workflow picker's first fill: a seed names the workflow outright (the
+  // quick-job default), otherwise the picked role's own default is offered.
+  // Reading THROUGH the seed lets refill keep a value the auto had set, which
+  // is how a role switch re-homes it without trampling an explicit pick.
+  ui.workflow.value = seed.workflow || "";
+  syncSpawnGates(ui);
+  st.lastWfAuto = refillSpawnWorkflows(ui, seed.role || re.role || ui.role.value, "").auto;
+  syncSpawnGates(ui);
+  st.spawnBtn.disabled = false;
+  // The default mesh's own members, fetched once so the connect offers are
+  // standing before anyone touches the mesh picker.
+  refreshSpawnConnect(st).then(() => {
+    if (spawnModal === st) syncSpawnGates(ui);
+  });
+
+  // The choices that re-gate their neighbours:
+  ui.harness.addEventListener("change", () => syncSpawnGates(ui));
+  ui.nullTok.addEventListener("change", () => syncSpawnGates(ui));
+  ui.worktree.addEventListener("change", () => syncSpawnGates(ui));
+  ui.update.addEventListener("change", () => syncSpawnGates(ui));
+  ui.workspace.addEventListener("change", () => syncSpawnGates(ui));
+  ui.workflow.addEventListener("change", () => syncSpawnGates(ui));
+  ui.mesh.addEventListener("change", () => refreshSpawnConnect(st).then(() => syncSpawnGates(ui)));
+  ui.handle.addEventListener("input", () => refreshSpawnConnect(st).then(() => syncSpawnGates(ui)));
+  ui.role.addEventListener("change", () => {
+    const last = st.lastWfAuto;
+    st.lastWfAuto = refillSpawnWorkflows(ui, ui.role.value, last).auto;
+    syncSpawnGates(ui);
+  });
+}
+
+/* The connect row: the members of the picked mesh the child may also message.
+   The parent's own handle and the child's pick are excluded — the mesh join
+   wires both — and the list is opt-in, so nothing is connected it was not
+   asked to be. */
+async function refreshSpawnConnect(st) {
+  const ui = st.ui;
+  const mesh = ui.mesh.value;
+  ui._connectChecked = [];
+  const row = ui.connectRow;
+  row.innerHTML = "";
+  if (!mesh || mesh === "-") { ui.connectHandles = []; return; }
+  let info = null;
+  try {
+    info = await api(`/api/mesh/${encodeURIComponent(mesh)}`)
+      .then((r) => (r.ok ? r.json() : null));
+  } catch { info = null; }
+  if (spawnModal !== st) return;
+  const handles = spawnConnectNow(ui,
+    (info && info.members || []).map((m) => m.handle).filter(Boolean));
+  ui.connectHandles = handles;
+  if (!handles.length) return;   // the row stays hidden; the join is enough
+  row.appendChild(el("span", "sess-spawn-label", "Connect"));
+  const boxes = [];
+  for (const h of handles) {
+    const lab = el("label", "check sess-spawn-check");
+    const cb = document.createElement("input");
+    cb.type = "checkbox";
+    boxes.push({ h, cb });
+    cb.addEventListener("change", () => {
+      ui._connectChecked =
+        boxes.filter((b) => b.cb.checked).map((b) => b.h);
+    });
+    lab.append(cb, el("span", null, h));
+    row.appendChild(lab);
+  }
+}
+
+async function spawnModalGo(st) {
+  if (st.busy) return;
+  const ui = st.ui;
+  const body = spawnPayload(ui);
+  st.busy = true;
+  st.spawnBtn.disabled = true;
+  st.noteShow("spawning…");
+  const res = await postSpawn(st.parent, body);
+  st.busy = false;
+  if (spawnModal !== st) return;
+  if (!res.ok) {
+    st.noteShow(res.error, "wf-warning");
+    st.spawnBtn.disabled = false;
+    return;
+  }
+  saveSpawnRecall({
+    parent: st.parent,
+    profile: body.profile, borrow: body.borrow,
+    null_token: !!body.null_token, role: body.role,
+  });
+  spawnModalClose();
+  refreshSessions();
+  if (sessName === st.parent) refreshSessKids();
+}
+
 /* ---- quick job: one form, one worker ----
    The wizard's spawn form shrunk to the child a leader actually dispatches:
    a worker-role session driving the worker workflow, in a checkout of its
@@ -6069,7 +6760,8 @@ function sessQuickJob(data) {
   form.appendChild(el(
     "p", "wf-note",
     "spawn one worker under this leader: role, workflow and worktree are " +
-    "the quick_job defaults from ~/.claunch.yaml — type the task, press Spawn"
+    "the quick_job defaults from ~/.claunch.yaml — the spawn wizard opens " +
+    "prefilled with them; type the task there, press Spawn worker"
   ));
 
   const row = el("div", "sess-send-row");
@@ -6091,14 +6783,9 @@ function sessQuickJob(data) {
     "span", null, "cut it a worktree of its own (no collisions with siblings)"
   ));
 
-  const nameIn = document.createElement("input");
-  nameIn.placeholder = "child name (blank = auto)";
-  const task = document.createElement("textarea");
-  task.rows = 3;
-  task.placeholder = "the job: what this worker is for — typed to it once " +
-    "it has booted";
-
   const spawnBtn = el("button", "wf-btn approve", "Spawn worker");
+  spawnBtn.title = "open the spawn wizard prefilled with these defaults — " +
+    "type the task there, then press Spawn worker";
   spawnBtn.disabled = true;
   const saveBtn = el("button", "wf-btn option", "Save as defaults");
   saveBtn.title = "write role/workflow/worktree back to the quick_job block " +
@@ -6107,7 +6794,7 @@ function sessQuickJob(data) {
   const btns = el("div", "sess-quickjob-btns");
   btns.append(spawnBtn, saveBtn);
   const status = el("p", "wf-note hidden");
-  form.append(row, wtLabel, nameIn, task, btns, status);
+  form.append(row, wtLabel, btns, status);
 
   const say = (msg, cls) => {
     status.className = cls || "wf-note";
@@ -6176,9 +6863,6 @@ function sessQuickJob(data) {
       "(no workflow)", defaults.workflow
     );
     wtBox.checked = !!defaults.worktree;
-    if (defaults.task) {
-      task.placeholder = `${defaults.task} …plus what you type here`;
-    }
     saveBtn.disabled = !canSave;
 
     // The policy's own verdict, before the button is pressed: a form that
@@ -6192,39 +6876,20 @@ function sessQuickJob(data) {
     spawnBtn.disabled = false;
   })();
 
-  spawnBtn.addEventListener("click", async () => {
+  spawnBtn.addEventListener("click", () => {
     if (spawnBtn.disabled) return;
-    const typed = task.value.trim();
-    const brief = [defaults.task, typed].filter(Boolean).join("\n\n");
-    if (!brief) {
-      say("a worker needs a task — it is the one field with no default",
-        "wf-warning");
-      return;
-    }
-    const body = { task: brief };
-    if (roleSel.value) body.role = roleSel.value;
-    if (wfSel.value) body.workflow = wfSel.value;
-    const name = nameIn.value.trim();
-    if (name) body.name = name;
-    if (wtBox.checked) {
-      body.worktree = name || `${defaults.name_prefix || "job"}-${qjStamp()}`;
-    }
-    spawnBtn.disabled = true;
-    say("spawning…");
-    const res = await postSpawn(s.name, body);
-    spawnBtn.disabled = false;
-    if (!res.ok) {
-      say(res.error, "wf-warning");
-      return;
-    }
-    const doc = res.doc;
-    const child = (doc.session || {}).name || "(unnamed)";
-    const joined = (doc.mesh || {}).ok ? ` — joined mesh '${doc.mesh.mesh}'` : "";
-    say(`spawned '${child}'${joined}`);
-    task.value = "";
-    nameIn.value = "";
-    refreshSessKids();     // the roster below should show it now, not in 5s
-    refreshSessions();     // and so should the rail
+    // The leader's batch dispatch, through the same wizard every spawn uses:
+    // the panel's three pickers are the seed, the task is typed where the
+    // wizard is. The panel stays the hand on the quick_job YAML (save below);
+    // the spawn itself moves to the modal, which refreshes kids and rail on
+    // success.
+    openSpawnModal(s.name, { seed: {
+      quick: true,
+      role: roleSel.value,
+      workflow: wfSel.value,
+      worktree: wtBox.checked,
+      task: defaults.task || "",
+    } });
   });
 
   saveBtn.addEventListener("click", async () => {

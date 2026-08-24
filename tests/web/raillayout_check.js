@@ -167,12 +167,12 @@ ctx.setMeshes([
      line has to be a full-width child, so counting the direct children is
      how many things are competing for that line. The name, its role and its
      rooms must not be three of them. */
-  check("the row's parts are the dot, the name group, the profile, the context chip and the ⓘ",
+  check("the row's parts are the dot, the name group, the profile, the context chip, the spawn + and the ⓘ",
         kidClasses(row("s21")),
-        ["dot busy", "rail-head", "meta", "rail-ctx unknown", "sess-info"]);
-  check("a session with no role and one room keeps the same five parts",
+        ["dot busy", "rail-head", "meta", "rail-ctx unknown", "sess-plus", "sess-info"]);
+  check("a session with no role and one room keeps the same six parts",
         kidClasses(row("loner")),
-        ["dot idle", "rail-head", "meta", "rail-ctx unknown", "sess-info"]);
+        ["dot idle", "rail-head", "meta", "rail-ctx unknown", "sess-plus", "sess-info"]);
 
   /* The point of the change: role and rooms are siblings inside one box, not
      loose on the row where they wrapped. */
