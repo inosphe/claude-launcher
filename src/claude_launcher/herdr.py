@@ -34,6 +34,18 @@ _TIMEOUT = 5.0
 #: How long a composed label may get before its path starts losing segments.
 LABEL_LIMIT = 120
 
+#: Agent label for a pane that mirrors a session rather than running it.
+#:
+#: This must NOT be a label Herdr resolves to a canonical agent ("claude",
+#: "claude-code", ...): Herdr silently drops an external report of a canonical
+#: agent on any pane where that agent's process was once seen exiting, and it
+#: only forgets that exit when it detects a real agent process again — which a
+#: mirror pane never produces. A reattach in a previously-used pane would
+#: therefore report into the void, rc 0 and all. A label outside Herdr's
+#: canon skips that guard entirely, and is the truer claim anyway: the pane
+#: mirrors claude, it does not run it.
+MIRROR_AGENT_LABEL = "claude-mirror"
+
 
 def in_herdr() -> bool:
     """Whether this process is running inside a Herdr-managed pane."""
@@ -92,7 +104,7 @@ def clear_pane_label(pane: Optional[str] = None) -> bool:
 
 
 def report_agent(
-    agent: str = "claude",
+    agent: str = MIRROR_AGENT_LABEL,
     *,
     pane: Optional[str] = None,
     state: str = "unknown",
@@ -105,7 +117,8 @@ def report_agent(
     ``report-agent`` is Herdr's official hook for an external source — here,
     the attach that makes the pane that session's mirror — to name the
     agent that actually owns it. Same liveness contract as the label:
-    reported on entry, released on exit, silent on failure.
+    reported on entry, released on exit, silent on failure. ``agent`` must
+    stay outside Herdr's canonical labels — see :data:`MIRROR_AGENT_LABEL`.
     """
     target = pane or pane_id()
     if not target:
@@ -117,7 +130,7 @@ def report_agent(
     return _run(args)
 
 
-def release_agent(agent: str = "claude", *, pane: Optional[str] = None) -> bool:
+def release_agent(agent: str = MIRROR_AGENT_LABEL, *, pane: Optional[str] = None) -> bool:
     """Withdraw an agent report from :func:`report_agent`.
 
     The counterpart to :func:`report_agent`: an attach that has ended must
