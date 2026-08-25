@@ -74,6 +74,7 @@ const form = {
    directories, because a child's list is its parent's. */
 const FLOWS = {
   "": [{ name: "solo" }],
+  "F:/other": [{ name: "spare" }],
   "F:/repo": [
     { name: "improv-worker", default_role: "worker", priority: 0,
       filter_roles: { type: "whitelist", roles: ["worker"] } },
@@ -84,9 +85,17 @@ const FLOWS = {
   ],
 };
 const asked = [];
+/* The next answer the daemon fails to give: "throw" is a daemon that is not
+   there, "status" one that is there and busy. Both are the same thing to this
+   form — no answer — and neither is a fact about the directory. */
+let failNext = "";
 const api = async (p) => {
   const cwd = decodeURIComponent((p.split("cwd=")[1] || ""));
   asked.push(cwd);
+  const how = failNext;
+  failNext = "";
+  if (how === "throw") throw new Error("daemon unreachable");
+  if (how === "status") return { ok: false, status: 503, json: async () => ({}) };
   return { ok: true, json: async () => ({ workflows: FLOWS[cwd] || [] }) };
 };
 
@@ -191,6 +200,37 @@ async function main() {
   form.cwd.value = "F:/elsewhere";
   check("a child moved to a workspace takes that one",
         ctx.cwdOf(), "F:/elsewhere");
+
+  /* A fetch that did not answer is not an answer. The list is memoised by
+     directory, and the memo used to be claimed before the fetch and kept
+     whatever came back — so one busy tick was remembered as "this directory
+     declares no workflows", every later call early-returned on the empty
+     list, and the row stayed blank for the life of the tab. That is the
+     create form's half of the reported symptom, and it is why it comes back
+     when the machine is loaded rather than when anything changed. */
+  form.parent.value = "";
+  form.cwd.disabled = false;
+  form.cwd.value = "F:/other";
+  asked.length = 0;
+  failNext = "throw";
+  await ctx.refresh();
+  check("an unreachable daemon empties the row", listed(), [""]);
+  await ctx.refresh();
+  check("...and is asked again rather than remembered",
+        [asked, listed()], [["F:/other", "F:/other"], ["", "spare"]]);
+
+  /* The other half of the same fact: a daemon that answered with a status,
+     not with a list. */
+  form.cwd.value = "F:/repo";
+  await ctx.refresh();          // park the memo somewhere else
+  form.cwd.value = "F:/other";
+  asked.length = 0;
+  failNext = "status";
+  await ctx.refresh();
+  check("a busy daemon empties the row too", listed(), [""]);
+  await ctx.refresh();
+  check("...and is also retried", [asked, listed()],
+        [["F:/other", "F:/other"], ["", "spare"]]);
 
   if (failures) {
     console.error(`${failures} check(s) failed`);
