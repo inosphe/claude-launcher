@@ -4526,13 +4526,25 @@ function newSessionCwd() {
 async function refreshWorkflowChoices() {
   const cwd = newSessionCwd();
   if (cwd === workflowsFor) return;
+  // Claimed before the await so two changes in flight do not both fetch, and
+  // GIVEN BACK below if the fetch failed: `workflowsFor` is a memo of an
+  // ANSWER, and a daemon that was busy for one tick did not give one. Left
+  // claimed, an empty list would be remembered as "this directory declares no
+  // workflows" and every later call would early-return on it -- the picker
+  // staying blank for the life of the tab, which is exactly how this comes
+  // back under load.
   workflowsFor = cwd;
+  let answered = false;
   try {
     const resp = await api(`/api/cflow/workflows?cwd=${encodeURIComponent(cwd)}`);
     workflowsCache = resp.ok ? ((await resp.json()).workflows || []) : [];
+    answered = resp.ok;
   } catch {
     workflowsCache = [];
   }
+  // Only this call's own claim is released: a later cwd change that already
+  // re-claimed it owns the memo now, and its fetch is the one that answers.
+  if (!answered && workflowsFor === cwd) workflowsFor = null;
   syncOnboardPickers();
 }
 
@@ -7231,6 +7243,21 @@ function spawnPreflightNote(kids) {
   return { ok: true, msg: "", cls: "wf-note" };
 }
 
+/* The blocks that are actually final. spawn.py folds the SOFT child cap into
+   `blocked_by` as well as into `soft_blocked_by` (capabilities(), "Kept IN
+   blocked_by too"), so that a client which reads only the one list refuses by
+   default. This client does not read only the one list: it has a person in
+   front of it and an Over-limit row to offer them, which is the crossing
+   spawn.py's own comment says such a client should offer "instead of a dead
+   end". So it subtracts the soft ones and asks what is LEFT — spawning
+   switched off, the depth ceiling — because only those two are worth stopping
+   a form load for. Reading `can_spawn` alone is how a parent standing at its
+   child cap came up with every picker unfilled. */
+function spawnHardBlocks(report) {
+  const soft = new Set((report && report.soft_blocked_by) || []);
+  return ((report && report.blocked_by) || []).filter((b) => !soft.has(b));
+}
+
 /* ---- an empty picker is two different facts ----
    Every list in the spawn surfaces is filled from its own fetch, and every
    one of those fetches degrades the same way: `.catch(() => null)`, which
@@ -7857,7 +7884,9 @@ async function spawnModalLoad(st) {
   const meta = await api(`/api/sessions/${encodeURIComponent(parent)}/meta`)
     .then((r) => (r.ok ? r.json() : null)).catch(() => null);
   if (spawnModal !== st) return;
-  const sess = (meta && meta.session) || sessionsCache.find((s) => s.name === parent) || {};
+  const found = (meta && meta.session) ||
+    sessionsCache.find((s) => s.name === parent) || null;
+  const sess = found || {};
   ui.parentSess = sess;
   const ms = (meta && meta.meshes) || [];
   // The parent's own handle in its mesh, for the connect list to leave out.
@@ -7868,16 +7897,27 @@ async function spawnModalLoad(st) {
   // (daemon/onboard.py inherit_mesh), so neither does this: a guess here does
   // not fail, it broadcasts the child into a room of strangers.
   ui.parentMesh = ui.parentMeshes.length === 1 ? ui.parentMeshes[0] : "";
-  const cwd = sess.cwd || "";
+  // Where the child will stand — the question the git and workflow fetches
+  // below are BOTH about. A blank cwd is a real answer for a parent that runs
+  // in no directory of its own: the child inherits that and runs where the
+  // daemon does, which is what an absent cwd resolves to (daemon/api.py
+  // h_cflow_workflows). It is not an answer when the parent's own record
+  // never arrived — its meta fetch failed and the rail's cache has no row for
+  // it. Asking anyway would succeed about the DAEMON's directory and fill the
+  // pickers with workflows and worktrees the child will never see, with
+  // nothing on screen to say so. `null` means "not known", and the two
+  // fetches that need it are skipped so they report as missing sources.
+  const cwd = found ? (sess.cwd || "") : null;
+  const askCwd = (path) => (cwd === null ? Promise.resolve(null)
+    : api(`${path}${encodeURIComponent(cwd)}`)
+        .then((r) => (r.ok ? r.json() : null)).catch(() => null));
   const [report, roles, profDoc, meshDoc, gitDoc, wfDoc] = await Promise.all([
     spawnReport(parent),
     api("/api/roles").then((r) => (r.ok ? r.json() : null)).catch(() => null),
     api("/api/profiles").then((r) => (r.ok ? r.json() : null)).catch(() => null),
     api("/api/mesh").then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    api(`/api/git?cwd=${encodeURIComponent(cwd)}`)
-      .then((r) => (r.ok ? r.json() : null)).catch(() => null),
-    api(`/api/cflow/workflows?cwd=${encodeURIComponent(cwd)}`)
-      .then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    askCwd("/api/git?cwd="),
+    askCwd("/api/cflow/workflows?cwd="),
   ]);
   if (spawnModal !== st) return;
   ui.report = report || {};
@@ -7927,9 +7967,14 @@ async function spawnModalLoad(st) {
   if (seed.context) ui.context.value = seed.context;
   if (seed.rebase) ui.rebase.value = seed.rebase;
 
-  if (ui.report.can_spawn === false) {
-    st.noteShow(ui.report.blocked_by.join("; ") || "this session may not spawn",
-      "wf-warning");
+  // Only a HARD block stops the load here. The child cap is soft and is
+  // crossed by the Over-limit row below, so stopping on it would hide that
+  // row (syncSpawnGates is what un-hides it) AND leave the Workflow picker
+  // unfilled -- a modal that reports "child limit reached" over an empty
+  // dropdown, which is what a full parent used to open as.
+  const hard = spawnHardBlocks(ui.report);
+  if (hard.length) {
+    st.noteShow(hard.join("; ") || "this session may not spawn", "wf-warning");
     return;   // the form stands readable; the button stays dead
   }
   const verdict = spawnPreflightNote(ui.report);
@@ -7942,11 +7987,19 @@ async function spawnModalLoad(st) {
     "the spawn policy": report, roles, profiles: profDoc,
     meshes: meshDoc, "the git state": gitDoc, workflows: wfDoc,
   }));
+  // A soft verdict is carried too, not dropped: past the cap the note is the
+  // only thing that explains why the button is still dead, and it names the
+  // row that revives it.
+  const capped = !verdict.ok;
   const lines = [];
   if (srcNote) lines.push(srcNote);
-  if (verdict.ok && verdict.msg) lines.push(verdict.msg);
+  if (verdict.msg) {
+    lines.push(capped
+      ? `${verdict.msg} — tick 'spawn over the child limit' to cross it`
+      : verdict.msg);
+  }
   if (lines.length) {
-    st.noteShow(lines.join(" · "), srcNote ? "wf-warning" : "wf-note");
+    st.noteShow(lines.join(" · "), (srcNote || capped) ? "wf-warning" : "wf-note");
   }
 
   // The workflow picker's first fill: a seed names the workflow outright (the
@@ -7957,7 +8010,12 @@ async function spawnModalLoad(st) {
   syncSpawnGates(ui);
   st.lastWfAuto = refillSpawnWorkflows(ui, seed.role || re.role || ui.role.value, "").auto;
   syncSpawnGates(ui);
-  st.spawnBtn.disabled = false;
+  // Past the cap the press is armed by the crossing and by nothing else: the
+  // daemon would refuse a payload without `over_limit`, and a button that
+  // provokes that refusal taught the operator nothing the form already knew.
+  const syncCap = () => { st.spawnBtn.disabled = capped && !ui.over.checked; };
+  ui.over.addEventListener("change", syncCap);
+  syncCap();
   // The default mesh's own members, fetched once so the connect offers are
   // standing before anyone touches the mesh picker.
   refreshSpawnConnect(st).then(() => {
