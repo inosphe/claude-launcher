@@ -126,10 +126,15 @@ const check = (name, cond, extra) => {
   console.log(`FAIL ${name}${extra === undefined ? "" : " — " + JSON.stringify(extra)}`);
 };
 
-const Q = (reason, msgs, status) => ({
-  reason,
-  status: status || (reason === "busy" ? "busy" : "idle"),
-  keyboard_busy: reason === "keyboard",
+/* The payload shape the daemon now sends: `state` is the gate's one-word
+   answer and is always filled, `reason` the same word while a backlog
+   exists (kept for old clients). The readers under test moved to `state`,
+   so the stubs name both — the hold and the reason are one value again. */
+const Q = (state, msgs, status) => ({
+  state,
+  reason: (msgs || []).length ? state : null,
+  status: status || (state === "busy" ? "busy" : "idle"),
+  keyboard_busy: state === "keyboard",
   busy_hold: 120,
   messages: msgs,
 });
