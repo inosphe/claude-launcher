@@ -206,6 +206,13 @@ Cycles are legal and are warned about (`cflow show` prints them). Two rules:
 
 ## Shape
 
+- The file's own header is `name` and `description`. The description is the
+  one line a person is given when something offers this workflow beside four
+  others — `claunch cflow ls`, the dashboard's start panel, the spawn
+  wizard's Workflow row — and every picker clips it to a line, so lead with
+  what a round of it DOES and where it ends. Nothing enforces it: a workflow
+  without one is offered as a bare name, which is how the wrong one gets
+  started.
 - Steps are defined **once** and wired by id, so a shared target (`next: impl`
   from three places) needs no duplication.
 - Termination is omitting `next`, or `next: end`.
@@ -275,7 +282,9 @@ time as a contradiction.
   the file, and which steps declare no completion criterion (neither
   `verify` nor `done_when`).
 - `claunch cflow ls` — confirms the name resolves to the file you just wrote,
-  and not to an older copy of it in the other layer.
+  and not to an older copy of it in the other layer. It prints each
+  workflow's `description` beside its name, which is the description read the
+  way the person picking one reads it: next to its rivals.
 - `claunch cflow request <workflow>` — reports `delegation_check`: what each
   delegated step resolves to *right now*, and which would fall to a human. It
   never blocks; a leader that has not spawned yet is legitimate.
