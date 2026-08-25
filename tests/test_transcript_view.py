@@ -195,6 +195,36 @@ def test_no_conversation_is_an_empty_page_not_an_error(transcript, monkeypatch):
     assert page == {"records": [], "has_more": False, "total": 0, "source": None}
 
 
+def test_the_index_fast_path_misses_nothing_it_should_keep(transcript):
+    """``_peek_type`` skips ``json.loads`` for lines without a literal
+    ``"type":"user"``, because nine records in ten are bookkeeping and the scan
+    walks a file that reaches tens of megabytes. A record it wrongly skipped
+    would vanish from the pane silently, so the substring test has to agree
+    with a real parse — including on the spacing json.dumps produces, and on a
+    tool result whose *body* happens to contain the needle.
+    """
+    spaced = json.dumps(
+        {"type": "assistant",
+         "message": {"role": "assistant", "content": "spaced out"}},
+        indent=None, separators=(", ", ": "),
+    ) + "\n"
+    nested = _rec("user", [{
+        "type": "tool_result", "tool_use_id": "t1",
+        # The needle, inside content that belongs to a record whose own type
+        # is `user` — the fast path must defer to the parsed top-level type.
+        "content": 'a file containing {"type":"assistant"} verbatim',
+    }])
+    _write(transcript, [
+        _noise("file-history-snapshot"),
+        spaced,
+        nested,
+        _noise("attachment"),
+    ])
+    page = tv.page("s1", FakeDef())
+    assert [r["role"] for r in page["records"]] == ["assistant", "user"]
+    assert page["total"] == 2, "the bookkeeping stayed out"
+
+
 def test_a_corrupt_line_costs_only_itself(transcript):
     _write(transcript, [
         _rec("user", "before"),
