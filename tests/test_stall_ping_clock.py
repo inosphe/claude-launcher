@@ -369,6 +369,15 @@ def test_the_api_edits_the_ping_settings(proj):
                 "/api/cflow/ping", headers=BEARER, json={"message": 7},
             )
             assert resp.status == 400
+
+            # and the box is actually on the page the daemon serves — the
+            # endpoint working while nothing calls it is the silent failure
+            resp = await client.get("/", headers=BEARER)
+            assert 'id="cflow-ping-defaults"' in await resp.text()
+            resp = await client.get("/static/app.js", headers=BEARER)
+            body = await resp.text()
+            assert "renderStallPingDefaults" in body
+            assert '"/api/cflow/ping"' in body
         finally:
             await client.close()
 
