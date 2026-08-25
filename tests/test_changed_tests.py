@@ -197,6 +197,60 @@ def test_a_listed_glob_discoverer_that_is_absent_is_not_selected(repo):
     assert _select(repo) == []
 
 
+def test_a_non_python_asset_with_a_cross_language_guard_is_reached(repo):
+    """Rule 3b's second shape, reported by a session before it bit them.
+
+    ``app.js`` has no python importer -- ``test_web_topology`` boots it
+    against a stub browser and drives ~40 ``tests/web/*_check.js`` files. So
+    rule 2 skips it (not python) and rule 3a will not grep a three-letter
+    stem, which left a whole round of web work selecting *nothing* and the
+    gate passing green having run zero tests.
+    """
+    _seed_on_base(
+        repo,
+        {
+            "tests/test_web_topology.py": "boots the frontend\n",
+            "src/claude_launcher/web/static/app.js": "// v1\n",
+        },
+    )
+    _write(repo, "src/claude_launcher/web/static/app.js", "// v2\n")
+    _git(repo, "commit", "-qam", "edit the frontend")
+
+    assert "tests/test_web_topology.py" in _select(repo)
+
+
+def test_a_path_no_rule_can_map_is_reported_not_silently_skipped(repo, capsys):
+    """The distinction the whole gate rests on: empty is not the same as fine.
+
+    A gate that answers "nothing guards this" and "I could not work out what
+    guards this" with the same green exit teaches people that green means
+    checked. So unmappable paths are named on stderr, with what to do next.
+    """
+    _write(repo, "assets/logo.bin", "\x00\x01\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qam", "add an asset nothing guards")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    err = capsys.readouterr().err
+    assert "assets/logo.bin" in err
+    assert "not that they are fine" in err
+    assert "EXPLICIT_GUARDS" in err  # says how to fix it, not just that
+
+
+def test_the_search_term_is_a_filename_not_an_english_word():
+    """Why ``needle`` exists, in the two cases that shaped it.
+
+    A compound stem is a real reference: a test pinning ``improv-worker.yaml``
+    writes ``improv-worker`` to load it. A plain word is not -- searching for
+    ``whatever`` selected fourteen modules that merely used the word in a
+    docstring, which is the full suite creeping back in by another route.
+    """
+    assert changed_tests.needle("improv-worker.yaml") == "improv-worker"
+    assert changed_tests.needle("whatever.md") == "whatever.md"
+    assert changed_tests.needle("app.js") == "app.js"       # too short to stand alone
+    assert changed_tests.needle("style.css") == "style.css"  # a word, not a name
+
+
 def test_a_very_short_stem_does_not_drag_in_the_whole_directory(repo):
     """Substring matching on a two-letter name would hit almost every file.
 

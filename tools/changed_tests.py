@@ -35,10 +35,15 @@ Selection, in two rules, both checkable by eye:
    a round that edits only workflow yaml selects nothing -- even though
    several test modules exist for exactly those files. Two halves:
 
-   a. any test module whose source *mentions the file's stem* (a test that
-      pins a yaml names it in order to load it), and
-   b. the few that find it by globbing its directory and so never name it,
-      listed in :data:`GLOB_DISCOVERERS`.
+   a. any test module whose source *refers to the file* (a test that pins a
+      yaml names it in order to load it) -- by stem when the stem looks like
+      a filename, by full basename otherwise, see :func:`needle`, and
+   b. the few that find it by globbing its directory, or drive it across a
+      language boundary, and so never name it: :data:`EXPLICIT_GUARDS`.
+
+   Anything no rule can map is **reported** rather than passed over --
+   see :func:`unmapped`. An empty selection must be able to mean "I could
+   not tell" instead of "there is nothing".
 
    Rule 3 arrived in two goes, and the second one is the lesson. It was
    first written as a hand-kept list of the guarding tests -- and that list
@@ -83,33 +88,38 @@ CANNOT_TELL = 2
 #: concurrently across sessions.
 MAX_WORKERS = 4
 
-#: Rule 3: directories whose files have guardian tests that no naming
-#: convention could find, because the files are not python.
+#: Rule 3b: guards that rule 3a provably cannot find, because the reference
+#: it would grep for is not there to grep. Two shapes so far:
 #:
-#: The workflow yaml is the case that forced this. Its two copies -- the
-#: packaged canonical one and this repository's project layer -- have to stay
-#: in step, and when they silently did not, the leader ran for days without a
-#: preflight step the package had gained. Nothing was red, because each file
-#: on its own was valid. ``test_sync_project_layer`` and
-#: ``test_project_layer_override`` are what notice; they just have no
-#: same-named source to be pulled in by.
-#: Rule 3b: the few tests that reach a file without ever naming it, because
-#: they discover it by globbing its directory. Rule 3a cannot see those, and
-#: no amount of grepping will make it.
+#: * The test discovers the file by globbing its directory and so never
+#:   writes its name (``test_sync_project_layer`` and the workflow layers).
+#: * The file is not python at all and its guard drives it from the other
+#:   side of a language boundary. ``test_web_topology`` boots ``app.js``
+#:   against a stub browser and runs ~40 ``tests/web/*_check.js`` files; no
+#:   python imports the asset, so nothing links them but this line.
 #:
-#: This table is hand-maintained, so keep it as small as this. The first
-#: version of rule 3 was a hand-written list of *all* the guarding tests, and
-#: it was wrong in both directions on its first outing -- it named two tests
-#: that do not touch the workflows and missed five that do, including the one
-#: whose assertion the same round had just broken. That regression went
-#: through the gate and was caught only by a full sweep. Hence 3a: the
-#: relationship is in the files, so read it from the files.
-GLOB_DISCOVERERS = (
+#: Keep this table small, and add to it only when 3a demonstrably cannot see
+#: the pair. The first version of rule 3 was a hand-written list of *all* the
+#: guarding tests and was wrong both ways on its first outing -- it named two
+#: tests that do not touch the workflows and missed five that do, one of them
+#: the test whose assertion that same round had broken. That regression went
+#: through the gate; a full sweep found it. So the default is to derive, and
+#: this is the documented exception list.
+EXPLICIT_GUARDS = (
     (
         ("src/claude_launcher/workflows/", ".claunch/workflows/"),
         ("tests/test_sync_project_layer.py",),
     ),
+    (
+        ("src/claude_launcher/web/static/", "tests/web/"),
+        ("tests/test_web_topology.py",),
+    ),
 )
+
+#: Shortest stem :func:`needle` will search for on its own. Below this a stem
+#: is not a reference, it is a substring -- ``app`` appears in most files in
+#: this repository -- so the full basename is used instead.
+MIN_STEM = 4
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -159,31 +169,80 @@ def select(repo: Path, paths: List[str]) -> List[str]:
                 picked.add(twin.as_posix())
             continue
         posix = p.as_posix()
-        picked.update(mentioning(repo, p.stem))          # 3a
-        for prefixes, guards in GLOB_DISCOVERERS:        # 3b
+        picked.update(mentioning(repo, p.name))          # 3a
+        for prefixes, guards in EXPLICIT_GUARDS:          # 3b
             if posix.startswith(prefixes):
                 picked.update(g for g in guards if (repo / g).is_file())
     return sorted(picked)
 
 
-def mentioning(repo: Path, stem: str) -> List[str]:
-    """Rule 3a: test modules whose source mentions ``stem``.
+def unmapped(repo: Path, paths: List[str]) -> List[str]:
+    """Changed paths no rule could map to a test -- reported, never silent.
 
-    Derived rather than remembered. A test that pins a yaml file names it to
-    load it, so the reference is in the file and can be read out of it -- no
-    table to forget to update when a fourth test starts pinning the same
-    workflow.
+    The distinction this exists to keep is the one this whole mesh kept
+    relearning today: **an empty result must be able to say "I could not
+    tell" rather than "there is nothing".** A gate that answers both with a
+    green exit teaches people that green means checked.
 
-    Widening only, like rule 2: a test that merely mentions the name in prose
-    gets selected and costs a few seconds. The failure worth avoiding is the
-    other direction.
+    The case that forced it: ``app.js``. Rule 2 skips it (not python), and
+    rule 3a will not grep for a three-letter stem that appears in most files
+    in the repository, so the selection came back empty and the gate passed
+    having run nothing. A whole round of web work would have gone through it
+    that way. ``EXPLICIT_GUARDS`` now covers that directory, but the next
+    unmapped asset is not covered by anything, and this is what makes it
+    visible instead of letting it look like a clean bill of health.
     """
-    if len(stem) < 4:  # too short to be a distinctive reference
-        return []
+    loose = []
+    for rel in paths:
+        p = Path(rel)
+        if p.suffix == ".py":
+            continue                      # rules 1 and 2 own python
+        posix = p.as_posix()
+        if any(posix.startswith(prefixes) for prefixes, _ in EXPLICIT_GUARDS):
+            continue                      # 3b speaks for it
+        if mentioning(repo, p.name):
+            continue                      # 3a found something
+        loose.append(rel)
+    return loose
+
+
+def needle(name: str) -> str:
+    """What to grep the tests for, given a changed file's name.
+
+    A bare stem is only a usable search term when it looks like a filename
+    rather than a word. ``improv-worker`` does -- a separator or a digit is
+    the tell, and a test that pins that yaml writes exactly that string in
+    order to load it. ``whatever`` does not: matching it selected fourteen
+    modules that merely used the word in a docstring, which is the full suite
+    creeping back in by another route.
+
+    So compound names are searched by stem, and everything else by its full
+    basename (``style.css``), which only appears where the file is genuinely
+    referenced.
+    """
+    stem = Path(name).stem
+    compound = "-" in stem or "_" in stem or any(c.isdigit() for c in stem)
+    return stem if (compound and len(stem) >= MIN_STEM) else name
+
+
+def mentioning(repo: Path, name: str) -> List[str]:
+    """Rule 3a: test modules whose source refers to the changed file.
+
+    Derived rather than remembered. A test that pins a yaml file names it in
+    order to load it, so the reference is in the file and can be read out of
+    it -- there is no table to forget to update when a fourth test starts
+    pinning the same workflow.
+
+    Widening only, like rule 2: a test that mentions the name in passing gets
+    selected and costs a few seconds. The failure worth avoiding is the other
+    direction -- but see :func:`needle` for why "widening only" still has to
+    have a limit.
+    """
+    term = needle(name)
     hits = []
     for path in sorted((repo / "tests").glob("test_*.py")):
         try:
-            if stem in path.read_text(encoding="utf-8", errors="replace"):
+            if term in path.read_text(encoding="utf-8", errors="replace"):
                 hits.append(f"tests/{path.name}")
         except OSError:
             continue
@@ -228,6 +287,25 @@ def main(argv: Optional[list] = None) -> int:
         return CANNOT_TELL
 
     files = select(repo, paths)
+    loose = unmapped(repo, paths)
+    if loose:
+        # Printed whether or not anything was selected: a change can map
+        # partly, and the mapped part passing is exactly what makes the
+        # unmapped part easy to miss.
+        print(
+            f"WARNING: {len(loose)} changed path(s) map to no test module. "
+            f"This gate says nothing about them -- not that they are fine:",
+            file=sys.stderr,
+        )
+        for rel in loose:
+            print(f"  {rel}", file=sys.stderr)
+        print(
+            "  Check by hand (grep -rl '<filename>' tests/) and, if something "
+            "guards them, add it to EXPLICIT_GUARDS in this file. If the "
+            "change is broad, ask the leader for a full sweep.",
+            file=sys.stderr,
+        )
+
     if not files:
         print(
             f"no test modules map to this change ({len(paths)} path(s) touched "
