@@ -120,7 +120,7 @@ def test_the_driver_is_reminded_and_told_to_call_next(proj):
     t = 1000.0
     assert clock.scan(t) == []  # first sight arms, as everywhere else
     due = clock.scan(t + 601)
-    assert [(c, s) for c, s, _ in due] == [(cwd, "w1")]
+    assert [(c, s) for c, s, _, _ in due] == [(cwd, "w1")]
     block = due[0][2]
     # the block must not pretend to hand over a step whose content is
     # withheld -- it names the real position and the one call that moves it

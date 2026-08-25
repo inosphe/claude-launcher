@@ -50,7 +50,14 @@ PROJECT = ROOT / ".claunch" / "workflows"
 
 #: A step header at the workflow's ``steps:`` level (two-space indent).
 STEP_RE = re.compile(r"^  ([A-Za-z0-9_.-]+):\s*$")
-#: The step-level fields the graft keys on (four-space indent).
+#: The step-level fields the graft keys on (four-space indent). Named as a
+#: tuple as well as a pattern because the set is not only this file's: the
+#: drift test in ``tests/test_project_layer_override.py`` compares the two
+#: copies of a workflow with exactly these fields excluded, and it imports the
+#: tuple rather than restating it. Two lists would agree right up until
+#: somebody widened one, and that failure is silent in the direction that
+#: matters — a field this tool stops grafting, while the test still ignores
+#: it, simply drops out of both.
 #:
 #: Keyed by field NAME, not by shape: what belongs to the project layer is
 #: whatever answers "what does THIS repository check" — the commands, not the
@@ -58,7 +65,8 @@ STEP_RE = re.compile(r"^  ([A-Za-z0-9_.-]+):\s*$")
 #: to write. ``awaits`` is here for the same reason ``verify`` is: what a step
 #: waits for is this repository's business, and the packaged copy that ships
 #: everywhere cannot name a tool that only exists here.
-GRAFT_RE = re.compile(r"^    (?:verify|awaits):")
+GRAFT_FIELDS = ("verify", "awaits")
+GRAFT_RE = re.compile(r"^    (?:" + "|".join(GRAFT_FIELDS) + r"):")
 COMMENT_RE = re.compile(r"^    #")
 NEXT_RE = re.compile(r"^    next:")
 #: A continuation of a grafted field: indented deeper than the field itself.

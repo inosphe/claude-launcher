@@ -228,13 +228,21 @@ Three forms, and there is no bare-command shorthand — a command is always
 written under `probe`, so the reserved word can never be mistaken for one:
 
 ```yaml
-awaits: verify                                   # this step's own verify
-awaits: {probe: verify, poll: 30}                # the same, with knobs
-awaits:
-  probe: "python tools/queue_depth.py --zero"    # something else entirely
-  poll: 30                                       # seconds; floor 15
-  timeout: 10                                    # seconds; hard cap 30
-  describe: the review queue has drained         # one line, for the signal
+plain:
+  instructions: wait for the restart
+  verify: "python tools/deploy_check.py --branch master"
+  awaits: verify                                 # this step's own verify
+knobs:
+  instructions: wait for the restart
+  verify: "python tools/deploy_check.py --branch master"
+  awaits: {probe: verify, poll: 30}              # the same, with knobs
+elsewhere:
+  instructions: wait for the queue to drain
+  awaits:
+    probe: "python tools/queue_depth.py --zero"  # something else entirely
+    poll: 30                                     # seconds; floor 15
+    timeout: 10                                  # seconds; hard cap 30
+    describe: the review queue has drained
 ```
 
 The exit code is the fact. Output rides into the signal as evidence and is

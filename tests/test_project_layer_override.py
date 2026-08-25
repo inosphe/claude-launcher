@@ -40,6 +40,22 @@ import pytest
 from claude_launcher.cflow import model, state as state_mod
 
 OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
+SYNC = Path(__file__).resolve().parents[1] / "tools" / "sync_project_layer.py"
+
+
+def _graft_fields() -> tuple:
+    """The field names the project layer owns, from the tool that grafts them.
+
+    Loaded by path rather than imported: pytest's ``pythonpath`` is ``src``,
+    so ``tools`` is not on it — the same reason the sync tool's own tests load
+    it this way.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("sync_project_layer", SYNC)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.GRAFT_FIELDS
 
 #: Which steps each override arms.
 #:
@@ -167,14 +183,17 @@ def test_the_leader_override_is_canonical_plus_its_grafted_fields():
     here yet — resyncing it would rewrite a workflow other sessions are
     mid-run on, so it is reported rather than fixed in passing.
 
-    Two fields are excluded, not one, and they are the two the project layer
-    owns (``tools/sync_project_layer.py``'s ``GRAFT_RE``): ``verify`` and
-    ``awaits``. Both answer "what does THIS repository check, with which tool"
-    — a question the packaged copy, which ships everywhere, cannot answer. The
-    exclusion list has to stay exactly that set: widen it and this stops being
-    a drift check.
+    The excluded fields are the ones the project layer owns, and they are
+    read from the tool that grafts them rather than restated here. Both answer
+    "what does THIS repository check, with which tool" — a question the
+    packaged copy, which ships everywhere, cannot answer — and the exclusion
+    has to stay exactly that set: widen it and this stops being a drift check.
+    A second hand-kept list would agree until somebody widened one, and that
+    is the kind of disagreement no machine would have been watching.
     """
     from dataclasses import replace
+
+    grafted = dict.fromkeys(_graft_fields())
 
     canonical = model.load(dict(state_mod.bundled_workflows())["improv-leader"])
     override = model.load(OVERRIDES / "improv-leader.yaml")
@@ -189,7 +208,6 @@ def test_the_leader_override_is_canonical_plus_its_grafted_fields():
         "the override gained or lost a step against the canonical leader"
     )
     for step_id, canonical_step in canonical.steps.items():
-        grafted = {"verify": None, "awaits": None}
         assert replace(override.steps[step_id], **grafted) == replace(
             canonical_step, **grafted
         ), (
