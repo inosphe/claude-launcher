@@ -334,6 +334,42 @@ async function offerForce(btn, path, verb) {
   return forced || result;
 }
 
+/* Everything this page remembers about a session, dropped when the session
+   stops existing.
+
+   The page keys several things by session NAME — the parked terminal, the
+   briefing card's text, whether that card is folded open — and a name is not
+   a durable identity here. Sessions are spawned and killed all day, so a tab
+   left open since morning has watched hundreds of names appear and go away
+   for good; a store that is only ever added to is then a per-session-EVER
+   cache wearing a per-session one's clothes. It grows for as long as the tab
+   is open (which is the leak), and when a respawn reuses a name it answers
+   for the wrong session (which is worse — a briefing card describing work
+   the session on screen never did).
+
+   So the sweep is one function rather than a line next to each store: the
+   next thing keyed by name belongs HERE, and the rule it has to obey is
+   visible from where it would be written. Called once per /api/sessions
+   poll, off the list that poll just returned — the daemon's own answer to
+   "which sessions exist", which is the only authority on the question. */
+function forgetDeadSessions() {
+  const alive = new Set(sessionsCache.map((s) => s.name));
+  // A parked terminal must not be re-shown, frozen, next time its old name
+  // is clicked — and its socket and xterm object die with it (dropKept).
+  for (const parked of [...keptTerms.keys()]) {
+    if (!alive.has(parked)) dropKept(parked);
+  }
+  // The briefing is a summary of a conversation that has ended. Keeping the
+  // text costs memory for nothing; showing it again under a reused name is
+  // a lie the reader has no way to spot.
+  for (const name of [...briefingCache.keys()]) {
+    if (!alive.has(name)) briefingCache.delete(name);
+  }
+  for (const name of [...briefingOpen]) {
+    if (!alive.has(name)) briefingOpen.delete(name);
+  }
+}
+
 async function refreshSessions() {
   let data;
   try {
@@ -344,12 +380,7 @@ async function refreshSessions() {
   }
   sessionsCache = data.sessions || [];
   briefingLLM = data.llm_configured !== false;
-  // A session that stops existing drops its parked terminal with it — killing
-  // or clearing one must not leave a stale terminal in the cache to be
-  // re-shown, frozen, next time its old name is clicked.
-  for (const parked of [...keptTerms.keys()]) {
-    if (!sessionsCache.some((s) => s.name === parked)) dropKept(parked);
-  }
+  forgetDeadSessions();
   const list = $("session-list");
   list.innerHTML = "";
   for (const [s, depth] of byLineage(sessionsCache)) {

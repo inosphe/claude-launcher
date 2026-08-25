@@ -100,6 +100,11 @@ let attachedPid = null, linkState = "down", sessName = null;
 // cache and its disposer are stubs here (the build owns no terminals).
 let keptTerms = new Map();
 function dropKept() {}
+/* The poll's sweep of everything keyed by a session name that has gone
+   away. It has its own harness (leak_check, which counts what a tab left
+   open all day is still holding); here it is a no-op so the rail stays
+   the subject. */
+function forgetDeadSessions() {}
 function refreshResumeChoices() {}
 function renderHome() {}
 function syncBulkActions() {}

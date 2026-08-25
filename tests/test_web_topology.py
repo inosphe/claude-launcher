@@ -88,6 +88,18 @@ docks and is carried with it and hidden on a phone, and ``railhome_check``
 on the rail's own wordmark, which doubles as the link back to the root
 route ("#/") and so has to look like a title and not like a browser's
 default link.
+
+``leak_check`` is the odd one out and deliberately so: instead of slicing a
+function it boots the WHOLE of ``app.js`` against a stub browser built by
+parsing the shipped ``index.html``, then runs the page the way an unattended
+tab runs it — four hundred poll ticks, forty terminals walked between, sixty
+sessions spawned and killed, a hundred dropped links — and holds the census
+afterwards to the census before. Live DOM nodes, live listeners, live
+sockets, live xterm objects, live timers and every cache keyed by session
+name. Nothing in a single tick is wrong when this class of bug is present;
+what is wrong is that the same correct tick leaves something behind, five
+thousand times a day, and only a before/after count can see that.
+
 This wrapper is what makes them run with everything else.
 
 Skipped, not failed, where node is unavailable: node is a convenience for
@@ -146,6 +158,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "wfscroll_check.js",
         "railhome_check.js",
         "typing_check.js",
+        "leak_check.js",
     ],
 )
 def test_topology_diagram_logic(script):
