@@ -2311,10 +2311,6 @@ async def h_session_hold(request: web.Request) -> web.Response:
     held = session.set_delivery_hold(
         not session.delivery_held() if want is None else bool(want)
     )
-    log.info(
-        "session %r: delivery %s by dashboard",
-        session.sdef.name, "held" if held else "resumed",
-    )
     return web.json_response(
         {"hold": held, "queued": _session_queued(request, session)}
     )
