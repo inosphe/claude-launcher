@@ -178,10 +178,24 @@
     <div id="new-view" class="hidden">
       <form id="new-session">
         <div class="page-head"><h2>New session</h2></div>
+        <!-- The form asks WHO this session is before HOW it runs. What the
+             user came here to decide is the arrangement — whose child it is,
+             which mesh it answers in, what role it holds, which run it drives
+             — and those rows are the ones that leave an agent stranded if
+             they are wrong: a session booted into no mesh cannot be told to
+             join one afterwards without a restart. What it runs on (harness,
+             profile, login, directory, args) is a machine detail that is
+             right by default nearly every time, so it folds away below —
+             reachable, editable, but not in the way. The opening task closes
+             the form on its own, under everything that shapes who receives
+             it. -->
         <!-- Naming a parent turns this form into `claunch spawn`: the child
              inherits what decides how it runs, and which of those rows it may
              still be asked is the spawn policy's call, per parent — the form
-             greys the rest (syncSpawnMode reads the daemon's report). -->
+             greys the rest (syncSpawnMode reads the daemon's report). Those
+             rows are the folded ones below, which is why the fold's summary
+             line reports where they came from rather than what the form
+             happens to be holding. -->
         <label>Parent <select name="parent"></select></label>
         <label class="check hidden" id="new-fork-row">
           <input type="checkbox" name="fork_parent">
@@ -197,26 +211,6 @@
           <span id="new-over-text"></span>
         </label>
         <label>Name <input name="name" placeholder="(auto)"></label>
-        <label>Harness <select name="harness"></select></label>
-        <label>Profile <select name="profile"></select></label>
-        <label>Borrow <select name="borrow"></select></label>
-        <label class="check">
-          <input type="checkbox" name="null_token">
-          <span><code>--null</code> (no OAuth token — log in with /login inside)</span>
-        </label>
-        <label class="with-link">
-          <span>Directory <a href="#/workspaces">manage</a></span>
-          <select name="cwd"></select>
-        </label>
-        <p id="cwd-hint" class="hidden"></p>
-        <label>Role <select name="role"></select></label>
-        <p id="role-stance" class="hidden"></p>
-        <label>Resume <select name="resume"></select></label>
-        <label class="check">
-          <input type="checkbox" name="fork" disabled>
-          <span><code>--fork-session</code> (leave the original untouched)</span>
-        </label>
-        <label>Args <input name="args" placeholder="extra harness flags"></label>
 
         <!-- What the session is FOR. Decided here because arranging them
              afterwards leaves an agent sitting at a prompt not knowing
@@ -227,14 +221,51 @@
           <label id="new-handle-row" class="hidden">
             Handle <input name="handle" placeholder="(session name)">
           </label>
+          <label>Role <select name="role"></select></label>
+          <p id="role-stance" class="hidden"></p>
           <label>Workflow <select name="workflow"></select></label>
           <label id="new-context-row" class="hidden">
             Context <input name="context" placeholder="context for the run (optional)">
           </label>
-          <label>Opening task
-            <textarea name="task" rows="3"
-              placeholder="typed in once it has booted — what it is for"></textarea>
-          </label>
+        </fieldset>
+
+        <!-- HOW it runs, folded shut. Every row here has a default that is
+             right unless the user says otherwise, so the fold is closed on
+             arrival — but the values still ride on the summary line
+             (renderRuntimeSummary), because the directory a session is
+             created in is not a thing anyone should have to open a fold to
+             find out: an agent started in the wrong checkout does not report
+             the mistake, it just works on the wrong tree. -->
+        <details id="new-runtime">
+          <summary>How it runs <span id="new-runtime-sum"></span></summary>
+          <div id="new-runtime-body">
+            <label>Harness <select name="harness"></select></label>
+            <label>Profile <select name="profile"></select></label>
+            <label>Borrow <select name="borrow"></select></label>
+            <label class="check">
+              <input type="checkbox" name="null_token">
+              <span><code>--null</code> (no OAuth token — log in with /login inside)</span>
+            </label>
+            <label class="with-link">
+              <span>Directory <a href="#/workspaces">manage</a></span>
+              <select name="cwd"></select>
+            </label>
+            <p id="cwd-hint" class="hidden"></p>
+            <label>Resume <select name="resume"></select></label>
+            <label class="check">
+              <input type="checkbox" name="fork" disabled>
+              <span><code>--fork-session</code> (leave the original untouched)</span>
+            </label>
+            <label>Args <input name="args" placeholder="extra harness flags"></label>
+          </div>
+        </details>
+
+        <!-- The first thing it is told, last thing on the form: it is the
+             only row whose right answer depends on every row above it. -->
+        <fieldset id="new-task">
+          <legend>Opening task</legend>
+          <textarea name="task" rows="3"
+            placeholder="typed in once it has booted — what it is for"></textarea>
         </fieldset>
 
         <button type="submit">Create</button>

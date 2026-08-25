@@ -480,6 +480,33 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #new-onboard legend {
   padding: 0 6px; font-size: 11px; text-transform: uppercase; color: #7d8590;
 }
+
+/* "How it runs" — the rows that are right by default, folded shut. The ▸/▾
+   affordance is the one the detail panel's run fold uses (.sess-run), so a
+   fold reads as a fold wherever it turns up in this page. */
+#new-runtime {
+  margin: 12px 0; padding: 8px 12px;
+  background: #14161a; border: 1px solid #262b33; border-radius: 6px;
+}
+#new-runtime > summary {
+  cursor: pointer; font-size: 12px; color: #9da5b0; list-style: none;
+}
+#new-runtime > summary::-webkit-details-marker { display: none; }
+#new-runtime > summary::before { content: "▸ "; color: #58a6ff; }
+#new-runtime[open] > summary::before { content: "▾ "; }
+/* What the fold is hiding, on its face. Dimmer and smaller than the summary
+   it trails: a reminder of what is set, not a second copy of the fields. */
+#new-runtime-sum { color: #7d8590; font-size: 11px; overflow-wrap: anywhere; }
+#new-runtime-body { margin-top: 10px; }
+/* The opening task, fenced on its own under everything that decides who
+   ends up reading it. */
+#new-task {
+  margin: 4px 0; padding: 10px 12px 4px;
+  border: 1px solid #2a2e36; border-radius: 6px;
+}
+#new-task legend {
+  padding: 0 6px; font-size: 11px; text-transform: uppercase; color: #7d8590;
+}
 #new-session textarea {
   width: 100%; margin-top: 2px; padding: 5px 8px; font-size: 13px;
   font-family: inherit; line-height: 1.45; resize: vertical;
