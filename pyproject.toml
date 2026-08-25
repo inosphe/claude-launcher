@@ -28,6 +28,21 @@ build-backend = "hatchling.build"
 packages = ["src/claude_launcher"]
 
 [tool.pytest.ini_options]
+# This one line has two consequences, and each has already cost somebody an
+# afternoon. It is resolved against pytest's ROOTDIR, and it is prepended to
+# sys.path, so:
+#   1. it beats an editable install's .pth. A suite always imports the tree it
+#      was collected from, never whichever checkout happens to be installed --
+#      which is what a worktree needs and what claunch-iis was closed on
+#      (tests/test_tree_isolation.py asks pytest itself, not `python -c`).
+#   2. a directory NOT listed here is not importable from a test, and `tools`
+#      is not listed. `from sync_project_layer import ...` raises ImportError;
+#      the tests that need something out of tools/ load it by path with
+#      importlib.util.spec_from_file_location (see tests/test_sync_project_layer.py
+#      and the _graft_fields helper in tests/test_project_layer_override.py).
+# Both victims arrive here by the same route -- "why is this import going
+# THERE?" -- so both answers live at the cause instead of in a document
+# neither of them was reading.
 pythonpath = ["src"]
 testpaths = ["tests"]
 addopts = "-p no:cacheprovider"
