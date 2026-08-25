@@ -2213,14 +2213,40 @@ function handleFrame(msg) {
    only delays a delivery by the guard, a missed one corrupts a line. */
 const TYPING_MARK_MS = 1000;
 let lastTypingMark = 0;
-function noteTyping() {
+let lastMarkWasDraft = false;
+
+/* Did this event put *text* into the composer? The daemon holds deliveries
+   for as long as an unsent line exists (Session.draft_open), and only a key
+   that writes one may open that hold: a held Shift, an arrow, a Ctrl chord
+   would open a draft that nothing the person types next can close. Enter is
+   excluded for the same reason from the other side — the byte it sends is
+   what CLOSES the draft, and a mark claiming otherwise would fight it. */
+function isDraftEvent(ev) {
+  if (!ev) return false;
+  if (ev.type !== "keydown") return true;  // composition/input: text, always
+  if (ev.ctrlKey || ev.metaKey || ev.altKey) return false;
+  const k = ev.key;
+  // "Process"/"Unidentified" is a keydown an IME has already swallowed —
+  // a syllable being composed, which is a draft in progress by definition.
+  if (k === "Process" || k === "Unidentified") return true;
+  return typeof k === "string" && k.length === 1;  // a character key
+}
+
+function noteTyping(ev) {
   // Same bookkeeping as a keystroke: the queued-deliveries banner says "your
   // typing" for a hold this tab is causing, composing included.
   lastLocalKey = Date.now();
-  if (Date.now() - lastTypingMark < TYPING_MARK_MS) return;
+  const draft = isDraftEvent(ev);
+  // Throttled to one mark per window, except the first mark that carries a
+  // draft: a bare keydown arriving a few milliseconds earlier must not
+  // swallow the composition event behind it, or the syllable being typed
+  // never opens the hold it exists to open.
+  const fresh = draft && !lastMarkWasDraft;
+  if (Date.now() - lastTypingMark < TYPING_MARK_MS && !fresh) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) return;
   lastTypingMark = Date.now();
-  ws.send(JSON.stringify({ type: "typing" }));
+  lastMarkWasDraft = draft;
+  ws.send(JSON.stringify({ type: "typing", draft }));
 }
 /* Wired once per Terminal object, like onData: xterm owns one hidden textarea
    for the life of the terminal and every key — composed or not — passes
@@ -2407,6 +2433,15 @@ function localTyping() {
 function queuedReason(q, mine) {
   switch (q.reason) {
     case "keyboard":
+      // A draft is a different wait from a recent keystroke, and saying so
+      // matters: "wait a few seconds" is true of the second and never of the
+      // first — an unsent line holds the message until it is sent or cleared,
+      // which is exactly what someone staring at the banner needs to know.
+      if (q.draft_open) {
+        return mine && localTyping()
+          ? "held: YOUR unsent line is in the composer — send it (Enter) or clear it (Ctrl-C) and this goes in right after"
+          : "held: an unsent line is in this session's composer (another viewer, or claunch attach)";
+      }
       return mine && localTyping()
         ? "held by YOUR typing — leave the keyboard alone a few seconds and it will be typed in"
         : "held: a keyboard is active on this session (another viewer, or claunch attach)";
@@ -2451,13 +2486,21 @@ async function flushQueued(name, btn) {
   if (doc.flushed > 0) return { doc, note: "" };
   // Nothing moved: the reason the backlog still has is the reason why.
   const q = doc.queued || {};
-  return {
-    doc,
-    note: q.reason === "exited"
-      ? "nothing delivered — the session has exited"
-      : "nothing delivered — the terminal cannot take a paste yet; it will " +
-        "land on its own",
-  };
+  let note;
+  if (q.reason === "exited") {
+    note = "nothing delivered — the session has exited";
+  } else if (q.draft_open) {
+    // The one hold this button deliberately does not overrule: typing the
+    // backlog in now would splice it into the line still sitting in the
+    // composer, wrecking both. Say whose keypress ends the wait instead of
+    // leaving a button that looks broken.
+    note = "nothing delivered — an unsent line is in the composer; send it " +
+      "(Enter) or clear it (Ctrl-C) and this goes in right after";
+  } else {
+    note = "nothing delivered — the terminal cannot take a paste yet; it " +
+      "will land on its own";
+  }
+  return { doc, note };
 }
 
 function queuedMsgRow(m) {

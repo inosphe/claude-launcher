@@ -19,9 +19,11 @@ class _Session:
         self.marks = 0
         self.writes = []
 
-    def note_human_input(self, *, at_terminal=False):
+    def note_human_input(self, *, at_terminal=False, data=None, composing=False):
         self.marks += 1
         self.at_terminal = at_terminal
+        self.data = data
+        self.composing = composing
 
     async def write_bytes(self, data):
         self.writes.append(data)
@@ -50,6 +52,25 @@ def test_typing_mark_restarts_the_guard_and_writes_nothing():
     assert s.at_terminal is True  # a person at a terminal, not a send-keys
     assert s.writes == []       # a mark, never a keystroke
     assert ws.sent == []        # and nothing to answer
+
+
+def test_a_bare_typing_mark_does_not_claim_an_unsent_draft():
+    """A mark says "somebody is at this keyboard" and nothing more. The web
+    client sends ``draft`` only for events that put text into the composer,
+    because a draft opened by a held modifier is one no later keystroke can
+    close — and it would hold this session's mail for DRAFT_GUARD."""
+    s = _Session()
+    _control(s, {"type": "typing"})
+    assert s.composing is False
+
+
+def test_a_composing_mark_opens_the_draft_the_wire_cannot_show():
+    """The case the mark exists for: an IME holding a Hangul syllable sends
+    no bytes at all, so only the client can say a line is being written."""
+    s = _Session()
+    _control(s, {"type": "typing", "draft": True})
+    assert (s.at_terminal, s.composing) == (True, True)
+    assert s.writes == []
 
 
 def test_other_controls_do_not_mark_the_keyboard():

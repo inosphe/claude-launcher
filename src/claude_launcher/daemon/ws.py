@@ -123,8 +123,13 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                 if msg.type == WSMsgType.BINARY:
                     # A binary frame is a human at a keyboard (attach or the
                     # web terminal); the mark parks automated deliveries so
-                    # they don't type into a message being composed.
-                    session.note_human_input(at_terminal=True)
+                    # they don't type into a message being composed. The
+                    # keystrokes go with it, because *when* they last typed
+                    # is only half the question — the other half is whether
+                    # what they typed is still sitting in the composer
+                    # unsent, and only these bytes can say (Session.
+                    # note_human_input / draft_state_from_bytes).
+                    session.note_human_input(at_terminal=True, data=msg.data)
                     try:
                         await session.write_bytes(msg.data)
                     except SessionGone:
@@ -239,4 +244,12 @@ async def _handle_control(
         # delivery sees a quiet keyboard and types into the half-written
         # line. Same mark as a keystroke frame — it only restarts the
         # TYPING_GUARD window, never writes anything.
-        session.note_human_input(at_terminal=True)
+        #
+        # ``draft`` is the client saying the event was text going *into* the
+        # composer (a composition, an input event) rather than a bare key it
+        # cannot classify. Only that opens a draft: a held modifier must not
+        # leave one open behind it, since nothing the person types next would
+        # ever close it.
+        session.note_human_input(
+            at_terminal=True, composing=bool(msg.get("draft"))
+        )

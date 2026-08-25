@@ -69,7 +69,75 @@ TYPING_GUARD = float(os.environ.get("CLAUNCH_TYPING_GUARD") or 5.0)
 #: reasoning, applied to the reader's other half: the human).
 TYPING_HOLD_TIMEOUT = float(os.environ.get("CLAUNCH_TYPING_HOLD_TIMEOUT") or 30.0)
 
+#: How long an *unsent draft* keeps the keyboard held (seconds). TYPING_GUARD
+#: asks "was a key pressed in the last few seconds", which a human composing a
+#: prompt answers "no" every time they stop to think — and a five-second pause
+#: is not the end of a message, it is the middle of one. So the composer's
+#: state is tracked as well as its timing: while characters are sitting in it
+#: unsent (see :func:`draft_state_from_bytes`) the keyboard counts as busy for
+#: this much longer, and it is released the moment the human submits (Enter)
+#: or clears the line — not on a timer. The cap is only for the person who
+#: types one character and walks away.
+DRAFT_GUARD = float(os.environ.get("CLAUNCH_DRAFT_GUARD") or 180.0)
+
 log = logging.getLogger(__name__)
+
+
+def draft_state_from_bytes(data: bytes) -> Optional[bool]:
+    """What ``data`` — keystrokes a human just sent — did to their composer.
+
+    ``True`` = there is now an unsent draft in it, ``False`` = it was just
+    submitted or cleared, ``None`` = neither (nothing about the draft
+    changed). The last one matters as much as the others: an arrow key, a
+    lone Escape or a backspace must leave a draft *open*, because a message
+    typed into the terminal at that moment is still typed into a line
+    somebody is writing.
+
+    Read from the bytes, not from the screen. A composer's contents are a
+    guess to make from a rendered grid — placeholder hints look exactly like
+    text once the colours are gone — but they are a fact on the wire: this is
+    the keyboard, and these are the keys.
+
+    Rules, in the order they are tested:
+
+    * an escape sequence (arrows, function keys, a bracketed-paste *marker*)
+      changes nothing — its bytes are not characters, whatever they look like;
+    * ``ESC`` + Enter and backslash + Enter insert a newline *into* the
+      composer rather than submitting it (Alt/Shift-Enter, the continuation
+      most TUIs take), so they open a draft rather than closing one;
+    * a bare Enter submits, and ``C-c`` / ``C-u`` discard: the composer is
+      empty after either, so the draft is closed;
+    * anything printable — including the multi-byte UTF-8 of a committed
+      Hangul syllable, and text arriving inside a bracketed paste — opens one.
+    """
+    state: Optional[bool] = None
+    i = 0
+    n = len(data)
+    while i < n:
+        b = data[i]
+        if b == 0x1B:  # ESC: a chord or a control sequence, not typing
+            nxt = data[i + 1] if i + 1 < n else None
+            if nxt in (0x5B, 0x4F):  # CSI / SS3 — skip to the final byte
+                i += 2
+                while i < n and not (0x40 <= data[i] <= 0x7E):
+                    i += 1
+                i += 1
+                continue
+            if nxt in (0x0D, 0x0A):  # Alt/Shift-Enter: a newline in the draft
+                state = True
+                i += 2
+                continue
+            i += 2 if nxt is not None else 1  # ESC alone, or Alt-<key>
+            continue
+        if b in (0x0D, 0x0A):
+            # Backslash-Enter is the other "newline, don't send" spelling.
+            state = True if (i and data[i - 1] == 0x5C) else False
+        elif b in (0x03, 0x15):  # C-c, C-u — the line is gone
+            state = False
+        elif b >= 0x20 and b != 0x7F:  # printable (0x7F is backspace)
+            state = True
+        i += 1
+    return state
 
 STATUS_STARTING = "starting"
 STATUS_BUSY = "busy"
@@ -145,6 +213,12 @@ class Session:
         #: marks) — never ``send-keys``. What the passthrough itself waits on;
         #: see :meth:`send_keys`.
         self._last_terminal_input = 0.0
+        #: Whether characters typed at such a terminal are still sitting in
+        #: the composer unsent. Opened and closed by the keys themselves (see
+        #: :func:`draft_state_from_bytes`), never by a timer: a delivery typed
+        #: into a half-written line is the corruption all of this exists to
+        #: prevent, and the human's own Enter is what says it is safe again.
+        self._draft_open = False
 
         session_dir = paths.session_dir(sdef.name)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -328,7 +402,14 @@ class Session:
         Best-effort by design — every caller is a background sender with
         nothing to tell a user. Returns whether it landed, so a caller that
         must not lose the message (mesh delivery advancing its cursor) can
-        hold its position and retry on the next tick.
+        hold its position and retry on the next tick. Nothing is stored here:
+        a ``False`` means nothing was typed and the message is still wholly
+        the caller's, exactly as it was before the call.
+
+        A human writing a prompt in this terminal is one of the reasons for
+        that ``False`` (see :meth:`await_keyboard_quiet`). The message waits
+        for their Enter — seconds away, since they are typing — and the next
+        attempt goes in behind it.
 
         Every message is stamped with the wall-clock time it actually lands
         (after the readiness/keyboard holds, in the machine's local zone), so
@@ -337,7 +418,19 @@ class Session:
         """
         try:
             await self._await_readable()
-            await self.await_keyboard_quiet()
+            if not await self.await_keyboard_quiet() and self.draft_open():
+                # Not a failure to report to anyone: somebody is mid-sentence
+                # at this keyboard. Said out loud all the same, because from a
+                # sender's side "held behind a human's prompt" and "the TUI
+                # never came up" look identical — both are just an undelivered
+                # message — and only one of them resolves on its own.
+                log.info(
+                    "deliver to %r held: an unsent line is in that "
+                    "terminal's composer; nothing was typed, and the message "
+                    "stays with its sender until the human sends or clears it",
+                    self.sdef.name,
+                )
+                return False
             await self.paste(f"{delivery_stamp()}\n{text}", enter=True)
         except Exception as exc:  # noqa: BLE001 — SessionGone, PTY write, ...
             log.debug("deliver to %r failed: %s", self.sdef.name, exc)
@@ -389,7 +482,13 @@ class Session:
             await asyncio.sleep(0.2)
         self._input_ready = True
 
-    def note_human_input(self, *, at_terminal: bool = False) -> None:
+    def note_human_input(
+        self,
+        *,
+        at_terminal: bool = False,
+        data: Optional[bytes] = None,
+        composing: bool = False,
+    ) -> None:
         """Record a human keystroke aimed at this terminal.
 
         Called by the raw keyboard passthroughs — the WebSocket bridge behind
@@ -404,11 +503,45 @@ class Session:
         Both count as "a human typed here" for a delivery; only the former
         counts for another ``send-keys``, so a script driving a session line
         by line does not wait TYPING_GUARD behind its own previous line.
+
+        ``data`` is the keystroke itself when the caller has it, and it is
+        what moves the draft state: the timing above says *when* somebody
+        last touched the keyboard, ``data`` says whether what they touched it
+        for is still sitting unsent in the composer (see
+        :func:`draft_state_from_bytes`). ``composing`` is the web terminal's
+        equivalent claim for keys that produced no bytes yet — an IME
+        mid-syllable is a draft being written even though the wire is quiet.
+        Both are terminal-only: ``send-keys`` types a line and its Enter
+        together, and holding *itself* behind its own text would deadlock.
         """
         now = time.monotonic()
         self._last_human_input = now
-        if at_terminal:
-            self._last_terminal_input = now
+        if not at_terminal:
+            return
+        self._last_terminal_input = now
+        if composing:
+            self._draft_open = True
+        if data:
+            state = draft_state_from_bytes(data)
+            if state is not None:
+                self._draft_open = state
+
+    def draft_open(self) -> bool:
+        """Whether a human has an unsent line in this terminal's composer.
+
+        Capped by DRAFT_GUARD since the last keystroke — not because the
+        draft stops existing, but because the *person* may have stopped: one
+        character typed before walking away would otherwise hold this
+        session's mail forever, and nobody is around for the interleaving to
+        harm. Everything short of that is released by the keyboard instead —
+        Enter, ``C-c`` — so an actual composer is protected for exactly as
+        long as it is being written.
+        """
+        if not self._draft_open:
+            return False
+        if time.monotonic() - self._last_terminal_input >= DRAFT_GUARD:
+            return False
+        return True
 
     def keyboard_busy(
         self, guard: Optional[float] = None, *, terminal_only: bool = False
@@ -420,16 +553,27 @@ class Session:
         terminal asks about the keyboard directly. ``terminal_only`` asks
         about keystrokes from an attached terminal alone, leaving out
         ``send-keys`` (see :meth:`note_human_input`).
+
+        Timing alone is not enough, and this is where several rounds of "the
+        delivery still spliced into my prompt" ended: ``guard`` is a few
+        seconds, and a person writing a paragraph pauses longer than that to
+        think, to re-read, to look something up. So an unsent draft counts as
+        a busy keyboard too (:meth:`draft_open`) — during those pauses the
+        line is still half-written, and that, not the recency of a keypress,
+        is what makes a paste destructive.
         """
         if guard is None:
             guard = TYPING_GUARD
+        if self.draft_open():
+            return True
         last = self._last_terminal_input if terminal_only else self._last_human_input
         if last <= 0:
             return False
         return time.monotonic() - last < guard
 
-    async def await_keyboard_quiet(self, *, terminal_only: bool = False) -> None:
-        """Hold a write while a human is typing into this terminal.
+    async def await_keyboard_quiet(self, *, terminal_only: bool = False) -> bool:
+        """Hold a write while a human is typing into this terminal, and say
+        whether the keyboard ever went quiet.
 
         The idle-gates upstream cannot catch this by watching the screen:
         typing keeps it changing, but the pauses inside composing a message
@@ -442,14 +586,29 @@ class Session:
         passthrough (:meth:`send_keys` with text, ``send-keys --paste``):
         those are how one agent hands another a line, and a line typed over
         a human's half-written one is the same corruption whichever door it
-        came through. Bounded, like every wait here: a keyboard that never
-        goes quiet delays the message rather than losing it.
+        came through.
+
+        The wait is bounded — a caller must not be parked forever — and the
+        return says which way it ended: ``True`` the keyboard went quiet,
+        ``False`` it never did. That answer is not the decision, though. What
+        callers do with a ``False`` depends on :meth:`draft_open`:
+
+        * **a draft is open** — refuse. A message typed into a half-written
+          line is not a late delivery, it is a broken one, and it breaks the
+          human's prompt along with itself. The sender keeps the message
+          (mesh delivery leaves its cursor where it is, and the queued banner
+          shows the hold) and it goes in behind their Enter.
+        * **no draft** — write anyway, as this has always done. Thirty
+          seconds of keys that left nothing in the composer is somebody
+          holding a modifier or leaning on an arrow key, and there is no
+          half-written line for the paste to land in.
         """
         deadline = time.monotonic() + TYPING_HOLD_TIMEOUT
         while not self.exited and time.monotonic() < deadline:
             if not self.keyboard_busy(terminal_only=terminal_only):
-                return
+                return True
             await asyncio.sleep(0.2)
+        return not self.keyboard_busy(terminal_only=terminal_only)
 
     async def send_keys(self, args: List[str], *, literal: bool = False) -> bytes:
         """Raw keystrokes — the passthrough for a human at a keyboard (the
@@ -466,6 +625,14 @@ class Session:
         ``Escape``, arrows) are never held: an interrupt or a submit is
         wanted the instant it was sent, and holding an Enter would separate
         it from the text it was sent for.
+
+        Raises :class:`KeyboardHeld` when the hold runs out with an unsent
+        line still in the composer. Refusing is the point: this path has no
+        queue to fall back on, so the two available answers are "tell the
+        sender it did not go" and "type it into somebody's half-written
+        sentence", and only the first leaves both lines intact. The sender
+        gets an error it can retry; the person at the keyboard sees nothing,
+        which is right.
         """
         if self.exited:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
@@ -473,7 +640,14 @@ class Session:
             args, literal=literal, app_cursor=self.screen.app_cursor_keys
         )
         if keys_mod.has_text(args, literal=literal):
-            await self.await_keyboard_quiet(terminal_only=True)
+            quiet = await self.await_keyboard_quiet(terminal_only=True)
+            if not quiet and self.draft_open():
+                raise KeyboardHeld(
+                    f"session {self.sdef.name!r}: someone is typing there "
+                    f"right now — nothing was sent. Retry in a moment, or "
+                    f"use 'claunch mesh send' / the deliver API, which keeps "
+                    f"the message and types it in when the line is free."
+                )
             if self.exited:
                 raise SessionGone(f"session {self.sdef.name!r} has exited")
         self.note_human_input()
@@ -616,6 +790,17 @@ class SessionGone(Exception):
     """Raised when acting on a session whose child already exited."""
 
 
+class KeyboardHeld(Exception):
+    """Raised when a write is refused because a human is typing there.
+
+    The raw passthrough's answer to a hold it cannot wait out
+    (:meth:`Session.send_keys`, and the ``/keys`` endpoint behind
+    ``claunch send-keys``). Distinct from :class:`SessionGone`: the session is
+    perfectly alive and the keys are perfectly valid — they were simply aimed
+    at a line somebody else is in the middle of writing.
+    """
+
+
 class DeadSession:
     """The record of a session that is no longer running.
 
@@ -724,8 +909,17 @@ class DeadSession:
     def idle_since(self) -> Optional[float]:
         return None
 
-    def note_human_input(self, *, at_terminal: bool = False) -> None:
+    def note_human_input(
+        self,
+        *,
+        at_terminal: bool = False,
+        data: Optional[bytes] = None,
+        composing: bool = False,
+    ) -> None:
         return None  # nobody is typing at a terminal that no longer exists
+
+    def draft_open(self) -> bool:
+        return False  # and nothing of theirs is left half-written in it
 
     def keyboard_busy(
         self, guard: Optional[float] = None, *, terminal_only: bool = False

@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from typing import Tuple
 
@@ -557,4 +558,33 @@ def open_with(session, block: str) -> None:
     """
     if not block or harness_mod.takes_opening_argv(session.sdef.harness):
         return
-    asyncio.ensure_future(session.deliver(block))
+    asyncio.ensure_future(_deliver_until_it_lands(session, block))
+
+
+#: How long :func:`open_with` keeps trying to hand over the opening block.
+#: Generous, and paid at most once per session: the block is the only thing
+#: telling the agent what it exists for, so a few minutes of retrying costs
+#: nothing next to a session that starts with nothing to do.
+OPENING_RETRY_WINDOW = 300.0
+
+
+async def _deliver_until_it_lands(session, block: str) -> None:
+    """Type the opening block in, retrying while the terminal is not free.
+
+    ``deliver`` declines rather than typing over a human composing at that
+    keyboard (:meth:`Session.deliver`), and one refused attempt used to be
+    the end of this one's only message. So it asks again until it lands or
+    the window closes — the session is brand new, so in practice the first
+    attempt is also the last.
+    """
+    deadline = time.monotonic() + OPENING_RETRY_WINDOW
+    while time.monotonic() < deadline:
+        if session.exited:
+            return
+        if await session.deliver(block):
+            return
+        await asyncio.sleep(1.0)
+    log.warning(
+        "opening block for %r never landed within %.0fs",
+        session.sdef.name, OPENING_RETRY_WINDOW,
+    )

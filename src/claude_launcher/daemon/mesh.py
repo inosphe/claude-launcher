@@ -1538,13 +1538,22 @@ class MeshManager:
                 return  # left before the briefing landed
             if session.exited:
                 return
-            if session.status() == STATUS_IDLE:
+            if session.status() == STATUS_IDLE and not session.keyboard_busy():
                 break
             await asyncio.sleep(0.5)
         else:
             return  # never went idle; skip rather than interleave
-        # best-effort: a dead session just misses it
-        await session.deliver(self.briefing_block(mesh, member))
+        # Retried inside the same window rather than fired once: deliver()
+        # returns False when a human is composing at that terminal (it does
+        # not type over them), and a briefing spent on that moment is a
+        # member who never learns it joined anything.
+        block = self.briefing_block(mesh, member)
+        while time.monotonic() < deadline:
+            if await session.deliver(block):
+                return
+            if session.exited or member.handle not in mesh.members:
+                return
+            await asyncio.sleep(0.5)
 
     async def leave(self, name: str, handle: str) -> Member:
         """Remove a member. Guests may only remove their OWN members (the
