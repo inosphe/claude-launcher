@@ -32,7 +32,7 @@ from . import mesh_roles
 from .harness import CLAUDE_HARNESS, HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
 from .mesh import MeshConflict, MeshError, MeshManager
-from .session import STATUS_IDLE, SessionGone
+from .session import STATUS_IDLE, KeyboardHeld, SessionGone
 from . import ws as ws_mod
 
 COOKIE_NAME = "claunch_session"
@@ -78,9 +78,12 @@ async def revalidate_middleware(request: web.Request, handler):
 async def error_middleware(request: web.Request, handler):
     try:
         return await handler(request)
-    except (SessionGone, MeshConflict, LockBusy) as exc:
+    except (SessionGone, MeshConflict, LockBusy, KeyboardHeld) as exc:
         # LockBusy is transient by construction (the other writer is mid-
         # transition), so it gets a retryable status, not a flat 400.
+        # KeyboardHeld is transient in the same way, and for the most human
+        # reason there is: somebody is typing there and the keys were not
+        # sent. Both want the caller to come back, not to give up.
         return json_error(409, str(exc))
     except (
         ManagerError,
@@ -2122,6 +2125,12 @@ def _session_queued(request: web.Request, session) -> dict:
       terminal or an attach). This is the hold a human causes *themselves*
       by keeping focus in the terminal they are waiting on, which is why it
       is told apart from ``busy`` rather than folded into it.
+      ``draft_open`` sharpens it into the two very different waits it covers:
+      with a draft, the hold ends when they send or clear the line they are
+      writing (their Enter, not a timer); without one it ends a few seconds
+      after the last keystroke. A banner that told someone to "leave the
+      keyboard alone" while their own half-written line is what holds the
+      message would be advice that never comes true.
     * ``settling`` — nothing is holding it; the next worker tick delivers.
 
     The raw signals ride along so a client can sharpen the wording (the web
@@ -2132,6 +2141,7 @@ def _session_queued(request: web.Request, session) -> dict:
     messages = mm.queued_for_session(session.sdef.name)
     status = session.status()
     keyboard = session.keyboard_busy()
+    draft = session.draft_open()
     if not messages:
         reason = None
     elif session.exited:
@@ -2146,6 +2156,7 @@ def _session_queued(request: web.Request, session) -> dict:
         "messages": messages,
         "status": status,
         "keyboard_busy": keyboard,
+        "draft_open": draft,
         "reason": reason,
         "busy_hold": mm.busy_hold,
     }
@@ -2485,8 +2496,15 @@ async def h_session_keys(request: web.Request) -> web.Response:
             return json_error(400, "'paste' must be a string")
         # A paste is text by definition: like send_keys with text, it queues
         # behind a human typing at this terminal rather than splicing into
-        # their half-written line (see Session.send_keys).
-        await session.await_keyboard_quiet(terminal_only=True)
+        # their half-written line — and refuses outright rather than typing
+        # over a composer that never emptied (see Session.send_keys).
+        quiet = await session.await_keyboard_quiet(terminal_only=True)
+        if not quiet and session.draft_open():
+            return json_error(
+                409,
+                f"session {session.sdef.name!r}: someone is typing there "
+                f"right now — nothing was pasted. Retry in a moment.",
+            )
         data = await session.paste(paste, enter=bool(body.get("enter")))
         return web.json_response({"ok": True, "bytes": len(data)})
     keys = body.get("keys")

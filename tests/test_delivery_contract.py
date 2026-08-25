@@ -139,6 +139,7 @@ def _fake_session(*, bracketed: bool, ready: bool = True):
         idle_threshold = 0.0
         _last_human_input = 0.0
         _last_terminal_input = 0.0
+        _draft_open = False
         paste = session_mod.Session.paste
         deliver = session_mod.Session.deliver
         send_keys = session_mod.Session.send_keys
@@ -146,6 +147,7 @@ def _fake_session(*, bracketed: bool, ready: bool = True):
         await_keyboard_quiet = session_mod.Session.await_keyboard_quiet
         note_human_input = session_mod.Session.note_human_input
         keyboard_busy = session_mod.Session.keyboard_busy
+        draft_open = session_mod.Session.draft_open
 
         def status(self, threshold=None):
             return session_mod.STATUS_IDLE

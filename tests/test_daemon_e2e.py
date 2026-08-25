@@ -469,10 +469,12 @@ def test_cflow_nudge_goes_through_deliver(home, tmp_path, monkeypatch):
         _await_readable = session_mod.Session._await_readable
         await_keyboard_quiet = session_mod.Session.await_keyboard_quiet
         keyboard_busy = session_mod.Session.keyboard_busy
+        draft_open = session_mod.Session.draft_open
         _started_mono = 0.0
         _input_ready = True  # a session already up; nothing to wait for
         _last_human_input = 0.0  # nobody has typed here
         _last_terminal_input = 0.0
+        _draft_open = False  # and nothing half-written is sitting in it
 
         async def write_bytes(self, data: bytes) -> None:
             writes.append(data)
