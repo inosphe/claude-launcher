@@ -31,6 +31,12 @@ class IdleTracker:
         self._prev: Optional[Tuple[int, ...]] = None
         self._changes: Deque[Set[int]] = deque(maxlen=window)
         self._last_meaningful: Optional[float] = None
+        #: Monotonic time each row was last observed to change, so a caller
+        #: can ask "did *this* row move recently" — the question a frozen
+        #: in-turn marker poses. Animated rows count here even though they
+        #: are excluded from "meaningful": a live spinner IS the activity the
+        #: marker claims.
+        self._last_change_at: dict = {}
 
     def _animated_rows(self) -> Set[int]:
         counts: dict = {}
@@ -45,10 +51,13 @@ class IdleTracker:
             # First observation: everything is new content.
             self._prev = hashes
             self._last_meaningful = now
+            for i in range(len(hashes)):
+                self._last_change_at[i] = now
             return
         if len(hashes) != len(self._prev):
             # Resize / row-count change: treat as activity and reset history.
             self._changes.clear()
+            self._last_change_at = {i: now for i in range(len(hashes))}
             self._prev = hashes
             self._last_meaningful = now
             return
@@ -56,6 +65,8 @@ class IdleTracker:
         animated = self._animated_rows()
         self._changes.append(changed)
         self._prev = hashes
+        for i in changed:
+            self._last_change_at[i] = now
         if changed - animated:
             self._last_meaningful = now
 
@@ -68,3 +79,12 @@ class IdleTracker:
         if self._last_meaningful is None:
             return None
         return max(0.0, now - self._last_meaningful)
+
+    def last_change_at(self, row: int) -> Optional[float]:
+        """Monotonic time ``row`` last changed (None if never sampled).
+
+        A live turn-marker row moves; a frozen one does not. This is the
+        evidence the status computation uses to tell a genuine "esc to
+        interrupt" from one a crashed TUI left painted on the grid.
+        """
+        return self._last_change_at.get(row)
