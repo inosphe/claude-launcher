@@ -489,6 +489,96 @@ def test_a_priority_that_is_a_numeric_string_still_ranks():
     assert wizard._workflow_entry({"name": "w", "priority": "7"})["priority"] == 7
 
 
+def test_the_picker_says_what_a_workflow_does_not_only_its_name():
+    """A name is not an answer to "which of these five?".
+
+    The workflow's own ``description`` is the one sentence its author wrote
+    for exactly this moment, and the daemon serves it beside the name. It
+    used to be dropped on the floor here, leaving a person to choose between
+    'improv-worker' and 'delegated-dev' by guessing.
+    """
+    entry = wizard._workflow_entry({
+        "name": "improv-worker", "description": "one goal, one round, one session",
+    })
+    assert entry["description"] == "one goal, one round, one session"
+
+    [opt] = wizard._workflow_options([entry], "")
+    assert opt.detail == "one goal, one round, one session"
+
+    # ...and beside the facts, it comes last -- see _workflow_options.
+    ranked = wizard._workflow_options(
+        [wizard._workflow_entry({
+            "name": "improv-worker", "description": "design -> ship",
+            "default_role": "worker", "priority": 5,
+        })],
+        "worker",
+    )
+    assert ranked[0].detail == "default for worker, priority 5 -- design -> ship"
+
+
+def test_a_workflow_that_says_nothing_about_itself_still_lists():
+    """The description is optional in the schema, and a daemon old enough to
+    serve bare names has none to give -- neither may cost the picker a row or
+    leave a dangling separator on it."""
+    assert wizard._workflow_entry("bare")["description"] == ""
+    assert wizard._workflow_entry({"name": "w"})["description"] == ""
+
+    [bare] = wizard._workflow_options([wizard._workflow_entry("bare")], "")
+    assert bare.detail == ""
+    [ranked] = wizard._workflow_options(
+        [wizard._workflow_entry({"name": "w", "default_role": "worker"})], "worker",
+    )
+    assert ranked.detail == "default for worker"
+
+
+def test_a_paragraph_of_description_is_cut_down_to_one_option_row():
+    """A description is a paragraph -- folded scalars, newlines and all --
+    and an option is one row that is then padded and fit to the terminal. So
+    it is flattened and cut here, on the same budget the dashboard's picker
+    uses, rather than left to shove the row's facts off a narrow screen."""
+    folded = "one\ntwo   three\n\nfour"
+    assert wizard._one_line(folded) == "one two three four"
+
+    exact = "x" * wizard.WORKFLOW_DESC_COLS
+    assert wizard._one_line(exact) == exact          # cut only when cut
+    cut = wizard._one_line(exact + "y")
+    assert cut.endswith("...") and wizard.width(cut) == wizard.WORKFLOW_DESC_COLS
+
+    # Columns, not characters: a Korean description is twice as wide as it is
+    # long, and it is the width that has to fit the row.
+    wide = wizard._one_line("가" * 200)
+    # A double-width script cannot always land on the budget exactly -- one
+    # more character would overshoot it -- so the rule is that the row never
+    # exceeds it, not that it always fills it.
+    assert wizard.WORKFLOW_DESC_COLS - 1 <= wizard.width(wide) <= wizard.WORKFLOW_DESC_COLS
+    # ...and the marker is ASCII, because this is drawn into a console that
+    # may not be able to encode an ellipsis character (cp949 replaces it with
+    # '?', which reads as a typo rather than as "there is more")
+    assert wide.endswith("...")
+
+    para = "a sentence long enough to be cut " * 4
+    [opt] = wizard._workflow_options(
+        [wizard._workflow_entry({"name": "w", "description": para})], "",
+    )
+    assert opt.detail.endswith("...")
+    assert wizard.width(opt.detail) == wizard.WORKFLOW_DESC_COLS
+
+
+def test_the_description_survives_the_whole_form():
+    """End to end: what the daemon serves reaches the row a person reads."""
+    sources = FakeSources(workflows={"/srv/api": [
+        {"name": "improv-worker", "description": "one goal, one round",
+         "default_role": "worker", "priority": 5},
+        {"name": "feature-dev", "description": "design -> ship"},
+    ]})
+    wiz = wizard.Wizard(sources, cwd="/work/repo")
+    pick(wiz, "cwd", "api")
+    pick(wiz, "role", "worker")
+    details = {o.value: o.detail for o in wiz.field("workflow").options}
+    assert details["improv-worker"] == "default for worker, priority 5 -- one goal, one round"
+    assert details["feature-dev"] == "design -> ship"
+
+
 def test_type_to_jump_in_a_long_picker():
     wiz = form()
     focus_on(wiz, "profile")

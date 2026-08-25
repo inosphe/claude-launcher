@@ -2316,6 +2316,21 @@ def test_the_authoring_skill_only_shows_yaml_the_parser_accepts(tmp_path):
         assert wf.deprecations == [], f"deprecated spelling shown: {wf.deprecations}"
 
 
+def test_the_authoring_skill_tells_the_author_to_write_a_description():
+    """The field every bundled workflow carries and the skill never named.
+
+    An author who is never told to write one ships a workflow that every
+    picker can only offer as a bare name -- `cflow ls`, the dashboard's start
+    panel, the spawn wizard's Workflow row all read this one field.
+    """
+    from claude_launcher.cflow import authoring
+
+    text = " ".join(authoring.SKILL_MD.split())
+    assert "`name` and `description`" in text
+    # ...and what it is FOR, which is the part that decides how it is written
+    assert "offered as a bare name" in text
+
+
 def test_the_authoring_skill_states_the_rule_it_exists_for():
     """The incentive rule is the one line here that prevents an incident."""
     from claude_launcher.cflow import authoring

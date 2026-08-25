@@ -645,9 +645,10 @@ def worktree_answer(form: "Form") -> tuple:
 def _workflow_entry(raw) -> dict:
     """One workflow the sources offered, normalized.
 
-    The daemon serves mappings (name, default_role, priority, filter_roles);
-    a bare name -- an older daemon, a simpler test double -- reads as a
-    workflow that volunteers for nobody.
+    The daemon serves mappings (name, description, default_role, priority,
+    filter_roles); a bare name -- an older daemon, a simpler test double --
+    reads as a workflow that volunteers for nobody and says nothing about
+    itself.
     """
     if isinstance(raw, dict):
         try:
@@ -660,13 +661,14 @@ def _workflow_entry(raw) -> dict:
             priority = 0
         return {
             "name": str(raw.get("name") or ""),
+            "description": str(raw.get("description") or ""),
             "default_role": str(raw.get("default_role") or "").strip().lower(),
             "priority": priority,
             "filter_roles": raw.get("filter_roles"),
         }
     return {
-        "name": str(raw or ""), "default_role": "", "priority": 0,
-        "filter_roles": None,
+        "name": str(raw or ""), "description": "", "default_role": "",
+        "priority": 0, "filter_roles": None,
     }
 
 
@@ -715,6 +717,28 @@ def _workflow_rank(entry: dict, role: str) -> tuple:
     return (band, -entry["priority"], entry["name"])
 
 
+#: How much of a workflow's ``description`` an option row carries, in display
+#: columns. The dashboard's picker settled on the same budget for the same
+#: reason (``wfOptionLabel`` in app.js): a description is a paragraph, an
+#: option is one row, and this row is already padded to 34 columns before the
+#: terminal gets a say in what is left.
+WORKFLOW_DESC_COLS = 48
+
+
+def _one_line(text: str, cols: int = WORKFLOW_DESC_COLS) -> str:
+    """A paragraph as one option-sized row.
+
+    Newlines and runs of space collapse to single spaces first -- a folded
+    YAML scalar arrives carrying the author's line breaks, and a row that
+    kept them would not be one row. The cut itself is :func:`fit`, the same
+    one every other row in this form is drawn through: display columns rather
+    than characters (a Korean description is twice as wide as it is long) and
+    an ASCII ellipsis, because this is printed to a console that may not be
+    able to encode a nicer one.
+    """
+    return fit(" ".join(str(text or "").split()), cols)
+
+
 def _workflow_options(entries: List[dict], role: str) -> List[Option]:
     out = []
     for e in sorted(entries, key=lambda e: _workflow_rank(e, role)):
@@ -725,7 +749,16 @@ def _workflow_options(entries: List[dict], role: str) -> List[Option]:
             detail.append(f"priority {e['priority']}")
         if role and not _workflow_admits(e, role):
             detail.append(f"filter_roles turns {role!r} away")
-        out.append(Option(e["name"], e["name"], ", ".join(detail)))
+        line = ", ".join(detail)
+        # What the workflow DOES, last. The facts before it are short and
+        # bounded and one of them is a warning, while a description has no
+        # length anyone controls -- so the description is the part that loses
+        # when the row is fit to a narrow terminal, rather than the part that
+        # pushes a refusal off the end of it.
+        desc = _one_line(e.get("description") or "")
+        if desc:
+            line = f"{line} -- {desc}" if line else desc
+        out.append(Option(e["name"], e["name"], line))
     return out
 
 
