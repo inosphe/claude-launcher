@@ -131,7 +131,7 @@ new Function(
   // The row also spends a line on its directory now (railcwd_check's
   // subject); here it is only a call that has to resolve.
   + slice("shortenPath") + slice("cwdSplit") + slice("cwdShort")
-  + slice("railCwdLine")
+  + slice("cwdLine") + slice("railCwdLine")
   + slice("ctxRailLine") + slice("refreshSessions")
   + `
 Object.assign(exports, {

@@ -18,7 +18,10 @@
    - It is actually on the row, as a full-width line of its own, and it
      lands BEFORE the context gauge — under the name, where "where" reads
      before "how full". Driven through the real refreshSessions, because a
-     helper that is right and never called leaves no trace. */
+     helper that is right and never called leaves no trace.
+   - And it is under the name in the detail panel's head too, in every
+     arrangement of that head — the Details list's `directory` row is the
+     seventh row down and not on the Workflow tab at all. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -108,6 +111,14 @@ function setStatusBadge() {}
 function ctxNoteOnRow() {}
 function ctxRailLine(s) { return el("span", "rail-ctx-line unknown"); }
 function $(id) { return list; }
+/* The panel head's other callers (panel_check's subject): the arrangement
+   is steered from here so the line can be shown to survive every one. */
+let termUp = false, narrow = false;
+function terminalOnScreen() { return termUp; }
+const MOBILE_MQ = { get matches() { return narrow; } };
+function openSpawnModal() {}
+function go() {}
+function closeDetail() {}
 `;
 
 const ctx = {};
@@ -116,13 +127,16 @@ new Function(
   stubs + capLine[0] + "\n"
   + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags")
   + slice("shortenPath") + slice("cwdSplit") + slice("cwdShort")
-  + slice("railCwdLine") + slice("refreshSessions")
+  + slice("cwdLine") + slice("railCwdLine") + slice("refreshSessions")
+  + slice("sessHead")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,
   split: cwdSplit,
   short: cwdShort,
   line: railCwdLine,
+  head: sessHead,
+  arrange: (o) => { termUp = !!o.termUp; narrow = !!o.narrow; currentName = o.cur || null; },
 });`)(ctx, document, el, api, list, []);
 
 let failures = 0;
@@ -187,6 +201,38 @@ check("...and is set apart", none.classes.has("unknown"), true);
 check("...and not called a worktree", none.classes.has("worktree"), false);
 check("...with a title that explains rather than repeats",
       none.title.includes("daemon"), true);
+
+/* ---- and under the name in the detail panel's head --------------------- */
+/* The same line, drawn by the real sessHead: the panel's Details list has
+   a `directory` row, but it is the seventh row down and not on the Workflow
+   tab at all, so the head — the one part both tabs share — says it too.
+   Every arrangement of that head must carry it: the head drops its buttons
+   when docked beside its own terminal, and the line must not go with them. */
+const cwdInHead = (h) => descendants(h).filter((k) => k.classes.has("sess-cwd"));
+ctx.arrange({ termUp: true, narrow: false, cur: "s84" });
+let head = ctx.head({ name: "s84", status: "busy", cwd: WT });
+check("docked beside its own terminal (no buttons) the head still says where",
+      cwdInHead(head).map((k) => k.text), ["claude-launcher › s84-scroll-restore"]);
+check("...flagged as a worktree, whole path on hover",
+      [cwdInHead(head)[0].classes.has("worktree"), cwdInHead(head)[0].title.split("\n").pop()],
+      [true, WT]);
+check("...and the name is still the head's first word", head.kids[0].text, "s84");
+ctx.arrange({ termUp: true, narrow: false, cur: "other" });
+head = ctx.head({ name: "s84", status: "busy", cwd: WT });
+check("aimed at another session (buttons kept) it says where, once",
+      cwdInHead(head).map((k) => k.text), ["claude-launcher › s84-scroll-restore"]);
+ctx.arrange({ termUp: false, narrow: true, cur: null });
+head = ctx.head({ name: "bare", status: "idle", cwd: "" });
+check("on a phone, a session with no directory of its own says whose",
+      cwdInHead(head).map((k) => [k.text, k.classes.has("unknown")]),
+      [["(daemon cwd)", true]]);
+/* The stylesheet's part: a line of its own under everything the head holds
+   (order past the buttons, which declare none), never wrapping. */
+const headRule = (css.match(/\.sess-head \.sess-cwd \{([^}]*)\}/) || [])[1] || "";
+check("the head's line is full-width", /flex-basis:\s*100%/.test(headRule), true);
+check("...sorted last", Number((headRule.match(/order:\s*(\d+)/) || [])[1]) > 0, true);
+check("...one line, ellipsised",
+      /white-space:\s*nowrap/.test(headRule) && /text-overflow:\s*ellipsis/.test(headRule), true);
 
 /* ---- on the row, built by the real code -------------------------------- */
 served = { sessions: [

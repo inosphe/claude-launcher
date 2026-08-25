@@ -102,8 +102,11 @@ silence — ``railcwd_check`` on the row's directory line, WHERE the session
 runs: a worktree of this launcher's own making reads as "repository ›
 checkout" rather than the "…/worktrees/<name>" the tail-of-path shortening
 would print (one constant word kept, the one that differs dropped), the
-whole path stays a hover away, and the line is a full-width child of the row
-placed under the name and before the gauge — and ``detailsplit_check`` on the docked detail rail's width: the drag bar
+whole path stays a hover away, the line is a full-width child of the row
+placed under the name and before the gauge, and the detail panel's head
+carries the same line under its name in every arrangement (the Details
+list's ``directory`` row is seven rows down and absent from the Workflow
+tab) — and ``detailsplit_check`` on the docked detail rail's width: the drag bar
 opposite the session list's, which resizes the ``#sess-view`` column once it
 docks and is carried with it and hidden on a phone, and ``railhome_check``
 on the rail's own wordmark, which doubles as the link back to the root

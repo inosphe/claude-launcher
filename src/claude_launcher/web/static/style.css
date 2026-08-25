@@ -760,6 +760,19 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 /* lit while this row is the one open in the right rail */
 #session-list .sess-info.on { color: #58a6ff; }
 .sess-head { flex-wrap: wrap; }
+/* Where the session runs, as the head's own bottom line — the rail row's
+   directory line drawn again under the name it belongs to, so the panel
+   says it on both tabs. `order` puts it after the buttons whatever the
+   arrangement appends, and full-width so it is a line of its own rather
+   than a crowd-out of the badge; one line, ellipsised, whole path on the
+   title. The head's gap is the row gap too, so the line sits a little
+   closer than that to read as the name's subtitle and not a new section. */
+.sess-head .sess-cwd {
+  flex-basis: 100%; order: 9; min-width: 0; margin-top: -6px;
+  font-family: SFMono-Regular, Consolas, monospace; font-size: 12px;
+  color: #7d8590; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.sess-head .sess-cwd.unknown { color: #6e7681; font-style: italic; font-family: inherit; }
 /* The panel's radio: Details or Workflow, one lit and dead, the other live.
    The trace page's tabs already dress this; only the widths are ours — two
    equal halves read as a switch, a pair of pills reads as a menu. */
