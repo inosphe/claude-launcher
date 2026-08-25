@@ -61,6 +61,29 @@ def find(config_dir: Path, conversation_id: str) -> Optional[Path]:
     return None
 
 
+def exists(config_dir: Path, conversation_id: str, cwd: str) -> bool:
+    """Whether ``conversation_id`` has a transcript on disk at all.
+
+    The question a *restore* has to ask before it runs ``--resume <id>``: a
+    conversation claude never wrote is not resumable, and asking for one is
+    fatal -- claude prints "No conversation found with session ID" and exits.
+    A session created seconds before a daemon restart is exactly that case;
+    its first turn had not landed yet, so there is no jsonl to reopen.
+
+    Deliberately *generous*: the strict address (:func:`project_dir` of
+    ``cwd``) decides it, and when that misses the whole config dir is
+    searched by id (:func:`find`). The two answers fail in opposite
+    directions and only one of them is cheap. Saying "resumable" when claude
+    disagrees costs a failed restore -- what already happens today. Saying
+    "not resumable" about a conversation that *does* exist would send the
+    caller off to start a fresh one at that id, and a scrollback is not worth
+    gambling on a slug spelling. So a match anywhere is a yes.
+    """
+    if (project_dir(config_dir, cwd) / f"{conversation_id}.jsonl").is_file():
+        return True
+    return find(config_dir, conversation_id) is not None
+
+
 def relocate(
     config_dir: Path, conversation_id: str, old_cwd: str, new_cwd: str
 ) -> Optional[Path]:
