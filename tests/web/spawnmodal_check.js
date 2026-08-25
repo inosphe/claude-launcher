@@ -142,6 +142,11 @@ let sessionsCache = [];
 let spawnModal = null;
 let BASE = "/";
 function refreshSessions() { railRefreshed++; }
+/* The box's remembered size is a contract of its own — spawnsize_check drives
+   the real pair. Here they are stubs: this harness is about the form's RULES,
+   and a stub DOM has no box to measure. */
+function spawnSizeApply() {}
+function spawnSizeRemember() {}
 function refreshSessKids() { kidsRefreshed++; }
 function go(h) { gotoHash = h; }
 `;
@@ -205,6 +210,7 @@ function uiStub(over = {}) {
     update: ctl(), rebase: ctl(), wtRow: ctl(), wtNameRow: ctl(),
     updateRow: ctl(), rebaseRow: ctl(),
     handleRow: ctl(), connectRow: ctl(), connectHandles: [],
+    meshNote: ctl(), parentMeshes: [],
     connect: () => [],
   }, over);
 }
@@ -350,6 +356,63 @@ async function main() {
   check("mesh '-' takes handle and connect away",
     g3.handleRow.hidden === true && g3.connectRow.hidden === true);
 
+  /* ---- inheriting a mesh: when it resolves, and when it cannot ---------- */
+  /* Sitting on "(inherit the parent's mesh)" is an answer the DAEMON settles
+     (daemon/onboard.py inherit_mesh), and it settles three ways: one mesh is
+     the answer, none opens a fresh one holding just the pair, and several is
+     REFUSED by name — guessing there does not fail, it broadcasts the child
+     into a room of strangers. The form must not guess where the daemon will
+     not, so the ambiguity is said on the row before Spawn is pressed. */
+  const meshCase = (over) => {
+    const u = uiStub(Object.assign({
+      report: { may_choose: [] }, git: {},
+      parentSess: { harness: "claude" }, over: ctl(), update: ctl(),
+    }, over));
+    ctx.syncSpawnGates(u);
+    return u;
+  };
+
+  const oneMesh = meshCase({ parentMeshes: ["m0"], parentMesh: "m0", mesh: ctl({ value: "" }) });
+  check("one mesh: inheriting resolves, so the row says nothing",
+    oneMesh.meshNote.hidden === true, oneMesh.meshNote.textContent);
+  check("...and spawnMeshNow answers with it",
+    ctx.spawnMeshNow(oneMesh) === "m0", ctx.spawnMeshNow(oneMesh));
+
+  /* No mesh is NOT the same as no answer: the daemon opens one for the pair,
+     so the child still gets a handle in it. */
+  const noneMesh = meshCase({ parentMeshes: [], parentMesh: "", mesh: ctl({ value: "" }) });
+  check("no mesh: inheriting is still unambiguous",
+    noneMesh.meshNote.hidden === true, noneMesh.meshNote.textContent);
+  check("...and the handle row stays, because a fresh mesh still needs one",
+    noneMesh.handleRow.hidden === false);
+
+  const many = meshCase({
+    parentMeshes: ["m0", "m9"], parentMesh: "", mesh: ctl({ value: "" }),
+  });
+  check("several meshes: the row says the daemon will refuse",
+    many.meshNote.hidden === false && /m0/.test(many.meshNote.textContent)
+      && /m9/.test(many.meshNote.textContent), many.meshNote.textContent);
+  check("...and the picker stays live, because naming one is the fix",
+    many.mesh.disabled !== true);
+  check("...and nothing is guessed for the connect offers",
+    ctx.spawnMeshNow(many) === "", ctx.spawnMeshNow(many));
+
+  const manyNamed = meshCase({
+    parentMeshes: ["m0", "m9"], parentMesh: "", mesh: ctl({ value: "m9" }),
+  });
+  check("several meshes, one named: the ambiguity is gone",
+    manyNamed.meshNote.hidden === true, manyNamed.meshNote.textContent);
+  check("...and that name is what travels",
+    ctx.spawnMeshNow(manyNamed) === "m9");
+
+  /* Declining outright is an answer too — not an unresolved inherit. */
+  const manyNone = meshCase({
+    parentMeshes: ["m0", "m9"], parentMesh: "", mesh: ctl({ value: "-" }),
+  });
+  check("several meshes, '-' picked: not ambiguous, just off the air",
+    manyNone.meshNote.hidden === true && manyNone.handleRow.hidden === true,
+    manyNone.meshNote.textContent);
+
   /* ---- recall: remembered between spawns, and only the fields ------------ */
   ctx.saveSpawnRecall({ parent: "lead1", role: "worker", profile: "p1",
                         borrow: "p2", null_token: true, stray: "x" });
@@ -420,8 +483,17 @@ async function main() {
     texts(modalEls["modal-body"]).includes("3 child slot(s) left"),
     texts(modalEls["modal-body"]).slice(-120));
   const mSel = nodeSel(modalEls["modal-body"], "select") || [];
-  check("the parent's own mesh is preselected",
-    mSel.some((s) => s.value === "m0"), mSel.map((s) => s.value));
+  // Inherit is the default, not merely an option — the row opens the way
+  // Harness, Profile and Directory do. Naming the parent's mesh outright is
+  // the same answer only while the parent is in ONE mesh, and spelling it into
+  // the payload takes the rule away from daemon/onboard.py inherit_mesh.
+  const meshSel = mSel.find((s) => (s.options || [])
+    .some((o) => o.text === "(inherit the parent's mesh)"));
+  check("the mesh picker opens on inherit", meshSel && meshSel.value === "",
+    meshSel && meshSel.value);
+  check("...with the parent's own mesh still on offer to name outright",
+    meshSel && (meshSel.options || []).some((o) => o.value === "m0"),
+    meshSel && (meshSel.options || []).map((o) => o.value));
   check("the role seed lands", mSel.some((s) => s.value === "worker"),
     mSel.map((s) => s.value));
   check("the workflow seed lands",
@@ -439,6 +511,12 @@ async function main() {
       texts(connRow).includes("w2") && !texts(connRow).includes("lead1"),
     connRow && texts(connRow));
 
+  // Tick the offered peer, so the payload below proves that inheriting the
+  // mesh does not cost the connect offers: they are resolved against the
+  // EFFECTIVE mesh, which is the parent's while the picker says inherit.
+  const peerBox = connRow && tags(connRow, "input")[0];
+  if (peerBox) { peerBox.checked = true; await peerBox.fire("change"); }
+
   // The leader's own panel is the opener, so a success refreshes the roster.
   ctx.setSess("lead1");
   sent = [];
@@ -450,7 +528,16 @@ async function main() {
   check("the quick-job seed travels: role", post && post.body.role === "worker");
   check("...workflow", post && post.body.workflow === "improv-worker");
   check("...and task", post && post.body.task === "fix the tab");
-  check("the mesh is the parent's own", post && post.body.mesh === "m0");
+  // Omitted, not spelt: "" is how the payload says inherit, and `put` drops
+  // an empty value rather than sending it.
+  check("the mesh is left for the daemon to inherit",
+    post && !("mesh" in post.body), post && post.body.mesh);
+  // ...and inheriting must not cost the connect offers. They are resolved
+  // against the EFFECTIVE mesh, so a child sitting on inherit still travels
+  // with the peers that were ticked.
+  check("the ticked peer still travels while inheriting",
+    post && JSON.stringify(post.body.connect || []) === JSON.stringify(["w2"]),
+    post && post.body.connect);
   check("the worktree is a stamped @auto under the parent",
     post && /^lead1-\d{8}-\d{6}$/.test(post.body.worktree || ""), post && post.body);
   check("success closes the modal", modalEls["modal-overlay"].classList.contains("hidden"));
