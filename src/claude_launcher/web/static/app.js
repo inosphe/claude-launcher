@@ -3306,6 +3306,14 @@ function holdChipText(q, msgs) {
 function renderHoldChip(q) {
   const chip = $("term-hold");
   if (!chip) return;   // markup from before the chip existed
+  if (!chip.dataset.holdBound) {
+    // Bound here, not at load: the chip lives in the terminal page's markup,
+    // and a load-time `$("term-hold")` throws the moment app.js is evaluated
+    // with that page absent (the stub DOMs in tests/web, which carry only the
+    // elements they exercise). First render is also first real use.
+    chip.dataset.holdBound = "1";
+    chip.addEventListener("click", toggleHold);
+  }
   const show = !!q && currentPage === "terminal" && !!currentName;
   if (!show) {
     chip.classList.add("hidden");
@@ -3339,7 +3347,7 @@ async function toggleHold() {
   const chip = $("term-hold");
   if (holdBusy) return;
   holdBusy = true;
-  chip.disabled = true;
+  if (chip) chip.disabled = true;
   let q = null;
   try {
     const resp = await api(
@@ -3359,7 +3367,6 @@ async function toggleHold() {
   if (q) { renderTermQueued(q); renderHoldChip(q); }
   else refreshTermQueued();
 }
-$("term-hold").addEventListener("click", toggleHold);
 // The network coming back is the one event that says "try now" without a
 // person having to be there. Guarded like the rest: it does nothing unless
 // the link is down.
