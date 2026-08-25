@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import re
 import sys
 from datetime import datetime, timezone
 from typing import List, Optional
@@ -108,7 +107,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             print(f"applied template env: {', '.join(sorted(applied))}")
     entry = harnesses.get(selected)
     if entry and entry.auth == "api-key":
-        print(f"next: claunch set-key {p.name} ENV_VAR")
+        print(f"next: claunch set-key {p.name}")
     else:
         print(f"next: claunch login {p.name}")
     return 0
@@ -194,7 +193,7 @@ def _cmd_login(args: argparse.Namespace) -> int:
     if entry.auth == "api-key":
         raise runner.RunnerError(
             f"harness {entry.name!r} uses a profile API key; run "
-            f"'claunch set-key {p.name} ENV_VAR'"
+            f"'claunch set-key {p.name}'"
         )
     command = [entry.program(), *(entry.login_args or ["setup-token"])]
     print(
@@ -328,7 +327,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             failed += 1
             print(
                 f"{p.name:<20} FAIL  no API key "
-                f"(run 'claunch set-key {p.name} ENV_VAR')"
+                f"(run 'claunch set-key {p.name}')"
             )
             continue
         result = runner.heartbeat(p, prompt=args.prompt, timeout=args.timeout)
@@ -366,26 +365,25 @@ def _cmd_set_token(args: argparse.Namespace) -> int:
     return 0
 
 
-_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
-
-
 def _cmd_set_key(args: argparse.Namespace) -> int:
     """Store an API key without conflating it with Claude OAuth/provider auth."""
     p = profile.require(args.name)
     entry = runner.profile_harness(p)
-    claude_provider_key = entry.builtin and args.env == runner.AUTH_TOKEN_ENV
-    if entry.auth != "api-key" and not claude_provider_key:
+    if not entry.api_key_env:
         raise CredentialsError(
             f"profile {p.name!r} selects {entry.name!r}, which uses "
-            f"{entry.auth} authentication; set-key is only for API-key harnesses "
-            f"or Claude provider key route {runner.AUTH_TOKEN_ENV}"
+            f"{entry.auth} authentication and declares no API-key route"
         )
-    if not _ENV_NAME_RE.fullmatch(args.env):
-        raise CredentialsError(f"invalid environment variable name {args.env!r}")
     key = args.key or sys.stdin.readline()
     credentials.save_api_key(p, key)
-    lineage.set_api_key_env(p, args.env)
-    print(f"stored API key for profile {p.name!r}; injected as {args.env}")
+    # Brief development builds stored this route on the profile. The harness
+    # declaration is authoritative now; prune the obsolete field when touched.
+    if "api_key_env" in store.profile_entry(p.name):
+        store.set_profile_field(p.name, "api_key_env", None)
+    print(
+        f"stored API key for profile {p.name!r}; "
+        f"{entry.name} injects it as {entry.api_key_env}"
+    )
     return 0
 
 
@@ -911,11 +909,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_key = sub.add_parser(
         "set-key",
-        help="store a harness API key separately from Claude tokens and inject "
-        "it through ENV_VAR",
+        help="store the profile's API key; its harness declares the env route",
     )
     p_key.add_argument("name")
-    p_key.add_argument("env", metavar="ENV_VAR")
     p_key.add_argument("key", nargs="?", help="key value; read from stdin if omitted")
     p_key.set_defaults(func=_cmd_set_key)
 

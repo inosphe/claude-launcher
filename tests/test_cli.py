@@ -5,7 +5,16 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from claude_launcher import cli, config, credentials, lineage, profile, runner, store
+from claude_launcher import (
+    cli,
+    config,
+    credentials,
+    harnesses,
+    lineage,
+    profile,
+    runner,
+    store,
+)
 
 
 def run(*argv):
@@ -129,16 +138,37 @@ def test_profile_harness_is_created_inherited_pinned_and_cleared(home, capsys):
     assert "harness" not in store.profile_entry("child")
 
 
-def test_set_key_uses_a_separate_secret_and_route(home, capsys):
+def test_set_key_uses_the_harness_declared_route(home, capsys):
     run("create", "pi-work", "--no-seed", "--harness", "pi")
+    store.set_profile_field("pi-work", "api_key_env", "OPENAI_API_KEY")
     capsys.readouterr()
 
-    assert run("set-key", "pi-work", "OPENAI_API_KEY", "pi-secret") == 0
+    assert run("set-key", "pi-work", "pi-secret") == 0
     p = profile.require("pi-work")
     assert credentials.stored_api_key(p) == "pi-secret"
     assert credentials.stored_token(p) is None
-    assert store.profile_entry("pi-work")["api_key_env"] == "OPENAI_API_KEY"
+    assert "api_key_env" not in store.profile_entry("pi-work")
+    assert harnesses.get("pi").api_key_env == "ANTHROPIC_API_KEY"
     assert "pi-secret" not in store.path().read_text(encoding="utf-8")
+
+
+def test_set_key_uses_packaged_claude_bearer_route_without_profile_metadata(
+    home, capsys
+):
+    run("create", "gateway", "--no-seed")
+    doc = store.load()
+    doc["providers"] = {"kimi": {"env": {"ANTHROPIC_BASE_URL": "https://x"}}}
+    store.save(doc)
+    store.set_profile_field("gateway", "provider", "kimi")
+    capsys.readouterr()
+
+    assert run("set-key", "gateway", "kimi-secret") == 0
+    p = profile.require("gateway")
+    env = runner.child_env(p, with_token=True)
+
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "kimi-secret"
+    assert env["ANTHROPIC_API_KEY"] == ""
+    assert "api_key_env" not in store.profile_entry("gateway")
 
 
 def test_set_harness_refuses_value_with_clear(home, capsys):
@@ -151,8 +181,8 @@ def test_set_harness_refuses_value_with_clear(home, capsys):
 def test_set_key_is_refused_for_oauth_harnesses(home, capsys):
     run("create", "kimi-work", "--no-seed", "--harness", "kimi")
     capsys.readouterr()
-    assert run("set-key", "kimi-work", "KIMI_API_KEY", "secret") == 1
-    assert "only for API-key harnesses" in capsys.readouterr().err
+    assert run("set-key", "kimi-work", "secret") == 1
+    assert "declares no API-key route" in capsys.readouterr().err
 
 
 def test_set_and_get_token(home, capsys):
@@ -235,7 +265,7 @@ def test_non_claude_run_does_not_steal_the_harness_provider_flag(
     home, monkeypatch, capsys
 ):
     run("create", "pi-work", "--no-seed", "--harness", "pi")
-    run("set-key", "pi-work", "ANTHROPIC_API_KEY", "pi-secret")
+    run("set-key", "pi-work", "pi-secret")
     reached = {}
 
     def fake_run(cmd, **kwargs):

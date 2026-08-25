@@ -22,16 +22,6 @@ OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 #: Bearer token Claude Code sends to a custom (provider-overridden) backend.
 AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 
-# OAuth-backed harnesses must not silently switch to an API-key login merely
-# because either the shell or a legacy profile environment exported one.
-# Their own OAuth credential store is the only supported auth source here.
-_OAUTH_SHELL_KEYS = {
-    "codex": ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"),
-    "kimi": ("KIMI_API_KEY",),
-    "agent": ("CURSOR_API_KEY",),
-}
-
-
 class RunnerError(Exception):
     """Raised when the selected harness cannot be launched."""
 
@@ -44,6 +34,15 @@ class Heartbeat:
     code: Optional[int]
     reason: str
     output: str
+
+
+def _finalize_declared_auth(harness: harnesses.Harness, env: dict) -> None:
+    """Apply the selected harness's declared authentication boundary."""
+    for name in harness.clear_env:
+        env.pop(name, None)
+    if harness.api_key_env and env.get(harness.api_key_env):
+        for name in harness.api_key_clear_env:
+            env[name] = ""
 
 
 def child_env(
@@ -70,6 +69,9 @@ def child_env(
     lender's provider token *and* its env come along, its env as a fill layer
     below the runner's own env, which keeps final responsibility for every key.
     """
+    harness = harnesses.get(harnesses.CLAUDE_HARNESS)
+    if harness is None:
+        raise RunnerError("the claude harness is not declared")
     env = dict(os.environ if base_env is None else base_env)
     provider_env: dict = {}
     lender_env: dict = {}
@@ -107,7 +109,11 @@ def child_env(
             # live in the per-machine 0600 token file instead of the yaml.
             stored = lineage.stored_auth_token(auth_source)
             if stored:
-                env[AUTH_TOKEN_ENV] = stored
+                if not harness.api_key_env:
+                    raise RunnerError(
+                        "the claude harness has no declared api_key_env"
+                    )
+                env[harness.api_key_env] = stored
             # A custom backend never uses the Anthropic OAuth var; drop any
             # shell leftover unless the config file set it explicitly (the
             # provider pattern pins it to "").
@@ -139,6 +145,10 @@ def child_env(
         # `--null` means *no* OAuth token, full stop — even one pinned by the
         # profile's own env or a provider pattern loses to the explicit flag.
         env.pop(OAUTH_TOKEN_ENV, None)
+    # Claude gateways authenticate with the declared bearer-token route. When
+    # it is active the packaged rule forces ANTHROPIC_API_KEY="", preventing
+    # Claude Code from also emitting a competing X-Api-Key header.
+    _finalize_declared_auth(harness, env)
     # Profile identity is not a user override. Set it last so neither a stale
     # shell value nor a synced ``env`` entry can escape this profile.
     env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
@@ -156,7 +166,7 @@ def harness_child_env(
     Non-Claude-safe profile env remains available, while Claude Code's
     namespace is filtered below. Authentication storage is separate: OAuth
     CLIs read their own namespaced home, while a launcher-managed API key is
-    injected only into the explicitly configured ``api_key_env``.
+    injected only into the route declared by the selected harness.
     """
     if harness.builtin:
         return child_env(profile, with_token=True, base_env=base_env)
@@ -182,8 +192,9 @@ def finalize_harness_env(
     otherwise that dead customization path could escape the same boundary.
     """
     if harness.builtin:
+        _finalize_declared_auth(harness, env)
         return
-    key_env = lineage.effective_api_key_env(profile)
+    key_env = harness.api_key_env
     managed_key = (
         lineage.stored_api_key(profile) if harness.auth == "api-key" else None
     )
@@ -200,16 +211,14 @@ def finalize_harness_env(
             # A Pi profile has one explicit key route. Do not let whatever
             # provider keys happened to start claunch choose Pi's backend.
             env.pop(key, None)
-    for key in _OAUTH_SHELL_KEYS.get(harness.name, ()):
-        env.pop(key, None)
     if managed_key:
         if not key_env:
             raise RunnerError(
-                f"profile {profile.name!r} has a stored API key but no "
-                "api_key_env; store it again with 'claunch set-key "
-                f"{profile.name} ENV_VAR'"
+                f"harness {harness.name!r} uses API-key auth but declares "
+                "no api_key_env"
             )
         env[key_env] = managed_key
+    _finalize_declared_auth(harness, env)
     if harness.home_env:
         home = harness.profile_home(profile.config_dir)
         home.mkdir(parents=True, exist_ok=True)
@@ -297,7 +306,7 @@ def login(profile: Profile) -> int:
             if harness.auth == "api-key":
                 raise RunnerError(
                     f"harness {harness.name!r} uses an API key; store one with "
-                    f"'claunch set-key {profile.name} ENV_VAR'"
+                    f"'claunch set-key {profile.name}'"
                 )
             raise RunnerError(
                 f"harness {harness.name!r} has no login command declared"

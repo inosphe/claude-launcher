@@ -1,0 +1,48 @@
+version: 1
+
+harnesses:
+
+  claude:
+    builtin: true
+    auth: claude
+    api_key_env: ANTHROPIC_AUTH_TOKEN
+    api_key_clear_env: [ANTHROPIC_API_KEY]
+    description: >-
+      Claude Code, run under a claunch profile (isolated config dir, provider
+      and token). Needs --profile; the executable is CLAUDE_LAUNCHER_BIN.
+
+  codex:
+    command: codex
+    home_env: CODEX_HOME
+    auth: oauth
+    clear_env: [OPENAI_API_KEY, CODEX_API_KEY, CODEX_ACCESS_TOKEN]
+    login_args: [login]
+    heartbeat_args: [exec, --skip-git-repo-check]
+    usage: codex-app-server
+    description: OpenAI's Codex CLI.
+
+  pi:
+    command: pi
+    home_env: PI_CODING_AGENT_DIR
+    auth: api-key
+    api_key_env: ANTHROPIC_API_KEY
+    heartbeat_args: [-p]
+    description: The pi CLI agent using the packaged Anthropic API-key route.
+
+  kimi:
+    command: kimi
+    home_env: KIMI_CODE_HOME
+    auth: oauth
+    clear_env: [KIMI_API_KEY]
+    login_args: [login]
+    heartbeat_args: [-p]
+    description: Moonshot AI's Kimi Code CLI.
+
+  agent:
+    command: agent
+    home_env: CURSOR_CONFIG_DIR
+    auth: oauth
+    clear_env: [CURSOR_API_KEY]
+    login_args: [login]
+    heartbeat_args: [-p]
+    description: Cursor Agent CLI.

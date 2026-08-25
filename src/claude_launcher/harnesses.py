@@ -16,6 +16,7 @@ override or extend it::
         env: {KEY: VALUE}       # optional overrides
         home_env: CODEX_HOME     # optional isolated per-profile home
         auth: oauth              # claude, oauth, api-key, or none
+        clear_env: [OPENAI_API_KEY]  # forbidden ambient credentials
         login_args: [login]      # optional interactive login argv
         description: "..."      # optional, shown in status surfaces
       pi: null                  # a tombstone: drop a packaged harness
@@ -32,8 +33,10 @@ shown as unavailable without reopening harness selection at session creation.
 
 from __future__ import annotations
 
+import re
 import shutil
 from dataclasses import dataclass, field
+from importlib import resources
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -51,57 +54,14 @@ class HarnessConfigError(Exception):
     """Raised for an unreadable harness declaration."""
 
 
-# --------------------------------------------------------------------------- #
-# the packaged default
-#
-# YAML rather than a dict literal so it reads exactly like the block a user
-# writes in ~/.claunch.yaml, and so the default is proven by the same parser
-# every user declaration goes through.
-# --------------------------------------------------------------------------- #
-DEFAULT_YAML = """\
-version: 1
-
-harnesses:
-
-  claude:
-    builtin: true
-    auth: claude
-    description: >-
-      Claude Code, run under a claunch profile (isolated config dir, provider
-      and token). Needs --profile; the executable is CLAUDE_LAUNCHER_BIN.
-
-  codex:
-    command: codex
-    home_env: CODEX_HOME
-    auth: oauth
-    login_args: [login]
-    heartbeat_args: [exec, --skip-git-repo-check]
-    usage: codex-app-server
-    description: OpenAI's Codex CLI.
-
-  pi:
-    command: pi
-    home_env: PI_CODING_AGENT_DIR
-    auth: api-key
-    heartbeat_args: [-p]
-    description: The pi CLI agent.
-
-  kimi:
-    command: kimi
-    home_env: KIMI_CODE_HOME
-    auth: oauth
-    login_args: [login]
-    heartbeat_args: [-p]
-    description: Moonshot AI's Kimi Code CLI.
-
-  agent:
-    command: agent
-    home_env: CURSOR_CONFIG_DIR
-    auth: oauth
-    login_args: [login]
-    heartbeat_args: [-p]
-    description: Cursor Agent CLI.
-"""
+# The source of the packaged harness/auth contract is a real package resource,
+# so changing or adding a harness does not require editing runner logic.
+DEFAULT_RESOURCE = "harnesses.yaml"
+DEFAULT_YAML = (
+    resources.files(__package__)
+    .joinpath(DEFAULT_RESOURCE)
+    .read_text(encoding="utf-8")
+)
 
 
 @dataclass(frozen=True)
@@ -118,14 +78,24 @@ class Harness:
     env: Dict[str, str] = field(default_factory=dict)
     description: str = ""
     builtin: bool = False
-    #: Environment variable that relocates this harness's user data. The
-    #: builtin claude harness is kept at the profile root for backwards
-    #: compatibility; other harnesses receive a namespaced child directory.
+    #: Environment variable that points this harness at a profile-specific
+    #: home/config directory. Exactly which files follow it is a contract of
+    #: the external harness. The builtin Claude harness is kept at the profile
+    #: root for backwards compatibility.
     home_env: str = ""
     #: ``claude`` uses the launcher's provider/token machinery, ``oauth``
-    #: keeps credentials in the harness-owned home, and ``api-key`` may
-    #: receive a launcher-managed key through the profile's ``api_key_env``.
+    #: keeps credentials in the harness-owned home, and ``api-key`` receives
+    #: a launcher-managed key through this packaged declaration.
     auth: str = "none"
+    #: Destination for ``claunch set-key``. This belongs to the harness, not
+    #: each profile: users choose the route once by choosing a harness.
+    api_key_env: str = ""
+    #: Variables always removed before launching this harness (principally
+    #: ambient API keys that would bypass an OAuth login).
+    clear_env: List[str] = field(default_factory=list)
+    #: Variables forced to the empty string when ``api_key_env`` is populated.
+    #: Claude gateways use this to suppress the competing X-Api-Key header.
+    api_key_clear_env: List[str] = field(default_factory=list)
     login_args: List[str] = field(default_factory=list)
     #: Non-interactive argv placed before the health-check prompt. Empty
     #: means this custom harness cannot be checked safely by ``validate``.
@@ -177,6 +147,9 @@ class Harness:
             "builtin": self.builtin,
             "home_env": self.home_env,
             "auth": self.auth,
+            "api_key_env": self.api_key_env,
+            "clear_env": list(self.clear_env),
+            "api_key_clear_env": list(self.api_key_clear_env),
             "login_args": list(self.login_args),
             "heartbeat_args": list(self.heartbeat_args),
             "usage": self.usage,
@@ -195,6 +168,17 @@ def _as_list(value, what: str) -> List[str]:
     if isinstance(value, (list, tuple)):
         return [str(v) for v in value]
     raise HarnessConfigError(f"{what} must be a string or a list, got {value!r}")
+
+
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _env_names(value, what: str) -> List[str]:
+    names = _as_list(value, what)
+    for name in names:
+        if not _ENV_NAME_RE.fullmatch(name):
+            raise HarnessConfigError(f"{what} contains invalid env name {name!r}")
+    return names
 
 
 def _parse_entry(name: str, body) -> Harness:
@@ -217,6 +201,20 @@ def _parse_entry(name: str, body) -> Harness:
         raise HarnessConfigError(
             f"harness {name!r} auth must be claude, oauth, api-key or none"
         )
+    api_key_env = str(body.get("api_key_env") or "").strip()
+    if api_key_env and not _ENV_NAME_RE.fullmatch(api_key_env):
+        raise HarnessConfigError(
+            f"harness {name!r} api_key_env is not a valid env name: "
+            f"{api_key_env!r}"
+        )
+    if auth == "api-key" and not api_key_env:
+        raise HarnessConfigError(
+            f"harness {name!r} uses api-key auth but has no api_key_env"
+        )
+    if auth == "oauth" and api_key_env:
+        raise HarnessConfigError(
+            f"harness {name!r} uses oauth auth and cannot declare api_key_env"
+        )
     return Harness(
         name=name,
         command=command,
@@ -228,6 +226,12 @@ def _parse_entry(name: str, body) -> Harness:
         builtin=builtin,
         home_env=str(body.get("home_env") or "").strip(),
         auth=auth,
+        api_key_env=api_key_env,
+        clear_env=_env_names(body.get("clear_env"), f"harness {name!r} clear_env"),
+        api_key_clear_env=_env_names(
+            body.get("api_key_clear_env"),
+            f"harness {name!r} api_key_clear_env",
+        ),
         login_args=_as_list(body.get("login_args"), f"harness {name!r} login_args"),
         heartbeat_args=_as_list(
             body.get("heartbeat_args"), f"harness {name!r} heartbeat_args"

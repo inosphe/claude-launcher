@@ -23,7 +23,7 @@ from .profile import Profile
 #: Launcher-managed token captured from ``claude setup-token``.
 TOKEN_FILENAME = ".launcher-token"
 #: Launcher-managed generic API key. Its destination environment variable is
-#: profile configuration (``api_key_env``), never inferred from the key text.
+#: declared by the selected harness, never inferred from the key text.
 API_KEY_FILENAME = ".launcher-api-key"
 #: Credentials file an interactive ``/login`` writes (fallback source).
 CREDENTIALS_FILENAME = ".credentials.json"
