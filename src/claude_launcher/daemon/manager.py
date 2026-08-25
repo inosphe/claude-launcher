@@ -15,11 +15,12 @@ for all of them, both reachable only from the CLI and the web UI.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
 from dataclasses import replace
-from typing import Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 from .. import profile as profile_mod
 from .. import spawn as spawn_mod
@@ -34,6 +35,7 @@ from .session import STATUS_BUSY, DeadSession, Session
 AnySession = Union[Session, DeadSession]
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+log = logging.getLogger(__name__)
 
 
 class ManagerError(Exception):
@@ -51,6 +53,13 @@ class SessionManager:
         #: (:mod:`claude_launcher.daemon.resume`). Written once per process,
         #: at restore; empty on a daemon that restored nothing.
         self.resumed_busy: List[str] = []
+        #: Called with a session once its child is gone for good — whatever
+        #: ended it. Registered by whoever has a stake in an ending (the
+        #: board sweep, :mod:`claude_launcher.daemon.beads`); not called for
+        #: the endings a daemon shutdown causes, which are not endings at
+        #: all — those sessions come back with the next daemon.
+        self.exit_hooks: List[Callable[[Session], None]] = []
+        self.shutting_down = False
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -78,8 +87,20 @@ class SessionManager:
             idle_threshold=self.idle_threshold,
             scrollback=self.scrollback,
         )
+        session.on_exit = self._session_exited
         self._sessions[name] = session
         return session
+
+    def _session_exited(self, session: Session) -> None:
+        """Fan a session's exit out to :attr:`exit_hooks` — unless the daemon
+        is going down, in which case nothing has ended."""
+        if self.shutting_down:
+            return
+        for hook in list(self.exit_hooks):
+            try:
+                hook(session)
+            except Exception:  # one hook must not silence the next
+                log.exception("exit hook %r failed for %r", hook, session.sdef.name)
 
     def launch(
         self, session: Session, *, restoring: bool = False, opening: str = ""
@@ -247,6 +268,10 @@ class SessionManager:
                     # the opening block, and this record is what lets a
                     # re-briefing restate it after a compaction (see rebrief).
                     "task": str(request.get("task") or ""),
+                    # The board link, when the parent names one outright;
+                    # otherwise settled at onboarding from the task text or
+                    # minted there (see daemon.beads.Board.ensure_issue).
+                    "issue": str(request.get("issue") or ""),
                 }
             )
         )
@@ -755,6 +780,7 @@ class SessionManager:
         return relaunched, moved is not None
 
     async def shutdown_all(self) -> None:
+        self.shutting_down = True  # these exits are the daemon's, not the sessions'
         self.persist()  # record which sessions were alive, for restore
         for session in list(self._sessions.values()):
             await session.shutdown()

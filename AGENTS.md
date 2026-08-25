@@ -31,3 +31,16 @@
 - 누가 만들고 누가 상태를 옮기는지는 워크플로 정본(improv-worker/leader/mid의
   intake에 있는 「beads(br) 규칙 — 공통」 절)이 말한다. 여기에 다시 적지 않는다 —
   두 자리에 적으면 갈린다.
+- 데몬도 보드를 쓴다(`src/claude_launcher/daemon/beads.py`) — 에이전트가 자리에
+  없는 세 순간만. (1) 생성: task를 가진 세션(new-session, 웹 폼, spawn)에 이슈를
+  만들어 assignee로 배정하고 오프닝에 `issue: <id>`를 실어 준다; 요청이 이미
+  `issue: <id>`를 말하면 새로 만들지 않고 그 이슈의 assignee만 옮긴다. (2) kill:
+  활성 이슈를 쥔 세션은 바로 죽이지 않고 정리 요청 블록을 타이핑한 뒤 그 턴이
+  끝나기(또는 유예 `beads_winddown_grace`초)를 기다렸다가 종료한다 — 두 번째
+  kill이나 `--force`는 즉시. (3) exit: 어떤 이유로든 프로세스가 사라지면 그
+  세션이 in_progress로 쥐고 있던 이슈는 `SESSION ENDED` 코멘트와 함께 open으로
+  돌아가고, 데몬이 만들었는데 손도 안 댄 자리표시 이슈는 닫힌다. 데몬 재기동은
+  exit가 아니라서 아무것도 쓸지 않는다. 설정 키는 `daemon.beads_auto_issue` /
+  `beads_winddown` / `beads_winddown_grace`(store.DAEMON_DEFAULTS). 웹 UI의
+  Beads 탭과 세션 레일의 Beads 블록이 이 매치(링크·assignee·created_by·task의
+  `issue:` 참조)를 그대로 보여 준다.

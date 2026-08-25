@@ -103,6 +103,7 @@ function sessReborrow() { return el("div", "sess-reborrow"); }
 function sessPerms() { return el("div", "sess-perms"); }
 function sessMigrate() { return el("div", "sess-migrate"); }
 function rolePanels() { return []; }
+function sessBeads() { return el("div", "sess-beads"); }
 function go() {}
 `;
 

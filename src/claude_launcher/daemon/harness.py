@@ -136,6 +136,12 @@ class SessionDef:
     #: context is compacted or cleared (see :mod:`rebrief`), which was the one
     #: piece of a session's setup that nothing could reconstruct.
     task: Optional[str] = None
+    #: The beads issue this session is for, by id — the exact half of the
+    #: session↔board link (see :mod:`daemon.beads`; the other half is who the
+    #: board says is assigned). Set at creation, from an ``issue: <id>`` the
+    #: request named or the issue the daemon minted from the task; carried on
+    #: restores, restated by a re-briefing, and read by the exit sweep.
+    issue: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -157,6 +163,7 @@ class SessionDef:
             "borrow": self.borrow,
             "null_token": self.null_token,
             "task": self.task,
+            "issue": self.issue,
         }
 
     @classmethod
@@ -180,6 +187,7 @@ class SessionDef:
             borrow=str(data.get("borrow") or "").strip() or None,
             null_token=bool(data.get("null_token")),
             task=str(data.get("task") or "").strip() or None,
+            issue=str(data.get("issue") or "").strip() or None,
         )
 
 

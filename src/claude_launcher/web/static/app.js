@@ -439,7 +439,12 @@ async function refreshSessions() {
     meta.className = "meta";
     meta.textContent = s.status === "exited"
       ? `exit ${s.exit_code ?? "?"}`
+      : s.winddown ? "winding down"
       : (s.profile || s.harness);
+    if (s.winddown) {
+      li.title = [li.title, "being ended — settling its board issues first; " +
+        "kill again to stop now"].filter(Boolean).join(" · ");
+    }
     if (s.status === "exited") {
       li.title = [li.title, "exited — open it to resume"].filter(Boolean).join(" · ");
     }
@@ -2387,8 +2392,15 @@ $("term-kill").addEventListener("click", async () => {
     "The daemon forgets it, so it can no longer be resumed from here.",
     "Remove"
   ))) return;
-  let resp = await api(`/api/sessions/${encodeURIComponent(name)}`,
-                       { method: "DELETE" });
+  // A live session holding board issues is wound down first (the daemon
+  // types a settle-the-board block in and waits for that turn); the same
+  // button pressed again while that runs means "stop now" — the daemon
+  // reads the second kill that way, this only says so in the URL.
+  const winding = !!(sessionsCache.find((s) => s.name === name) || {}).winddown;
+  let resp = await api(
+    `/api/sessions/${encodeURIComponent(name)}${winding ? "?winddown=0" : ""}`,
+    { method: "DELETE" }
+  );
   // The one refusal this route has: a mesh row still names the record. The
   // same choice the bulk buttons get (offerForce), asked for one session.
   if (exited && resp.status === 409) {
@@ -4396,6 +4408,7 @@ const VIEWS = {
   meshes: "meshes-view",
   flows: "flows-view",
   cli: "cli-view",
+  beads: "beads-view",
   wf: "wf-view",
   msg: "msg-view",
   mesh: "mesh-view",
@@ -4798,6 +4811,8 @@ function parseHash(h) {
   // One page, one shell: nothing else about the CLI tab is addressable, so
   // anything past "#/cli" is still the same terminal.
   if (parts[0] === "cli") return { page: "cli" };
+  // #/beads is the board; #/beads/<id> the board with one issue opened.
+  if (parts[0] === "beads") return { page: "beads", id: parts[1] || "" };
   if (parts[0] === "workspaces") return { page: "ws" };
   return { page: "home" };   // an unknown link is a wrong turn, not an error
 }
@@ -4811,6 +4826,7 @@ function route() {
   if (r.page !== "mesh") stopMeshPoll();
   if (r.page !== "flow") stopFlowPoll();
   if (r.page !== "ws") closeWorkspaces();
+  if (r.page !== "beads") stopBeadsPoll();
 
   switch (r.page) {
     case "terminal":
@@ -4842,6 +4858,7 @@ function route() {
     case "flows": showView("flows"); refreshCflow(); break;
     case "cli": openCli(); break;
     case "ws": openWorkspaces(); break;
+    case "beads": openBeads(r.id); break;
     default: openHome();
   }
 }
@@ -5033,6 +5050,11 @@ function renderHome() {
     runs.length ? plural(runs.length, "run") + " active" : "no active runs"
   ));
 
+  grid.appendChild(homeCard(
+    "Beads", "#/beads",
+    "the repository board, by session — who is on what"
+  ));
+
   const missing = workspacesCache.filter((w) => !w.exists).length;
   grid.appendChild(homeCard(
     "Workspaces", "#/workspaces",
@@ -5151,6 +5173,354 @@ function closeWorkspaces() {
   if (!wsOpen) return;
   wsOpen = false;
   wsError = "";
+}
+
+/* ------------------------------------------------------------------ */
+/* the Beads page: the board, drawn against the fleet                 */
+/* ------------------------------------------------------------------ */
+/* One page, every board the fleet's sessions live in (one per repository,
+   found through git's common dir so worktrees share it). The daemon tags
+   each issue with the sessions it belongs to — the same match the rail
+   draws for one session (`beads.match`: the recorded link, assignee,
+   created_by, an `issue: <id>` in the task) — so the page answers "who is
+   on what" without a shell. Read-only by design: the writes are the
+   agents' (`claunch beads ...`) and the daemon's (creation, wind-down,
+   the exit sweep). Polled at 5 s, not 2: `br` forks per board per read. */
+let beadsOpen = false;
+let beadsTimer = null;
+let beadsCache = null;     // the last /api/beads payload
+let beadsError = "";
+let beadsFocus = "";       // the issue opened in the detail pane, by id
+let beadsDetail = null;    // its /api/beads/<id> payload
+let beadsFilter = "active";  // status filter: active | <status> | all
+let beadsSession = "";     // session filter: "" = everybody
+
+const BEADS_STATUSES = ["open", "in_progress", "in_review", "blocked", "closed"];
+const BEADS_ACTIVE = new Set(["open", "in_progress", "in_review", "blocked"]);
+
+function openBeads(id) {
+  beadsOpen = true;
+  const focus = id || "";
+  if (focus !== beadsFocus) beadsDetail = null;
+  beadsFocus = focus;
+  showView("beads");
+  renderBeads();
+  refreshBeads();
+  if (!beadsTimer) beadsTimer = setInterval(refreshBeads, 5000);
+}
+
+function stopBeadsPoll() {
+  if (beadsTimer) { clearInterval(beadsTimer); beadsTimer = null; }
+  beadsOpen = false;
+}
+
+async function refreshBeads() {
+  if (!beadsOpen) return;
+  try {
+    const resp = await api("/api/beads");
+    if (resp.status === 404) {
+      beadsError = "this daemon predates the Beads page — 'claunch daemon " +
+        "restart' to pick up this version";
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) beadsError = data.error || `HTTP ${resp.status}`;
+      else { beadsCache = data; beadsError = data.error || ""; }
+    }
+  } catch { return; }   // auth overlay is up, or the daemon is away
+  if (beadsFocus) {
+    const root = beadsRootOf(beadsFocus);
+    const q = root ? `?cwd=${encodeURIComponent(root)}` : "";
+    try {
+      const resp = await api(`/api/beads/${encodeURIComponent(beadsFocus)}${q}`);
+      const data = await resp.json().catch(() => ({}));
+      beadsDetail = resp.ok ? data : { error: data.error || `HTTP ${resp.status}` };
+    } catch { /* keep the last detail */ }
+  }
+  if (beadsOpen) renderBeads();
+}
+
+/* The board an issue id belongs to, from the last listing. */
+function beadsRootOf(id) {
+  for (const b of (beadsCache && beadsCache.boards) || []) {
+    if ((b.issues || []).some((i) => i.id === id)) return b.root;
+  }
+  return "";
+}
+
+/* The rows a board shows under the current filters. `active` is the default
+   because a board is read for what is still to do; `all` is the audit view.
+   The session filter matches the daemon's tags, so "s12" shows every issue
+   the daemon says is s12's — by whichever of the four links. */
+function beadsFilterIssues(issues, filter, session) {
+  return (issues || []).filter((i) => {
+    if (filter === "active" ? !BEADS_ACTIVE.has(i.status)
+        : filter !== "all" && i.status !== filter) return false;
+    if (session && !(i.sessions || []).some((s) => s.name === session)) return false;
+    return true;
+  });
+}
+
+/* Sort for reading: what is being worked first, then by priority, then the
+   most recently touched. */
+function beadsSortIssues(issues) {
+  const rank = { in_progress: 0, in_review: 1, blocked: 2, open: 3, closed: 9 };
+  return [...issues].sort((a, b) =>
+    (rank[a.status] ?? 8) - (rank[b.status] ?? 8) ||
+    (a.priority ?? 9) - (b.priority ?? 9) ||
+    String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+}
+
+function beadsStatusBadge(status) {
+  const cls = { in_progress: "busy", in_review: "review", blocked: "blocked",
+                open: "open", closed: "exited" }[status] || "";
+  return el("span", `badge beads-status ${cls}`, status || "?");
+}
+
+/* One issue, one row. `compact` is the rail's shape (no session column —
+   the rail already IS one session). A session tag is a link to that
+   session's terminal, carrying why it matched in its title. */
+function beadsIssueRow(issue, opts = {}) {
+  const row = el("div", "beads-row");
+  if (issue.id === beadsFocus && !opts.compact) row.classList.add("on");
+  const id = el("a", "beads-id", issue.id || "?");
+  id.href = "#/beads/" + encodeURIComponent(issue.id || "");
+  id.title = "open this issue";
+  row.appendChild(id);
+  row.appendChild(beadsStatusBadge(issue.status));
+  if (issue.priority !== undefined && issue.priority !== null) {
+    row.appendChild(el("span", "beads-pri", `P${issue.priority}`));
+  }
+  const text = el("div", "beads-text");
+  text.appendChild(el("span", "beads-title", issue.title || "(untitled)"));
+  const bits = [];
+  if (issue.issue_type && issue.issue_type !== "task") bits.push(issue.issue_type);
+  for (const l of issue.labels || []) bits.push("#" + l);
+  if (issue.assignee) bits.push("→ " + issue.assignee);
+  if (opts.compact && issue.via) bits.push("via " + issue.via.join(", "));
+  if (bits.length) text.appendChild(el("span", "beads-bits", bits.join("  ")));
+  row.appendChild(text);
+  if (!opts.compact) {
+    const who = el("span", "beads-sessions");
+    for (const s of issue.sessions || []) {
+      const tag = el("a", `beads-sess ${s.status || ""}`, s.name);
+      tag.href = "#/s/" + encodeURIComponent(s.name);
+      tag.title = `${s.name} (${s.status || "?"}) — ${(s.via || []).join(", ")}`;
+      who.appendChild(tag);
+    }
+    row.appendChild(who);
+  }
+  return row;
+}
+
+function beadsFilterBar() {
+  const bar = el("div", "seq-tabs beads-filters");
+  for (const f of ["active", ...BEADS_STATUSES, "all"]) {
+    const b = el("button", "seq-tab" + (beadsFilter === f ? " on" : ""), f);
+    b.type = "button";
+    b.addEventListener("click", () => { beadsFilter = f; renderBeads(); });
+    bar.appendChild(b);
+  }
+  const sel = document.createElement("select");
+  sel.className = "beads-session-pick";
+  sel.title = "only the issues the daemon ties to this session";
+  const any = document.createElement("option");
+  any.value = ""; any.textContent = "every session";
+  sel.appendChild(any);
+  const names = new Set();
+  for (const b of (beadsCache && beadsCache.boards) || []) {
+    for (const s of b.sessions || []) names.add(s.name);
+  }
+  for (const s of sessionsCache) names.add(s.name);
+  for (const n of [...names].sort()) {
+    const o = document.createElement("option");
+    o.value = n; o.textContent = n;
+    if (n === beadsSession) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.addEventListener("change", () => { beadsSession = sel.value; renderBeads(); });
+  bar.appendChild(sel);
+  return bar;
+}
+
+function beadsBoardSection(board) {
+  const sec = el("div", "beads-board");
+  const head = el("div", "beads-board-head");
+  head.appendChild(el("h3", null, board.root || "?"));
+  const live = (board.sessions || []).filter((s) => s.status !== "exited");
+  head.appendChild(el("span", "wf-note",
+    live.length ? live.map((s) => s.name).join(" · ") : "no live session here"));
+  sec.appendChild(head);
+  if (board.error) {
+    sec.appendChild(el("p", "wf-warning", board.error));
+    return sec;
+  }
+  const rows = beadsSortIssues(
+    beadsFilterIssues(board.issues, beadsFilter, beadsSession));
+  if (!rows.length) {
+    sec.appendChild(el("p", "wf-note",
+      `nothing ${beadsFilter === "all" ? "" : beadsFilter + " "}here` +
+      (beadsSession ? ` for ${beadsSession}` : "")));
+  }
+  for (const i of rows) sec.appendChild(beadsIssueRow(i));
+  return sec;
+}
+
+/* The opened issue: what the row cannot show — description and comments. */
+function beadsDetailPane() {
+  const pane = el("div", "beads-detail");
+  const head = el("div", "beads-detail-head");
+  head.appendChild(el("h3", null, beadsFocus));
+  const close = el("button", "sess-close", "×");
+  close.title = "close";
+  close.addEventListener("click", () => { location.hash = "#/beads"; });
+  head.appendChild(close);
+  pane.appendChild(head);
+  if (!beadsDetail) {
+    pane.appendChild(el("p", "wf-note", "loading…"));
+    return pane;
+  }
+  if (beadsDetail.error) {
+    pane.appendChild(el("p", "wf-warning", beadsDetail.error));
+    return pane;
+  }
+  const i = beadsDetail.issue || {};
+  pane.appendChild(el("h2", "beads-detail-title", i.title || "(untitled)"));
+  const meta = el("div", "beads-detail-meta");
+  meta.appendChild(beadsStatusBadge(i.status));
+  const facts = [];
+  if (i.priority !== undefined) facts.push(`P${i.priority}`);
+  if (i.issue_type) facts.push(i.issue_type);
+  if (i.assignee) facts.push("assignee " + i.assignee);
+  if (i.created_by) facts.push("by " + i.created_by);
+  for (const l of i.labels || []) facts.push("#" + l);
+  if (i.updated_at) facts.push("updated " + String(i.updated_at).replace("T", " ").slice(0, 19));
+  meta.appendChild(el("span", "beads-bits", facts.join("  ·  ")));
+  pane.appendChild(meta);
+  if (i.description) pane.appendChild(el("pre", "beads-desc", i.description));
+  if (i.close_reason) pane.appendChild(el("p", "wf-note", "closed: " + i.close_reason));
+  const comments = i.comments || [];
+  pane.appendChild(el("h4", null, `Comments (${comments.length})`));
+  for (const c of comments) {
+    const box = el("div", "beads-comment");
+    box.appendChild(el("span", "beads-bits",
+      `${c.author || c.actor || "?"} · ${String(c.created_at || "").replace("T", " ").slice(0, 19)}`));
+    box.appendChild(el("pre", "beads-desc", c.text || c.body || c.content || ""));
+    pane.appendChild(box);
+  }
+  return pane;
+}
+
+function renderBeads() {
+  const view = $("beads-view");
+  if (formInUse(view)) return;
+  view.innerHTML = "";
+  const head = el("div", "wf-head");
+  head.appendChild(el("h2", null, "Beads"));
+  const back = el("button", "wf-btn clear", "Back");
+  back.addEventListener("click", () => { location.hash = "#"; });
+  head.appendChild(back);
+  view.appendChild(head);
+  view.appendChild(el("p", "wf-note",
+    "The repository board (beads), by session: each issue carries the " +
+    "sessions the daemon ties it to — the recorded link, assignee, " +
+    "creator, or an `issue: <id>` in the session's task. Writes are the " +
+    "agents' (`claunch beads …`); the daemon registers an issue at " +
+    "creation, winds a session down before a kill, and returns what it " +
+    "was working on to open when it exits."));
+  if (beadsError) view.appendChild(el("p", "wf-warning", beadsError));
+  if (!beadsCache) {
+    if (!beadsError) view.appendChild(el("p", "wf-note", "loading…"));
+    return;
+  }
+  view.appendChild(beadsFilterBar());
+  const body = el("div", "beads-body" + (beadsFocus ? " split" : ""));
+  const list = el("div", "beads-list");
+  const boards = beadsCache.boards || [];
+  if (!boards.length) {
+    list.appendChild(el("p", "wf-note",
+      "no board: none of the sessions' directories is a repository with a " +
+      ".beads/ — 'claunch beads init --prefix <name>' at its root starts one"));
+  }
+  for (const b of boards) list.appendChild(beadsBoardSection(b));
+  body.appendChild(list);
+  if (beadsFocus) body.appendChild(beadsDetailPane());
+  view.appendChild(body);
+}
+
+/* ---- the rail's block: one session's slice of its board ---- */
+let sessBeadsBox = null;   // the create form, which holds a typed title
+
+function sessBeads(data) {
+  const s = data.session || {};
+  const b = data.beads || {};
+  const issues = b.issues || [];
+  const box = el("div", "sess-beads");
+  box.appendChild(el("h3", null, `Beads (${issues.length})`));
+  if (b.winddown) {
+    const w = el("p", "wf-warning",
+      `winding down since ${String(b.winddown.since || "").replace("T", " ").slice(0, 19)} — ` +
+      `asked to settle ${(b.winddown.issues || []).join(", ")}; terminated once ` +
+      `idle or after ${Math.round(b.winddown.grace || 0)}s. Kill again to stop now.`);
+    box.appendChild(w);
+  }
+  if (b.error) {
+    box.appendChild(el("p", "wf-note", b.error));
+    return box;
+  }
+  if (!issues.length) {
+    box.appendChild(el("p", "wf-note", "no issue on the board names this session"));
+  }
+  for (const i of issues) box.appendChild(beadsIssueRow(i, { compact: true }));
+  if (!b.issue && s.name && s.status !== "exited") {
+    box.appendChild(sessBeadsCreate(s.name));
+  }
+  const open = el("button", "wf-btn option", "Open board");
+  open.title = "the Beads page, filtered to this session";
+  open.addEventListener("click", () => {
+    beadsSession = s.name || "";
+    go("#/beads");
+  });
+  box.appendChild(open);
+  return box;
+}
+
+/* An issue for a session that has none — the one write this panel makes.
+   Hoisted across renders (the poll rebuilds the panel every 2 s) and rebuilt
+   only when the rail points at another session. */
+function sessBeadsCreate(name) {
+  if (sessBeadsBox && sessBeadsBox.dataset.session === name) return sessBeadsBox;
+  const form = el("form", "sess-beads-create");
+  form.dataset.session = name;
+  const input = document.createElement("input");
+  input.type = "text";
+  input.placeholder = "register an issue for this session — title";
+  input.maxLength = 140;
+  form.appendChild(input);
+  const btn = el("button", "wf-btn", "Create");
+  btn.type = "submit";
+  form.appendChild(btn);
+  const note = el("span", "wf-note", "");
+  form.appendChild(note);
+  form.addEventListener("submit", async (ev) => {
+    ev.preventDefault();
+    const title = input.value.trim();
+    if (!title) return;
+    btn.disabled = true;
+    note.textContent = "";
+    try {
+      const resp = await api(`/api/sessions/${encodeURIComponent(name)}/beads`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ title }),
+      });
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) note.textContent = doc.error || `HTTP ${resp.status}`;
+      else { input.value = ""; sessBeadsBox = null; refreshSession(); }
+    } catch { /* auth overlay is up */ }
+    finally { btn.disabled = false; }
+  });
+  sessBeadsBox = form;
+  return form;
 }
 
 /* Sessions currently running in a directory. normcase-style comparison,
@@ -6419,6 +6789,7 @@ function dropDetail() {
   sessPermsBox = null;
   sessQuickJobBox = null;
   sessKidsBox = null;
+  sessBeadsBox = null;
   sessRunFold = null;
   $("sess-view").innerHTML = "";
   markDetailRow();
@@ -6453,6 +6824,7 @@ function repointDetail(name) {
   sessPermsBox = null;
   sessQuickJobBox = null;
   sessKidsBox = null;
+  sessBeadsBox = null;
   sessRunFold = null;
   $("sess-view").innerHTML = "<p class='wf-note'>loading…</p>";
   markDetailRow();
@@ -6727,6 +7099,12 @@ function renderSession(data) {
     meshBox.appendChild(trace);
   }
   view.appendChild(meshBox);
+
+  // Its work, as the board records it: the issue it was created for and
+  // every issue that names it. Right after the memberships because the two
+  // answer the same question from two registries — where it belongs, and
+  // what it is on.
+  view.appendChild(sessBeads(data));
 
   // What this session is FOR, by role: a leader gets its dispatch and reaping
   // panels here, other roles whatever ROLE_PANELS declares for them. Between
