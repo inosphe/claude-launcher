@@ -326,10 +326,12 @@ class Session:
         # ScreenFeeder). Logging and the viewer broadcast stay inline — both
         # are cheap, and attached terminals must not lag behind the PTY.
         prev_alt = self.screen.alt_screen
+        prev_mouse = self.screen.mouse_tracking
         self._feeder.submit(chunk)
         # ScreenFeeder.submit runs the mode tracker synchronously — only the
         # render is deferred — so alt_screen is already current right here.
         new_alt = self.screen.alt_screen
+        new_mouse = self.screen.mouse_tracking
         self._append_log(chunk)
         self._broadcast(("data", chunk))
         if new_alt != prev_alt:
@@ -338,6 +340,13 @@ class Session:
             # the new buffer after their xterm has consumed the escape, and a
             # viewer scrolled back into history is unfrozen against this.
             self._broadcast(("buffer", new_alt))
+        if new_mouse != prev_mouse:
+            # The program took the mouse, or gave it back. Queued after the
+            # data frame for the same reason: the viewer's own terminal learns
+            # the mode from the bytes, and this frame only tells the *page*
+            # whose wheel it is now — which affordance to show, and whether
+            # the daemon still owes this socket a scrollback.
+            self._broadcast(("mouse", new_mouse))
 
     def seed_screen_from_log(self) -> None:
         """Give a restored session back the scrollback its predecessor had.

@@ -431,3 +431,149 @@ def test_repaint_of_a_sparse_history_row_survives_the_scroll():
     assert s.history_len >= 1
     seq = s.repaint_sequence(s.history_len)
     assert b"RIGHTEDGE" in seq
+
+
+# --------------------------------------------------------------------------- #
+# who owns the wheel
+# --------------------------------------------------------------------------- #
+def test_mouse_tracking_is_tracked_like_the_other_private_modes():
+    """A program that asks for the mouse is asking for the wheel.
+
+    pyte models none of 1000/1002/1003, so the byte sweep is the only place
+    this can be learned — and it decides whether the web viewer forwards a
+    wheel tick or spends it on a scroll control of its own.
+    """
+    s = ScreenState(20, 5)
+    assert s.mouse_tracking is False
+    assert s.wheel_is_the_programs is False
+
+    s.feed(b"\x1b[?1000h")
+    assert s.mouse_tracking is True
+    assert s.wheel_is_the_programs is True
+
+    s.feed(b"\x1b[?1000l")
+    assert s.mouse_tracking is False
+
+
+def test_the_tracking_levels_are_independent():
+    """Set and cleared separately, so the flag is the OR of what is still on.
+
+    claude asserts all three and clears them one sequence at a time; reading
+    only the last mode seen would hand the wheel back while the program is
+    still listening on another level.
+    """
+    s = ScreenState(20, 5)
+    s.feed(b"\x1b[?1000h\x1b[?1002h\x1b[?1003h")
+    assert s.mouse_tracking is True
+    s.feed(b"\x1b[?1000l\x1b[?1002l")
+    assert s.mouse_tracking is True, "1003 is still on"
+    s.feed(b"\x1b[?1003l")
+    assert s.mouse_tracking is False
+
+
+def test_mouse_encoding_is_tracked():
+    s = ScreenState(20, 5)
+    assert s.mouse_encoding == ""
+    s.feed(b"\x1b[?1006h")
+    assert s.mouse_encoding == "sgr"
+    s.feed(b"\x1b[?1006l")
+    assert s.mouse_encoding == ""
+
+
+def test_one_sequence_can_carry_several_modes():
+    """``CSI ? 1000 ; 1002 ; 1006 h`` is one match with three parameters."""
+    s = ScreenState(20, 5)
+    s.feed(b"\x1b[?1000;1002;1006h")
+    assert s.mouse_tracking is True
+    assert s.mouse_encoding == "sgr"
+
+
+def test_repaint_re_asserts_the_mouse_modes():
+    """A viewer that attached late has only the repaint to learn them from.
+
+    Without this the browser's terminal swallows the wheel instead of
+    reporting it, and the session reads as unscrollable — which is exactly
+    how it read before.
+    """
+    s = ScreenState(20, 5)
+    s.feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1006h")
+    s.feed(b"hello")
+    rep = s.repaint_sequence(0)
+    assert b"\x1b[?1000h" in rep
+    assert b"\x1b[?1002h" in rep
+    assert b"\x1b[?1006h" in rep
+    assert b"\x1b[?1049h" in rep
+
+
+def test_repaint_stays_quiet_when_the_program_left_the_mouse_alone():
+    s = ScreenState(20, 5)
+    s.feed(b"hello")
+    rep = s.repaint_sequence(0)
+    assert b"\x1b[?1000h" not in rep
+    assert b"\x1b[?1006h" not in rep
+
+
+def test_forget_modes_drops_the_mouse_too():
+    """A replayed log's modes belong to a program that is gone."""
+    s = ScreenState(20, 5)
+    s.feed(b"\x1b[?1000h\x1b[?1006h")
+    s.forget_modes()
+    assert s.mouse_tracking is False
+    assert s.mouse_encoding == ""
+    assert b"\x1b[?1000h" not in s.repaint_sequence(0)
+
+
+# --------------------------------------------------------------------------- #
+# the scrollback seed
+# --------------------------------------------------------------------------- #
+def test_history_sequence_carries_the_scrolled_off_lines():
+    """The seed that fills the browser's own scrollback at attach."""
+    s = ScreenState(10, 3)
+    s.feed(b"1\r\n2\r\n3\r\n4\r\n5")
+    seed = s.history_sequence()
+    assert seed.startswith(b"\x1b[?1049l"), "must land in the main buffer"
+    text = seed.decode()
+    assert "1" in text and "2" in text
+    # The rows are newline-separated so a terminal scrolls them off the way
+    # they originally went; that is what puts them in ITS scrollback.
+    assert "\r\n" in text
+
+
+def test_history_sequence_is_empty_without_history():
+    """The honest answer for a TUI that repaints instead of scrolling.
+
+    Measured on this project's own sessions: 424 KiB of claude output leaves
+    one or two lines behind. Seeding nothing is right — the wheel there
+    belongs to the program.
+    """
+    s = ScreenState(20, 5)
+    s.feed(b"\x1b[?1049h")
+    s.feed(b"just a grid, never scrolled")
+    assert s.history_sequence() == b""
+
+
+def test_history_sequence_honours_the_limit():
+    s = ScreenState(10, 3)
+    s.feed(b"".join(b"%d\r\n" % i for i in range(200)))
+    seed = s.history_sequence(limit=5).decode()
+    rows = [r for r in seed.split("\r\n") if r.strip()]
+    # The preamble shares the first row, so allow it; what matters is that a
+    # limit of 5 does not ship 197 lines.
+    assert len(rows) <= 6, rows
+
+
+# --------------------------------------------------------------------------- #
+# the grid read that used to raise
+# --------------------------------------------------------------------------- #
+def test_render_screen_survives_a_wide_character():
+    """pyte's ``display`` calls ``wcwidth(char[0])`` on a wide glyph's stub.
+
+    The stub's ``data`` is empty, so that indexing raises ``IndexError`` —
+    on any grid holding CJK text. ``session.capture()`` reads through here,
+    and so does idle detection.
+    """
+    s = ScreenState(20, 3)
+    s.feed("한글 wide 글자".encode())
+    lines = s.render_screen()
+    assert "한글" in lines[0]
+    assert len(s.line_hashes()) == 3

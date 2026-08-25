@@ -8,8 +8,10 @@ capture and idle-detection features read.
 
 pyte does not track DECCKM (application cursor keys, private mode 1), which
 ``send-keys`` needs to encode arrow keys the way the running program expects,
-nor bracketed paste (private mode 2004), which paste injection needs — so this
-module watches the byte stream for ``CSI ? Pm h/l`` itself. It also tracks the
+nor bracketed paste (private mode 2004), which paste injection needs, nor the
+mouse-tracking modes (1000/1002/1003, and the 1006/1015/1005 report encodings),
+which decide who owns the wheel — so this module watches the byte stream for
+``CSI ? Pm h/l`` itself. It also tracks the
 alternate screen (private mode 1049) for the same reason pyte is blind to it:
 a repaint that does not say which buffer the program is in leaves a viewer
 attached mid-session stuck in xterm's main buffer, where a full-screen TUI
@@ -21,11 +23,17 @@ from __future__ import annotations
 import asyncio
 import re
 from collections import deque
-from typing import Deque, List, Optional, Tuple
+from typing import Deque, List, Optional, Set, Tuple
 
 import pyte
 
 _PRIVATE_MODE_RE = re.compile(rb"\x1b\[\?([0-9;]+)([hl])")
+
+#: The private mode number behind each mouse *report encoding* we track.
+#: Default (no mode) is the original X10 encoding, which cannot express a
+#: column past 222 — every terminal in practice asks for SGR (1006), and this
+#: project's grids are 233 columns wide, so the encoding matters.
+_MOUSE_ENCODING_MODES = {"sgr": 1006, "urxvt": 1015, "utf8": 1005}
 
 # --------------------------------------------------------------------------- #
 # SGR reconstruction (pyte grid attributes -> escape sequences)
@@ -74,6 +82,15 @@ def _sgr(char) -> str:
 #: chunks is still recognised.
 _TAIL = 16
 
+#: How many scrolled-off lines an attaching viewer is seeded with, so its own
+#: terminal can serve the wheel natively. Matched to the browser's xterm
+#: ``scrollback`` — seeding more would only be dropped on arrival. Measured on
+#: this project's sessions at 233 columns: 1861 attributed rows are 486 KiB of
+#: escapes raw and 46 KiB once the WebSocket's permessage-deflate has had it,
+#: paid once per attach — against 22.8 KiB per wheel tick for the control-frame
+#: scroll it replaces.
+HISTORY_SEED_LINES = 5000
+
 
 class ScreenState:
     """A pyte-backed screen + scrollback with launcher-specific helpers."""
@@ -82,9 +99,36 @@ class ScreenState:
         self._screen = pyte.HistoryScreen(cols, rows, history=history, ratio=0.5)
         self._stream = pyte.ByteStream(self._screen)
         self._mode_tail = b""
+        self._mouse_modes: Set[bytes] = set()
         self.app_cursor_keys = False
         self.bracketed_paste = False
         self.alt_screen = False
+        #: The program asked to be told about mouse buttons (1000), or that
+        #: plus drag (1002) / any motion (1003). Wheel ticks ride the same
+        #: reports, so this is the flag that says "the wheel is the
+        #: program's, not the viewer's" — see :attr:`wheel_is_the_programs`.
+        self.mouse_tracking = False
+        #: An extended report encoding: SGR (1006), urxvt (1015) or utf-8
+        #: (1005). Tracked for the same reason DECCKM is: a client that
+        #: encodes mouse reports itself has to encode them the agreed way.
+        self.mouse_encoding = ""
+
+    @property
+    def wheel_is_the_programs(self) -> bool:
+        """Whether wheel ticks belong to the program rather than the viewer.
+
+        A full-screen TUI that turns mouse tracking on (claude does: it
+        asserts ``?1000h ?1002h ?1003h ?1006h`` behind ``?1049h`` and leaves
+        them on) is asking for the wheel — it scrolls its own view, from its
+        own model, with a depth no terminal could reconstruct. A viewer that
+        swallows those ticks to scroll something else leaves the program
+        believing nobody ever reached for the wheel.
+
+        The alternate screen alone is not the test. A TUI that does *not*
+        take the mouse (a pager on the alt screen) leaves the wheel to the
+        terminal, and there the terminal's own answer is the right one.
+        """
+        return self.mouse_tracking
 
     @property
     def cols(self) -> int:
@@ -132,6 +176,21 @@ class ScreenState:
                 self.bracketed_paste = match.group(2) == b"h"
             if b"1049" in params:
                 self.alt_screen = match.group(2) == b"h"
+            # Any of the three tracking levels means the program is listening
+            # for mouse reports; they are set and cleared independently (and
+            # usually together, in one sequence), so the flag is the OR of
+            # whatever is still on rather than the last one seen.
+            for mode in (b"1000", b"1002", b"1003"):
+                if mode not in params:
+                    continue
+                if match.group(2) == b"h":
+                    self._mouse_modes.add(mode)
+                else:
+                    self._mouse_modes.discard(mode)
+            self.mouse_tracking = bool(self._mouse_modes)
+            for mode, name in ((b"1006", "sgr"), (b"1015", "urxvt"), (b"1005", "utf8")):
+                if mode in params:
+                    self.mouse_encoding = name if match.group(2) == b"h" else ""
         self._mode_tail = window[-_TAIL:]
 
     def forget_modes(self) -> None:
@@ -146,6 +205,9 @@ class ScreenState:
         self.app_cursor_keys = False
         self.bracketed_paste = False
         self.alt_screen = False
+        self.mouse_tracking = False
+        self.mouse_encoding = ""
+        self._mouse_modes.clear()
         self._mode_tail = b""
 
     def scroll_grid_into_history(self) -> None:
@@ -166,8 +228,21 @@ class ScreenState:
     # capture
     # ------------------------------------------------------------------ #
     def render_screen(self) -> List[str]:
-        """The current visible grid, one right-trimmed string per row."""
-        return [line.rstrip() for line in self._screen.display]
+        """The current visible grid, one right-trimmed string per row.
+
+        Read cell by cell rather than through pyte's ``display``, which calls
+        ``wcwidth(char[0])`` on every cell and raises ``IndexError`` on the
+        empty ``data`` of a wide glyph's continuation stub — a cell any grid
+        holding CJK text carries, and one a DCH shift can push to column 0.
+        The stub contributes nothing to the join, which is the same reading
+        :meth:`render_history` and :meth:`bottom_line` already do.
+        """
+        screen = self._screen
+        cols = screen.columns
+        return [
+            "".join(screen.buffer[y][x].data for x in range(cols)).rstrip()
+            for y in range(screen.lines)
+        ]
 
     def render_history(self) -> List[str]:
         """Scrolled-off lines (oldest first), right-trimmed.
@@ -193,14 +268,51 @@ class ScreenState:
         """Scrolled-off lines available for virtual scroll (oldest first)."""
         return len(self._screen.history.top)
 
+    def history_sequence(self, limit: int = HISTORY_SEED_LINES) -> bytes:
+        """The tail of the scrollback, as bytes that fill a terminal's own.
+
+        The seed a freshly attached viewer needs before
+        :meth:`repaint_sequence`: written into the main buffer these rows
+        scroll off the top the way they originally did, so the browser's
+        terminal ends up holding the same scrollback the daemon does — and
+        from there the wheel is the browser's own, with a scrollbar, momentum
+        and find-in-page behind it, instead of a control frame per tick.
+
+        Leads with ``?1049l`` for the reason the repaint leads with a buffer
+        selector: a socket may be replacing one that left the terminal on the
+        alternate screen, where these rows would be written into a buffer
+        that keeps no scrollback and is about to be cleared anyway.
+
+        Empty when there is no history — which is the honest answer for a
+        session running a TUI that repaints instead of scrolling. Callers
+        skip this entirely on the alternate screen; see ``ws.py``.
+        """
+        history = self._screen.history.top
+        if not history or limit <= 0:
+            return b""
+        rows = list(history)[-limit:]
+        parts = ["\x1b[?1049l\x1b[2J\x1b[H"]
+        for i, row in enumerate(rows):
+            if i:
+                parts.append("\r\n")
+            parts.append(self._row_with_attrs(row))
+        parts.append("\x1b[0m\r\n")
+        return "".join(parts).encode("utf-8")
+
     def cursor(self) -> Tuple[int, int]:
         """Cursor position as (x, y), zero-based."""
         c = self._screen.cursor
         return (c.x, c.y)
 
     def line_hashes(self) -> Tuple[int, ...]:
-        """A cheap per-row fingerprint of the visible grid (for idle detection)."""
-        return tuple(hash(line) for line in self._screen.display)
+        """A cheap per-row fingerprint of the visible grid (for idle detection).
+
+        Off :meth:`render_screen` rather than pyte's ``display``, which raises
+        on a wide-char stub. Idle detection samples every session on a timer,
+        so it is the most frequent caller of the two — and the one whose
+        exception would be swallowed into "this session never goes idle".
+        """
+        return tuple(hash(line) for line in self.render_screen())
 
     def bottom_line(self) -> str:
         """The bottom row of the visible grid, right-trimmed.
@@ -259,6 +371,16 @@ class ScreenState:
             "\x1b[?1049h" if self.alt_screen else "\x1b[?1049l",
             "\x1b[2J\x1b[H",
         ]
+        # And the mouse modes, for the reason the buffer is re-asserted: a
+        # viewer that attached after the program turned tracking on has only
+        # this repaint to learn it from, and a terminal that does not know
+        # swallows the wheel instead of reporting it — which is precisely how
+        # a session ends up unscrollable. Re-asserted in the program's own
+        # order (tracking levels, then the report encoding).
+        for mode in sorted(self._mouse_modes):
+            parts.append("\x1b[?%sh" % mode.decode())
+        if self.mouse_encoding:
+            parts.append("\x1b[?%dh" % _MOUSE_ENCODING_MODES[self.mouse_encoding])
         start = hlen - offset
         for i in range(rows):
             if i:

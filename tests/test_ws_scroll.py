@@ -1,12 +1,17 @@
-"""The virtual-scroll control clamps against a grid that has caught up.
+"""The virtual-scroll control, and the one regime that still uses it.
 
-The web terminal's wheel is served entirely by the daemon: the browser's xterm
-is built with ``scrollback: 0``, so a ``scroll`` control is answered with a
-clamped offset and a repaint windowed over the daemon's pyte history. The
-render behind that history is deferred (:class:`ScreenFeeder`), which is why
-the handler syncs before it reads ``history_len`` — reading it first clamps the
-viewer against lines that have not been rendered yet, and during a burst that
-number can still be 0.
+The wheel has three owners now (see ``ws.py``): a program that took the mouse
+gets its ticks forwarded, the main buffer scrolls the browser's own scrollback,
+and only the alternate screen with the mouse left alone is served by a
+``scroll`` control — answered with a clamped offset and a repaint windowed over
+the daemon's pyte history. The render behind that history is deferred
+(:class:`ScreenFeeder`), which is why the handler syncs before it reads
+``history_len`` — reading it first clamps the viewer against lines that have
+not been rendered yet, and during a burst that number can still be 0.
+
+The second half of this module is the handover itself: a viewer holding a
+frozen history window when the program takes the mouse has to be dropped back
+to live, because from then on no wheel of theirs will lower the offset.
 """
 
 from __future__ import annotations
@@ -112,5 +117,74 @@ def test_scrolling_back_toward_live_floors_at_zero():
         assert state.offset == 10
         await send(-999999)          # the client's snap-to-live
         assert state.offset == 0
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# who owns the wheel
+# --------------------------------------------------------------------------- #
+async def _drain(ws, session, state, frame):
+    """Run one queued frame through the pump and stop it again."""
+    queue = asyncio.Queue()
+    queue.put_nowait(frame)
+    pump = asyncio.ensure_future(ws_mod._pump_to_client(ws, queue, session, state))
+    while not queue.empty():
+        await asyncio.sleep(0)
+    await asyncio.sleep(0)
+    pump.cancel()
+    try:
+        await pump
+    except asyncio.CancelledError:
+        pass
+
+
+def test_a_program_taking_the_mouse_unfreezes_a_scrolled_back_viewer():
+    """From that moment the wheel is the program's, so nothing would scroll
+    this viewer out of the frozen window it is holding.
+
+    Left frozen the terminal simply stops advancing: live bytes are
+    suppressed while ``offset > 0``, and the wheel that used to lower the
+    offset now goes to the program instead. Dropping to live is the only way
+    back, so the daemon takes it on the viewer's behalf.
+    """
+
+    async def run():
+        screen = ScreenState(20, 5, history=500)
+        feeder = ScreenFeeder(screen, slice_size=64)
+        session = _Session(screen, feeder)
+        feeder.submit(_burst(60))
+
+        ws = _WS()
+        state = ws_mod.ViewerState()
+        await ws_mod._handle_control(
+            ws, session, json.dumps({"type": "scroll", "lines": 10}), state
+        )
+        assert state.offset == 10
+
+        await _drain(ws, session, state, ("mouse", True))
+
+        assert state.offset == 0, "the viewer was returned to live"
+        assert {"type": "scrolled", "offset": 0} in ws.text
+        assert {"type": "mouse", "tracking": True} in ws.text
+
+    asyncio.run(run())
+
+
+def test_giving_the_mouse_back_is_announced_without_disturbing_the_viewer():
+    """A program releasing the mouse hands the wheel back to the terminal; a
+    viewer already sitting live has nothing to be moved off."""
+
+    async def run():
+        screen = ScreenState(20, 5, history=500)
+        feeder = ScreenFeeder(screen, slice_size=64)
+        session = _Session(screen, feeder)
+
+        ws = _WS()
+        state = ws_mod.ViewerState()
+        await _drain(ws, session, state, ("mouse", False))
+
+        assert ws.text == [{"type": "mouse", "tracking": False}]
+        assert not ws.binary, "no repaint: the viewer never left live"
 
     asyncio.run(run())

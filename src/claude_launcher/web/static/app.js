@@ -12,6 +12,7 @@ let attachedPid = null;           // pid of the incarnation this socket is bound
 let applyingRemoteResize = false; // guards against echoing a server-driven resize
 let fitTimer = null;              // debounces viewport-driven fit() calls
 let altScreen = false;      // the program is drawing the alternate screen
+let mouseTracking = false;  // the program asked for the mouse — the wheel is its own
 let scrollOffset = 0;       // daemon history offset this viewer is reading (0 = live)
 let wheelAccum = 0;         // unflushed wheel delta, accumulated in lines
 let wheelTimer = null;      // debounce timer for wheel -> scroll control
@@ -2889,8 +2890,9 @@ function handleFrame(msg) {
     // Adopt the viewer's size once attached.
     refitSoon(50);
     // A fresh socket always starts live, in whatever buffer the program is
-    // drawing.
+    // drawing — and with whoever owns the mouse still owning it.
     altScreen = !!msg.alt;
+    mouseTracking = !!msg.mouse;
     scrollOffset = 0;
     updateScrollChip();
   } else if (msg.type === "buffer") {
@@ -2899,8 +2901,14 @@ function handleFrame(msg) {
       // The TUI left the alternate screen: xterm's own scrollback takes over
       // for the wheel, and the daemon has already unfrozen us (ws.py).
       scrollOffset = 0;
-      updateScrollChip();
     }
+    updateScrollChip();
+  } else if (msg.type === "mouse") {
+    // The program took the mouse, or gave it back. Either way the wheel
+    // changes hands; the daemon has already unfrozen us if it had to.
+    mouseTracking = !!msg.tracking;
+    if (mouseTracking) scrollOffset = 0;
+    updateScrollChip();
   } else if (msg.type === "scrolled") {
     // The daemon's clamped answer to a scroll control — the truth for the
     // chip and for sendInput's snap-to-live.
@@ -2941,6 +2949,7 @@ function handleFrame(msg) {
     setLink("idle");
     setStatusBadge("exited");
     altScreen = false;
+    mouseTracking = false;
     scrollOffset = 0;
     updateScrollChip();
     term.write(
@@ -3143,6 +3152,7 @@ function detach() {
   wheelAccum = 0;
   scrollOffset = 0;
   altScreen = false;
+  mouseTracking = false;
   if (term) { term.dispose(); term = null; fitAddon = null; }
   updateScrollChip();
 }
@@ -3628,17 +3638,56 @@ function setSessLayout(name, patch) {
   syncSplitPane();
 }
 
-/* ---- virtual scroll ----
-   The session's real scrollback lives in the daemon's pyte history
-   (ScreenState.render_history) — xterm's own never holds it. On the alt
-   screen xterm turns wheel events into arrow keys and its scrollback is
-   empty by construction; on the main buffer it only hoards what scrolled
-   past while THIS socket was open, which for a viewer that just attached
-   (whose seed is a repaint of the grid alone) is nothing — the wheel spun
-   and nothing moved, on either buffer. So the wheel always becomes `scroll`
-   controls, and the daemon repaints a window over the one history that is
-   actually whole. */
+/* ---- who owns the wheel ----
+
+   Three regimes, and the whole trick is telling them apart before spending a
+   tick.
+
+   1. The program took the mouse. claude does — it asserts `?1000h ?1002h
+      ?1003h ?1006h` behind the alternate screen and never lets go — and that
+      is a program saying "send me the wheel, I scroll myself". It does, from
+      its own model, to a depth no terminal keeps. This is the common case and
+      it wants exactly one thing from us: to get out of the way. xterm.js
+      already encodes the SGR report; returning true lets it.
+
+   2. The main buffer, no mouse. A plain shell, a build log. Here xterm's OWN
+      scrollback is the right answer, and the terminal is built with one (see
+      buildSessionTerm) seeded from the daemon at attach — so, again, hands
+      off: native scrolling, a real scrollbar, momentum, find-in-page.
+
+   3. The alternate screen with the mouse left alone. A pager that reads arrow
+      keys. Nothing scrolls off the alt buffer, so neither xterm's scrollback
+      nor a native wheel has anything to move; the daemon's history window is
+      all there is, and the `scroll` control below serves it.
+
+   Only (3) is ours. Until now every tick went through (3)'s path, including
+   claude's — which is why the wheel felt dead: the daemon spends ~18 ms and
+   22 KB repainting a 233x77 grid per tick to move a history that, measured on
+   real sessions, is one or two lines deep. */
+function wheelBelongsToProgram() {
+  // xterm's own view of the modes, learned from the byte stream — including
+  // the re-assertion the daemon puts in every repaint, so a terminal that
+  // attached mid-session knows as much as one that watched it start.
+  const m = term && term.modes;
+  if (m && m.mouseTrackingMode && m.mouseTrackingMode !== "none") return true;
+  // The daemon's `init.mouse` / `mouse` frames, as the fallback for an xterm
+  // that has not parsed the assertion yet (the flag arrives with `init`,
+  // ahead of the repaint that carries the escapes).
+  return mouseTracking;
+}
+
+/* True when the wheel is xterm's to spend on its own scrollback: the main
+   buffer, where a seeded scrollback actually holds something. */
+function wheelIsNative() {
+  return !altScreen;
+}
+
 function handleWheel(e) {
+  if (wheelBelongsToProgram() || wheelIsNative()) {
+    // Not ours. No preventDefault, no accumulator, no control frame — xterm
+    // forwards the mouse report, or scrolls its own buffer, natively.
+    return true;
+  }
   e.preventDefault();
   let delta = e.deltaY;
   if (e.deltaMode === 2) {                 // DOM_DELTA_PAGE
@@ -3671,7 +3720,13 @@ function sendScroll(lines) {
 
 /* The header says why the terminal is not advancing while the session keeps
    running: the viewer scrolled into history, and the wheel below it (or a
-   keystroke) is the way back to live. */
+   keystroke) is the way back to live.
+
+   Only the daemon-served regime gets a chip. When the program owns the wheel
+   it is scrolling its own view and the terminal is not frozen at all — there
+   is nothing to explain and nothing to come back from — and when xterm owns
+   it the scrollbar is the affordance, which is the whole point of giving the
+   wheel back. */
 function updateScrollChip() {
   const chip = $("term-scroll");
   if (!chip) return;
@@ -3725,7 +3780,8 @@ function suspendActive() {
   const b = {
     name: currentName, term, fitAddon, ws,
     pid: attachedPid, boot: attachedBoot,
-    alt: altScreen, scroll: scrollOffset, exited: sessionEnded,
+    alt: altScreen, mouse: mouseTracking,
+    scroll: scrollOffset, exited: sessionEnded,
   };
   if (ws) {
     ws.onopen = null;
@@ -3758,6 +3814,7 @@ function resetLive() {
   attachedBoot = null;
   scrollOffset = 0;
   altScreen = false;
+  mouseTracking = false;
   applyingRemoteResize = false;
   currentName = null;
   term = null;
@@ -3800,8 +3857,12 @@ function shimFrame(b, ev) {
       b.pid = msg.pid || null;
       b.boot = msg.boot_id || null;
       b.alt = !!msg.alt;
+      b.mouse = !!msg.mouse;
     } else if (msg.type === "buffer") {
       b.alt = !!msg.alt;
+    } else if (msg.type === "mouse") {
+      b.mouse = !!msg.tracking;
+      if (b.mouse) b.scroll = 0;
     } else if (msg.type === "scrolled") {
       b.scroll = msg.offset || 0;
     } else if (msg.type === "resize") {
@@ -3809,6 +3870,7 @@ function shimFrame(b, ev) {
     } else if (msg.type === "exit") {
       b.exited = true;
       b.alt = false;
+      b.mouse = false;
       b.scroll = 0;
       if (b.term) {
         b.term.write(
@@ -3869,6 +3931,7 @@ function restoreTerminal(b) {
   attachedBoot = b.boot;
   scrollOffset = b.scroll;
   altScreen = b.alt;
+  mouseTracking = !!b.mouse;
   sessionEnded = b.exited;
   // The same header seeding a fresh attach does, so the previous session's
   // controls never linger on this one.
@@ -4095,10 +4158,17 @@ function freshAttach(name) {
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
     fontSize: fontSize,
     theme: { background: "#14161a" },
-    // No local scrollback: the wheel always browses the daemon's history
-    // (handleWheel), so lines xterm would hoard here are unreachable — and a
-    // hoard it cannot show is a scrollbar it must not grow.
-    scrollback: 0,
+    // A real scrollback, like the CLI tab's. It used to be 0, on the reading
+    // that the daemon's history served the wheel instead — but that history
+    // is one or two lines deep for a session running claude (it repaints the
+    // grid rather than scrolling it), so the trade bought nothing and cost
+    // the browser's own scrolling: the scrollbar, the momentum, the touch
+    // drag, PgUp/Home, find-in-page, selection across more than one screen.
+    // On the alternate screen xterm keeps this empty by construction, which
+    // is right — there the program owns the wheel (see handleWheel). This is
+    // for the main buffer: a plain shell, a build log, a session after its
+    // TUI has exited.
+    scrollback: 5000,
   });
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);

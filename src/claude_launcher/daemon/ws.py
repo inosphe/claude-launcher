@@ -20,14 +20,30 @@ Protocol (matches the SPA's app.js and any non-browser client):
   server: ``{"type":"state","status":...}``, ``{"type":"exit","code":...}``,
   ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"buffer","alt":..}``
   (the program entered or left the alternate screen — the client learns the
-  mode it may not have been connected for), ``{"type":"scrolled","offset":N}``
+  mode it may not have been connected for),
+  ``{"type":"mouse","tracking":bool}`` (the program took the mouse, or gave
+  it back — see "Who owns the wheel" below),
+  ``{"type":"scrolled","offset":N}``
   (the server's clamped scroll position for this socket, sent before the
   repaint answering a ``scroll``), ``{"type":"pong"}``, and
   ``{"type":"shutdown"}`` — the daemon itself is stopping/restarting, sent
   before its sessions are terminated so a viewer can tell this apart from the
   session's program exiting on its own.
 
-Virtual scroll: while a socket is scrolled back (``scrolled.offset > 0``) the
+Who owns the wheel: a program that turns mouse tracking on (``?1000h`` and
+friends — claude does, behind the alternate screen, and leaves it on) is asking
+for wheel ticks itself. It scrolls its own view from its own model, to a depth
+no terminal could reconstruct, and the client must forward the ticks as mouse
+reports rather than spend them on anything else. Measured on this project's own
+sessions, a claude terminal yields **one or two lines** of daemon-side history
+for four hundred kilobytes of output — it repaints the whole grid every frame
+instead of scrolling it — so the virtual scroll below has nothing to serve such
+a session anyway. ``init.mouse`` and the ``mouse`` frame say which regime a
+socket is in; ``ScreenState.repaint_sequence`` re-asserts the modes themselves
+so a late-joining terminal reports the wheel like an early one.
+
+Virtual scroll (for the other regime — a program that leaves the mouse alone):
+while a socket is scrolled back (``scrolled.offset > 0``) the
 daemon feeds it no raw PTY data — the viewer is looking at a snapshot of the
 daemon's scrollback, and live bytes would smear it. ``data`` frames resume
 the moment the offset returns to 0. Each socket has its own offset; one
@@ -111,10 +127,25 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                     # joining mid-TUI knows whether the wheel browses history
                     # (alt screen) or xterm's own scrollback (main buffer).
                     "alt": session.screen.alt_screen,
+                    # And whether the program has taken the mouse. When it
+                    # has, wheel ticks are the program's — it scrolls its own
+                    # view, deeper than any scrollback the daemon could keep —
+                    # and a viewer that swallows them to scroll something else
+                    # leaves the program believing nobody touched the wheel.
+                    "mouse": session.screen.mouse_tracking,
                 }
             )
         )
         await _synced(session)
+        # On the main buffer, hand the viewer the scrollback before the grid,
+        # so its own terminal holds what the daemon holds and the wheel below
+        # it is the browser's own. Skipped on the alternate screen: those rows
+        # would land in a buffer that keeps no scrollback, and a program there
+        # has usually taken the mouse anyway.
+        if not session.screen.alt_screen:
+            seed = session.screen.history_sequence()
+            if seed:
+                await ws.send_bytes(seed)
         await ws.send_bytes(session.screen.repaint_sequence(0))
 
         sender = asyncio.ensure_future(_pump_to_client(ws, queue, session, state))
@@ -285,6 +316,14 @@ async def _pump_to_client(
                 # exists, so return the viewer to live before announcing it.
                 await _unfreeze(ws, session, state)
             await ws.send_str(json.dumps({"type": "buffer", "alt": payload}))
+        elif kind == "mouse":
+            if state.offset > 0 and payload:
+                # The program just took the mouse, and this viewer is holding
+                # a frozen snapshot the wheel can no longer move — from here
+                # the wheel belongs to the program. Drop to live first, or the
+                # viewer is stranded in a history nothing will scroll out of.
+                await _unfreeze(ws, session, state)
+            await ws.send_str(json.dumps({"type": "mouse", "tracking": payload}))
         elif kind == "state":
             await ws.send_str(json.dumps({"type": "state", "status": payload}))
         elif kind == "resize":
