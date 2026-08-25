@@ -853,7 +853,9 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
     assert "master는 어떤 경우에도 머지 대상이 아니다" in land.instructions
 
     landing = wf.steps["landing"].select
-    assert landing.chooser == "user"  # the user's gate, as for every worker
+    # Delegated to the leader, as for every worker -- the route itself is
+    # pinned in test_landing_is_decided_by_the_session_above_not_by_a_person.
+    assert landing.chooser == "delegate"
     assert landing.options["request"].next == "handoff"
     assert landing.options["hold"].next == "wrapup"
 
@@ -908,3 +910,99 @@ def test_both_leader_layers_route_a_crowded_area_through_improv_mid():
         assert "improv-mid" in integrate
         assert "--rebase-merges" in integrate
         assert "--merged" in integrate
+
+
+def _landing_route(wf):
+    """The landing select's candidate roles/scopes and its fallback."""
+    sel = wf.steps["landing"].select
+    assert sel.chooser == "delegate", (
+        "landing is a delegated decision, not a human gate or a self-decision"
+    )
+    return (
+        [(c.role, c.scope) for c in sel.delegate.candidates],
+        sel.delegate.otherwise,
+        sel.delegate.timeout,
+    )
+
+
+@pytest.mark.parametrize(
+    "name, roles",
+    [
+        # A worker's parent is a mid worker (role ``worker``) in a stacked
+        # formation and the leader in a flat one; the groups are tried in
+        # order, so the same file covers both shapes.
+        ("improv-worker", [("worker", model.SCOPE_ANCESTOR),
+                           ("leader", model.SCOPE_ANCESTOR)]),
+        # A mid worker is only ever spawned by the leader.
+        ("improv-mid", [("leader", model.SCOPE_ANCESTOR)]),
+    ],
+)
+def test_landing_is_decided_by_the_session_above_not_by_a_person(name, roles):
+    """``landing`` must ask the owner of the integration queue, not a human.
+
+    Neither option is irreversible for the run that reaches this step:
+    ``request`` ends in ``integration-request``/``handoff``, which forbid a
+    master merge outright, so it only puts the branch in the upper session's
+    queue — and ``hold`` returns to that same queue through the wrapup
+    ``HOLD:`` comment and fyi. So the human gate that used to stand here
+    guarded nothing; master is guarded by the leader's exclusive merge and
+    the post-merge full sweep. The leader's own ``integrate`` had already
+    dropped its user gate for the *heavier* action, which left the lighter
+    one — asking to be queued — as the only thing still stopping for a
+    person every round.
+
+    It is not ``chooser: agent`` either: ``hold`` skips the rebase and the
+    evidence bundle, so chooser and beneficiary would be the same party.
+    ``scope: ancestor`` keeps it that way from the other side — a run cannot
+    stand up a descendant to approve itself.
+    """
+    wf = model.load(dict(state_mod.bundled_workflows())[name])
+    candidates, otherwise, timeout = _landing_route(wf)
+    assert candidates == roles
+    # Nobody above, or nobody answering in time, and it is a person's call
+    # again -- that is the only place this decision is still the user's.
+    assert otherwise == model.OTHERWISE_HUMAN
+    assert timeout and timeout > 0, "an unanswered delegation must reach a human"
+
+
+def test_the_project_override_worker_lands_through_the_same_delegation():
+    """The override shadows the bundled worker here, so it must match it.
+
+    Otherwise this repository's own rounds would keep stopping for a person
+    at ``landing`` while every other repository's did not -- one name, two
+    policies, and the drift invisible until someone waits.
+    """
+    candidates, otherwise, _ = _landing_route(
+        model.load(PROJECT_OVERRIDES / "improv-worker.yaml")
+    )
+    assert candidates == [
+        ("worker", model.SCOPE_ANCESTOR),
+        ("leader", model.SCOPE_ANCESTOR),
+    ]
+    assert otherwise == model.OTHERWISE_HUMAN
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_leader_is_told_that_a_delegated_decision_is_its_own(layer):
+    """``standby`` must not read a landing ask as somebody else's gate.
+
+    The same step already says ``approve/select/goto/abort`` are a person's
+    doors and never the leader's to walk through. A delegated decision
+    arrives at the same session and looks adjacent, but it is the opposite
+    case: the workflow named the leader as the one who answers. Without a
+    line separating them, the rule against stepping on human gates reads as
+    "leave the worker's ask alone" -- and the worker waits out its timeout
+    for a person the change was meant to stop calling.
+    """
+    if layer == "bundled":
+        wf = model.load(dict(state_mod.bundled_workflows())["improv-leader"])
+    else:
+        wf = model.load(PROJECT_OVERRIDES / "improv-leader.yaml")
+
+    standby = wf.steps["standby"].instructions
+    assert "answer" in standby, "standby never names the tool that answers an ask"
+    assert "asks" in standby
+    assert "내 결정이다" in standby, (
+        "standby does not distinguish a decision delegated TO the leader "
+        "from a human gate it must not touch"
+    )
