@@ -124,6 +124,10 @@ new Function(
   + slice("fmtAge") + slice("ctxShort") + slice("ctxAgeOf")
   + slice("ctxKnowable") + slice("ctxSentence") + slice("ctxBreakdown")
   + slice("ctxTooltip") + slice("ctxNoteOnRow") + domLine[0] + "\n"
+  // The gauge line now names the model that the count was taken on, so it
+  // needs the shortener too. What that name is, and where it lands, is
+  // railmodel_check's subject; here it is only a call that has to resolve.
+  + slice("modelShort")
   + slice("ctxRailLine") + slice("refreshSessions")
   + `
 Object.assign(exports, {
