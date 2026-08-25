@@ -18,7 +18,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import daemon_client, store
-from . import cflow_clock, paths, runtime_state
+from . import cflow_clock, paths, resume, runtime_state
 from .api import build_app, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -127,6 +127,11 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     ping_clock.start()
     event_clock = cflow_clock.RunEventClock(manager, mesh_manager)
     event_clock.start()
+    # Last, and only now: the sessions restore brought back are alive but
+    # nothing is driving them. Started after the server is up because a nudge
+    # can send an agent straight back to the API it was using.
+    resume_nudge = resume.ResumeNudge(manager, manager.resumed_busy)
+    resume_nudge.start()
 
     try:
         await app["shutdown_event"].wait()
@@ -149,6 +154,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
                 await uplink_task
             except (asyncio.CancelledError, Exception):
                 pass
+        await resume_nudge.shutdown()
         await event_clock.shutdown()
         await ping_clock.shutdown()
         await reminder_clock.shutdown()

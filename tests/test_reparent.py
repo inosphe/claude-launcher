@@ -42,6 +42,11 @@ class _Fake:
         self.sdef = SessionDef(name=name, harness="py", parent=parent)
         self.exited = exited
 
+    def status(self, threshold=None) -> str:
+        # persist() asks what each session was doing, to record whether a
+        # restart interrupted a turn here (see daemon/resume.py).
+        return "exited" if self.exited else "idle"
+
 
 def _tree() -> SessionManager:
     """lead -> (w1 -> w1a, w2), plus a root ``solo``."""

@@ -208,6 +208,12 @@ DAEMON_DEFAULTS = {
         "This run has not moved in a long time and nothing is holding it. "
         "Pick it back up, or say what you are waiting for."
     ),
+    # The resume nudge's machine switch: after a daemon restart, whether the
+    # sessions that were mid-turn when it went down are told to carry on.
+    # Restored sessions come back alive but idle — nothing is driving them —
+    # and this is what re-starts them. Read LIVE, like the keys above, but
+    # only ever at restore, so an edit applies to the next restart.
+    "resume_nudge": True,
 }
 
 
