@@ -680,12 +680,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .scroll-chip { color: #9ecbff; border-color: #1f4272; cursor: default; }
 /* The briefing card's strip, between the header and the terminal: padding
    and a rule like the queued strip's, in the panel's own grey so a summary
-   reads as something to read, not as a wait the reader caused. */
+   reads as something to read, not as a wait the reader caused. The card
+   spans the strip — the session's own width, like the terminal below it;
+   the 760px clamp the rail's card wears would read as a floating box here. */
 #term-brief-pane {
   flex: none; padding: 10px 14px; border-bottom: 1px solid #2a2e36;
   background: #161b22;
 }
-#term-brief-pane .sess-brief { margin: 0; max-width: 760px; }
+#term-brief-pane .sess-brief { margin: 0; }
 /* Queued deliveries: the strip between the header and the terminal saying
    the daemon is holding messages for this session. Amber like the busy
    badge — it is the same fact (something must finish before the next thing

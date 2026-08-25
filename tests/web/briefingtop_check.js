@@ -268,6 +268,19 @@ function findTag(node, tag) {
          true]);
   ctx.setLLM(true);
 
+  /* The pane's card spans the strip — the session's own width, like the
+     terminal below it. The rail's card keeps its own placement rules; a
+     max-width clamp on the pane's card is the regression this guards. */
+  const css = fs.readFileSync(
+    path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "static",
+              "style.css"),
+    "utf8"
+  );
+  const paneCard = css.match(/#term-brief-pane \.sess-brief \{([^}]*)\}/);
+  check("the pane's card rule exists", !!paneCard, true);
+  check("and clamps no width — it spans the session's",
+        paneCard ? !/max-width/.test(paneCard[1]) : false, true);
+
   if (failures) {
     console.error(`${failures} check(s) failed`);
     process.exit(1);
