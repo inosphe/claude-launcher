@@ -180,6 +180,58 @@ def test_a_receipt_from_one_worktree_answers_for_another(repo, receipts):
     )
 
 
+def test_a_tree_standing_on_another_commit_refuses_to_produce_a_receipt(
+    repo, receipts, capsys
+):
+    """The bug this file shipped with, and the one a clean tree hides.
+
+    The suite runs in the working tree; the receipt is filed under
+    ``--branch``'s sha. Nothing tied those together, so running from a
+    feature branch filed a receipt naming ``master`` -- reporting master red
+    over a failure that only existed on the branch. It happened for real on
+    the round that wrote this tool, and the receipt looked entirely healthy:
+    a commit, a tree, counts, a command.
+
+    ``git status`` cannot catch this. The tree in that incident was clean;
+    it was a clean checkout of a *different* commit. So HEAD is compared
+    directly, and before the dirty check, because naming the wrong commit is
+    worse than naming a smudged one.
+    """
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "b.txt").write_text("two\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "only on the branch")
+
+    assert _run(repo, receipts, "--command", GREEN) == sweep.CANNOT_TELL
+    err = capsys.readouterr().err
+    assert "refusing to sweep" in err
+    assert "nothing tested" in err  # says why, not just that
+
+    commit = _git(repo, "rev-parse", "master").strip()
+    assert not sweep.receipt_path(repo, commit, receipts).exists(), (
+        "a receipt was filed for a commit the working tree was not on"
+    )
+
+
+def test_the_head_check_precedes_the_dirty_check(repo, receipts, capsys):
+    """Both wrong at once must report the wrong *commit*.
+
+    A message about uncommitted files sends someone to `git stash`, which
+    does nothing about standing on the wrong branch -- they would clean the
+    tree and file the same lie.
+    """
+    _git(repo, "checkout", "-q", "-b", "feature")
+    (repo / "b.txt").write_text("two\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "only on the branch")
+    (repo / "wip.py").write_text("x = 1\n", encoding="utf-8")
+
+    assert _run(repo, receipts, "--command", GREEN) == sweep.CANNOT_TELL
+    err = capsys.readouterr().err
+    assert "nothing tested" in err
+    assert "refusing to sweep" in err and "uncommitted" not in err
+
+
 def test_a_dirty_tree_refuses_to_produce_a_receipt(repo, receipts, capsys):
     """The failure this repository actually shipped, made impossible.
 

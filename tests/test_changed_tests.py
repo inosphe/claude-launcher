@@ -96,6 +96,23 @@ def _select(repo: Path) -> list:
     return changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
 
 
+def _seed_on_base(repo: Path, files: dict) -> None:
+    """Put files in the *base* commit, not in the branch's change.
+
+    Rules 1 and 3a would otherwise be impossible to tell apart: a test module
+    written as part of the round is selected by rule 1 no matter what it
+    contains, so a case meaning to prove "3a found this by its content" would
+    pass on a file 3a never looked at.
+    """
+    _git(repo, "checkout", "-q", "master")
+    for rel, text in files.items():
+        _write(repo, rel, text)
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "seed")
+    _git(repo, "checkout", "-q", "feature")
+    _git(repo, "rebase", "-q", "master")
+
+
 def test_a_changed_test_module_is_selected(repo):
     _write(repo, "tests/test_mesh.py", "x = 2\n")
     _git(repo, "commit", "-qam", "edit the test")
@@ -123,34 +140,46 @@ def test_a_changed_tools_script_pulls_in_its_test(repo):
     assert _select(repo) == ["tests/test_deploy_check.py"]
 
 
-def test_a_changed_workflow_yaml_pulls_in_the_tests_that_guard_it(repo):
-    """Rule 3, and the gap that produced it.
+def test_a_changed_yaml_pulls_in_every_test_that_names_it(repo):
+    """Rule 3a, and the regression that forced it to be derived.
 
-    Rule 2 can only follow a naming convention between ``.py`` files, so a
-    round editing only workflow yaml selected nothing -- while two test
-    modules existed for exactly those files. The round that wrote this
-    script hit it on itself: its own gate skipped
-    ``test_project_layer_override`` until the yaml was mapped.
+    Rule 3 was first a hand-kept list of the tests guarding the workflows.
+    It was wrong on its first outing: it missed ``test_cflow_window``, whose
+    assertion about the leader's sweep gate that same round had just broken.
+    The gate passed the round; a full sweep found the failure.
 
-    The failure this guards against is the quiet kind. The two workflow
-    layers each stay valid yaml while drifting apart, and the leader once
-    ran for days without a preflight step the packaged copy had gained.
+    A test that pins a yaml file *names* it, in order to load it. So the
+    relationship is already written in the test's own source and can be read
+    out of it -- there is no list to forget to update when a fourth test
+    starts pinning the same workflow.
     """
-    _write(repo, "tests/test_sync_project_layer.py")
-    _write(repo, "tests/test_project_layer_override.py")
-    _write(repo, "src/claude_launcher/workflows/improv-worker.yaml", "name: w\n")
-    _git(repo, "add", "-A")
+    _seed_on_base(
+        repo,
+        {
+            "tests/test_alpha.py": 'load("improv-worker.yaml")\n',
+            "tests/test_beta.py": "# also pins improv-worker here\n",
+            "tests/test_elsewhere.py": "nothing to do with it\n",
+            "src/claude_launcher/workflows/improv-worker.yaml": "name: w\n",
+        },
+    )
+    _write(repo, "src/claude_launcher/workflows/improv-worker.yaml", "name: w2\n")
     _git(repo, "commit", "-qam", "edit a workflow")
 
-    assert _select(repo) == [
-        "tests/test_project_layer_override.py",
-        "tests/test_sync_project_layer.py",
-    ]
+    picked = _select(repo)
+    assert "tests/test_alpha.py" in picked
+    assert "tests/test_beta.py" in picked
+    assert "tests/test_elsewhere.py" not in picked
 
 
-def test_the_project_layer_copy_of_a_workflow_counts_too(repo):
-    """Both layers, because either one drifting is the failure."""
-    _write(repo, "tests/test_sync_project_layer.py")
+def test_a_test_that_globs_the_directory_is_still_reached(repo):
+    """Rule 3b, for the case 3a provably cannot see.
+
+    ``tests/test_sync_project_layer.py`` discovers the overrides through
+    ``sync.overrides()``, which globs the directory -- it never writes
+    "improv-worker" anywhere. Grepping for the name will never find it, so
+    this one stays in a table, and the table stays that small.
+    """
+    _write(repo, "tests/test_sync_project_layer.py", "names = sync.overrides()\n")
     _write(repo, ".claunch/workflows/improv-leader.yaml", "name: l\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qam", "edit the override")
@@ -158,12 +187,31 @@ def test_the_project_layer_copy_of_a_workflow_counts_too(repo):
     assert "tests/test_sync_project_layer.py" in _select(repo)
 
 
-def test_a_companion_that_does_not_exist_is_not_selected(repo):
+def test_a_listed_glob_discoverer_that_is_absent_is_not_selected(repo):
     """The table names files, and a named file may be absent in a checkout
     that predates it -- selecting it would fail the gate on its own table."""
     _write(repo, "src/claude_launcher/workflows/improv-worker.yaml", "name: w\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qam", "edit a workflow, no guards present")
+
+    assert _select(repo) == []
+
+
+def test_a_very_short_stem_does_not_drag_in_the_whole_directory(repo):
+    """Substring matching on a two-letter name would hit almost every file.
+
+    Rule 3a widens on purpose, but widening to "everything" is just the full
+    suite with extra steps -- which is the thing this script exists to stop.
+    """
+    _seed_on_base(
+        repo,
+        {
+            "tests/test_alpha.py": "the letter a appears here\n",
+            "docs/a.yaml": "x\n",
+        },
+    )
+    _write(repo, "docs/a.yaml", "y\n")
+    _git(repo, "commit", "-qam", "edit a short-named file")
 
     assert _select(repo) == []
 

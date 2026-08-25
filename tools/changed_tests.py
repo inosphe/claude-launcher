@@ -30,13 +30,23 @@ Selection, in two rules, both checkable by eye:
    ``tools/deploy_check.py`` and ``tests/test_deploy_check.py``. This is a
    convention, not a guarantee -- 31 of 79 source modules have a same-named
    test -- so it only ever *widens* the selection and never narrows it.
-3. **A changed file that is not python pulls in whatever guards it**, from
-   the explicit table in :data:`COMPANIONS`. Rule 2 can only follow a naming
-   convention between ``.py`` files, so without this a round that edits only
-   workflow yaml selects nothing -- even though two test modules exist for
-   exactly those files. That is not hypothetical: the round that introduced
-   this script edited both workflow layers, and until this rule was added
-   its own gate skipped the tests guarding them.
+3. **A changed file that is not python pulls in whatever guards it.** Rule 2
+   can only follow a naming convention between ``.py`` files, so without this
+   a round that edits only workflow yaml selects nothing -- even though
+   several test modules exist for exactly those files. Two halves:
+
+   a. any test module whose source *mentions the file's stem* (a test that
+      pins a yaml names it in order to load it), and
+   b. the few that find it by globbing its directory and so never name it,
+      listed in :data:`GLOB_DISCOVERERS`.
+
+   Rule 3 arrived in two goes, and the second one is the lesson. It was
+   first written as a hand-kept list of the guarding tests -- and that list
+   was wrong on its first outing, missing ``test_cflow_window``, whose
+   assertion about the leader's sweep gate the very same round had broken.
+   The gate passed; a full sweep found the regression. A relationship that
+   is written down in the files should be read out of the files, so 3a reads
+   it, and 3b is kept as small as the cases 3a genuinely cannot see.
 
 Changes are read against the merge base with ``--base`` (default ``master``),
 plus anything uncommitted, so the gate covers work that is staged, committed,
@@ -83,10 +93,21 @@ MAX_WORKERS = 4
 #: on its own was valid. ``test_sync_project_layer`` and
 #: ``test_project_layer_override`` are what notice; they just have no
 #: same-named source to be pulled in by.
-COMPANIONS = (
+#: Rule 3b: the few tests that reach a file without ever naming it, because
+#: they discover it by globbing its directory. Rule 3a cannot see those, and
+#: no amount of grepping will make it.
+#:
+#: This table is hand-maintained, so keep it as small as this. The first
+#: version of rule 3 was a hand-written list of *all* the guarding tests, and
+#: it was wrong in both directions on its first outing -- it named two tests
+#: that do not touch the workflows and missed five that do, including the one
+#: whose assertion the same round had just broken. That regression went
+#: through the gate and was caught only by a full sweep. Hence 3a: the
+#: relationship is in the files, so read it from the files.
+GLOB_DISCOVERERS = (
     (
         ("src/claude_launcher/workflows/", ".claunch/workflows/"),
-        ("tests/test_sync_project_layer.py", "tests/test_project_layer_override.py"),
+        ("tests/test_sync_project_layer.py",),
     ),
 )
 
@@ -138,10 +159,35 @@ def select(repo: Path, paths: List[str]) -> List[str]:
                 picked.add(twin.as_posix())
             continue
         posix = p.as_posix()
-        for prefixes, guards in COMPANIONS:
+        picked.update(mentioning(repo, p.stem))          # 3a
+        for prefixes, guards in GLOB_DISCOVERERS:        # 3b
             if posix.startswith(prefixes):
                 picked.update(g for g in guards if (repo / g).is_file())
     return sorted(picked)
+
+
+def mentioning(repo: Path, stem: str) -> List[str]:
+    """Rule 3a: test modules whose source mentions ``stem``.
+
+    Derived rather than remembered. A test that pins a yaml file names it to
+    load it, so the reference is in the file and can be read out of it -- no
+    table to forget to update when a fourth test starts pinning the same
+    workflow.
+
+    Widening only, like rule 2: a test that merely mentions the name in prose
+    gets selected and costs a few seconds. The failure worth avoiding is the
+    other direction.
+    """
+    if len(stem) < 4:  # too short to be a distinctive reference
+        return []
+    hits = []
+    for path in sorted((repo / "tests").glob("test_*.py")):
+        try:
+            if stem in path.read_text(encoding="utf-8", errors="replace"):
+                hits.append(f"tests/{path.name}")
+        except OSError:
+            continue
+    return hits
 
 
 def build_command(files: List[str]) -> List[str]:

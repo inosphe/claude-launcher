@@ -346,5 +346,17 @@ def test_the_leader_batches_integration_and_sweeps_after_a_gate(layer):
     assert "subagent" in wf.steps["sweep"].instructions
     assert "sweep N/M" in wf.steps["sweep"].instructions
     if layer == "project":
-        assert wf.steps["sweep"].verify is not None
-        assert "pytest" in wf.steps["sweep"].verify.command
+        # Armed, but deliberately NOT with the suite. This assertion used to
+        # read `"pytest" in ...`, from when the step's verify *was* the sweep
+        # — which the engine runs synchronously on leaving the step, so the
+        # leader ran a 178-second sweep inside the turn this same workflow
+        # says it never sweeps in. The suite moved into a spawned subagent
+        # (`tools/sweep.py run`) and this gate reads the receipt it leaves.
+        # tests/test_sweep.py owns the behaviour; what belongs here is that
+        # the step is still armed and still is not the sweep.
+        verify = wf.steps["sweep"].verify
+        assert verify is not None
+        assert "pytest" not in verify.command, (
+            "the sweep gate must not run the suite in the leader's turn"
+        )
+        assert "sweep.py check" in verify.command

@@ -44,14 +44,24 @@ deliberate: the leader sweeps in a throwaway worktree (a short path, and one
 nobody else has uncommitted files in) and the receipt still answers for
 master in the main checkout.
 
-**A dirty tree cannot produce a receipt.** A sweep in a checkout holding
-somebody else's uncommitted work is not a verdict about the commit -- it is a
-verdict about that commit plus whatever was lying around. This is not
-hypothetical: a leader's sweep in the shared checkout collected four foreign
-tests and reported 1562/1563 where clean master had 1559, and six issues were
-closed citing the contaminated number before another session caught it.
-``run`` refuses to write a receipt when ``git status --porcelain`` is
-non-empty, and records the fact either way.
+**The tree must actually BE the commit the receipt names.** Two ways it can
+fail to be, and both were seen for real:
+
+* *Dirty.* A sweep in a checkout holding somebody else's uncommitted work is
+  a verdict about that commit plus whatever was lying around. A leader's
+  sweep in the shared checkout collected four foreign tests and reported
+  1562/1563 where clean master had 1559; six issues were closed citing the
+  contaminated number before another session caught it.
+* *The wrong commit entirely.* The suite runs in the working tree while the
+  receipt is filed under ``--branch``'s sha, so running it from a feature
+  branch files a receipt naming a commit nothing tested. That happened on
+  the round that wrote this file: a red receipt against ``master``, from a
+  tree that was not master, while master was fine. A clean ``git status``
+  does not catch it -- the tree was a perfectly clean checkout of something
+  else.
+
+So ``run`` refuses both, and checks HEAD first, because standing on the
+wrong commit is the worse of the two.
 
 Exit codes match ``tools/deploy_check.py``: 0 = confirmed, 1 = no, 2 = could
 not tell.
@@ -167,9 +177,31 @@ def cmd_run(args) -> int:
     try:
         commit = _git(repo, "rev-parse", args.branch)
         tree = _git(repo, "rev-parse", args.branch + "^{tree}")
+        head = _git(repo, "rev-parse", "HEAD")
         dirty = _git(repo, "status", "--porcelain")
     except LookupError as exc:
         print(f"cannot tell: {exc}", file=sys.stderr)
+        return CANNOT_TELL
+
+    # The suite runs in this working tree, but the receipt is filed under
+    # --branch's sha. If those are different commits the receipt is a lie in
+    # the most useful-looking form: it names a commit nobody tested. This
+    # happened on the very round that wrote this file -- a run in a feature
+    # worktree filed a red receipt against master, and master was fine.
+    #
+    # A clean tree is not enough to catch it: `git status` was empty, because
+    # the tree was a perfectly clean checkout of a *different* commit. So the
+    # identity has to be checked directly, and it is checked before the
+    # dirty test because standing on the wrong commit is the worse error.
+    if head != commit:
+        print(
+            f"refusing to sweep: {repo} is at {head[:12]}, but this run would "
+            f"file its receipt against {args.branch} = {commit[:12]}. The "
+            f"suite runs in the working tree, so the receipt would name a "
+            f"commit nothing tested. Check out {args.branch} (a scratch "
+            f"worktree detached at it is the cheap way) and run this there.",
+            file=sys.stderr,
+        )
         return CANNOT_TELL
 
     if dirty and not args.allow_dirty:
