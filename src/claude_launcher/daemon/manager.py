@@ -90,6 +90,12 @@ class SessionManager:
         argv, env, cwd = harness_mod.build_command(
             session.sdef, restoring=restoring, opening=opening
         )
+        if restoring:
+            # The relaunched program gets a brand-new screen, and the daemon's
+            # pyte history is the only scrollback the web terminal has. Replay
+            # the previous run's log into it before the new child writes a
+            # byte, or the restart silently costs every viewer their wheel.
+            session.seed_screen_from_log()
         session.start(argv, env, cwd)
         self.persist()
         return session

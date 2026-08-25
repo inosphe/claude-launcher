@@ -36,6 +36,13 @@ SAMPLE_INTERVAL = 0.4
 #: Rotate the raw output log beyond this size (a single .1 backup is kept).
 LOG_MAX_BYTES = 10 * 1024 * 1024
 
+#: How much of a session's log is replayed through pyte to rebuild its screen
+#: — for an exited record on first capture, and for a restored session getting
+#: its scrollback back (:meth:`Session.seed_screen_from_log`). Large enough for
+#: a full-screen TUI repaint, small enough that neither attaching nor a daemon
+#: restart stalls on it.
+REPLAY_TAIL_BYTES = 256 * 1024
+
 #: Gap between a paste and its submitting Enter (seconds), so the CR arrives in
 #: its own PTY read — see :meth:`Session.paste`. Measured against Claude Code:
 #: 0 never submits, 20ms already does; 150ms leaves room for a busy renderer.
@@ -295,6 +302,40 @@ class Session:
             # the new buffer after their xterm has consumed the escape, and a
             # viewer scrolled back into history is unfrozen against this.
             self._broadcast(("buffer", new_alt))
+
+    def seed_screen_from_log(self) -> None:
+        """Give a restored session back the scrollback its predecessor had.
+
+        The daemon's pyte history is the only scrollback the web terminal has
+        — the browser's xterm is built with ``scrollback: 0`` because a viewer
+        that just attached has nothing in it, so the wheel is served entirely
+        by :meth:`ScreenState.repaint_sequence` windowing over this history.
+        A restart used to start that history at nothing: the relaunched
+        session got a brand-new :class:`ScreenState` and nobody replayed the
+        log into it, so the wheel had nothing to scroll while megabytes of it
+        sat on disk. (``DeadSession`` has replayed its log all along, which is
+        why an *exited* record could be scrolled and a restored one could not.)
+
+        The tail is replayed, the grid it ends on is rolled up into history
+        (the program that drew it is gone), and the modes it asserted are
+        dropped — see :meth:`ScreenState.forget_modes`. Called before the
+        harness is started, so the first bytes of the new program land on a
+        blank grid with the old lines behind it.
+        """
+        path = paths.session_log(self.sdef.name)
+        try:
+            size = path.stat().st_size
+            with open(path, "rb") as fh:
+                if size > REPLAY_TAIL_BYTES:
+                    fh.seek(size - REPLAY_TAIL_BYTES)
+                data = fh.read()
+        except OSError:
+            return  # no log (or unreadable): an empty screen is honest enough
+        if not data:
+            return
+        self.screen.feed(data)
+        self.screen.scroll_grid_into_history()
+        self.screen.forget_modes()
 
     async def screen_synced(self) -> None:
         """Wait for the grid to catch up with the bytes received so far.
@@ -885,10 +926,6 @@ class DeadSession:
     :class:`SessionGone` for anything that needs a live child.
     """
 
-    #: How much of the raw log is replayed to rebuild the last screen: enough
-    #: for a full-screen TUI repaint, small enough that attaching stays quick.
-    REPLAY_TAIL_BYTES = 256 * 1024
-
     exited = True
 
     def __init__(
@@ -933,8 +970,8 @@ class DeadSession:
         try:
             size = path.stat().st_size
             with open(path, "rb") as fh:
-                if size > self.REPLAY_TAIL_BYTES:
-                    fh.seek(size - self.REPLAY_TAIL_BYTES)
+                if size > REPLAY_TAIL_BYTES:
+                    fh.seek(size - REPLAY_TAIL_BYTES)
                 screen.feed(fh.read())
         except OSError:
             pass  # no log (or unreadable): an empty screen is honest enough

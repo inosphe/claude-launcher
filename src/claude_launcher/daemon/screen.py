@@ -134,6 +134,31 @@ class ScreenState:
                 self.alt_screen = match.group(2) == b"h"
         self._mode_tail = window[-_TAIL:]
 
+    def forget_modes(self) -> None:
+        """Drop the private modes, keeping the grid and its scrollback.
+
+        For a screen seeded by replaying an old log: the modes in it were
+        asserted by a program that is gone, and the one about to draw has not
+        said anything yet. Carrying them over would encode ``send-keys``
+        arrows for a DECCKM nobody turned on, and would make the repaint claim
+        an alternate screen the new program may not have entered.
+        """
+        self.app_cursor_keys = False
+        self.bracketed_paste = False
+        self.alt_screen = False
+        self._mode_tail = b""
+
+    def scroll_grid_into_history(self) -> None:
+        """Push the whole visible grid off the top, leaving a blank screen.
+
+        What a replayed log is worth to a restored session is its
+        *scrollback*, not its last frame: the program that drew that frame is
+        gone and the new one is about to paint its own. Rolling the grid up
+        turns those rows into history — reachable by the wheel — instead of
+        leaving them on screen pretending to be live.
+        """
+        self.feed_render(b"\r\n" * self._screen.lines)
+
     def resize(self, cols: int, rows: int) -> None:
         self._screen.resize(lines=rows, columns=cols)
 
@@ -154,11 +179,13 @@ class ScreenState:
         cols = self._screen.columns
         out: List[str] = []
         for line in self._screen.history.top:
-            # History lines keep the width they had when they scrolled off, so
-            # a resize that grew the screen can leave them shorter than cols.
-            out.append(
-                "".join(line[x].data for x in range(min(len(line), cols))).rstrip()
-            )
+            # A row is a column-keyed mapping, not a list: ``len(line)`` counts
+            # the cells that were *written*, which is smaller than the row's
+            # width whenever the program drew it sparsely (a cursor jump to a
+            # right-aligned element leaves the cells between untouched). The
+            # width is ``cols``; reading past the written cells yields the
+            # default char without storing it.
+            out.append("".join(line[x].data for x in range(cols)).rstrip())
         return out
 
     @property
@@ -251,9 +278,17 @@ class ScreenState:
 
     def _row_with_attrs(self, row) -> str:
         cols = self._screen.columns
-        # History lines keep the width they scrolled off with, so a resize
-        # that grew the screen can leave them shorter than cols.
-        end = min(cols, len(row))
+        # ``row`` is pyte's StaticDefaultDict — a mapping keyed by column, so
+        # ``len(row)`` is the number of cells ever written, NOT the row's
+        # width. A row drawn sparsely (a cursor jump past untouched cells to a
+        # right-aligned element) has far fewer written cells than its rightmost
+        # column, and clamping to that count silently drops everything to the
+        # right of it: the live PTY bytes carry that region fine, but every
+        # repaint rebuilt from the grid loses it until the program redraws.
+        # The width is ``cols``; the trim below walks back over the blank tail,
+        # and reading an unwritten cell yields the default char without
+        # storing it, so the mapping does not grow.
+        end = cols
         while end and row[end - 1].data in ("", " ") and _sgr(row[end - 1]) == "0":
             end -= 1
         out: List[str] = []

@@ -370,3 +370,64 @@ def test_pending_output_still_renders_when_the_session_ends():
         return line
 
     assert asyncio.run(run()) == "last words"
+
+
+# --------------------------------------------------------------------------- #
+# sparse rows: a row is a column-keyed mapping, not a list
+#
+# A TUI that jumps the cursor to a right-aligned element leaves the cells in
+# between untouched, so the row holds far fewer written cells than its
+# rightmost column. Sizing the repaint by that count drops everything to the
+# right of it — the live PTY bytes carry the region fine, so it reads as "part
+# of the screen is missing until something redraws it".
+# --------------------------------------------------------------------------- #
+def _sparse_row_screen(cols=80):
+    s = ScreenState(cols, 5)
+    s.feed(b"\x1b[2J\x1b[H")
+    s.feed(b"LEFT")                  # columns 0-3
+    s.feed(b"\x1b[1;60HRIGHTEDGE")   # a jump to column 59, nothing in between
+    return s
+
+
+def test_repaint_keeps_content_right_of_the_written_cell_count():
+    s = _sparse_row_screen()
+    row = s._screen.buffer[0]
+    # The premise: far fewer written cells than the rightmost column.
+    assert len(row) < max(row) < s._screen.columns
+    seq = s.repaint_sequence(0)
+    assert b"LEFT" in seq
+    assert b"RIGHTEDGE" in seq
+
+
+def test_repaint_of_a_sparse_row_does_not_grow_the_row_mapping():
+    """Reading an unwritten cell must not store one, or the grid bloats."""
+    s = _sparse_row_screen()
+    before = len(s._screen.buffer[0])
+    s.repaint_sequence(0)
+    assert len(s._screen.buffer[0]) == before
+
+
+def test_repaint_still_trims_the_blank_tail():
+    s = _sparse_row_screen()
+    row = s.repaint_sequence(0).split(b"\r\n")[0]
+    # Nothing is emitted past the last glyph, so the row ends at RIGHTEDGE.
+    assert row.rstrip(b"\x1b[0m").endswith(b"RIGHTEDGE")
+    assert not row.endswith(b" ")
+
+
+def test_render_history_keeps_content_right_of_the_written_cell_count():
+    s = ScreenState(80, 2)
+    s.feed(b"LEFT\x1b[1;60HRIGHTEDGE\r\n")
+    s.feed(b"a\r\nb\r\nc")                 # push the sparse row into history
+    joined = "".join(s.render_history())
+    assert "LEFT" in joined
+    assert "RIGHTEDGE" in joined
+
+
+def test_repaint_of_a_sparse_history_row_survives_the_scroll():
+    s = ScreenState(80, 2)
+    s.feed(b"LEFT\x1b[1;60HRIGHTEDGE\r\n")
+    s.feed(b"a\r\nb\r\nc")
+    assert s.history_len >= 1
+    seq = s.repaint_sequence(s.history_len)
+    assert b"RIGHTEDGE" in seq
