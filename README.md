@@ -2263,9 +2263,26 @@ Defaults:
 `cflow_reminder_interval 600` — these two keys are read live, no restart —
 with a per-run override on the run's web page (or the POST above).
 
+**Resuming what a restart stopped.** A daemon restart brings restorable
+sessions back (`--resume` of the pinned conversation), but a restored session
+is *alive and idle*: the turn it was in the middle of died with the old
+daemon, and nothing starts the next one — an agent only acts when something is
+put in front of it. So the daemon puts something there. The sessions that were
+**working** in the moment before shutdown (recorded alongside `was_running` in
+`sessions.json`) are told, once, that the gap in their conversation was a
+restart and to carry on. Two things narrow it: a session that was idle before
+the restart hears nothing (its agent had finished — "continue" would invent
+work), and neither does one whose cflow run is parked behind a human gate, a
+user's selection or somebody else's answer (the run is stopped exactly where
+the workflow wants it, and the agent cannot open that guardrail anyway). A run
+on a `step` or `select` — and a session with no run at all — is nudged. The
+nudge also waits for the TUI to be able to take it, and is dropped if the
+session starts working on its own first. `claunch daemon config resume_nudge
+true|false` (read at restore, so an edit applies to the next restart).
+
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`,
-`cflow_reminder`, `cflow_reminder_interval`); runtime
+`cflow_reminder`, `cflow_reminder_interval`, `resume_nudge`); runtime
 state (pid/port file, auth token, session logs) stays machine-local under
 `~/.claude-launcher/daemon/`.
 

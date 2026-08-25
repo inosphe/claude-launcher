@@ -28,7 +28,7 @@ from . import harness as harness_mod
 from . import mesh_roles
 from . import paths
 from .harness import SessionDef
-from .session import DeadSession, Session
+from .session import STATUS_BUSY, DeadSession, Session
 
 #: Either a live session or the record left behind by one that ended.
 AnySession = Union[Session, DeadSession]
@@ -46,6 +46,11 @@ class SessionManager:
         self.scrollback = scrollback
         self.restore_default = restore_default
         self._sessions: Dict[str, AnySession] = {}
+        #: Names :meth:`restore_all` relaunched that the previous daemon
+        #: recorded as *working* — the audience for the resume nudge
+        #: (:mod:`claude_launcher.daemon.resume`). Written once per process,
+        #: at restore; empty on a daemon that restored nothing.
+        self.resumed_busy: List[str] = []
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -758,6 +763,13 @@ class SessionManager:
                 {
                     "def": session.sdef.to_dict(),
                     "was_running": not session.exited,
+                    # Whether an agent was mid-turn here. persist() runs
+                    # first in shutdown_all, before anything is torn down,
+                    # so at a restart this is what the session was doing in
+                    # the last moment before the daemon went down — the one
+                    # question a restored-but-idle terminal cannot answer
+                    # about itself (see daemon/resume.py).
+                    "was_busy": session.status() == STATUS_BUSY,
                     "exit_code": session.exit_code,
                     # carried across restarts so a retired record keeps
                     # answering like the session it was
@@ -783,7 +795,11 @@ class SessionManager:
         as exited records the user can respawn (or clear) later.
 
         Returns the names whose relaunch failed — they are listed as exited
-        records, so nothing is lost by retrying or dropping them.
+        records, so nothing is lost by retrying or dropping them. The ones
+        that came back *and* were mid-turn when the previous daemon went down
+        are recorded in :attr:`resumed_busy`: a restored session is alive but
+        nothing is driving it, and that list is who should be told to carry
+        on (:mod:`claude_launcher.daemon.resume`).
         """
         path = paths.sessions_json()
         if not path.is_file():
@@ -803,6 +819,8 @@ class SessionManager:
             if sdef.restore and entry.get("was_running"):
                 try:
                     self.create(sdef, restoring=True)
+                    if entry.get("was_busy"):
+                        self.resumed_busy.append(sdef.name)
                     continue
                 except Exception:
                     failed.append(sdef.name)
