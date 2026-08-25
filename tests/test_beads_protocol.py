@@ -167,3 +167,130 @@ def test_the_mid_worker_parents_children_and_closes_only_those():
     # The only close a mid runs is on its own children, in the landing step.
     assert own.count("claunch beads close") == 1
     assert "부모 이슈는 닫지 않는다" in wf.steps["wrapup"].instructions
+
+
+# --------------------------------------------------------------------------- #
+# 기록은 코멘트에, 신호는 메시지에
+# --------------------------------------------------------------------------- #
+# The board became the system of record for work *items*; the evidence about
+# that work stayed on the wire, because the shared block said comments carry
+# pointers only while the landing step asked for a whole bundle in the
+# message. So both were written and only the message was paid for: in one
+# measured hour of a six-worker mesh (mesh-0824, seq 740..859) 438,243
+# characters were typed into terminals, and 54% of them were fyi/ack —
+# records that by their own intent asked nobody for anything. These pins keep
+# the two halves of the rule pointing the same way.
+#
+# Prose is asserted through _flat: the yaml wraps a sentence wherever the
+# column runs out, so a phrase pinned verbatim would break on a re-wrap that
+# changed nothing. Markers an agent greps for (LANDING REQUEST, STACK) are
+# pinned raw on purpose — those must survive on one line, or the instruction
+# teaches a wrapped marker.
+def _flat(text: str) -> str:
+    return " ".join(text.split())
+
+
+def test_the_block_sends_the_record_to_the_board_and_keeps_the_message_a_nudge():
+    b = _block(_bundled("improv-worker"))
+    flat = _flat(b)
+    assert "기록은 코멘트에, 신호는 메시지에" in flat
+    # the bundle has a home, and a way in that survives a long payload
+    assert "claunch beads comments add <id> -f <파일>" in flat
+    # ...and is not also spent on the wire
+    assert "같은 것을 메시지 본문에 다시 싣지 않는다" in flat
+    assert "nudge" in flat
+    # a shared convention is not a work item, but is still read back
+    assert "--type doc" in flat
+    # the one place the split does not stand up
+    assert "다른 머신의 멤버는 이 저장소의 보드에 닿지 않는다" in flat
+    # the clause that used to force the evidence into the message is gone
+    assert "포인터와 판정만" not in flat
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_worker_puts_its_evidence_in_a_comment_not_in_the_message(layer):
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    wf = model.load(path)
+    req = wf.steps["integration-request"].instructions
+    assert "LANDING REQUEST @ <tip>" in req      # grepped verbatim: keep it inline
+    assert "claunch beads comments add <id> -f <파일>" in _flat(req)
+    assert "메시지 본문에 다시 싣지 않는다" in _flat(req)
+    # done_when has to agree, or the step keeps passing on the old behaviour
+    dw = _flat(wf.steps["integration-request"].done_when)
+    assert "LANDING REQUEST" in dw and "nudge" in dw
+    # the completion report is what the parent decides landing on, so it goes
+    # to the board as well
+    commit = _flat(wf.steps["commit"].instructions)
+    assert "claunch beads comments add <id> -f <파일>" in commit
+    assert "nudge" in commit
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_leader_reads_the_queue_from_the_board_and_pulls_selectively(layer):
+    """Moving the bundle to the board is only half the saving — a leader that
+    then opens every comment has bought nothing. The nudge's value line is
+    what decides which one to open."""
+    path = (
+        _bundled("improv-leader") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-leader.yaml"
+    )
+    whole = _flat(path.read_text(encoding="utf-8"))
+    standby = model.load(path).steps["standby"].instructions
+    assert "LANDING REQUEST @ <tip>" in standby
+    flat = _flat(standby)
+    assert "claunch beads list --status in_review --json" in flat
+    assert "골라서 당긴다" in flat
+    # a certified rule is a doc issue with an id to broadcast, not prose
+    assert "--type doc" in flat
+    # and the table is the board's: the journal cross-check in `integrate` no
+    # longer claims mesh fyi is what builds it
+    assert "표는 mesh fyi로만 쌓이므로" not in whole
+
+
+def test_the_mid_worker_keeps_the_stack_table_on_the_board():
+    """The stack table changes on every landing. Sent as a message it is the
+    same table re-typed into the leader's terminal once per child."""
+    wf = model.load(_bundled("improv-mid"))
+    assert "STACK @ <베이스 tip>" in wf.steps["intake"].instructions
+    land = wf.steps["land"].instructions
+    assert "STACK @ <새 tip>" in land
+    assert "STACK @ <새 tip>" in wf.steps["land"].done_when
+    handoff = wf.steps["handoff"].instructions
+    assert "LANDING REQUEST @ <tip>" in handoff
+    assert "묶음을 메시지 본문에 다시 싣지 않는다" in _flat(handoff)
+    # restack is an event, not a record, so it stays on the wire — and the step
+    # says why, or the next edit moves it to the board along with the rest
+    assert "restack 공지" in _flat(land)
+    assert "사건이라 메시가 맞는 자리다" in _flat(land)
+
+
+# --------------------------------------------------------------------------- #
+# the mesh layer learns the same split
+# --------------------------------------------------------------------------- #
+# The board was wired into the daemon (daemon/beads.py) and into the three
+# workflows, but not into the layer that teaches an agent what to put in a
+# message — so the payload rule had nowhere to live and members sent whatever
+# they had in hand. These two pin the other end of it.
+def test_the_mesh_skill_teaches_where_a_record_goes():
+    from claude_launcher import mesh_install
+
+    md = mesh_install.SKILL_MD
+    assert "claunch beads" in md
+    assert "Records go to the board, not the wire." in md
+    assert "Then send the nudge." in md
+    assert "Events stay on the wire." in md
+    assert "another machine" in md               # the cross-machine exception
+    assert "claunch beads list --status in_review --json" in md
+
+
+def test_the_packaged_stances_know_a_record_has_a_home():
+    """A stance that never names the board leaves `mesh send` the only channel
+    an agent knows it has."""
+    from claude_launcher.daemon import mesh_roles
+
+    rs = mesh_roles.resolve()
+    assert "board" in rs.get("leader").stance
+    assert "board" in rs.get("worker").stance
