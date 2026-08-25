@@ -6,7 +6,16 @@ from __future__ import annotations
 
 import pytest
 
-from claude_launcher import credentials, lineage, profile, providers, runner, settings, store
+from claude_launcher import (
+    credentials,
+    harnesses,
+    lineage,
+    profile,
+    providers,
+    runner,
+    settings,
+    store,
+)
 
 BASE = "https://api.example.com/inference"
 
@@ -56,6 +65,20 @@ def test_provider_selection_prefers_stored_token(home):
     assert env["ANTHROPIC_BASE_URL"] == BASE
     assert env["ANTHROPIC_AUTH_TOKEN"] == "backend-secret"  # overrides plaintext
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""  # yaml's explicit pin kept
+
+
+def test_provider_prefers_separate_api_key_without_losing_oauth(home):
+    p = profile.create("kimi-claude")
+    store.update(_provider_glm)
+    store.set_profile_field(p.name, "provider", "glm")
+    credentials.save_token(p, "oauth-or-legacy-fallback")
+    credentials.save_api_key(p, "kimi-api-key")
+    lineage.set_api_key_env(p, "ANTHROPIC_AUTH_TOKEN")
+
+    env = runner.child_env(p, with_token=True)
+
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "kimi-api-key"
+    assert credentials.stored_token(p) == "oauth-or-legacy-fallback"
 
 
 def test_provider_without_stored_token_keeps_yaml_value(home):
@@ -295,3 +318,60 @@ def test_borrow_lends_profile_env_above_provider_below_runner(home):
     assert env["ANTHROPIC_MODEL"] == "runner-model"  # runner's own key still wins
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "lender-opus"  # lender fills the gap
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "provider-sonnet"  # provider falls through
+
+
+def test_pi_gets_only_its_separate_managed_api_key(home, monkeypatch):
+    p = profile.create("pi-work")
+    lineage.set_harness(p, "pi")
+    settings.set_env(
+        p,
+        {
+            "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "90",
+            "ANTHROPIC_BASE_URL": "https://claude-only.example",
+            "KEEP_ME": "yes",
+        },
+    )
+    credentials.save_api_key(p, "pi-secret")
+    lineage.set_api_key_env(p, "ANTHROPIC_API_KEY")
+    monkeypatch.setenv("OPENAI_API_KEY", "ambient-openai")
+
+    env = runner.harness_child_env(p, harnesses.get("pi"), base_env=dict())
+
+    assert env["ANTHROPIC_API_KEY"] == "pi-secret"
+    assert env["KEEP_ME"] == "yes"
+    assert "ANTHROPIC_BASE_URL" not in env
+    assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in env
+    assert "OPENAI_API_KEY" not in env
+    assert env["PI_CODING_AGENT_DIR"] == str(p.config_dir / "pi")
+
+
+@pytest.mark.parametrize(
+    "name,key_name,home_name",
+    [
+        ("codex", "OPENAI_API_KEY", "CODEX_HOME"),
+        ("kimi", "KIMI_API_KEY", "KIMI_CODE_HOME"),
+        ("agent", "CURSOR_API_KEY", "CURSOR_CONFIG_DIR"),
+    ],
+)
+def test_oauth_harnesses_ignore_api_keys_and_use_namespaced_storage(
+    home, name, key_name, home_name
+):
+    p = profile.create(name)
+    lineage.set_harness(p, name)
+    credentials.save_api_key(p, "stale-managed-key")
+    lineage.set_api_key_env(p, key_name)
+    settings.set_env(
+        p,
+        {
+            key_name: "stale-profile-key",
+            "ANTHROPIC_MODEL": "claude-only-model",
+            "PLAIN_SETTING": "kept",
+        },
+    )
+
+    env = runner.harness_child_env(p, harnesses.get(name), base_env={key_name: "shell"})
+
+    assert key_name not in env
+    assert "ANTHROPIC_MODEL" not in env
+    assert env["PLAIN_SETTING"] == "kept"
+    assert env[home_name] == str(p.config_dir / name)

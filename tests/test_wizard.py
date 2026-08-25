@@ -146,13 +146,10 @@ def test_every_closed_set_is_a_picker_not_a_text_box():
         assert isinstance(wiz.field(key), wizard.TextField), key
 
 
-def test_an_uninstalled_harness_is_shown_and_unpickable():
-    """Hiding it would read as "claunch does not know about codex"."""
+def test_harness_is_read_only_and_derived_from_the_profile():
     wiz = form()
-    codex = [o for o in wiz.field("harness").options if o.value == "codex"][0]
-    assert codex.disabled and "not installed" in codex.detail
-    focus_on(wiz, "harness")
-    wiz.handle("right")
+    assert not wiz.field("harness").selectable
+    assert "profile" in wiz.field("harness").disabled_note.lower()
     assert wiz.value("harness") == "claude"
 
 
@@ -170,20 +167,27 @@ def test_the_directory_starts_where_the_command_was_typed():
     assert wiz.field("cwd").options[0].label == "this directory"
 
 
-def test_the_claude_harness_defaults_to_a_real_profile():
+def test_the_form_defaults_to_a_real_profile():
     wiz = form()
     assert wiz.value("profile") == "work"
-    assert wiz.field("profile").options[0].value == ""  # (no profile), on purpose
+    assert wiz.field("profile").options[0].value == ""  # empty placeholder
 
 
 # --------------------------------------------------------------------------- #
 # fields that depend on other fields
 # --------------------------------------------------------------------------- #
 def test_role_and_resume_belong_to_claude_only():
-    wiz = form()
+    class PiSources(FakeSources):
+        def profile_details(self):
+            return [
+                {"name": "work", "harness": "claude", "harness_available": True},
+                {"name": "ds4", "harness": "pi", "harness_available": True},
+            ]
+
+    wiz = form(sources=PiSources())
     assert wiz.field("role").selectable
-    wiz.field("harness").options.append(wizard.Option("pi", "pi"))
-    pick(wiz, "harness", "pi")
+    pick(wiz, "profile", "ds4")
+    assert wiz.value("harness") == "pi"
     assert not wiz.field("role").selectable
     assert not wiz.field("resume").selectable
     assert not wiz.field("fork_session").selectable
@@ -614,7 +618,7 @@ def test_apply_writes_new_sessions_own_spelling():
     args = argparse.Namespace()
     wiz.apply(args)
     assert args.name == "api"
-    assert args.harness == "claude"
+    assert args.harness is None  # profile is the only submitted source
     assert args.profile == "ds4"
     assert args.borrow == "work"
     assert args.null_token is False
@@ -705,14 +709,18 @@ def test_flags_typed_before_the_wizard_prefill_it():
     assert wiz.field("args").text == "--verbose"
 
 
-def test_claude_without_a_profile_is_refused_at_the_profile_field():
-    wiz = form()
-    pick(wiz, "profile", "(no profile)")
+def test_a_session_without_any_profile_is_refused_at_the_profile_field():
+    class NoProfiles(FakeSources):
+        def profiles(self):
+            return []
+
+        def profile_details(self):
+            return []
+
+    wiz = form(sources=NoProfiles())
     assert wiz.handle("submit") is None      # nothing created
-    assert "needs a profile" in wiz.error
+    assert "profile" in wiz.error
     assert wiz.current.key == "profile"
-    pick(wiz, "profile", "work")
-    assert wiz.handle("submit") == "create"
 
 
 # --------------------------------------------------------------------------- #
@@ -790,7 +798,7 @@ def test_stdin_closing_under_the_form_is_a_cancel(monkeypatch, capsys):
 def test_ctrl_s_creates_and_says_what_it_is_creating(monkeypatch, capsys):
     args = argparse.Namespace()
     assert drive(monkeypatch, b"\x13", args) is True
-    assert args.harness == "claude"
+    assert args.harness is None
     assert args.profile == "work"
     err = capsys.readouterr().err
     assert "creating:" in err and "profile work" in err
@@ -1024,10 +1032,9 @@ def test_an_older_daemon_keeps_the_cap_hard():
 
 def test_the_policy_decides_which_rows_are_open():
     wiz = spawn_form()
-    # allow_harness is empty in the default report: the child runs what its
-    # parent runs, and the row says so rather than disappearing.
+    # Harness is never a policy gate: the selected profile owns it.
     assert not wiz.field("harness").selectable
-    assert "spawn.allow_harness" in wiz.field("harness").disabled_note
+    assert "profile" in wiz.field("harness").disabled_note
     # allow_workspace is on, so the registry it published is pickable
     assert wiz.field("workspace").selectable
     assert [o.value for o in wiz.field("workspace").options] == ["", "api"]
@@ -1189,16 +1196,15 @@ def test_null_needs_no_unlock_and_takes_the_borrow_with_it():
     assert args.borrow is None and args.profile is None
 
 
-def test_an_unlocked_harness_becomes_pickable():
+def test_even_an_old_daemon_harness_unlock_stays_read_only():
     wiz = spawn_form(report={
         "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
         "children_used": 0, "children_remaining": 4,
         "may_choose": [], "spawnable_harnesses": ["codex"],
     })
     harness = wiz.field("harness")
-    assert harness.selectable
-    assert [o.value for o in harness.options] == ["", "codex"]
-    assert "the parent's" in harness.options[0].label
+    assert not harness.selectable
+    assert [o.value for o in harness.options] == ["claude"]
     # allow_workspace off means the report carries no workspace list at all
     assert not wiz.field("workspace").selectable
 

@@ -20,7 +20,7 @@ from typing import List, Optional
 from aiohttp import web
 
 from .. import __version__, harnesses as harness_registry
-from .. import profile as profile_mod, quickjob, spawn as spawn_mod, store, workspaces
+from .. import lineage, profile as profile_mod, quickjob, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import briefing, cflow_clock, ctxsize, onboard, rebrief
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
@@ -389,7 +389,26 @@ async def h_daemon_restart(request: web.Request) -> web.Response:
 
 
 async def h_profiles(request: web.Request) -> web.Response:
-    return web.json_response({"profiles": [p.name for p in profile_mod.list_all()]})
+    items = []
+    for p in profile_mod.list_all():
+        try:
+            name = lineage.effective_harness(p)
+            entry = harness_registry.get(name)
+            items.append(
+                {
+                    "name": p.name,
+                    "harness": name,
+                    "harness_available": bool(entry and entry.available()),
+                }
+            )
+        except lineage.LineageError as exc:
+            items.append(
+                {"name": p.name, "harness": "?", "harness_available": False,
+                 "error": str(exc)}
+            )
+    return web.json_response(
+        {"profiles": [item["name"] for item in items], "profile_details": items}
+    )
 
 
 async def h_harnesses(request: web.Request) -> web.Response:
@@ -397,7 +416,8 @@ async def h_harnesses(request: web.Request) -> web.Response:
 
     ``available`` is reported rather than filtered on: a harness claunch knows
     about but the machine has not installed is a *different* thing from one
-    claunch does not know about, and the picker should say which it is.
+    claunch does not know about. Session forms do not use this as a selector;
+    they project the harness already configured on their selected profile.
     """
     return web.json_response(
         {
@@ -1809,6 +1829,13 @@ async def h_sessions_create(request: web.Request) -> web.Response:
     """
     manager: SessionManager = request.app["manager"]
     body = await _json_body(request)
+    if "harness" in body:
+        return json_error(
+            400,
+            "harness is read-only and comes from profile; omit 'harness'",
+        )
+    if not str(body.get("profile") or "").strip():
+        return json_error(400, "a session needs profile; its harness comes from it")
     body.setdefault("restore", manager.restore_default)
     body.setdefault("name", "")
     try:

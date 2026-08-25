@@ -196,8 +196,8 @@ check("a named conversation is named",
 parentSession = { name: "lead" };
 for (const k of INHERITS) if (f[k]) f[k].disabled = true;
 ctx.render();
-check("a fully locked child points at the parent, not at the form",
-      sumBox.textContent, "— inherited from lead");
+check("a fully locked child shows the inherited profile harness",
+      sumBox.textContent, "— lead's setup · claude");
 
 /* A child whose policy hands two rows back. Those two speak; the rest stay
    the parent's and stay unnamed — which rows are shut is the parent hint's
@@ -205,8 +205,8 @@ check("a fully locked child points at the parent, not at the form",
 f.profile.disabled = false;
 f.cwd.disabled = false;
 ctx.render();
-check("only the rows the policy opened speak for a child",
-      sumBox.textContent, "— lead's setup · nc · launcher");
+check("only open rows plus read-only harness speak for a child",
+      sumBox.textContent, "— lead's setup · claude · nc · launcher");
 
 /* Unlocking the harness adds it; the still-locked borrow/--null/args do not
    come back with it. */

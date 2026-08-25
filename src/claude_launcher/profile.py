@@ -1,8 +1,8 @@
 """Profile model and on-disk registry.
 
-A *profile* is just a named directory used as ``CLAUDE_CONFIG_DIR``. This module
-owns creating, listing, resolving and deleting those directories. It performs no
-subprocess work and knows nothing about ``claude`` itself.
+A *profile* is a named storage root. Claude Code uses it directly as
+``CLAUDE_CONFIG_DIR``; other harnesses use namespaced children selected by
+their own home environment variable. This module only owns the roots.
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ class ProfileError(Exception):
 
 @dataclass(frozen=True)
 class Profile:
-    """A named, isolated Claude Code configuration directory."""
+    """A named, isolated harness storage root."""
 
     name: str
     config_dir: Path

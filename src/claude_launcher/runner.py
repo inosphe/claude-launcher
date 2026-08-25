@@ -1,9 +1,8 @@
-"""Invoke the ``claude`` CLI with a profile's ``CLAUDE_CONFIG_DIR``.
+"""Invoke the CLI harness selected by a profile.
 
-This is the only module that shells out to ``claude``. It builds the child
-environment (injecting ``CLAUDE_CONFIG_DIR`` and, for ``run``, the stored
-``CLAUDE_CODE_OAUTH_TOKEN``) and never decides *which* profile to use — callers
-pass a resolved :class:`~claude_launcher.profile.Profile`.
+Claude keeps its established provider/token environment. Other harnesses get
+their namespaced storage and authentication boundary here. Callers always pass
+a resolved :class:`~claude_launcher.profile.Profile`.
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from . import config, credentials, lineage, providers
+from . import config, credentials, harnesses, lineage, providers
 from .profile import Profile
 
 #: Environment variable Claude Code reads for a setup-token login.
@@ -23,14 +22,23 @@ OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 #: Bearer token Claude Code sends to a custom (provider-overridden) backend.
 AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 
+# OAuth-backed harnesses must not silently switch to an API-key login merely
+# because either the shell or a legacy profile environment exported one.
+# Their own OAuth credential store is the only supported auth source here.
+_OAUTH_SHELL_KEYS = {
+    "codex": ("OPENAI_API_KEY", "CODEX_API_KEY", "CODEX_ACCESS_TOKEN"),
+    "kimi": ("KIMI_API_KEY",),
+    "agent": ("CURSOR_API_KEY",),
+}
+
 
 class RunnerError(Exception):
-    """Raised when the ``claude`` executable cannot be launched."""
+    """Raised when the selected harness cannot be launched."""
 
 
 @dataclass(frozen=True)
 class Heartbeat:
-    """Result of a non-interactive ``claude -p`` health check."""
+    """Result of a non-interactive harness health check."""
 
     ok: bool
     code: Optional[int]
@@ -63,7 +71,6 @@ def child_env(
     below the runner's own env, which keeps final responsibility for every key.
     """
     env = dict(os.environ if base_env is None else base_env)
-    env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
     provider_env: dict = {}
     lender_env: dict = {}
     if with_token:
@@ -94,8 +101,8 @@ def child_env(
     if with_token:
         if provider != providers.DEFAULT_PROVIDER:
             # A provider is overriding the backend: auth comes from the
-            # profile's stored `set-token` secret (own, inherited, or the
-            # borrowed profile's), which OVERRIDES any plaintext
+            # profile's separate provider key (or legacy set-token; own,
+            # inherited, or borrowed), which OVERRIDES any plaintext
             # ANTHROPIC_AUTH_TOKEN in the config file — so backend keys can
             # live in the per-machine 0600 token file instead of the yaml.
             stored = lineage.stored_auth_token(auth_source)
@@ -132,7 +139,111 @@ def child_env(
         # `--null` means *no* OAuth token, full stop — even one pinned by the
         # profile's own env or a provider pattern loses to the explicit flag.
         env.pop(OAUTH_TOKEN_ENV, None)
+    # Profile identity is not a user override. Set it last so neither a stale
+    # shell value nor a synced ``env`` entry can escape this profile.
+    env[config.CLAUDE_CONFIG_DIR_ENV] = str(profile.config_dir)
     return env
+
+
+def harness_child_env(
+    profile: Profile,
+    harness: harnesses.Harness,
+    *,
+    base_env: Optional[dict] = None,
+) -> dict:
+    """Environment for a non-Claude profile harness.
+
+    Non-Claude-safe profile env remains available, while Claude Code's
+    namespace is filtered below. Authentication storage is separate: OAuth
+    CLIs read their own namespaced home, while a launcher-managed API key is
+    injected only into the explicitly configured ``api_key_env``.
+    """
+    if harness.builtin:
+        return child_env(profile, with_token=True, base_env=base_env)
+    env = dict(os.environ if base_env is None else base_env)
+    env.update(harness.env)
+    env.update(lineage.effective_env(profile))
+
+    finalize_harness_env(profile, harness, env)
+    return env
+
+
+def finalize_harness_env(
+    profile: Profile, harness: harnesses.Harness, env: dict
+) -> None:
+    """Enforce profile auth/storage boundaries after all environment layers.
+
+    Existing profiles often carry many ``ANTHROPIC_*`` and
+    ``CLAUDE_CODE_*`` values. They remain untouched for Claude Code (including
+    Kimi-compatible Claude backends), but are not sprayed into unrelated CLI
+    agents. Pi receives its one launcher-managed provider key again below.
+
+    The daemon calls this a second time after applying per-session ``--env``;
+    otherwise that dead customization path could escape the same boundary.
+    """
+    if harness.builtin:
+        return
+    key_env = lineage.effective_api_key_env(profile)
+    managed_key = (
+        lineage.stored_api_key(profile) if harness.auth == "api-key" else None
+    )
+    for key in list(env):
+        if key.startswith(("CLAUDE_CODE_", "ANTHROPIC_")) and not (
+            harness.auth == "api-key" and managed_key and key == key_env
+        ):
+            env.pop(key, None)
+        elif (
+            harness.auth == "api-key"
+            and key.upper().endswith("API_KEY")
+            and (not managed_key or key != key_env)
+        ):
+            # A Pi profile has one explicit key route. Do not let whatever
+            # provider keys happened to start claunch choose Pi's backend.
+            env.pop(key, None)
+    for key in _OAUTH_SHELL_KEYS.get(harness.name, ()):
+        env.pop(key, None)
+    if managed_key:
+        if not key_env:
+            raise RunnerError(
+                f"profile {profile.name!r} has a stored API key but no "
+                "api_key_env; store it again with 'claunch set-key "
+                f"{profile.name} ENV_VAR'"
+            )
+        env[key_env] = managed_key
+    if harness.home_env:
+        home = harness.profile_home(profile.config_dir)
+        home.mkdir(parents=True, exist_ok=True)
+        # Like CLAUDE_CONFIG_DIR, the storage boundary is launcher-owned.
+        env[harness.home_env] = str(home)
+
+
+def profile_harness(profile: Profile) -> harnesses.Harness:
+    name = lineage.effective_harness(profile)
+    entry = harnesses.get(name)
+    if entry is None:  # effective_harness already validates; belt and braces
+        raise RunnerError(f"unknown harness {name!r}")
+    return entry
+
+
+def _plain_spawn(
+    profile: Profile,
+    harness: harnesses.Harness,
+    args: Sequence[str],
+    *,
+    cwd: Optional[str] = None,
+) -> int:
+    cmd = [*harness.launch_command(), *harness.args, *args]
+    try:
+        return subprocess.run(
+            cmd, cwd=cwd, env=harness_child_env(profile, harness)
+        ).returncode
+    except FileNotFoundError as exc:
+        raise RunnerError(
+            f"could not find harness {harness.name!r} command "
+            f"{harness.program()!r}; install it or update the harness declaration"
+        ) from exc
+    except OSError as exc:
+        raise RunnerError(f"could not launch harness {harness.name!r}: {exc}") from exc
 
 
 def _spawn(
@@ -172,7 +283,7 @@ def _spawn(
 
 
 def login(profile: Profile) -> int:
-    """Run ``claude setup-token`` interactively for the profile.
+    """Run the selected harness's interactive login for ``profile``.
 
     ``setup-token`` renders a full-screen TUI and drives an interactive OAuth
     flow, so its stdio is left attached to the terminal (no piping/capture).
@@ -180,6 +291,19 @@ def login(profile: Profile) -> int:
     ``CLAUDE_CONFIG_DIR``; if it instead only prints a token, the user can store
     it with ``claunch set-token``.
     """
+    harness = profile_harness(profile)
+    if not harness.builtin:
+        if not harness.login_args:
+            if harness.auth == "api-key":
+                raise RunnerError(
+                    f"harness {harness.name!r} uses an API key; store one with "
+                    f"'claunch set-key {profile.name} ENV_VAR'"
+                )
+            raise RunnerError(
+                f"harness {harness.name!r} has no login command declared"
+            )
+        return _plain_spawn(profile, harness, harness.login_args)
+
     code = _spawn(profile, ["setup-token"], with_token=False)
     if code != 0:
         return code
@@ -207,7 +331,7 @@ def run(
     null_token: bool = False,
     cwd: Optional[str] = None,
 ) -> int:
-    """Launch ``claude`` for the profile, optionally borrowing another's token.
+    """Launch the harness selected by the profile.
 
     ``provider`` (from ``run --provider``) overrides the config-file provider
     resolution for this run only. ``null_token`` (from ``run --null``) launches
@@ -215,6 +339,22 @@ def run(
     --worktree``) starts claude in another directory; ``None`` inherits this
     process's, which is what every run that did not ask for a worktree wants.
     """
+    harness = profile_harness(profile)
+    if not harness.builtin:
+        incompatible = []
+        if borrow is not None:
+            incompatible.append("--borrow")
+        if provider:
+            incompatible.append("--provider")
+        if null_token:
+            incompatible.append("--null")
+        if incompatible:
+            raise RunnerError(
+                f"{', '.join(incompatible)} only applies to the claude harness; "
+                f"profile {profile.name!r} selects {harness.name!r}"
+            )
+        return _plain_spawn(profile, harness, list(args), cwd=cwd)
+
     auth_source = borrow if borrow is not None else profile
     if provider:
         name, source = provider, "--provider"
@@ -222,13 +362,13 @@ def run(
         name, source = providers.resolve_with_source(auth_source)
     if name != providers.DEFAULT_PROVIDER:
         # Tell the user why auth behaves differently on this run: with a
-        # provider overriding the backend, the stored set-token (if any) is
+        # provider overriding the backend, the stored provider key (if any) is
         # exported as ANTHROPIC_AUTH_TOKEN instead of the OAuth injection.
         stored = lineage.stored_auth_token(auth_source)
         via = (
-            "auth: stored set-token exported as ANTHROPIC_AUTH_TOKEN"
+            "auth: stored provider key exported as ANTHROPIC_AUTH_TOKEN"
             if stored
-            else "auth: no stored set-token; using the provider's env as configured"
+            else "auth: no stored provider key; using the provider's env as configured"
         )
         print(
             f"provider {name!r} active ({source}); {via}",
@@ -263,16 +403,32 @@ def run(
 def heartbeat(
     profile: Profile, prompt: str = "heartbeat", timeout: float = 120.0
 ) -> Heartbeat:
-    """Run ``claude -p <prompt>`` non-interactively and report whether it worked.
+    """Run the profile harness non-interactively and report whether it worked.
 
     Captures output instead of attaching the terminal, so a broken/expired login
     fails fast rather than dropping into an interactive prompt.
     """
-    cmd = [config.claude_bin(), "-p", prompt]
+    harness = profile_harness(profile)
+    if harness.builtin:
+        cmd = [config.claude_bin(), "-p", prompt]
+        env = child_env(profile, with_token=True)
+    else:
+        if not harness.heartbeat_args:
+            raise RunnerError(
+                f"harness {harness.name!r} has no non-interactive health-check "
+                "command; declare harnesses.<name>.heartbeat_args to enable validate"
+            )
+        cmd = [
+            *harness.launch_command(),
+            *harness.args,
+            *harness.heartbeat_args,
+            prompt,
+        ]
+        env = harness_child_env(profile, harness)
     try:
         completed = subprocess.run(
             cmd,
-            env=child_env(profile, with_token=True),
+            env=env,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -281,8 +437,8 @@ def heartbeat(
         )
     except FileNotFoundError as exc:
         raise RunnerError(
-            f"could not find {config.claude_bin()!r} executable; "
-            f"is Claude Code installed? (override with {config.LAUNCHER_BIN_ENV})"
+            f"could not find harness {harness.name!r} command "
+            f"{harness.program()!r}"
         ) from exc
     except subprocess.TimeoutExpired:
         return Heartbeat(ok=False, code=None, reason=f"timed out after {int(timeout)}s", output="")

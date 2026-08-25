@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional, Tuple
 
-from . import credentials, profile as profile_mod, settings, store
+from . import credentials, harnesses, profile as profile_mod, settings, store
 from .profile import Profile
 
 
@@ -128,6 +128,61 @@ def effective_env(profile: Profile) -> Dict[str, str]:
     return env
 
 
+def effective_harness(profile: Profile) -> str:
+    """Harness selected by the nearest profile in the inheritance chain.
+
+    Profiles created before harness selection existed have no field and keep
+    the historical ``claude`` default. The returned name is validated against
+    the live registry so a deleted/tombstoned harness fails at the profile
+    boundary rather than much later at process spawn.
+    """
+    name = harnesses.CLAUDE_HARNESS
+    for item in chain(profile):
+        own = str(store.profile_entry(item.name).get("harness") or "").strip()
+        if own:
+            name = own
+    if harnesses.get(name) is None:
+        known = ", ".join(harnesses.names())
+        raise LineageError(
+            f"profile {profile.name!r} selects unknown harness {name!r} "
+            f"(known: {known})"
+        )
+    return name
+
+
+def set_harness(profile: Profile, name: str) -> None:
+    """Pin ``profile`` to one declared harness."""
+    name = str(name or "").strip()
+    if harnesses.get(name) is None:
+        known = ", ".join(harnesses.names())
+        raise LineageError(f"unknown harness {name!r} (known: {known})")
+    store.set_profile_field(profile.name, "harness", name)
+
+
+def clear_harness(profile: Profile) -> None:
+    """Drop the local pin, inheriting an ancestor or the claude default."""
+    store.set_profile_field(profile.name, "harness", None)
+
+
+def effective_api_key_env(profile: Profile) -> Optional[str]:
+    """Environment variable receiving this profile's stored API key.
+
+    Kept separate from ``env`` because the value itself lives in a 0600 local
+    secret file, while this non-secret routing choice belongs in syncable YAML.
+    The nearest declaration wins just like ``harness``.
+    """
+    name: Optional[str] = None
+    for item in chain(profile):
+        raw = str(store.profile_entry(item.name).get("api_key_env") or "").strip()
+        if raw:
+            name = raw
+    return name
+
+
+def set_api_key_env(profile: Profile, name: Optional[str]) -> None:
+    store.set_profile_field(profile.name, "api_key_env", name)
+
+
 def injectable_token(profile: Profile) -> Optional[str]:
     """Token to inject as ``CLAUDE_CODE_OAUTH_TOKEN`` for ``run``.
 
@@ -169,14 +224,17 @@ def lookup_token(profile: Profile) -> Optional[str]:
 
 
 def stored_auth_token(profile: Profile) -> Optional[str]:
-    """The nearest ``set-token`` value (own first, then up the parent chain).
+    """Claude provider key, with the historical ``set-token`` fallback.
 
-    Only launcher-*stored* tokens (``.launcher-token``) are considered — not
-    ``.credentials.json`` logins, which are Anthropic OAuth by definition. This
-    is the secret exported as ``ANTHROPIC_AUTH_TOKEN`` when a non-default
-    provider is active for the run, so third-party API keys can live in the
-    per-machine ``0600`` token file instead of in ``~/.claunch.yaml`` plaintext.
+    New provider profiles use the separate API-key secret routed to
+    ``ANTHROPIC_AUTH_TOKEN``. Existing profiles used ``set-token`` before that
+    distinction existed, so the nearest launcher token remains a fallback.
+    Native ``.credentials.json`` OAuth is never treated as a provider key.
     """
+    if effective_api_key_env(profile) == "ANTHROPIC_AUTH_TOKEN":
+        key = stored_api_key(profile)
+        if key:
+            return key
     for p in [profile, *_ancestors_nearest_first(profile)]:
         token = credentials.stored_token(p)
         if token:
@@ -184,8 +242,35 @@ def stored_auth_token(profile: Profile) -> Optional[str]:
     return None
 
 
+def stored_api_key(profile: Profile) -> Optional[str]:
+    """Nearest launcher-managed API key (own first, then ancestors)."""
+    for item in [profile, *_ancestors_nearest_first(profile)]:
+        key = credentials.stored_api_key(item)
+        if key:
+            return key
+    return None
+
+
 def login_state(profile: Profile) -> str:
-    """Display state: ``"ok"``, ``"expired"``, ``"inherited"`` or ``"none"``."""
+    """Best display state for the selected harness's authentication.
+
+    OAuth harness credential files are deliberately opaque and report
+    ``"managed"``; Claude and API-key harnesses can be inspected safely.
+    """
+    harness = effective_harness(profile)
+    if harness != harnesses.CLAUDE_HARNESS:
+        entry = harnesses.get(harness)
+        if entry and entry.auth == "api-key":
+            return "ok" if stored_api_key(profile) else "none"
+        # OAuth files are intentionally owned and refreshed by each harness.
+        # We do not parse undocumented credential formats merely to paint a
+        # status cell; ``claunch login``/the harness is authoritative.
+        return "managed"
+    if (
+        effective_api_key_env(profile) == "ANTHROPIC_AUTH_TOKEN"
+        and stored_api_key(profile)
+    ):
+        return "ok"
     own = credentials.token_state(profile)
     if own != "none":
         return own

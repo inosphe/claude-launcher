@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from claude_launcher import store
+from claude_launcher import lineage, profile, store
 from claude_launcher.daemon import paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
@@ -39,6 +39,8 @@ def _register_py_harness():
             {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
         )
     )
+    if not profile.resolve("py").exists():
+        lineage.set_harness(profile.create("py"), "py")
 
 
 def _screen_text(session) -> str:
@@ -1264,7 +1266,19 @@ def test_api_end_to_end(home, tmp_path):
             # create -> send-keys -> capture -> wait -> kill, all over HTTP
             resp = await client.post(
                 "/api/sessions",
-                json={"name": "api1", "harness": "py", "cwd": str(tmp_path)},
+                json={
+                    "name": "dead-picker",
+                    "profile": "py",
+                    "harness": "py",
+                    "cwd": str(tmp_path),
+                },
+                headers=bearer,
+            )
+            assert resp.status == 400
+            assert "read-only" in (await resp.json())["error"]
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "api1", "profile": "py", "cwd": str(tmp_path)},
                 headers=bearer,
             )
             assert resp.status == 201, await resp.text()
@@ -1340,13 +1354,13 @@ def test_api_end_to_end(home, tmp_path):
             # duplicate names conflict
             resp = await client.post(
                 "/api/sessions",
-                json={"name": "dup", "harness": "py", "cwd": str(tmp_path)},
+                json={"name": "dup", "profile": "py", "cwd": str(tmp_path)},
                 headers=bearer,
             )
             assert resp.status == 201
             resp = await client.post(
                 "/api/sessions",
-                json={"name": "dup", "harness": "py", "cwd": str(tmp_path)},
+                json={"name": "dup", "profile": "py", "cwd": str(tmp_path)},
                 headers=bearer,
             )
             assert resp.status == 409
@@ -1399,6 +1413,15 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
                     }
                 )
             )
+            pi_profile = profile.create("pi-profile")
+            lineage.set_harness(pi_profile, "pi")
+            resp = await client.get("/api/profiles", headers=bearer)
+            details = {
+                item["name"]: item
+                for item in (await resp.json())["profile_details"]
+            }
+            assert details["pi-profile"]["harness"] == "pi"
+            assert details["pi-profile"]["harness_available"] is False
             resp = await client.get("/api/harnesses", headers=bearer)
             assert resp.status == 200
             by_name = {h["name"]: h for h in (await resp.json())["harnesses"]}
@@ -1411,7 +1434,7 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             # with a message that says so, not a spawn failure
             resp = await client.post(
                 "/api/sessions",
-                json={"name": "nope", "harness": "pi", "cwd": str(tmp_path)},
+                json={"name": "nope", "profile": "pi-profile", "cwd": str(tmp_path)},
                 headers=bearer,
             )
             assert resp.status == 400
@@ -1545,7 +1568,7 @@ def test_api_roles_offers_the_spawnable_vocabulary(home, tmp_path):
             resp = await client.post(
                 "/api/sessions",
                 json={
-                    "name": "roled", "harness": "py", "cwd": str(tmp_path),
+                    "name": "roled", "profile": "py", "cwd": str(tmp_path),
                     "role": "worker",
                 },
                 headers=bearer,

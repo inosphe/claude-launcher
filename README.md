@@ -84,29 +84,39 @@ claunch login work      # log in via `claude setup-token`
 claunch run work        # launch Claude Code as that profile
 claunch validate work   # confirm the login works (claude -p heartbeat)
 claunch usage work      # show this profile's subscription usage
+
+# Other harnesses are selected by the profile, never by a session:
+claunch create pi-work --harness pi --no-seed
+claunch set-key pi-work ANTHROPIC_API_KEY
+claunch run pi-work
+
+claunch create kimi-work --harness kimi --no-seed
+claunch login kimi-work                  # kimi login (OAuth)
 ```
 
 ## Commands
 
 | Command | Description |
 | ------- | ----------- |
-| `create <name>`        | Create a profile (`--parent` to inherit), seed config, apply template. |
-| `login <name>`         | Run `claude setup-token` for the profile. |
-| `run <name> [args...]` | Launch `claude` for the profile (`--borrow NAME`, `--null`, `--provider NAME`, `--add-prompt`, `--worktree[=NAME]`/`--no-worktree`; extra args pass through). |
+| `create <name>`        | Create a profile (`--harness`, `--parent` to inherit). Claude profiles seed/apply Claude config; other harnesses start clean. |
+| `set-harness <name> [h]` | Show or pin the profile's harness; `--clear` inherits from its parent/default. |
+| `login <name>`         | Run the selected OAuth harness's login flow (Claude setup-token, Codex/Kimi/Cursor login). |
+| `set-key <name> ENV [key]` | Store an API-key harness secret separately and inject it only as `ENV` (Pi). |
+| `run <name> [args...]` | Launch the profile's harness. Claude-only launcher flags are `--borrow`, `--null`, `--provider`, `--add-prompt`; other args pass through untouched. |
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
 | `migrate <name> [src]` | Copy skills/MCP servers from a global or local path. |
 | `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claunch.yaml`. |
 | `sync [--mode ...]`    | Reconcile `~/.claunch.yaml` with the sync server (`merge`/`up`/`down`). |
-| `validate [name]`      | Health-check logins via `claude -p heartbeat` (all if no name). |
-| `usage <name>`         | Query subscription usage (`--json` for the raw response). |
+| `validate [name]`      | Run the selected harness's declared non-interactive heartbeat (all if no name). |
+| `usage <name>`         | Query Claude or Codex subscription usage (`--json` for the raw response). |
 | `set-provider [p] <provider>` | Pin a provider globally or per profile (`--clear` to inherit). |
 | `providers`            | List API providers from the config file and the active one. |
-| `set-token <name> [t]` | Store a token manually (pasted, or piped via stdin). |
+| `set-token <name> [t]` | Store a Claude setup-token manually (also the legacy fallback for provider keys). |
 | `get-token <name>`     | Print the profile's OAuth token (resolves inheritance; `--own`). |
 | `list`                 | List profiles and each login's state (alias: `ls`). |
-| `path <name>`          | Print the profile's `CLAUDE_CONFIG_DIR`. |
+| `path <name>`          | Print the profile storage root. Claude uses it directly; other harnesses use a namespaced child. |
 | `remove <name>`        | Delete a profile and its tokens (aliases: `delete`, `rm`). |
 
 Plus the **[managed-session commands](#managed-sessions-tmux-style-daemon)** —
@@ -402,9 +412,9 @@ claunch env <name> --apply-template
 ## Inheritance (parent profiles)
 
 A profile can inherit from a **parent**, so you can build a base profile once and
-spin off variants. Children inherit the parent's `env` (child keys win) and its
-login token (when the child has none of its own) — log in once on the parent and
-share it across working profiles.
+spin off variants. Children inherit the parent's `harness`, `env` (child keys
+win), API-key route and applicable login secret. A local `set-harness` pin wins;
+`set-harness --clear` returns to the inherited/default (`claude`) choice.
 
 ```bash
 claunch create company                       # base profile
@@ -426,7 +436,7 @@ parent in with `setup-token` — those tokens are long-lived.) Cycles and missin
 parents are rejected. Use `claunch parent <name> <parent>` to re-parent an
 existing profile or `--clear` to detach it.
 
-**What inheritance covers.** `env` and the login token are resolved live at
+**What inheritance covers.** `harness`, `env` and applicable auth are resolved live at
 launch, so changing them on a parent affects children immediately. **Skills and
 MCP servers are *files* in each profile's own config dir**, which Claude Code
 reads from a single `CLAUDE_CONFIG_DIR` — they can't be merged live, so they are
@@ -434,7 +444,7 @@ reads from a single `CLAUDE_CONFIG_DIR` — they can't be merged live, so they a
 and `claunch migrate <parent> --recursive` re-copies into the parent and every
 descendant when you add more later.
 
-| Inherited live (env, token) | Copied point-in-time (skills, MCP) |
+| Inherited live (harness, env, auth) | Copied point-in-time (Claude skills, MCP) |
 | --------------------------- | ---------------------------------- |
 | change parent → children see it next run | `create --parent` seeds from parent |
 | `env --effective` shows the merge | `migrate <parent> --recursive` re-syncs the tree |
@@ -483,8 +493,9 @@ the profile's OAuth token as usual. For any other provider the launcher applies 
 `env`, so a per-profile (or template/inherited) value always wins over the
 provider for the same key. The provider carries its own auth, so the launcher
 does **not** inject `CLAUDE_CODE_OAUTH_TOKEN` — supply the backend key with
-`claunch set-token` (recommended; see *keeping backend keys out of the config
-file* below) or as a plaintext `ANTHROPIC_AUTH_TOKEN` in the provider's `env`
+`claunch set-key PROFILE ANTHROPIC_AUTH_TOKEN` (recommended; see *keeping
+backend keys out of the config file* below) or as a plaintext
+`ANTHROPIC_AUTH_TOKEN` in the provider's `env`
 (clearing `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` as above).
 
 The resulting precedence for a run is: shell env < provider `env` < profile `env`
@@ -493,11 +504,13 @@ The resulting precedence for a run is: shell env < provider `env` < profile `env
 **Keeping backend keys out of the config file.** Whenever a **non-default
 provider is active** for the run (selected on the profile, inherited, the
 global default, or forced with `run --provider`), the launcher looks up the
-profile's **stored token** — the `set-token` value in the per-machine `0600`
-`.launcher-token` file, resolved like a login token (own first, then inherited
-from a parent; `--borrow` uses the lender's) — and injects it as
+profile's **stored provider key** — the `set-key ... ANTHROPIC_AUTH_TOKEN`
+value in the per-machine `.launcher-api-key` file, resolved own first and then
+inherited (`--borrow` uses the lender's) — and injects it as
 `ANTHROPIC_AUTH_TOKEN`, **overriding** any plaintext value in the yaml. So a
-provider needs no secret in the file at all:
+provider needs no secret in the file at all. For compatibility, an existing
+`.launcher-token`/`set-token` value remains the fallback when no separate key
+exists:
 
 ```yaml
 providers:
@@ -505,23 +518,23 @@ providers:
     env:
       ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference"
       ANTHROPIC_MODEL: "accounts/fireworks/models/glm-5p2"
-      # no ANTHROPIC_AUTH_TOKEN here — supplied by set-token per machine
+      # no ANTHROPIC_AUTH_TOKEN here — supplied by set-key per machine
 ```
 
 ```bash
 claunch set-provider work fireworks-glm5p2
-claunch set-token work fw_...        # the backend API key, stored 0600
+claunch set-key work ANTHROPIC_AUTH_TOKEN fw_...  # separate backend API key
 claunch run work
 ```
 
 A plaintext `ANTHROPIC_AUTH_TOKEN` in the yaml still works when the profile has
-no stored token (backwards compatible), but the stored token always wins when
+no stored provider key (backwards compatible), but the stored key always wins when
 both exist. The trigger is the **provider selection itself** — env vars like
 `ANTHROPIC_BASE_URL` set in a profile's `env` (or inherited from the shell)
 don't change auth handling on their own. `run` tells you when this happens:
 
 ```text
-provider 'fireworks-glm5p2' active (set on profile 'work'); auth: stored set-token exported as ANTHROPIC_AUTH_TOKEN
+provider 'fireworks-glm5p2' active (set on profile 'work'); auth: stored provider key exported as ANTHROPIC_AUTH_TOKEN
 ```
 
 **Selecting from the CLI.** `set-provider` writes the selection into the config
@@ -562,7 +575,7 @@ profiles using a provider:
 ```
 
 > **Secrets.** Prefer keeping backend keys **out** of `~/.claunch.yaml` via
-> `set-token` (above) — the file is meant to be copied between machines. If you
+> `set-key` (above) — the file is meant to be copied between machines. If you
 > do put an `ANTHROPIC_AUTH_TOKEN` in a provider's `env`, it is plaintext:
 > treat the file as a secret when committing or copying it.
 
@@ -593,8 +606,9 @@ or `--mcp` to narrow it.
 
 Every launcher-managed setting lives in **one file, `~/.claunch.yaml`**, which
 the launcher reads live at launch — there is no separate "export" step, because
-this file *is* the state. It holds the profile list, each profile's `env`,
-`parent` and `provider`, the default `template`, and any provider definitions:
+this file *is* the state. It holds the profile list, each profile's `harness`,
+`env`, `parent`, `api_key_env` and Claude `provider`, the default `template`,
+and provider/harness definitions:
 
 ```yaml
 version: 1
@@ -604,6 +618,7 @@ template:
     CLAUDE_CODE_AUTO_COMPACT_WINDOW: "400000"
 profiles:
   company:
+    harness: claude
     env:
       COMPANY_REGION: "eu"
   company_work:
@@ -611,6 +626,8 @@ profiles:
     env:
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000"
   personal:
+    harness: pi
+    api_key_env: ANTHROPIC_API_KEY   # routing only; the key is not in YAML
     env: {}
 ```
 
@@ -630,9 +647,11 @@ claunch login work                            # tokens are per-machine (below)
 Past two or three machines, copying stops being fun — point them all at a
 [profile sync server](#profile-sync-server) and run `claunch sync` instead.
 
-**Login tokens are never stored here** — they are secrets, kept per-profile and
-per-machine, so run `claunch login` on each machine. Provider auth tokens *are*
-in this file (see the [secrets note](#api-providers-third-party-backends)).
+**Launcher-managed login tokens and API keys are never stored here** — they are
+separate per-profile, per-machine secret files. Run `claunch login` for OAuth
+harnesses or `claunch set-key` for Pi on each machine. A plaintext provider
+token placed manually in an `env` block is still plaintext (see the
+[secrets note](#api-providers-third-party-backends)).
 Override the file's path with `CLAUDE_LAUNCHER_SYNC_FILE`.
 
 **Pruning.** Reconciliation only ever *creates* directories. To delete local
@@ -651,8 +670,8 @@ three. `claunch sync` reconciles that file with a **sync server** — a small
 service that holds one shared document per namespace — so every machine ends up
 with the same profiles, providers and template.
 
-What travels is **configuration only**. Login tokens never leave the machine
-(they are per-profile secrets — run `claunch login` on each host), and the
+What travels is **configuration only**. OAuth tokens and API keys never leave
+the machine (run `claunch login` or `set-key` on each host), and the
 `daemon` and [`workspaces`](#workspaces-where-a-session-may-be-spawned) blocks
 stay local too: ports, bind host, the relay token and absolute directory paths
 describe *that* machine, not the profile set.
@@ -716,8 +735,8 @@ synced 'alice' with https://sync.example.com  (mode: merge)
 ```
 
 A pulled profile is **materialized immediately** — its `CLAUDE_CONFIG_DIR` is
-created and seeded, so it is usable right after the sync (it still needs
-`claunch login`). A pulled *deletion* only removes the declaration: as everywhere
+created (Claude profiles are seeded), so it is usable after the matching
+`claunch login`/`set-key`. A pulled *deletion* only removes the declaration: as everywhere
 else in the launcher, deleting a directory is explicit, so run `claunch prune`
 to finish the job.
 
@@ -970,7 +989,7 @@ without a human at the keyboard.
 ### Building one from a form (`--wizard`)
 
 `new-session` spells every field out as a flag, which is what makes it
-scriptable and what makes it hard to type — the harness, profile, directory,
+scriptable and what makes it hard to type — the profile, directory,
 role, mesh, workflow and worktree are all **closed sets the daemon already
 publishes**, and typing them from memory is guessing at names a picker could
 show. `--wizard` opens exactly that picker in the terminal you are standing
@@ -985,7 +1004,7 @@ claunch new -s api --wizard           # flags typed alongside pre-fill the form
 claunch new-session
 
    Name            api
-   Harness         claude  Claude Code
+   Harness         claude  (read-only; selected by profile)
  > Profile         work
    Borrow          (this profile's own token)
    Null token      no - inject the profile's token
@@ -1038,7 +1057,9 @@ that does not exist or a workflow not declared in that directory is never
 offered rather than refused once the session is half arranged. Fields that do
 not apply grey out rather than vanish: `Fork` says *needs a conversation to
 fork* until you pick one under `Resume`, and `Role`/`Resume`/`Borrow`/`Null
-token` say *the claude harness only* under any other harness. `Borrow` and
+token` say *the claude harness only* when the selected profile uses another
+harness. The Harness row itself is always read-only; use `claunch set-harness`
+outside the wizard. `Borrow` and
 `Null token` are `--borrow`/`--null` as rows — and since the daemon refuses
 the pair outright, saying yes to null greys the borrow row and resets it,
 so the form can never offer a combination the flags would error on.
@@ -1058,7 +1079,7 @@ claunch spawn
 
  > Parent          lead  idle, work, /work/repo
    Name            (auto)
-   Harness         the child runs what its parent runs (spawn.allow_harness)
+   Harness         claude (read-only; selected by the child profile)
    Profile         the child runs under its parent's profile (spawn.allow_profile)
    Borrow          the child authenticates as its parent does (spawn.allow_profile)
    Null token      no - authenticate as the parent does
@@ -1113,7 +1134,7 @@ a terminal has to name one. The form also reads that parent's
 [spawn budget](#agents-that-build-their-own-team-spawn--hierarchy--member-graph)
 and prints it under the cursor, so a session with no slots left says so on its
 own row instead of refusing a filled-in form. What
-[`spawn.allow_harness` / `allow_workspace`](#agents-that-build-their-own-team-spawn--hierarchy--member-graph)
+[`spawn.allow_profile` / `allow_workspace`](#agents-that-build-their-own-team-spawn--hierarchy--member-graph)
 leave locked is greyed out with the config key that would open it, rather than
 hidden.
 
@@ -1141,8 +1162,8 @@ and a form painted into its PTY would hang the session it was creating.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn a harness in a managed PTY. `--wizard` picks every field from a form in this terminal instead (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `--harness H`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R`, `--resume [S]`, `--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH` to update a reused worktree first, `-a/--attach` to attach immediately, trailing args pass to the harness). Also **what it is for**, in the same call: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."` — see [Created with a job](#created-with-a-job-mesh--workflow--opening-task). **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
-| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` picks the parent (and everything its policy allows) from a form; by flag: (`--parent S`, `-s NAME`, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `--harness H`, `-w/--workspace NAME`, `--worktree NAME --rebase-onto BRANCH` for a checkout of the child's own). `--mesh` defaults to the parent's own. See [Agents that build their own team](#agents-that-build-their-own-team-spawn--hierarchy--member-graph). |
+| `new-session` (`new`) | Spawn the harness owned by required `--profile P` in a managed PTY. `--wizard` displays Harness read-only and picks every other field (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, Claude-only `--role R`/`--resume [S]`/`--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH`, `-a/--attach`; trailing args pass through). Also **what it is for**: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."`. `--harness` remains only as a deprecated, refused compatibility flag. **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
+| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` displays the profile-owned Harness read-only; by flag: (`--parent S`, `-s NAME`, `--profile P` when allowed, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `-w/--workspace NAME`, `--worktree NAME --rebase-onto BRANCH`). `--harness` is refused; changing an allowed profile is the only way to change the child harness. `--mesh` defaults to the parent's own. |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
@@ -1157,7 +1178,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `reparent S PARENT`   | Move a session — with everything spawned under it — under another parent. The operator's form of the agents' `reparent` MCP tool, which is scoped to the caller's own subtree; this one is not. Refused for a cycle, an exited parent, or a move that would push any session past `spawn.max_depth`. Opens the session's edge to its new parent in every mesh the two share. |
 | `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their output logs, freeing their auto-generated names. |
 | `resize S COLS ROWS`  | Resize the session's terminal. |
-| `harnesses`           | List the declared harnesses (`claude`, `codex`, `pi`, plus your own) and whether each is installed here. |
+| `harnesses`           | List the declared harnesses (`claude`, `codex`, `pi`, `kimi`, `agent`, plus your own) and whether each is installed here. |
 | `workspace add\|ls\|rm` (`ws`) | Register / list / unregister the directories a session may be spawned in — the web UI's Directory picker is exactly this list, and (unless `spawn.allow_workspace` is off) where an agent may send a child (see [Workspaces](#workspaces-where-a-session-may-be-spawned)). `add` defaults to the current directory and refuses one that does not exist. |
 | `daemon start\|stop\|status\|restart` | Explicit daemon control (session commands auto-start it, tmux-style). |
 | `daemon token [--rotate]` | Print (or rotate) the API/web auth token. |
@@ -1559,7 +1580,7 @@ log; `--logs` is what frees those numbers again.
 ### Other harnesses (codex, pi, ...)
 
 Which harnesses exist is **declared, not hard-coded**. The packaged set ships
-`claude`, `codex` and `pi`; `claunch harnesses` shows it, along with whether
+`claude`, `codex`, `pi`, `kimi` and Cursor's `agent`; `claunch harnesses` shows it, along with whether
 this machine can actually run each one:
 
 ```
@@ -1568,13 +1589,15 @@ declared harnesses:
   claude     [ready        ] profile-managed
   codex      [ready        ] codex
   pi         [not installed] pi
+  kimi       [ready        ] kimi
+  agent      [ready        ] agent
 ```
 
 **Declared is not installed.** `pi` ships in the set whether or not you have
-it — the web UI lists it as a *disabled* option rather than hiding it, since a
-missing option reads as "claunch does not support pi", which is the wrong
-thing to learn. Spawning one that is not installed is refused up front, naming
-the program it looked for, instead of failing later as `could not spawn`.
+it. `claunch harnesses` reports availability, and a session form shows the
+selected profile's missing harness as unavailable without offering an
+alternative picker. Spawning one that is not installed is refused up front,
+naming the program it looked for, instead of failing later as `could not spawn`.
 
 `~/.claunch.yaml` overrides or extends the set. Overriding is **per harness,
 not per field** — a name in the config replaces that harness's whole
@@ -1587,19 +1610,52 @@ harnesses:
     command: codex          # string or argv list
     args: []                # optional, before the session's own args
     env: {KEY: VALUE}       # optional overrides
-    description: "..."      # optional, shown in the picker
+    home_env: CODEX_HOME     # optional isolated per-profile home
+    auth: oauth              # claude, oauth, api-key, or none
+    login_args: [login]      # optional interactive login argv
+    description: "..."      # optional, shown in status surfaces
   pi: null                  # a tombstone: drop a packaged harness
 ```
 
-`claude` is the one harness the document does not describe a command for: it
-runs through the profile machinery, and its executable is `CLAUDE_LAUNCHER_BIN`.
+Every new user-facing session requires a profile, and the profile is the
+**only source of its harness**. Configure it once; the web create form,
+`new --wizard` and `spawn --wizard` display the result read-only:
 
 ```bash
-claunch new-session -s cdx --harness codex -c ~/proj
+claunch create cdx --harness codex --no-seed
+claunch login cdx
+claunch new-session -s cdx --profile cdx -c ~/proj
 ```
 
+`claude` is the one harness whose executable is `CLAUDE_LAUNCHER_BIN`; it uses
+the profile root as `CLAUDE_CONFIG_DIR` for backwards compatibility. Other
+packaged harnesses get namespaced storage below that root:
+
+| Harness | Authentication | Isolated home |
+| --- | --- | --- |
+| Claude Code | launcher token or Claude provider | profile root (`CLAUDE_CONFIG_DIR`) |
+| Codex | `codex login` OAuth | `codex/` (`CODEX_HOME`) |
+| Pi | `claunch set-key PROFILE ENV_VAR` | `pi/` (`PI_CODING_AGENT_DIR`) |
+| Kimi harness | `kimi login` OAuth | `kimi/` (`KIMI_CODE_HOME`) |
+| Cursor agent | `agent login` OAuth | `agent/` (`CURSOR_CONFIG_DIR`) |
+
+Kimi has two deliberately separate uses. A `harness: kimi` profile runs the
+Kimi CLI with OAuth. A `harness: claude` profile may still use a Kimi-compatible
+API endpoint through the existing Claude provider mechanism (`ANTHROPIC_*` and
+`CLAUDE_CODE_*`); that path remains Claude Code and keeps its existing env/token
+precedence.
+
+Pi's managed key lives in `.launcher-api-key`, separate from Claude's
+`.launcher-token`; only its non-secret `api_key_env` route is syncable YAML.
+Codex/Kimi/Cursor never receive this managed key. Existing Claude-oriented
+`ANTHROPIC_*` and `CLAUDE_CODE_*` profile values remain intact for Claude, but
+are filtered from non-Claude harness environments. This prevents changing a
+profile's harness from silently carrying a Claude backend or OAuth token into
+another CLI.
+
 Sessions inherit the **daemon's** environment (tmux-server semantics), then the
-harness `env`, then the session's own `--env` overrides. Every session also
+harness/profile safe env and the session's `--env`. Auth and home boundaries
+are re-applied last. Every session also
 gets `CLAUNCH_SESSION=<name>` (tmux's `$TMUX` equivalent) — child processes
 can tell which session they live in, and [cflow](#cflow-declarative-agent-workflows)
 keys its run state by it. The claude harness
@@ -1866,7 +1922,6 @@ workflow).
   spawn:
     max_children: 4          # direct children per session
     max_depth: 3             # root session = depth 0
-    allow_harness: [codex]   # [] = the parent's harness only
     allow_workspace: true    # ...the one that starts open (see below)
     allow_cwd: false         # ...allow_profile / allow_args / allow_env too
   ```
@@ -1876,9 +1931,11 @@ workflow).
   `children` report names the profiles, since an agent cannot read that
   registry. `--null` (spawn a child logged out) is never gated: it takes a
   credential away rather than granting one. A child otherwise
-  **authenticates the way its parent does**, a parent's borrow included; a
-  harness swap drops the inherited args *and* auth, since both are written
-  for the program the parent runs.
+  **authenticates the way its parent does**, a parent's borrow included.
+  Harness itself has no spawn unlock: it is derived from the inherited or
+  allowed replacement profile. If that profile changes the harness, inherited
+  args and Claude-only auth choices are dropped because they belonged to the
+  parent's program.
 - **A child may be sent to another directory — by name, not by path.**
   `allow_workspace` lets the agent pass a `workspace` from your
   [registry](#workspaces-where-a-session-may-be-spawned); `allow_cwd` lets it
@@ -2048,10 +2105,10 @@ daemon answering with a boot id the page has not seen) tries again. The rail's
 version readout says `daemon offline` for as long as nothing answers, so a
 list of sessions is never mistaken for a list of *current* sessions.
 
-Both fields that used to take free text are now pickers. **Harness** lists the
-[declared set](#other-harnesses-codex-pi-) — one that is declared but not
-installed on this machine (`pi`, out of the box) is shown greyed out as
-`pi (not installed)` rather than hidden.
+**Harness** is read-only: it reflects the selected profile and cannot be
+submitted independently. Configure it with `claunch set-harness`; the web UI,
+`new --wizard`, `spawn --wizard`, and the session API all preserve that one
+source of truth.
 
 The create form's **Directory** is a picker over your
 [workspaces](#workspaces-where-a-session-may-be-spawned) — free-text paths are
@@ -2207,7 +2264,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/auth/session`            | token → HttpOnly cookie (browser login) |
 | GET    | `/api/daemon`                  | version/`boot_id`/uptime/session count |
 | POST   | `/api/daemon/shutdown`         | graceful stop |
-| GET/POST | `/api/sessions`              | list / create (`{name?, harness?, profile?, cwd?, args?, env?, role?, resume?, fork_session?}`; `resume` = session name, conversation uuid, or `""`/`true` for claude's picker). Onboarding is optional and composed in the same call: `{mesh?, handle?, connect?, workflow?, context?, task?}` — checked before anything is built, and reported per leg beside the session's own fields |
+| GET/POST | `/api/sessions`              | list / create (`profile` is required and owns the harness; a submitted `harness` is refused; other fields include `{name?, cwd?, args?, env?, role?, resume?, fork_session?}`). Onboarding is optional and composed in the same call: `{mesh?, handle?, connect?, workflow?, context?, task?}` — checked before anything is built, and reported per leg beside the session's own fields |
 | DELETE | `/api/sessions`                | clear all exited records (`?logs=1` deletes their logs; `?running=1` first shuts down and waits out every running session, so this drops *all* of them — `stopped` names what it ended). Records a mesh still names are kept back and reported in `kept` |
 | POST   | `/api/sessions/kill`           | stop every running session (`?force=1`). Records stay, so all of them are still respawnable; `killed`/`failed` name both halves |
 | POST   | `/api/sessions/respawn`        | relaunch every exited session under its own name, in creation order; `respawned`/`failed` |
@@ -2305,8 +2362,12 @@ state (pid/port file, auth token, session logs) stays machine-local under
 
 ## Usage reporting
 
-`claunch usage <name>` reads the profile's OAuth token and queries the Anthropic
-usage endpoint (the same one Claude Code uses), printing per-window utilization:
+`claunch usage <name>` follows the profile harness. Claude profiles query the
+Anthropic usage/rate-limit API; Codex profiles use the isolated CLI's stable
+`codex app-server` `account/rateLimits/read` RPC. Pi, Kimi and Cursor do not
+currently expose a supported equivalent through claunch and fail explicitly
+rather than guessing from screen output. Both supported paths print per-window
+utilization:
 
 ```text
 usage for profile 'work'
@@ -2314,8 +2375,8 @@ usage for profile 'work'
   seven_day          [--------------------]   2.0%  (resets in 5h44m)
 ```
 
-Add `--json` for the raw API response. The query uses only that profile's token,
-so each profile reports its own account's usage.
+Add `--json` for the raw response. Each query uses only that profile's isolated
+auth/home, so profiles cannot report another profile's account accidentally.
 
 **setup-token note.** The free `/api/oauth/usage` endpoint requires the
 `user:profile` scope, which `claude setup-token` tokens don't carry. For those
@@ -2625,16 +2686,14 @@ outside — a supervising script or another agent can watch
 ## How it works
 
 - Profiles live under `~/.claude-launcher/profiles/<name>` (override the base
-  with `CLAUDE_LAUNCHER_HOME`). That directory **is** the profile's
-  `CLAUDE_CONFIG_DIR`.
-- `login` / `run` export `CLAUDE_CONFIG_DIR=<profile dir>` before invoking
-  `claude`, keeping each profile's credentials and settings isolated.
-- `run` exports the profile's `env` vars (from `~/.claunch.yaml`) into claude's
-  process (overriding the inherited shell), plus `CLAUDE_CODE_OAUTH_TOKEN` when a
-  token has been stored — so it authenticates and runs non-interactively.
-- Launcher config (`env`, `parent`, `provider`, template, providers) lives in
-  `~/.claunch.yaml`, **not** in the profile directory; the profile dir holds only
-  Claude Code's own files plus per-machine login tokens.
+  with `CLAUDE_LAUNCHER_HOME`). That directory is the profile storage root.
+- Claude uses the root as `CLAUDE_CONFIG_DIR`; Codex, Pi, Kimi and Cursor use
+  their namespaced child directory through their documented home variable.
+- `run` exports the profile's safe `env` plus the authentication appropriate
+  to its harness. Claude keeps the existing `ANTHROPIC_*`/`CLAUDE_CODE_*`
+  precedence; those namespaces are not copied to unrelated harnesses.
+- Launcher config (`harness`, `env`, `parent`, `api_key_env`, Claude provider,
+  templates/definitions) lives in `~/.claunch.yaml`. Secrets stay local.
 
 A profile directory typically holds:
 
@@ -2642,8 +2701,10 @@ A profile directory typically holds:
 | ---- | ------ |
 | `.claude.json`      | Seeded from your global config (onboarding flags, prefs). |
 | `settings.json`     | Seeded global settings (and any migrated `mcpServers`). |
-| `.launcher-token`   | OAuth token stored by `set-token` (`0600`). |
+| `.launcher-token`   | Claude setup-token stored by `set-token` (`0600`). |
+| `.launcher-api-key` | Separate Pi or Claude-provider key stored by `set-key` (`0600`). |
 | `.credentials.json` | Written by Claude Code itself after an interactive login. |
+| `codex/`, `pi/`, `kimi/`, `agent/` | Non-Claude harness auth/config homes, created as needed. |
 
 ## Configuration
 

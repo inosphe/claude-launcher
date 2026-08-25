@@ -198,13 +198,6 @@ TOOLS = [
                         "started elsewhere would boot empty"
                     ),
                 },
-                "harness": {
-                    "type": "string",
-                    "description": (
-                        "a different harness (only if spawn.allow_harness "
-                        "lists it; otherwise yours is inherited)"
-                    ),
-                },
                 "workspace": {
                     "type": "string",
                     "description": (

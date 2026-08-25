@@ -24,7 +24,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import config, profile, seed, store, template
+from . import config, harnesses, lineage, profile, seed, store, template
 
 LEGACY_META_FILENAME = ".launcher.json"
 LEGACY_SETTINGS_FILENAME = "settings.json"
@@ -52,15 +52,22 @@ def reconcile() -> None:
     """Materialize profiles the store declares but that have no directory here.
 
     The store is the source of truth, but a profile only *works* with a real
-    ``CLAUDE_CONFIG_DIR``. So a config copied from another machine (or a
+    storage root. So a config copied from another machine (or a
     hand-edited ``~/.claunch.yaml``) can name a profile whose directory does not
-    exist yet — create and seed it on demand, so commands work without an
+    exist yet — create it on demand, seeding only Claude profiles, so commands work without an
     explicit step. Idempotent: once the directory exists this does nothing.
     """
+    created = []
     for name in store.profiles():
         p = profile.resolve(name)
         if not p.exists():
-            profile.create(name)
+            p = profile.create(name)
+            created.append(p)
+    # Resolve inheritance only after all roots exist. A child whose parent was
+    # also pulled in this reconciliation must see that parent's harness before
+    # deciding whether Claude config belongs in its storage root.
+    for p in created:
+        if lineage.effective_harness(p) == harnesses.CLAUDE_HARNESS:
             seed.seed_profile(p)
 
 

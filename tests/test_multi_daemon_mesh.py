@@ -28,7 +28,7 @@ from pathlib import Path
 import pytest
 
 import claude_launcher
-from claude_launcher import store
+from claude_launcher import lineage, profile, store
 from claude_launcher.daemon_client import DaemonClient
 
 PASSWORD = "md-pw"
@@ -141,6 +141,7 @@ def test_mesh_between_two_daemon_processes(home, tmp_path):
             }
         )
     )
+    lineage.set_harness(profile.create("py"), "py")
 
     relay_port = _free_port()
     cfg_dir = tmp_path / "relay"
@@ -185,14 +186,14 @@ def test_mesh_between_two_daemon_processes(home, tmp_path):
         assert cb.get("/api/daemon")["relay"]["name"] == "pcb"
 
         # daemon A hosts the mesh and a member session
-        ca.post("/api/sessions", {"name": "sa", "harness": "py", "cwd": str(tmp_path)})
+        ca.post("/api/sessions", {"name": "sa", "profile": "py", "cwd": str(tmp_path)})
         ca.post("/api/mesh", {"name": "fedmesh"})
         ca.post("/api/mesh/fedmesh/members", {"session": "sa", "handle": "alice"})
         code = ca.post("/api/mesh/fedmesh/invite")["code"]
 
         # bob joins fedmesh@pca from daemon B: one call over the relay bridge,
         # redeeming the ticket, creates B's mirror and admits him
-        cb.post("/api/sessions", {"name": "sb", "harness": "py", "cwd": str(tmp_path)})
+        cb.post("/api/sessions", {"name": "sb", "profile": "py", "cwd": str(tmp_path)})
         joined = cb.post(
             "/api/mesh/fedmesh@pca/members",
             {"session": "sb", "handle": "bob", "code": code},
@@ -245,7 +246,7 @@ def test_mesh_between_two_daemon_processes(home, tmp_path):
         # sessions, and pushes an invitation — no code changes hands
         peers = ca.get("/api/relay/peers")["peers"]
         assert "pcb" in peers and "pca" not in peers
-        cb.post("/api/sessions", {"name": "sb2", "harness": "py", "cwd": str(tmp_path)})
+        cb.post("/api/sessions", {"name": "sb2", "profile": "py", "cwd": str(tmp_path)})
         remote = ca.get("/api/relay/peers/pcb/sessions")
         assert "sb2" in [s["name"] for s in remote["sessions"]]
         pushed = ca.post(

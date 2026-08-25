@@ -2,8 +2,8 @@
 
 A *harness* is the CLI agent program a session runs. The set used to be
 "``claude``, plus whatever the user happened to write under ``harnesses:``",
-which meant a fresh install knew exactly one — and the web UI had to take the
-name as free text, with a typo indistinguishable from an unconfigured harness.
+which meant a fresh install knew exactly one. Profiles now name a declared
+harness once; session creation only displays that resolved value read-only.
 
 The set is now a **document**. The packaged default declares the harnesses
 claunch knows about (:data:`DEFAULT_YAML`), and ``~/.claunch.yaml`` may
@@ -14,7 +14,10 @@ override or extend it::
         command: codex          # string or argv list
         args: ["--yolo"]        # optional, before the session's own args
         env: {KEY: VALUE}       # optional overrides
-        description: "..."      # optional, shown in pickers
+        home_env: CODEX_HOME     # optional isolated per-profile home
+        auth: oauth              # claude, oauth, api-key, or none
+        login_args: [login]      # optional interactive login argv
+        description: "..."      # optional, shown in status surfaces
       pi: null                  # a tombstone: drop a packaged harness
 
 Overriding is **per harness, not per field** (as with :mod:`mesh_roles`): a
@@ -23,15 +26,15 @@ declaration — new command, inherited flags — can never happen.
 
 Being *declared* is not the same as being *installed*: ``pi`` ships in the
 default set whether or not the machine has it. :meth:`Harness.available`
-answers that separately, which is what lets the web UI list a harness it
-cannot run yet as a disabled option instead of hiding it (a hidden option
-reads as "claunch does not support pi", which is the wrong thing to learn).
+answers that separately, so a profile selecting a missing executable can be
+shown as unavailable without reopening harness selection at session creation.
 """
 
 from __future__ import annotations
 
 import shutil
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Dict, List, Optional
 
 import yaml
@@ -62,17 +65,42 @@ harnesses:
 
   claude:
     builtin: true
+    auth: claude
     description: >-
       Claude Code, run under a claunch profile (isolated config dir, provider
       and token). Needs --profile; the executable is CLAUDE_LAUNCHER_BIN.
 
   codex:
     command: codex
+    home_env: CODEX_HOME
+    auth: oauth
+    login_args: [login]
+    heartbeat_args: [exec, --skip-git-repo-check]
+    usage: codex-app-server
     description: OpenAI's Codex CLI.
 
   pi:
     command: pi
+    home_env: PI_CODING_AGENT_DIR
+    auth: api-key
+    heartbeat_args: [-p]
     description: The pi CLI agent.
+
+  kimi:
+    command: kimi
+    home_env: KIMI_CODE_HOME
+    auth: oauth
+    login_args: [login]
+    heartbeat_args: [-p]
+    description: Moonshot AI's Kimi Code CLI.
+
+  agent:
+    command: agent
+    home_env: CURSOR_CONFIG_DIR
+    auth: oauth
+    login_args: [login]
+    heartbeat_args: [-p]
+    description: Cursor Agent CLI.
 """
 
 
@@ -90,12 +118,37 @@ class Harness:
     env: Dict[str, str] = field(default_factory=dict)
     description: str = ""
     builtin: bool = False
+    #: Environment variable that relocates this harness's user data. The
+    #: builtin claude harness is kept at the profile root for backwards
+    #: compatibility; other harnesses receive a namespaced child directory.
+    home_env: str = ""
+    #: ``claude`` uses the launcher's provider/token machinery, ``oauth``
+    #: keeps credentials in the harness-owned home, and ``api-key`` may
+    #: receive a launcher-managed key through the profile's ``api_key_env``.
+    auth: str = "none"
+    login_args: List[str] = field(default_factory=list)
+    #: Non-interactive argv placed before the health-check prompt. Empty
+    #: means this custom harness cannot be checked safely by ``validate``.
+    heartbeat_args: List[str] = field(default_factory=list)
+    usage: str = ""
 
     def program(self) -> str:
         """The executable whose presence decides :meth:`available`."""
         if self.builtin:
             return config.claude_bin()
         return self.command[0] if self.command else self.name
+
+    def launch_command(self) -> List[str]:
+        """Runnable argv prefix, including Windows ``.CMD`` resolution.
+
+        npm-installed agents commonly expose ``codex.cmd``/``kimi.cmd`` on
+        Windows. ``shutil.which`` understands PATHEXT while CreateProcess does
+        not resolve a bare extensionless argv element reliably.
+        """
+        if self.builtin:
+            return []
+        first = shutil.which(self.program()) or self.program()
+        return [first, *self.command[1:]]
 
     def available(self) -> bool:
         """Whether this machine can actually run it right now.
@@ -106,6 +159,15 @@ class Harness:
         """
         return shutil.which(self.program()) is not None
 
+    def profile_home(self, config_dir: Path) -> Path:
+        """Directory this harness owns inside a claunch profile.
+
+        Claude profiles predate the harness model and already store their
+        settings directly in ``config_dir``. Moving them would log every
+        existing profile out, so only non-builtin harnesses get a child.
+        """
+        return config_dir if self.builtin else config_dir / self.name
+
     def to_dict(self) -> dict:
         return {
             "name": self.name,
@@ -113,6 +175,11 @@ class Harness:
             "args": list(self.args),
             "description": self.description,
             "builtin": self.builtin,
+            "home_env": self.home_env,
+            "auth": self.auth,
+            "login_args": list(self.login_args),
+            "heartbeat_args": list(self.heartbeat_args),
+            "usage": self.usage,
             # Resolved per call, never stored: installing pi should not need a
             # config edit, and a PATH change is exactly what this reports.
             "available": self.available(),
@@ -145,6 +212,11 @@ def _parse_entry(name: str, body) -> Harness:
     elif not command:
         command = [name]
     env = body.get("env")
+    auth = str(body.get("auth") or ("claude" if builtin else "none")).strip()
+    if auth not in {"claude", "oauth", "api-key", "none"}:
+        raise HarnessConfigError(
+            f"harness {name!r} auth must be claude, oauth, api-key or none"
+        )
     return Harness(
         name=name,
         command=command,
@@ -154,6 +226,13 @@ def _parse_entry(name: str, body) -> Harness:
         ),
         description=str(body.get("description") or "").strip(),
         builtin=builtin,
+        home_env=str(body.get("home_env") or "").strip(),
+        auth=auth,
+        login_args=_as_list(body.get("login_args"), f"harness {name!r} login_args"),
+        heartbeat_args=_as_list(
+            body.get("heartbeat_args"), f"harness {name!r} heartbeat_args"
+        ),
+        usage=str(body.get("usage") or "").strip(),
     )
 
 

@@ -116,9 +116,14 @@ const fetched = [];
    answers null — a fetch that failed, which must open nothing. */
 const reports = {};
 const ctx = {};
+const PROFILE_DETAILS = {
+  work: { name: "work", harness: "claude", harness_available: true },
+  home: { name: "home", harness: "claude", harness_available: true },
+};
 new Function(
   "exports", "$", "document", "Option", "sessionsCache", "syncForkAvailability",
   "renderRoleStance", "refreshWorkflowChoices", "spawnReport", "workspacesCache",
+  "profileDetails",
   "syncRuntimeFold", "renderRuntimeSummary",
   [sliceConst("SPAWN_INHERITS"), sliceLet("newSpawnReport"),
    sliceLet("newSpawnReportFor"), sliceLet("newSpawnDefaultsFor"),
@@ -149,6 +154,7 @@ exports.setSessions = (s) => { sessionsCache = s; };
    () => { wfRefreshes++; },
    async (name) => { fetched.push(name); return reports[name] || null; },
    [{ name: "repo", path: "F:/repo", exists: true }],
+   PROFILE_DETAILS,
    // The "How it runs" fold opens itself when the policy hands a row back.
    // That rule reads the fold element, which this stub page does not have,
    // and it is newform_check's to hold — here it only has to exist. The
@@ -200,7 +206,7 @@ async function main() {
      the row that offers the parent's conversation is not there at all. */
   check("no parent, nothing inherited",
         ["harness", "cwd", "args"].map((k) => form[k].disabled),
-        [false, false, false]);
+        [true, false, false]);
   check("the fork row is hidden until there is a parent",
         box_["new-fork-row"].classes.has("hidden"), true);
   check("the create form's own rows are re-derived by their owner",
@@ -288,22 +294,20 @@ async function main() {
   form.borrow.value = "work";
   ctx.sync();
 
-  /* An unlocked harness row: only what the policy named, plus the parent's
-     own — which is not an override at all. Being installed is the option's
-     other reason to be greyed, and it outlives this one. */
+  /* Even an old daemon advertising the dead harness unlock cannot open it. */
   reports.lead.spawnable_harnesses = ["codex"];
   await reread("lead");
-  check("the harness row opens when the policy names any",
-        form.harness.disabled, false);
-  check("only the unlocked harnesses and the parent's own are choosable",
+  check("the harness row stays read-only when the policy names any",
+        form.harness.disabled, true);
+  check("only the selected profile's harness is displayed",
         form.harness.options.map((o) => [o.value, o.disabled]),
-        [["claude", false], ["codex", false], ["gemini", true], ["pi", true]]);
+        [["claude", false]]);
   check("entering child mode seeds the row with the parent's own harness",
         form.harness.value, "claude");
 
-  /* A child on another harness: auth and role are claude's machinery, so
-     those rows go down however the policy is set. */
-  form.harness.value = "codex";
+  /* A child on another profile-owned harness: auth and role are Claude's. */
+  PROFILE_DETAILS.home.harness = "codex";
+  form.profile.value = "home";
   ctx.sync();
   check("a non-claude child has no token rows and no role",
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled,
@@ -311,7 +315,7 @@ async function main() {
         [true, true, true, "", ""]);
   check("the stance was re-rendered when the role was taken back",
         stances > 0, true);
-  form.harness.value = "claude";
+  PROFILE_DETAILS.home.harness = "claude";
   ctx.sync();
   check("back on claude the rows come back",
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled],
@@ -381,13 +385,13 @@ async function main() {
   ctx.sync();
   check("clearing the parent hands the rows back",
         ["harness", "profile", "cwd", "args"].map((k) => form[k].disabled),
-        [false, false, false, false]);
+        [true, false, false, false]);
   check("the inherit entry goes with it, and a real profile is selected",
         [form.profile.options[0].value, form.profile.value], ["work", "work"]);
   check("the blank directory entry is the daemon's own again",
         form.cwd.options[0].textContent, "(daemon cwd)");
-  check("every harness that is installed is choosable again",
-        form.harness.options.map((o) => o.disabled), [false, false, false, true]);
+  check("the root harness remains a one-option projection",
+        form.harness.options.map((o) => o.disabled), [false]);
   check("the fork row goes with it",
         box_["new-fork-row"].classes.has("hidden"), true);
   check("and the create form re-derives its own greying",
