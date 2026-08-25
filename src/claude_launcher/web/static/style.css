@@ -180,6 +180,9 @@ option:disabled { color: #6b7280; }
   flex-basis: 100%; display: flex; align-items: center; gap: 6px;
   min-width: 0; padding-left: 16px; font-size: 11px; color: #7d8590;
 }
+/* No dot is drawn on this line any more — the run's mark is a glyph (see
+   .wf-mark) — but the rule stays for the session's own dot, which the row
+   above it still owns. */
 #session-list .sess-cflow .dot { width: 6px; height: 6px; }
 #session-list .sess-cflow-text {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
@@ -494,13 +497,26 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   font-family: Cascadia Mono, Consolas, Menlo, monospace;
   color: #d29922; background: #14161a; border: 1px solid #30363d; border-radius: 4px;
 }
-.dot.wf-running { background: #58a6ff; }
-.dot.wf-waiting { background: #d29922; }
-/* Delegated: stopped, but on a peer rather than on the operator — so it is
-   deliberately NOT the amber that means "your move". */
-.dot.wf-delegated { background: #a371f7; }
-.dot.wf-done { background: #3fb950; }
-.dot.wf-error { background: #ff7b72; }
+/* A workflow run's state, as a glyph and NOT as a colour.
+
+   There is no `.dot.wf-*` colour rule here any more, and that absence is the
+   fix. The run's mark used to be a coloured dot drawn one line under the
+   session's own liveness dot, and the two palettes were the same palette —
+   a finished run and an idle session both #3fb950, a running step and a
+   starting session both #58a6ff. Two green circles in a column read as two
+   sessions, which is how it was reported. Colour on this rail now means one
+   thing only: a session. (`.badge.wf-*` further down keeps its colours — a
+   labelled pill with no dot beside it was never part of the confusion.)
+
+   So the mark takes `color: inherit` and nothing else: grey with the line it
+   sits on, amber when `.sess-cflow.gated` turns the whole line over to the
+   reader. What it says on its own, it says by shape — ▸ running, ◆ your move,
+   ◇ with a peer, ✓ done, ✕ error (WF_GLYPH in app.js). The fixed width keeps
+   the names beside them in one column whichever glyph is showing. */
+.wf-mark {
+  flex: none; width: 1em; text-align: center; color: inherit;
+  line-height: 1; font-style: normal;
+}
 
 #new-session { padding: 0; max-width: 520px; }
 #new-session label { display: block; font-size: 12px; color: #9da5b0; margin-bottom: 6px; }

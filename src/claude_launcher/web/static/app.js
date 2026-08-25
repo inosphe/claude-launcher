@@ -620,8 +620,10 @@ function sessCflowLabel(r) {
     return answerFellToUs(r) ? "asked of nobody — approve to continue"
                              : `with ${askWho(r.ask)}`;
   if (r.status === "report_required") return "report required";
+  // "held → 19:52", the short form s107 draws on the diagram and the flow
+  // card. One state, one wording, wherever a reader meets it.
   if (r.status === "waiting_window")
-    return `'${r.option}' held — opens ${fmtOpensAt(r.opens_at)}`;
+    return `'${r.option}' held → ${fmtOpensAt(r.opens_at)}`;
   if (r.status === "done" || r.status === "error" || r.status === "aborted")
     return r.status;
   return r.title || r.step_id || "running";
@@ -662,8 +664,10 @@ function applyCflowBadges() {
     const gated = sessCflowGated(r);
     line.className = `sess-cflow${gated ? " gated" : ""}`;
     line.textContent = "";
-    const dot = document.createElement("span");
-    dot.className = `dot ${wfDotClass(r.status, r)}`;
+    const [markCls, markGlyph] = wfMark(r.status, r);
+    const mark = document.createElement("span");
+    mark.className = markCls;
+    mark.textContent = markGlyph;
     const txt = document.createElement("span");
     txt.className = "sess-cflow-text";
     txt.textContent =
@@ -672,7 +676,7 @@ function applyCflowBadges() {
       ? (r.gate || r.prompt || "") +
         (r.options ? ` — options: ${r.options.join(", ")}` : "")
       : (r.title || r.step_id || "");
-    line.append(dot, txt);
+    line.append(mark, txt);
   }
 }
 
@@ -1295,6 +1299,74 @@ function wfDotClass(status, run) {
   return "wf-running";
 }
 
+/* The mark that stands in front of a workflow run's name — a glyph, and
+   deliberately COLOURLESS.
+
+   It used to be a coloured dot, and that is the bug: the rail draws a run's
+   mark one line under the session's own liveness dot, and the two palettes
+   are the same palette — a finished run and an idle session are both
+   #3fb950, a running step and a starting session are both #58a6ff. A reader
+   scanning the rail saw two green circles and read the second as another
+   session. Colour cannot say WHOSE state it is showing, only which.
+
+   So the run's mark gives colour up entirely: it inherits the line's colour
+   (grey, or the amber the whole line takes when the run is the reader's
+   move), which leaves the saturated dots on this rail meaning exactly one
+   thing — a session. Its own state it says by SHAPE, which nothing else in
+   the rail speaks in:
+
+     ▸  running     — moving
+     ‖  held        — stopped by the clock: a paced option waiting for its
+                      window, which the daemon opens. Nobody can hurry it,
+                      so it must not look like either kind of "waiting"
+     ◆  your move   — stopped, filled: it is on the person reading this
+     ◇  with a peer — stopped, hollow: it is on somebody else
+     ✓  done
+     ✕  error/aborted
+
+   ▸/‖ is the play/pause pair, and ◆/◇ is the filled/hollow one; the latter
+   matters because those two are the same status word ("waiting") and
+   opposite meanings for the reader. Badges are untouched: `.badge.wf-*`
+   keeps its colour, being a labelled pill that no dot sits near. */
+const WF_GLYPH = {
+  running: "▸",
+  held: "‖",
+  yours: "◆",
+  peer: "◇",
+  done: "✓",
+  error: "✕",
+};
+
+/* Which SHAPE a run wears — deliberately its own vocabulary, not a re-use of
+   the colour classes above.
+
+   The two axes stopped agreeing the moment colour left. `wfDotClass` answers
+   "which colour does a badge paint" and hands `waiting_window` the same
+   `wf-delegated` as an ask sitting with a peer, because neither is the
+   operator's move and one colour said that much. Shape can afford the
+   distinction the colour could not: a peer can be chased and a clock cannot.
+   Keeping them separate also means a new shape costs nothing — the mark has
+   no per-state rule to add, having no colour to declare. (Agreed with s107,
+   who draws the same state on the workflow diagram: the word for it is
+   "held", the thing that releases it is the daemon.) */
+function wfMarkState(status, run) {
+  if (status === "waiting_window") return "held";
+  if (status === "waiting_answer") return answerFellToUs(run) ? "yours" : "peer";
+  if (status === "waiting_approval" || status === "waiting_selection" ||
+      status === "report_required") return "yours";
+  if (status === "done") return "done";
+  if (status === "error" || status === "aborted") return "error";
+  return "running";
+}
+
+/* [class, glyph] for a run's mark. Two values rather than a built element:
+   the three places that draw one build their nodes in their own idiom, and
+   one of them goes through `el`. */
+function wfMark(status, run) {
+  const state = wfMarkState(status, run);
+  return [`wf-mark wf-mark-${state}`, WF_GLYPH[state]];
+}
+
 /* Who an open ask is with, in a few words. */
 function askWho(ask) {
   const asked = (ask && ask.asked) || [];
@@ -1513,8 +1585,10 @@ async function refreshCflow() {
 
     const head = document.createElement("div");
     head.className = "cflow-head";
-    const dot = document.createElement("span");
-    dot.className = `dot ${wfDotClass(r.status, r)}`;
+    const [markCls, markGlyph] = wfMark(r.status, r);
+    const mark = document.createElement("span");
+    mark.className = markCls;
+    mark.textContent = markGlyph;
     const name = document.createElement("span");
     // A run is keyed by (directory, session), so a team working one workflow
     // in one tree makes cards that differ ONLY by the session. That makes the
@@ -1534,7 +1608,7 @@ async function refreshCflow() {
         : r.status === "waiting_answer"
         ? (answerFellToUs(r) ? "asked of nobody" : `with ${askWho(r.ask)}`)
         : r.status;
-    head.append(dot, name, st);
+    head.append(mark, name, st);
     li.appendChild(head);
 
     if (r.step_id) {
@@ -7815,7 +7889,7 @@ function sessWorkflow(data) {
 
   if (flow.status && flow.status !== "idle") {
     const line = el("div", "sess-wf-run");
-    line.appendChild(el("span", `dot ${wfDotClass(flow.status, flow)}`));
+    line.appendChild(el("span", ...wfMark(flow.status, flow)));
     line.appendChild(el("span", "sess-wf-name", flow.workflow || "(workflow)"));
     line.appendChild(el("span", "meta",
       flow.status +
