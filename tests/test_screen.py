@@ -91,6 +91,16 @@ def test_bottom_line_matches_render_screen_tail():
     assert s.bottom_line() == s.render_screen()[-1]
 
 
+def test_bottom_line_survives_a_leading_stub_cell():
+    # A DCH (delete-char) shift can push a wide glyph's stub cell to column 0,
+    # where its data is "" — reading its width would explode. The footer read
+    # must not, and must return the visible text (the wide glyphs intact).
+    s = ScreenState(20, 3)
+    s.feed("\x1b[3;1H가나다".encode())
+    s.feed(b"\x1b[3;1H\x1b[1P")  # DCH: delete the leading cell -> stub at col 0
+    assert s.bottom_line() == "나다"
+
+
 def test_repaint_sequence_contains_content():
     s = ScreenState(20, 5)
     s.feed(b"hi there")
