@@ -217,6 +217,7 @@ class Session:
         *,
         idle_threshold: float,
         scrollback: int,
+        created_at: Optional[str] = None,
     ) -> None:
         self.sdef = sdef
         self.argv: List[str] = []
@@ -226,7 +227,12 @@ class Session:
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
         self._feeder = ScreenFeeder(self.screen)
         self.tracker = IdleTracker()
-        self.created_at = _utcnow()
+        #: When this session was *first* made, not when this object was.
+        #: A relaunch that keeps the name — a daemon restart's restore, a
+        #: respawn, a redefine — is the same session continuing, and the
+        #: manager hands the old value back in so listings stay in the order
+        #: the sessions were actually created (see SessionManager.list).
+        self.created_at = created_at or _utcnow()
         self.last_output_at: Optional[str] = None
         self.exit_code: Optional[int] = None
         self.exited_at: Optional[str] = None

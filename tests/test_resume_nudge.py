@@ -103,8 +103,19 @@ class _NoSpawnManager(SessionManager):
     spawn is the one part these tests do not need.
     """
 
-    def create(self, sdef, *, restoring: bool = False, opening: str = ""):
+    def create(
+        self,
+        sdef,
+        *,
+        restoring: bool = False,
+        opening: str = "",
+        created_at: str = "",
+    ):
         session = _Recorded(sdef.name, "starting", cwd=sdef.cwd)
+        # Carried like the real one does: a restore relaunches into a new
+        # object, and the session's creation time has to survive it (the
+        # listings are ordered by it -- see manager.list).
+        session.created_at = created_at or None
         self._sessions[sdef.name] = session
         return session
 
