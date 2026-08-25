@@ -74,7 +74,8 @@ its payload therefore carries, the soft child cap offered as a crossing,
 and when the parent's conversation is on offer to fork — ``newflow_check``
 on the same form's Role and Workflow rows, where picking a role picks the
 workflow that volunteers for it and a pick made by hand outlives every
-later role change — ``spawnsize_check`` on how big that dialog is: the
+later role change — ``spawnsize_check`` on how big the spawn DIALOG is
+(the modal, not this form): the
 grip the stylesheet draws, the size the browser remembers between opens,
 and the shared ``.modal-box`` a dragged-wide form must hand back so the
 next confirm dialog is not 900px of prose — and the two
