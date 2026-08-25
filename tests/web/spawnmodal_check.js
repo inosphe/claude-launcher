@@ -164,7 +164,8 @@ new Function(
   + slice("spawnReport") + slice("spawnPreflightNote")
   + slice("spawnHardBlocks") + slice("postSpawn")
   + slice("spawnMissingSources") + slice("spawnSourceNote")
-  + slice("qjStamp") + slice("fillSpawnSelect") + slice("spawnRow") + slice("spawnCheckRow")
+  + slice("qjStamp") + slice("fillSpawnSelect") + slice("spawnRow") + slice("spawnSubRow")
+  + slice("spawnCheckRow") + slice("spawnRadioGroup")
   + slice("refillSpawnWorkflows") + slice("spawnConnectNow")
   + slice("buildSpawnForm")
   + slice("spawnModalKey") + slice("spawnModalClose") + slice("openSpawnModal")
@@ -172,13 +173,14 @@ new Function(
   + `
 Object.assign(exports, {
   spawnPayload, syncSpawnGates, spawnRankWorkflows, spawnWorkflowAdmits,
-  spawnWorkflowEntry, spawnAutoWorktree, spawnMeshNow,
+  spawnWorkflowEntry, spawnAutoWorktree, spawnMeshNow, spawnRadioGroup,
   spawnRecall, saveSpawnRecall, buildSpawnForm, openSpawnModal, spawnModalClose,
   refillSpawnWorkflows, spawnConnectNow,
   spawnMissingSources, spawnSourceNote,
   setSessions: (a) => { sessionsCache = a; },
   setSess: (n) => { sessName = n; },
   isOpen: () => spawnModal !== null,
+  spawnUi: () => (spawnModal ? spawnModal.ui : null),
   counters: () => ({ rail: railRefreshed, kids: kidsRefreshed, goto: gotoHash }),
 });`
 )(ctx, document, el, api, localStorage, $);
@@ -196,6 +198,19 @@ const ctl = (extra = {}) => Object.assign({
   value: "", checked: false, disabled: false, hidden: false, textContent: "",
 }, extra);
 
+/* The worktree row is the one control the brain does not drive as a plain
+   value: it is a radio group, so the harness builds the REAL one (against the
+   stub DOM) rather than a ctl() that would agree with anything. */
+let wtGroupN = 0;
+const wtGroup = (value = "", off = false) => {
+  const g = ctx.spawnRadioGroup(`wt${wtGroupN++}`, [
+    ["", "no worktree"], ["new", "new worktree"], ["existing", "existing worktree"],
+  ]);
+  g.value = value;
+  if (off) g.disabled = true;
+  return g;
+};
+
 function uiStub(over = {}) {
   return Object.assign({
     parent: { value: "lead1" }, parentSess: {}, parentMesh: "", report: {},
@@ -207,7 +222,8 @@ function uiStub(over = {}) {
     harnessNote: ctl(), profileNote: ctl(), borrowNote: ctl(),
     nullNote: ctl(), forkNote: ctl(), argsNote: ctl(),
     workspace: ctl(), workspaceNote: ctl(),
-    worktree: ctl(), worktreeNote: ctl(), wtName: ctl(),
+    wtMode: wtGroup(), worktreeNote: ctl(), wtName: ctl(),
+    wtPick: ctl(), wtPickRow: ctl(),
     update: ctl(), rebase: ctl(), wtRow: ctl(), wtNameRow: ctl(),
     updateRow: ctl(), rebaseRow: ctl(),
     handleRow: ctl(), connectRow: ctl(), connectHandles: [],
@@ -265,8 +281,8 @@ async function main() {
     borrow: ctl({ value: "p2" }), nullTok: ctl({ checked: true }),
     args: ctl({ value: "--verbose --json" }),
     workspace: ctl({ value: "ws" }),
-    worktree: ctl({ value: "@named" }), wtName: ctl({ value: "my-wt" }),
-    wtRow: ctl({ hidden: false }), rebaseRow: ctl({ hidden: true }),
+    wtMode: wtGroup("new"), wtName: ctl({ value: "my-wt" }),
+    wtPick: ctl(), wtRow: ctl({ hidden: false }), rebaseRow: ctl({ hidden: true }),
     update: ctl(), rebase: ctl(),
     overRow: ctl({ hidden: true }), over: ctl({ checked: true }),
   });
@@ -276,7 +292,7 @@ async function main() {
   check("payload sends mesh and handle", body.mesh === "m0" && body.handle === "c7");
   check("payload sends the connect list", body.connect && body.connect.join(",") === "w2", body.connect);
   check("payload splits args", body.args.join(" ") === "--verbose --json", body.args);
-  check("@named sends the given worktree name", body.worktree === "my-wt", body.worktree);
+  check("a named new worktree sends that name", body.worktree === "my-wt", body.worktree);
   check("a hidden over-limit row is not asked",
     body.over_limit === undefined, body);
 
@@ -290,7 +306,7 @@ async function main() {
     args: ctl({ value: "-x", disabled: true }),
     workspace: ctl({ value: "ws", disabled: true }),
     fork: ctl({ checked: true, disabled: true }),
-    worktree: ctl({ value: "@auto", disabled: true }), wtRow: ctl({ hidden: false }),
+    wtMode: wtGroup("new", true), wtRow: ctl({ hidden: false }),
     overRow: ctl({ hidden: true }), over: ctl({ checked: true }),
     mesh: ctl({ value: "-" }), role: ctl({ value: "" }),
   });
@@ -319,21 +335,27 @@ async function main() {
     g.profile.disabled === true && /spawn\.allow_profile/.test(g.profileNote.textContent));
   check("no workspaces list locks the directory row",
     g.workspace.disabled === true && /spawn\.allow_workspace/.test(g.workspaceNote.textContent));
-  check("worktree not in may_choose locks the row",
-    g.worktree.disabled === true && /spawn\.allow_worktree/.test(g.worktreeNote.textContent));
+  check("worktree not in may_choose locks every mode",
+    g.wtMode.disabled === true &&
+      Object.values(g.wtMode.inputs).every((i) => i.disabled === true) &&
+      /spawn\.allow_worktree/.test(g.worktreeNote.textContent),
+    g.worktreeNote.textContent);
 
   const g2 = uiStub({
     report: { may_choose: ["worktree", "profile", "fork"], workspaces: [] },
     harness: ctl({ value: "claude" }), parentSess: { harness: "claude" },
-    git: { repo: true, worktrees: ["tan"] }, worktree: ctl({ value: "tan" }),
-    update: ctl({ checked: true }), fork: ctl(),
+    git: { repo: true, worktrees: ["tan"] }, wtMode: wtGroup("existing"),
+    wtPick: ctl({ value: "tan" }), update: ctl({ checked: true }), fork: ctl(),
   });
   ctx.syncSpawnGates(g2);
-  check("a choosable worktree stays open", g2.worktree.disabled === false);
+  check("a choosable worktree stays open", g2.wtMode.disabled === false);
+  check("reuse folds out its picker and hides the name field",
+    g2.wtPickRow.hidden === false && g2.wtNameRow.hidden === true,
+    [g2.wtPickRow.hidden, g2.wtNameRow.hidden]);
   const gRepo = uiStub({
     report: { may_choose: ["worktree"] }, git: { repo: false },
     harness: ctl({ value: "claude" }), parentSess: { harness: "claude" },
-    worktree: ctl(), update: ctl(), over: ctl(),
+    update: ctl(), over: ctl(),
   });
   ctx.syncSpawnGates(gRepo);
   check("a non-repo directory takes the worktree rows away", gRepo.wtRow.hidden === true);
@@ -342,12 +364,110 @@ async function main() {
     g2.fork.disabled === true && /worktree of its own/.test(g2.forkNote.textContent),
     g2.forkNote.textContent);
 
+  /* ---- the worktree row: three modes, each with its own detail -----------
+     The bug this pins: one <select> used to hold "(no worktree)", "@auto",
+     "@named" and every checkout the repository has — four kinds of answer in
+     one list, so the mode and the name were the same question. The modes are
+     radios now, and each one's detail is folded under it; what must hold is
+     that only the picked mode's rows are on screen and only its answer is in
+     the payload. */
+  const wtCase = (over = {}) => {
+    const u = uiStub(Object.assign({
+      report: { may_choose: ["worktree"], workspaces: [] },
+      harness: ctl({ value: "claude" }), parentSess: { harness: "claude" },
+      git: { repo: true, worktrees: ["tan", "oak"] },
+      wtRow: ctl({ hidden: false }), over: ctl(), update: ctl(),
+    }, over));
+    ctx.syncSpawnGates(u);
+    return u;
+  };
+
+  const none = wtCase({ wtMode: wtGroup("") });
+  check("no worktree folds every detail away",
+    none.wtNameRow.hidden === true && none.wtPickRow.hidden === true &&
+      none.updateRow.hidden === true && none.rebaseRow.hidden === true,
+    [none.wtNameRow.hidden, none.wtPickRow.hidden, none.updateRow.hidden]);
+  check("...and sends no worktree at all",
+    ctx.spawnPayload(none).worktree === undefined);
+
+  const fresh = wtCase({ wtMode: wtGroup("new"), name: ctl({ value: "w7" }) });
+  check("new worktree asks for a name and nothing else",
+    fresh.wtNameRow.hidden === false && fresh.wtPickRow.hidden === true &&
+      fresh.updateRow.hidden === true,
+    [fresh.wtNameRow.hidden, fresh.wtPickRow.hidden]);
+  // The generated name is READ on the form, not discovered by pressing Spawn.
+  check("...spelling the generated name into the blank field's placeholder",
+    fresh.wtName.placeholder === "blank = w7-20260824-210000",
+    fresh.wtName.placeholder);
+  check("...and a blank name sends that generated one",
+    ctx.spawnPayload(fresh).worktree === "w7-20260824-210000",
+    ctx.spawnPayload(fresh).worktree);
+
+  const reuse = wtCase({
+    wtMode: wtGroup("existing"), wtPick: ctl({ value: "oak" }),
+    wtName: ctl({ value: "typed-then-abandoned" }),
+    update: ctl({ checked: true }), rebase: ctl({ value: "master" }),
+  });
+  ctx.syncSpawnGates(reuse);   // the update tick opens the rebase row
+  check("existing sends the checkout it names",
+    ctx.spawnPayload(reuse).worktree === "oak", ctx.spawnPayload(reuse).worktree);
+  check("...carrying the rebase the catch-up opened",
+    ctx.spawnPayload(reuse).rebase_onto === "master");
+  // A name typed under 'new' and then abandoned is not an answer either: the
+  // mode decides which field is read, which is the point of splitting them.
+  check("...and not the name left in the other mode's field",
+    ctx.spawnPayload(reuse).worktree !== "typed-then-abandoned");
+
+  // Nothing to reuse: the mode is greyed rather than offered over an empty
+  // picker, and a greyed mode cannot stay the answer.
+  const bare = wtCase({
+    wtMode: wtGroup("existing"), git: { repo: true, worktrees: [] },
+  });
+  check("a repository with no checkouts greys the reuse mode",
+    bare.wtMode.inputs.existing.disabled === true &&
+      bare.wtMode.inputs.new.disabled === false,
+    [bare.wtMode.inputs.existing.disabled, bare.wtMode.inputs.new.disabled]);
+  check("...and drops it as the answer rather than leaving it stuck",
+    bare.wtMode.value === "" && ctx.spawnPayload(bare).worktree === undefined,
+    bare.wtMode.value);
+  const grown = wtCase({
+    wtMode: wtGroup(""), git: { repo: true, worktrees: ["tan"] },
+  });
+  check("...and it comes back live once there is one",
+    grown.wtMode.inputs.existing.disabled === false);
+
+  // Reuse with nothing picked is not a silent fall back to a fresh checkout.
+  const unpicked = wtCase({ wtMode: wtGroup("existing"), wtPick: ctl({ value: "" }) });
+  check("reuse with no checkout picked sends nothing",
+    ctx.spawnPayload(unpicked).worktree === undefined,
+    ctx.spawnPayload(unpicked));
+
+  // The group answers to `.value` and `.disabled` the way the <select> did,
+  // so the gates and the payload never learn which widget they are driving.
+  const grp = wtGroup("");
+  check("the group opens on the harmless first answer", grp.value === "");
+  grp.value = "existing";
+  check("setting the value checks that one and unchecks the rest",
+    grp.inputs.existing.checked === true && grp.inputs.new.checked === false);
+  grp.value = "nonsense";
+  check("an unknown answer lands on the harmless first one", grp.value === "");
+  let heard = 0;
+  grp.listen(() => { heard++; });
+  // The browser unchecks the siblings itself (they share a name); the group's
+  // own handler repeats it, so a stub DOM — and a node that drifted out of the
+  // group — read the same. One handler covers all three buttons.
+  grp.inputs.new.checked = true;
+  await grp.inputs.new.fire("change");
+  check("a click is the group's value, with the siblings unchecked",
+    grp.value === "new" && grp.inputs[""].checked === false && heard === 1,
+    [grp.value, grp.inputs[""].checked, heard]);
+
   const g3 = uiStub({
     report: { may_choose: ["fork"] }, git: {},
     harness: ctl({ value: "" }), profile: ctl({ value: "pi-profile" }),
     profileDetails: { "pi-profile": { harness: "pi" } },
     parentSess: { harness: "claude" },
-    nullTok: ctl(), borrow: ctl(), worktree: ctl({ value: "" }),
+    nullTok: ctl(), borrow: ctl(), wtMode: wtGroup(""),
     over: ctl(), update: ctl(),
     mesh: ctl({ value: "-" }), connectHandles: ["a"],
   });
@@ -428,8 +548,8 @@ async function main() {
   const built = ctx.buildSpawnForm("lead1", { quick: true, task: "fix the tab", name: "w7" });
   const bui = built.ui;
   for (const k of ["name", "role", "workflow", "context", "mesh", "handle", "task",
-                   "harness", "profile", "borrow", "args", "workspace", "worktree",
-                   "wtName", "update", "rebase", "fork", "over"]) {
+                   "harness", "profile", "borrow", "args", "workspace", "wtMode",
+                   "wtPick", "wtName", "update", "rebase", "fork", "over"]) {
     check(`form builds ${k}`, bui[k] && typeof bui[k] === "object", k);
   }
   check("parent is pinned to the opener", bui.parent.value === "lead1", bui.parent);
@@ -594,6 +714,72 @@ async function main() {
   await settle();
   check("a healthy load raises no source warning",
     !texts(modalEls["modal-body"]).includes("could not load"));
+
+  /* ---- the seed still speaks the API's language, the form speaks modes ---
+     `worktree: true` and `worktree: "<name>"` are what the quick job and the
+     saved defaults carry, and the daemon takes the same. The modal is where
+     that becomes a MODE, and the rule is the repository's own list: a name it
+     has is a reuse, a name it does not have is a new checkout carrying that
+     name. Getting this backwards would open the wizard on "new" over a name
+     that already exists — and cut a second checkout of it on Spawn. */
+  const goodGit = routes["GET /api/git?cwd=C%3A%2Frepo"];
+  routes["GET /api/git?cwd=C%3A%2Frepo"] =
+    { doc: { repo: true, worktrees: ["tan", "oak"] } };
+
+  await ctx.openSpawnModal("lead1", { seed: { worktree: "oak" } });
+  await settle();
+  await settle();
+  const wui = ctx.spawnUi();
+  const radios = tags(modalEls["modal-body"], "input").filter((i) => i.type === "radio");
+  check("the row is three radios, not a list of four kinds of answer",
+    radios.length === 3 &&
+      JSON.stringify(radios.map((r) => r.value)) === JSON.stringify(["", "new", "existing"]),
+    radios.map((r) => r.value));
+  check("a seeded name the repository has opens on reuse",
+    wui.wtMode.value === "existing" && wui.wtPick.value === "oak",
+    [wui.wtMode.value, wui.wtPick.value]);
+  check("...with the reuse rows out and the name row folded away",
+    wui.wtPickRow.hidden === false && wui.updateRow.hidden === false &&
+      wui.wtNameRow.hidden === true,
+    [wui.wtPickRow.hidden, wui.updateRow.hidden, wui.wtNameRow.hidden]);
+  // Switching mode on the form re-folds the detail without a reload.
+  wui.wtMode.inputs.new.checked = true;
+  await wui.wtMode.inputs.new.fire("change");
+  check("picking new folds the reuse rows away and asks for a name",
+    wui.wtNameRow.hidden === false && wui.wtPickRow.hidden === true &&
+      wui.updateRow.hidden === true && wui.rebaseRow.hidden === true,
+    [wui.wtNameRow.hidden, wui.wtPickRow.hidden, wui.updateRow.hidden]);
+  const acts3 = buttons(modalEls["modal-actions"]);
+  const spawn3 = acts3.find((b) => b.text.startsWith("Spawn"));
+  sent = [];
+  await spawn3.fire("click");
+  await settle();
+  const newPost = sent.find((x) => x.method === "POST");
+  check("...and Spawn cuts the generated name, not the checkout it left",
+    newPost && /^lead1-\d{8}-\d{6}$/.test(newPost.body.worktree || ""),
+    newPost && newPost.body.worktree);
+
+  await ctx.openSpawnModal("lead1", { seed: { worktree: "s45-fresh" } });
+  await settle();
+  await settle();
+  const wui2 = ctx.spawnUi();
+  check("a seeded name the repository does NOT have opens on new",
+    wui2.wtMode.value === "new" && wui2.wtName.value === "s45-fresh",
+    [wui2.wtMode.value, wui2.wtName.value]);
+
+  await ctx.openSpawnModal("lead1", { seed: { worktree: true } });
+  await settle();
+  await settle();
+  check("`true` opens on new with the name left blank",
+    ctx.spawnUi().wtMode.value === "new" && ctx.spawnUi().wtName.value === "",
+    ctx.spawnUi().wtName.value);
+
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  check("no seed opens on no worktree at all",
+    ctx.spawnUi().wtMode.value === "" && ctx.spawnUi().wtPickRow.hidden === true);
+  routes["GET /api/git?cwd=C%3A%2Frepo"] = goodGit;
 
   /* ---- the child cap is a crossing, not a dead end ----------------------
      spawn.py folds the SOFT cap into `blocked_by` as well, so `can_spawn` is
