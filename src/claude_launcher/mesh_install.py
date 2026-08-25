@@ -127,9 +127,11 @@ yours to carry out, with `spawn`.
   branch the checkout sits on shares the name: the child's session when you
   set one (`worktree: s54-detail-split`), otherwise your own ($CLAUNCH_SESSION,
   e.g. `s45-detail-split`). A bare word like `helper-auth` says nothing about
-  whose checkout it is and can collide with another session's branch. Naming
-  one that already exists returns to that checkout — add `rebase_onto` with
-  your branch to bring it up to date first; if the rebase cannot apply
+  whose checkout it is and can collide with another session's branch. A new
+  worktree is cut from the trunk unless you add `rebase_onto` with a branch
+  — then it begins there, which is how a child's branch is stacked on yours.
+  Naming one that already exists returns to that checkout — `rebase_onto`
+  then rebases it onto your branch first; if the rebase cannot apply
   cleanly the spawn is refused with nothing created, so say so instead of
   retrying.
 - **A different directory is a `workspace`, not a path**: `workspace: NAME`

@@ -347,8 +347,10 @@ roles:
       exchange. Only members you spawned (or their descendants) can be wired
       this way; do it as soon as the need is clear, not only when asked.
       When one area holds more of your workers than you can keep apart, spawn
-      a nested worker for that area and move them under it (the reparent
-      tool): it folds their branches into one and asks you to integrate once.
+      a nested worker for that area (still a worker, running the improv-mid
+      workflow) and move them under it (the reparent tool): it lands their
+      branches on its own as a stacked pull request and asks you to
+      integrate once.
       Escalate to your user only what they alone hold (value, priority, scope,
       authorization), batched with options and a recommendation.
       Do not do the members' production for them.

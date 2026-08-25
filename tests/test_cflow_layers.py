@@ -165,7 +165,7 @@ def test_the_improv_workflows_carry_no_repo_specific_verify():
     check overrides in its project layer (``.claunch/workflows/``).
     """
     bundled = dict(state_mod.bundled_workflows())
-    for name in ("improv-worker", "improv-leader"):
+    for name in ("improv-worker", "improv-leader", "improv-mid"):
         wf = model.load(bundled[name])
         for step_id, step in wf.steps.items():
             assert step.verify is None, (
@@ -808,3 +808,102 @@ def test_both_leader_layers_teach_the_topology_skills():
         assert "reparent" in standby
         assert "self-decision" in standby  # not a user gate
         assert "mesh-delegate" in wf.steps["intake"].instructions
+
+
+# --------------------------------------------------------------------------- #
+# the nested worker's own workflow: an area run as a stacked pull request
+# --------------------------------------------------------------------------- #
+def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
+    """A nested worker is still a worker on the mesh but its run is a small
+    control loop, not a one-goal round: it opens a stack on its own branch,
+    lands its children's branches on it one at a time (``--no-ff``, in
+    order, a restack notice to the rest after each), and hands the lead ONE
+    branch. The shape below is what ``mesh-delegate`` and both improv
+    layers point at, so it is pinned here."""
+    wf = _bundled("improv-mid")
+    assert wf.filter_roles is not None
+    assert wf.filter_roles.type == model.FILTER_WHITELIST
+    assert wf.filter_roles.roles == ("worker",)
+    # never the wizard's default for a worker — improv-worker keeps that
+    assert wf.default_role is None
+    assert wf.max_visits > model.DEFAULT_MAX_VISITS  # standby <-> land loops
+    assert set(wf.steps) == {
+        "intake", "standby", "land", "landing", "handoff", "await-landing",
+        "wrapup",
+    }
+
+    intake = wf.steps["intake"].instructions
+    for anchor in ("스택 베이스", "rebase_onto", "스택 표", "기준", "batch send"):
+        assert anchor in intake, f"intake lost its {anchor!r} rule"
+    assert "머지 커밋만" in intake  # the base takes merges, not feature work
+
+    standby = wf.steps["standby"]
+    assert standby.select is not None and standby.select.chooser == "agent"
+    assert set(standby.select.options) == {"land", "complete"}
+    assert standby.select.options["land"].next == "land"
+    assert standby.select.options["complete"].next == "landing"
+    assert "merge-tree" in standby.instructions
+    assert "master 대비가 아니다" in standby.instructions
+
+    land = wf.steps["land"]
+    assert land.next == "standby"  # one child per pass, then back on watch
+    for anchor in ("--no-ff", "merge-tree", "restack", "rebase <네 기준>"):
+        assert anchor in land.instructions, f"land lost its {anchor!r} rule"
+    assert "master는 어떤 경우에도 머지 대상이 아니다" in land.instructions
+
+    landing = wf.steps["landing"].select
+    assert landing.chooser == "user"  # the user's gate, as for every worker
+    assert landing.options["request"].next == "handoff"
+    assert landing.options["hold"].next == "wrapup"
+
+    handoff = wf.steps["handoff"]
+    assert handoff.next == "await-landing"
+    for anchor in ("--rebase-merges", "git branch --merged", "스택 표",
+                   "master를 직접 머지하지 않는다"):
+        assert anchor in handoff.instructions, f"handoff lost its {anchor!r} rule"
+
+    waiting = wf.steps["await-landing"].select
+    assert waiting.chooser == "agent"
+    assert waiting.options["landed"].next == "wrapup"
+    assert waiting.options["restack"].next == "handoff"
+
+    assert "claunch kill-session $CLAUNCH_SESSION" in wf.steps["wrapup"].instructions
+    assert wf.steps["wrapup"].next is None
+
+
+def test_both_worker_layers_know_their_place_on_a_stack():
+    """A worker under a nested worker measures against its declared base
+    branch, requests from that parent, and rebases on a restack notice —
+    in both layers, so a project-layer resync cannot un-teach it."""
+    for wf in (
+        _bundled("improv-worker"),
+        model.load(PROJECT_OVERRIDES / "improv-worker.yaml"),
+    ):
+        intake = wf.steps["intake"].instructions
+        assert "improv-mid" in intake and "스택 베이스" in intake
+        assert "git rebase" in intake and "<기준>" in intake
+        rebase = wf.steps["rebase"].instructions
+        assert "restack" in rebase and "upstream에 있으므로" in rebase
+        request = wf.steps["integration-request"].instructions
+        assert "merge-tree" in request and "improv-mid" in request
+        # the general nested-merge rule survives for a worker that spawned
+        # helpers of its own; the dedicated nested worker is sent elsewhere
+        assert "improv-mid" in wf.steps["commit"].instructions
+
+
+def test_both_leader_layers_route_a_crowded_area_through_improv_mid():
+    """The lead spawns the nested worker with ``workflow: improv-mid``,
+    tells moved workers their integration target changed, and merges the
+    stack as ONE candidate — re-requests to it mean ``--rebase-merges``."""
+    for wf in (
+        _bundled("improv-leader"),
+        model.load(PROJECT_OVERRIDES / "improv-leader.yaml"),
+    ):
+        assert "improv-mid" in wf.steps["intake"].instructions
+        standby = wf.steps["standby"].instructions
+        assert "improv-mid" in standby and "stacked pull request" in standby
+        assert "restack" in standby
+        integrate = wf.steps["integrate"].instructions
+        assert "improv-mid" in integrate
+        assert "--rebase-merges" in integrate
+        assert "--merged" in integrate

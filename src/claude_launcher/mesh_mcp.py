@@ -230,11 +230,14 @@ TOOLS = [
                 "rebase_onto": {
                     "type": "string",
                     "description": (
-                        "with a REUSED 'worktree', rebase it onto this branch "
-                        "before the child starts — usually the branch you are "
-                        "on. If the rebase cannot be done cleanly the spawn is "
-                        "refused and nothing is created, so the child never "
-                        "wakes up in a conflicted checkout"
+                        "put the child's 'worktree' ON this branch — usually "
+                        "the branch you are on. A NEW worktree is cut from it "
+                        "instead of from the trunk (a nested worker's branch "
+                        "then begins on yours, like a stacked pull request); "
+                        "a REUSED one is rebased onto it before the child "
+                        "starts. If that rebase cannot be done cleanly the "
+                        "spawn is refused and nothing is created, so the child "
+                        "never wakes up in a conflicted checkout"
                     ),
                 },
             },
