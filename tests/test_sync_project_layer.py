@@ -1,4 +1,4 @@
-"""The project layer is the package plus ``verify:`` — regenerated, not typed.
+"""The project layer is the package plus its grafted fields — regenerated, not typed.
 
 ``tools/sync_project_layer.py`` is the procedure AGENTS.md names for
 propagating a packaged workflow edit into this repository's overrides. The
@@ -61,8 +61,8 @@ steps:
 """
 
 
-def test_verify_blocks_take_the_comment_run_above_each_verify(sync):
-    blocks = sync.verify_blocks(PROJECT)
+def test_field_blocks_take_the_comment_run_above_each_field(sync):
+    blocks = sync.field_blocks(PROJECT)
     assert list(blocks) == ["one", "two"]
     assert blocks["one"] == [
         "    # verify lives in the project layer\n",
@@ -73,7 +73,7 @@ def test_verify_blocks_take_the_comment_run_above_each_verify(sync):
 
 
 def test_graft_keeps_the_package_and_only_adds_verify(sync):
-    out = sync.graft(BUNDLED, sync.verify_blocks(PROJECT))
+    out = sync.graft(BUNDLED, sync.field_blocks(PROJECT))
     # The project's stale wording is gone; the packaged wording stands.
     assert "stale wording" not in out and "do the thing" in out
     # The packaged pointer comment is replaced by the block, not duplicated.
@@ -86,12 +86,12 @@ def test_graft_keeps_the_package_and_only_adds_verify(sync):
 def test_a_verify_for_a_step_the_package_lost_is_an_error_not_a_silent_drop(sync):
     orphan = PROJECT.replace("  two:", "  gone:")
     with pytest.raises(ValueError, match="gone"):
-        sync.graft(BUNDLED, sync.verify_blocks(orphan))
+        sync.graft(BUNDLED, sync.field_blocks(orphan))
 
 
 def test_regeneration_is_idempotent(sync):
-    once = sync.graft(BUNDLED, sync.verify_blocks(PROJECT))
-    assert sync.graft(BUNDLED, sync.verify_blocks(once)) == once
+    once = sync.graft(BUNDLED, sync.field_blocks(PROJECT))
+    assert sync.graft(BUNDLED, sync.field_blocks(once)) == once
 
 
 def test_this_repositorys_overrides_are_their_own_regeneration(sync):
@@ -107,6 +107,56 @@ def test_this_repositorys_overrides_are_their_own_regeneration(sync):
         current = (sync.PROJECT / f"{name}.yaml").read_text(encoding="utf-8")
         assert current == sync.regenerate(name), (
             f"{name}: .claunch/workflows/{name}.yaml differs from the packaged "
-            f"copy by more than its verify blocks — regenerate it with "
+            f"copy by more than its grafted field blocks — regenerate it with "
             f"tools/sync_project_layer.py instead of editing it"
         )
+
+
+def test_a_multi_line_field_survives_the_graft_whole(sync):
+    """``verify`` fits on one line; ``awaits`` need not. The graft keys on the
+    field NAME and takes everything indented under it, so a block written over
+    several lines is carried across instead of being cut after its first."""
+    project = PROJECT.replace(
+        "    verify: 'run the suite'\n",
+        "    verify: 'run the suite'\n"
+        "    # why we watch it\n"
+        "    awaits:\n"
+        "      probe: verify\n"
+        "      poll: 30\n",
+    )
+    blocks = sync.field_blocks(project)
+    assert blocks["one"] == [
+        "    # verify lives in the project layer\n",
+        "    # why: this suite, this machine\n",
+        "    verify: 'run the suite'\n",
+        "    # why we watch it\n",
+        "    awaits:\n",
+        "      probe: verify\n",
+        "      poll: 30\n",
+    ]
+    out = sync.graft(BUNDLED, blocks)
+    assert "      poll: 30\n    next: two\n" in out
+    # the block stopped where it should: the next step is still intact
+    assert "  two:\n" in out
+    assert sync.graft(BUNDLED, sync.field_blocks(out)) == out
+
+
+def test_a_field_block_does_not_swallow_the_blank_line_between_steps(sync):
+    """A blank line inside a block scalar belongs to the field; the one that
+    separates two steps does not, and telling them apart takes a lookahead."""
+    project = (
+        "name: t\nsteps:\n"
+        "  one:\n"
+        "    verify: |\n"
+        "      first line\n"
+        "\n"
+        "      after a blank\n"
+        "\n"
+        "    next: two\n"
+    )
+    assert sync.field_blocks(project)["one"] == [
+        "    verify: |\n",
+        "      first line\n",
+        "\n",
+        "      after a blank\n",
+    ]

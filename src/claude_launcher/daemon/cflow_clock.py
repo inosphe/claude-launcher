@@ -9,7 +9,11 @@ run registry the dashboard lists runs from:
   would notice an expiry is the one stopped waiting for the answer.
 * :class:`ReminderClock` — the step instructions an agent has drifted away
   from. The agent that would notice it has forgotten the protocol is,
-  definitionally, the one that forgot it.
+  definitionally, the one that forgot it. The same clock carries the opposite
+  errand for a step that declares an ``awaits``: re-measuring what the step is
+  waiting for and speaking only when it moves. One class, because the two are
+  the same decision — *does this position have anything to say right now?* —
+  and splitting them would need two clocks negotiating each other's silence.
 * :class:`StallPingClock` — the session that simply STOPPED, at a step no
   gate is holding. The reminder above never reaches it (it types only into a
   session that is working), and no gate event fires (there is no gate), so
@@ -49,7 +53,7 @@ import time
 from typing import Dict, List, Optional, Set, Tuple
 
 from .. import store
-from ..cflow import engine as cflow_engine, state as cflow_state
+from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from .session import STATUS_BUSY, STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.cflow")
@@ -211,17 +215,25 @@ class ReminderClock:
             try:
                 await asyncio.sleep(self.poll)
                 due = await asyncio.to_thread(self.scan, time.monotonic())
-                for cwd, scope, block in due:
-                    await self._deliver(cwd, scope, block)
+                for cwd, scope, block, kind in due:
+                    await self._deliver(cwd, scope, block, kind)
             except asyncio.CancelledError:
                 raise
             except Exception:
                 # One unreadable run must not stop the clock for the rest.
                 log.exception("cflow reminder clock tick failed")
 
-    def scan(self, now: float) -> List[Tuple[str, str, str]]:
-        """Decide who is due. Blocking (config + every run's state); call it
-        in a thread. Public for the tests, which own ``now`` there."""
+    def scan(self, now: float) -> List[Tuple[str, str, str, str]]:
+        """Decide who is due, as ``(cwd, scope, block, kind)``.
+
+        Blocking — config, every run's state, and any probe whose poll
+        interval has elapsed — so call it in a thread. Public for the tests,
+        which own ``now`` there (and, through it, the probe spacing).
+
+        ``kind`` is ``"reminder"`` or ``"signal"``, and it is carried rather
+        than inferred because the two are delivered under different rules;
+        see :meth:`_deliver`.
+        """
         try:
             cfg = store.daemon_config()
         except store.StoreError as exc:
@@ -229,7 +241,7 @@ class ReminderClock:
             return []
         default_on = bool(cfg.get("cflow_reminder"))
         default_interval = float(cfg.get("cflow_reminder_interval") or 0)
-        due: List[Tuple[str, str, str]] = []
+        due: List[Tuple[str, str, str, str]] = []
         live = set()
         for cwd, scope in cflow_state.known_runs():
             key = (cwd, scope)
@@ -245,45 +257,119 @@ class ReminderClock:
             override = payload.get("reminder") or {}
             enabled = bool(override.get("enabled", default_on))
             interval = float(override.get("interval", default_interval) or 0)
-            if not enabled or interval <= 0:
+            awaits = payload.get("awaits") or {}
+            if not enabled or (interval <= 0 and not awaits.get("probe")):
+                # `enabled` is this clock's master switch: off, it says
+                # neither of the two things it can say. An interval of zero
+                # turns off only the clock half, which leaves the one
+                # configuration in which this clock speaks nothing but news —
+                # a step that declares what it waits for, and silence until
+                # that changes.
                 self._seen.pop(key, None)
                 continue
-            interval = max(interval, cflow_engine.REMINDER_MIN_INTERVAL)
+            if interval > 0:
+                interval = max(interval, cflow_engine.REMINDER_MIN_INTERVAL)
             pos = (
                 payload.get("run"), payload.get("status"),
                 payload.get("step_id"), payload.get("visit"),
             )
             entry = self._seen.get(key)
-            if entry is None or entry["pos"] != pos:
+            arrived = entry is None or entry["pos"] != pos
+            if arrived:
                 # Progress (or first sight) arms the timer; it does not fire
                 # it. An agent that just took this step from 'next' has the
-                # instructions already.
-                self._seen[key] = {"pos": pos, "at": now}
+                # instructions already — and, for the same reason, the first
+                # probe below is a baseline and never a signal: the state a
+                # step arrives in is not news about it.
+                entry = {"pos": pos, "at": now, "probed_at": None, "probe": None}
+                self._seen[key] = entry
+            if awaits.get("probe"):
+                before, after = entry["probe"], self._measure(cwd, awaits, entry, now)
+                if after is not None:
+                    entry["probe"] = after
+                    if before is not None and before["code"] != after["code"]:
+                        # A signal also re-arms the clock: whatever the agent
+                        # does next, it was just spoken to, and following that
+                        # with the step restated would undo the point.
+                        entry["at"] = now
+                        due.append(
+                            (cwd, scope, signal_block(payload, before, after), "signal")
+                        )
+                    # Measured — so something IS watching this position, and
+                    # the clock has nothing to add. An unchanged condition is
+                    # not news, and the step repeated over it is exactly the
+                    # noise this path exists to remove.
+                    continue
+                # No answer at all: the probe could not be launched, or did
+                # not finish inside its budget. That is not "not yet", so the
+                # ordinary reminder resumes below. A broken probe must never
+                # be the reason a stalled run goes quiet.
+            if arrived:
                 continue
-            if now - entry["at"] >= interval:
-                due.append((cwd, scope, reminder_block(payload, interval)))
+            if interval > 0 and now - entry["at"] >= interval:
+                due.append((cwd, scope, reminder_block(payload, interval), "reminder"))
         for key in list(self._seen):
             if key not in live:
                 del self._seen[key]
         return due
 
-    async def _deliver(self, cwd: str, scope: str, block: str) -> None:
+    def _measure(self, cwd: str, awaits: dict, entry: dict, now: float) -> Optional[dict]:
+        """This position's standing measurement, re-taken when due.
+
+        Three returns, and only one of them is a fresh subprocess:
+
+        * between samples — the previous answer, unchanged. Returning it
+          rather than ``None`` is what keeps the clock quiet in the gaps: to
+          the caller ``None`` means *broken*, and a gap is not that.
+        * a fresh dict — the poll interval elapsed and the probe ran.
+        * ``None`` — it ran and could not answer (see
+          :func:`cflow.engine.run_probe`).
+
+        The ceilings are re-applied here, not trusted from the payload. The
+        parser already refuses a probe that could hold the daemon for long,
+        but this clock reads runs whose workflow file it never opened —
+        snapshots written by an older parser included — and "the probe is
+        cheap" is the one promise this class cannot afford to take on faith.
+        """
+        poll = max(float(awaits.get("poll") or 0), cflow_model.MIN_AWAITS_POLL)
+        last = entry.get("probed_at")
+        if last is not None and now - last < poll:
+            return entry.get("probe")
+        entry["probed_at"] = now
+        timeout = float(awaits.get("timeout") or cflow_model.DEFAULT_AWAITS_TIMEOUT)
+        return cflow_engine.run_probe(
+            awaits["probe"], cwd, min(timeout, cflow_model.MAX_AWAITS_TIMEOUT)
+        )
+
+    async def _deliver(
+        self, cwd: str, scope: str, block: str, kind: str = "reminder"
+    ) -> None:
         session = self._session_for(cwd, scope)
         if session is None:
             return
-        if session.status() != STATUS_BUSY:
-            # Not working: an idle agent has ended its turn, a suspended or
-            # wedged one is not reading, and a paste into either would open
-            # a fresh turn just to restate a protocol nobody is mid-way
-            # through forgetting. Held, not dropped — the debt stays due and
-            # is retried each poll, so the reminder lands the moment the
-            # session is working again.
+        if kind == "reminder" and session.status() != STATUS_BUSY:
+            # A REMINDER waits for a working session. It carries nothing the
+            # agent does not already have — it restates the step — so its
+            # whole value is landing in front of an agent mid-turn that has
+            # buried the protocol under everything else on its screen. Pasted
+            # into a session that has ended its turn it would open a fresh one
+            # just to say "keep going" to somebody who already stopped. Held,
+            # not dropped: the debt stays due and is retried each poll, so it
+            # lands the moment the session is working again.
+            #
+            # A SIGNAL does not wait, and the difference is not a preference.
+            # It is news the agent does NOT have, about the very thing it
+            # ended its turn to wait for. Holding it until the session happens
+            # to be busy would leave the run correctly waiting while the
+            # daemon sits on the answer — the exact failure this path exists
+            # to remove. So a signal wakes an idle session, as a released
+            # window does (:class:`WindowClock`).
             log.debug("cflow reminder held for %r: session is not working", scope)
             return
         try:
             delivered = await session.deliver(block)
         except Exception:
-            log.exception("cflow reminder delivery to %r failed", scope)
+            log.exception("cflow %s delivery to %r failed", kind, scope)
             return
         if delivered:
             # Rearm only on success: a delivery that failed past deliver's
@@ -291,7 +377,7 @@ class ReminderClock:
             entry = self._seen.get((cwd, scope))
             if entry is not None:
                 entry["at"] = time.monotonic()
-            log.info("cflow reminder delivered to %r (%s)", scope, cwd)
+            log.info("cflow %s delivered to %r (%s)", kind, scope, cwd)
 
     def _session_for(self, cwd: str, scope: str):
         return session_for(self.manager, cwd, scope)
@@ -388,6 +474,55 @@ def reminder_block(payload: dict, interval: float) -> str:
             "'report' and advance with 'next'; if you have lost the thread, "
             "call 'status' first -- it is the current truth."
         )
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def signal_block(payload: dict, before: dict, after: dict) -> str:
+    """The text a waiting run hears when its awaited condition MOVED.
+
+    The opposite errand to :func:`reminder_block`, and it must not read like
+    it. A reminder repeats what the agent already has; this carries something
+    it does not — so the step's instructions are deliberately absent. Their
+    presence is what would turn "the thing you were waiting for arrived" back
+    into "here is your step again", which is the noise the whole ``awaits``
+    path exists to remove, and the agent has ``status`` for the step anyway.
+
+    Framed like the window notice, for the same reason: it lands in a session
+    that ended its turn, and an unframed line reads as a user message.
+
+    The probe's own output rides along as *evidence*, and the block says in
+    as many words that it is not proof. A probe is a cheap check on state
+    something else changed; between the sample and the reading, that
+    something else may have changed it again.
+    """
+    step = payload.get("step_id")
+    visit = payload.get("visit")
+    position = f"step '{step}'" + (f" (visit {visit})" if visit and visit > 1 else "")
+    awaits = payload.get("awaits") or {}
+    lines = [
+        "---",
+        "# claunch cflow: signal -- machine-generated, not typed by the user",
+        f"workflow: {payload.get('workflow')}",
+        f"position: {position}",
+        f"awaiting: {awaits.get('describe') or awaits.get('probe')}",
+        f"changed: exit {before.get('code')} -> exit {after.get('code')}",
+    ]
+    if awaits.get("describe") and awaits.get("probe"):
+        lines.append(f"probe: {awaits['probe']}")
+    says = str(after.get("says") or "").strip()
+    if says:
+        lines.append("probe said:")
+        lines.extend(f"  {line}" for line in says.splitlines())
+    lines.append(
+        "protocol: this fired because the condition MOVED, and you will hear "
+        "nothing more from it until it moves again -- silence is not 'still "
+        "waiting', it is 'nothing new'. The probe is a cheap check and not "
+        "proof, so confirm the change yourself before you act on it, then "
+        "carry on with this step. The step itself has not moved and nothing "
+        "was decided for you; call the cflow 'status' tool if you need it "
+        "restated."
+    )
     lines.append("---")
     return "\n".join(lines)
 

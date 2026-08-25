@@ -16,11 +16,18 @@ update`` does not help; it refreshes the *global* layer. ``claunch cflow add
 lines away with them.
 
 So this script does the one mechanical thing the layer needs: take the
-packaged file, graft in each ``verify:`` line the project copy carries —
+packaged file, graft in each project-layer field the project copy carries —
 together with the run of ``#`` comment lines directly above it, which is
 where the reasons for the command live — and write that as the project
 copy. Nothing else from the project copy survives, on purpose: anything
 else there is drift.
+
+The grafted fields are ``verify:`` and ``awaits:`` (see ``GRAFT_RE``), and
+they are chosen by name rather than by shape. Both answer "what does *this*
+repository check, and with which tool" — a question the packaged copy cannot
+answer because it ships to every repository — and ``awaits`` may run to
+several lines where ``verify`` is usually one, so a block is the field's line
+plus everything indented under it.
 
     uv run --no-sync python tools/sync_project_layer.py            # rewrite
     uv run --no-sync python tools/sync_project_layer.py --check    # exit 1 on drift
@@ -43,30 +50,82 @@ PROJECT = ROOT / ".claunch" / "workflows"
 
 #: A step header at the workflow's ``steps:`` level (two-space indent).
 STEP_RE = re.compile(r"^  ([A-Za-z0-9_.-]+):\s*$")
-#: The step-level fields the graft keys on (four-space indent).
-VERIFY_RE = re.compile(r"^    verify:")
+#: The step-level fields the graft keys on (four-space indent). Named as a
+#: tuple as well as a pattern because the set is not only this file's: the
+#: drift test in ``tests/test_project_layer_override.py`` compares the two
+#: copies of a workflow with exactly these fields excluded, and it imports the
+#: tuple rather than restating it. Two lists would agree right up until
+#: somebody widened one, and that failure is silent in the direction that
+#: matters — a field this tool stops grafting, while the test still ignores
+#: it, simply drops out of both.
+#:
+#: Keyed by field NAME, not by shape: what belongs to the project layer is
+#: whatever answers "what does THIS repository check" — the commands, not the
+#: prose — and that is a property of the field, not of how many lines it takes
+#: to write. ``awaits`` is here for the same reason ``verify`` is: what a step
+#: waits for is this repository's business, and the packaged copy that ships
+#: everywhere cannot name a tool that only exists here.
+GRAFT_FIELDS = ("verify", "awaits")
+GRAFT_RE = re.compile(r"^    (?:" + "|".join(GRAFT_FIELDS) + r"):")
 COMMENT_RE = re.compile(r"^    #")
 NEXT_RE = re.compile(r"^    next:")
+#: A continuation of a grafted field: indented deeper than the field itself.
+CONTINUATION_RE = re.compile(r"^     +\S")
 
 
-def verify_blocks(project_text: str) -> Dict[str, List[str]]:
-    """Each step's ``verify:`` line plus the comment run above it, by step id."""
+def field_blocks(project_text: str) -> Dict[str, List[str]]:
+    """Each step's grafted fields, with their comment runs, by step id.
+
+    A block is the field's line, any lines indented deeper than it (so a
+    mapping written over several lines survives, not only a one-liner), and
+    the run of ``#`` comments directly above — which is where the reason for
+    the command lives, and the reason is the half that is worth keeping.
+
+    A step may carry more than one grafted field, so blocks accumulate in file
+    order rather than the last one winning.
+    """
     lines = project_text.splitlines(keepends=True)
     blocks: Dict[str, List[str]] = {}
     step = None
-    for i, line in enumerate(lines):
-        m = STEP_RE.match(line)
+    i = 0
+    while i < len(lines):
+        m = STEP_RE.match(lines[i])
         if m:
             step = m.group(1)
+            i += 1
             continue
-        if VERIFY_RE.match(line):
-            if step is None:
-                raise ValueError("a verify: line before any step")
-            j = i
-            while j > 0 and COMMENT_RE.match(lines[j - 1]):
-                j -= 1
-            blocks[step] = lines[j : i + 1]
+        if not GRAFT_RE.match(lines[i]):
+            i += 1
+            continue
+        if step is None:
+            raise ValueError(f"a {lines[i].strip()} line before any step")
+        start = i
+        while start > 0 and COMMENT_RE.match(lines[start - 1]):
+            start -= 1
+        end = i + 1
+        while end < len(lines) and _continues(lines, end):
+            end += 1
+        blocks.setdefault(step, []).extend(lines[start:end])
+        i = end
     return blocks
+
+
+def _continues(lines: List[str], i: int) -> bool:
+    """Whether ``lines[i]`` still belongs to the grafted field above it.
+
+    A blank line counts only when something deeper-indented follows it — a
+    block scalar may contain one, and the blank line between two steps must
+    not be swallowed along with it.
+    """
+    if CONTINUATION_RE.match(lines[i]):
+        return True
+    if lines[i].strip():
+        return False
+    for line in lines[i + 1 :]:
+        if not line.strip():
+            continue
+        return bool(CONTINUATION_RE.match(line))
+    return False
 
 
 def graft(bundled_text: str, blocks: Dict[str, List[str]]) -> str:
@@ -95,7 +154,7 @@ def graft(bundled_text: str, blocks: Dict[str, List[str]]) -> str:
         out.append(line)
     if pending:
         raise ValueError(
-            "verify blocks for steps the packaged copy does not have: "
+            "grafted field blocks for steps the packaged copy does not have: "
             + ", ".join(sorted(pending))
         )
     return "".join(out)
@@ -104,7 +163,7 @@ def graft(bundled_text: str, blocks: Dict[str, List[str]]) -> str:
 def regenerate(name: str, bundled_dir: Path = BUNDLED, project_dir: Path = PROJECT) -> str:
     bundled = (bundled_dir / f"{name}.yaml").read_text(encoding="utf-8")
     project = (project_dir / f"{name}.yaml").read_text(encoding="utf-8")
-    return graft(bundled, verify_blocks(project))
+    return graft(bundled, field_blocks(project))
 
 
 def overrides(bundled_dir: Path = BUNDLED, project_dir: Path = PROJECT) -> List[str]:

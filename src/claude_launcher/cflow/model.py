@@ -38,6 +38,10 @@ and loops need no duplicated content::
       test:
         instructions: ...
         done_when: ...      # completion criterion; restated by status/reminders
+        verify: "pytest -q"
+        awaits: verify      # what this step WAITS for: the daemon re-measures
+                            # this step's verify and speaks only when its exit
+                            # code moves. See "Waiting for a signal" below.
         next: review
       review:
         select:
@@ -103,6 +107,52 @@ accumulated every N minutes" is written without a timer in the agent: the
 first take is immediate (nothing to pace against yet), the rest batch. A
 human confirming the option (CLI, dashboard) is not paced — that is the
 override, and it is journaled as one.
+
+Waiting for a signal
+--------------------
+``verify`` and ``done_when`` both answer "may this step be left?". ``awaits``
+answers a different question — "what is it standing still *for*?" — and it is
+the only one of the three the run itself never reads: the daemon's reminder
+clock does.
+
+Without it a stalled run is on a clock. The reminder repeats the step's
+instructions every interval for as long as the position does not move, and it
+has no opinion about whether what the step is waiting for has arrived — the
+step can be quoting a ``verify`` that went green ten minutes ago and the
+reminder will still read as "not yet". With ``awaits`` declared, the clock
+runs the probe every ``poll`` seconds and:
+
+* **speaks once when the exit code changes**, carrying what moved and the
+  probe's own output as evidence — "what you were waiting for arrived", not
+  the step restated;
+* **says nothing at all while it does not change.** That silence is the
+  feature. A condition that has not moved is not news, and a reminder that
+  fires anyway teaches its reader to skim past the one that matters;
+* **falls back to the clock the moment it cannot measure.** A probe that
+  times out or cannot be launched is not the answer "not yet" — it is no
+  answer, so the ordinary reminder resumes rather than a broken probe
+  silencing the run. That distinction is the whole safety story: silence is
+  only ever granted while something is actually watching.
+
+The exit code is the fact; output is evidence and is not compared, so a probe
+free to print a timestamp does not "change" every sample. The first
+measurement at a position is the baseline and never fires — an agent that has
+just been handed the step does not need to be told the state it arrived in.
+
+``awaits: verify`` re-measures the step's own ``verify`` rather than repeating
+its command, and is written per step on purpose. A ``verify`` is contracted to
+run *once, on the way out*; sampling one every minute demands that it also be
+read-only and idempotent, and that demand is reasonable to make of a command an
+author nominated and unreasonable to impose on every ``verify`` ever written.
+Cost is not left to the promise: the probe runs under ``awaits.timeout``
+(default 10s, hard-capped at 30s), never the verify's own, so a suite
+nominated by mistake times out into "cannot measure" instead of being run on a
+loop. ``poll`` has a floor for the mirror-image reason.
+
+A workflow that gains an ``awaits`` does not change any run already in
+flight: a run reads the snapshot it started on, where the field is simply
+absent, and an absent ``awaits`` is exactly today's clock. New behaviour
+arrives with the next run, never under one already moving.
 
 Delegated decisions
 -------------------
@@ -189,6 +239,24 @@ import yaml
 DEFAULT_VERIFY_TIMEOUT = 900.0
 DEFAULT_MAX_VISITS = 25
 
+#: ``awaits.probe`` spelled as this reserved word re-measures the step's own
+#: ``verify`` command instead of naming a second one. Never a default: writing
+#: it is the author's assertion that *that* command is cheap and read-only,
+#: which is a promise about one step and not a new demand on every ``verify``.
+AWAITS_VERIFY = "verify"
+
+#: How often the daemon may re-run a probe, and the floor under it. Below the
+#: floor the clock stops sampling a condition and starts hammering it.
+DEFAULT_AWAITS_POLL = 60.0
+MIN_AWAITS_POLL = 15.0
+
+#: How long one run of a probe may take. The ceiling is the load-bearing part:
+#: a probe is a cheap question about state somebody else changed, and thirty
+#: seconds is not enough to run a test suite in. It is what stops "wait until
+#: the sweep is green" from being written as "run the sweep every minute".
+DEFAULT_AWAITS_TIMEOUT = 10.0
+MAX_AWAITS_TIMEOUT = 30.0
+
 #: Reserved next-target meaning "the workflow ends here".
 END = "end"
 
@@ -221,6 +289,49 @@ class WorkflowError(Exception):
 class Verify:
     command: str
     timeout: float = DEFAULT_VERIFY_TIMEOUT
+
+
+@dataclass(frozen=True)
+class Awaits:
+    """What a step is waiting for, in a form the daemon can re-measure.
+
+    ``verify`` and ``done_when`` say when a step may be *left*. This says what
+    it is *sitting still for* — and unlike those two it is read by nobody in
+    the run: the daemon's reminder clock runs :attr:`probe` every
+    :attr:`poll` seconds while the run holds this position, and speaks only
+    when the answer changes.
+
+    The exit code is the fact. Output is carried into the signal as evidence
+    and is deliberately not part of the comparison: a probe that prints a
+    timestamp would otherwise "change" on every sample, which is the noise
+    this field exists to remove.
+
+    ``probe`` of ``None`` is the reserved spelling :data:`AWAITS_VERIFY` — re-measure
+    the step's own ``verify`` command. It is spelled per step, never defaulted:
+    a ``verify`` is contracted to run once, on the way out, and re-running one
+    every minute demands that it be read-only and idempotent. That demand is
+    fair to make of a command an author explicitly nominated and unfair to
+    make of every ``verify`` already written. Cheapness is not left to the
+    promise either — the probe runs under :attr:`timeout` (capped at
+    :data:`MAX_AWAITS_TIMEOUT`), not under the verify's own, so a heavy command
+    nominated by mistake times out into "cannot measure" rather than running.
+    """
+
+    #: The command whose exit code answers "has it arrived?", or ``None`` for
+    #: the step's own ``verify`` command (see :data:`AWAITS_VERIFY`).
+    probe: Optional[str] = None
+    poll: float = DEFAULT_AWAITS_POLL
+    timeout: float = DEFAULT_AWAITS_TIMEOUT
+    #: One line naming the condition in human terms, for the signal's text.
+    #: Without it the signal shows the command, which is true but rarely says
+    #: what the waiting was *about*.
+    describe: Optional[str] = None
+
+    def command(self, step: "Step") -> Optional[str]:
+        """The command to actually run, resolving the reserved spelling."""
+        if self.probe is not None:
+            return self.probe
+        return step.verify.command if step.verify else None
 
 
 @dataclass(frozen=True)
@@ -332,6 +443,11 @@ class Step:
     #: count as done, for the parts no command can check (those are `verify`).
     #: Never enforced; surfaced by the step payload and the reminder clock.
     done_when: Optional[str] = None
+    #: What this step is WAITING for, re-measurable by the daemon. Where
+    #: `verify` and `done_when` say when the step may be left, this says what
+    #: the standing still is for — and it is the only one of the three the
+    #: run itself never reads. See :class:`Awaits`.
+    awaits: Optional[Awaits] = None
     select: Optional[Select] = None
     next: Optional[str] = None  # None = termination (non-select steps)
 
@@ -654,7 +770,20 @@ def _parse_step(step_id: str, raw) -> Step:
             f"true for this step to count as done"
         )
     done_when = done_when.strip() if done_when else None
+    awaits = _parse_awaits(raw.get("awaits"), step_id)
     select = _parse_select(raw.get("select"), step_id)
+    if (
+        awaits is not None
+        and awaits.probe is None
+        and verify is None
+        and select is None  # a select step gets the sharper message below
+    ):
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits: {AWAITS_VERIFY}' re-measures this "
+            f"step's own verify command, and it has none — either give the "
+            f"step a 'verify', or name the probe: "
+            f"awaits: {{probe: '<command>'}}"
+        )
     instructions = raw.get("instructions")
     if select is None and not instructions:
         raise WorkflowError(f"step {step_id!r} needs 'instructions' (or a 'select')")
@@ -667,6 +796,12 @@ def _parse_step(step_id: str, raw) -> Step:
             raise WorkflowError(
                 f"step {step_id!r}: 'done_when' is not allowed on a select "
                 f"step — its completion is the choice itself"
+            )
+        if awaits is not None and awaits.probe is None:
+            raise WorkflowError(
+                f"step {step_id!r}: 'awaits: {AWAITS_VERIFY}' has nothing to "
+                f"re-measure on a select step — a select step takes no "
+                f"'verify'. Name the probe: awaits: {{probe: '<command>'}}"
             )
         if "next" in raw:
             raise WorkflowError(
@@ -681,6 +816,7 @@ def _parse_step(step_id: str, raw) -> Step:
         ask=ask,
         verify=verify,
         done_when=done_when,
+        awaits=awaits,
         select=select,
         next=_parse_next(raw.get("next"), step_id),
     )
@@ -799,6 +935,111 @@ def _parse_verify(raw, step_id: str) -> Optional[Verify]:
     raise WorkflowError(
         f"step {step_id!r}: 'verify' must be a command string or {{command, timeout}}"
     )
+
+
+def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
+    """Parse a step's ``awaits``: the reserved word, or a mapping.
+
+    There is deliberately no bare-command shorthand. ``awaits: verify`` has to
+    mean the reserved spelling, and a config language in which one scalar is
+    sometimes a keyword and sometimes a shell command is a trap nobody reads
+    the docs in time to avoid — so a command is always written
+    ``{probe: '<command>'}``.
+
+    The ceilings below are refusals, not advice. "Wait until the suite is
+    green" is the shape this field invites and the one thing it must not
+    allow: a probe is a cheap question, and a workflow that hangs a test run
+    on one has the daemon re-running the suite for as long as the step sits
+    there. That is a parse error here rather than a note in a docstring
+    somebody skims.
+    """
+    if raw is None:
+        return None
+    if raw is True or (isinstance(raw, str) and raw.strip() == AWAITS_VERIFY):
+        # `awaits: verify` (and YAML's `awaits: true`, which reads the same
+        # way at a glance) — re-measure this step's own verify command.
+        return Awaits()
+    if not isinstance(raw, dict):
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits' must be the word {AWAITS_VERIFY!r} "
+            f"(re-measure this step's own verify) or a mapping "
+            f"{{probe, poll, timeout, describe}} — got {raw!r}. A command is "
+            f"written as {{probe: '<command>'}}, never as a bare string"
+        )
+    unknown = sorted(set(raw) - {"probe", "poll", "timeout", "describe"})
+    if unknown:
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits' has unknown key(s): "
+            f"{', '.join(unknown)} (allowed: probe, poll, timeout, describe)"
+        )
+    probe = raw.get("probe")
+    if probe is None or (isinstance(probe, str) and probe.strip() == AWAITS_VERIFY):
+        probe = None
+    elif not isinstance(probe, str) or not probe.strip():
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits.probe' must be a command string, or "
+            f"the word {AWAITS_VERIFY!r} to re-measure this step's own verify"
+        )
+    else:
+        probe = probe.strip()
+
+    poll = _parse_seconds(raw.get("poll"), DEFAULT_AWAITS_POLL, step_id, "poll")
+    if poll < MIN_AWAITS_POLL:
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits.poll' must be at least "
+            f"{MIN_AWAITS_POLL:.0f}s, got {poll:g} — below that the daemon is "
+            f"not sampling a condition, it is hammering it"
+        )
+    timeout = _parse_seconds(
+        raw.get("timeout"), min(DEFAULT_AWAITS_TIMEOUT, poll), step_id, "timeout"
+    )
+    if timeout <= 0:
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits.timeout' must be positive, got {timeout:g}"
+        )
+    if timeout > MAX_AWAITS_TIMEOUT:
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits.timeout' may not exceed "
+            f"{MAX_AWAITS_TIMEOUT:.0f}s, got {timeout:g} — a probe is a cheap "
+            f"check on state something else changed. If the condition takes "
+            f"longer than that to measure, what you have is a job, and a job "
+            f"does not belong on a clock that re-runs it every {poll:g}s"
+        )
+    if timeout > poll:
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits.timeout' ({timeout:g}s) is longer than "
+            f"'awaits.poll' ({poll:g}s) — a probe that cannot finish inside "
+            f"its own interval never yields a stable answer"
+        )
+    describe = raw.get("describe")
+    if describe is not None and not isinstance(describe, str):
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits.describe' must be a string — one line "
+            f"naming, in human terms, what the step is waiting for"
+        )
+    return Awaits(
+        probe=probe,
+        poll=poll,
+        timeout=timeout,
+        describe=describe.strip() if describe else None,
+    )
+
+
+def _parse_seconds(raw, default: float, step_id: str, field_name: str) -> float:
+    """A number of seconds from an ``awaits`` field, or its default."""
+    if raw is None:
+        return float(default)
+    if isinstance(raw, bool):
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits.{field_name}' must be a number of seconds"
+        )
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits.{field_name}' must be a number of "
+            f"seconds, got {raw!r}"
+        ) from None
 
 
 def _parse_interval(raw, where: str) -> Optional[float]:

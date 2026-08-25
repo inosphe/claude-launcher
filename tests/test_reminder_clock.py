@@ -111,7 +111,7 @@ def test_no_progress_then_repeat(proj):
     assert clock.scan(t) == []                      # armed, not fired
     assert clock.scan(t + 599) == []                # default 600 not yet up
     due = clock.scan(t + 601)
-    assert [(c, s) for c, s, _ in due] == [(cwd, "w1")]
+    assert [(c, s) for c, s, _, _ in due] == [(cwd, "w1")]
     assert "do one" in due[0][2]                    # the step's instructions
     assert "step 'one'" in due[0][2]
     # the run moves: the new position re-arms instead of firing

@@ -63,7 +63,9 @@ the run it drives and the run on disk can never be two different things.
 from __future__ import annotations
 
 import functools
+import os
 import secrets
+import signal
 import subprocess
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
@@ -73,6 +75,17 @@ from .model import Delegate, Step, Workflow
 
 #: Kept from a verify command's combined output when reporting failure.
 VERIFY_OUTPUT_TAIL = 4000
+
+#: Kept from a probe's output as the evidence a signal carries. Far smaller
+#: than a verify's tail on purpose: this lands pasted into a terminal every
+#: time a condition moves, and a probe that needs more than a few lines to say
+#: what happened is answering the wrong question.
+PROBE_OUTPUT_TAIL = 600
+
+#: How long to wait on a killed probe before giving up on it entirely. Only
+#: ever spent after a probe has already blown its own timeout, and only to
+#: stop holding pipes nobody is going to write to.
+KILL_GRACE = 5.0
 
 #: The two decisions an ``ask`` (an approval) offers, and the escape hatch
 #: every delegated decision offers on top of its own options. ``abstain`` is
@@ -993,6 +1006,15 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
         "title": step.title or step.id,
         "visit": visit,
     }
+    awaited = _awaits_payload(step)
+    if awaited:
+        # On `base`, so it rides every payload this position can produce. The
+        # daemon's reminder clock reads runs through `status` and nothing
+        # else, so this dict is the entire interface between a workflow's
+        # `awaits` and the thing that acts on it — the clock never opens a
+        # workflow file, and never learns that `awaits: verify` was a spelling
+        # rather than a command.
+        base["awaits"] = awaited
 
     # Loop guard first: arriving past the visit limit pauses the run.
     if visit > _limit(workflow, state, step.id):
@@ -1262,6 +1284,36 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
         )
         state_mod.save_state(state, cwd)
     return payload
+
+
+def _awaits_payload(step: Step) -> Optional[dict]:
+    """A step's awaited condition, resolved, or None when it declares none.
+
+    ``note`` is here for the agent, and says the thing the agent most needs to
+    hear: the waiting is being watched, so ending the turn is correct and
+    polling the condition by hand is not. That instruction is the difference
+    between this field saving a session's turns and merely adding to them.
+    """
+    if step.awaits is None:
+        return None
+    command = step.awaits.command(step)
+    if not command:  # parse forbids it; a hand-built Step could still do it
+        return None
+    out = {
+        "probe": command,
+        "poll": step.awaits.poll,
+        "timeout": step.awaits.timeout,
+        "note": (
+            f"this step declares what it is waiting for, and the daemon is "
+            f"re-measuring it every {step.awaits.poll:g}s. You will be told "
+            f"when it changes and told nothing while it does not — so do not "
+            f"poll it yourself, and do not read silence as the condition "
+            f"being unmet"
+        ),
+    }
+    if step.awaits.describe:
+        out["describe"] = step.awaits.describe
+    return out
 
 
 def _delegations(workflow: Workflow) -> List[tuple]:
@@ -1844,6 +1896,97 @@ def _run_verify(step: Step, cwd: Optional[str]) -> Optional[dict]:
         "exit_code": completed.returncode,
         "output": output[-VERIFY_OUTPUT_TAIL:],
     }
+
+
+def run_probe(command: str, cwd: Optional[str], timeout: float) -> Optional[dict]:
+    """Measure a step's awaited condition once. ``None`` = could not measure.
+
+    Called by the daemon's reminder clock, not by the run — nothing in a run's
+    own lifecycle samples a probe. Lives here anyway because this is where
+    cflow's subprocess policy is written, and a second copy of it in the
+    daemon would drift from :func:`_run_verify` the first time either changed.
+
+    Two answers, and keeping them apart is the point:
+
+    * a dict — the probe ran, and its ``code`` is the fact. Nothing is judged
+      here: 0 is not "good" and 1 is not "not yet", because only the workflow
+      author knows what their own probe's codes mean. The caller compares this
+      code with the previous one and cares about nothing but the difference.
+    * ``None`` — the probe could not be run at all, or did not finish inside
+      ``timeout``. That is *no answer*, not the answer "not yet", and the
+      caller must fall back to its clock rather than read it as "unchanged".
+      A broken probe silencing a run is the one failure this feature could
+      introduce, and this return value is where it is refused.
+
+    The timeout is the caller's (a step's ``awaits.timeout``, capped at
+    :data:`model.MAX_AWAITS_TIMEOUT`), never a verify's — a probe nominated with
+    ``awaits: verify`` runs under the probe's budget, so a heavy command
+    nominated by mistake times out into ``None`` instead of being re-run on a
+    loop.
+    """
+    kwargs = (
+        {"start_new_session": True}
+        if os.name == "posix"
+        else {"creationflags": getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)}
+    )
+    try:
+        proc = subprocess.Popen(
+            command,
+            shell=True,
+            cwd=cwd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            **kwargs,
+        )
+    except (OSError, ValueError):
+        return None
+    try:
+        out, err = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        # `subprocess.run(timeout=...)` would not be enough here, and the
+        # difference is the whole reason this is written out. With `shell=True`
+        # the child is a shell; killing it leaves the grandchild it launched
+        # alive, still holding the write end of these pipes, so the read that
+        # follows the kill blocks until the *real* process finishes — and the
+        # timeout that was supposed to cap a probe at ten seconds caps nothing.
+        # A clock that can be held open by a slow probe is a clock a workflow
+        # can hang the daemon with, which is exactly what the ceilings on
+        # `awaits` exist to prevent. So the whole tree goes.
+        _kill_tree(proc)
+        return None
+    except (OSError, ValueError):
+        return None
+    says = ((out or "") + (err or "")).strip()
+    return {"code": proc.returncode, "says": says[-PROBE_OUTPUT_TAIL:]}
+
+
+def _kill_tree(proc: "subprocess.Popen") -> None:
+    """Kill a probe and everything it started, then stop holding its pipes."""
+    try:
+        if os.name == "posix":
+            os.killpg(proc.pid, signal.SIGKILL)
+        else:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                capture_output=True,
+                timeout=KILL_GRACE,
+            )
+    except Exception:
+        # A tree-kill that failed still leaves the direct child to kill, and a
+        # probe already gone raises here on some platforms. Either way the
+        # answer to the caller is the same one: None.
+        pass
+    try:
+        proc.kill()
+    except Exception:
+        pass
+    try:
+        proc.communicate(timeout=KILL_GRACE)
+    except Exception:
+        pass
 
 
 @_locked_op

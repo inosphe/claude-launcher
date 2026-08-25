@@ -40,6 +40,22 @@ import pytest
 from claude_launcher.cflow import model, state as state_mod
 
 OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
+SYNC = Path(__file__).resolve().parents[1] / "tools" / "sync_project_layer.py"
+
+
+def _graft_fields() -> tuple:
+    """The field names the project layer owns, from the tool that grafts them.
+
+    Loaded by path rather than imported: pytest's ``pythonpath`` is ``src``,
+    so ``tools`` is not on it — the same reason the sync tool's own tests load
+    it this way.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("sync_project_layer", SYNC)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod.GRAFT_FIELDS
 
 #: Which steps each override arms.
 #:
@@ -150,8 +166,8 @@ def test_the_override_adds_no_other_verify(stem):
     assert armed == list(ARMED[stem])
 
 
-def test_the_leader_override_is_canonical_plus_verify():
-    """Field for field the bundled leader, verify excluded — no other drift.
+def test_the_leader_override_is_canonical_plus_its_grafted_fields():
+    """Field for field the bundled leader, the grafted fields excluded.
 
     The override is a whole copy with a verify grafted on, so it goes stale
     silently the moment the canonical file is edited alone. It did: commit
@@ -166,8 +182,18 @@ def test_the_leader_override_is_canonical_plus_verify():
     The worker pair drifted the same way and is deliberately NOT covered
     here yet — resyncing it would rewrite a workflow other sessions are
     mid-run on, so it is reported rather than fixed in passing.
+
+    The excluded fields are the ones the project layer owns, and they are
+    read from the tool that grafts them rather than restated here. Both answer
+    "what does THIS repository check, with which tool" — a question the
+    packaged copy, which ships everywhere, cannot answer — and the exclusion
+    has to stay exactly that set: widen it and this stops being a drift check.
+    A second hand-kept list would agree until somebody widened one, and that
+    is the kind of disagreement no machine would have been watching.
     """
     from dataclasses import replace
+
+    grafted = dict.fromkeys(_graft_fields())
 
     canonical = model.load(dict(state_mod.bundled_workflows())["improv-leader"])
     override = model.load(OVERRIDES / "improv-leader.yaml")
@@ -182,12 +208,12 @@ def test_the_leader_override_is_canonical_plus_verify():
         "the override gained or lost a step against the canonical leader"
     )
     for step_id, canonical_step in canonical.steps.items():
-        assert replace(override.steps[step_id], verify=None) == replace(
-            canonical_step, verify=None
+        assert replace(override.steps[step_id], **grafted) == replace(
+            canonical_step, **grafted
         ), (
             f"{step_id!r} differs from the canonical leader by more than its "
-            f"verify — the override drifted, and a run here would follow the "
-            f"override's version of the rule"
+            f"grafted fields — the override drifted, and a run here would "
+            f"follow the override's version of the rule"
         )
 
 

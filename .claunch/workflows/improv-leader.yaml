@@ -587,6 +587,15 @@ steps:
     # 서빙하는가)은 위 done_when이 계속 사람에게 요구한다.
     # tests/test_deploy_check.py가 양방향과 판정 불가 두 갈래를 못박는다.
     verify: 'uv run --no-sync python tools/deploy_check.py --branch master'
+    # 그 사용자 신고의 나머지 절반이 이 줄이다. 위 verify는 「재기동 없이 초록을
+    # 적는 것」만 막았고, 「재기동이 일어난 것을 아무도 안 알려준다」는 열려 있었다.
+    # awaits는 같은 명령을 데몬이 30초마다 다시 재게 하고 exit code가 움직이는
+    # 순간에만 한 번 신호를 보낸다 — 안 움직이는 동안은 아무 말도 하지 않는다.
+    # 여기서 verify를 재사용해도 되는 근거: deploy_check는 daemon.json 한 번
+    # 읽기 + git log 한 번이고 아무것도 쓰지 않는다(tools/deploy_check.py 도크스트링).
+    # 이 줄이 그 읽기 전용·값쌈에 대한 저자의 선언이다 — 엔진은 verify를 절대
+    # 자동으로 재지 않는다.
+    awaits: {probe: verify, poll: 30}
     next: end
 
   wrapup:
