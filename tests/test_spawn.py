@@ -436,6 +436,15 @@ def test_a_forked_child_launches_on_the_parents_conversation(tmp_path):
     # A fresh id for the copy: the child is restorable, and restoring it
     # reopens its own conversation rather than forking the parent again.
     assert sdef.conversation_id and sdef.conversation_id != conversation
+    # The fork's own conversation, as claude would have written it: a restore
+    # only resumes a transcript that is there.
+    from claude_launcher import transcripts
+
+    forked = transcripts.project_dir(
+        profile_mod.require("work").config_dir, sdef.cwd
+    )
+    forked.mkdir(parents=True, exist_ok=True)
+    (forked / f"{sdef.conversation_id}.jsonl").write_text("{}", encoding="utf-8")
     again, _, _ = harness_mod.build_command(sdef, restoring=True)
     assert again[again.index("--resume") + 1] == sdef.conversation_id
     assert "--fork-session" not in again

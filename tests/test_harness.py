@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from claude_launcher import credentials, profile, store
+from claude_launcher import credentials, profile, store, transcripts
 from claude_launcher.daemon import harness
 from claude_launcher.daemon.harness import HarnessError, SessionDef
 
@@ -22,6 +22,20 @@ def _declare_harness(name: str, **extra) -> None:
     """
     entry = {"command": sys.executable, **extra}
     store.update(lambda doc: doc.setdefault("harnesses", {}).update({name: entry}))
+
+
+def _write_transcript(sdef, profile_name: str = "work") -> None:
+    """Put a conversation on disk where claude would have written it.
+
+    A restore only resumes what exists, so any test about ``--resume`` has to
+    say that the conversation is there — otherwise it is testing the *other*
+    branch (a session that died before its first turn landed).
+    """
+    d = transcripts.project_dir(
+        profile.require(profile_name).config_dir, sdef.cwd
+    )
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{sdef.conversation_id}.jsonl").write_text("{}", encoding="utf-8")
 
 
 def test_sessiondef_roundtrip():
@@ -100,8 +114,46 @@ def test_claude_restore_resumes_own_conversation(home, tmp_path):
     cwd's most recent one (--continue), which can hijack another session."""
     profile.create("work")
     sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+    _write_transcript(sdef)
     argv, _, _ = harness.build_command(sdef, restoring=True)
     assert "--continue" not in argv
+    assert argv[argv.index("--resume") + 1] == sdef.conversation_id
+    assert "--session-id" not in argv
+
+
+def test_claude_restore_without_a_transcript_starts_the_pinned_id_fresh(
+    home, tmp_path
+):
+    """A session born just before a restart has no conversation on disk yet.
+
+    ``--resume`` of an id claude never wrote is fatal ("No conversation found
+    with session ID"), and the session comes back as ``exited(1)`` — alive in
+    the record, dead in fact, with whatever it was spawned to do lost. The
+    restore takes the pinned id as a *new* conversation instead, which is
+    exactly what the first spawn would have done.
+    """
+    profile.create("work")
+    sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+    argv, _, _ = harness.build_command(sdef, restoring=True)
+    assert "--resume" not in argv
+    assert "--continue" not in argv  # would hijack another session's history
+    assert argv[argv.index("--session-id") + 1] == sdef.conversation_id
+
+
+def test_claude_restore_resumes_a_transcript_filed_under_another_slug(
+    home, tmp_path
+):
+    """The check is generous on purpose: a conversation found anywhere in the
+    config dir counts as resumable. Guessing 'not there' about one that is
+    would start a fresh conversation over a live scrollback — so a slug we
+    spell differently than claude does costs a failed restore (today's
+    behaviour), never a lost history."""
+    profile.create("work")
+    sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+    stray = profile.require("work").config_dir / "projects" / "somewhere-else"
+    stray.mkdir(parents=True)
+    (stray / f"{sdef.conversation_id}.jsonl").write_text("{}", encoding="utf-8")
+    argv, _, _ = harness.build_command(sdef, restoring=True)
     assert argv[argv.index("--resume") + 1] == sdef.conversation_id
     assert "--session-id" not in argv
 
@@ -193,6 +245,7 @@ def test_resume_opens_the_named_conversation_and_pins_it(home, tmp_path):
     assert "--session-id" not in argv  # would collide with --resume
     assert "--fork-session" not in argv
 
+    _write_transcript(sdef)
     argv, _, _ = harness.build_command(sdef, restoring=True)
     assert argv[argv.index("--resume") + 1] == other
 
@@ -218,6 +271,7 @@ def test_fork_session_lands_the_copy_on_a_restorable_id(home, tmp_path):
     assert argv[argv.index("--session-id") + 1] == sdef.conversation_id
 
     # From the second spawn on it is an ordinary session of its own.
+    _write_transcript(sdef)
     argv, _, _ = harness.build_command(sdef, restoring=True)
     assert argv[argv.index("--resume") + 1] == sdef.conversation_id
     assert "--fork-session" not in argv

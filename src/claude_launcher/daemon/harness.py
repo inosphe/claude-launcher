@@ -15,6 +15,7 @@ modelled here too.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import sys
 import uuid
@@ -22,9 +23,11 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .. import harnesses as harness_registry
-from .. import profile as profile_mod, runner, store
+from .. import profile as profile_mod, runner, store, transcripts
 from .. import config as launcher_config
 from . import mesh_roles
+
+log = logging.getLogger("claunch.daemon.harness")
 
 CLAUDE_HARNESS = harness_registry.CLAUDE_HARNESS
 
@@ -360,6 +363,14 @@ def build_command(
     conversation. Definitions predating the pin fall back to ``--continue``
     (most recent conversation for that cwd + profile).
 
+    A pinned id with no transcript behind it is the one exception. A session
+    spawned in the last seconds before a restart has not written its
+    conversation yet, and ``--resume`` of a jsonl that is not there kills
+    claude on startup -- the session is restored into the record and then
+    exits 1, looking healthy in ``sessions.json`` and being gone in fact. It
+    is relaunched on ``--session-id`` instead: the same pinned id, a new
+    conversation, which is all the first spawn would have given it anyway.
+
     A definition that opens someone else's conversation (``resume``) does so
     on the *first* spawn only — from then on the conversation is this
     session's own (forked or not) and a restore reopens it by its pinned id,
@@ -389,10 +400,27 @@ def build_command(
             argv.extend(["--settings", json.dumps(REBRIEF_HOOK_SETTINGS)])
         if not steers_conversation(sdef.args):
             if restoring:
-                if sdef.conversation_id:
+                if not sdef.conversation_id:
+                    argv.append("--continue")
+                elif transcripts.exists(
+                    prof.config_dir, sdef.conversation_id, sdef.cwd
+                ):
                     argv.extend(["--resume", sdef.conversation_id])
                 else:
-                    argv.append("--continue")
+                    # Pinned, but claude never wrote the conversation: the
+                    # session was born too close to the restart for its first
+                    # turn to land. --resume of a jsonl that is not there is
+                    # fatal ("No conversation found with session ID"), and a
+                    # session that dies on restore is worse than one that
+                    # comes back empty -- so come back empty, on the same
+                    # pinned id, which is what a first spawn does anyway.
+                    log.info(
+                        "session %r has no transcript for %s yet; restoring it "
+                        "as a fresh conversation on that id rather than "
+                        "resuming one claude never wrote",
+                        sdef.name, sdef.conversation_id,
+                    )
+                    argv.extend(["--session-id", sdef.conversation_id])
             elif sdef.resume is not None:
                 # Bare --resume opens claude's picker; with a target it opens
                 # that conversation. --session-id rides along only for a fork,
