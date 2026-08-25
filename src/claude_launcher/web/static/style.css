@@ -247,6 +247,15 @@ option:disabled { color: #6b7280; }
 #session-list .sess-brief-rowref:hover:not(:disabled) { color: #58a6ff; }
 /* off (no llm: block): the ⟳ has nothing to ask for — inert like the toggle */
 #session-list .sess-brief-rowref:disabled { color: #3d434d; cursor: default; }
+/* in flight: the same spin as the card's ⟳ — with the card closed this is
+   the only thing on the row that says the click was taken. It is disabled
+   meanwhile, so this rule follows the :disabled one to keep its colour. */
+#session-list .sess-brief-rowref.spinning {
+  color: #58a6ff; animation: spin 0.7s linear infinite; cursor: default;
+}
+/* the last try failed: the glyph goes red and the reason is on its title;
+   still clickable — the ⟳ is also the retry */
+#session-list .sess-brief-rowref.failed { color: #ff7b72; }
 /* The one line inside the open card, above goal/now/progress — the same fact
    the row's under-name line carries, read where the full summary is. */
 .sess-brief-one {
@@ -320,11 +329,16 @@ option:disabled { color: #6b7280; }
    the bar and not this gives up the width — a truncated model name is worth
    less than the gauge it qualifies — and `max-width` so an unfamiliar id
    from a gateway cannot push the count off the row; the full id is on its
-   title either way. Dimmer than the count and not monospaced: it is the
-   label on the scale, not another figure to compare across rows. */
+   title either way. Not monospaced — it is the label on the scale, not
+   another figure to compare across rows — but in a teal of its own, a shade
+   brighter and bolder than the count beside it: which model a session is
+   answering on is the fact people scan the rail for, and a hue no other
+   rail element uses (blue is the accent, purple is mesh, amber/red/green
+   are status) lets the eye pick it out of twenty rows without reading. */
 #session-list .rail-model {
   flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; font-size: 10px; color: #6e7681; line-height: 16px;
+  white-space: nowrap; font-size: 11px; font-weight: 600; color: #56d4dd;
+  line-height: 16px;
 }
 #session-list .rail-ctx {
   flex: none; font-family: SFMono-Regular, Consolas, monospace;
