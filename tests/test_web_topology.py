@@ -68,8 +68,13 @@ open-set and off-state — ``briefrow_check`` on the row's always-on face —
 the one-line job description the /api/sessions poll pours into every row
 (digest first, the opening task as fallback) and the collapsed ⟳ that
 refreshes without opening — ``spawnform_check`` on the create form
-turned into a spawn — what a child may be asked once a parent is named, and
-when the parent's conversation is on offer to fork — and the two
+turned into a spawn — what a child may be asked once a parent is named
+(the spawn policy's answer, per parent, rather than the form's own), what
+its payload therefore carries, the soft child cap offered as a crossing,
+and when the parent's conversation is on offer to fork — ``newflow_check``
+on the same form's Role and Workflow rows, where picking a role picks the
+workflow that volunteers for it and a pick made by hand outlives every
+later role change — and the two
 ``flow*_check`` harnesses on the flow view — one on the track a workflow
 becomes, one on the page those tracks are drawn into — and the two context
 harnesses: ``ctxsize_check`` on how full a session's conversation is said to
@@ -132,6 +137,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "briefingtop_check.js",
         "briefrow_check.js",
         "spawnform_check.js",
+        "newflow_check.js",
         "selectpopup_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
