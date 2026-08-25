@@ -1836,3 +1836,115 @@ def test_children_reports_the_run_the_next_child_would_start_on(home, tmp_path):
             await client.close()
 
     asyncio.run(run())
+
+
+def test_an_unnamed_child_gets_a_worktree_named_after_both_sessions(home, tmp_path):
+    """The quick job's case, and the whole point of the naming rule.
+
+    The dashboard's quick-job form types a task and nothing else -- no child
+    name, no worktree name -- so the browser cannot finish the name: the
+    child's `sN` is the daemon's to pick. It used to fall back to the PARENT's
+    name, which is how a fleet of quick jobs leaves a repository full of
+    `lead-<stamp>` checkouts that no longer say which worker each one is. So
+    the request travels as `worktree: true` and the daemon, which knows both
+    session names by then, names it `<parent>-<child>-<stamp>`.
+    """
+    _register_py_harness()
+    repo = _repo(tmp_path / "repo")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
+
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"worktree": True},   # no name of its own, no name for it
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            child = (await resp.json())["session"]
+            kid = child["name"]
+            assert kid != "lead"
+
+            tree = Path(child["cwd"]).name
+            assert tree.startswith(f"lead-{kid}-"), tree
+            # A real checkout on a branch of the same name -- not just a
+            # directory, and not a branch called `True`.
+            assert Path(child["cwd"], "a.txt").exists()
+            assert tree in _git("worktree", "list", cwd=repo).stdout
+            assert tree in _git("branch", "--list", tree, cwd=repo).stdout
+            assert "True" not in _git("branch", cwd=repo).stdout
+
+            # Two of them, and they do not collide or share a checkout.
+            resp2 = await client.post(
+                "/api/sessions/lead/children",
+                json={"worktree": True},
+                headers=BEARER,
+            )
+            assert resp2.status == 201
+            sibling = (await resp2.json())["session"]
+            assert sibling["cwd"] != child["cwd"]
+            assert Path(sibling["cwd"]).name.startswith(f"lead-{sibling['name']}-")
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_named_worktree_is_still_that_name_exactly(home, tmp_path):
+    """The auto rule is the fallback, not a rewrite: a caller that names the
+    checkout gets the name it asked for, which is what makes naming an
+    EXISTING one return to it."""
+    _register_py_harness()
+    repo = _repo(tmp_path / "repo")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "worktree": "helper"},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            assert Path((await resp.json())["session"]["cwd"]).name == "helper"
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_worktree_false_leaves_the_child_in_its_parents_checkout(home, tmp_path):
+    """`false` is not the name of a worktree. It used to be read as one, and
+    cut a checkout called `False` on a branch called `False`."""
+    _register_py_harness()
+    repo = _repo(tmp_path / "repo")
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(repo)))
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "worktree": False},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            assert (await resp.json())["session"]["cwd"] == str(repo)
+            assert "False" not in _git("branch", cwd=repo).stdout
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
