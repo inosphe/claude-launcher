@@ -134,6 +134,31 @@ class ScreenState:
                 self.alt_screen = match.group(2) == b"h"
         self._mode_tail = window[-_TAIL:]
 
+    def forget_modes(self) -> None:
+        """Drop the private modes, keeping the grid and its scrollback.
+
+        For a screen seeded by replaying an old log: the modes in it were
+        asserted by a program that is gone, and the one about to draw has not
+        said anything yet. Carrying them over would encode ``send-keys``
+        arrows for a DECCKM nobody turned on, and would make the repaint claim
+        an alternate screen the new program may not have entered.
+        """
+        self.app_cursor_keys = False
+        self.bracketed_paste = False
+        self.alt_screen = False
+        self._mode_tail = b""
+
+    def scroll_grid_into_history(self) -> None:
+        """Push the whole visible grid off the top, leaving a blank screen.
+
+        What a replayed log is worth to a restored session is its
+        *scrollback*, not its last frame: the program that drew that frame is
+        gone and the new one is about to paint its own. Rolling the grid up
+        turns those rows into history — reachable by the wheel — instead of
+        leaving them on screen pretending to be live.
+        """
+        self.feed_render(b"\r\n" * self._screen.lines)
+
     def resize(self, cols: int, rows: int) -> None:
         self._screen.resize(lines=rows, columns=cols)
 

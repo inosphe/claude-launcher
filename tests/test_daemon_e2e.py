@@ -128,6 +128,83 @@ def test_restore_relaunches_recorded_sessions(home, tmp_path):
     asyncio.run(run())
 
 
+def test_restore_gives_a_relaunched_session_its_scrollback_back(home, tmp_path):
+    """A restart must not cost the web terminal its wheel.
+
+    The daemon's pyte history is the only scrollback the browser has (its
+    xterm is built with ``scrollback: 0``), and a restored session used to get
+    a brand-new screen with nobody replaying the log into it — so the wheel
+    had nothing to scroll while megabytes of it sat on disk.
+    """
+    _register_py_harness()
+    nl = chr(10)
+
+    async def run():
+        mgr = _manager()
+        session = mgr.create(SessionDef(name="deep", harness="py", cwd=str(tmp_path)))
+        await _wait_screen(session, "READY")
+        # More lines than the grid is tall, so they genuinely scroll off.
+        for i in range(60):
+            await session.send_keys(["scrollback-line-%d" % i, "Enter"])
+        await _wait_screen(session, "echo:scrollback-line-59")
+        # The render is deferred (ScreenFeeder), so the grid — and the history
+        # rows below it — lag the byte stream until this returns.
+        await session.screen_synced()
+        assert session.screen.history_len > 0
+        mgr.persist()
+        await mgr.shutdown_all()
+
+        mgr2 = _manager()
+        assert mgr2.restore_all() == []
+        revived = mgr2.get("deep")
+        assert revived.screen.history_len > 0, "the restart wiped the scrollback"
+        assert "scrollback-line-" in nl.join(revived.capture(history=True))
+        await mgr2.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_seeding_a_restored_screen_drops_the_dead_program_modes(home, tmp_path):
+    """The replayed log's private modes belong to a program that is gone.
+
+    Carrying them over would encode ``send-keys`` arrows for a DECCKM nobody
+    turned on, and would make the repaint claim an alternate screen the
+    relaunched program may not have entered. The scrollback is the point of
+    the replay; the modes are debris that comes with it.
+    """
+    _register_py_harness()
+    esc = chr(27)
+    nl = chr(10)
+
+    # A log written by a program that asserted DECCKM and the alternate screen
+    # and then printed more than a screenful.
+    log = paths.session_log("modes")
+    log.parent.mkdir(parents=True, exist_ok=True)
+    body = esc + "[?1049h" + esc + "[?1h"
+    body += "".join("old-line-%d" % i + chr(13) + nl for i in range(60))
+    log.write_bytes(body.encode())
+
+    async def run():
+        mgr = _manager()
+        session = mgr.stage(SessionDef(name="modes", harness="py", cwd=str(tmp_path)))
+        try:
+            session.seed_screen_from_log()
+            # The scrollback came back...
+            assert session.screen.history_len > 0
+            assert "old-line-" in nl.join(session.capture(history=True))
+            # ...and the dead program's modes did not.
+            assert session.screen.app_cursor_keys is False
+            assert session.screen.alt_screen is False
+            # The grid itself is blank: the last frame belongs to a program
+            # that is gone, so it is rolled into history rather than left on
+            # screen pretending to be live.
+            assert not [line for line in session.capture() if line.strip()]
+        finally:
+            mgr.discard("modes")
+
+    asyncio.run(run())
+
+
 def test_restart_keeps_exited_sessions_respawnable(home, tmp_path):
     """A daemon restart must never *lose* a session: what it does not relaunch
     (already exited, or --no-restore) comes back as an exited record that can
