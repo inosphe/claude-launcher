@@ -744,6 +744,22 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
 
+/* ---- the CLI tab: one raw shell, one terminal ---- */
+/* Column like #main itself, so the terminal box (not the page) owns the
+   free height; the header is the session header's sibling, same grey. */
+#cli-view { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+#cli-header {
+  padding: 8px 14px; display: flex; align-items: center; gap: 10px;
+  background: #1b1e24; border-bottom: 1px solid #2a2e36; font-size: 13px;
+}
+#cli-title { color: #c6cdd5; }
+.cli-actions { margin-left: auto; }
+#cli-term { flex: 1; padding: 6px; min-height: 0; overflow: hidden; }
+#cli-term .xterm { height: 100%; }
+#cli-term .xterm-viewport {
+  overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
+}
+
 /* ---- split mode: the run pane halved into the terminal's column ----
    Both panes grow from a zero basis, so the two ratio variables ARE the
    split: the free height left by the header divides exactly by them, and the

@@ -3668,6 +3668,184 @@ function restoreTerminal(b) {
   refitSoon(50);
 }
 
+/* ---- the CLI tab: one raw shell, one terminal ----
+
+   The daemon keeps exactly one unmanaged shell for its lifetime (see
+   daemon/clipty.py), so this page's xterm and socket are also built exactly
+   once and kept: navigating away hides the page but leaves the socket up,
+   so the shell's output keeps flowing into this terminal's buffer and
+   nothing is lost for the viewer coming back. The frame dialect is the
+   session terminal's, thinned: init (which carries `exited`, because a
+   viewer can land on a shell that is already dead), exit, resize, and the
+   raw bytes themselves. No scrollback negotiation — the wheel browses
+   xterm's own scrollback, so this terminal gets one.
+
+   STATE: cliStatus says what this page is looking at — "connecting", "live",
+   "exited" (the shell stopped; the header offers restart) or "down" (the
+   daemon itself stopped answering; the header offers retry). */
+let cliTerm = null;
+let cliFit = null;
+let cliWs = null;
+let cliStatus = "off";
+let cliRetry = 0;
+let cliRemoteResize = false;
+let cliFitTimer = null;
+
+/* The header's one control; what it does is named by its label — restart an
+   exited shell, retry a dead link. */
+function cliAct() {
+  if (cliStatus === "exited" && cliWs && cliWs.readyState === WebSocket.OPEN) {
+    cliWs.send(JSON.stringify({ type: "restart" }));
+  } else if (cliStatus === "down") {
+    ensureCliSocket();
+  }
+}
+
+function cliSetStatus(state) {
+  cliStatus = state;
+  $("cli-status").className = "badge " + (state === "live" ? "idle" : "exited");
+  $("cli-status").textContent =
+    state === "live" ? "live"
+    : state === "exited" ? "exited"
+    : state === "down" ? "offline"
+    : state === "connecting" ? "…"
+    : "off";
+  const act = $("cli-act");
+  act.classList.toggle("hidden", state !== "exited" && state !== "down");
+  act.textContent = state === "exited" ? "restart" : state === "down" ? "retry" : "";
+  act.title = state === "exited"
+    ? "the shell exited — start a fresh one"
+    : "the daemon stopped answering — try the socket again";
+}
+
+/* Enter the CLI page. The terminal object IS the page's content and is
+   never rebuilt — like the session terminals, it is hidden in place on the
+   way out and simply shown again here. */
+function openCli() {
+  showView("cli");
+  if (!cliTerm) buildCliTerm();
+  ensureCliSocket();
+  cliRefit(0);
+}
+
+function buildCliTerm() {
+  cliTerm = new Terminal({
+    fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
+    fontSize: fontSize,
+    theme: { background: "#14161a" },
+    // The session terminal runs scrollback: 0 because the daemon serves the
+    // wheel from its own history. A raw shell has no daemon-side screen —
+    // the ring the daemon keeps is only catch-up on attach — so this
+    // terminal keeps xterm's own scrollback and the wheel browses it.
+    scrollback: 5000,
+  });
+  cliFit = new FitAddon.FitAddon();
+  cliTerm.loadAddon(cliFit);
+  cliTerm.open($("cli-term"));
+  cliTerm.onData((data) => {
+    if (cliWs && cliWs.readyState === WebSocket.OPEN && cliStatus !== "exited") {
+      // A binary frame, on purpose: the daemon reads TEXT frames as JSON
+      // control messages, and a keystroke must never be mistaken for one.
+      cliWs.send(new TextEncoder().encode(data));
+    }
+  });
+  // A resize we applied from a server broadcast must not be echoed back, or
+  // two viewers ping-pong forever (the session terminal's rule, verbatim).
+  cliTerm.onResize(({ cols, rows }) => {
+    if (cliRemoteResize) return;
+    if (cliWs && cliWs.readyState === WebSocket.OPEN) {
+      cliWs.send(JSON.stringify({ type: "resize", cols, rows }));
+    }
+  });
+  $("cli-act").addEventListener("click", cliAct);
+  cliRefit(0);
+}
+
+/* Open (or re-open) the socket. One per page lifetime: a close only ever
+   means "try again", never "point at a different child" — the daemon names
+   the shell, the tab just looks at it. */
+function ensureCliSocket() {
+  if (cliWs) {
+    if (cliWs.readyState === WebSocket.OPEN || cliWs.readyState === WebSocket.CONNECTING) return;
+    cliWs = null;   // closed: fall through to a fresh socket
+  }
+  cliSetStatus("connecting");
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const sock = new WebSocket(`${proto}://${location.host}${url("/api/cli/ws")}`);
+  sock.binaryType = "arraybuffer";
+  cliWs = sock;
+  sock.onopen = () => {
+    if (cliWs !== sock) return;
+    cliRetry = 0;
+  };
+  sock.onmessage = (ev) => {
+    if (cliWs !== sock) return;
+    if (typeof ev.data === "string") {
+      let msg;
+      try { msg = JSON.parse(ev.data); } catch { return; }
+      if (msg.type === "init") {
+        cliRetry = 0;
+        // The daemon's truth on arrival: a fresh shell (first viewer of
+        // this daemon incarnation) or an already-dead one (only the restart
+        // control brings it back).
+        if (cliTerm) {
+          cliRemoteResize = true;
+          try { cliTerm.resize(msg.cols, msg.rows); }
+          finally { cliRemoteResize = false; }
+        }
+        if (msg.exited) {
+          if (cliTerm) cliTerm.write(
+            "\r\n\x1b[90m[shell exited — restart it from the header]\x1b[0m\r\n");
+          cliSetStatus("exited");
+        } else {
+          cliSetStatus("live");
+          cliRefit(60);   // then claim this viewer's own size
+        }
+      } else if (msg.type === "exit") {
+        if (cliTerm) cliTerm.write(
+          `\r\n\x1b[90m[shell exited (code ${msg.code}) — restart it from the header]\x1b[0m\r\n`);
+        cliSetStatus("exited");
+      } else if (msg.type === "resize") {
+        // Another viewer claimed the size; take it unless it is the echo of
+        // this viewer's own claim.
+        if (cliTerm && (cliTerm.cols !== msg.cols || cliTerm.rows !== msg.rows)) {
+          cliRemoteResize = true;
+          try { cliTerm.resize(msg.cols, msg.rows); }
+          finally { cliRemoteResize = false; }
+        }
+      }
+      // shutdown, pong and friends: nothing this page needs to hold.
+    } else if (cliTerm) {
+      cliTerm.write(new Uint8Array(ev.data));
+    }
+  };
+  sock.onclose = () => {
+    if (cliWs !== sock) return;
+    cliWs = null;
+    if (cliStatus === "exited") return;   // the shell stopped, not the link
+    if (cliRetry < 8) {
+      cliRetry += 1;
+      cliSetStatus("connecting");
+      setTimeout(ensureCliSocket, 1000 * cliRetry);
+    } else {
+      cliSetStatus("down");   // gave up: from here the header's retry does it
+    }
+  };
+}
+
+/* Fit the CLI terminal to its box at the reader's font size — the session
+   terminal's localFit, minus the zoom pill this page has no room for.
+   Delayed so a page swap has landed before the measurement. */
+function cliRefit(delay = 60) {
+  if (!cliFit || !cliTerm) return;
+  clearTimeout(cliFitTimer);
+  cliFitTimer = setTimeout(() => {
+    if (currentPage !== "cli") return;   // hidden boxes measure to nothing
+    if (cliTerm.options.fontSize !== fontSize) cliTerm.options.fontSize = fontSize;
+    cliFit.fit();
+  }, delay);
+}
+
 /* Build a new terminal for a session that has not been up before (or whose
    parked copy was evicted). This is the pre-cache attach() body — the cost a
    session switch used to always pay. */
@@ -3774,7 +3952,10 @@ function refitSoon(delay = 150) {
   clearTimeout(fitTimer);
   fitTimer = setTimeout(localFit, delay);
 }
-window.addEventListener("resize", () => refitSoon());
+window.addEventListener("resize", () => {
+  refitSoon();
+  if (currentPage === "cli") cliRefit(150);
+});
 
 /* Another viewer (e.g. `claunch attach`) may have resized the session while
    this tab was in the background, leaving the grid garbled. On focus regain,
@@ -3793,6 +3974,22 @@ function resyncTerminal() {
 window.addEventListener("focus", resyncTerminal);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) resyncTerminal();
+});
+
+/* The CLI tab's half of the same two wake-ups: the daemon is not watching
+   its grid and a backgrounded tab's socket may have died quietly, so coming
+   back to the CLI page re-fits the terminal (which sends the daemon this
+   viewer's size) and re-opens a dead socket. */
+function resyncCli() {
+  if (currentPage !== "cli") return;
+  if (cliStatus === "down") { ensureCliSocket(); return; }
+  if (!cliTerm) return;
+  if (cliWs && cliWs.readyState !== WebSocket.OPEN) ensureCliSocket();
+  cliRefit(0);
+}
+window.addEventListener("focus", resyncCli);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) resyncCli();
 });
 
 /* ------------------------------------------------------------------ */
@@ -4060,6 +4257,7 @@ const VIEWS = {
   new: "new-view",
   meshes: "meshes-view",
   flows: "flows-view",
+  cli: "cli-view",
   wf: "wf-view",
   msg: "msg-view",
   mesh: "mesh-view",
@@ -4459,6 +4657,9 @@ function parseHash(h) {
   }
   if (parts[0] === "new") return { page: "new" };
   if (parts[0] === "flows") return { page: "flows" };
+  // One page, one shell: nothing else about the CLI tab is addressable, so
+  // anything past "#/cli" is still the same terminal.
+  if (parts[0] === "cli") return { page: "cli" };
   if (parts[0] === "workspaces") return { page: "ws" };
   return { page: "home" };   // an unknown link is a wrong turn, not an error
 }
@@ -4501,6 +4702,7 @@ function route() {
     case "meshes": showView("meshes"); refreshMeshList(); break;
     case "new": showView("new"); refreshWorkflowChoices(); break;
     case "flows": showView("flows"); refreshCflow(); break;
+    case "cli": openCli(); break;
     case "ws": openWorkspaces(); break;
     default: openHome();
   }

@@ -152,6 +152,120 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     return ws
 
 
+# --------------------------------------------------------------------------- #
+# the CLI tab: one raw, unmanaged shell (daemon/clipty.py)
+#
+# A smaller protocol than the session terminal's, for exactly what a bare
+# shell needs. Same frame lanes: binary output both ways, JSON control
+# frames. There is no scrollback negotiation or viewer state — the browser
+# keeps xterm's own scrollback, the daemon keeps no screen — so the control
+# set is just init (may carry ``exited`` for a shell that is already dead
+# when a viewer attaches), resize and restart.
+# --------------------------------------------------------------------------- #
+async def cli_ws(request: web.Request) -> web.WebSocketResponse:
+    # Auth already happened: /api/ prefix, so the shared middleware validated
+    # a Bearer header (CLI/scripts) or the session cookie (the SPA).
+    shell = request.app["shell"]
+
+    ws = web.WebSocketResponse(heartbeat=30)
+    await ws.prepare(request)
+    request.app["websockets"].add(ws)
+
+    # First viewer of this daemon incarnation brings the shell up; afterwards
+    # it lives on its own until it exits (see ShellPty.start_once).
+    shell.start_once()
+    queue, replay = shell.attach()
+    try:
+        await ws.send_str(
+            json.dumps(
+                {
+                    "type": "init",
+                    "cols": shell.cols,
+                    "rows": shell.rows,
+                    "pid": shell.pid,
+                    # True when the viewer joined after the shell already
+                    # died — the client shows the restart control instead of
+                    # pretending keystrokes can land anywhere.
+                    "exited": shell.exited,
+                }
+            )
+        )
+        # The ring: what this shell printed while no one was watching, so a
+        # fresh viewer is caught up before the live stream starts.
+        if replay:
+            await ws.send_bytes(replay)
+
+        sender = asyncio.ensure_future(_pump_cli(ws, queue))
+        try:
+            async for msg in ws:
+                if msg.type == WSMsgType.BINARY:
+                    await shell.write_bytes(msg.data)
+                elif msg.type == WSMsgType.TEXT:
+                    await _cli_control(ws, shell, msg.data)
+                elif msg.type in (WSMsgType.CLOSE, WSMsgType.ERROR):
+                    break
+        finally:
+            sender.cancel()
+            try:
+                await sender
+            except (asyncio.CancelledError, Exception):
+                pass
+    finally:
+        request.app["websockets"].discard(ws)
+        shell.unsubscribe(queue)
+        if not ws.closed:
+            await ws.close()
+    return ws
+
+
+async def _pump_cli(ws: web.WebSocketResponse, queue: asyncio.Queue) -> None:
+    while True:
+        kind, payload = await queue.get()
+        if kind == "data":
+            await ws.send_bytes(payload)
+        elif kind == "exit":
+            await ws.send_str(json.dumps({"type": "exit", "code": payload}))
+        elif kind == "resize":
+            cols, rows = payload
+            await ws.send_str(
+                json.dumps({"type": "resize", "cols": cols, "rows": rows})
+            )
+        elif kind == "init":
+            # A restart: the child was replaced under this socket. Say which
+            # incarnation it is now, so the viewer leaves its "exited" state.
+            cols, rows, pid = payload
+            await ws.send_str(
+                json.dumps(
+                    {
+                        "type": "init",
+                        "cols": cols,
+                        "rows": rows,
+                        "pid": pid,
+                        "exited": False,
+                    }
+                )
+            )
+
+
+async def _cli_control(
+    ws: web.WebSocketResponse, shell, raw: str
+) -> None:
+    try:
+        msg = json.loads(raw)
+    except ValueError:
+        return
+    if not isinstance(msg, dict):
+        return
+    kind = msg.get("type")
+    if kind == "resize":
+        try:
+            shell.resize(int(msg["cols"]), int(msg["rows"]))
+        except (KeyError, ValueError, TypeError):
+            pass
+    elif kind == "restart":
+        shell.restart()
+
+
 async def _pump_to_client(
     ws: web.WebSocketResponse,
     queue: asyncio.Queue,

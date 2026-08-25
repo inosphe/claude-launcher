@@ -101,6 +101,7 @@
       <a href="#/new" data-page="new"><span>+</span>New</a>
       <a href="#/mesh" data-page="meshes"><span>◉</span>Mesh</a>
       <a href="#/flows" data-page="flows"><span>⇶</span>Flows</a>
+      <a href="#/cli" data-page="cli"><span>&gt;_</span>CLI</a>
       <a href="#/workspaces" data-page="ws"><span>⌸</span>Spaces</a>
     </nav>
   </aside>
@@ -333,6 +334,21 @@
     <div id="mesh-view" class="hidden"></div>
     <div id="flow-view" class="hidden"></div>
     <div id="ws-view" class="hidden"></div>
+    <!-- The CLI tab: a raw, unmanaged shell on the daemon machine. Not a
+         session — nothing to name, arrange or restore, just a terminal you
+         can stand in. One per daemon, so its xterm (like the session
+         terminal's) is never rebuilt by navigation: only the socket's frame
+         handlers change. -->
+    <div id="cli-view" class="hidden">
+      <div id="cli-header">
+        <span id="cli-title">CLI</span>
+        <span id="cli-status" class="badge"></span>
+        <span class="cli-actions">
+          <button id="cli-act" class="term-btn hidden" type="button"></button>
+        </span>
+      </div>
+      <div id="cli-term"></div>
+    </div>
   </main>
 
   <!-- #sess-view is moved in here, to the right of #main, on a wide screen:

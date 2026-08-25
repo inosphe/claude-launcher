@@ -216,6 +216,12 @@ DAEMON_DEFAULTS = {
     # and this is what re-starts them. Read LIVE, like the keys above, but
     # only ever at restore, so an edit applies to the next restart.
     "resume_nudge": True,
+    # The dashboard CLI tab's raw shell: the command (a string or an argv
+    # list) and the directory it starts in. None = the platform's default
+    # shell (COMSPEC / $SHELL) in the daemon's own working directory. Read
+    # when the daemon constructs its shell, i.e. at daemon start.
+    "shell": None,
+    "shell_cwd": None,
 }
 
 

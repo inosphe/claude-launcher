@@ -22,7 +22,7 @@ from aiohttp import web
 from .. import __version__, harnesses as harness_registry
 from .. import lineage, profile as profile_mod, quickjob, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
-from . import briefing, cflow_clock, ctxsize, onboard, rebrief
+from . import briefing, cflow_clock, clipty, ctxsize, onboard, rebrief
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
@@ -127,6 +127,7 @@ def build_app(
     started_at: float,
     mesh: MeshManager | None = None,
     relay_state=None,
+    shell: "clipty.ShellPty | None" = None,
 ) -> web.Application:
     cookie_sessions: set = set()
     # Identifies this daemon *process*, and is handed out by /api/health (which
@@ -160,6 +161,9 @@ def build_app(
     # Open terminal sockets never close on their own; without this, runner
     # cleanup waits its shutdown timeout for every browser tab left open.
     app.on_shutdown.append(_close_websockets)
+    # The CLI tab's raw shell: one per daemon, injected for tests.
+    app["shell"] = shell if shell is not None else clipty.ShellPty()
+    app.on_shutdown.append(_close_cli_shell)
 
     r = app.router
     r.add_get("/api/health", h_health)
@@ -291,6 +295,8 @@ def build_app(
     r.add_get("/api/sessions/{name}/wait", h_session_wait)
     r.add_post("/api/sessions/{name}/resize", h_session_resize)
     r.add_get("/api/sessions/{name}/ws", ws_mod.terminal_ws)
+    # The CLI tab's raw shell — one socket per viewer, one child under it.
+    r.add_get("/api/cli/ws", ws_mod.cli_ws)
     r.add_get("/", h_index)
     if _STATIC_DIR.is_dir():
         r.add_static("/static", _STATIC_DIR)
@@ -305,6 +311,16 @@ async def _close_websockets(app: web.Application) -> None:
             await ws.close(code=WSCloseCode.GOING_AWAY, message=b"daemon shutdown")
         except Exception:
             pass
+
+
+async def _close_cli_shell(app: web.Application) -> None:
+    """Kill the CLI tab's shell child. A raw shell restores nothing across a
+    daemon restart — the daemon dies, the shell dies with it, and the tab's
+    first viewer after the restart starts a fresh one."""
+    try:
+        await app["shell"].shutdown()
+    except Exception:  # noqa: BLE001 — never let shutdown fail on this
+        pass
 
 
 async def notify_shutdown(app: web.Application) -> None:
