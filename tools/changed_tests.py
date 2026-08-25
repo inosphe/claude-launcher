@@ -30,6 +30,13 @@ Selection, in two rules, both checkable by eye:
    ``tools/deploy_check.py`` and ``tests/test_deploy_check.py``. This is a
    convention, not a guarantee -- 31 of 79 source modules have a same-named
    test -- so it only ever *widens* the selection and never narrows it.
+3. **A changed file that is not python pulls in whatever guards it**, from
+   the explicit table in :data:`COMPANIONS`. Rule 2 can only follow a naming
+   convention between ``.py`` files, so without this a round that edits only
+   workflow yaml selects nothing -- even though two test modules exist for
+   exactly those files. That is not hypothetical: the round that introduced
+   this script edited both workflow layers, and until this rule was added
+   its own gate skipped the tests guarding them.
 
 Changes are read against the merge base with ``--base`` (default ``master``),
 plus anything uncommitted, so the gate covers work that is staged, committed,
@@ -65,6 +72,23 @@ CANNOT_TELL = 2
 #: measured n=8 optimum for the *whole* suite, because several of these run
 #: concurrently across sessions.
 MAX_WORKERS = 4
+
+#: Rule 3: directories whose files have guardian tests that no naming
+#: convention could find, because the files are not python.
+#:
+#: The workflow yaml is the case that forced this. Its two copies -- the
+#: packaged canonical one and this repository's project layer -- have to stay
+#: in step, and when they silently did not, the leader ran for days without a
+#: preflight step the package had gained. Nothing was red, because each file
+#: on its own was valid. ``test_sync_project_layer`` and
+#: ``test_project_layer_override`` are what notice; they just have no
+#: same-named source to be pulled in by.
+COMPANIONS = (
+    (
+        ("src/claude_launcher/workflows/", ".claunch/workflows/"),
+        ("tests/test_sync_project_layer.py", "tests/test_project_layer_override.py"),
+    ),
+)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -112,6 +136,11 @@ def select(repo: Path, paths: List[str]) -> List[str]:
             twin = Path("tests") / f"test_{p.stem}.py"
             if (repo / twin).is_file():
                 picked.add(twin.as_posix())
+            continue
+        posix = p.as_posix()
+        for prefixes, guards in COMPANIONS:
+            if posix.startswith(prefixes):
+                picked.update(g for g in guards if (repo / g).is_file())
     return sorted(picked)
 
 

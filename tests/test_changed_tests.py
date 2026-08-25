@@ -123,6 +123,51 @@ def test_a_changed_tools_script_pulls_in_its_test(repo):
     assert _select(repo) == ["tests/test_deploy_check.py"]
 
 
+def test_a_changed_workflow_yaml_pulls_in_the_tests_that_guard_it(repo):
+    """Rule 3, and the gap that produced it.
+
+    Rule 2 can only follow a naming convention between ``.py`` files, so a
+    round editing only workflow yaml selected nothing -- while two test
+    modules existed for exactly those files. The round that wrote this
+    script hit it on itself: its own gate skipped
+    ``test_project_layer_override`` until the yaml was mapped.
+
+    The failure this guards against is the quiet kind. The two workflow
+    layers each stay valid yaml while drifting apart, and the leader once
+    ran for days without a preflight step the packaged copy had gained.
+    """
+    _write(repo, "tests/test_sync_project_layer.py")
+    _write(repo, "tests/test_project_layer_override.py")
+    _write(repo, "src/claude_launcher/workflows/improv-worker.yaml", "name: w\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qam", "edit a workflow")
+
+    assert _select(repo) == [
+        "tests/test_project_layer_override.py",
+        "tests/test_sync_project_layer.py",
+    ]
+
+
+def test_the_project_layer_copy_of_a_workflow_counts_too(repo):
+    """Both layers, because either one drifting is the failure."""
+    _write(repo, "tests/test_sync_project_layer.py")
+    _write(repo, ".claunch/workflows/improv-leader.yaml", "name: l\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qam", "edit the override")
+
+    assert "tests/test_sync_project_layer.py" in _select(repo)
+
+
+def test_a_companion_that_does_not_exist_is_not_selected(repo):
+    """The table names files, and a named file may be absent in a checkout
+    that predates it -- selecting it would fail the gate on its own table."""
+    _write(repo, "src/claude_launcher/workflows/improv-worker.yaml", "name: w\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qam", "edit a workflow, no guards present")
+
+    assert _select(repo) == []
+
+
 def test_a_source_module_with_no_test_selects_nothing_rather_than_guessing(repo):
     """The convention holds for 31 of 79 modules here, so it has to be allowed
     to miss. Widening is the only thing it may do; inventing a filename that
