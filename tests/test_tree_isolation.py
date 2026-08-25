@@ -55,16 +55,25 @@ def _imported_tree() -> Path:
 def test_the_suite_imports_the_tree_it_is_run_from(pytestconfig):
     """The package under test comes from this rootdir, not another checkout.
 
-    Failing here means the run measured somebody else's source. The usual
-    cause is a worktree whose ``.venv`` never got ``uv sync --extra test``,
-    which leaves the editable ``.pth`` as the only thing pointing at a tree.
+    Failing here means the run measured somebody else's source. An empty
+    ``.venv`` is NOT a cause -- ``pythonpath`` still points pytest at this
+    tree, and reading that case as contamination is the false positive this
+    file exists to retire. What actually breaks it:
+
+    * ``pythonpath`` gone from ``pyproject.toml``, or overridden on the
+      command line (``-o pythonpath=``);
+    * ``PYTHONPATH`` naming another checkout -- the environment is searched
+      before the ini value's own fallback, so it wins;
+    * pytest pointed at a tree other than the one it is collecting from.
     """
     root = Path(pytestconfig.rootpath).resolve()
     got = _imported_tree()
     assert got == root / "src", (
-        f"this run measured {got}, not {root / 'src'}. The numbers it "
-        f"produces are about that other tree. Run 'uv sync --extra test' in "
-        f"this worktree, then measure again."
+        f"this run measured {got}, not {root / 'src'}. Every number it "
+        f"produces is about that other tree. Check `pythonpath` in "
+        f"pyproject.toml and PYTHONPATH in this environment -- one of them "
+        f"is pointing away from here. Re-running 'uv sync' does not fix "
+        f"this and never did."
     )
 
 
