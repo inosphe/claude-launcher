@@ -290,6 +290,9 @@ def test_ws_attach_to_a_retired_record(home, tmp_path):
             assert init["boot_id"] == app["boot_id"]
             health = await (await client.get("/api/health")).json()
             assert health["boot_id"] == app["boot_id"]
+            # and when this daemon came up, as a wall clock — what the
+            # restart notice prints next to when the page noticed
+            assert health["started_at"] == app["started_wall"]
             repaint = await ws.receive(timeout=10)
             assert repaint.type == aiohttp.WSMsgType.BINARY
             assert b"READY" in repaint.data  # its last screen, replayed from the log

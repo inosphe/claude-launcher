@@ -14,6 +14,7 @@ import json
 import os
 import secrets
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -151,6 +152,12 @@ def build_app(
     app["token"] = token
     app["cookie_sessions"] = cookie_sessions
     app["started_at"] = started_at
+    # The same moment as a wall clock, which is what "when did this daemon
+    # come up" means to a person. ``started_at`` is monotonic — it can only
+    # ever become a duration; /api/health hands this out so the restart
+    # notice can name the restart's own time, not just when the page
+    # happened to notice it. Same stamp daemon.json writes.
+    app["started_wall"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     app["boot_id"] = boot_id
     app["shutdown_event"] = asyncio.Event()
     #: Whether the shutdown now in progress should spawn a successor. Read by
@@ -329,9 +336,15 @@ async def h_health(request: web.Request) -> web.Response:
     # Open, and deliberately the only place a client can learn *both* that the
     # daemon is answering and which daemon it is without holding a credential:
     # a browser whose cookie died in the restart still needs to be able to tell
-    # "not back yet" from "back, and I must log in again".
+    # "not back yet" from "back, and I must log in again". started_at rides
+    # along so the restart notice can say when the new daemon came up.
     return web.json_response(
-        {"status": "ok", "version": __version__, "boot_id": request.app["boot_id"]}
+        {
+            "status": "ok",
+            "version": __version__,
+            "boot_id": request.app["boot_id"],
+            "started_at": request.app["started_wall"],
+        }
     )
 
 
