@@ -123,6 +123,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     ask_clock.start()
     reminder_clock = cflow_clock.ReminderClock(manager)
     reminder_clock.start()
+    ping_clock = cflow_clock.StallPingClock(manager)
+    ping_clock.start()
     event_clock = cflow_clock.RunEventClock(manager, mesh_manager)
     event_clock.start()
 
@@ -148,6 +150,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             except (asyncio.CancelledError, Exception):
                 pass
         await event_clock.shutdown()
+        await ping_clock.shutdown()
         await reminder_clock.shutdown()
         await ask_clock.shutdown()
         await mesh_manager.shutdown()

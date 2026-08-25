@@ -188,6 +188,12 @@ def build_app(
     # tick); POST is one run's override, stored in that run's state.
     r.add_get("/api/cflow/reminder", h_cflow_reminder_defaults)
     r.add_put("/api/cflow/reminder", h_cflow_reminder_defaults_set)
+    # The stall ping's machine settings — the reminder's complement: that
+    # clock steers a session that is working, this one wakes one that stopped
+    # at a step no gate is holding. Machine-wide only (no per-run override),
+    # read live like the reminder's.
+    r.add_get("/api/cflow/ping", h_cflow_ping_defaults)
+    r.add_put("/api/cflow/ping", h_cflow_ping_defaults_set)
     r.add_get("/api/quickjob", h_quickjob_get)
     r.add_put("/api/quickjob", h_quickjob_set)
     r.add_post("/api/cflow/reminder", h_cflow_reminder_run_set)
@@ -1035,6 +1041,68 @@ async def h_cflow_reminder_defaults_set(request: web.Request) -> web.Response:
         if interval is not None:
             store.set_daemon_field("cflow_reminder_interval", interval)
         return web.json_response({"defaults": _reminder_defaults()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+def _ping_defaults() -> dict:
+    """The stall-ping clock's machine settings, read live from the config
+    file — the same read the clock does each tick, so this reports what the
+    next tick will act on."""
+    cfg = store.daemon_config()
+    return {
+        "enabled": bool(cfg.get("cflow_ping")),
+        "interval": float(cfg.get("cflow_ping_interval") or 0),
+        "message": str(cfg.get("cflow_ping_message") or ""),
+        "min_interval": cflow_clock.PING_MIN_INTERVAL,
+    }
+
+
+async def h_cflow_ping_defaults(request: web.Request) -> web.Response:
+    try:
+        return web.json_response({"defaults": _ping_defaults()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
+
+
+async def h_cflow_ping_defaults_set(request: web.Request) -> web.Response:
+    """Set the stall-ping clock's machine settings.
+
+    Whether a session that has STOPPED at a step no gate is holding gets
+    pinged, after how long, and with what text. Written to the config file,
+    which the clock re-reads every tick — so this applies within one poll, no
+    daemon restart. The same keys answer to ``claunch daemon config
+    cflow_ping`` / ``cflow_ping_interval`` / ``cflow_ping_message``. Partial:
+    only the keys sent change.
+    """
+    body = await _json_body(request)
+    interval = body.get("interval")
+    if interval is not None:
+        try:
+            interval = float(interval)
+        except (TypeError, ValueError):
+            return json_error(400, "'interval' must be a number of seconds")
+        if interval < cflow_clock.PING_MIN_INTERVAL:
+            return json_error(
+                400,
+                f"ping interval must be at least "
+                f"{cflow_clock.PING_MIN_INTERVAL:.0f}s",
+            )
+    message = body.get("message")
+    if message is not None:
+        if not isinstance(message, str):
+            return json_error(400, "'message' must be a string")
+        message = message.strip()
+    try:
+        if "enabled" in body:
+            store.set_daemon_field("cflow_ping", bool(body["enabled"]))
+        if interval is not None:
+            store.set_daemon_field("cflow_ping_interval", interval)
+        if message is not None:
+            # Empty clears it back to the packaged default rather than
+            # pinging with a frame and no words in it.
+            store.set_daemon_field("cflow_ping_message", message or None)
+        return web.json_response({"defaults": _ping_defaults()})
     except store.StoreError as exc:
         return json_error(500, str(exc))
 

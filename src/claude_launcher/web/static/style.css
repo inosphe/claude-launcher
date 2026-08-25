@@ -1250,6 +1250,13 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 }
 .cflow-defaults:empty { display: none; }
 .cflow-defaults .pol-label { min-width: 0; }
+/* The stall ping's message is prose, not a token — it needs room to be read
+   before it is saved, so it gets a textarea rather than the .pol-row input. */
+.pol-row textarea.pol-msg {
+  background: #14161a; color: #c6cdd5; border: 1px solid #2a2e36;
+  border-radius: 5px; padding: 6px 8px; font-size: 12px; flex: 1;
+  font-family: inherit; line-height: 1.45; resize: vertical; min-height: 54px;
+}
 .wf-reminder { margin-top: 10px; padding-top: 8px; border-top: 1px solid #22262d; }
 .wf-reminder-head {
   display: flex; gap: 8px; align-items: center; font-size: 13px;
