@@ -570,6 +570,26 @@ def test_answering_no_to_the_worktree_is_not_the_same_as_not_answering():
     assert args.worktree is worktree.NEVER
 
 
+def test_a_new_worktree_travels_as_the_bare_flag():
+    """"new worktree" with nobody naming it is ``--worktree`` bare -- the
+    empty string, which :func:`worktree.resolve` fills in with
+    ``default_name``. The two neighbouring answers mean the opposite (NEVER
+    is "no", None is "nobody asked"), and both leave the session in the
+    directory as it stands, so an empty string is the only spelling that
+    actually cuts one. SpawnWizard pins its own auto-name; this pins the
+    form ``claunch new --wizard`` opens.
+    """
+    wiz = form()
+    assert wiz.auto_worktree_name() == ""  # new-session lets the cutter decide
+    pick(wiz, "worktree", "new worktree")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.worktree == ""
+    assert args.worktree is not worktree.NEVER and args.worktree is not None
+    assert args.rebase_onto == ""  # a fresh checkout has nothing to catch up on
+    assert "worktree (auto)" in wiz.summary()
+
+
 def test_flags_typed_before_the_wizard_prefill_it():
     defaults = argparse.Namespace(
         name="api", harness="claude", profile="ds4", cwd="/srv/api",
