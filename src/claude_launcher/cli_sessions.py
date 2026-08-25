@@ -1439,7 +1439,13 @@ def register(sub) -> None:
         help="another member the child may message (repeatable); it can "
              "always reach its parent",
     )
-    p_spawn.add_argument("--workflow", help="cflow workflow to start for the child")
+    p_spawn.add_argument(
+        "--workflow",
+        help="cflow workflow to start for the child; omitted, it takes the "
+             "one the parent's own run pairs children with "
+             "(default_child_cflow), and none when there is no pair. "
+             "'-' declines that pair",
+    )
     p_spawn.add_argument("--context", help="context string for that workflow run")
     p_spawn.add_argument("--task", help="opening instruction typed into the child")
     p_spawn.add_argument(
