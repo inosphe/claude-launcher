@@ -8,7 +8,7 @@ import sys
 
 import pytest
 
-from claude_launcher import credentials, profile, store, transcripts
+from claude_launcher import credentials, lineage, profile, store, transcripts
 from claude_launcher.daemon import harness
 from claude_launcher.daemon.harness import HarnessError, SessionDef
 
@@ -22,6 +22,12 @@ def _declare_harness(name: str, **extra) -> None:
     """
     entry = {"command": sys.executable, **extra}
     store.update(lambda doc: doc.setdefault("harnesses", {}).update({name: entry}))
+
+
+def _profile_for(name: str, harness_name: str):
+    p = profile.create(name)
+    lineage.set_harness(p, harness_name)
+    return p
 
 
 def _write_transcript(sdef, profile_name: str = "work") -> None:
@@ -65,8 +71,10 @@ def test_claude_harness_requires_profile(home):
 
 
 def test_unknown_harness_rejected(home):
+    p = profile.create("work")
+    store.set_profile_field(p.name, "harness", "nope")
     with pytest.raises(HarnessError, match="unknown harness"):
-        harness.normalize(SessionDef(name="x", harness="nope"))
+        harness.normalize(SessionDef(name="x", profile="work"))
 
 
 def test_claude_command_uses_profile_env(home, monkeypatch, tmp_path):
@@ -93,7 +101,10 @@ def test_session_identity_env_exported(home, tmp_path):
     assert env["CLAUNCH_SESSION"] == "sx"
 
     _declare_harness("h")
-    sdef = harness.normalize(SessionDef(name="hx", harness="h", cwd=str(tmp_path)))
+    _profile_for("custom", "h")
+    sdef = harness.normalize(
+        SessionDef(name="hx", profile="custom", cwd=str(tmp_path))
+    )
     _, env, _ = harness.build_command(sdef)
     assert env["CLAUNCH_SESSION"] == "hx"
 
@@ -318,26 +329,28 @@ def test_role_and_resume_rejected_on_a_non_claude_harness(home, tmp_path):
     """Both are spelled in claude's own flags; accepting and dropping them
     would only be discovered later, by the session's behaviour."""
     _declare_harness("h")
+    _profile_for("custom", "h")
     with pytest.raises(HarnessError, match="claude harness"):
         harness.normalize(
-            SessionDef(name="x", harness="h", cwd=str(tmp_path), role="worker")
+            SessionDef(name="x", profile="custom", cwd=str(tmp_path), role="worker")
         )
     with pytest.raises(HarnessError, match="claude harness"):
         harness.normalize(
-            SessionDef(name="x", harness="h", cwd=str(tmp_path), resume="")
+            SessionDef(name="x", profile="custom", cwd=str(tmp_path), resume="")
         )
 
 
 def test_borrow_and_null_rejected_on_a_non_claude_harness(home, tmp_path):
     """Auth arrangements are the profile machinery's, which only claude has."""
     _declare_harness("h")
+    _profile_for("custom", "h")
     with pytest.raises(HarnessError, match="claude harness"):
         harness.normalize(
-            SessionDef(name="x", harness="h", cwd=str(tmp_path), borrow="lender")
+            SessionDef(name="x", profile="custom", cwd=str(tmp_path), borrow="lender")
         )
     with pytest.raises(HarnessError, match="claude harness"):
         harness.normalize(
-            SessionDef(name="x", harness="h", cwd=str(tmp_path), null_token=True)
+            SessionDef(name="x", profile="custom", cwd=str(tmp_path), null_token=True)
         )
 
 
@@ -381,8 +394,9 @@ def test_a_null_session_launches_with_no_token_at_all(home, tmp_path, monkeypatc
 
 def test_generic_harness_from_config(home, tmp_path):
     _declare_harness("codex", args=["--yolo"], env={"K": "V"})
+    _profile_for("custom", "codex")
     sdef = harness.normalize(
-        SessionDef(name="x", harness="codex", cwd=str(tmp_path), args=("extra",))
+        SessionDef(name="x", profile="custom", cwd=str(tmp_path), args=("extra",))
     )
     argv, env, _ = harness.build_command(sdef)
     assert argv[0] == sys.executable
@@ -393,8 +407,9 @@ def test_generic_harness_from_config(home, tmp_path):
 
 def test_session_env_overrides_harness_env(home, tmp_path):
     _declare_harness("h", env={"K": "harness"})
+    _profile_for("custom", "h")
     sdef = harness.normalize(
-        SessionDef(name="x", harness="h", cwd=str(tmp_path), env={"K": "session"})
+        SessionDef(name="x", profile="custom", cwd=str(tmp_path), env={"K": "session"})
     )
     _, env, _ = harness.build_command(sdef)
     assert env["K"] == "session"
@@ -450,7 +465,10 @@ def test_a_harness_with_no_prompt_argument_is_not_given_one(home, tmp_path):
     """Only claude documents 'claude [options] [prompt]'. Anything else would
     be handed a stray argument, so those are typed into instead."""
     _declare_harness("h")
-    sdef = harness.normalize(SessionDef(name="x", harness="h", cwd=str(tmp_path)))
+    _profile_for("custom", "h")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="custom", cwd=str(tmp_path))
+    )
     argv, _, _ = harness.build_command(sdef, opening="take the API")
     assert "take the API" not in argv
     assert harness.takes_opening_argv("h") is False
@@ -499,6 +517,9 @@ def test_non_claude_harness_gets_no_settings_flag(home, tmp_path):
     """--settings is claude's flag; handed to another harness it is a stray
     argument, exactly like the opening prompt would be."""
     _declare_harness("h")
-    sdef = harness.normalize(SessionDef(name="x", harness="h", cwd=str(tmp_path)))
+    _profile_for("custom", "h")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="custom", cwd=str(tmp_path))
+    )
     argv, _, _ = harness.build_command(sdef)
     assert "--settings" not in argv

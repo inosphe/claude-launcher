@@ -29,7 +29,8 @@ def _cells(out: str) -> dict:
         if not line.strip():
             continue
         name, rest = line.split("[", 1)
-        cells[name.strip()] = rest.split("]", 1)[1].split()[0]
+        # status is bracketed, then harness, then provider
+        cells[name.strip()] = rest.split("]", 1)[1].split()[1]
     return cells
 
 

@@ -13,7 +13,7 @@ import sys
 import time
 from pathlib import Path
 
-from claude_launcher import store, workspaces
+from claude_launcher import lineage, profile, store, workspaces
 from claude_launcher.cflow import state as cflow_state
 from claude_launcher.daemon import harness as harness_mod
 from claude_launcher.daemon.api import build_app
@@ -37,6 +37,8 @@ def _register_py_harness():
             {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
         )
     )
+    if not profile.resolve("py").exists():
+        lineage.set_harness(profile.create("py"), "py")
 
 
 def _manager() -> SessionManager:
@@ -669,7 +671,7 @@ def test_create_joins_a_mesh_and_starts_a_run_in_one_call(home, tmp_path):
             resp = await client.post(
                 "/api/sessions",
                 json={
-                    "name": "w1", "harness": "py", "cwd": str(tmp_path),
+                    "name": "w1", "profile": "py", "cwd": str(tmp_path),
                     "mesh": "team", "handle": "worker_1",
                     "workflow": "review", "task": "take the API",
                 },
@@ -708,7 +710,7 @@ def test_an_unknown_mesh_is_refused_before_anything_is_built(home, tmp_path):
         try:
             resp = await client.post(
                 "/api/sessions",
-                json={"name": "w1", "harness": "py", "cwd": str(tmp_path),
+                json={"name": "w1", "profile": "py", "cwd": str(tmp_path),
                       "mesh": "nope"},
                 headers=BEARER,
             )
@@ -718,7 +720,7 @@ def test_an_unknown_mesh_is_refused_before_anything_is_built(home, tmp_path):
 
             resp = await client.post(
                 "/api/sessions",
-                json={"name": "w1", "harness": "py", "cwd": str(tmp_path),
+                json={"name": "w1", "profile": "py", "cwd": str(tmp_path),
                       "workflow": "ghost"},
                 headers=BEARER,
             )
@@ -747,7 +749,7 @@ def test_a_taken_handle_is_refused_before_the_session_exists(home, tmp_path):
 
             resp = await client.post(
                 "/api/sessions",
-                json={"name": "w1", "harness": "py", "cwd": str(tmp_path),
+                json={"name": "w1", "profile": "py", "cwd": str(tmp_path),
                       "mesh": "team", "handle": "lead"},
                 headers=BEARER,
             )
@@ -784,7 +786,7 @@ def test_a_second_live_leader_fails_the_create_not_just_the_join(home, tmp_path)
             for wanted in ("mod2", "lead-b"):
                 resp = await client.post(
                     "/api/sessions",
-                    json={"name": "l2", "harness": "py", "cwd": str(tmp_path),
+                    json={"name": "l2", "profile": "py", "cwd": str(tmp_path),
                           "mesh": "team", "handle": wanted},
                     headers=BEARER,
                 )
@@ -797,7 +799,7 @@ def test_a_second_live_leader_fails_the_create_not_just_the_join(home, tmp_path)
             # where an explicit mesh role is allowed for any harness.
             resp = await client.post(
                 "/api/sessions/boss/children",
-                json={"harness": "py", "mesh": "team", "role": "leader"},
+                json={"mesh": "team", "role": "leader"},
                 headers=BEARER,
             )
             assert resp.status == 400
@@ -807,7 +809,7 @@ def test_a_second_live_leader_fails_the_create_not_just_the_join(home, tmp_path)
             # A non-exclusive role sails through the same door.
             resp = await client.post(
                 "/api/sessions",
-                json={"name": "w1", "harness": "py", "cwd": str(tmp_path),
+                json={"name": "w1", "profile": "py", "cwd": str(tmp_path),
                       "mesh": "team", "handle": "w1"},
                 headers=BEARER,
             )
@@ -992,7 +994,7 @@ def test_the_join_and_the_run_happen_before_the_harness_starts(home, tmp_path):
             resp = await client.post(
                 "/api/sessions",
                 json={
-                    "name": "w1", "harness": "py", "cwd": str(tmp_path),
+                    "name": "w1", "profile": "py", "cwd": str(tmp_path),
                     "mesh": "team", "handle": "worker_1",
                     "workflow": "review", "task": "take the API",
                 },
@@ -1040,7 +1042,7 @@ def test_a_session_that_fails_to_start_does_not_leave_its_mesh_seat_behind(
             resp = await client.post(
                 "/api/sessions",
                 json={
-                    "name": "w1", "harness": "py", "cwd": str(tmp_path),
+                    "name": "w1", "profile": "py", "cwd": str(tmp_path),
                     "mesh": "team", "handle": "worker_1",
                 },
                 headers=BEARER,

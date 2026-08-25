@@ -312,8 +312,8 @@ async function main() {
     git: { repo: true }, over: ctl(), update: ctl(),
   });
   ctx.syncSpawnGates(g);
-  check("locked harness greys with the policy key",
-    g.harness.disabled === true && /spawn\.allow_harness/.test(g.harnessNote.textContent),
+  check("harness is read-only because the profile owns it",
+    g.harness.disabled === true && /profile owns/.test(g.harnessNote.textContent),
     g.harnessNote.textContent);
   check("locked profile names its key",
     g.profile.disabled === true && /spawn\.allow_profile/.test(g.profileNote.textContent));
@@ -344,7 +344,9 @@ async function main() {
 
   const g3 = uiStub({
     report: { may_choose: ["fork"] }, git: {},
-    harness: ctl({ value: "pi" }), parentSess: { harness: "claude" },
+    harness: ctl({ value: "" }), profile: ctl({ value: "pi-profile" }),
+    profileDetails: { "pi-profile": { harness: "pi" } },
+    parentSess: { harness: "claude" },
     nullTok: ctl(), borrow: ctl(), worktree: ctl({ value: "" }),
     over: ctl(), update: ctl(),
     mesh: ctl({ value: "-" }), connectHandles: ["a"],

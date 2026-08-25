@@ -15,7 +15,7 @@ import time
 
 import pytest
 
-from claude_launcher import store
+from claude_launcher import lineage, profile, store
 from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.daemon import rebrief
 from claude_launcher.daemon.api import build_app
@@ -49,6 +49,8 @@ def _register_py_harness():
             {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
         )
     )
+    if not profile.resolve("py").exists():
+        lineage.set_harness(profile.create("py"), "py")
 
 
 def _manager() -> SessionManager:
@@ -183,7 +185,7 @@ def test_the_api_composes_and_delivers(home, tmp_path):
             resp = await client.post(
                 "/api/sessions", headers=BEARER,
                 json={
-                    "name": "root", "harness": "py", "cwd": str(tmp_path),
+                    "name": "root", "profile": "py", "cwd": str(tmp_path),
                     "task": "count the beans",
                 },
             )

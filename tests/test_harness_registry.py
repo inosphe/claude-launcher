@@ -10,13 +10,16 @@ from claude_launcher import config, harnesses, store
 from claude_launcher.harnesses import HarnessConfigError
 
 
-def test_packaged_set_declares_claude_codex_and_pi(home):
+def test_packaged_set_declares_supported_harnesses(home):
     """A fresh install knows more than one harness — that is what lets the web
     UI offer a picker instead of taking the name as free text."""
     reg = harnesses.registry()
-    assert {"claude", "codex", "pi"} <= set(reg)
+    assert {"claude", "codex", "pi", "kimi", "agent"} <= set(reg)
     assert reg["codex"].command == ["codex"]
     assert reg["pi"].command == ["pi"]
+    assert reg["kimi"].auth == "oauth"
+    assert reg["agent"].home_env == "CURSOR_CONFIG_DIR"
+    assert reg["pi"].auth == "api-key"
     # claude leads the pickers; it is the default and the only profile-managed one
     assert harnesses.names()[0] == "claude"
 
@@ -104,4 +107,4 @@ def test_packaged_document_is_proven_by_the_same_parser():
     """The default is YAML read through the parser every user entry goes
     through, so it cannot drift into a shape the parser would reject."""
     parsed = harnesses.parse(harnesses.DEFAULT_YAML)
-    assert set(parsed) == {"claude", "codex", "pi"}
+    assert set(parsed) == {"claude", "codex", "pi", "kimi", "agent"}

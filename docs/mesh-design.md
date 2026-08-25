@@ -1085,7 +1085,8 @@ every session returns resumed and idle, waiting to be told to go on.
 profile, cwd, args and env; the agent supplies only what makes it a
 different worker — name, handle, role, opening task. Each inherited field
 has its own unlock (`allow_profile`, `allow_cwd`, `allow_args`,
-`allow_env`, `allow_harness`), plus `max_children` and `max_depth`.
+`allow_env`), plus `max_children` and `max_depth`. Harness is derived from
+that inherited or allowed replacement profile and has no separate unlock.
 
 `max_children` counts the children that are **running**. It is a cap on how
 many agents are alive at once, so a child that has been ended does not hold

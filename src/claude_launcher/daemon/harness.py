@@ -23,7 +23,7 @@ from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
 from .. import harnesses as harness_registry
-from .. import profile as profile_mod, runner, store, transcripts
+from .. import lineage, profile as profile_mod, runner, store, transcripts
 from .. import config as launcher_config
 from . import mesh_roles
 
@@ -227,6 +227,18 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
         # the web UI from making at all.
         raise HarnessError(f"working directory does not exist: {cwd}")
     sdef = replace(sdef, cwd=cwd)
+    # A profile is now the source of the harness. Keep the resolved value in
+    # the session record as a useful snapshot/display field, but user-facing
+    # creation never accepts it as an independent choice. Profile-less custom
+    # definitions remain supported for the Python embedding API and old saved
+    # records; the HTTP and CLI creation doors require a profile.
+    if sdef.profile:
+        prof = profile_mod.require(sdef.profile)
+        try:
+            selected = lineage.effective_harness(prof)
+        except lineage.LineageError as exc:
+            raise HarnessError(str(exc)) from exc
+        sdef = replace(sdef, harness=selected)
     if sdef.harness == CLAUDE_HARNESS:
         if not sdef.profile:
             raise HarnessError(
@@ -376,15 +388,17 @@ def build_command(
     session's own (forked or not) and a restore reopens it by its pinned id,
     exactly like any other session.
     """
+    prof = profile_mod.require(sdef.profile) if sdef.profile else None
+    base = {
+        k: v for k, v in os.environ.items() if k not in _NESTED_SESSION_MARKERS
+    }
+    entry = harness_registry.get(sdef.harness)
     if sdef.harness == CLAUDE_HARNESS:
-        prof = profile_mod.require(sdef.profile)
+        assert prof is not None
         # Resolved at spawn time like the profile itself, so a lender deleted
         # between restarts fails the restore loudly instead of silently
         # falling back to the session's own token.
         borrow_prof = profile_mod.require(sdef.borrow) if sdef.borrow else None
-        base = {
-            k: v for k, v in os.environ.items() if k not in _NESTED_SESSION_MARKERS
-        }
         env = runner.child_env(
             prof, with_token=True, base_env=base,
             borrow=borrow_prof, null_token=sdef.null_token,
@@ -466,14 +480,35 @@ def build_command(
         entry = harness_registry.get(sdef.harness)
         if entry is None:  # normalize() refuses these; belt and braces
             raise HarnessError(f"unknown harness {sdef.harness!r}")
-        argv = [*entry.command, *entry.args, *sdef.args]
-        env = os.environ.copy()
-        env.update(entry.env)
+        argv = [*entry.launch_command(), *entry.args, *sdef.args]
+        if prof is None:
+            # Legacy restored definitions may lack a profile. Preserve their
+            # old plain-command environment until they are recreated.
+            env = base
+            env.update(entry.env)
+        else:
+            try:
+                env = runner.harness_child_env(prof, entry, base_env=base)
+            except runner.RunnerError as exc:
+                raise HarnessError(str(exc)) from exc
     # The session's identity, tmux's ``$TMUX`` equivalent. Children (claude,
     # its MCP servers, `!` shells) inherit it — cflow keys its run state by
     # it, mapping each session 1:1 to its own workflow run.
     env["CLAUNCH_SESSION"] = sdef.name
     env.update(sdef.env)
+    if prof is not None and entry is not None and sdef.harness != CLAUDE_HARNESS:
+        try:
+            runner.finalize_harness_env(prof, entry, env)
+        except runner.RunnerError as exc:
+            raise HarnessError(str(exc)) from exc
+    # Storage isolation is launcher-owned and cannot be escaped through
+    # ``--env``. Claude stays at the historical root; each other supported
+    # harness gets its own child directory.
+    if prof is not None:
+        if sdef.harness == CLAUDE_HARNESS:
+            env[launcher_config.CLAUDE_CONFIG_DIR_ENV] = str(prof.config_dir)
+        elif entry is not None and entry.home_env:
+            env[entry.home_env] = str(entry.profile_home(prof.config_dir))
     if sys.platform != "win32":
         env.setdefault("TERM", "xterm-256color")
     return argv, env, sdef.cwd

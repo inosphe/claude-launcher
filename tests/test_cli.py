@@ -5,7 +5,7 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
-from claude_launcher import cli, config, runner, store
+from claude_launcher import cli, config, credentials, lineage, profile, runner, store
 
 
 def run(*argv):
@@ -114,6 +114,47 @@ def test_create_child_inherits_env(home, capsys):
     assert "FOO=bar" in out
 
 
+def test_profile_harness_is_created_inherited_pinned_and_cleared(home, capsys):
+    assert run("create", "base", "--no-seed", "--harness", "pi") == 0
+    assert run("create", "child", "--no-seed", "--parent", "base") == 0
+    child = profile.require("child")
+    assert lineage.effective_harness(child) == "pi"
+
+    assert run("set-harness", "child", "kimi") == 0
+    assert lineage.effective_harness(child) == "kimi"
+    assert store.profile_entry("child")["harness"] == "kimi"
+
+    assert run("set-harness", "child", "--clear") == 0
+    assert lineage.effective_harness(child) == "pi"
+    assert "harness" not in store.profile_entry("child")
+
+
+def test_set_key_uses_a_separate_secret_and_route(home, capsys):
+    run("create", "pi-work", "--no-seed", "--harness", "pi")
+    capsys.readouterr()
+
+    assert run("set-key", "pi-work", "OPENAI_API_KEY", "pi-secret") == 0
+    p = profile.require("pi-work")
+    assert credentials.stored_api_key(p) == "pi-secret"
+    assert credentials.stored_token(p) is None
+    assert store.profile_entry("pi-work")["api_key_env"] == "OPENAI_API_KEY"
+    assert "pi-secret" not in store.path().read_text(encoding="utf-8")
+
+
+def test_set_harness_refuses_value_with_clear(home, capsys):
+    run("create", "work", "--no-seed")
+    capsys.readouterr()
+    assert run("set-harness", "work", "pi", "--clear") == 1
+    assert "not both" in capsys.readouterr().err
+
+
+def test_set_key_is_refused_for_oauth_harnesses(home, capsys):
+    run("create", "kimi-work", "--no-seed", "--harness", "kimi")
+    capsys.readouterr()
+    assert run("set-key", "kimi-work", "KIMI_API_KEY", "secret") == 1
+    assert "only for API-key harnesses" in capsys.readouterr().err
+
+
 def test_set_and_get_token(home, capsys):
     run("create", "work", "--no-seed")
     capsys.readouterr()
@@ -188,6 +229,29 @@ def test_run_without_null_still_injects_token(home, monkeypatch, capsys):
     capsys.readouterr()
     assert run("run", "work", "--no-worktree") == 0
     assert captured["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-X"
+
+
+def test_non_claude_run_does_not_steal_the_harness_provider_flag(
+    home, monkeypatch, capsys
+):
+    run("create", "pi-work", "--no-seed", "--harness", "pi")
+    run("set-key", "pi-work", "ANTHROPIC_API_KEY", "pi-secret")
+    reached = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd and cmd[0] == "git":
+            return _REAL_RUN(cmd, **kwargs)
+        if "env" not in kwargs:
+            return type("Done", (), {"returncode": 0, "stdout": ""})()
+        reached["cmd"] = list(cmd)
+        reached["env"] = kwargs["env"]
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    capsys.readouterr()
+    assert run("run", "pi-work", "--no-worktree", "--provider", "openai") == 0
+    assert reached["cmd"][-2:] == ["--provider", "openai"]
+    assert reached["env"]["ANTHROPIC_API_KEY"] == "pi-secret"
 
 
 def test_run_null_conflicts_with_borrow(home, capsys):

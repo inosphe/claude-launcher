@@ -323,6 +323,18 @@ class Sources:
     def profiles(self) -> List[str]:
         return []
 
+    def profile_details(self) -> List[dict]:
+        return [
+            {"name": name, "harness": "claude", "harness_available": True}
+            for name in self.profiles()
+        ]
+
+    def profile_harness(self, name: str) -> dict:
+        for item in self.profile_details():
+            if item.get("name") == name:
+                return item
+        return {"name": name, "harness": "", "harness_available": False}
+
     def workspaces(self) -> List[dict]:
         return []
 
@@ -409,6 +421,12 @@ class DaemonSources(Sources):
 
     def profiles(self) -> List[str]:
         return self._get("profiles", "/api/profiles", "profiles", [])
+
+    def profile_details(self) -> List[dict]:
+        details = self._get(
+            "profile_details", "/api/profiles", "profile_details", []
+        )
+        return details or super().profile_details()
 
     def workspaces(self) -> List[dict]:
         return self._get("workspaces", "/api/workspaces", "workspaces", [])
@@ -1209,7 +1227,7 @@ class Wizard(Form):
     # directory and the role, and takes no preset -- remembering it would
     # promise a default the form never applies.
     recall_fields = (
-        "harness", "profile", "borrow", "null_token", "role", "args",
+        "profile", "borrow", "null_token", "role", "args",
         "mesh", "restore", "attach",
     )
 
@@ -1225,33 +1243,21 @@ class Wizard(Form):
         self._members_for: Optional[str] = None
         self._worktrees_for: Optional[str] = None
 
-        harnesses = self.sources.harnesses() or []
         harness = ChoiceField(
             key="harness", label="Harness",
-            hint="the program the session runs; one not on PATH cannot be picked",
-            options=[
-                Option(
-                    h.get("name", ""),
-                    h.get("name", ""),
-                    (h.get("description") or "") if h.get("available", True)
-                    else "(not installed)",
-                    disabled=not h.get("available", True),
-                )
-                for h in harnesses
-            ],
+            hint="read-only: configured on the selected profile",
+            options=[Option("(select a profile)", "")],
+            disabled=True,
+            disabled_note="set with 'claunch set-harness PROFILE HARNESS'",
         )
-        harness.index = next(
-            (i for i, o in enumerate(harness.options) if not o.disabled), 0
-        )
-        harness.select(get("harness") or "claude")
 
         profiles = self.sources.profiles() or []
         profile = ChoiceField(
             key="profile", label="Profile",
             hint="which login and config the harness runs under ('claunch list')",
-            options=[Option("(no profile)", "")] + [Option(p, p) for p in profiles],
+            options=[Option("(select a profile)", "")] + [Option(p, p) for p in profiles],
         )
-        # A profile is what the claude harness needs, so the first real one is
+        # Every harness comes from a profile, so the first real one is
         # the default: "(no profile)" should be an answer somebody gave, not
         # the one they get by not looking.
         if profiles:
@@ -1447,7 +1453,17 @@ class Wizard(Form):
         one, and the workflows on offer are the ones declared in the directory
         currently picked.
         """
-        claude = self.value("harness") == "claude"
+        detail = self.sources.profile_harness(self.value("profile") or "")
+        harness_name = detail.get("harness") or ""
+        harness = self.field("harness")
+        harness.options = [
+            Option(
+                harness_name or "(select a profile)", harness_name,
+                "" if detail.get("harness_available", True) else "(not installed)",
+            )
+        ]
+        harness.index = 0
+        claude = harness_name == "claude"
         for key in ("role", "resume", "borrow", "null_token"):
             f = self.field(key)
             f.disabled = not claude
@@ -1495,16 +1511,17 @@ class Wizard(Form):
         beside a cursor that is somewhere else is a complaint about nothing.
         """
         out: List[tuple] = []
-        if not self.value("harness"):
-            out.append((
-                "harness",
-                "no harness is installed here; 'claunch harnesses' lists them",
-            ))
-        if self.value("harness") == "claude" and not self.value("profile"):
+        if not self.value("profile"):
             out.append((
                 "profile",
-                "the claude harness needs a profile - pick one, or make one "
-                "first with 'claunch add <name>'",
+                "a profile is required because it selects the harness",
+            ))
+        detail = self.sources.profile_harness(self.value("profile") or "")
+        if self.value("profile") and not detail.get("harness_available", True):
+            out.append((
+                "profile",
+                f"profile {self.value('profile')!r} selects unavailable harness "
+                f"{detail.get('harness')!r}",
             ))
         out.extend(check_worktree(self))
         return out
@@ -1519,9 +1536,9 @@ class Wizard(Form):
         onboarding payload, the attach -- is the code that has always run.
         """
         args.name = self.value("name")
-        args.harness = self.value("harness")
+        args.harness = None
         args.profile = self.value("profile") or None
-        claude = args.harness == "claude"
+        claude = self.value("harness") == "claude"
         args.borrow = (self.value("borrow") or None) if claude else None
         args.null_token = bool(self.value("null_token")) if claude else False
         args.cwd = self.value("cwd") or self.cwd
@@ -1745,9 +1762,10 @@ class SpawnWizard(Form):
         )
         harness = ChoiceField(
             key="harness", label="Harness",
-            hint="a different program for the child (spawn.allow_harness "
-                 "decides whether it may be one)",
-            options=[],
+            hint="read-only: inherited from the child's selected profile",
+            options=[Option("(the parent's profile)", "")],
+            disabled=True,
+            disabled_note="change the Profile row to change its harness",
         )
         # Options for these two are the parent's to decide (they are rebuilt
         # in _rebuild_for_parent), so a flag given alongside --wizard is
@@ -1956,10 +1974,15 @@ class SpawnWizard(Form):
         # like the other form, saying yes to null greys the borrow row
         # rather than provoking the daemon's refusal of the pair. Re-derived
         # every pass, because the answers follow the Harness and Null rows.
+        picked_profile = self.value("profile") or ""
         child_harness = (
-            self.value("harness")
-            or self._session(parent).get("harness") or ""
+            (self.sources.profile_harness(picked_profile).get("harness") or "")
+            if picked_profile
+            else self._session(parent).get("harness") or ""
         )
+        harness_f = self.field("harness")
+        harness_f.options = [Option(child_harness or "(unknown)", child_harness)]
+        harness_f.index = 0
         borrow_f = self.field("borrow")
         null_f = self.field("null_token")
         if child_harness and child_harness != "claude":
@@ -2056,17 +2079,11 @@ class SpawnWizard(Form):
         self.field("over_limit").hidden = not report.get("soft_blocked_by")
 
         harness = self.field("harness")
-        keep = harness.value
-        allowed = report.get("spawnable_harnesses") or []
-        harness.options = [
-            Option("(the parent's" + (f": {info['harness']}" if info.get("harness") else "") + ")", "")
-        ] + [Option(h, h) for h in allowed]
+        parent_harness = info.get("harness") or ""
+        harness.options = [Option(parent_harness or "(unknown)", parent_harness)]
         harness.index = 0
-        harness.select(keep)
-        harness.disabled = not allowed
-        harness.disabled_note = (
-            "the child runs what its parent runs (spawn.allow_harness)"
-        )
+        harness.disabled = True
+        harness.disabled_note = "the selected profile owns the harness"
 
         may = report.get("may_choose") or []
         # The report carries the names when the field is unlocked (the same
@@ -2218,7 +2235,7 @@ class SpawnWizard(Form):
         args.parent = self.value("parent")
         args.over_limit = self._over_limit()
         args.name = self.value("name")
-        args.harness = self.value("harness") or None
+        args.harness = None
         # Read through the disable, like borrow and args below: a value
         # standing on a greyed-out row is not an answer the user gave --
         # it is what the row held before the policy shut it, or before the

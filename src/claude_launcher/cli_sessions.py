@@ -27,7 +27,15 @@ import time
 import webbrowser
 from typing import List
 
-from . import cli_mesh, daemon_client, store, worktree
+from . import (
+    cli_mesh,
+    daemon_client,
+    harnesses,
+    lineage,
+    profile as profile_mod,
+    store,
+    worktree,
+)
 from .daemon import harness as harness_def
 from .daemon import paths as daemon_paths
 from .daemon import runtime_state
@@ -54,6 +62,38 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         return 2
     if getattr(args, "wizard", False) and not _run_wizard(args):
         return 1
+    if getattr(args, "harness", None):
+        print(
+            "error: --harness is read-only; select a profile whose harness is "
+            "configured with 'claunch set-harness PROFILE HARNESS'",
+            file=sys.stderr,
+        )
+        return 1
+    if not args.profile:
+        print("error: --profile is required; the profile selects the harness", file=sys.stderr)
+        return 1
+    # Resolve from the shared config without requiring a local directory: a
+    # CLI may be pointed at a named daemon instance whose reconciled storage
+    # is authoritative. The daemon still performs the existence check.
+    selected = lineage.effective_harness(profile_mod.resolve(args.profile))
+    if selected != harnesses.CLAUDE_HARNESS:
+        claude_only = []
+        for flag, given in (
+            ("--role", args.role),
+            ("--resume", args.resume is not None),
+            ("--fork-session", args.fork_session),
+            ("--borrow", args.borrow),
+            ("--null", args.null_token),
+        ):
+            if given:
+                claude_only.append(flag)
+        if claude_only:
+            print(
+                f"error: {', '.join(claude_only)} only applies to the claude "
+                f"harness; profile {args.profile!r} selects {selected!r}",
+                file=sys.stderr,
+            )
+            return 1
     env = {}
     for item in args.env or []:
         if "=" not in item:
@@ -78,7 +118,10 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     tree = worktree.resolve(
         cwd,
         args.worktree,
-        resuming=args.resume is not None or harness_def.steers_conversation(extra),
+        resuming=(
+            selected == harnesses.CLAUDE_HARNESS
+            and (args.resume is not None or harness_def.steers_conversation(extra))
+        ),
         rebase_onto=getattr(args, "rebase_onto", "") or "",
     )
     worktree.announce(tree)
@@ -92,7 +135,6 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     # covers `-a` below and a later `claunch attach` with the same code.
     body = {
         "name": args.name or "",
-        "harness": args.harness,
         "profile": args.profile,
         "cwd": cwd,
         "args": extra,
@@ -242,9 +284,6 @@ def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
         ("--mesh", args.mesh), ("--as", args.handle), ("--role", args.role),
         ("--workflow", args.workflow), ("--context", args.context),
         ("--task", args.task),
-        # only when it is a real choice: 'claude' is this parser's default,
-        # and a child inherits its parent's harness anyway
-        ("--harness", args.harness if args.harness != "claude" else ""),
     ):
         if value:
             out.append(f"{flag} {value!r}" if " " in str(value) else f"{flag} {value}")
@@ -338,6 +377,13 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     """
     if getattr(args, "wizard", False) and not _run_wizard(args, spawn=True):
         return 1
+    if getattr(args, "harness", None):
+        print(
+            "error: --harness is read-only; a child gets the harness of its "
+            "profile (change --profile instead)",
+            file=sys.stderr,
+        )
+        return 1
     env = {}
     for item in args.env or []:
         if "=" not in item:
@@ -369,7 +415,6 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("workflow", args.workflow),
             ("context", args.context),
             ("task", args.task),
-            ("harness", args.harness),
             ("profile", args.profile),
             ("borrow", args.borrow),
             ("null_token", args.null_token),
@@ -1241,13 +1286,13 @@ def register(sub) -> None:
     p_new.add_argument(
         "--wizard", action="store_true",
         help="pick every field from a form in this terminal instead of "
-        "spelling them out as flags -- harness, profile, borrow/null, "
+        "spelling them out as flags -- profile (with its read-only harness), borrow/null, "
         "directory, worktree, role, resume, mesh, workflow and whether to "
         "attach, each from the list the daemon publishes. Any flag given "
         "alongside it pre-fills its field",
     )
     p_new.add_argument("-s", "--name", help="session name (auto-generated if omitted)")
-    p_new.add_argument("--profile", help="claunch profile (required for the claude harness)")
+    p_new.add_argument("--profile", help="claunch profile (required; selects the harness)")
     auth = p_new.add_mutually_exclusive_group()
     auth.add_argument(
         "--borrow", metavar="NAME",
@@ -1262,9 +1307,8 @@ def register(sub) -> None:
         "unauthenticated (log in with /login inside)",
     )
     p_new.add_argument(
-        "--harness", default="claude",
-        help="harness to run: claude (default), codex, pi, or one you declared "
-        "under 'harnesses:' — see 'claunch harnesses'",
+        "--harness", default=None,
+        help="deprecated/read-only: configure it on the profile with set-harness",
     )
     p_new.add_argument("-c", "--cwd", help="working directory (default: current dir)")
     wt = p_new.add_mutually_exclusive_group()
@@ -1358,7 +1402,7 @@ def register(sub) -> None:
         "--wizard", action="store_true",
         help="pick the child from a form in this terminal: which session it "
         "is a child of (with what that parent may still spawn), and its "
-        "harness, profile, borrow/null, workspace, mesh, role, workflow, "
+        "profile (with its read-only harness), borrow/null, workspace, mesh, role, workflow, "
         "opening task, extra args and whether to attach -- each "
         "from the list the daemon publishes. Any flag given alongside it "
         "pre-fills its field",
@@ -1399,7 +1443,7 @@ def register(sub) -> None:
     p_spawn.add_argument("--context", help="context string for that workflow run")
     p_spawn.add_argument("--task", help="opening instruction typed into the child")
     p_spawn.add_argument(
-        "--harness", help="a different harness (needs spawn.allow_harness)"
+        "--harness", help="deprecated/read-only: the selected profile owns it"
     )
     p_spawn.add_argument(
         "--profile",

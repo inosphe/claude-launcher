@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from claude_launcher import spawn, store, workspaces
+from claude_launcher import lineage, profile, spawn, store, workspaces
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
 
@@ -24,6 +24,19 @@ PARENT = {
     "args": ["--flag"],
     "env": {"A": "1"},
 }
+
+
+@pytest.fixture(autouse=True)
+def _profile_owned_harnesses():
+    """Every parent snapshot starts from a real profile-owned harness."""
+    store.update(
+        lambda doc: doc.setdefault("harnesses", {}).update(
+            {"py": {"command": "python"}}
+        )
+    )
+    work = profile.create("work")
+    lineage.set_harness(work, "py")
+    profile.create("talk")  # the historical/default Claude harness
 
 
 def _policy(**overrides) -> spawn.SpawnPolicy:
@@ -125,10 +138,12 @@ def test_a_child_authenticates_the_way_its_parent_does():
 def test_a_harness_swap_drops_the_inherited_auth_with_the_args():
     """borrow/null are claude-only machinery; dragged onto another harness
     they would fail the spawn over a field nobody in the request named."""
-    policy = _policy(allow_harness=["codex"])
+    codex = profile.create("codex-profile")
+    lineage.set_harness(codex, "codex")
+    policy = _policy(allow_profile=True)
     parent = {**PARENT, "borrow": "lender", "null_token": False}
     child = spawn.check(
-        policy, {"harness": "codex"}, parent=parent, depth=0, children=0
+        policy, {"profile": "codex-profile"}, parent=parent, depth=0, children=0
     )
     assert child["borrow"] is None
     assert child["null_token"] is False
@@ -285,9 +300,6 @@ def test_capabilities_stays_quiet_about_workspaces_when_locked(tmp_path):
 def test_capabilities_lists_the_profiles_only_when_the_field_is_unlocked():
     """Same courtesy as workspaces: profile names live in a registry the
     agent cannot read, so an unlocked field names its options."""
-    from claude_launcher import profile
-
-    profile.create("work")
     profile.create("other")
     report = spawn.capabilities(_policy(), depth=0, children=0)
     assert "profile" not in report["may_choose"]
@@ -297,7 +309,7 @@ def test_capabilities_lists_the_profiles_only_when_the_field_is_unlocked():
     report = spawn.capabilities(_policy(allow_profile=True), depth=0, children=0)
     assert "profile" in report["may_choose"]
     assert "borrow" in report["may_choose"]  # the same unlock covers both
-    assert report["profiles"] == ["other", "work"]
+    assert report["profiles"] == ["other", "talk", "work"]
 
 
 def test_capabilities_always_offers_null_token():
@@ -309,7 +321,12 @@ def test_capabilities_always_offers_null_token():
 # fork: a copy of the parent's own conversation
 # --------------------------------------------------------------------------- #
 #: A parent that could actually be forked: claude, with a conversation pinned.
-TALKER = {**PARENT, "harness": "claude", "conversation_id": "c-1"}
+TALKER = {
+    **PARENT,
+    "harness": "claude",
+    "profile": "talk",
+    "conversation_id": "c-1",
+}
 
 
 def test_fork_hands_the_child_a_copy_of_the_parents_conversation():
@@ -354,10 +371,12 @@ def test_forking_a_parent_with_no_conversation_is_refused():
 def test_forking_onto_another_harness_is_refused():
     """The thing being copied is a claude transcript; there is nothing to
     hand another program."""
-    policy = _policy(allow_harness=["codex"])
+    codex = profile.create("codex-profile")
+    lineage.set_harness(codex, "codex")
+    policy = _policy(allow_profile=True)
     with pytest.raises(spawn.SpawnDenied) as exc:
         spawn.check(
-            policy, {"fork": True, "harness": "codex"},
+            policy, {"fork": True, "profile": "codex-profile"},
             parent=TALKER, depth=0, children=0,
         )
     assert "claude" in str(exc.value)
@@ -420,7 +439,6 @@ def test_a_forked_child_launches_on_the_parents_conversation(tmp_path):
     from claude_launcher import profile as profile_mod
     from claude_launcher.daemon import harness as harness_mod
 
-    profile_mod.create("work")
     conversation = "11111111-2222-3333-4444-555555555555"
     parent = {
         **TALKER, "cwd": str(tmp_path), "args": [],
@@ -441,7 +459,7 @@ def test_a_forked_child_launches_on_the_parents_conversation(tmp_path):
     from claude_launcher import transcripts
 
     forked = transcripts.project_dir(
-        profile_mod.require("work").config_dir, sdef.cwd
+        profile_mod.require("talk").config_dir, sdef.cwd
     )
     forked.mkdir(parents=True, exist_ok=True)
     (forked / f"{sdef.conversation_id}.jsonl").write_text("{}", encoding="utf-8")
@@ -453,31 +471,33 @@ def test_a_forked_child_launches_on_the_parents_conversation(tmp_path):
 # --------------------------------------------------------------------------- #
 # harness
 # --------------------------------------------------------------------------- #
-def test_a_harness_swap_needs_an_explicit_unlock():
+def test_harness_is_never_a_spawn_request_field():
     with pytest.raises(spawn.SpawnDenied) as exc:
         spawn.check(
             _policy(), {"harness": "codex"}, parent=PARENT, depth=0, children=0
         )
-    assert "spawn.allow_harness" in str(exc.value)
+    assert "read-only" in str(exc.value)
+    assert "profile" in str(exc.value)
 
 
-def test_swapping_the_harness_drops_the_inherited_args():
+def test_changing_profile_changes_harness_and_drops_inherited_args():
     """Those flags were written for another program; carrying them over is a
     spawn failure at best and a misread flag at worst."""
-    policy = _policy(allow_harness=["codex"])
+    codex = profile.create("codex-profile")
+    lineage.set_harness(codex, "codex")
+    policy = _policy(allow_profile=True)
     child = spawn.check(
-        policy, {"harness": "codex"}, parent=PARENT, depth=0, children=0
+        policy, {"profile": "codex-profile"}, parent=PARENT, depth=0, children=0
     )
     assert child["harness"] == "codex"
     assert child["args"] == []
 
 
-def test_naming_your_own_harness_is_not_a_swap():
-    child = spawn.check(
-        _policy(), {"harness": "py"}, parent=PARENT, depth=0, children=0
-    )
-    assert child["harness"] == "py"
-    assert child["args"] == ["--flag"]  # kept: nothing was swapped
+def test_even_naming_the_inherited_harness_is_refused():
+    with pytest.raises(spawn.SpawnDenied, match="read-only"):
+        spawn.check(
+            _policy(), {"harness": "py"}, parent=PARENT, depth=0, children=0
+        )
 
 
 # --------------------------------------------------------------------------- #

@@ -16,7 +16,6 @@ field, in ``~/.claunch.yaml``::
       enabled: true
       max_children: 4          # direct children per parent -- a SOFT cap
       max_depth: 3             # root session = depth 0 -- hard
-      allow_harness: [codex]   # [] = the parent's harness only
       allow_profile: false
       allow_cwd: false
       allow_workspace: true    # ...the one field that starts open
@@ -63,10 +62,10 @@ the axis it runs away on.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from dataclasses import dataclass
+from typing import Dict, List, Optional
 
-from . import profile as profile_mod, store, workspaces, worktree as worktree_mod
+from . import lineage, profile as profile_mod, store, workspaces, worktree as worktree_mod
 
 #: Policy defaults. Permissive enough that spawning works out of the box,
 #: restrictive enough that a child is always recognisably a copy of its
@@ -76,7 +75,6 @@ DEFAULTS = {
     "enabled": True,
     "max_children": 4,
     "max_depth": 3,
-    "allow_harness": [],
     "allow_profile": False,
     "allow_cwd": False,
     # The exception to "inherited until the user says otherwise": a workspace
@@ -149,7 +147,6 @@ class SpawnPolicy:
     enabled: bool = True
     max_children: int = 4
     max_depth: int = 3
-    allow_harness: Tuple[str, ...] = ()
     allow_profile: bool = False
     allow_cwd: bool = False
     allow_workspace: bool = True
@@ -170,16 +167,10 @@ class SpawnPolicy:
         block = dict(DEFAULTS)
         if isinstance(raw, dict):
             block.update({k: v for k, v in raw.items() if k in DEFAULTS})
-        harness = block.get("allow_harness")
-        if isinstance(harness, str):
-            harness = [harness]
-        if not isinstance(harness, (list, tuple)):
-            harness = []
         return cls(
             enabled=bool(block["enabled"]),
             max_children=max(0, _int(block["max_children"], DEFAULTS["max_children"])),
             max_depth=max(0, _int(block["max_depth"], DEFAULTS["max_depth"])),
-            allow_harness=tuple(str(h).strip() for h in harness if str(h).strip()),
             allow_profile=bool(block["allow_profile"]),
             allow_cwd=bool(block["allow_cwd"]),
             allow_workspace=bool(block["allow_workspace"]),
@@ -193,7 +184,6 @@ class SpawnPolicy:
             "enabled": self.enabled,
             "max_children": self.max_children,
             "max_depth": self.max_depth,
-            "allow_harness": list(self.allow_harness),
             "allow_profile": self.allow_profile,
             "allow_cwd": self.allow_cwd,
             "allow_workspace": self.allow_workspace,
@@ -292,26 +282,11 @@ def check(
         "null_token": bool(parent.get("null_token")),
     }
 
-    harness = str(request.get("harness") or "").strip()
-    if harness and harness != child["harness"]:
-        if harness not in policy.allow_harness:
-            allowed = ", ".join(policy.allow_harness) or "(none)"
-            raise SpawnDenied(
-                f"harness {harness!r} is not spawnable from a session — the "
-                f"child inherits {child['harness']!r}; harnesses unlocked by "
-                f"spawn.allow_harness: {allowed}"
-            )
-        child["harness"] = harness
-        # A harness swap invalidates the inherited command line: those args
-        # were written for a different program, and passing them on is a
-        # spawn failure at best and a misread flag at worst.
-        child["args"] = []
-        # ...and the inherited auth with it: borrow/null are claude-only
-        # machinery, and dragging them onto another harness would build a
-        # definition normalize() refuses — a spawn that fails over a field
-        # nobody in this request ever named.
-        child["borrow"] = None
-        child["null_token"] = False
+    if request.get("harness"):
+        raise SpawnDenied(
+            "a child's harness is read-only and comes from its profile; "
+            "choose an allowed profile instead of sending 'harness'"
+        )
 
     if request.get("workspace") and request.get("cwd"):
         raise SpawnDenied(
@@ -362,6 +337,22 @@ def check(
             child["worktree"] = worktree_mod.validate_name(str(value))
         else:
             child[key] = str(value)
+
+    # A profile override can legitimately change the harness; that is now the
+    # only route. Re-resolve it before fork validation and discard inherited
+    # command/auth fields that belonged to the parent's different program.
+    if child.get("profile"):
+        selected = lineage.effective_harness(
+            profile_mod.require(str(child["profile"]))
+        )
+        if selected != child.get("harness"):
+            child["harness"] = selected
+            if not request.get("args"):
+                child["args"] = []
+            if not request.get("borrow"):
+                child["borrow"] = None
+            if not request.get("null_token"):
+                child["null_token"] = False
 
     if request.get("fork"):
         _fork_parents_conversation(child, parent, request)
@@ -531,7 +522,6 @@ def capabilities(
         "children_remaining": remaining,
         "may_choose": sorted(
             [key for key, gate in _GATED_FIELDS if getattr(policy, gate)]
-            + (["harness"] if policy.allow_harness else [])
             # Always choosable: it removes a credential rather than granting
             # one, so no unlock stands in front of it.
             + ["null_token"]
@@ -541,7 +531,9 @@ def capabilities(
             # an agent reading this list does not have to try it to find out.
             + (["fork"] if can_fork(parent) else [])
         ),
-        "spawnable_harnesses": list(policy.allow_harness),
+        # Compatibility field for older clients. Harness selection itself is
+        # gone; an allowed profile may still resolve to a different harness.
+        "spawnable_harnesses": [],
     }
     if policy.allow_profile:
         # The values, not just the field names, same reason as workspaces

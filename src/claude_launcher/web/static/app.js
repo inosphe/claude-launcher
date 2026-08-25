@@ -1614,11 +1614,39 @@ async function refreshCflow() {
   }
 }
 
+let profileDetails = {};
+
+function syncProfileHarness() {
+  const f = $("new-session");
+  if (!f || !f.harness || !f.profile) return;
+  const parent = spawnParent();
+  const picked = f.profile.value || "";
+  const detail = picked ? profileDetails[picked] : null;
+  const name = detail ? detail.harness : (parent ? parent.harness : "");
+  const label = name || "(select a profile)";
+  f.harness.innerHTML = "";
+  f.harness.appendChild(new Option(
+    detail && detail.harness_available === false
+      ? `${label} (not installed)` : label,
+    name
+  ));
+  f.harness.disabled = true;
+  f.harness.title = picked
+    ? `read-only — profile ${picked} selects ${label}`
+    : parent
+      ? `read-only — inherited profile selects ${label}`
+      : "read-only — select a profile; configure it with claunch set-harness";
+}
+
 async function refreshProfiles() {
   try {
     const resp = await api("/api/profiles");
     const data = await resp.json();
     const select = document.querySelector("#new-session select[name=profile]");
+    profileDetails = {};
+    for (const item of data.profile_details || []) {
+      if (item && item.name) profileDetails[item.name] = item;
+    }
     select.innerHTML = "";
     for (const name of data.profiles || []) {
       const opt = document.createElement("option");
@@ -1638,6 +1666,8 @@ async function refreshProfiles() {
     if ([...borrow.options].some((o) => o.value === previous)) {
       borrow.value = previous;
     }
+    syncProfileHarness();
+    syncForkAvailability();
   } catch { /* ignore */ }
 }
 
@@ -1686,39 +1716,10 @@ let cflowCache = [];
    happens mid-session — a reload is the honest way to pick those up. */
 async function refreshHarnesses() {
   const select = document.querySelector("#new-session select[name=harness]");
-  let list = [];
-  try {
-    const resp = await api("/api/harnesses");
-    if (!resp.ok) throw new Error(String(resp.status));
-    list = (await resp.json()).harnesses || [];
-  } catch {
-    // Older daemon, same fallback reasoning as refreshWorkspaces: claude is
-    // the one harness that is always there, so the form stays usable.
-    list = [{ name: "claude", available: true, description: "" }];
-  }
-  select.innerHTML = "";
-  for (const h of list) {
-    const opt = new Option(
-      h.available ? h.name : `${h.name} (not installed)`,
-      h.name
-    );
-    // Declared but missing: shown, not hidden. Hiding it would read as
-    // "claunch does not support pi", which is the wrong thing to learn.
-    opt.disabled = !h.available;
-    // Remembered on the option itself, because a second reason to grey it
-    // comes and goes: a child may only be spawned onto a harness the policy
-    // unlocked, and handing the row back when the parent is cleared must not
-    // re-offer a harness that is not installed.
-    opt.available = h.available;
-    opt.title = h.available
-      ? h.description || h.name
-      : `${h.description || h.name}\n\n'${h.program || h.name}' is not on PATH`;
-    select.appendChild(opt);
-  }
-  const first = [...select.options].find((o) => !o.disabled);
-  select.value = first ? first.value : "";
+  select.disabled = true;
+  syncProfileHarness();
   syncForkAvailability();  // role/resume/fork only apply to the claude harness
-  syncSpawnMode();         // ...and a child may only have the ones it may spawn
+  syncSpawnMode();
 }
 
 async function refreshWorkspaces() {
@@ -1902,7 +1903,8 @@ function renderRuntimeSummary() {
   const parent = spawnParent();
   const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
   const bits = [];
-  if (speaks("harness")) bits.push(f.harness.value || "claude");
+  // Read-only, but still part of the launch contract and worth previewing.
+  bits.push(f.harness.value || "claude");
   if (speaks("profile") && f.profile.value) bits.push(f.profile.value);
   if (speaks("cwd")) {
     // The option's label is "name — path"; the name is what the user
@@ -1988,7 +1990,7 @@ let newSpawnDefaultsFor = null;
 function spawnUnlocked(report) {
   const may = (report && report.may_choose) || [];
   return {
-    harness: !!(report && (report.spawnable_harnesses || []).length),
+    harness: false,
     profile: may.includes("profile"),
     borrow: may.includes("borrow"),
     // Ungated by the policy — it takes a credential away rather than
@@ -2099,16 +2101,15 @@ function syncSpawnMode() {
   // would be the one that throws away the operator's own pick.
   const fresh = (parent ? parent.name : null) !== newSpawnDefaultsFor;
   newSpawnDefaultsFor = parent ? parent.name : null;
-  syncSpawnHarnessRow(f, parent, report, fresh);
   syncSpawnProfileRow(f, !!parent);
+  syncSpawnHarnessRow(f, parent);
   syncSpawnCwdRow(f, !!parent);
   if (parent) {
     // Auth is claude's token machinery: on a child running anything else
     // both rows are moot however the policy is set, and a yes on --null greys
     // the borrow row rather than provoking the daemon's refusal of the pair.
     // The same two rules the spawn modal applies.
-    const childHarness =
-      (open.harness && f.harness.value) || parent.harness || "";
+    const childHarness = f.harness.value || parent.harness || "";
     const claude = !childHarness || childHarness === "claude";
     f.role.disabled = !claude;
     if (!claude) {
@@ -2161,26 +2162,25 @@ function syncSpawnMode() {
     : "the parent has no claude conversation to copy";
 }
 
-/* The harness row in child mode: only the harnesses the policy unlocked are
-   choosable, plus the parent's own — which is not an override at all, it is
-   what the child gets by saying nothing. Being installed is the option's
-   other reason to be greyed and outlives this one, so it is read back off
-   the option rather than recomputed. */
-function syncSpawnHarnessRow(f, parent, report, fresh) {
+/* The harness row is a projection of the selected profile, never a child
+   override. Kept self-contained because the web contract tests extract this
+   spawn block independently from the page-level refresh functions. */
+function syncSpawnHarnessRow(f, parent) {
   const sel = f.harness;
-  if (!sel || !sel.options) return;
-  const allowed = parent
-    ? new Set([...((report && report.spawnable_harnesses) || []),
-               parent.harness || ""])
-    : null;
-  for (const o of sel.options) {
-    o.disabled = o.available === false || (!!allowed && !allowed.has(o.value));
+  if (!sel) return;
+  const details = typeof profileDetails === "object" ? profileDetails : {};
+  const picked = f.profile ? (f.profile.value || "") : "";
+  const detail = picked ? details[picked] : null;
+  const name = detail ? detail.harness : ((parent || {}).harness || "");
+  if (typeof sel.appendChild === "function") {
+    sel.innerHTML = "";
+    sel.appendChild(new Option(name || "(select a profile)", name));
+    sel.value = name;
+  } else {
+    sel.value = name;
   }
-  // Entering child mode seeds the row with what the child would be anyway.
-  if (parent && fresh &&
-      [...sel.options].some((o) => o.value === parent.harness)) {
-    sel.value = parent.harness;
-  }
+  sel.disabled = true;
+  sel.title = "read-only — the selected profile owns the harness";
 }
 
 /* The profile row means different things in the two modes: a session of its
@@ -2241,7 +2241,6 @@ function syncSpawnOverRow(f, report) {
    as the workspace NAME the registry vouched for, never as a path. */
 function spawnChildFields(f, body) {
   const put = (k, v) => { if (v) body[k] = v; };
-  if (!f.harness.disabled) put("harness", f.harness.value);
   if (!f.profile.disabled) put("profile", f.profile.value);
   if (!f.borrow.disabled) put("borrow", f.borrow.value);
   if (!f.null_token.disabled && f.null_token.checked) body.null_token = true;
@@ -2276,7 +2275,11 @@ document
     syncOnboardPickers();
   });
 $("new-session").resume.addEventListener("change", syncForkAvailability);
-$("new-session").harness.addEventListener("change", syncForkAvailability);
+$("new-session").profile.addEventListener("change", () => {
+  syncProfileHarness();
+  syncForkAvailability();
+  syncSpawnMode();
+});
 $("new-session").null_token.addEventListener("change", syncForkAvailability);
 
 $("new-session").addEventListener("submit", async (e) => {
@@ -2288,7 +2291,6 @@ $("new-session").addEventListener("submit", async (e) => {
   // spawn policy, field by field.
   const body = parent ? { name: f.name.value.trim() } : {
     name: f.name.value.trim(),
-    harness: f.harness.value || "claude",
     profile: f.profile.value || null,
     cwd: f.cwd.value,  // a registered workspace path, or "" = the daemon's cwd
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
@@ -7485,16 +7487,26 @@ function syncSpawnGates(ui) {
 
   ui.overRow.hidden = !(report.soft_blocked_by || []).length;
 
+  const pickedProfile = ui.profile.value || "";
+  const pickedDetail = (ui.profileDetails || {})[pickedProfile];
+  const childHarness = pickedDetail
+    ? pickedDetail.harness : (ui.parentSess || {}).harness || "";
+  if (typeof ui.harness.appendChild === "function") {
+    fillSpawnSelect(
+      ui.harness, childHarness ? [[childHarness, childHarness]] : [],
+      childHarness ? null : "(unknown)", childHarness
+    );
+  } else {
+    ui.harness.value = childHarness;
+  }
   lock(ui.harness, ui.harnessNote,
-    (report.spawnable_harnesses || []).length ? "" :
-      "the child runs what its parent runs (spawn.allow_harness)");
+    "read-only — the selected profile owns the harness");
   lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
     "the child runs under its parent's profile (spawn.allow_profile)");
 
   // Auth is claude's token machinery: for a child on another harness both
   // rows are moot however the policy is set, and a yes on null greys the
   // borrow row rather than provoking the daemon's refusal of the pair.
-  const childHarness = ui.harness.value || sess.harness || "";
   const nonClaude = !!childHarness && childHarness !== "claude";
   if (nonClaude) {
     lock(ui.nullTok, ui.nullNote, "the claude harness only");
@@ -7996,9 +8008,12 @@ async function spawnModalLoad(st) {
   const seed = st.seed || {};
   const re = spawnRecall();
 
-  const hn = ui.report.spawnable_harnesses || [];
-  fillSpawnSelect(ui.harness, hn.map((n) => [n, n]), hn.length ? null : "the parent's own",
-    seed.harness || (hn.includes(sess.harness) ? sess.harness : hn[0]) || "");
+  ui.profileDetails = {};
+  for (const item of (profDoc && profDoc.profile_details) || []) {
+    if (item && item.name) ui.profileDetails[item.name] = item;
+  }
+  fillSpawnSelect(ui.harness, [[sess.harness || "", sess.harness || ""]], null,
+    sess.harness || "");
   fillSpawnSelect(ui.profile, profileNames.map((n) => [n, n]), "(inherit the parent's profile)",
     (seed.profile !== undefined && seed.profile !== null) ? seed.profile :
       (re.profile || ""));
@@ -8089,7 +8104,7 @@ async function spawnModalLoad(st) {
   });
 
   // The choices that re-gate their neighbours:
-  ui.harness.addEventListener("change", () => syncSpawnGates(ui));
+  ui.profile.addEventListener("change", () => syncSpawnGates(ui));
   ui.nullTok.addEventListener("change", () => syncSpawnGates(ui));
   ui.worktree.addEventListener("change", () => syncSpawnGates(ui));
   ui.update.addEventListener("change", () => syncSpawnGates(ui));

@@ -1,13 +1,13 @@
-"""Token storage and lookup for a profile.
+"""Separate Claude token and generic API-key storage for a profile.
 
 ``claude setup-token`` prints a long-lived OAuth token but does **not** write it
 into the config dir — Claude Code consumes it via the ``CLAUDE_CODE_OAUTH_TOKEN``
 environment variable. So the launcher captures that token at login and stores it
 inside the profile (``<CLAUDE_CONFIG_DIR>/.launcher-token``, ``0600``).
 
-This module is the single source of truth for "what token does this profile
-use", checking the launcher-stored token first and falling back to a
-``.credentials.json`` written by an interactive ``/login`` if present.
+This module owns both secret files. Claude token lookup checks the
+launcher-stored token first and falls back to a ``.credentials.json`` written
+by an interactive ``/login``; generic API keys never enter that fallback.
 """
 
 from __future__ import annotations
@@ -22,29 +22,52 @@ from .profile import Profile
 
 #: Launcher-managed token captured from ``claude setup-token``.
 TOKEN_FILENAME = ".launcher-token"
+#: Launcher-managed generic API key. Its destination environment variable is
+#: profile configuration (``api_key_env``), never inferred from the key text.
+API_KEY_FILENAME = ".launcher-api-key"
 #: Credentials file an interactive ``/login`` writes (fallback source).
 CREDENTIALS_FILENAME = ".credentials.json"
 
 
 class CredentialsError(Exception):
-    """Raised when a profile has no usable OAuth token."""
+    """Raised when profile credential storage cannot satisfy a request."""
 
 
 def _token_path(profile: Profile):
     return profile.config_dir / TOKEN_FILENAME
 
 
-def save_token(profile: Profile, token: str) -> None:
-    """Persist a setup-token for ``profile`` with owner-only permissions."""
-    token = token.strip()
-    if not token:
-        raise CredentialsError("refusing to store an empty token")
-    path = _token_path(profile)
-    path.write_text(token + "\n", encoding="utf-8")
+def _api_key_path(profile: Profile):
+    return profile.config_dir / API_KEY_FILENAME
+
+
+def _save_secret(path, value: str, what: str) -> None:
+    value = value.strip()
+    if not value:
+        raise CredentialsError(f"refusing to store an empty {what}")
+    path.write_text(value + "\n", encoding="utf-8")
     try:
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)  # 0600 (best effort on Windows)
     except OSError:
         pass
+
+
+def save_token(profile: Profile, token: str) -> None:
+    """Persist a setup-token for ``profile`` with owner-only permissions."""
+    _save_secret(_token_path(profile), token, "token")
+
+
+def save_api_key(profile: Profile, key: str) -> None:
+    """Persist a harness API key separately from Claude OAuth/provider auth."""
+    _save_secret(_api_key_path(profile), key, "API key")
+
+
+def stored_api_key(profile: Profile) -> Optional[str]:
+    path = _api_key_path(profile)
+    if not path.is_file():
+        return None
+    value = path.read_text(encoding="utf-8").strip()
+    return value or None
 
 
 def stored_token(profile: Profile) -> Optional[str]:

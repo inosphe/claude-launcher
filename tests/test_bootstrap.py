@@ -113,6 +113,14 @@ def test_reconcile_materializes_declared_profile(home, config_file):
     assert store.profile_entry("copied")["env"] == {"A": "1"}
 
 
+def test_reconcile_does_not_seed_claude_config_into_a_pi_profile(home):
+    store.save({"version": 1, "profiles": {"pi-work": {"harness": "pi"}}})
+    bootstrap.reconcile()
+    root = config.profiles_dir() / "pi-work"
+    assert root.is_dir()
+    assert not (root / "settings.json").exists()
+
+
 def test_clean_install_noop(home, config_file):
     # No legacy files, no declared profiles: bootstrap does nothing surprising.
     bootstrap.run()
