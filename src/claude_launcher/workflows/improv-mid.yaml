@@ -55,15 +55,57 @@ steps:
         depth/max_depth로 자리를 확인한다.
       - 스택 표: 순서 | 자식 세션 | 브랜치 | 기준 | 상태(작업 중 / 요청됨 /
         착지 <머지 해시> / restack 필요) — 이 표가 이 런의 수합 표이고
-        상위 통합 요청의 증거다.
+        상위 통합 요청의 증거다. 표의 본체는 보드다: 이 영역의 이슈(리더가
+        배정한 내 이슈)를 부모로 자식 한 명당 이슈 하나 — 새 자식은
+        `claunch beads create "<제목>" --parent <내 이슈> --priority <P>
+        --labels leader --description "<규격>"` 후 spawn context에 `issue:
+        <id>`; 옮겨온 자식의 기존 이슈는 `claunch beads update <id> --parent
+        <내 이슈>`로 내 밑에 건다. 착지 순서·기준은 표에, 상태는 보드에.
       명단 전원에게 ONE batch send(자식마다 section)로 알린다: 네 기준
       브랜치와 스택 순서, 완료 보고·통합 요청의 수신자는 리더가 아니라
       나, restack 공지가 오면 rebase 후 재요청. 옮겨온 자식의 브리핑은
       여전히 리더를 부모로 적고 있으므로 이 공지는 생략할 수 없다.
       리더에게는 스택 표를 fyi로 남긴다.
+
+      ── beads(br) 규칙 — 공통 ──
+      일감의 정본은 beads다: 세션이 한 회차를 쓸 일, 다른 세션·회차로 넘어갈
+      일은 이슈로 존재해야 한다(존재·제목·범위·완료 기준·assignee·상태·
+      의존·부모). beads에 두지 않는 것: 실행 기록(cflow 저널), 대화·답장
+      (mesh), 승인·선택(cflow ask/select), 머지 가능 판정(통합 단계의 git
+      증거). 코멘트에는 포인터와 판정만 — run id, 커밋 해시, 테스트 수치,
+      `REBASE REQUESTED @ <hash>` / `HOLD: <이유>` / `BLOCKED: <게이트>` /
+      `merged <hash>`.
+      호출은 항상 `claunch beads <br 인자>` — 워크트리에서도 저장소 루트의
+      .beads/beads.db 하나를 쓰고(--db를 대신 붙인다), 쓰기에 --actor
+      $CLAUNCH_SESSION을 붙이며, DB가 없으면 issues.jsonl에서 스스로
+      만든다. 조회는 --json.
+      이슈가 없을 때 만드는 자 = 그 일을 사람에게서 처음 받은 세션, 또는
+      발견한 세션이다 — 리더가 아니다. 만들기 전에 `claunch beads search
+      "<핵심어>" --json`과 open/in_progress/in_review 목록으로 중복을 본다;
+      있으면 create 대신 comments add. 규격: 제목 한 줄「무엇을 어떻게」,
+      --description은 `## 목표 / ## 범위(포함·제외) / ## 완료 증거 기준 /
+      ## 출처(누가·언제·원문)`, --labels에 출처 하나(user | user-direct |
+      leader | handoff | found | review). 우선순위: P1 사용자가 보고한
+      라이브 데몬·UI 고장과 master 빨강 / P2 사용자 지시·리더 배정(기본) /
+      P3 인수인계·발견·후속·후보 / P4 아이디어. type은 task 기본, bug는
+      회귀·결함, epic은 스택 부모, doc은 참조 전용(ready에서 빼고 배정하지
+      않는다). staged 순서: description이 먼저, --assignee가 마지막.
+      상태 전이의 주인: open→in_progress는 assignee 워커(intake 끝,
+      --external-ref에 run id) / in_progress→in_review는 assignee 워커
+      (landing request) / in_review→in_progress는 리더(rebase 재요청) /
+      in_review→closed는 리더만(`claunch beads close <id> --reason "merged
+      <hash>, sweep N/M"`; 중간 워커는 자기 --parent 자식만) / 아무
+      상태→blocked는 그 게이트에 걸린 세션(`BLOCKED: <스텝>`), 해소되면
+      같은 세션이 되돌린다 / reopen은 리더만. update --status closed는
+      없다 — close뿐이다.
+      br가 실패하면(잠금·바이너리 없음) --lock-timeout 5000으로 한 번 더,
+      그래도 안 되면 mesh fyi 첫 줄에 `NO-BEAD:` + 위 규격 그대로 — 리더가
+      다음 관제 대기에서 대신 만들고 id를 답한다. 이슈 없이 착수하는
+      것만은 금지다.
     done_when: |
-      스택 베이스 브랜치와 tip 해시, 스택 표(순서·기준 포함), 자식 전원
-      batch 공지, 리더 fyi가 보고에 기록되어 있다.
+      스택 베이스 브랜치와 tip 해시, 스택 표(순서·기준 포함)와 자식 이슈
+      id(--parent 연결), 자식 전원 batch 공지, 리더 fyi가 보고에 기록되어
+      있다.
     next: standby
 
   standby:
@@ -126,7 +168,10 @@ steps:
         절차와 수치 표기(트리 해시·축·값)는 improv-worker의 review 절과
         같고, 메시에 스윕 순번 규칙이 있으면 따른다. 수치는 "스택 베이스
         기준"으로 적는다. 전체 스윕은 리더의 통합 단계 몫이다.
-      - 표 갱신: 그 자식을 "착지 <머지 해시>"로, 스택 tip 해시를 새로.
+      - 표 갱신: 그 자식을 "착지 <머지 해시>"로, 스택 tip 해시를 새로. 보드:
+        `claunch beads close <자식 이슈> --reason "landed <머지 해시> on
+        <베이스>"` — 중간 워커가 닫는 것은 자기 --parent 자식뿐이고, 부모
+        이슈(스택 자체)는 리더가 master 머지 뒤에 닫는다.
       - ONE batch send(section별): 착지한 자식에게 "착지됨(머지 해시) —
         브랜치는 동결 유지, 네 wrapup을 진행하라"; 미착지 자식 전원에게
         **restack 공지**: "스택 베이스가 <옛 tip>→<새 tip>으로 움직였다.
@@ -188,7 +233,10 @@ steps:
         (= 스택의 트리 구조), 정렬 후 tip 해시와 간소화 스위트 수치(스택
         베이스 기준).
       - 이 묶음을 보고에 남기고 리더(부모)에게 --no-ff 머지 요청을
-        회신 기대(ask)로 보낸 뒤, 베이스를 동결한다(추가 착지 없음).
+        회신 기대(ask)로 보낸 뒤, 베이스를 동결한다(추가 착지 없음). 보드:
+        `claunch beads update <내 이슈> --status in_review`와 `comments add
+        <내 이슈> "<베이스> @ <tip>, stack of N, tests N/M (간소화)"` —
+        리더의 통합 대기 표는 그 in_review 목록이다.
       ── 금지: master를 직접 머지하지 않는다 ──
       master로의 merge·push, master 체크아웃 후 커밋·리베이스·cherry-pick,
       fast-forward로 슬쩍 반영 — 전부 금지다. 사용자가 승인했다는 이유로도,
@@ -229,7 +277,8 @@ steps:
         남은 자식을 보고, 런 상태(claunch cflow status -t <세션>)로 유휴가
         확인된 것만 kill 도구로 종료해 슬롯을 돌려준다. hold로 동결된
         미착지 자식 브랜치는 리더에게 fyi로 알려 통합 대기 목록에 오르게
-        한다.
+        한다(그 자식 이슈는 in_progress 그대로 — `comments add <id> "HOLD:
+        …"`가 있는지 본다). 부모 이슈는 닫지 않는다 — 리더가 닫는다.
       - 잔류 테스트 서버·headless 브라우저 프로세스 종료, 임시 파일 삭제,
         git status 클린 확인. basetemp는 지우지 않는다(포렌식 기록 —
         지워야 하면 시작·소요·워커 수·실행량 네 값을 먼저 보고에 적는다).
