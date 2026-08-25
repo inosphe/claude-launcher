@@ -238,12 +238,19 @@ def worktrees_dir(root: Path) -> Path:
     return root / WORKTREES_SUBDIR
 
 
-def create(root: Path, name: str) -> Worktree:
+def create(root: Path, name: str, *, start: str = "") -> Worktree:
     """Create -- or reuse -- the worktree ``name`` of the repository at ``root``.
 
     Reuse is deliberate: ``--worktree=review`` a second time should return to
     that checkout with its branch and its uncommitted work intact, not fail
     because the directory is already there.
+
+    ``start`` is where a *new* branch is cut from; empty means the
+    repository's HEAD. ``root`` is the main checkout (see :func:`repo_root`),
+    so HEAD is usually the trunk -- a caller that wants the branch to begin
+    on its own branch, the way a stacked pull request begins on the one
+    below it, names that branch here. Ignored when the branch already
+    exists: a branch that has history is checked out as it stands.
     """
     name = validate_name(name)
     path = worktrees_dir(root) / name
@@ -257,13 +264,14 @@ def create(root: Path, name: str) -> Worktree:
         )
     path.parent.mkdir(parents=True, exist_ok=True)
     # An existing branch is checked out as it stands (resuming named work); a
-    # new one is cut from HEAD. `git worktree add` refuses either if the branch
-    # is checked out somewhere else, which is the refusal we want.
+    # new one is cut from HEAD, or from `start` when the caller named one.
+    # `git worktree add` refuses either if the branch is checked out somewhere
+    # else, which is the refusal we want.
     reused_branch = _branch_exists(root, name)
     args = (
         ["worktree", "add", str(path), name]
         if reused_branch
-        else ["worktree", "add", "-b", name, str(path)]
+        else ["worktree", "add", "-b", name, str(path), *([start] if start else [])]
     )
     done = _git(args, cwd=str(root))
     if done.returncode != 0:
@@ -471,10 +479,13 @@ def resolve(
     only when a worktree was *asked for* and could not be made: an unanswered
     question never fails a launch.
 
-    ``rebase_onto`` brings a *reused* checkout up to date before the agent is
-    let into it (see :func:`rebase`); it is ignored for one just created,
-    which was cut from the repository as it stands and has nothing to catch
-    up on. A rebase that cannot be done cleanly fails the launch, which is
+    ``rebase_onto`` puts the checkout ON that branch: a *reused* one is
+    rebased onto it before the agent is let into it (see :func:`rebase`),
+    and a *new* one is cut from it instead of from HEAD -- so a nested
+    worker's branch can begin on its parent's branch rather than on the
+    trunk, the way a stacked pull request begins on the one below it. A new
+    branch has nothing to replay, so no rebase runs and ``rebased`` stays
+    empty. A rebase that cannot be done cleanly fails the launch, which is
     the same rule a worktree that cannot be made already follows.
 
     ``resuming`` says the launch opens an existing conversation
@@ -511,18 +522,22 @@ def resolve(
                 "none to resume. Name a worktree that already exists, or drop "
                 "the resume and start a conversation there"
             )
-        return _updated(create(root, name), rebase_onto)
+        return _updated(create(root, name, start=rebase_onto), rebase_onto)
     if resuming:
         # Nothing to ask: the answer that a resume implies is "here".
         return None
     if not interactive():
         return None
     chosen = _ask(root)
-    return _updated(create(root, chosen), rebase_onto) if chosen else None
+    return (
+        _updated(create(root, chosen, start=rebase_onto), rebase_onto)
+        if chosen
+        else None
+    )
 
 
 def _updated(wt: Worktree, base: str) -> Worktree:
-    """Rebase a reused checkout onto ``base``; a fresh one is already there."""
+    """Rebase a reused checkout onto ``base``; a fresh one was cut from it."""
     return wt if wt.created or not base else rebase(wt, base)
 
 

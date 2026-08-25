@@ -940,6 +940,34 @@ def test_a_fresh_worktree_is_never_rebased(repo):
     assert wt.rebased == ""
 
 
+def test_a_fresh_worktree_is_cut_from_the_branch_it_is_put_on(repo):
+    """``rebase_onto`` says where the checkout ends up, and for a NEW branch
+    that means where it is cut from: a nested worker's branch cut from its
+    parent's branch begins on the stack, not on the trunk. Nothing is
+    replayed, so ``rebased`` stays empty -- there was no rebase."""
+    parent = worktree.resolve(str(repo), "parent")
+    commit(parent.path, "parent-only.txt")
+    trunk_tip = git("rev-parse", "HEAD", cwd=repo).stdout.strip()
+
+    child = worktree.resolve(str(repo), "child", rebase_onto="parent")
+    assert child.created is True and child.rebased == ""
+    assert child.branch == "child"
+    assert (child.path / "parent-only.txt").exists()
+    assert (
+        git("rev-parse", "HEAD", cwd=child.path).stdout.strip()
+        == git("rev-parse", "parent", cwd=repo).stdout.strip()
+    )
+    # the trunk did not move, and a cut that names nothing still starts there
+    assert git("rev-parse", "HEAD", cwd=repo).stdout.strip() == trunk_tip
+    plain = worktree.resolve(str(repo), "plain")
+    assert not (plain.path / "parent-only.txt").exists()
+    # a branch that already exists is checked out as it stands -- the start
+    # point is for new branches only
+    git("branch", "old", trunk_tip, cwd=repo)
+    old = worktree.resolve(str(repo), "old", rebase_onto="parent")
+    assert old.created is True and not (old.path / "parent-only.txt").exists()
+
+
 def test_uncommitted_work_refuses_the_launch_before_touching_anything(repo):
     """There is no safe automatic answer to somebody's uncommitted work, so
     it is refused rather than stashed, moved or committed for them."""

@@ -461,9 +461,11 @@ def make_worktree(child: dict, request: dict) -> dict:
 
     It is cut from ``child["cwd"]``, which is the parent's directory or the
     workspace that replaced it, so "a worktree of the workspace I sent it to"
-    means what it says. ``rebase_onto`` brings a *reused* checkout up to date
-    first (see :func:`claude_launcher.worktree.rebase`) -- a fresh one is cut
-    from the repository as it stands and has nothing to catch up on.
+    means what it says. ``rebase_onto`` puts the checkout on that branch: a
+    *reused* one is rebased onto it first (see
+    :func:`claude_launcher.worktree.rebase`), a fresh one is cut from it
+    instead of from the trunk -- which is how a nested worker's branch is
+    made to begin on its parent's branch (a stacked pull request).
 
     **This is the one place a child gets a directory that is nobody's
     workspace**, and it is allowed for the same reason ``allow_workspace`` is:

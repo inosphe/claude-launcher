@@ -1841,7 +1841,9 @@ mesh, decide who they may talk to, and re-draw the tree it built — via the
 procedure for the re-drawing: `mesh-wire` (when to connect two peers who
 keep needing each other through you) and `mesh-delegate` (spawn a nested
 worker for a crowded area and `reparent` that area's workers under it, so
-their branches fold into one and the lead integrates once).
+their branches land on its branch as a stacked pull request and the lead
+integrates once — the nested worker runs the bundled `improv-mid`
+workflow).
 
 - **`spawn` is the door from inside a session; `new-session` is yours.**
   They build the same thing by different rights: `new-session` spells every
@@ -1951,10 +1953,25 @@ their branches fold into one and the lead integrates once).
   lead spawns w1, w2, w3 (all on app.js)     then: spawn mid; reparent w1..w3 -> mid
                 lead                                      lead
              /   |   \                                     |
-           w1   w2    w3                                  mid  (folds w1..w3 into one branch)
+           w1   w2    w3                                  mid  (lands w1..w3 on its branch as a stack)
         (three branches, three sweeps)                  / | \
                                                       w1 w2  w3
   ```
+
+- **The nested worker runs `improv-mid`: a stacked pull request.** Its
+  branch is the stack base and takes merge commits only; each child branch
+  declares a base (the mid's branch, or a sibling's when it builds on that
+  sibling), requests integration from the mid measured against that base,
+  and lands with one `--no-ff` in order — after each landing the mid sends
+  the rest a restack notice (`git rebase <base>`; commits already on the
+  base are skipped). Children the mid spawns start on the stack via
+  `spawn`'s `rebase_onto: <mid branch>`, which cuts a new worktree from that
+  branch instead of the trunk. When the stack is complete the mid aligns
+  the base on master with `git rebase --rebase-merges` (a plain rebase would
+  flatten it) and sends the lead ONE request carrying the stack table; the
+  lead merges it with one `--no-ff`. Landing gates stay where they were —
+  each worker's and the mid's own are the user's — while landing a child on
+  the mid's own branch is the mid's call, as master is the lead's.
 
 ### Nudge policies (heartbeat · task-poll · stall warnings)
 

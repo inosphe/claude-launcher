@@ -1183,9 +1183,15 @@ def test_mesh_install_project(tmp_path, home):
             encoding="utf-8"
         )
         assert text.startswith(f"---\nname: {name}\n")
-    assert "reparent" in (
+    delegate = (
         tmp_path / ".claude" / "skills" / "mesh-delegate" / "SKILL.md"
     ).read_text(encoding="utf-8")
+    assert "reparent" in delegate
+    # the nested worker runs the area as a stacked pull request on its own
+    # workflow, and children it spawns start on the stack via rebase_onto
+    assert "improv-mid" in delegate and "stacked pull request" in delegate
+    assert "rebase_onto: <MID branch>" in delegate
+    assert "--rebase-merges" in delegate
     assert sum(1 for line in done if line.startswith("mcp server")) == 1
     assert not [line for line in done if line.startswith("workflow ->")]
     doc = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
