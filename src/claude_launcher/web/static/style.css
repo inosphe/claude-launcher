@@ -1972,3 +1972,36 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   font-size: 15px; line-height: 1; padding: 1px 6px; cursor: pointer;
 }
 #session-list .sess-plus:hover { color: #3fb950; }
+
+/* ------------------------------------------------------------------ */
+/* notices — the strip the page announces itself in                    */
+/*                                                                    */
+/* Fixed to the top-right corner and z-indexed above BOTH overlays     */
+/* (auth 10, modal 20): the one thing it exists to report — the daemon */
+/* restarted — is also what raises the token prompt, and a notice      */
+/* hidden behind that prompt would explain nothing. The strip itself   */
+/* never eats clicks (pointer-events: none); each card takes its own   */
+/* back, so an empty strip cannot swallow a corner of the page.        */
+/* ------------------------------------------------------------------ */
+#notices {
+  position: fixed; top: 12px; right: 14px; z-index: 30;
+  display: flex; flex-direction: column; gap: 8px;
+  width: min(340px, calc(100vw - 28px));
+  pointer-events: none;
+}
+.notice {
+  pointer-events: auto; cursor: pointer;
+  background: #1b1e24; border: 1px solid #2a2e36; border-left: 3px solid #58a6ff;
+  border-radius: 6px; padding: 8px 11px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+}
+.notice:hover { border-color: #3c444d; }
+.notice.warn { border-left-color: #d29922; }
+.notice.bad { border-left-color: #ff7b72; }
+.notice-title { font-size: 12.5px; color: #e6edf3; }
+.notice-sub { font-size: 11px; color: #9da5b0; margin-top: 3px; line-height: 1.4; }
+/* A phone has no corner to spare: the strip spans the width under the
+   mobile bar instead of floating over the session it is reporting on. */
+@media (max-width: 700px) {
+  #notices { top: 8px; right: 8px; left: 8px; width: auto; }
+}

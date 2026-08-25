@@ -3993,10 +3993,17 @@ function daemonCard() {
   head.appendChild(el("h3", null, "Daemon"));
   card.appendChild(head);
   const live = sessionsCache.filter((s) => s.status !== "exited").length;
+  // The start time earns its place here: the card in the corner is a moment
+  // and is dismissed, and this is what is left to answer "is this still the
+  // daemon from this morning?" long after it. A clock, not a duration —
+  // this line is redrawn by a poll and a duration would sit here frozen.
   card.appendChild(el(
     "p", "home-sub",
     (daemonCache ? `v${daemonCache.version}` : "version unknown") +
-      ` · ${plural(live, "live session")}`
+      ` · ${plural(live, "live session")}` +
+      (daemonStartedAt
+        ? ` · started ${new Date(daemonStartedAt).toLocaleTimeString()}`
+        : "")
   ));
   const btn = el("button", "wf-btn force", "Restart daemon");
   btn.title = "planned restart of a daemon that is answering - a daemon " +
@@ -4028,6 +4035,15 @@ function daemonCard() {
     // actual recovery the moment the successor answers.
     setDaemonOnline(false);
     $("daemon-info").textContent = "restarting…";
+    // setDaemonOnline just posted "daemon offline", which is true and, here,
+    // alarming for no reason: this outage was asked for. Same key, so the
+    // card is replaced rather than joined by a second one.
+    notify(
+      "restarting the daemon",
+      `asked at ${noticeClock()} — it stops answering while it drains, and ` +
+        "this page reconnects on its own once the successor is up",
+      { key: NOTICE_LINK, kind: "warn", sticky: true }
+    );
   });
   card.appendChild(btn);
   return card;
@@ -11230,6 +11246,62 @@ function renderTrace(data) {
 }
 
 /* ------------------------------------------------------------------ */
+/* notices — the page's own voice                                     */
+/* ------------------------------------------------------------------ */
+/* Every other surface here is a poll: it repaints, and whatever changed is
+   simply *there*. That is right for a number that moved and wrong for an
+   event that happened — a daemon restart repaints into a page that looks
+   exactly like the one before it, so the one thing a person wants to know
+   ("is this the daemon I was talking to?") was the one thing nothing said.
+
+   A notice is that sentence, and it is deliberately cheap: no permissions,
+   no service worker, no sound — a card in the corner, dismissed by clicking
+   it. The only real decision in here is `sticky`: an event that happened
+   while the tab sat unwatched must NOT time out before it is read, which is
+   exactly the restart case, while a blip that already healed should not
+   need clearing by hand. `key` is the other half of that — a flapping
+   daemon replaces its own card instead of stacking twenty of them. */
+const NOTICE_MS = 8000;          // how long a non-sticky card stays up
+const NOTICE_LINK = "daemon-link";  // the connection's card: offline / back
+const NOTICE_BOOT = "daemon-boot";  // "this is a different daemon"
+const notices = new Map();       // key -> {node, timer}
+let noticeSeq = 0;
+
+/* Local wall-clock, which is what "when did it happen" means to the person
+   reading it: the daemon's own uptime is a duration, and a duration read off
+   a card that has been sitting there for ten minutes is a lie. */
+function noticeClock() {
+  return new Date().toLocaleTimeString();
+}
+
+function notify(title, sub, opts) {
+  const o = opts || {};
+  const host = $("notices");
+  if (!host) return null;
+  const key = o.key || `n${(noticeSeq += 1)}`;
+  dismissNotice(key);            // one card per key, always the newest
+  const node = el("div", "notice" + (o.kind ? ` ${o.kind}` : ""));
+  node.appendChild(el("div", "notice-title", title));
+  if (sub) node.appendChild(el("div", "notice-sub", sub));
+  node.title = "click to dismiss";
+  node.addEventListener("click", () => dismissNotice(key));
+  host.appendChild(node);
+  const timer = o.sticky
+    ? null
+    : setTimeout(() => dismissNotice(key), o.ms || NOTICE_MS);
+  notices.set(key, { node, timer });
+  return node;
+}
+
+function dismissNotice(key) {
+  const rec = notices.get(key);
+  if (!rec) return;
+  notices.delete(key);
+  if (rec.timer) clearTimeout(rec.timer);
+  if (rec.node.parentNode) rec.node.parentNode.removeChild(rec.node);
+}
+
+/* ------------------------------------------------------------------ */
 /* boot                                                               */
 /* ------------------------------------------------------------------ */
 /* The poll is installed here rather than at the end of boot(), and is never
@@ -11248,6 +11320,7 @@ let booted = false;        // boot() has seeded the page and routed once
 let daemonOnline = true;   // last verdict; only the transitions do any work
 let daemonBoot = null;     // which daemon that verdict was about
 let daemonCache = null;    // last /api/daemon payload; the home card reads it
+let daemonStartedAt = null; // ms epoch, derived from that payload's uptime
 
 function authOpen() {
   return !$("auth-overlay").classList.contains("hidden");
@@ -11264,6 +11337,23 @@ function setDaemonOnline(up) {
     // sessions is otherwise indistinguishable from a rail full of *current*
     // sessions, and this one is a photograph.
     info.title = "nothing is answering — the lists below are the last thing it said";
+    // The badge is eight pixels in a corner and is missed by everyone whose
+    // eyes are on a terminal; the card says the same thing where it cannot
+    // be. Sticky, because the outage outlasts any timeout worth setting.
+    // Guarded on `booted`: a page opened while the daemon is already down
+    // reports that through the auth/empty state, not as an event.
+    if (booted) {
+      notify(
+        "daemon offline",
+        `nothing has answered since ${noticeClock()} — what is on screen is ` +
+          "the last thing it said, not what is happening now",
+        { key: NOTICE_LINK, kind: "bad", sticky: true }
+      );
+    }
+  } else {
+    // Whatever the card said about the link is over the moment one answers;
+    // WHICH daemon answered is pollOnce's sentence, not this one's.
+    dismissNotice(NOTICE_LINK);
   }
   // Coming back is boot()'s job: it re-reads the version and the relay state.
 }
@@ -11277,6 +11367,13 @@ async function boot() {
     return;   // down, or the auth overlay is up — the poll comes back to this
   }
   daemonCache = info;
+  // Uptime is a duration measured at the instant it was read, so it goes
+  // stale the moment it lands; the wall-clock start it implies does not.
+  // That is what the home card shows, and it is what makes "did it restart
+  // while I was away" answerable after the card in the corner is gone.
+  if (typeof info.uptime === "number") {
+    daemonStartedAt = Date.now() - info.uptime * 1000;
+  }
   const badge = $("daemon-info");
   badge.textContent = `v${info.version}`;
   badge.title = "";
@@ -11318,9 +11415,32 @@ async function pollOnce() {
   // new cookies, new pids, and every socket we hold bound to nothing.
   const restarted = !!(health.boot_id && daemonBoot && health.boot_id !== daemonBoot);
   const returned = !daemonOnline || !booted;
+  const wasDown = !daemonOnline;   // setDaemonOnline is about to forget this
   setDaemonOnline(true);
   if (restarted || returned) {
     daemonBoot = health.boot_id || null;
+    // ...and it is announced. Everything below this line already worked —
+    // the page rebuilt itself and the terminal got its socket back — which
+    // is precisely why the restart was invisible: recovery that succeeds
+    // silently is indistinguishable from nothing having happened. `booted`
+    // keeps the first load quiet: arriving is not an event.
+    if (booted && restarted) {
+      notify(
+        "daemon restarted",
+        `a different daemon answered at ${noticeClock()}` +
+          (health.version ? ` (v${health.version})` : "") +
+          " — sessions were relaunched, this page re-read everything, and " +
+          "your login cookie died with the old process",
+        { key: NOTICE_BOOT, kind: "warn", sticky: true }
+      );
+    } else if (booted && wasDown) {
+      notify(
+        "daemon back",
+        `the same daemon answered again at ${noticeClock()} — it never ` +
+          "restarted, so nothing was relaunched",
+        { key: NOTICE_LINK }
+      );
+    }
     await boot();     // re-read everything this daemon publishes, from scratch
     reconnectNow();   // and give the attached terminal its socket back
     return;
