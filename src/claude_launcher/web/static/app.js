@@ -6752,6 +6752,21 @@ function syncSpawnGates(ui) {
     lock(ui.fork, ui.forkNote, "");
   }
 
+  // Inheriting is only ambiguous upward: several meshes and the daemon will
+  // refuse the spawn by name. Saying it here costs the operator one read
+  // instead of one failed spawn — and the picker stays live, because naming
+  // one is exactly the fix.
+  if (ui.meshNote) {
+    const several = (ui.parentMeshes || []).length > 1;
+    const ambiguous = several && !ui.mesh.value;
+    ui.meshNote.hidden = !ambiguous;
+    ui.meshNote.textContent = ambiguous
+      ? `the parent is in ${ui.parentMeshes.length} meshes `
+        + `(${ui.parentMeshes.join(", ")}) — name the one this child belongs `
+        + `in, or pick (none)`
+      : "";
+  }
+
   const noMesh = ui.mesh.value === "-";
   ui.handleRow.hidden = noMesh;
   ui.connectRow.hidden = noMesh || !(ui.connectHandles || []).length;
@@ -6907,7 +6922,7 @@ function buildSpawnForm(parentName, seed) {
   const box = el("div", "sess-spawn");
   const st = {
     parent: parentName,
-    parentSess: {}, parentMesh: "", report: {}, git: {},
+    parentSess: {}, parentMesh: "", parentMeshes: [], report: {}, git: {},
     _meshHandle: null, _wfs: [], stamp: qjStamp(),
     connectHandles: [], lastWfAuto: "",
   };
@@ -6943,7 +6958,7 @@ function buildSpawnForm(parentName, seed) {
   box.appendChild(ui.contextRow);
 
   ui.mesh = document.createElement("select");
-  box.appendChild(spawnRow("Mesh", ui.mesh, null));
+  box.appendChild(spawnRow("Mesh", ui.mesh, (ui.meshNote = el("span", "sess-spawn-note"))));
   ui.handleRow = spawnRow("Handle", (ui.handle = document.createElement("input")), null);
   ui.handleRow.hidden = true;
   box.appendChild(ui.handleRow);
@@ -7137,7 +7152,12 @@ async function spawnModalLoad(st) {
   const ms = (meta && meta.meshes) || [];
   // The parent's own handle in its mesh, for the connect list to leave out.
   ui.parentSess._meshHandle = ms.length ? ms[0].handle : null;
-  ui.parentMesh = ms.length ? ms[0].mesh : "";
+  ui.parentMeshes = ms.map((m) => (m && m.mesh) || "").filter(Boolean);
+  // The mesh an INHERITING child lands in — defined only when the parent is
+  // in exactly one. The daemon refuses to guess between several and says why
+  // (daemon/onboard.py inherit_mesh), so neither does this: a guess here does
+  // not fail, it broadcasts the child into a room of strangers.
+  ui.parentMesh = ui.parentMeshes.length === 1 ? ui.parentMeshes[0] : "";
   const cwd = sess.cwd || "";
   const [report, roles, profDoc, meshDoc, gitDoc, wfDoc] = await Promise.all([
     spawnReport(parent),
@@ -7175,7 +7195,12 @@ async function spawnModalLoad(st) {
   fillSpawnSelect(ui.mesh,
     [].concat(meshNames.map((n) => [n, n]), [["-", "(none) — no mesh"]]),
     "(inherit the parent's mesh)",
-    seed.mesh !== undefined ? seed.mesh : (ui.parentMesh || ""));
+    // Inherit is the DEFAULT, not merely an option: the row now opens the way
+    // Harness, Profile and Directory do. Naming the parent's mesh outright is
+    // the same answer only while the parent is in one mesh, and it spells that
+    // answer into the payload — which takes the choice away from
+    // daemon/onboard.py inherit_mesh, the one place that knows the rule.
+    seed.mesh !== undefined ? seed.mesh : "");
   const wsp = ui.report.workspaces;   // absent when the policy locks the row
   fillSpawnSelect(ui.workspace,
     (wsp || []).map((w) => [w.name, w.exists ? `${w.name} — ${w.path}` : `${w.name} (missing)`, !w.exists]),
@@ -7251,7 +7276,13 @@ async function spawnModalLoad(st) {
    asked to be. */
 async function refreshSpawnConnect(st) {
   const ui = st.ui;
-  const mesh = ui.mesh.value;
+  // The effective mesh, not the literal pick: sitting on "(inherit)" still
+  // lands the child in the parent's mesh, so its members are still the peers
+  // on offer. spawnMeshNow answers "" when there is nothing to inherit — a
+  // parent in no mesh (the daemon opens a fresh one holding only the pair) or
+  // in several (the daemon refuses rather than guess) — and an empty answer
+  // is the right one to offer no peers for.
+  const mesh = spawnMeshNow(ui);
   ui._connectChecked = [];
   const row = ui.connectRow;
   row.innerHTML = "";
