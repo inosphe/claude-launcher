@@ -40,6 +40,13 @@ is a property of being parent and child, not of having remembered a flag. The
 child is then told whose it is, on both channels, because a session that does
 not know who is waiting on it reports to nobody.
 
+The same reading applies to its run (:func:`inherit_workflow`): saying nothing
+means *the workflow the parent's own run pairs children with*
+(``default_child_cflow``), so a leader flow and its worker flow are declared
+as a pair once instead of retyped at every spawn — and a parent whose
+workflow pairs with nothing gives its child nothing, rather than whatever its
+role happened to volunteer.
+
 The split between the two channels follows what is *true for how long*:
 
 * **System prompt** (:attr:`SessionDef.identity`, claude harness only) takes
@@ -72,6 +79,11 @@ log = logging.getLogger(__name__)
 #: means *inherit*: there has to be a way to say "no mesh" that is louder than
 #: saying nothing.
 NO_MESH = "-"
+
+#: The same spelling, for the run: a child deliberately given none where its
+#: parent's workflow would have paired it with one. Omission means *inherit*
+#: here too, so refusing needs a word of its own.
+NO_WORKFLOW = "-"
 
 
 class OnboardError(Exception):
@@ -156,6 +168,82 @@ async def inherit_mesh(body: dict, *, parent: str, mesh_mgr) -> None:
             "there is no default to take"
         )
     body["mesh"] = mine[0] if mine else await _open_mesh_for(parent, mesh_mgr)
+
+
+def inherit_workflow(body: dict, *, parent: str, parent_cwd: str, cwd: str) -> None:
+    """Settle which run a child drives when its parent named none.
+
+    Rewrites ``body['workflow']`` in place, the way :func:`inherit_mesh`
+    rewrites the mesh, so preflight sees an ordinary request that happens to
+    name a workflow. Run before it, for the same reason: the run goes into the
+    system prompt, which is fixed the moment the harness starts.
+
+    Silence means **the pair the parent's own run declares**
+    (``default_child_cflow``). A leader flow and a worker flow are two halves
+    of one procedure, and until now nothing said so: the child's *role* picked
+    its run, so a session driving some unrelated workflow still handed its
+    children the worker flow because their role was worker. Reading it off the
+    parent's run instead makes the pairing a fact of the procedure being run —
+    and makes "this workflow pairs with nothing" a legible answer, delivered
+    as a child with no run rather than as a wrong one.
+
+    Nothing is inherited when the parent has no live run, when its workflow
+    declares no pair, or when the paired workflow is not declared where the
+    child will stand — the last one logged, never raised. Inheritance is
+    implicit, and an implicit default must not turn a spawn that would have
+    worked (a child sent to a workspace where that workflow is not declared)
+    into a refusal; the child simply starts runless, which is what it got
+    before this existed.
+
+    :data:`NO_WORKFLOW` declines the pair for one child.
+    """
+    named = str(body.get("workflow") or "").strip()
+    if named == NO_WORKFLOW:
+        body.pop("workflow", None)
+        return
+    if named:
+        return
+    paired = paired_child_workflow(parent=parent, parent_cwd=parent_cwd, cwd=cwd)
+    if paired:
+        body["workflow"] = paired
+
+
+def paired_child_workflow(*, parent: str, parent_cwd: str, cwd: str) -> str:
+    """The run ``parent`` pairs a child standing in ``cwd`` with, "" for none.
+
+    Split out of :func:`inherit_workflow` so the pickers can *show* what the
+    spawn would do: the wizard's Workflow row and the dashboard's spawn modal
+    preselect this, and a person who then leaves the row alone gets exactly
+    what the answer here says. One reading, two surfaces -- a picker that
+    computed the pair itself would be a second one, free to drift.
+    """
+    # Scoped to the parent's session name, never falling back to the
+    # directory's default-scope run: that run belongs to whoever started it,
+    # and pairing off a run the parent does not drive would hand the child a
+    # stranger's procedure.
+    try:
+        status = cflow_engine.status(parent_cwd, scope=parent)
+    except Exception as exc:  # a broken run must not break the spawn
+        log.debug("no run to pair a child against for %r: %s", parent, exc)
+        return ""
+    if not status or status.get("status") == "idle":
+        return ""
+    try:
+        paired = cflow_state.load_snapshot(parent_cwd, parent).default_child_cflow
+    except Exception as exc:
+        log.debug("could not read %r's workflow snapshot: %s", parent, exc)
+        return ""
+    if not paired:
+        return ""
+    available = [name for name, _ in cflow_state.list_workflows(cwd or None)]
+    if paired not in available:
+        log.info(
+            "workflow %r pairs children with %r, which is not declared in %s "
+            "— child of %r starts with no run",
+            status.get("workflow"), paired, cwd or "the daemon cwd", parent,
+        )
+        return ""
+    return paired
 
 
 async def _open_mesh_for(parent: str, mesh_mgr) -> str:

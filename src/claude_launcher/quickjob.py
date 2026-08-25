@@ -12,7 +12,8 @@ user's to set and survive the daemon::
 
     quick_job:
       role: worker             # the child's role (stance at every spawn)
-      workflow: improv-worker  # cflow run started for the child ('' = none)
+      workflow: ''             # cflow run started for the child; '' leaves it
+                               # to the pair the parent's own run declares
       worktree: true           # cut the child a checkout of its own
       name_prefix: job         # child names/worktrees are stamped after this
       task: ''                 # text placed before the typed job description
@@ -31,12 +32,16 @@ from typing import Optional
 
 from . import store
 
-#: What the form offers before anybody edits the config. The role/workflow
-#: pair is the worker convention the meshes here already run on; the prefix
+#: What the form offers before anybody edits the config. ``workflow`` is
+#: empty on purpose: which run a child drives is the parent's pair to declare
+#: (``default_child_cflow`` on the workflow the parent is running), and a name
+#: hard-coded here would hand the same run to the children of a session
+#: driving something else entirely -- the whole bug the pair closes. Naming
+#: one still works, and overrides the pair for every quick job. The prefix
 #: keeps a fleet of quick jobs recognisable in the rail.
 DEFAULTS = {
     "role": "worker",
-    "workflow": "improv-worker",
+    "workflow": "",
     "worktree": True,
     "name_prefix": "job",
     "task": "",

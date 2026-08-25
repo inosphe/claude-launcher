@@ -8511,8 +8511,17 @@ function spawnPayload(ui) {
     if (conn.length) body.connect = conn;
   }
   put("role", ui.role.value);
-  put("workflow", ui.workflow.value);
-  if (body.workflow) put("context", (ui.context.value || "").trim());
+  // "" is not silence here: the daemon reads an absent workflow as "give the
+  // child the pair my run declares", so a row the operator cleared has to say
+  // no out loud — otherwise the form hands back the very run it was used to
+  // take away. Only worth saying when there is a pair to refuse.
+  const paired = ((ui.report || {}).child_cflow) || "";
+  if (ui.workflow.value) {
+    put("workflow", ui.workflow.value);
+    put("context", (ui.context.value || "").trim());
+  } else if (paired) {
+    body.workflow = "-";
+  }
   put("task", (ui.task.value || "").trim());
   return body;
 }
@@ -8670,13 +8679,22 @@ function fillSpawnSelect(sel, pairs, noneLabel, want) {
 /* The workflow picker, ranked by the picked role the way the CLI wizard
    ranks it: the role's own defaults first, then the rest, the ones its filter
    refuses last. The current selection is carried over UNLESS it was the
-   auto-pick — then it follows the role, so a role switch re-homes the auto
+   auto-pick — then it follows the pair, so a role switch re-ranks the list
    without trampling a pick the operator made. `last` is the auto value the
-   caller last applied; it is returned so the caller can remember it. */
+   caller last applied; it is returned so the caller can remember it.
+
+   What is auto-picked is NOT the role's default, though: this form makes a
+   CHILD, and a child's run comes from the pair its parent's own run declares
+   (`child_cflow`, the daemon's reading of `default_child_cflow`). The role
+   only ranks the list. A parent that pairs with nothing preselects nothing —
+   that "" is an answer, not a missing one, which is why it is not fallen
+   back from: reading the child's run off its role is exactly what handed a
+   worker-role child the worker flow under a parent driving something else. */
 function refillSpawnWorkflows(ui, role, last) {
-  const { options, auto } = spawnRankWorkflows(
+  const { options } = spawnRankWorkflows(
     ui._wfs || [], role
   );
+  const auto = ((ui.report || {}).child_cflow) || "";
   const want = ui.workflow.value === last ? auto
     : (ui.workflow.value || auto);
   fillSpawnSelect(ui.workflow,
@@ -9066,7 +9084,7 @@ async function spawnModalLoad(st) {
   }
 
   // The workflow picker's first fill: a seed names the workflow outright (the
-  // quick-job default), otherwise the picked role's own default is offered.
+  // quick-job default), otherwise the parent's own pair is offered.
   // Reading THROUGH the seed lets refill keep a value the auto had set, which
   // is how a role switch re-homes it without trampling an explicit pick.
   ui.workflow.value = seed.workflow || "";
@@ -9180,7 +9198,10 @@ async function spawnModalGo(st) {
    policy's call: a default the policy refuses is refused at spawn time,
    with the daemon's own message shown here. */
 const QUICKJOB_FALLBACK = {
-  role: "worker", workflow: "improv-worker", worktree: true,
+  // No workflow: which run a child drives is the parent's pair to declare
+  // (default_child_cflow), and a name hard-coded here would hand it to the
+  // children of a session driving something else. Mirrors quickjob.DEFAULTS.
+  role: "worker", workflow: "", worktree: true,
   name_prefix: "job", task: "",
 };
 
@@ -9243,7 +9264,8 @@ function sessQuickJob(data) {
   }
   roleSel.title = "the child's role — a stance injected at every spawn";
   wfSel.title = "the cflow workflow started for the child, from those " +
-    "declared in this directory";
+    "declared in this directory — leave it at (no workflow) to take the " +
+    "pair this session's own run declares (default_child_cflow)";
   row.append(roleSel, wfSel);
 
   const wtLabel = el("label", "check");

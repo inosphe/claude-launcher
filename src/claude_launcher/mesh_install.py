@@ -143,8 +143,13 @@ yours to carry out, with `spawn`.
   and to nobody else; if you are in none, one is opened for the two of you.
   Name a `mesh` only to put a child somewhere other than your own. (`'-'`
   starts it in no mesh, unable to answer you — you will rarely want that.)
-- `workflow: NAME` starts a cflow run scoped to the child's own session, so
-  the run is its work and not yours.
+- **Leave `workflow` out too.** The child starts on the run your OWN workflow
+  pairs children with (`default_child_cflow`; `children` reports it as
+  `child_cflow`), and on none when your workflow pairs with nothing or you are
+  driving no run — so the pair is declared once, in the workflow file, instead
+  of retyped at every spawn. `workflow: NAME` overrides it and starts that run
+  scoped to the child's own session; `workflow: '-'` gives a child no run
+  where the pair would have given it one.
 - A refusal that mentions `spawn.<something>` is policy, not a bug: the limit
   is in the user's `~/.claunch.yaml`. Do not retry it — tell the user which
   key would allow it, and carry on without the child.

@@ -793,18 +793,34 @@ def _workflow_default(entries: List[dict], role: str) -> str:
     return best[0]["name"] if best else ""
 
 
-def sync_workflows(form: "Form", cwd: str, role: str) -> None:
-    """Rebuild the Workflow row when the directory or the role changed.
+def sync_workflows(
+    form: "Form", cwd: str, role: str, paired: Optional[str] = None
+) -> None:
+    """Rebuild the Workflow row when the directory, the role or the pair changed.
 
-    Choosing a role selects its default workflow (rivals settled by
-    priority) -- but only over a row this function itself filled in last
-    time: a workflow a person picked survives every later role change, and
-    an auto-pick is never mistaken for one because the last auto-picked
+    Two forms, two rules for what the row selects on its own, and ``paired``
+    is which one applies. Omitted (``new-session``, where a person is making
+    a session that answers to nobody) the row auto-picks the chosen role's
+    default workflow, rivals settled by priority. Passed (``spawn``, where the
+    session being made is a *child*) the row takes the parent's pair instead
+    -- the daemon's ``child_cflow``, which is "" when the parent's own run
+    pairs with nothing, and then this row picks nothing at all.
+
+    The role default is deliberately NOT a fallback on the child path. Which
+    run a child drives is a property of the procedure its parent is running,
+    not of the child's role: a role travels across every workflow, so reading
+    the child's run off it handed a worker-role child the worker flow even
+    when its parent was driving something else entirely. On the child path
+    the pair is the only answer, and "no pair" is one of its answers.
+
+    Either way the auto-pick only ever writes over a row this function filled
+    in last time: a workflow a person picked survives every later role change,
+    and an auto-pick is never mistaken for one because the last auto-picked
     value is remembered and compared.
     """
     role = str(role or "").strip().lower()
     wf = form.field("workflow")
-    key = (cwd, role)
+    key = (cwd, role, paired)
     if form._workflows_for == key:
         return
     form._workflows_for = key
@@ -815,7 +831,7 @@ def sync_workflows(form: "Form", cwd: str, role: str) -> None:
     wf.index = 0
     if keep and keep != form._workflow_auto and wf.select(keep):
         return
-    auto = _workflow_default(entries, role)
+    auto = str(paired or "") if paired is not None else _workflow_default(entries, role)
     form._workflow_auto = auto if auto and wf.select(auto) else ""
 
 
@@ -1696,6 +1712,11 @@ class SpawnWizard(Form):
 
     #: The mesh picker's "none at all" entry. The API spells it exactly so.
     NO_MESH = "-"
+    #: The same spelling for the run: an EMPTY Workflow row on a parent that
+    #: pairs its children with one has to travel as a refusal, or the daemon
+    #: would read the silence as "inherit" and hand the child the very run
+    #: this form was just used to take away.
+    NO_WORKFLOW = "-"
 
     #: The Args row's hint with nothing known about the parent yet. Left
     #: empty the child runs the parent's args, so the row says so rather
@@ -1878,8 +1899,9 @@ class SpawnWizard(Form):
         workflow = ChoiceField(
             key="workflow", label="Workflow",
             hint="a cflow workflow started for the child, from those declared "
-                 "in the directory it will run in; picking a role selects "
-                 "its default one",
+                 "in the directory it will run in; preselected from the "
+                 "parent's own run (default_child_cflow), empty when it "
+                 "pairs with none",
             options=[],
         )
         context = TextField(
@@ -2057,7 +2079,15 @@ class SpawnWizard(Form):
             )
         else:
             fork_f.disabled = False
-        sync_workflows(self, cwd, self.value("role") or "")
+        # A child's run comes from its parent's pair, never from its own role
+        # -- "" (the daemon's answer when the parent pairs with nothing) is
+        # itself the answer, so it is passed rather than falling back.
+        sync_workflows(
+            self,
+            cwd,
+            self.value("role") or "",
+            paired=str(self._report.get("child_cflow") or ""),
+        )
         self.field("context").hidden = not self.value("workflow")
 
     def _rebuild_for_parent(self, parent: str) -> None:
@@ -2295,8 +2325,10 @@ class SpawnWizard(Form):
         args.connect = (
             list(self.value("connect") or []) if mesh != self.NO_MESH else []
         )
-        args.workflow = self.value("workflow") or None
-        args.context = (self.value("context") or None) if args.workflow else None
+        picked = self.value("workflow") or ""
+        paired = str(self._report.get("child_cflow") or "")
+        args.workflow = picked or (self.NO_WORKFLOW if paired else None)
+        args.context = (self.value("context") or None) if picked else None
         args.task = self.value("task") or None
         args.attach = bool(self.value("attach"))
         return args

@@ -33,6 +33,16 @@ filter_roles:
 # own filter_roles가 whitelist로 leader를 받으므로 모순이 없다.
 default_role: leader
 
+# 이 런을 모는 세션이 spawn한 자식은 워크플로를 따로 대지 않아도 이 런에
+# 붙는다 — improv-leader:improv-worker는 한 절차의 두 짝이고, 그 짝을
+# 부모 쪽에 한 번 선언해 두는 자리가 여기다. 자식의 role이 아니라 부모가
+# 도는 절차가 자식의 런을 정한다: role은 워크플로를 가로질러 따라다니므로,
+# role=worker라는 이유로 improv-worker를 물리면 다른 절차를 도는 리더의
+# 자식에게도 이 워커 런이 붙는다. 짝을 선언하지 않은 워크플로의 자식은
+# 런 없이 시작한다 — 그게 정답이다. 한 자식만 예외로 두려면 spawn에
+# workflow를 직접 대거나(덮어쓴다), workflow: '-'로 거절한다.
+default_child_cflow: improv-worker
+
 steps:
   intake:
     title: 운영 확인
@@ -40,7 +50,9 @@ steps:
       새 회차다. 첫 회차면 운영 조건을 사용자와 합의하고, 이후 회차면 변경
       사항이 없는지 한 줄로 확인하고 바로 넘어간다. 정할 만한 것:
       - 워커 편성: 몇 세션, 어느 워크스페이스, 지금 spawn할지 필요 시 spawn할지
-        (spawn 시 workflow: improv-worker 로 워커 런을 물려준다). 한 영역에
+        (spawn에 workflow를 대지 않으면 이 워크플로의 짝인 improv-worker가
+        자동으로 붙는다 — default_child_cflow. 런 없이 심부름만 시킬 자식만
+        workflow: '-'로 거절한다). 한 영역에
         워커가 몰리면 평면으로 두지 않고 mesh-delegate 스킬로 그 영역의
         중간 워커(workflow: improv-mid — 역할은 worker, 런은 그 영역의
         스택 PR 관제)를 두고 그 밑으로 옮긴다(reparent)
@@ -120,6 +132,15 @@ steps:
       사건이 없으면 이 단계에 머문다. 처리한 것마다 보고에 누적한다:
       - 워커 요청 처리: 질문 응답, 재브리핑, 막힌 워커 확인(아래 침묵
         판독의 순서로), 필요 시 spawn/재배정
+      - 위임: 일감이 쌓이거나 내 턴이 남의 작업으로 채워지면 그 자리에서
+        자식 세션을 spawn해 넘긴다 — 리더의 손은 결정·통합·조정이고,
+        생산은 워커의 몫이다. 슬롯은 `children`이 답하고(budget), 코드에
+        닿는 자식은 워크트리를 하나씩 준다. **spawn에 workflow를 적지
+        않는다** — 이 런의 짝(default_child_cflow: improv-worker)이 자식에
+        붙고, 그게 이 워크플로가 짝을 선언하는 이유다. 예외는 둘뿐이다:
+        한 영역의 중간 워커는 workflow: improv-mid를 직접 대고(mesh-delegate
+        스킬의 경로), 런이 필요 없는 심부름 자식은 workflow: '-'로 거절한다.
+        자식에게는 이슈 id를 context에 실어 보낸다(아래 일감 등록).
       - 나에게 온 결정 답하기: 워커의 런이 나에게 위임한 결정(예:
         improv-worker/improv-mid의 착지 — 그 브랜치를 지금 통합 대기 표에
         올릴지, 동결시킬지)은 decide 메시지로 도착하고 `claunch cflow asks`

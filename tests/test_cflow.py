@@ -2235,6 +2235,58 @@ def test_default_role_its_own_filter_refuses_is_a_contradiction():
     assert wf.default_role == "worker"
 
 
+def test_default_child_cflow_takes_either_spelling():
+    """The canonical key and the dashed one are the same key. Underscore is
+    what every other key here uses and what `show` prints; the dash is taken
+    too because it is the shape a person writes, and a silently ignored key
+    would be a pair that never fires."""
+    canonical = model.parse(
+        "name: w\ndefault_child_cflow: worker-flow\n"
+        "steps:\n  a:\n    instructions: x\n"
+    )
+    dashed = model.parse(
+        "name: w\ndefault-child-cflow: worker-flow\n"
+        "steps:\n  a:\n    instructions: x\n"
+    )
+    assert canonical.default_child_cflow == "worker-flow"
+    assert dashed.default_child_cflow == "worker-flow"
+    # nothing by default: a workflow pairs with nothing until it says so
+    assert model.parse("steps:\n  a:\n    instructions: x\n").default_child_cflow is None
+
+
+def test_the_two_spellings_may_not_disagree():
+    """Two keys saying different things have no reading, and picking one
+    would be deciding which of the author's intentions was the typo."""
+    with pytest.raises(WorkflowError, match="spelled two ways"):
+        model.parse(
+            "default_child_cflow: a\ndefault-child-cflow: b\n"
+            "steps:\n  s:\n    instructions: x\n"
+        )
+    # the same value twice is not a disagreement
+    wf = model.parse(
+        "default_child_cflow: a\ndefault-child-cflow: a\n"
+        "steps:\n  s:\n    instructions: x\n"
+    )
+    assert wf.default_child_cflow == "a"
+
+
+def test_default_child_cflow_must_name_a_workflow():
+    with pytest.raises(WorkflowError, match="must name a workflow"):
+        model.parse(
+            "default_child_cflow: '  '\nsteps:\n  a:\n    instructions: x\n"
+        )
+
+
+def test_a_pair_naming_an_undeclared_workflow_still_parses():
+    """Unresolved on purpose: which workflows exist depends on the directory
+    a child will stand in, which the parser cannot see. The spawn settles it,
+    where the answer is knowable."""
+    wf = model.parse(
+        "default_child_cflow: nowhere-flow\nsteps:\n  a:\n    instructions: x\n"
+    )
+    assert wf.default_child_cflow == "nowhere-flow"
+
+
 def test_start_admits_a_whitelisted_driver(flow_dir, monkeypatch):
     _write(flow_dir, "worker-only", WORKER_ONLY)
     _driving_session(monkeypatch)

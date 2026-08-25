@@ -29,6 +29,11 @@ filter_roles:
 # own filter_roles가 whitelist로 worker를 받으므로 모순이 없다.
 default_role: worker
 
+# 중첩 편성의 짝 — 이 런을 도는 워커가 spawn한 하위 워커도 이 런을 돈다
+# (설명문과 intake가 말하는 "improv-worker 자식 세션"이 이것이다).
+# 자식에게 런을 주고 싶지 않으면 spawn에 workflow: '-'를 댄다.
+default_child_cflow: improv-worker
+
 steps:
   intake:
     title: 목표 수립
