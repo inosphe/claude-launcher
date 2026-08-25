@@ -1611,6 +1611,22 @@ let rolesByName = {};
    so the options are only rebuilt when the list actually differs. */
 let workspacesRendered = null;
 
+/* The same guard for the two create-form pickers built out of the session
+   list, which the rail's own two-second poll rebuilds. Same symptom exactly:
+   a user who opens either dropdown and reads it for two seconds has it shut
+   in their face, and the longer the list the more certain they are still
+   reading when the tick lands.
+
+   These cannot be signed the way the workspace list is, by stringifying what
+   the poll returned. A session record carries a pid, a context size and a
+   last-activity clock that move on their own, so the whole record differs on
+   nearly every tick and a signature over it would never hold — the guard
+   would be there and do nothing. So each of these signs exactly the fields
+   its own rebuild reads, and the rebuild is fed from the same list it
+   signed, which is what keeps the two from drifting apart. */
+let resumeRendered = null;
+let parentsRendered = null;
+
 /* Last workspace list the poll saw, for the manage page (#/workspaces). */
 let workspacesCache = [];
 
@@ -1751,16 +1767,27 @@ function renderRoleStance() {
 /* The resume picker: claude's own interactive picker, or the conversation of
    a session this daemon knows. Exited sessions are offered too — their
    conversation outlives them, and picking one up elsewhere is the point.
-   Rebuilt on every poll, so the current choice is preserved by hand. */
+   Fed by the session poll, so it is rebuilt only when the offered
+   conversations actually differ (see resumeRendered) and the current choice
+   is preserved by hand across that rebuild. */
 function refreshResumeChoices() {
   const select = document.querySelector("#new-session select[name=resume]");
+  // Name and status ARE the option — its value and its label — so they are
+  // the whole of the signature. A session whose pid or context size moved is
+  // the same row and must not cost the user their open dropdown.
+  const offered = sessionsCache
+    .filter((s) => s.conversation_id)  // nothing pinned to resume
+    .map((s) => [s.name, s.status]);
+  const signature = JSON.stringify(offered);
+  if (signature === resumeRendered) return;
+  resumeRendered = signature;
+
   const previous = select.value;
   select.innerHTML = "";
   select.appendChild(new Option("(new conversation)", ""));
   select.appendChild(new Option("pick in claude's picker (--resume)", PICKER));
-  for (const s of sessionsCache) {
-    if (!s.conversation_id) continue;  // nothing pinned to resume
-    select.appendChild(new Option(`${s.name} — ${s.status}`, s.name));
+  for (const [name, status] of offered) {
+    select.appendChild(new Option(`${name} — ${status}`, name));
   }
   // A session that vanished (cleared, renamed) takes its option with it;
   // falling back to "(new conversation)" beats silently resuming a stranger.
@@ -1966,16 +1993,30 @@ function spawnWorkspaceName(path) {
 
 /* The sessions a child can be a child of: the live ones. An exited session
    is refused by the daemon ("an exited session cannot spawn children"), so
-   it is not offered. */
+   it is not offered. Fed by the session poll and so guarded the same way as
+   the resume picker (see parentsRendered). */
 function refreshParentChoices() {
   const select = document.querySelector("#new-session select[name=parent]");
   if (!select) return;
+  // Wider than the option it draws, on purpose: the rebuild's tail is
+  // syncSpawnMode, which reads more of the PICKED parent than the label
+  // shows — its harness decides which rows a child may differ on, and
+  // whether it has a conversation decides whether the fork is offered.
+  // Leave those out of the signature and a parent that changed one keeps
+  // the greying it had before, which is the create form lying about what
+  // Create would send.
+  const offered = sessionsCache
+    .filter((s) => s.status !== "exited")
+    .map((s) => [s.name, s.status, s.harness || "", !!s.conversation_id]);
+  const signature = JSON.stringify(offered);
+  if (signature === parentsRendered) return;
+  parentsRendered = signature;
+
   const previous = select.value;
   select.innerHTML = "";
   select.appendChild(new Option("(none — a session of its own)", ""));
-  for (const s of sessionsCache) {
-    if (s.status === "exited") continue;
-    select.appendChild(new Option(`${s.name} — ${s.status}`, s.name));
+  for (const [name, status] of offered) {
+    select.appendChild(new Option(`${name} — ${status}`, name));
   }
   select.value = [...select.options].some((o) => o.value === previous)
     ? previous
