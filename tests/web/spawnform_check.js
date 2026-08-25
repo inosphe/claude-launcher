@@ -122,6 +122,11 @@ new Function(
   "syncRuntimeFold", "renderRuntimeSummary",
   [sliceConst("SPAWN_INHERITS"), sliceLet("newSpawnReport"),
    sliceLet("newSpawnReportFor"), sliceLet("newSpawnDefaultsFor"),
+   // The picker's signature guard against the two-second poll, which lives
+   // at module scope because it has to outlive the call that wrote it. What
+   // it holds off is pollselect_check's; here it only has to exist, so that
+   // slicing the function does not slice it away from its own state.
+   sliceLet("parentsRendered"),
    slice("spawnUnlocked"), slice("refreshSpawnPolicy"),
    slice("spawnWorkspaceName"), slice("refreshParentChoices"),
    slice("spawnParent"), slice("syncSpawnMode"), slice("syncSpawnHarnessRow"),

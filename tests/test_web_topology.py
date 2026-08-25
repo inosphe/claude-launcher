@@ -81,7 +81,15 @@ its payload therefore carries, the soft child cap offered as a crossing,
 and when the parent's conversation is on offer to fork — ``newflow_check``
 on the same form's Role and Workflow rows, where picking a role picks the
 workflow that volunteers for it and a pick made by hand outlives every
-later role change — ``spawnsize_check`` on how big the spawn DIALOG is
+later role change — ``pollselect_check`` on what the two-second session poll
+is allowed to do to that form's resume and parent pickers, which it feeds:
+rebuilding a ``<select>`` shuts the native popup, so a user two seconds into
+reading a list has it vanish under the cursor unless the rebuild is guarded
+by a signature — and the signature cannot simply be the poll's answer, since
+a session record carries a pid and a clock that move on their own, so each
+picker signs the fields its own rebuild reads (the parent one wider than its
+label, because its tail greys rows from the picked parent's harness) —
+``spawnsize_check`` on how big the spawn DIALOG is
 (the modal, not this form): the
 grip the stylesheet draws, the size the browser remembers between opens,
 and the shared ``.modal-box`` a dragged-wide form must hand back so the
@@ -189,6 +197,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "leak_check.js",
         "pingbox_check.js",
         "newform_check.js",
+        "pollselect_check.js",
     ],
 )
 def test_topology_diagram_logic(script):
