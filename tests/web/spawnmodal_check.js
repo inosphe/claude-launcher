@@ -142,6 +142,11 @@ let sessionsCache = [];
 let spawnModal = null;
 let BASE = "/";
 function refreshSessions() { railRefreshed++; }
+/* The box's remembered size is a contract of its own — spawnsize_check drives
+   the real pair. Here they are stubs: this harness is about the form's RULES,
+   and a stub DOM has no box to measure. */
+function spawnSizeApply() {}
+function spawnSizeRemember() {}
 function refreshSessKids() { kidsRefreshed++; }
 function go(h) { gotoHash = h; }
 `;

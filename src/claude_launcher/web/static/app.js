@@ -7012,6 +7012,68 @@ function buildSpawnForm(parentName, seed) {
   return { box, ui, noteShow };
 }
 
+/* ---- the box's remembered size --------------------------------------- */
+/* The spawn form is a 21-row form in a box sized for a paragraph, so how much
+   of it is on screen at once is the operator's call. The grip itself is the
+   stylesheet's (`resize: both`); what belongs here is REMEMBERING where they
+   left it, on the same contract the rail and detail bars keep: clamped on the
+   way in, written down once, scoped by BASE because daemons behind one relay
+   share this localStorage.
+
+   Native resize writes INLINE width/height, and #modal-overlay's .modal-box is
+   one element shared with the confirm dialogs — 460px of prose that must not
+   inherit a 900px form's drag. So the inline pair is applied when the spawn
+   modal takes the box and stripped when it gives it back; the sheet's own
+   width rules the confirm dialogs again the moment it closes. */
+const SPAWN_SIZE_KEY = `claunch_spawnsize:${BASE}`;
+const SPAWN_W_MIN = 420;   // the stylesheet's floor, mirrored so JS clamps alike
+const SPAWN_H_MIN = 240;
+const spawnWMax = () => Math.max(SPAWN_W_MIN, window.innerWidth - 32);
+const spawnHMax = () => Math.max(SPAWN_H_MIN, Math.round(window.innerHeight * 0.88));
+
+/* A remembered size is only as good as the window it is restored into: the
+   operator may have dragged it wide on a monitor they are no longer at. */
+function clampSpawnSize(size) {
+  if (!size || !Number.isFinite(size.w) || !Number.isFinite(size.h)) return null;
+  return {
+    w: Math.min(spawnWMax(), Math.max(SPAWN_W_MIN, Math.round(size.w))),
+    h: Math.min(spawnHMax(), Math.max(SPAWN_H_MIN, Math.round(size.h))),
+  };
+}
+
+function spawnSizeRecall() {
+  try {
+    return clampSpawnSize(JSON.parse(localStorage.getItem(SPAWN_SIZE_KEY) || "null"));
+  } catch { return null; }   // a hand-edited or half-written row is not a size
+}
+
+function spawnSizeApply(box) {
+  const size = spawnSizeRecall();
+  if (!size) return;
+  box.style.width = `${size.w}px`;
+  box.style.height = `${size.h}px`;
+}
+
+/* Read at close rather than watched while dragging: there is no resize EVENT
+   on an element, and the alternative — a ResizeObserver — would be a listener
+   to own and unhook for a value nobody needs until the box shuts. */
+function spawnSizeRemember(box) {
+  const r = box.getBoundingClientRect();
+  // A box that is not laid out measures 0x0, and the stylesheet's floors mean
+  // a VISIBLE spawn box can never measure under them. So a measurement below
+  // the floor is not a small size the operator chose — it is no size at all,
+  // and clamping it up to the floor would silently shrink the modal they had.
+  // Nothing is written down; the size they last chose stands.
+  if (r.width >= SPAWN_W_MIN && r.height >= SPAWN_H_MIN) {
+    const size = clampSpawnSize({ w: r.width, h: r.height });
+    if (size) {
+      try { localStorage.setItem(SPAWN_SIZE_KEY, JSON.stringify(size)); } catch { /* full or blocked */ }
+    }
+  }
+  box.style.width = "";
+  box.style.height = "";
+}
+
 /* ---- open / load / go / close ---------------------------------------- */
 let spawnModal = null;
 
@@ -7021,6 +7083,10 @@ function spawnModalClose() {
   if (!spawnModal) return;
   spawnModal = null;
   const overlay = $("modal-overlay");
+  // Before the class goes: the size is read off the box while the spawn rules
+  // still apply to it, and the inline pair is stripped so the next confirm
+  // dialog opens at the sheet's 460px rather than at this form's drag.
+  spawnSizeRemember(overlay.querySelector(".modal-box"));
   overlay.classList.add("hidden");
   overlay.classList.remove("spawn-open");
   const body = $("modal-body");
@@ -7052,6 +7118,7 @@ async function openSpawnModal(parentName, opts = {}) {
   document.addEventListener("keydown", spawnModalKey);
   overlay.classList.remove("hidden");
   overlay.classList.add("spawn-open");
+  spawnSizeApply(overlay.querySelector(".modal-box"));
   spawnModal = st;
   await spawnModalLoad(st);
 }

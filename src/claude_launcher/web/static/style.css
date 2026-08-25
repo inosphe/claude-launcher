@@ -1934,8 +1934,30 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
    confirm dialogs the overlay normally holds are 460px of prose; a form is
    neither — the overlay gets a class while the spawn modal owns it, and the
    box widens. */
-#modal-overlay.spawn-open .modal-box { width: 700px; }
-#modal-overlay.spawn-open #modal-body { white-space: normal; }
+#modal-overlay.spawn-open .modal-box {
+  /* the remembered size, applied inline by the JS; these are the fallbacks a
+     first-ever open gets */
+  width: 700px; max-height: 88vh;
+  /* `resize` is ignored on a box whose overflow is visible. The scrolling
+     belongs to #modal-body one level down, so hiding it here costs nothing
+     and buys the grip. */
+  overflow: hidden; resize: both;
+  /* narrower and the 130px label column eats the control; shorter and the
+     form is a slit. Both are floors the grip cannot cross. */
+  min-width: 420px; min-height: 240px;
+}
+/* The body takes the slack a taller box creates — without this it keeps its
+   content height and the extra pixels open as dead space under the form. */
+#modal-overlay.spawn-open #modal-body { white-space: normal; flex: 1 1 auto; }
+/* One scroller, not two. The form carried its own 58vh cap, which fought the
+   box: dragging the modal taller grew the box and not the form, and while the
+   two were both scrollable a wheel over the form moved whichever the pointer
+   happened to be inside. The box's height is now the only limit. */
+#modal-overlay.spawn-open .sess-spawn { max-height: none; overflow-y: visible; }
+/* The native grip is drawn in the bottom-right corner — the corner the
+   actions already sit in. Give them the grip's width so Spawn stays clickable
+   to its own edge. */
+#modal-overlay.spawn-open #modal-actions { padding-right: 18px; }
 .sess-spawn-parent { margin: 0 0 12px; color: #9da5b0; font: inherit; }
 .sess-spawn {
   display: flex; flex-direction: column; gap: 9px;

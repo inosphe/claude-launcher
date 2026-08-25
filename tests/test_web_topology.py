@@ -69,7 +69,10 @@ the one-line job description the /api/sessions poll pours into every row
 (digest first, the opening task as fallback) and the collapsed ⟳ that
 refreshes without opening — ``spawnform_check`` on the create form
 turned into a spawn — what a child may be asked once a parent is named, and
-when the parent's conversation is on offer to fork — and the two
+when the parent's conversation is on offer to fork — ``spawnsize_check`` on
+how big that dialog is: the grip the stylesheet draws, the size the browser
+remembers between opens, and the shared ``.modal-box`` a dragged-wide form
+must hand back so the next confirm dialog is not 900px of prose — and the two
 ``flow*_check`` harnesses on the flow view — one on the track a workflow
 becomes, one on the page those tracks are drawn into — and the two context
 harnesses: ``ctxsize_check`` on how full a session's conversation is said to
@@ -132,6 +135,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "briefingtop_check.js",
         "briefrow_check.js",
         "spawnform_check.js",
+        "spawnsize_check.js",
         "selectpopup_check.js",
         "flowtrack_check.js",
         "flowrender_check.js",
