@@ -4820,6 +4820,16 @@ class MeshManager:
         # A live keyboard is held exactly like a running turn: the human is
         # mid-composition, and their thinking pauses outlast the idle
         # threshold, so the screen alone would call this moment deliverable.
+        #
+        # A hold a PERSON set is checked first and separately, because it is
+        # the one hold with no timeout: the gate below gives up after
+        # ``busy_hold`` and types in anyway, which is right for a guess drawn
+        # from timing and wrong for somebody who said "not into this
+        # terminal". ``force`` still wins — that is the same person at the
+        # same dashboard pressing "deliver now", and a hold you can no longer
+        # get out of is a trap, not a setting.
+        if not force and session.delivery_held():
+            return  # held by a human until they say otherwise
         if not force and (
             session.status() != STATUS_IDLE or session.keyboard_busy()
         ):
