@@ -255,6 +255,149 @@ def _current_report(state: dict, step_id: str) -> Optional[dict]:
 
 
 # --------------------------------------------------------------------------- #
+# cadence: a paced select option, held until its window opens
+# --------------------------------------------------------------------------- #
+def _utc_now() -> datetime:
+    """The clock every cadence decision reads (tests replace it)."""
+    return datetime.now(timezone.utc)
+
+
+def _iso(at: datetime) -> str:
+    return at.isoformat(timespec="seconds")
+
+
+def _parse_at(text) -> Optional[datetime]:
+    try:
+        at = datetime.fromisoformat(str(text))
+    except (TypeError, ValueError):
+        return None
+    return at if at.tzinfo else at.replace(tzinfo=timezone.utc)
+
+
+def _window_opens(
+    state: dict, step: Step, option: str, cwd, now: datetime
+) -> Optional[datetime]:
+    """When the driver may next take this option, or None for "now".
+
+    None covers both "no cadence declared" and "the interval has passed" —
+    and the first take ever, which has nothing to pace against. The record
+    read here is the slot's (:func:`state.read_windows`), so a recurring
+    run's round N+1 paces against round N's take.
+    """
+    interval = step.select.options[option].interval
+    if not interval:
+        return None
+    key = state_mod.window_key(state["workflow"], step.id, option)
+    last = _parse_at(state_mod.read_windows(cwd).get(key) or "")
+    if last is None:
+        return None
+    opens = last + timedelta(seconds=float(interval))
+    return opens if opens > now else None
+
+
+def _current_window(state: dict, step_id: str, visit: int) -> Optional[dict]:
+    """The held choice on this step and visit, if any — keyed like a report,
+    for the same reason: a hold from a previous pass must not survive into
+    this one."""
+    window = state.get("window")
+    if window and window.get("step") == step_id and window.get("visit") == visit:
+        return window
+    return None
+
+
+def _window_due(window: dict, now: datetime) -> bool:
+    opens = _parse_at(window.get("opens_at"))
+    return opens is None or opens <= now
+
+
+def _hold(
+    state: dict, step: Step, option: str, reason: str, opens: datetime, cwd, now: datetime
+) -> None:
+    """Record the driver's choice and park the run until ``opens``."""
+    visit = _visits(state, step.id)
+    previous = _current_window(state, step.id, visit)
+    renewed = bool(previous and previous.get("option") == option)
+    state["window"] = {
+        "step": step.id,
+        "visit": visit,
+        "option": option,
+        "reason": reason,
+        "by": "agent",
+        "at": previous["at"] if renewed else _iso(now),
+        "opens_at": _iso(opens),
+    }
+    state_mod.save_state(state, cwd)
+    state_mod.journal(
+        "select_held",
+        {"run": state["run_id"], "step": step.id, "visit": visit, "option": option,
+         "reason": reason, "opens_at": _iso(opens), "renewed": renewed},
+        cwd,
+    )
+
+
+def _take(state: dict, step: Step, option: str, cwd, now: datetime) -> None:
+    """Note a take of a paced option — the moment its next window is
+    measured from. Every take counts, a human's confirm included: the
+    cadence is about how often the option happens, not who pressed it."""
+    if step.select.options[option].interval:
+        state_mod.record_window(
+            state_mod.window_key(state["workflow"], step.id, option), _iso(now), cwd
+        )
+
+
+def _release(workflow: Workflow, state: dict, step: Step, cwd, now: datetime) -> dict:
+    """Confirm a held choice whose window has opened, and move the run.
+
+    The reason journaled is the LATEST the driver filed while holding — that
+    is the point of letting a renewal replace it: what accumulated during
+    the wait belongs in the record the next step reads.
+    """
+    window = dict(state["window"])
+    state["window"] = None
+    option = window["option"]
+    state_mod.journal(
+        "select_confirmed",
+        {"run": state["run_id"], "step": step.id, "option": option,
+         "reason": window.get("reason") or "", "by": "window",
+         "visit": _visits(state, step.id), "held_since": window.get("at"),
+         "opens_at": window.get("opens_at")},
+        cwd,
+    )
+    _take(state, step, option, cwd, now)
+    state["completed"] += 1
+    _move_to(workflow, state, step.select.options[option].next, cwd)
+    return window
+
+
+def _window_payload(base: dict, step: Step, window: dict, now: datetime) -> dict:
+    opens = _parse_at(window.get("opens_at"))
+    remaining = max(0, int((opens - now).total_seconds())) if opens else 0
+    option = step.select.options[window["option"]]
+    return {
+        **base,
+        "status": "waiting_window",
+        "prompt": step.select.prompt,
+        "option": window["option"],
+        "interval": option.interval,
+        "held_since": window.get("at"),
+        "opens_at": window.get("opens_at"),
+        "remaining": remaining,
+        "note": (
+            f"your choice {window['option']!r} is recorded and HELD: this option "
+            f"runs at most once per {option.interval:g}s and its window opens "
+            f"at {window.get('opens_at')} (~{remaining}s). Stop your turn — do "
+            f"not poll. The daemon's clock releases it then, moves the run and "
+            f"nudges you; without a daemon, your next 'next' call after that "
+            f"moment releases it. Meanwhile keep doing this step's standing "
+            f"work: if what the choice rests on changes, call 'select' again "
+            f"with the same option and the updated reason (it replaces the "
+            f"held one — the reason confirmed at release is the latest), or "
+            f"with a different option to cancel the hold"
+        ),
+    }
+
+
+# --------------------------------------------------------------------------- #
 # delegated decisions
 # --------------------------------------------------------------------------- #
 def _deadline(timeout: Optional[float]) -> Optional[str]:
@@ -604,10 +747,22 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
             },
             cwd,
         )
+    held = state.get("window")
+    if held:
+        # Same story as the ask above: a human moved the run while a choice
+        # was parked here waiting for its window.
+        state_mod.journal(
+            "window_discarded",
+            {"run": state["run_id"], "step": held.get("step"),
+             "option": held.get("option"),
+             "reason": "the run moved before the window opened"},
+            cwd,
+        )
     state["delivered"] = False
     state["gate_approved"] = False
     state["gate_logged"] = None
     state["pending_select"] = None
+    state["window"] = None
     state["ask"] = None
     state["declined"] = None
     state["unanswered"] = None
@@ -876,6 +1031,16 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
             if ask is not None:
                 return _ask_payload(base, ask)
             chooser = "agent"  # nobody to ask; this run decides it after all
+        held = _current_window(state, step.id, visit)
+        if held:
+            now = _utc_now()
+            if mutate and _window_due(held, now):
+                # The no-daemon path (and the daemon's own, through
+                # `release_window`): the window has opened, so the held choice
+                # is confirmed here and the run reads from its new position.
+                _release(workflow, state, step, cwd, now)
+                return _payload(workflow, state, cwd, mutate=True)
+            return _window_payload(base, step, held, now)
         if pending and pending.get("step") == step.id:
             return {
                 **base,
@@ -1440,6 +1605,10 @@ def next_step(*, cwd: Optional[str] = None) -> dict:
             return _payload(workflow, state, cwd, mutate=True)
 
         if step.is_select:
+            if _current_window(state, step.id, _visits(state, step.id)):
+                # A held choice: due, it is released right here (the
+                # no-daemon path); not yet, the hold is restated.
+                return _payload(workflow, state, cwd, mutate=True)
             payload = _payload(workflow, state, cwd, mutate=False)
             if payload.get("status") == "select":
                 # Only when the decision is actually this agent's to make; a
@@ -1611,6 +1780,37 @@ def select(
         )
         return _payload(workflow, state, cwd, mutate=False)
 
+    now = _utc_now()
+    held = _current_window(state, step.id, _visits(state, step.id))
+    if by == "agent":
+        opens = _window_opens(state, step, option, cwd, now)
+        if opens is not None:
+            # Inside the option's interval: the choice is parked, not refused.
+            # A different option held before this one is dropped — the driver
+            # changed its mind, and the record says so.
+            if held and held.get("option") != option:
+                state_mod.journal(
+                    "select_hold_cancelled",
+                    {"run": state["run_id"], "step": step.id,
+                     "was": held.get("option"), "now": option},
+                    cwd,
+                )
+                state["window"] = None
+            _hold(state, step, option, (reason or "").strip(), opens, cwd, now)
+            return _payload(workflow, state, cwd, mutate=True)
+    if held:
+        # A take that goes through now — the driver past the window, or a
+        # human confirming from the CLI/dashboard, which is not paced — makes
+        # the hold moot; if it was for another option, that is a cancel.
+        if held.get("option") != option:
+            state_mod.journal(
+                "select_hold_cancelled",
+                {"run": state["run_id"], "step": step.id,
+                 "was": held.get("option"), "now": option, "by": by},
+                cwd,
+            )
+        state["window"] = None
+
     open_ask = _current_ask(state, step.id, _visits(state, step.id), "branch")
     if open_ask:
         # A human settling a delegated decision — from the dashboard, or
@@ -1628,9 +1828,11 @@ def select(
         "select_confirmed",
         {"run": state["run_id"], "step": step.id, "option": option,
          "reason": (reason or "").strip(), "by": by,
-         "visit": _visits(state, step.id)},
+         "visit": _visits(state, step.id),
+         **({"paced": "override"} if held and by != "agent" else {})},
         cwd,
     )
+    _take(state, step, option, cwd, now)
     state["completed"] += 1  # the decision itself counts as a completed step
     _move_to(workflow, state, step.select.options[option].next, cwd)
     if state["status"] == "done":
@@ -1646,6 +1848,46 @@ def select(
         "step_id": step.id,
         "option": option,
         "note": "selection confirmed; nudge the agent to continue",
+    }
+
+
+@_locked_op
+def release_window(
+    *, now: Optional[datetime] = None, cwd: Optional[str] = None
+) -> Optional[dict]:
+    """Confirm a held choice whose window has opened. Daemon-driven.
+
+    Same shape as :func:`expire_ask`, for the same reason: the agent that
+    would notice the window opening is the one that stopped its turn to wait
+    for it. The daemon's clock (:class:`..daemon.cflow_clock.WindowClock`)
+    calls this over every run and nudges the driver when it moved something.
+    Without a daemon the hold is not lost — the driver's next ``next`` past
+    the moment releases it (see :func:`_payload`) — it is only late.
+
+    Returns what moved (for the nudge), or None when nothing was due.
+    """
+    if not state_mod.has_run(cwd):
+        return None
+    workflow, state = _load(cwd)
+    if state["status"] in ("done", "aborted") or not state.get("current"):
+        return None
+    step = workflow.step(state["current"])
+    held = _current_window(state, step.id, _visits(state, step.id))
+    if held is None:
+        return None
+    now = now or _utc_now()
+    if not _window_due(held, now):
+        return None
+    window = _release(workflow, state, step, cwd, now)
+    return {
+        "run": state["run_id"],
+        "workflow": state["workflow"],
+        "step": step.id,
+        "option": window["option"],
+        "held_since": window.get("at"),
+        "opens_at": window.get("opens_at"),
+        "now_at": state.get("current"),
+        "status": state["status"],
     }
 
 

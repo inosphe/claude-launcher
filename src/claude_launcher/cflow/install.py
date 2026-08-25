@@ -67,6 +67,16 @@ workflow to be started here), that is the answer; otherwise list candidates
      itself.
    - `select` with `chooser: agent` — decide per the prompt's criteria and
      call `select {option, reason}`.
+   - `waiting_window` — you chose a PACED option (the workflow gives it an
+     `interval`), and the interval since it was last taken has not passed:
+     your choice is recorded and held, `opens_at` says until when. STOP your
+     turn and do not poll — the daemon releases it at that moment, moves
+     the run and nudges you (a "window opened" frame); without a daemon,
+     your next `next` after that moment releases it. Until then keep doing
+     the step's standing work, and if what the choice rests on changes,
+     call `select` again: the same option with an updated reason replaces
+     the held reason (the one confirmed at release is the latest), a
+     different option cancels the hold. Nobody else is asked anything here.
    - `select` with `chooser: user`, or `waiting_selection` — call `select`
      once to record your RECOMMENDATION with reasoning, then STOP your turn
      and write the decision brief below. Ask them to confirm with `!

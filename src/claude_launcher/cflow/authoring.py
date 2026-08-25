@@ -161,6 +161,49 @@ alone. Three rules:
 Option `description`s are read by whoever chooses, so write them as
 consequences ("another implement/test pass"), not as labels ("no").
 
+## Cadence — `interval` on an option
+
+Some options are not wrong to take, only wrong to take *too often*: "merge
+what is waiting" chosen the moment each branch is ready gives one merge and
+one full sweep per task. Put `interval: <seconds>` on the option and the
+driver's take of it is **held** until that long has passed since the option
+was last taken — across rounds of a `recur` workflow, since the record
+outlives the run. The run reports `waiting_window` with `opens_at`, the
+daemon's clock releases it then (moving the run and waking the driver), and
+what accumulated during the wait is in the batch, because the driver may
+re-select the same option while held to update its reason — the reason
+confirmed at release is the latest one. Selecting another option cancels
+the hold; the first take ever is immediate (nothing to pace against yet).
+
+```yaml
+standby:
+  select:
+    prompt: is there a branch with its evidence complete? then integrate.
+    chooser: agent
+    options:
+      integrate:
+        description: merge what is waiting — at most once per window
+        next: merge
+        interval: 300        # a 5-minute batch window
+      wind-down: {description: the user ended the shift, next: end}
+merge:
+  instructions: merge every waiting branch with --no-ff; the sweep is the next step's.
+  next: sweep
+sweep:
+  ask:                       # the gate between merge and sweep; who opens it
+    prompt: master's tip is this batch's merge — sweep the merged tree?
+    otherwise: self          # is this workflow's call: self, a role, or a person
+  instructions: run the full suite over the merged tree.
+  verify: "pytest -q"
+  next: end
+```
+
+It is a cadence, not a permission: nobody is asked anything while a choice
+is held, and a person confirming the option from the CLI or dashboard takes
+it at once (journaled as an override). Put it on the option whose cost is
+per-take — a merge, a deploy, a sweep — never on one whose delay loses
+information.
+
 ## `ask:` gates ENTRY
 
 An `ask` withholds the step's `instructions` until it is answered, so it goes
@@ -216,7 +259,8 @@ Cycles are legal and are warned about (`cflow show` prints them). Two rules:
 - Steps are defined **once** and wired by id, so a shared target (`next: impl`
   from three places) needs no duplication.
 - Termination is omitting `next`, or `next: end`.
-- A `select` routes only through its options — no `next` on the step.
+- A `select` routes only through its options — no `next` on the step. An
+  option may carry `interval: <seconds>` — see its section above.
 - `verify` is a gate to **leave** a step; `ask`/`gate` gate **entering** it.
   A select step takes neither.
 - `done_when` states the leave criterion where no command can check it —

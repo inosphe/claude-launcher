@@ -615,9 +615,19 @@ function sessCflowLabel(r) {
     return answerFellToUs(r) ? "asked of nobody — approve to continue"
                              : `with ${askWho(r.ask)}`;
   if (r.status === "report_required") return "report required";
+  if (r.status === "waiting_window")
+    return `'${r.option}' held — opens ${fmtOpensAt(r.opens_at)}`;
   if (r.status === "done" || r.status === "error" || r.status === "aborted")
     return r.status;
   return r.title || r.step_id || "running";
+}
+
+/* A paced option's opening moment, as a local clock time; the raw ISO
+   string when it does not parse. */
+function fmtOpensAt(iso) {
+  const t = Date.parse(iso || "");
+  if (Number.isNaN(t)) return iso || "?";
+  return new Date(t).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 }
 
 /* One line under each rail row: which workflow the session is on and where it
@@ -1258,6 +1268,8 @@ function wfDotClass(status, run) {
     return answerFellToUs(run) ? "wf-waiting" : "wf-delegated";
   }
   if (status === "waiting_approval" || status === "waiting_selection" || status === "report_required") return "wf-waiting";
+  // A held choice: the agent decided, the workflow paces it — nobody's move.
+  if (status === "waiting_window") return "wf-delegated";
   if (status === "done") return "wf-done";
   if (status === "error" || status === "aborted") return "wf-error";
   return "wf-running";
@@ -1588,6 +1600,12 @@ async function refreshCflow() {
         const opts = (r.options || []).map((o) => o.name).join("|");
         li.appendChild(cflowHint(`claunch cflow select <${opts}>`));
       }
+    } else if (r.status === "waiting_window") {
+      li.appendChild(cflowLine(
+        `chose '${r.option}' — held until ${fmtOpensAt(r.opens_at)} ` +
+        `(at most every ${r.interval}s); the daemon releases it`
+      ));
+      li.appendChild(cflowHint(`claunch cflow select ${r.option}`));
     } else if (r.status === "error") {
       li.appendChild(cflowLine(r.error || "error", "error"));
     }
@@ -5367,6 +5385,24 @@ function wfActions(data, opts = {}) {
     } else {
       msgs.appendChild(el("p", "wf-note", "the agent decides this branch on its own"));
     }
+  } else if (run.status === "waiting_window") {
+    msgs.appendChild(el("p", "wf-gate", run.prompt || "decision point"));
+    msgs.appendChild(el(
+      "p", "wf-note",
+      `agent chose '${run.option}' — held until ${fmtOpensAt(run.opens_at)} ` +
+      `(this option runs at most every ${run.interval}s); the daemon releases ` +
+      `it then and nudges the session`
+    ));
+    const btn = el("button", "wf-btn option", `take '${run.option}' now`);
+    btn.title = "confirm the held choice without waiting for its window (journaled as an override)";
+    btn.addEventListener("click", () => {
+      if (confirm(`Take '${run.option}' now, without waiting for its window?`)) {
+        cflowAction("/api/cflow/select", {
+          cwd: data.cwd, scope: data.scope, option: run.option,
+        }, after);
+      }
+    });
+    main.appendChild(btn);
   } else if (run.status === "done" || run.status === "aborted") {
     msgs.appendChild(el("p", "wf-note", `workflow ${run.status}`));
   } else {

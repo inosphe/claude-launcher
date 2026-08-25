@@ -430,6 +430,45 @@ def clear_request(cwd: Optional[str] = None) -> None:
 
 
 # --------------------------------------------------------------------------- #
+# cadence record: when a paced select option was last taken
+# --------------------------------------------------------------------------- #
+#: Per-scope record of the last take of every paced option, keyed
+#: ``<workflow>:<step>:<option>`` -> ISO timestamp. Deliberately NOT one of
+#: :data:`RUN_FILES`: a cadence is a fact about the slot, not about one run —
+#: a recurring workflow's round N+1 must pace against round N's take, and
+#: archiving the finished round must not reset the clock.
+WINDOWS_FILE = "windows.json"
+
+
+def _windows_path(cwd: Optional[str] = None, scope: Optional[str] = None) -> Path:
+    return scope_dir(cwd, scope) / WINDOWS_FILE
+
+
+def window_key(workflow: str, step_id: str, option: str) -> str:
+    return f"{workflow}:{step_id}:{option}"
+
+
+def read_windows(cwd: Optional[str] = None, scope: Optional[str] = None) -> Dict[str, str]:
+    """Every paced option's last take in this slot (empty when none)."""
+    try:
+        doc = json.loads(_windows_path(cwd, scope).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(doc, dict):
+        return {}
+    return {str(k): str(v) for k, v in doc.items() if isinstance(v, str)}
+
+
+def record_window(key: str, at: str, cwd: Optional[str] = None) -> None:
+    """Note that the paced option ``key`` was taken at ``at`` (ISO)."""
+    path = _windows_path(cwd)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    doc = read_windows(cwd)
+    doc[key] = at
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+# --------------------------------------------------------------------------- #
 # workflow discovery
 # --------------------------------------------------------------------------- #
 @dataclass(frozen=True)
