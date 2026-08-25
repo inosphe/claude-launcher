@@ -1,4 +1,4 @@
-"""improv-worker's landing: delegated to the session above, open to the user.
+"""improv-worker/improv-mid landing: delegated upward, open to the user.
 
 The landing decision moved from a human gate to the session above it because
 that session — not the person — knows the state of the integration queue, and
@@ -31,28 +31,37 @@ def _bundled(name: str) -> Path:
     return Path(dict(state_mod.bundled_workflows())[name])
 
 
-#: Both copies of the file, because the project layer is a regenerated copy
-#: of the packaged one and a hand-edit to either is how they last drifted.
+#: Every copy of a landing that delegates, and who each one delegates to.
+#: The worker ships in two layers (the project one is a regenerated copy, and
+#: a hand-edit to either is how they last drifted); the middle worker ships in
+#: one, and its candidate list is shorter because a middle worker's parent is
+#: always the leader. The pair is checked together on purpose: the two files
+#: say of each other that they are the same shape for the same reason, and
+#: that sentence is only true while both carry the rule.
 LAYERS = {
-    "bundled": lambda: _bundled("improv-worker"),
-    "project": lambda: PROJECT_OVERRIDES / "improv-worker.yaml",
+    "worker/bundled": (lambda: _bundled("improv-worker"), ["worker", "leader"]),
+    "worker/project": (
+        lambda: PROJECT_OVERRIDES / "improv-worker.yaml", ["worker", "leader"]
+    ),
+    "mid/bundled": (lambda: _bundled("improv-mid"), ["leader"]),
 }
 
 
 @pytest.fixture(params=sorted(LAYERS))
 def landing(request):
-    path = LAYERS[request.param]()
+    where, roles = LAYERS[request.param]
+    path = where()
     text = path.read_text(encoding="utf-8")
-    step = model.parse(text, default_name="improv-worker").steps["landing"]
-    return step, text
+    step = model.parse(text, default_name=path.stem).steps["landing"]
+    return step, text, roles
 
 
 def test_the_landing_is_still_delegated_upward(landing):
     """The door is added beside the delegation, not in place of it."""
-    step, _ = landing
+    step, _, roles = landing
     delegate = step.select.delegate
     assert delegate is not None, "landing stopped delegating"
-    assert [c.role for c in delegate.candidates] == ["worker", "leader"]
+    assert [c.role for c in delegate.candidates] == roles
     assert all(c.scope == "ancestor" for c in delegate.candidates)
     assert delegate.otherwise == model.OTHERWISE_HUMAN
     assert delegate.timeout == 1800
@@ -61,7 +70,7 @@ def test_the_landing_is_still_delegated_upward(landing):
 def test_the_prompt_tells_the_responder_a_person_may_answer_too(landing):
     """The responder is the party that can be overridden, so it is the party
     that has to know the rule before it spends a turn on the question."""
-    step, _ = landing
+    step, _, _roles = landing
     prompt = step.select.prompt
     assert "문이 둘" in prompt
     assert "사용자 지침이 이긴다" in prompt
@@ -74,7 +83,7 @@ def test_the_comment_names_the_press_and_who_wins(landing):
     answer" without ``claunch cflow select`` is how the door stayed shut
     while being documented as open.
     """
-    _, text = landing
+    _, text, _roles = landing
     assert "claunch cflow select request|hold" in text
     assert "사용자의 답이 이긴다" in text
     # ...and that it is a door, not a gate: nothing here re-introduces the
