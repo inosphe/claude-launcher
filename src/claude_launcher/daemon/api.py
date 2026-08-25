@@ -262,6 +262,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/children", h_session_children)
     r.add_post("/api/sessions/{name}/children", h_session_spawn)
     r.add_delete("/api/sessions/{name}/children/{child}", h_session_child_kill)
+    r.add_post("/api/sessions/{name}/parent", h_session_reparent)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
@@ -1884,6 +1885,44 @@ async def h_session_spawn(request: web.Request) -> web.Response:
     return web.json_response(
         {"session": session.info(), "parent": parent, **result}, status=201
     )
+
+
+async def h_session_reparent(request: web.Request) -> web.Response:
+    """Move a session (with its subtree) under another parent — the topology
+    ``spawn`` fixes at birth, edited after the fact.
+
+    Why it exists: a lead whose workers have crowded into one area wants a
+    nested worker to own that area — collect their branches, request one
+    integration — without killing and respawning sessions that hold live
+    conversations, worktrees and cflow runs. The move is
+    :meth:`SessionManager.reparent`; the rules (no cycle, no exited parent,
+    the depth limit, authority down the tree) live there.
+
+    ``actor`` names the session asking, as it does on the link route: with it
+    the move is checked against the tree, without it the caller is an
+    operator. On success the child's edge to its new parent is opened in every
+    mesh the two share, so it can report there the way a spawned child can
+    from its first turn; the old parent's edge is left as it was, because the
+    move changes who commands the child, not who may hear from it.
+    """
+    manager: SessionManager = request.app["manager"]
+    child = request.match_info["name"]
+    body = await _json_body(request)
+    parent = str(body.get("parent") or "").strip()
+    if not parent:
+        return json_error(400, "'parent' is required")
+    try:
+        result = manager.reparent(child, parent, actor=str(body.get("actor") or ""))
+    except ManagerError as exc:
+        msg = str(exc)
+        if "no session named" in msg:
+            return json_error(404, msg)
+        if "does not command" in msg or "cannot move itself" in msg:
+            return json_error(403, msg)
+        return json_error(400, msg)
+    mm = request.app.get("mesh")
+    result["connected"] = await mm.link_lineage(child, parent) if mm else []
+    return web.json_response(result)
 
 
 async def h_sessions_clear(request: web.Request) -> web.Response:

@@ -1174,9 +1174,18 @@ def test_mesh_install_project(tmp_path, home):
     from claude_launcher import install
 
     done = install.install_into_project(tmp_path)
-    # one server, four skills — and nothing outside the project: workflow
+    # one server, six skills — and nothing outside the project: workflow
     # seeding is the global/profile installs' business
-    assert len([line for line in done if line.startswith("skill ->")]) == 4
+    assert len([line for line in done if line.startswith("skill ->")]) == 6
+    # the two topology skills (wire peers, delegate a domain) land beside mesh
+    for name in ("mesh-wire", "mesh-delegate"):
+        text = (tmp_path / ".claude" / "skills" / name / "SKILL.md").read_text(
+            encoding="utf-8"
+        )
+        assert text.startswith(f"---\nname: {name}\n")
+    assert "reparent" in (
+        tmp_path / ".claude" / "skills" / "mesh-delegate" / "SKILL.md"
+    ).read_text(encoding="utf-8")
     assert sum(1 for line in done if line.startswith("mcp server")) == 1
     assert not [line for line in done if line.startswith("workflow ->")]
     doc = json.loads((tmp_path / ".mcp.json").read_text(encoding="utf-8"))
@@ -1225,7 +1234,7 @@ def test_global_install_targets_the_user_scope(tmp_path, home, monkeypatch):
 
     cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
     done = install.install_into_user()
-    assert len([line for line in done if line.startswith("skill ->")]) == 4
+    assert len([line for line in done if line.startswith("skill ->")]) == 6
     assert [line for line in done if line.startswith("workflow ->")]
     assert (cfg / "skills" / "mesh" / "SKILL.md").is_file()
     doc = json.loads((cfg / ".claude.json").read_text(encoding="utf-8"))
@@ -1356,8 +1365,9 @@ def test_mesh_mcp_tools(home, monkeypatch):
         # talking ...
         "send", "members", "history",
         # ... building the team that does it: made, counted, re-oriented,
-        # ended, wired
-        "spawn", "children", "rebrief", "kill", "connect", "disconnect",
+        # ended, re-drawn, wired
+        "spawn", "children", "rebrief", "kill", "reparent", "connect",
+        "disconnect",
     ]
 
     # send requires a session identity

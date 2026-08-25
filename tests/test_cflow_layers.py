@@ -735,3 +735,21 @@ def test_seed_writes_a_record_loaded_by_update(project, home, tmp_path, monkeypa
     assert (home / "workflows" / ".seeded.json").is_file()
     record = cflow_install.seed_record(home / "workflows")
     assert "tiny.yaml" in record and len(record["tiny.yaml"]) == 64
+
+
+def test_both_leader_layers_teach_the_topology_skills():
+    """The lead re-draws its own team — wires two peers who keep needing each
+    other through it, and puts a crowded area under a nested worker it moves
+    the area's workers beneath — without waiting to be told. Both layers name
+    the skills (``mesh-wire``, ``mesh-delegate``) and the tool (``reparent``)
+    so the instruction survives a project-layer resync from the bundle."""
+    for wf in (
+        _bundled("improv-leader"),
+        model.load(PROJECT_OVERRIDES / "improv-leader.yaml"),
+    ):
+        standby = wf.steps["standby"].instructions
+        assert "mesh-wire" in standby
+        assert "mesh-delegate" in standby
+        assert "reparent" in standby
+        assert "self-decision" in standby  # not a user gate
+        assert "mesh-delegate" in wf.steps["intake"].instructions

@@ -2439,6 +2439,40 @@ class MeshManager:
         )
         return {"a": a, "b": b, "enabled": bool(enabled)}
 
+    async def link_lineage(self, child: str, parent: str) -> List[dict]:
+        """Open the parent edge a re-parented session now needs, in every mesh
+        both sessions are members of on this daemon.
+
+        A spawn opens this edge at the join (:meth:`_wire_member`), and for
+        the same reason: a child that cannot reach its parent cannot report.
+        A session moved under a new parent after the fact needs the same edge
+        and has no join to get it from, so the re-parent route asks here.
+        Only *opening* is done — the edge to the former parent stays, because
+        the move changed who commands the child, not who may hear from it;
+        cutting that one is the mover's call (``disconnect``).
+
+        Returns the edges opened, ``{mesh, a, b}`` each; an edge already open
+        is not reported, so a repeated move says nothing new.
+        """
+        opened: List[dict] = []
+        for entry in self.meshes_for_session(child):
+            mesh = self.get(entry["mesh"])
+            above = next(
+                (
+                    h for h, m in mesh.members.items()
+                    if m.session == parent and self._is_local(mesh, m)
+                ),
+                "",
+            )
+            mine = str(entry["handle"])
+            if not above or above == mine:
+                continue
+            if mesh.member_edges.get(Mesh.member_key(mine, above)):
+                continue
+            await self.set_member_link(mesh.name, mine, above, enabled=True)
+            opened.append({"mesh": mesh.name, "a": mine, "b": above})
+        return opened
+
     async def isolate_member(
         self, name: str, handle: str, *, keep: Iterable[str] = ()
     ) -> List[str]:

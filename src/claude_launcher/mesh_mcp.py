@@ -301,6 +301,43 @@ TOOLS = [
         },
     },
     {
+        "name": "reparent",
+        "description": (
+            "Move a session you spawned (or a descendant of one) — with its "
+            "whole subtree — under another session you command, or under "
+            "yourself. This is how a lead hands the workers of one crowded "
+            "domain to a nested worker it spawned for that domain: that worker "
+            "then collects their branches and requests integration once. The "
+            "moved session keeps its terminal, conversation, mesh handle and "
+            "cflow run; what changes is who it reports to — so TELL IT, its "
+            "own briefing still names you. Its edge to the new parent is "
+            "opened in every mesh the two share; its edge to you is left for "
+            "you to cut (disconnect) or keep. Refused when it would make a "
+            "cycle, hang a subtree from an exited session, or push any moved "
+            "session past spawn.max_depth."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session": {
+                    "type": "string",
+                    "description": (
+                        "the session to move, as 'children' lists it (the "
+                        "session name, not its mesh handle)"
+                    ),
+                },
+                "parent": {
+                    "type": "string",
+                    "description": (
+                        "its new parent's session name — yourself, or a "
+                        "session you spawned (or a descendant of one)"
+                    ),
+                },
+            },
+            "required": ["session", "parent"],
+        },
+    },
+    {
         "name": "connect",
         "description": (
             "Let two members of a mesh message each other. At least one of "
@@ -379,6 +416,15 @@ def call_tool(name: str, args: dict) -> dict:
         q = "?force=1" if args.get("force") else ""
         return _client().delete(
             f"/api/sessions/{_session()}/children/{child}{q}"
+        )
+    if name == "reparent":
+        child = str(args.get("session") or "")
+        parent = str(args.get("parent") or "")
+        if not child or not parent:
+            raise MeshMcpError("'session' and 'parent' are both required")
+        return _client().post(
+            f"/api/sessions/{child}/parent",
+            {"parent": parent, "actor": _session()},
         )
 
     mesh = str(args.get("mesh") or "")
