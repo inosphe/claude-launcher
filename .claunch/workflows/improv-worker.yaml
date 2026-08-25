@@ -73,8 +73,9 @@ steps:
         새 워크트리는 관례 위치에 피처 브랜치로 만든다
         (git worktree add .claude/worktrees/<이름> -b <피처 브랜치>).
       - 완료 증거 기준: 테스트 수치(suite green N/N, 신규 K), 커밋 해시
-      - 이슈(beads): 목표가 리더 브리핑이면 생성 task/context의 `issue: <id>`를
-        `claunch beads show <id> --json`으로 읽는다 — 그 본문이 목표다.
+      - 이슈(beads): 생성 task/context에 `issue: <id>`가 있으면(리더가 배정했든
+        데몬이 오프닝 task에서 등록했든) `claunch beads show <id> --json`으로
+        읽는다 — 그 본문이 목표이고, 같은 일로 이슈를 또 만들지 않는다.
         터미널 사용자의 직접 지시면 지금 만든다: `claunch beads create "<제목>"
         --type task --priority 2 --labels user-direct --assignee
         $CLAUNCH_SESSION --description "<규격>"`. 리더가 배정한 이슈가 따로

@@ -124,6 +124,7 @@ function openTrace() {}
 function stopMeshPoll() {}
 function stopFlowPoll() {}
 function closeWorkspaces() {}
+function stopBeadsPoll() {}
 function openWorkflow() {}
 function openMesh() {}
 function openFlowTopology() {}

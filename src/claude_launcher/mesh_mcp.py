@@ -272,7 +272,13 @@ TOOLS = [
             "mesh row stays, reading 'exited', and it can be respawned by an "
             "operator until somebody clears it. Calling it again on a child "
             "that has already exited changes nothing and says so, so a retry "
-            "is safe; dropping the record is the operator's."
+            "is safe; dropping the record is the operator's. A child holding "
+            "active beads issues is not cut off at once: the daemon first "
+            "types a wind-down block into it (settle the board — in_review "
+            "with evidence, or a HANDOFF comment), waits for that turn (a "
+            "bounded grace), then terminates; the reply says winding_down. "
+            "Once it has exited, its in_progress issues go back to open with "
+            "a SESSION ENDED comment, ready to reassign."
         ),
         "inputSchema": {
             "type": "object",

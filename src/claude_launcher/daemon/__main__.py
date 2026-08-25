@@ -157,6 +157,9 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             except (asyncio.CancelledError, Exception):
                 pass
         await resume_nudge.shutdown()
+        # Pending wind-downs are dropped, not finished: shutdown_all below
+        # ends every session the daemon's way, and they come back on restart.
+        await app["beads"].cancel_all()
         await event_clock.shutdown()
         await ping_clock.shutdown()
         await reminder_clock.shutdown()

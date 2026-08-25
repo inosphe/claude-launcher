@@ -222,6 +222,18 @@ DAEMON_DEFAULTS = {
     # when the daemon constructs its shell, i.e. at daemon start.
     "shell": None,
     "shell_cwd": None,
+    # The board (beads) hooks on a session's life — see daemon/beads.py. All
+    # read LIVE. beads_auto_issue: a session created with a task gets an
+    # issue minted and assigned to it (one it names as `issue: <id>` is
+    # adopted instead). beads_winddown: a kill of a session holding active
+    # issues first types a wind-down block into it and waits for that turn
+    # (at most beads_winddown_grace seconds) before terminating; 0 or false
+    # kills at once, as before. The exit sweep (in_progress -> open with a
+    # comment) is not a setting: a board that says a gone session is still
+    # working on something is wrong, whatever the operator's preferences.
+    "beads_auto_issue": True,
+    "beads_winddown": True,
+    "beads_winddown_grace": 120.0,
 }
 
 

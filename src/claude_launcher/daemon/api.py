@@ -15,6 +15,7 @@ import os
 import secrets
 import time
 from datetime import datetime, timezone
+from dataclasses import replace
 from pathlib import Path
 from typing import List, Optional
 
@@ -23,7 +24,9 @@ from aiohttp import web
 from .. import __version__, harnesses as harness_registry
 from .. import lineage, profile as profile_mod, quickjob, spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
+from . import beads as beads_mod
 from . import briefing, cflow_clock, clipty, ctxsize, onboard, rebrief
+from ..cli_beads import BeadsError
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
@@ -94,6 +97,7 @@ async def error_middleware(request: web.Request, handler):
         WorkflowError,
         StateError,
         MeshError,
+        BeadsError,
     ) as exc:
         return json_error(400, str(exc))
     except web.HTTPException:
@@ -129,6 +133,7 @@ def build_app(
     mesh: MeshManager | None = None,
     relay_state=None,
     shell: "clipty.ShellPty | None" = None,
+    beads: "beads_mod.Board | None" = None,
 ) -> web.Application:
     cookie_sessions: set = set()
     # Identifies this daemon *process*, and is handed out by /api/health (which
@@ -171,6 +176,12 @@ def build_app(
     # The CLI tab's raw shell: one per daemon, injected for tests.
     app["shell"] = shell if shell is not None else clipty.ShellPty()
     app.on_shutdown.append(_close_cli_shell)
+    # The board: one per daemon, injected for tests. Its exit sweep rides the
+    # manager's hook so every ending — kill, wind-down, /exit, crash — reaches
+    # the board, and a daemon shutdown (not an ending) does not.
+    board = beads if beads is not None else beads_mod.Board()
+    app["beads"] = board
+    manager.exit_hooks.append(board.session_exited)
 
     r = app.router
     r.add_get("/api/health", h_health)
@@ -305,6 +316,13 @@ def build_app(
     r.add_get("/api/sessions/{name}/ws", ws_mod.terminal_ws)
     # The CLI tab's raw shell — one socket per viewer, one child under it.
     r.add_get("/api/cli/ws", ws_mod.cli_ws)
+    # The board: every repository board the fleet touches, one issue in
+    # full, and a session's own slice of it (GET), with the one write the
+    # dashboard offers — an issue for a session that has none (POST).
+    r.add_get("/api/beads", h_beads_fleet)
+    r.add_get("/api/beads/{id}", h_beads_issue)
+    r.add_get("/api/sessions/{name}/beads", h_session_beads)
+    r.add_post("/api/sessions/{name}/beads", h_session_beads_create)
     r.add_get("/", h_index)
     if _STATIC_DIR.is_dir():
         r.add_static("/static", _STATIC_DIR)
@@ -1834,6 +1852,11 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         d = briefing.digest(info.get("name") or "")
         if d:
             info["briefing"] = d
+        # A kill that is still a wind-down (see beads.Board): the row says so
+        # and its kill button turns into "stop now".
+        wd = request.app["beads"].winddowns.get(info.get("name") or "")
+        if wd:
+            info["winddown"] = wd
         attached.append(info)
     return web.json_response(
         {
@@ -1921,11 +1944,32 @@ async def _onboard_and_launch(
         raise
     manager.assign_identity(session, plan.identity)
 
-    report, opening = {}, ""
+    # The board link, settled before the opening is composed so the agent's
+    # first message names the issue it will be working — the record the
+    # workflows tell it to read (`claunch beads show <id> --json`). Never a
+    # reason to refuse the session: a board that cannot be written is logged
+    # and the session starts without one.
+    linked = await request.app["beads"].ensure_issue(session, body=body, parent=parent)
+    report: dict = {}
+    if linked:
+        beads_mod.link_issue(session, linked["issue"])
+        report["beads"] = linked
+        if linked["issue"] not in beads_mod.issue_refs(plan.task, plan.context):
+            plan = replace(
+                plan,
+                task=(plan.task + "\n\n" if plan.task else "")
+                + f"issue: {linked['issue']} -- your board record, "
+                + ("registered from this task" if linked["created"] else "assigned to you")
+                + f"; read it with `claunch beads show {linked['issue']} --json` "
+                "and keep its status current (claunch beads update/comments).",
+            )
+
+    opening = ""
     if plan.wanted:
-        report, opening = await onboard.arrange(
+        arranged, opening = await onboard.arrange(
             plan, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request)
         )
+        report.update(arranged)
     try:
         manager.launch(session, opening=opening)
     except Exception:
@@ -2129,18 +2173,24 @@ async def h_sessions_kill_all(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     force = request.query.get("force") in ("1", "true")
     killed: List[str] = []
+    winding: List[str] = []
     failed: List[dict] = []
     for session in list(manager.list()):
         if session.exited:
             continue
         name = session.sdef.name
         try:
+            if await _winding_down(request, session, force=force):
+                winding.append(name)
+                continue
             manager.kill(name, force=force)
         except Exception as exc:  # one refusal must not strand the other nine
             failed.append({"name": name, "error": str(exc)})
         else:
             killed.append(name)
-    return web.json_response({"killed": killed, "failed": failed})
+    return web.json_response(
+        {"killed": killed, "winding_down": winding, "failed": failed}
+    )
 
 
 async def h_sessions_respawn_all(request: web.Request) -> web.Response:
@@ -2228,6 +2278,10 @@ async def h_session_meta(request: web.Request) -> web.Response:
         "queued": _session_queued(request, session),
         "cflow": None,
         "workflows": [],
+        # The board's slice for this session: the issue it is for and every
+        # issue that names it (see beads.match). Keyed by repository, not by
+        # session — one board per repo, reached from any worktree.
+        "beads": await request.app["beads"].session_view(session),
     }
     if cwd:
         body["cflow"] = _cflow_entry(manager, cwd, name)
@@ -2449,8 +2503,27 @@ async def h_session_delete(request: web.Request) -> web.Response:
             held = await _leave_meshes(request.app["mesh"], held)
         if held:
             return json_error(409, _mesh_holds_error(name, held))
+    elif await _winding_down(request, session, force=force):
+        return web.json_response({**session.info(), "winding_down": True})
     session = manager.kill(name, force=force)
     return web.json_response(session.info())
+
+
+async def _winding_down(request: web.Request, session, *, force: bool) -> bool:
+    """Whether a kill of ``session`` is now a wind-down instead (see
+    :meth:`beads.Board.begin_winddown`) — the considerate ending for a live
+    session holding active board issues. Skipped by ``force`` (the operator
+    wants it gone now) and by ``?winddown=0`` (the same, without SIGKILL);
+    a second kill of a session already winding down goes straight through,
+    which is what the button turns into while one is running."""
+    if force or request.query.get("winddown") in ("0", "false"):
+        board = request.app["beads"]
+        board.winddowns.pop(session.sdef.name, None)
+        return False
+    if session.sdef.name in request.app["beads"].winddowns:
+        request.app["beads"].winddowns.pop(session.sdef.name, None)
+        return False
+    return await request.app["beads"].begin_winddown(session, request.app["manager"])
 
 
 async def h_session_child_kill(request: web.Request) -> web.Response:
@@ -2504,6 +2577,8 @@ async def h_session_child_kill(request: web.Request) -> web.Response:
         # know the second ask changed nothing, or it will keep asking.
         return web.json_response({**target.info(), "already_exited": True})
     force = request.query.get("force") in ("1", "true")
+    if await _winding_down(request, target, force=force):
+        return web.json_response({**target.info(), "winding_down": True})
     session = manager.kill(child, force=force)
     return web.json_response(session.info())
 
@@ -2807,6 +2882,67 @@ async def h_index(request: web.Request) -> web.Response:
     if not index.is_file():
         return web.Response(text="claunch daemon is running (web UI assets missing)")
     return web.FileResponse(index)
+
+
+async def h_beads_fleet(request: web.Request) -> web.Response:
+    """Every board the fleet touches — the Beads page.
+
+    One entry per repository root among the sessions' directories (and the
+    daemon's own), each issue tagged with the sessions it belongs to and why,
+    so the page can draw the session↔issue match the rail draws per session,
+    for everybody at once.
+    """
+    manager: SessionManager = request.app["manager"]
+    extra = [os.getcwd()]
+    cwd = request.query.get("cwd")
+    if cwd:
+        extra.insert(0, cwd)
+    view = await request.app["beads"].fleet_view(list(manager.list()), extra)
+    return web.json_response(view)
+
+
+async def h_beads_issue(request: web.Request) -> web.Response:
+    """One issue in full, comments included. ``?cwd=`` says which board —
+    any directory inside the repository — and defaults to the daemon's."""
+    board = request.app["beads"]
+    cwd = request.query.get("cwd") or os.getcwd()
+    root = await board.root_for(cwd)
+    if not board.has_board(root):
+        return json_error(404, f"no board for {cwd}")
+    try:
+        issue = await board.show(root, request.match_info["id"])
+    except BeadsError as exc:
+        return json_error(404, str(exc))
+    return web.json_response({"root": str(root), "issue": issue})
+
+
+async def h_session_beads(request: web.Request) -> web.Response:
+    """A session's slice of its board — the same object the meta call carries."""
+    manager: SessionManager = request.app["manager"]
+    session = manager.get(request.match_info["name"])
+    return web.json_response(await request.app["beads"].session_view(session))
+
+
+async def h_session_beads_create(request: web.Request) -> web.Response:
+    """Give a session an issue after the fact — for one created without a
+    task, which the daemon minted nothing for. Body: ``title`` (required),
+    ``description`` (optional; the workflows' template when omitted). The
+    new issue is linked to the session the way a creation-time one is."""
+    manager: SessionManager = request.app["manager"]
+    session = manager.get(request.match_info["name"])
+    body = await _json_body(request)
+    title = str(body.get("title") or "").strip()
+    if not title:
+        return json_error(400, "an issue needs a title")
+    made = await request.app["beads"].create_for(
+        session, title=title, description=str(body.get("description") or "")
+    )
+    beads_mod.link_issue(session, made["issue"])
+    manager.persist()
+    return web.json_response(
+        {**made, "beads": await request.app["beads"].session_view(session)},
+        status=201,
+    )
 
 
 async def _json_body(request: web.Request) -> dict:

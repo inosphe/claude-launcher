@@ -38,6 +38,7 @@ the first-spawn ``opening`` argv path is untouched.
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
@@ -79,7 +80,7 @@ def compose(name: str, *, manager, mesh_mgr) -> str:
             _cflow_section(sdef),
             _asks_section(name),
             _children_section(name, manager),
-            _task_section(sdef.task or ""),
+            _task_section(sdef.task or "", issue=sdef.issue),
         )
         if s
     )
@@ -276,28 +277,36 @@ def _children_section(name: str, manager) -> str:
     )
 
 
-def _task_section(task: str) -> str:
+def _task_section(task: str, *, issue: Optional[str] = None) -> str:
     """The opening instruction, as recorded at creation.
 
     Restated last so it sits closest to the agent's next turn. The note draws
     the line the record cannot: this is what was *asked*, and whatever has
     been done toward it since lives in the conversation summary, the mesh
-    history and the cflow journal — not here.
+    history and the cflow journal — not here. The board issue the session is
+    for is named with it: the one record that *does* hold what has been done
+    since, and the one thing a compaction cannot take away.
     """
     task = task.strip()
-    if not task:
+    if not task and not issue:
         return ""
     if len(task) > TASK_LIMIT:
         task = task[:TASK_LIMIT] + (
             "\n[... task cut for the re-briefing; the full text is in the "
             "session record]"
         )
+    issue_line = (
+        f"issue: {issue} -- your board record; `claunch beads show {issue} "
+        "--json` for its state and comments\n"
+        if issue else ""
+    )
     return (
         "---\n"
         "# claunch: your opening task, as recorded at creation -- "
         "machine-generated\n"
-        f"{task}\n"
-        "note: this is the instruction as first given. What has been done "
+        f"{issue_line}"
+        + (f"{task}\n" if task else "")
+        + "note: this is the instruction as first given. What has been done "
         "toward it since is in your conversation summary, the mesh history "
         "and the cflow journal -- not in this block.\n"
         "---"

@@ -22,7 +22,7 @@ import os
 import threading
 import time
 from datetime import datetime, timezone
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from . import keys as keys_mod
 from . import paths, pty_backend
@@ -265,6 +265,12 @@ class Session:
         #: In memory only, and deliberately: it says "I am at this keyboard
         #: right now", which a daemon restart has already ended.
         self._delivery_hold = False
+        #: Called once, with this session, when the child is gone for good —
+        #: whatever ended it (see :meth:`_finish`). Set by the manager, which
+        #: fans it out to whoever asked (the board sweep in
+        #: :mod:`claude_launcher.daemon.beads`). Synchronous: a hook that has
+        #: work to do schedules it.
+        self.on_exit: Optional[Callable[["Session"], None]] = None
 
         session_dir = paths.session_dir(sdef.name)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -407,6 +413,11 @@ class Session:
         self._write_meta()
         self._broadcast(("exit", self.exit_code))
         self.pty.close()
+        if self.on_exit is not None:
+            try:
+                self.on_exit(self)
+            except Exception:  # a hook must never break the exit itself
+                log.exception("on_exit hook for %r failed", self.sdef.name)
 
     def _write_meta(self) -> None:
         meta = {
