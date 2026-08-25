@@ -4,22 +4,35 @@ The canonical improv pair ships verify-free (a suite command is a property
 of one repository), and THIS repository's machine checks live in its
 ``.claunch/workflows/`` overrides instead. These tests pin that arrangement:
 the two override files must parse, and each must carry exactly the one
-verify its layer exists to add — the worker's simplified suite on ``review``,
-the leader's full sweep on ``sweep`` (the batch sweep step after the merge). A later edit that breaks the yaml
-or drops a verify would otherwise only be discovered by a run blocking on it.
+verify its layer exists to add. A later edit that breaks the yaml or drops a
+verify would otherwise only be discovered by a run blocking on it.
 
-Both run under a *bounded* ``-n``: the suite is parallel safe (the heavy
-e2e tests all take an OS-assigned port, and ``conftest`` gives every test
-its own tmp home), but its cost is spawning processes rather than burning
-CPU, so workers past a handful buy nothing —
-:func:`test_the_verify_runs_bounded_parallel` keeps the width honest, and
-:func:`test_the_verify_basetemp_leaves_room_for_xdist` keeps the paths it
-builds under Windows' limit.
+**Neither of those verifies is a test suite any more, and that is the rule
+these pin hardest.** The engine runs a ``verify`` synchronously as the run
+leaves the step (``cflow/engine.py`` ``_run_verify``), so a suite in that
+field is a sweep that blocks the round and that nobody typed — the worker
+workflow's own review step calls this out: "the least visible sweep is the
+least recorded sweep." It had both:
+
+* ``review`` ran ``pytest tests -m "not worktree" -n 8`` — 1450 of 1558
+  tests. The step's prose said "the full sweep is not run here" while the
+  command ran 93% of it, and six sessions ran it concurrently.
+* ``sweep`` ran the whole suite outright, which quietly made a liar of the
+  leader workflow's "the leader does not run sweeps or merges in its turn".
+
+So the suites moved out to ``tools/``: ``changed_tests.py`` runs only what a
+branch's change can affect, and ``sweep.py`` splits the sweep (a subagent
+runs it) from the verdict (this gate reads its receipt in milliseconds).
+:func:`test_no_override_verify_runs_a_test_suite` is what keeps a future
+edit from putting a suite back.
+
+The measurements that used to justify ``-n 8`` and a short basetemp did not
+go away — they moved with the commands, and are pinned where those commands
+now live (``tests/test_sweep.py``, ``tests/test_changed_tests.py``).
 """
 
 from __future__ import annotations
 
-import re
 from pathlib import Path
 
 import pytest
@@ -28,78 +41,83 @@ from claude_launcher.cflow import model, state as state_mod
 
 OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
 
-#: Which steps each override arms, and how strictly this file may say so.
-#: The worker's is pinned to the letter here because this file and it are
-#: edited together; the leader's suite is checked by prefix, so a change to
-#: its workflow does not paint this suite red before it lands.
+#: Which steps each override arms.
 #:
-#: The leader arms two, and they are different kinds of check: ``sweep``
-#: runs this repository's suite over the batch's merge result (it used to
-#: sit on ``integrate`` itself, when every merge was its own sweep; the
-#: 5-minute integration window split the two), and ``reflect`` asks
-#: whether the live daemon was actually restarted onto that merge. The second
-#: exists because the step used to be prose alone -- a round could be filed
-#: as deployed while the daemon kept serving pre-merge code.
+#: The leader arms two, and by now they are the same *kind* of check: each
+#: reads a fact some other actor already established, rather than
+#: establishing it here. ``sweep`` asks whether a subagent's sweep of the
+#: batch's merge result was green (it used to sit on ``integrate`` itself,
+#: when every merge was its own sweep; the 5-minute integration window split
+#: the two, and moving the suite into a subagent split run from verdict).
+#: ``reflect`` asks whether the live daemon was actually restarted onto that
+#: merge. Both exist because their step used to be prose alone -- a round
+#: could be filed as swept, or as deployed, with nothing having happened.
 ARMED = {"improv-worker": ("review",), "improv-leader": ("sweep", "reflect")}
 
-# Both gates run against a venv that is already there. A worker's worktree
-# builds its venv once during the work ('uv sync --extra test'), and that one
-# sync also installs the xdist that -n 8 needs; after it, re-syncing inside a
-# verify is a side effect that really did block the gate — sync cannot replace
-# the claunch.exe a running daemon holds open (os error 5). So both are
-# --no-sync, and --extra test goes with the sync it belonged to.
-WORKER_SUITE = 'uv run --no-sync pytest tests -q -m "not worktree"'
-LEADER_SUITE = 'uv run --no-sync pytest tests -q'
+# Every gate runs against a venv that is already there. A worker's worktree
+# builds its venv once during the work ('uv sync --extra test'); after that,
+# re-syncing inside a verify is a side effect that really did block the gate
+# — sync cannot replace the claunch.exe a running daemon holds open (os error
+# 5). So every one of them is --no-sync.
+NO_SYNC = "uv run --no-sync python"
+
+#: What each armed step's verify must invoke. The point of the table is that
+#: none of these is a suite: the worker's picks the tests its own change can
+#: affect, and the leader's two read a fact somebody else already established
+#: (a sweep receipt, a daemon's boot time).
+GATES = {
+    ("improv-worker", "review"): "tools/changed_tests.py",
+    ("improv-leader", "sweep"): "tools/sweep.py",
+    ("improv-leader", "reflect"): "tools/deploy_check.py",
+}
 
 
-def test_the_worker_override_verifies_without_touching_the_environment():
-    """The worker's gate command, spelled out — every word of it load-bearing.
-
-    ``--no-sync`` keeps the verify from re-installing the venv out from under
-    a running daemon. ``-n 8`` is the measured ceiling (see
-    ``test_the_verify_runs_bounded_parallel``). The basetemp is short (deep
-    worktree paths under a long one hit Windows' path limit) and per-session
-    (pytest empties its basetemp at startup, so a shared one has concurrent
-    workers deleting each other's runs).
-    """
-    verify = model.load(OVERRIDES / "improv-worker.yaml").steps["review"].verify
-    assert verify is not None, "the worker override lost its verify"
-    assert verify.command == (
-        'uv run --no-sync pytest tests -q -m "not worktree" -n 8 '
-        '--basetemp="C:/t/%CLAUNCH_SESSION%"'
-    )
-
-
-@pytest.mark.parametrize(
-    "stem, step_id, suite",
-    [
-        ("improv-worker", "review", WORKER_SUITE),
-        ("improv-leader", "sweep", LEADER_SUITE),
-    ],
-)
-def test_the_override_carries_this_repos_suite_as_its_verify(
-    stem, step_id, suite
+@pytest.mark.parametrize("key, script", sorted(GATES.items()))
+def test_each_armed_step_runs_its_gate_without_touching_the_environment(
+    key, script
 ):
+    stem, step_id = key
     wf = model.load(OVERRIDES / f"{stem}.yaml")
     assert wf.name == stem
     verify = wf.steps[step_id].verify
     assert verify is not None, f"{stem}:{step_id} lost its verify"
-    assert verify.command.startswith(suite)
-    # basetemp keeps concurrent verifies out of each other's temp trees (and
-    # off the default %TEMP%, which has bitten this machine's permissions).
-    assert "--basetemp=" in verify.command
+    assert verify.command.startswith(NO_SYNC), (
+        f"{stem}:{step_id} must run --no-sync: a gate that re-resolves the "
+        f"venv fails on the claunch.exe a live daemon holds open"
+    )
+    assert script in verify.command
 
 
-def test_each_override_still_arms_its_step(stem="improv-leader"):
-    """The leader half, held to the one thing that is this file's business:
-    the override exists to add machine checks, so it must have them."""
-    wf = model.load(OVERRIDES / f"{stem}.yaml")
-    for step_id in ARMED[stem]:
-        assert wf.steps[step_id].verify is not None, (
-            f"{stem}:{step_id} lost its verify"
-        )
-    suite = wf.steps["sweep"].verify.command
-    assert "pytest" in suite and "--basetemp=" in suite
+def test_the_worker_gate_targets_the_change_rather_than_the_suite():
+    """The exact command, and the argument that makes it targeted.
+
+    ``--base`` is what turns "run tests" into "run the tests this branch's
+    change can affect": without it there is no diff to select from and the
+    script has nothing to narrow to.
+    """
+    verify = model.load(OVERRIDES / "improv-worker.yaml").steps["review"].verify
+    assert verify.command == (
+        "uv run --no-sync python tools/changed_tests.py --base master"
+    )
+
+
+def test_the_leader_sweep_gate_reads_a_receipt_rather_than_sweeping():
+    """``check``, not ``run`` — the distinction the whole split rests on.
+
+    ``tools/sweep.py`` has both halves in one file so the receipt format has
+    one home, which means the gate is one word away from being the very
+    blocking sweep it replaced. Pin the word.
+    """
+    verify = model.load(OVERRIDES / "improv-leader.yaml").steps["sweep"].verify
+    assert verify.command == (
+        "uv run --no-sync python tools/sweep.py check --branch master"
+    )
+    # Anchored to the script: a bare `" run "` also matches `uv run`, which
+    # every one of these commands starts with.
+    assert "sweep.py run" not in verify.command, (
+        "the sweep gate must read a receipt, not run the suite in the "
+        "leader's turn — that is the whole reason it stopped being pytest"
+    )
 
 
 def test_the_leader_override_gates_the_deploy_on_a_real_restart():
@@ -173,76 +191,52 @@ def test_the_leader_override_is_canonical_plus_verify():
         )
 
 
-#: Windows refuses a path this long; the run that broke measured exactly 260.
-MAX_PATH = 260
+@pytest.mark.parametrize("key", sorted(GATES))
+def test_no_override_verify_runs_a_test_suite(key):
+    """The rule the rest of this file exists to protect.
 
-#: What the longest path under basetemp costs *besides* basetemp — xdist's
-#: ``popen-gwN/``, the test directory, the transcript layout and the
-#: conversation id. Measured against the path that actually raised.
-PATH_CONSTANT = 162
+    A ``verify`` is run by the engine, synchronously, as the run leaves the
+    step. Put a suite there and you have a sweep that blocks the round,
+    that six sessions start at once, and that nobody typed — so nobody
+    records it either. Both of this repository's suites lived there once,
+    and both prose halves said they did not: the worker step said "the full
+    sweep is not run here" over a command running 93% of the suite, and the
+    leader workflow said "the leader does not run sweeps in its turn" over a
+    verify that ran the whole thing in exactly that turn.
 
-#: The longest session name to budget for (``%CLAUNCH_SESSION%`` expands to
-#: one; ``w-brief-be`` is the longest this mesh has used).
-LONGEST_SESSION = "w" * 16
-
-
-@pytest.mark.parametrize("stem", ["improv-worker", "improv-leader"])
-def test_the_verify_basetemp_leaves_room_for_xdist(stem):
-    """A short basetemp is a correctness requirement here, not tidiness.
-
-    ``-n auto`` inserts ``popen-gwN/`` under basetemp, and the transcript
-    tests re-encode their whole cwd into one filename (that is how claude
-    files a conversation) — so every character of basetemp is spent twice
-    and the path grows as ``2 * len(basetemp) + PATH_CONSTANT``. Measured on
-    this suite: a 48-character basetemp lands on 258 and passes, 49 lands on
-    260 and raises ``FileNotFoundError``. A gate that flips on one character
-    is not a gate, so keep the room explicit.
+    The prose is fixed now, but prose is what was already wrong. This is the
+    machine half: no verify in either override may invoke pytest.
     """
-    wf = model.load(OVERRIDES / f"{stem}.yaml")
-    verify = wf.steps["review" if stem == "improv-worker" else "sweep"].verify
-    basetemp = verify.command.split('--basetemp="')[1].split('"')[0]
-    # cmd leaves %CLAUNCH_SESSION% standing when the daemon — which cannot
-    # see it — runs the verify, and that literal is longer than most session
-    # names, so budgeting for the longer of the two covers both writers.
-    expanded = basetemp.replace("%CLAUNCH_SESSION%", LONGEST_SESSION)
-    longest = 2 * max(len(expanded), len(basetemp)) + PATH_CONSTANT
-    assert longest < MAX_PATH, (
-        f"{stem}'s basetemp {basetemp!r} builds paths up to {longest} "
-        f"characters, over Windows' {MAX_PATH}: xdist's popen-gwN/ and the "
-        f"transcript slug under it spend every character of it twice"
+    stem, step_id = key
+    command = model.load(OVERRIDES / f"{stem}.yaml").steps[step_id].verify.command
+    assert "pytest" not in command, (
+        f"{stem}:{step_id} verify runs pytest ({command!r}). The engine runs "
+        f"this synchronously on leaving the step, so a suite here is a "
+        f"blocking sweep nobody typed. Targeted selection belongs in "
+        f"tools/changed_tests.py; a full sweep belongs in a spawned subagent "
+        f"via 'tools/sweep.py run', with this gate reading its receipt"
+    )
+    assert " -n " not in command, (
+        f"{stem}:{step_id} verify passes -n ({command!r}): xdist width is a "
+        f"property of running a suite, and these gates do not run one"
     )
 
 
-#: Measured on this suite (32 cores): serial 532s, ``-n 4`` 230s, ``-n 8``
-#: 178s, ``-n auto`` (= 32 here) 184s. Past a handful of workers the curve is
-#: flat, because the wall clock belongs to daemons and PTYs starting up, not
-#: to arithmetic.
-MAX_USEFUL_WORKERS = 8
+def test_the_prose_forbids_the_suite_too_so_the_next_editor_reads_it():
+    """Both halves say it, because only one of them said it last time.
 
-
-@pytest.mark.parametrize("stem", ["improv-worker", "improv-leader"])
-def test_the_verify_runs_bounded_parallel(stem):
-    """Parallel, but with a ceiling — and the ceiling is the point.
-
-    ``-n auto`` reads as the obvious choice and is the wrong one here. It
-    measured no faster than ``-n 8`` while running four times the processes,
-    and that contention starved the PTY-timing tests: one sweep in three
-    failed ``test_delivery_holds_while_a_human_is_typing``, whose 20-second
-    wait for a screen to render is generous until 32 workers are spawning
-    daemons at once. A gate that fails one run in three teaches people to
-    re-run it, which is worse than a slow gate. The ceiling also has to hold
-    when *six* sessions verify at once, which is the normal state of this
-    mesh: 6x8 fits this machine, 6x32 does not.
+    The commands are fixed above; this pins that a reader of either workflow
+    is told *why* before they reach for pytest again. The worker's review
+    step and the leader's sweep step are the two places the temptation
+    lands.
     """
-    wf = model.load(OVERRIDES / f"{stem}.yaml")
-    verify = wf.steps["review" if stem == "improv-worker" else "sweep"].verify
-    width = re.search(r" -n (\S+)", verify.command)
-    assert width, f"{stem}'s verify lost its -n; the gate is serial again"
-    assert width.group(1) != "auto", (
-        "-n auto is one worker per core (32 here): no faster than -n 8 and "
-        "flaky with it — see this test's docstring"
-    )
-    assert 2 <= int(width.group(1)) <= MAX_USEFUL_WORKERS
+    worker = model.load(OVERRIDES / "improv-worker.yaml").steps["review"]
+    assert "전체 스위트는 워커가 어떤 경로로도 돌리지 않는다" in worker.instructions
+    assert "verify" in worker.instructions  # and that the ban covers the field
+
+    sweep = model.load(OVERRIDES / "improv-leader.yaml").steps["sweep"]
+    assert "spawn한 subagent 안에서 돈다" in sweep.instructions
+    assert "subagent" in sweep.done_when
 
 
 # --------------------------------------------------------------------------- #
