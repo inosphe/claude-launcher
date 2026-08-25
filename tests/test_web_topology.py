@@ -163,6 +163,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "railhome_check.js",
         "typing_check.js",
         "leak_check.js",
+        "pingbox_check.js",
     ],
 )
 def test_topology_diagram_logic(script):

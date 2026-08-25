@@ -1,8 +1,8 @@
 """The clocks cflow cannot carry itself.
 
 Everything else in cflow happens because somebody called a tool: the agent
-advances, a human approves, a responder answers. Three things have nobody to
-call them, so the daemon carries all three, scanning the same machine-local
+advances, a human approves, a responder answers. Four things have nobody to
+call them, so the daemon carries all four, scanning the same machine-local
 run registry the dashboard lists runs from:
 
 * :class:`AskClock` — a delegated decision's ``timeout``. The one agent that
@@ -10,6 +10,11 @@ run registry the dashboard lists runs from:
 * :class:`ReminderClock` — the step instructions an agent has drifted away
   from. The agent that would notice it has forgotten the protocol is,
   definitionally, the one that forgot it.
+* :class:`StallPingClock` — the session that simply STOPPED, at a step no
+  gate is holding. The reminder above never reaches it (it types only into a
+  session that is working), and no gate event fires (there is no gate), so
+  the one run position nobody watches is the one where nothing is wrong
+  except that nobody is working.
 * :class:`RunEventClock` — the moment a run stops being its own agent's: a
   human gate entered, a recurring round finished, a driver that exited. The
   session that would want to know — the overseer that spawned the driver —
@@ -41,7 +46,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, state as cflow_state
-from .session import STATUS_BUSY
+from .session import STATUS_BUSY, STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.cflow")
 
@@ -285,24 +290,30 @@ class ReminderClock:
             log.info("cflow reminder delivered to %r (%s)", scope, cwd)
 
     def _session_for(self, cwd: str, scope: str):
-        """The live session this run maps 1:1 to, or None.
+        return session_for(self.manager, cwd, scope)
 
-        Same containment rule as the dashboard's ``_scope_sessions``: the
-        scope IS the session name, and the cwd must match so a name reused in
-        another directory is never typed into by that directory's run.
-        """
-        try:
-            session = self.manager.get(scope)
-        except Exception:
+
+def session_for(manager, cwd: str, scope: str):
+    """The live session a run maps 1:1 to, or None.
+
+    Same containment rule as the dashboard's ``_scope_sessions``: the scope
+    IS the session name, and the cwd must match so a name reused in another
+    directory is never typed into by that directory's run. Shared by every
+    clock here that types into a driver, so the containment rule is stated
+    once and cannot drift between them.
+    """
+    try:
+        session = manager.get(scope)
+    except Exception:
+        return None
+    if session.exited or not session.sdef.cwd:
+        return None
+    try:
+        if cflow_state.resolve_cwd(session.sdef.cwd) != cwd:
             return None
-        if session.exited or not session.sdef.cwd:
-            return None
-        try:
-            if cflow_state.resolve_cwd(session.sdef.cwd) != cwd:
-                return None
-        except Exception:
-            return None
-        return session
+    except Exception:
+        return None
+    return session
 
 
 def reminder_block(payload: dict, interval: float) -> str:
@@ -373,6 +384,220 @@ def reminder_block(payload: dict, interval: float) -> str:
             "'report' and advance with 'next'; if you have lost the thread, "
             "call 'status' first -- it is the current truth."
         )
+    lines.append("---")
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# the stall ping clock
+# --------------------------------------------------------------------------- #
+#: How often the ping clock looks. The reminder's cadence — the stalls it
+#: measures are minutes to hours, so a finer poll would only cost scans.
+PING_POLL = 15.0
+
+#: The floor on the configured interval. A ping opens a fresh turn in a
+#: session that had stopped; at less than a minute apart that is not a nudge,
+#: it is a session that never gets to finish reading the last one.
+PING_MIN_INTERVAL = 60.0
+
+
+class StallPingClock:
+    """Pings a session that STOPPED at a step nothing is holding.
+
+    Between the reminder and the gate events there is one position nobody
+    watches, and it is the one a fleet actually dies in: the run sits at a
+    step (or a select) that is the agent's own to move — no approval, no
+    selection, no delegated answer outstanding — and the session driving it
+    is not working. The reminder clock will not touch it on purpose: it
+    types only into a *busy* session, because its job is to re-aim an agent
+    mid-turn, not to restart one. The run event clock will not either: there
+    is no gate to report, no round finished, and the session has not exited.
+    So nothing at all happens, indefinitely, and the run looks exactly like
+    one that is making progress.
+
+    This clock is the one that pokes it. The trigger is *stopped at an
+    unchanged actionable position*: the position key resets the timer when
+    the run moves, and a session that reads busy resets it too — an agent
+    working a long side quest at one step is the reminder's business, not
+    this clock's. What lands is a machine-generated frame carrying the
+    operator's configured message, so the text of the poke is a setting and
+    not a constant baked into the daemon.
+
+    Configuration is the machine's, read fresh every pass like the
+    reminder's: ``cflow_ping`` (off by default), ``cflow_ping_interval`` and
+    ``cflow_ping_message`` in :func:`store.daemon_config`, editable from
+    ``claunch daemon config`` or the web UI's ``PUT /api/cflow/ping``. While
+    it is off no timers are kept at all, so switching it on starts every run
+    at zero rather than firing a backlog of pings for stalls that accrued in
+    the dark.
+
+    Why it is off by default, unlike the reminder: a run may be idle at an
+    actionable step *legitimately* — a workflow whose intake step parks until
+    a human hands it a goal is stopped, actionable and perfectly healthy. The
+    daemon cannot tell that apart from an agent that forgot, so the operator
+    turns this on for the fleet where the trade is worth it.
+    """
+
+    def __init__(self, manager, *, poll: float = PING_POLL) -> None:
+        self.manager = manager
+        self.poll = poll
+        self._task: Optional[asyncio.Task] = None
+        #: (cwd, scope) -> {"pos": position key, "at": monotonic seconds} —
+        #: in memory only, same trade as the reminder's timers: a restart
+        #: delays the next ping by one interval and replays nothing.
+        self._seen: Dict[Tuple[str, str], dict] = {}
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.poll)
+                due = await asyncio.to_thread(self.scan, time.monotonic())
+                for cwd, scope, block in due:
+                    await self._deliver(cwd, scope, block)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One unreadable run must not stop the clock for the rest.
+                log.exception("cflow stall ping clock tick failed")
+
+    def scan(self, now: float) -> List[Tuple[str, str, str]]:
+        """Decide who is stalled. Blocking (config + every run's state); call
+        it in a thread. Public for the tests, which own ``now`` there."""
+        try:
+            cfg = store.daemon_config()
+        except store.StoreError as exc:
+            log.warning("cflow stall ping: config unreadable, skipping: %s", exc)
+            return []
+        if not bool(cfg.get("cflow_ping")):
+            # Off: keep no timers, so turning it on does not fire a backlog.
+            self._seen.clear()
+            return []
+        interval = float(cfg.get("cflow_ping_interval") or 0)
+        if interval <= 0:
+            self._seen.clear()
+            return []
+        interval = max(interval, PING_MIN_INTERVAL)
+        message = str(cfg.get("cflow_ping_message") or "").strip()
+        due: List[Tuple[str, str, str]] = []
+        live = set()
+        for cwd, scope in cflow_state.known_runs():
+            key = (cwd, scope)
+            live.add(key)
+            try:
+                payload = cflow_engine.status(cwd, scope=scope)
+            except Exception as exc:
+                log.debug("cflow stall ping skipped %s/%s: %s", cwd, scope, exc)
+                continue
+            if not _actionable(payload):
+                # A guardrail IS holding this one — an approval, a selection,
+                # a responder's answer. That stop is the protocol working, and
+                # the overseer already hears about it (RunEventClock).
+                self._seen.pop(key, None)
+                continue
+            session = session_for(self.manager, cwd, scope)
+            if session is None:
+                # No session of this machine drives it (a CLI run), or the
+                # driver has exited — the latter is 'orphaned', not a stall.
+                self._seen.pop(key, None)
+                continue
+            pos = (
+                payload.get("run"), payload.get("status"),
+                payload.get("step_id"), payload.get("visit"),
+            )
+            entry = self._seen.get(key)
+            if entry is None or entry["pos"] != pos or self._working(session):
+                # Working, or moved, or first sight: arm, never fire. Only an
+                # unbroken stretch of *stopped at the same position* counts.
+                self._seen[key] = {"pos": pos, "at": now}
+                continue
+            if now - entry["at"] >= interval:
+                due.append((cwd, scope, ping_block(payload, message, now - entry["at"])))
+        for key in list(self._seen):
+            if key not in live:
+                del self._seen[key]
+        return due
+
+    @staticmethod
+    def _working(session) -> bool:
+        """Whether somebody is at work in this session right now.
+
+        Only ``idle`` is a stall. ``busy`` is an agent mid-turn (the
+        reminder's audience), and ``starting`` is a session whose harness has
+        not printed yet — pinging either says "you have stopped" to one that
+        has not.
+        """
+        try:
+            return session.status() != STATUS_IDLE
+        except Exception:
+            return True  # unreadable status: assume working, never ping blind
+
+    async def _deliver(self, cwd: str, scope: str, block: str) -> None:
+        session = session_for(self.manager, cwd, scope)
+        if session is None:
+            return
+        try:
+            delivered = await session.deliver(block)
+        except Exception:
+            log.exception("cflow stall ping delivery to %r failed", scope)
+            return
+        if delivered:
+            # Rearm only on success — a failed delivery keeps its debt and is
+            # retried on the next poll, exactly like the reminder's.
+            entry = self._seen.get((cwd, scope))
+            if entry is not None:
+                entry["at"] = time.monotonic()
+            log.info("cflow stall ping delivered to %r (%s)", scope, cwd)
+
+
+def ping_block(payload: dict, message: str, stalled_for: float) -> str:
+    """The text a stopped session hears: the operator's message, framed.
+
+    The frame is not decoration. A ping arrives in a session that had ended
+    its turn, so it reads as a fresh user message unless it says otherwise —
+    and an agent that mistakes it for one starts explaining itself instead of
+    working. So the block names itself machine-generated, states the position
+    and the two things the reader most needs to know about it (nothing is
+    blocking it; the step is theirs to move), and carries the configured
+    message as the operator's own words inside that.
+    """
+    minutes = max(1, int(stalled_for // 60))
+    step = payload.get("step_id")
+    visit = payload.get("visit")
+    position = f"step '{step}'" + (f" (visit {visit})" if visit and visit > 1 else "")
+    if payload.get("status") == "select":
+        position = f"branch choice at {position}"
+    elif _ask_reached_nobody(payload):
+        position = f"{position}, on a delegated decision nobody was ever asked"
+    lines = [
+        "---",
+        "# claunch cflow: stall ping -- machine-generated, not typed by the "
+        f"user. This session has been stopped for ~{minutes} min and no gate "
+        "is holding its run.",
+        f"workflow: {payload.get('workflow')}",
+        f"position: {position}",
+    ]
+    if message:
+        lines.append(f"message: {message}")
+    lines.append(
+        "protocol: nothing is waiting on anybody else -- no approval, no "
+        "selection, no delegated answer is outstanding, so this position is "
+        "yours to move. If you are deliberately parked (waiting for a person "
+        "to hand you a goal, or for work you cannot start yet), say what you "
+        "are waiting for and stay put -- that is a real answer. Otherwise "
+        "call the cflow 'status' tool for the current truth and carry on; "
+        "'report' then 'next' is what advances it."
+    )
     lines.append("---")
     return "\n".join(lines)
 

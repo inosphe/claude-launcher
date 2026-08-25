@@ -190,6 +190,24 @@ DAEMON_DEFAULTS = {
     # oversees hits a human gate, finishes a recurring round, or loses its
     # driver. Read LIVE like the reminder keys.
     "cflow_events": True,
+    # The stall ping clock: whether a session that has STOPPED at a step that
+    # is its own to move — no gate, no selection, no delegated answer holding
+    # it — is pinged after this many seconds, and with what text. The reminder
+    # above deliberately never lands here (it types only into a *working*
+    # session), so this is the one clock that opens a fresh turn in a session
+    # that has gone quiet. OFF by default for exactly that reason: a run may
+    # be idle at an actionable step because its workflow parks there waiting
+    # for a human to hand it a goal, and pinging a fleet of those burns tokens
+    # to tell agents something they already know. Read LIVE like the keys
+    # above — a config edit or the web UI's PUT applies within one tick.
+    "cflow_ping": False,
+    "cflow_ping_interval": 900.0,
+    # English like every other block the daemon types into a session; the
+    # point of the setting is that an operator replaces it with their own.
+    "cflow_ping_message": (
+        "This run has not moved in a long time and nothing is holding it. "
+        "Pick it back up, or say what you are waiting for."
+    ),
 }
 
 

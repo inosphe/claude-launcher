@@ -1090,8 +1090,13 @@ def _cmd_daemon_token(args: argparse.Namespace) -> int:
 _CONFIG_KEYS = tuple(store.DAEMON_DEFAULTS)
 
 #: Keys the daemon re-reads from the config file at runtime (the cflow
-#: reminder clock reads them every tick), so an edit needs no restart.
-_LIVE_KEYS = ("cflow_reminder", "cflow_reminder_interval")
+#: reminder, stall-ping and event clocks read them every tick), so an edit
+#: needs no restart.
+_LIVE_KEYS = (
+    "cflow_reminder", "cflow_reminder_interval",
+    "cflow_ping", "cflow_ping_interval", "cflow_ping_message",
+    "cflow_events",
+)
 
 
 def _cmd_daemon_config(args: argparse.Namespace) -> int:

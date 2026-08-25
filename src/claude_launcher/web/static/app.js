@@ -1224,8 +1224,92 @@ async function renderReminderDefaults() {
   ));
 }
 
+/* The stall ping's machine settings, editable in place — the reminder box's
+   complement. That clock re-aims a session that is WORKING; this one wakes a
+   session that has STOPPED at a step no gate is holding, which is the one
+   position nothing else watches. Off by default (a run can sit at an
+   actionable step legitimately, waiting for a person to hand it a goal), so
+   this box is where it gets turned on. Rendered once, same guard as above:
+   the flows list rebuilds on every poll and would otherwise wipe a
+   half-typed message. */
+async function renderStallPingDefaults() {
+  const box = $("cflow-ping-defaults");
+  if (!box || box.dataset.ready) return;
+  box.dataset.ready = "1";
+  let defs = null;
+  try {
+    const resp = await api("/api/cflow/ping");
+    if (resp.ok) defs = ((await resp.json()) || {}).defaults;
+  } catch { /* auth overlay is up */ }
+  if (!defs) {
+    delete box.dataset.ready; // try again on the next visit
+    return;
+  }
+  box.innerHTML = "";
+  const head = el("label", "pol-head");
+  const on = document.createElement("input");
+  on.type = "checkbox";
+  on.checked = !!defs.enabled;
+  head.appendChild(on);
+  head.appendChild(el("span", null, "stall pings — stopped sessions"));
+  head.title = "when a run sits at a step that is its agent's own to move " +
+    "— no approval, no selection, no delegated answer holding it — and the " +
+    "session has stopped working, the daemon pings it with the message below";
+  box.appendChild(head);
+  const row = el("div", "pol-row");
+  row.appendChild(el("span", "pol-label", "after"));
+  const iv = document.createElement("input");
+  iv.type = "number";
+  iv.min = String(Math.round(defs.min_interval || 60));
+  iv.step = "30";
+  iv.className = "pol-num";
+  iv.value = String(Math.round(defs.interval || 900));
+  row.appendChild(iv);
+  row.appendChild(el("span", "pol-label", "s stopped"));
+  box.appendChild(row);
+  const msgRow = el("div", "pol-row");
+  const msg = document.createElement("textarea");
+  msg.className = "pol-msg";
+  msg.rows = 3;
+  msg.value = defs.message || "";
+  msg.placeholder = "ping message (blank restores the default)";
+  msgRow.appendChild(msg);
+  box.appendChild(msgRow);
+  const saveRow = el("div", "pol-row");
+  const save = el("button", "wf-btn", "Save ping settings");
+  save.addEventListener("click", async () => {
+    try {
+      const resp = await api("/api/cflow/ping", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          enabled: on.checked, interval: +iv.value, message: msg.value,
+        }),
+      });
+      const doc = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        alert(doc.error || `HTTP ${resp.status}`);
+        return;
+      }
+      // A blank message clears back to the packaged default, so show what
+      // the daemon actually kept rather than the empty box that was sent.
+      if (doc.defaults) msg.value = doc.defaults.message || "";
+      document.activeElement?.blur?.();
+    } catch { /* auth overlay is up */ }
+  });
+  saveRow.appendChild(save);
+  box.appendChild(saveRow);
+  box.appendChild(el(
+    "p", "wf-note",
+    "the message is typed in as a fresh turn, so it wakes an agent that had " +
+    "stopped; a run parked on an approval or a delegated answer is never " +
+    "pinged. Applies within one daemon tick (~15s)"
+  ));
+}
+
 async function refreshCflow() {
   renderReminderDefaults(); // once; guarded inside
+  renderStallPingDefaults(); // once; guarded inside
   let data;
   try {
     const resp = await api("/api/cflow");
