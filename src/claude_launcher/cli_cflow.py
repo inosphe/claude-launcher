@@ -142,6 +142,11 @@ def _cmd_show(args: argparse.Namespace) -> int:
         )
     elif wf.priority:
         print(f"priority: {wf.priority} — rank among a picker's candidates")
+    if wf.default_child_cflow:
+        print(
+            f"default_child_cflow: {wf.default_child_cflow} — a child spawned "
+            f"by a session driving this workflow starts on that one"
+        )
     for s in wf.steps.values():
         flags = []
         if s.gate:

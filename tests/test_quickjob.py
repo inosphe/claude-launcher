@@ -31,6 +31,17 @@ def test_defaults_stand_without_a_block(home):
     convention, not an empty form."""
     assert quickjob.load() == quickjob.DEFAULTS
     assert quickjob.load()["role"] == "worker"
+
+
+def test_the_default_names_no_workflow_so_the_parents_pair_decides(home):
+    """The one field the worker convention does NOT fill in. Which run a
+    child drives is the parent's workflow's to declare
+    (``default_child_cflow``); a name hard-coded here would hand the same run
+    to the children of a session driving something else entirely, which is
+    the bug the pair closes. Empty means the spawn inherits it."""
+    assert quickjob.load()["workflow"] == ""
+    # naming one is still allowed, and then it overrides the pair
+    quickjob.save({"workflow": "improv-worker"})
     assert quickjob.load()["workflow"] == "improv-worker"
 
 

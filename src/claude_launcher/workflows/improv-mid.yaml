@@ -27,6 +27,13 @@ filter_roles:
 # 이 런은 mesh-delegate 스킬이 spawn에 workflow: improv-mid 로 지목할 때만
 # 돈다. 위저드의 Role 행이 worker를 고른다고 이 런이 뽑히면 안 된다.
 
+# 반대로 이 런을 도는 중간 워커가 spawn하는 자식은 워커다 — 아래 intake가
+# "spawn에 role worker, workflow improv-worker"라고 이미 지시하는 그 짝을
+# 여기 한 줄로 못박는다(자식 spawn이 workflow를 대지 않으면 이것이 붙는다).
+# 스택은 층이 하나 더 생기는 것이 아니라 자식이 워커 런을 도는 것이다:
+# improv-mid를 다시 물리려면 mesh-delegate처럼 spawn에서 직접 대야 한다.
+default_child_cflow: improv-worker
+
 steps:
   intake:
     title: 스택 개설

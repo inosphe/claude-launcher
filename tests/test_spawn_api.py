@@ -14,6 +14,7 @@ import time
 from pathlib import Path
 
 from claude_launcher import lineage, profile, store, workspaces
+from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.cflow import state as cflow_state
 from claude_launcher.daemon import harness as harness_mod
 from claude_launcher.daemon.api import build_app
@@ -1615,6 +1616,221 @@ def test_a_worktree_of_a_directory_that_is_no_repository_is_refused(home, tmp_pa
             assert resp.status == 400
             assert "not inside a git repository" in (await resp.json())["error"]
             assert "w1" not in [s.sdef.name for s in mgr.list()]
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the pair: which run a child drives is the parent's workflow's to declare
+# --------------------------------------------------------------------------- #
+def _declare_paired_workflows(cwd) -> None:
+    """Two workflows that are two halves of one procedure.
+
+    ``lead-flow`` pairs its children with ``worker-flow``; ``review`` (from
+    :func:`_declare_review_workflow`) pairs with nothing, which is the other
+    answer this feature has to be able to give.
+    """
+    d = cwd / ".claunch" / "workflows"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "lead-flow.yaml").write_text(
+        "name: lead-flow\n"
+        "start: watch\n"
+        "default_child_cflow: worker-flow\n"
+        "steps:\n"
+        "  watch:\n"
+        "    title: Watch\n"
+        "    instructions: watch the fleet\n",
+        encoding="utf-8",
+    )
+    (d / "worker-flow.yaml").write_text(
+        "name: worker-flow\n"
+        "start: work\n"
+        "steps:\n"
+        "  work:\n"
+        "    title: Work\n"
+        "    instructions: do the one thing\n",
+        encoding="utf-8",
+    )
+
+
+def _lead_driving(mgr, tmp_path, workflow: str) -> None:
+    """A parent session standing in ``tmp_path``, with a run of its own."""
+    mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+    if workflow:
+        cflow_engine.start(workflow, cwd=str(tmp_path), scope="lead")
+
+
+def test_a_child_starts_on_the_run_its_parents_workflow_pairs_it_with(home, tmp_path):
+    """The pair, end to end: the spawn names no workflow and the child gets
+    one anyway - the one ``lead-flow`` declares, scoped to the child."""
+    _register_py_harness()
+    _declare_paired_workflows(tmp_path)
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            _lead_driving(mgr, tmp_path, "lead-flow")
+            await mm.join("team", "lead", handle="lead")
+
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "role": "worker"},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            body = await resp.json()
+            assert body["workflow"]["ok"] is True, body["workflow"]
+            assert body["workflow"]["workflow"] == "worker-flow"
+            # the run is the CHILD's work, not the parent's: its own scope
+            assert body["workflow"]["scope"] == "w1"
+            assert "w1" in cflow_state.scopes_in(str(tmp_path))
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_parent_whose_workflow_pairs_with_nothing_gives_its_child_no_run(
+    home, tmp_path
+):
+    """The other answer, and the point of the whole change: a parent driving
+    a workflow that declares no pair hands its child NO run. Where the
+    child's role used to decide, a worker-role child got the worker flow no
+    matter what its parent was actually doing."""
+    _register_py_harness()
+    _declare_paired_workflows(tmp_path)
+    _declare_review_workflow(tmp_path)
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            _lead_driving(mgr, tmp_path, "review")   # declares no pair
+            await mm.join("team", "lead", handle="lead")
+
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "role": "worker"},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            body = await resp.json()
+            assert "workflow" not in body, body.get("workflow")
+            assert "w1" not in cflow_state.scopes_in(str(tmp_path))
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_parent_driving_no_run_at_all_pairs_its_child_with_nothing(home, tmp_path):
+    """Nothing to read the pair off is the same answer as a workflow that
+    declares none - and never the directory's default-scope run, which
+    belongs to whoever started it rather than to this parent."""
+    _register_py_harness()
+    _declare_paired_workflows(tmp_path)
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            _lead_driving(mgr, tmp_path, "")                     # no run of its own
+            cflow_engine.start("lead-flow", cwd=str(tmp_path))   # somebody else's
+            await mm.join("team", "lead", handle="lead")
+
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "role": "worker"},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            assert "workflow" not in await resp.json()
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_named_workflow_overrides_the_pair_and_a_dash_refuses_it(home, tmp_path):
+    """Two ways to differ from the pair, because they are different wishes:
+    'this child runs something else' and 'this child runs nothing'."""
+    _register_py_harness()
+    _declare_paired_workflows(tmp_path)
+    _declare_review_workflow(tmp_path)
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            _lead_driving(mgr, tmp_path, "lead-flow")
+            await mm.join("team", "lead", handle="lead")
+
+            named = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "workflow": "review"},
+                headers=BEARER,
+            )
+            assert named.status == 201
+            assert (await named.json())["workflow"]["workflow"] == "review"
+
+            refused = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w2", "workflow": "-"},
+                headers=BEARER,
+            )
+            assert refused.status == 201
+            body = await refused.json()
+            assert "workflow" not in body, body.get("workflow")
+            assert "w2" not in cflow_state.scopes_in(str(tmp_path))
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_children_reports_the_run_the_next_child_would_start_on(home, tmp_path):
+    """The pickers' single source: the spawn forms preselect this rather than
+    computing the pair themselves, so what the form shows is what the spawn
+    does."""
+    _register_py_harness()
+    _declare_paired_workflows(tmp_path)
+    _declare_review_workflow(tmp_path)
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            _lead_driving(mgr, tmp_path, "lead-flow")
+            mgr.create(SessionDef(name="solo", harness="py", cwd=str(tmp_path)))
+            cflow_engine.start("review", cwd=str(tmp_path), scope="solo")
+
+            paired = await client.get("/api/sessions/lead/children", headers=BEARER)
+            assert (await paired.json())["child_cflow"] == "worker-flow"
+
+            unpaired = await client.get("/api/sessions/solo/children", headers=BEARER)
+            assert (await unpaired.json())["child_cflow"] == ""
+
             await mgr.shutdown_all()
         finally:
             await client.close()

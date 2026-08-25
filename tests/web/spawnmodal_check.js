@@ -258,6 +258,59 @@ async function main() {
   check("ranking marks the refusal in the option detail",
     ranked.options.some((o) => /filter_roles turns 'worker' away/.test(o.detail)), ranked.options);
 
+  /* ---- the pair: a child's run comes from its PARENT, not its role ------
+     The role still ranks the list; what is preselected is the pair the
+     parent's own run declares (`child_cflow`). Reading the child's run off
+     its role is what handed a worker-role child the worker flow under a
+     parent driving something else entirely. */
+  const WFS = [
+    { name: "improv-worker", default_role: "worker", priority: 5 },
+    { name: "worker-flow" },
+  ];
+  const pairUi = uiStub({
+    workflow: node("select"), _wfs: WFS,
+    report: { child_cflow: "worker-flow" },
+  });
+  ctx.refillSpawnWorkflows(pairUi, "worker", "");
+  check("the parent's pair is preselected, not the role's default",
+    pairUi.workflow.value === "worker-flow", pairUi.workflow.value);
+  check("...over a list the role still ranks",
+    pairUi.workflow.options[1].value === "improv-worker",
+    pairUi.workflow.options.map((o) => o.value));
+
+  const loneUi = uiStub({ workflow: node("select"), _wfs: WFS, report: {} });
+  ctx.refillSpawnWorkflows(loneUi, "worker", "");
+  check("a parent that pairs with nothing preselects nothing",
+    loneUi.workflow.value === "", loneUi.workflow.value);
+
+  const pickedUi = uiStub({
+    workflow: node("select"), _wfs: WFS,
+    report: { child_cflow: "worker-flow" },
+  });
+  ctx.refillSpawnWorkflows(pickedUi, "worker", "");
+  pickedUi.workflow.value = "improv-worker";          // the operator picks
+  ctx.refillSpawnWorkflows(pickedUi, "leader", "worker-flow");
+  check("a pick of the operator's survives a role change",
+    pickedUi.workflow.value === "improv-worker", pickedUi.workflow.value);
+
+  /* An emptied row is not silence: the daemon reads an absent workflow as
+     "give the child my pair", so a cleared row has to say no out loud. */
+  const cleared = uiStub({
+    report: { child_cflow: "worker-flow", may_choose: [] },
+    wtMode: wtGroup(), wtRow: ctl({ hidden: true }),
+    rebaseRow: ctl({ hidden: true }), overRow: ctl({ hidden: true }),
+  });
+  check("clearing the row over a pair travels as a refusal",
+    ctx.spawnPayload(cleared).workflow === "-", ctx.spawnPayload(cleared));
+  const clearedNoPair = uiStub({
+    report: { may_choose: [] },
+    wtMode: wtGroup(), wtRow: ctl({ hidden: true }),
+    rebaseRow: ctl({ hidden: true }), overRow: ctl({ hidden: true }),
+  });
+  check("...but with no pair there is nothing to refuse",
+    ctx.spawnPayload(clearedNoPair).workflow === undefined,
+    ctx.spawnPayload(clearedNoPair));
+
   const auto = ctx.spawnAutoWorktree(uiStub({ name: ctl({ value: "w7" }) }));
   check("the auto name is name-stamped", auto === "w7-20260824-210000", auto);
   const autoParent = ctx.spawnAutoWorktree(uiStub());
@@ -793,6 +846,7 @@ async function main() {
     can_spawn: false, blocked_by: [CAP], soft_blocked_by: [CAP],
     children_used: 4, children_remaining: 0,
     may_choose: ["worktree"], spawnable_harnesses: [],
+    child_cflow: "improv-worker",
   } };
   sent = [];
   await ctx.openSpawnModal("lead1", { seed: { role: "worker" } });
@@ -804,7 +858,7 @@ async function main() {
   check("at the cap the workflow picker is still filled",
     capWf && (capWf.options || []).some((o) => o.value === "improv-worker"),
     capWf && (capWf.options || []).map((o) => o.value));
-  check("...and the role's own default is still auto-picked",
+  check("...and the parent's pair is still auto-picked",
     capWf && capWf.value === "improv-worker", capWf && capWf.value);
   const capOverRow = walk(modalEls["modal-body"]).find((n) =>
     n.tag === "div" && n.classes.has("sess-spawn-row") &&

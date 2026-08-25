@@ -168,7 +168,14 @@ TOOLS = [
                     "type": "string",
                     "description": (
                         "a cflow workflow to start for the child, scoped to "
-                        "its own session so the run is its work, not yours"
+                        "its own session so the run is its work, not yours. "
+                        "OMIT IT for the normal case: the child starts on the "
+                        "workflow YOUR OWN run pairs children with "
+                        "('default_child_cflow'; 'children' reports it as "
+                        "child_cflow), and on none when your workflow pairs "
+                        "with nothing or you are driving no run. Name one to "
+                        "override that pairing; '-' gives the child no run "
+                        "where the pair would have given it one"
                     ),
                 },
                 "context": {
@@ -241,9 +248,11 @@ TOOLS = [
         "name": "children",
         "description": (
             "The sessions you spawned (and theirs), plus how many more you "
-            "may spawn, which fields you are allowed to choose, and the "
-            "registered workspaces you may send a child to. Call this "
-            "before spawning rather than provoking a refusal."
+            "may spawn, which fields you are allowed to choose, the "
+            "registered workspaces you may send a child to, and "
+            "'child_cflow' — the workflow your next child starts on if you "
+            "spawn without naming one ('' = none). Call this before spawning "
+            "rather than provoking a refusal."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },

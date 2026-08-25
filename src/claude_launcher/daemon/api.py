@@ -707,6 +707,7 @@ def _serialize_workflow(wf) -> dict:
         "max_visits": wf.max_visits,
         "recur": wf.recur,
         "default_role": wf.default_role,
+        "default_child_cflow": wf.default_child_cflow,
         "priority": wf.priority,
         "filter_roles": (
             {"type": wf.filter_roles.type, "roles": list(wf.filter_roles.roles)}
@@ -869,6 +870,7 @@ def _startable_workflows(cwd: str) -> list:
             # itself to, its rank among rivals, and the filter that decides
             # whether volunteering even applies.
             entry["default_role"] = wf.default_role
+            entry["default_child_cflow"] = wf.default_child_cflow
             entry["priority"] = wf.priority
             entry["filter_roles"] = (
                 {
@@ -1943,6 +1945,12 @@ async def _onboard_and_launch(
     try:
         if parent:
             await onboard.inherit_mesh(body, parent=parent, mesh_mgr=_mesh_mgr(request))
+            onboard.inherit_workflow(
+                body,
+                parent=parent,
+                parent_cwd=manager.get(parent).sdef.cwd,
+                cwd=cwd,
+            )
         plan = onboard.preflight(
             body,
             mesh_mgr=_mesh_mgr(request),
@@ -1998,6 +2006,13 @@ async def h_session_children(request: web.Request) -> web.Response:
     Each child row also carries the cflow run that child drives, when there
     is one — the overseer-facing counterpart of the run event clock's push,
     so "where is everybody" is one call instead of one shell read per child.
+
+    ``child_cflow`` is the run the NEXT child would start on: the pair this
+    session's own workflow declares (``default_child_cflow``), "" when it
+    declares none. It rides here because this is the call every spawn form
+    already makes about its parent, and because a form that computed the pair
+    itself would be a second reading of it — :func:`onboard.inherit_workflow`
+    applies exactly this answer when the spawn names no workflow.
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
@@ -2014,12 +2029,20 @@ async def h_session_children(request: web.Request) -> web.Response:
         if run:
             entry["cflow"] = run
         children.append(entry)
+    parent_cwd = manager.get(name).sdef.cwd or ""
     return web.json_response(
         {
             "session": name,
             "parent": manager.get(name).sdef.parent,
             "children": children,
             "descendants": manager.descendants(name),
+            # A child inherits its parent's directory unless the spawn sends
+            # it elsewhere, so that is the cwd this answer is about; a form
+            # aiming a child at another workspace re-reads the workflows
+            # declared there anyway.
+            "child_cflow": onboard.paired_child_workflow(
+                parent=name, parent_cwd=parent_cwd, cwd=parent_cwd
+            ),
             **manager.spawn_capabilities(name),
         }
     )

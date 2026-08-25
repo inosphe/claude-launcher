@@ -319,6 +319,19 @@ picker never volunteers a workflow whose filter turns the chosen role away,
 and a `default_role` the workflow's own filter refuses is rejected at parse
 time as a contradiction.
 
+A workflow can also name the run its *children* get — the two halves of a
+delegation declared as a pair, from the parent's side:
+
+    default_child_cflow: worker-flow   # or: default-child-cflow
+
+A session driving this workflow that spawns a child without naming a run
+gives it that one; a workflow declaring no pair gives its children no run at
+all. Write it on the parent's half only — the child's role does not decide
+this, because a role travels across every workflow while the pairing is a
+property of the procedure the parent is actually running. A spawn that names
+a workflow outright always wins, and `workflow: '-'` refuses the pair for one
+child.
+
 ## Before you hand it over
 
 - `claunch cflow show <workflow>` — prints the graph, each step's control

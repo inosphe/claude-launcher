@@ -869,6 +869,9 @@ class FakeSpawnSources(FakeSources):
             # list, and a checkout of the repository the parent is already in
             "may_choose": ["workspace", "worktree"], "spawnable_harnesses": [],
             "workspaces": [{"name": "api", "path": "/srv/api", "exists": True}],
+            # the run this parent's own workflow pairs its children with:
+            # nothing, unless a test says otherwise
+            "child_cflow": "",
         }
         self._sessions = sessions if sessions is not None else [
             {"name": "lead", "status": "idle", "harness": "claude",
@@ -1309,21 +1312,80 @@ def test_workflows_follow_the_directory_the_child_will_run_in():
     assert "ship-it" in [o.value for o in wiz.field("workflow").options]
 
 
-def test_spawn_role_pick_selects_the_default_workflow_too():
-    """Same contract as the new-session form: the role volunteers its
-    workflow, priority settles rivals, in the directory the CHILD runs in."""
-    sources = FakeSpawnSources(workflows={"/work/repo": [
-        {"name": "improv-low", "default_role": "worker", "priority": 1},
-        {"name": "improv", "default_role": "worker", "priority": 5},
-        {"name": "audit", "default_role": "leader", "priority": 9},
-    ]})
+def test_a_childs_workflow_comes_from_its_parents_pair_not_from_its_role():
+    """The spawn form's Workflow row follows the PARENT, not the role.
+
+    Which run a child drives is a property of the procedure its parent is
+    running (``default_child_cflow``, served as ``child_cflow``); a role
+    travels across every workflow, so reading the child's run off it handed a
+    worker-role child the worker flow even under a parent driving something
+    else. The role still ranks the list — it just no longer decides.
+    """
+    sources = FakeSpawnSources(
+        report={**FakeSpawnSources().spawn_report("lead"),
+                "child_cflow": "worker-flow"},
+        workflows={"/work/repo": [
+            {"name": "improv", "default_role": "worker", "priority": 5},
+            {"name": "audit", "default_role": "leader", "priority": 9},
+            {"name": "worker-flow"},
+        ]},
+    )
     wiz = wizard.SpawnWizard(sources, cwd="/work/repo")
-    assert wiz.value("workflow") == ""
+    assert wiz.value("workflow") == "worker-flow"      # before any role
     pick(wiz, "role", "worker")
-    assert wiz.value("workflow") == "improv"
+    assert wiz.value("workflow") == "worker-flow"      # the role does not steer
+    pick(wiz, "role", "leader")
+    assert wiz.value("workflow") == "worker-flow"
     args = argparse.Namespace()
     wiz.apply(args)
-    assert args.workflow == "improv"
+    assert args.workflow == "worker-flow"
+
+
+def test_a_parent_that_pairs_with_nothing_preselects_no_workflow():
+    """"" is an answer, not a missing one — so no fallback to the role's
+    default, which is the very reading this replaced."""
+    sources = FakeSpawnSources(workflows={"/work/repo": [
+        {"name": "improv", "default_role": "worker", "priority": 5},
+    ]})
+    wiz = wizard.SpawnWizard(sources, cwd="/work/repo")
+    pick(wiz, "role", "worker")
+    assert wiz.value("workflow") == ""
+    args = argparse.Namespace()
+    wiz.apply(args)
+    # nothing to refuse, so nothing travels: the daemon has no pair to apply
+    assert args.workflow is None
+
+
+def test_clearing_the_workflow_row_travels_as_a_refusal():
+    """An emptied row is not silence. The daemon reads an absent workflow as
+    'give the child the pair my run declares', so a person who cleared the
+    row has to be heard saying no — or the form hands back the run it was
+    just used to take away."""
+    sources = FakeSpawnSources(
+        report={**FakeSpawnSources().spawn_report("lead"),
+                "child_cflow": "worker-flow"},
+        workflows={"/work/repo": [{"name": "worker-flow"}]},
+    )
+    wiz = wizard.SpawnWizard(sources, cwd="/work/repo")
+    assert wiz.value("workflow") == "worker-flow"
+    pick(wiz, "workflow", "(none)")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.workflow == wizard.SpawnWizard.NO_WORKFLOW
+    assert args.context is None
+
+
+def test_the_bundled_leader_flow_pairs_its_children_with_the_worker_flow():
+    """The pair as shipped: improv-leader hands its children improv-worker,
+    and nothing else in the bundle has to remember that."""
+    bundled = cflow_state.bundled_workflows_dir()
+    paired = {
+        path.stem: model.load(path).default_child_cflow
+        for path in sorted(bundled.glob("improv-*.yaml"))
+    }
+    assert paired["improv-leader"] == "improv-worker"
+    assert paired["improv-mid"] == "improv-worker"
+    assert paired["improv-worker"] == "improv-worker"
 
 
 def test_spawn_apply_writes_the_flags_spawn_reads():

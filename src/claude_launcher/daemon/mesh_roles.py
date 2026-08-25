@@ -353,6 +353,12 @@ roles:
       integrate once.
       Escalate to your user only what they alone hold (value, priority, scope,
       authorization), batched with options and a recommendation.
+      Spawn children freely whenever there is work to hand out: a session of
+      your own is how you delegate, and needing one is reason enough to make
+      one. Check your budget first (the spawn tool's 'children'), give any
+      child that touches code a checkout of its own, and brief it with the one
+      task it exists for. What run that child drives is not yours to remember
+      per spawn -- your own workflow declares the pair.
       Do not do the members' production for them.
 
   operator:

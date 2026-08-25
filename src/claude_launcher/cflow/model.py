@@ -14,6 +14,8 @@ and loops need no duplicated content::
       roles: [worker]
     default_role: worker    # optional: pickers auto-select this workflow
                             # when that role is chosen
+    default_child_cflow: worker-flow   # optional: the run a child spawned
+                            # by a session driving THIS one starts on
     priority: 10            # optional tie-breaker between defaults for the
                             # same role (higher wins; 0 when unstated)
     steps:
@@ -143,6 +145,27 @@ without being asked. Several workflows may volunteer for the same role;
 listed as candidates. Neither admits anybody anywhere — ``filter_roles``
 still decides who may drive — and a ``default_role`` the workflow's own
 filter turns away is a contradiction refused at parse time.
+
+Pairing a child's run
+---------------------
+``default_child_cflow`` is the third arrow, and it points *down the spawn
+tree*: it names the workflow a child gets when the session driving this one
+spawns one without naming a run. That is what makes "leader flow and worker
+flow" a **pair** rather than a convention two files each half-remember —
+declared once, on the parent's side, where the pairing is actually known.
+
+It is deliberately not the role's business. A role says what a member IS on
+the mesh and travels with it across every workflow; which run its children
+drive is a property of *the procedure the parent is running*, and reading it
+off the role instead was the bug this field closes — a leader driving some
+other workflow entirely still handed its children the worker flow, because
+the child's role was worker and that role volunteered one. With the pair, a
+parent driving a workflow that declares none gives its children none, and
+"no run" is a legible answer rather than a forgotten field.
+
+Unresolved on purpose (see :func:`_parse_child_cflow`): a workflow may pair
+with a name that is not declared in the directory a child ends up standing
+in, and only the spawn knows that directory.
 
 A candidate needs a ``role`` — a delegation is to a *function*, and "whoever
 happens to be connected" is not one. ``scope`` narrows further: ``any``
@@ -360,6 +383,11 @@ class Workflow:
     #: it when that role is chosen. Advisory — :attr:`filter_roles` remains
     #: the enforcement. Stored lower-cased, like every resolved role.
     default_role: Optional[str] = None
+    #: The workflow a session driving THIS one gives to a child it spawns —
+    #: the other half of a pair, named from the parent's side. ``None`` means
+    #: this workflow pairs with nothing, and a child of it starts with no run
+    #: unless the spawn names one.
+    default_child_cflow: Optional[str] = None
     #: Tie-breaker between workflows volunteering for the same role, and the
     #: order pickers list them in: higher first, 0 when unstated.
     priority: int = 0
@@ -425,6 +453,7 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         default_role = str(doc.get("default_role")).strip().lower()
         if not default_role:
             raise WorkflowError("'default_role' must be a non-empty role name")
+    default_child_cflow = _parse_child_cflow(doc)
     try:
         priority = int(doc.get("priority", 0))
     except (TypeError, ValueError):
@@ -445,6 +474,7 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         recur=recur,
         filter_roles=filter_roles,
         default_role=default_role,
+        default_child_cflow=default_child_cflow,
         priority=priority,
         warnings=[],
     )
@@ -458,6 +488,7 @@ def parse(text: str, *, default_name: str = "workflow") -> Workflow:
         recur=workflow.recur,
         filter_roles=workflow.filter_roles,
         default_role=workflow.default_role,
+        default_child_cflow=workflow.default_child_cflow,
         priority=workflow.priority,
         warnings=_graph_warnings(workflow),
         deprecations=_deprecations(workflow),
@@ -504,6 +535,46 @@ def load(path: Path) -> Workflow:
     except OSError as exc:
         raise WorkflowError(f"cannot read workflow {path}: {exc}") from exc
     return parse(text, default_name=path.stem)
+
+
+#: The pair field's canonical spelling, and the dashed one accepted beside
+#: it. Every other key here is underscored, so that is the spelling ``show``
+#: and the docs use; the dash is taken too because it is the shape a person
+#: writes when the word "cflow" is on their mind rather than the file's other
+#: keys, and a silently-ignored key would be a pair that never fires.
+CHILD_CFLOW_KEY = "default_child_cflow"
+CHILD_CFLOW_ALIAS = "default-child-cflow"
+
+
+def _parse_child_cflow(doc: dict) -> Optional[str]:
+    """``default_child_cflow``: the workflow this one hands to its children.
+
+    Read from either spelling, refusing a file that uses both to say
+    different things — two keys that disagree have no reading, and picking
+    one would decide which of the author's two intentions is the typo.
+
+    The name is *not* resolved here: which workflows exist depends on the
+    directory a child will stand in, which this parser cannot see. A pair
+    naming a workflow that is not declared there is settled at spawn time,
+    where the answer is knowable.
+    """
+    present = [k for k in (CHILD_CFLOW_KEY, CHILD_CFLOW_ALIAS) if doc.get(k) is not None]
+    if not present:
+        return None
+    values = {str(doc[k]).strip() for k in present}
+    if len(values) > 1:
+        raise WorkflowError(
+            f"{CHILD_CFLOW_KEY!r} and {CHILD_CFLOW_ALIAS!r} are the same key "
+            f"spelled two ways, but this file gives them different values "
+            f"({', '.join(sorted(repr(v) for v in values))}) — keep one"
+        )
+    name = values.pop()
+    if not name:
+        raise WorkflowError(
+            f"{present[0]!r} must name a workflow — drop the key to pair "
+            f"with nothing"
+        )
+    return name
 
 
 def _parse_role_filter(raw) -> Optional[RoleFilter]:
