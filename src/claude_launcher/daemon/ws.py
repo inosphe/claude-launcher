@@ -227,9 +227,16 @@ async def _handle_control(
             lines = int(msg["lines"])
         except (KeyError, ValueError, TypeError):
             return
+        # Sync FIRST: the render is deferred (ScreenFeeder), so history_len
+        # read before this counts only the lines that have reached the grid.
+        # Clamping against that number pins the viewer short of the newest
+        # history — and while a burst is still rendering it can be 0, which
+        # clamps every scroll to 0 and reads as a wheel that does nothing.
+        # It is worst exactly when the session is busy, which is when someone
+        # reaches for the wheel.
+        await _synced(session)
         history = session.screen.history_len
         state.offset = max(0, min(state.offset + lines, history))
-        await _synced(session)
         # Echo the clamped result so the client's scroll state (and its
         # auto-unfreeze and affordance) matches the server's truth.
         await ws.send_str(json.dumps({"type": "scrolled", "offset": state.offset}))
