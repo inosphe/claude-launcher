@@ -100,7 +100,7 @@ new Function(
   [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
    slice("fetchBriefing"), slice("toggleBriefing"),
    slice("renderBriefingCard"), slice("applyBriefingTop"),
-   slice("applyBriefingCards")].join("\n") + `
+   slice("applyBriefingCards"), slice("syncRowRefresh")].join("\n") + `
 const briefingOpen = new Set();
 const briefingCache = new Map();
 let briefingLLM = true;

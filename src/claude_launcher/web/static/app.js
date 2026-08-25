@@ -1115,6 +1115,17 @@ function applyBriefingCards() {
         + " in ~/.claunch.yaml to enable";
     const open = briefingLLM && briefingOpen.has(name);
     btn.textContent = open ? "▾" : "▸";
+    syncRowRefresh(li, name);
+    // A refresh that just landed paints its one-line onto the row now, so
+    // the ⟳ stopping and the text changing are one event — otherwise the
+    // line waits for the next /api/sessions poll and the click looks to
+    // have done nothing. The poll repaints the same words from the
+    // daemon's cache, so this is early, not different.
+    const fresh = briefingCache.get(name);
+    const one = fresh && fresh.phase === "ok" && fresh.data && fresh.data.briefing
+      && fresh.data.briefing["one-line-job-description"];
+    const oline = li.querySelector(".rail-brief");
+    if (one && oline) oline.textContent = one;
     const old = li.querySelector(".sess-brief");
     if (old) old.remove();
     if (open) li.appendChild(renderBriefingCard(name, briefingCache.get(name)));
@@ -1178,12 +1189,31 @@ function decorateBriefingRow(li, s) {
     });
     li.appendChild(refresh);
   }
-  refresh.disabled = !briefingLLM;
-  refresh.title = briefingLLM
-    ? "refresh the summary without opening it"
-    : "briefing off — set the llm section (endpoint, model, api_key)"
-      + " in ~/.claunch.yaml to enable";
   refresh.textContent = "⟳";
+  syncRowRefresh(li, s.name);
+}
+
+/* The row ⟳'s face, read off the briefing cache: spinning and inert while a
+   fetch is in flight (the only sign the row gives that the click landed —
+   the card is closed, so nothing else moves), red with the reason on its
+   tooltip after a failed one, plain otherwise. Called from every rebuild
+   and every cache change, since the row is torn down by the poll and the
+   phase is set by the fetch, and both must repaint the same button. */
+function syncRowRefresh(li, name) {
+  const refresh = li.querySelector(".sess-brief-rowref");
+  if (!refresh) return;
+  const entry = briefingCache.get(name);
+  const loading = !!entry && entry.phase === "loading";
+  const failed = briefingLLM && !!entry && entry.phase === "error";
+  refresh.classList.toggle("spinning", loading);
+  refresh.classList.toggle("failed", failed);
+  refresh.disabled = !briefingLLM || loading;
+  refresh.title = !briefingLLM
+    ? "briefing off — set the llm section (endpoint, model, api_key)"
+      + " in ~/.claunch.yaml to enable"
+    : loading ? "summarising…"
+    : failed ? `briefing failed: ${entry.error || "unknown error"} — click to retry`
+    : "refresh the summary without opening it";
 }
 
 /* The collapsed row's refresh: re-ask the daemon (bypassing its cache) and

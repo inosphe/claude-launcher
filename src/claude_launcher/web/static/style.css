@@ -247,6 +247,15 @@ option:disabled { color: #6b7280; }
 #session-list .sess-brief-rowref:hover:not(:disabled) { color: #58a6ff; }
 /* off (no llm: block): the ⟳ has nothing to ask for — inert like the toggle */
 #session-list .sess-brief-rowref:disabled { color: #3d434d; cursor: default; }
+/* in flight: the same spin as the card's ⟳ — with the card closed this is
+   the only thing on the row that says the click was taken. It is disabled
+   meanwhile, so this rule follows the :disabled one to keep its colour. */
+#session-list .sess-brief-rowref.spinning {
+  color: #58a6ff; animation: spin 0.7s linear infinite; cursor: default;
+}
+/* the last try failed: the glyph goes red and the reason is on its title;
+   still clickable — the ⟳ is also the retry */
+#session-list .sess-brief-rowref.failed { color: #ff7b72; }
 /* The one line inside the open card, above goal/now/progress — the same fact
    the row's under-name line carries, read where the full summary is. */
 .sess-brief-one {

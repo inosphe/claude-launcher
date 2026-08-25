@@ -67,6 +67,18 @@ function mkel(tag) {
     get() { return text; },
     set(v) { text = v; node.children.length = 0; },
   });
+  Object.defineProperty(node, "classList", {
+    value: {
+      toggle(c, force) {
+        const has = node.className.split(" ").includes(c);
+        if (force === undefined) force = !has;
+        if (force && !has) node.className = (node.className + " " + c).trim();
+        else if (!force) node.className =
+          node.className.split(" ").filter((x) => x !== c).join(" ");
+        return force;
+      },
+    },
+  });
   return node;
 }
 
@@ -96,7 +108,7 @@ new Function(
    slice("fetchBriefing"), slice("refreshBriefingRow"),
    slice("toggleBriefing"), slice("renderBriefingCard"),
    slice("applyBriefingTop"), slice("applyBriefingCards"),
-   slice("decorateBriefingRow")].join("\n") + `
+   slice("decorateBriefingRow"), slice("syncRowRefresh")].join("\n") + `
 const briefingOpen = new Set();
 const briefingCache = new Map();
 let briefingLLM = true;
@@ -167,7 +179,49 @@ const click = (n) => n.listeners.click({ stopPropagation() {} });
   check("the collapsed ⟳ re-asks, uncached", calls, ["/api/sessions/s1/briefing?refresh=1"]);
   check("it never opens the card", [ctx.openSet.has("s1"),
         s1.querySelector(".sess-brief")], [false, null]);
+  /* With the card closed, the ⟳ itself is the only place the row can say
+     the click was taken: it spins, goes inert against a double-click, and
+     says so on its tooltip — until the answer lands. */
+  const spinning = (n) => n.className.split(" ").includes("spinning");
+  check("in flight, the collapsed ⟳ spins and is inert",
+        [spinning(refresh(s1)), refresh(s1).disabled, refresh(s1).title],
+        [true, true, "summarising…"]);
+  check("the old one-line stays up meanwhile", oneLine(s1).textContent, "한 줄");
   await flush();
+  check("landed: the ⟳ stops and is live again",
+        [spinning(refresh(s1)), refresh(s1).disabled, refresh(s1).title],
+        [false, false, "refresh the summary without opening it"]);
+  /* ...and the fresh one-line is on the row at once, not after the next
+     poll — the spin stopping and the text changing are one event. */
+  check("the refreshed one-line is painted without waiting for the poll",
+        oneLine(s1).textContent, "새 한 줄");
+
+  /* A failed refresh: the glyph says so (class + reason on the tooltip) and
+     stays clickable, because it is also the retry. The one-line keeps the
+     last good text. */
+  answer = { status: 500, body: { error: "llm timed out" } };
+  click(refresh(s1));
+  await flush();
+  const failed = (n) => n.className.split(" ").includes("failed");
+  check("a failed refresh marks the ⟳ and keeps it clickable",
+        [failed(refresh(s1)), spinning(refresh(s1)), refresh(s1).disabled, refresh(s1).title],
+        [true, false, false, "briefing failed: llm timed out — click to retry"]);
+  check("the one-line keeps the last good text after a failure",
+        oneLine(s1).textContent, "새 한 줄");
+  /* The poll rebuilds the row; the failure mark must survive it (it is
+     read off the cache, not the element). */
+  ctx.decorate(s1, { name: "s1", briefing: { one_line: "새 한 줄", state: "working" }, task: "테스크" });
+  check("the failure mark survives a poll rebuild", failed(refresh(s1)), true);
+  answer = { status: 200, body: {
+    session: "s1", generated_at: new Date().toISOString(), cached: false,
+    source: { jsonl: true, cflow: false },
+    briefing: { goal: "g", now: "n", state: "working",
+                "one-line-job-description": "새 한 줄" },
+    raw: null,
+  } };
+  click(refresh(s1));
+  await flush();
+  check("a retry that succeeds clears the mark", failed(refresh(s1)), false);
 
   /* Off (no llm: block): the ⟳ is inert with the config tooltip; the
      task-line (a local fact) still shows. */
