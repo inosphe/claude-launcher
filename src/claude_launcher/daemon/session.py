@@ -166,6 +166,18 @@ STATUS_EXITED = "exited"
 #: to the old heuristic behaviour, never to a false "busy".
 _CLAUDE_TURN_MARKER = "esc to interrupt"
 
+#: Seconds a row carrying the in-turn marker (or the animated spinner/counter
+#: rows around it) may stay unchanged before the marker is distrusted. A live
+#: turn repaints that region constantly — the spinner spins, the elapsed time
+#: ticks — so a marker row frozen past this is a crashed or dead TUI's fossil,
+#: not a turn. Generous, since a genuine turn's animation is far more frequent;
+#: the cost of being too small is a slow turn flickering to idle, the cost of
+#: too large is a stale dot persisting. Made an env var so it can be tuned
+#: against a real frozen claude without a rebuild.
+TURN_MARKER_FRESH_FOR = float(
+    os.environ.get("CLAUNCH_TURN_MARKER_FRESH_FOR") or 15.0
+)
+
 
 def _utcnow() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -442,7 +454,7 @@ class Session:
         return STATUS_BUSY
 
     def _claude_turn_in_flight(self) -> bool:
-        """True iff the claude *footer* is carrying the in-turn marker.
+        """True iff the claude *footer* carries a *live* in-turn marker.
 
         The marker is an ordinary English phrase, so it legitimately appears
         in transcript content — a commit subject, a quoted docstring, this
@@ -451,6 +463,12 @@ class Session:
         a phrase anywhere above it is content, not a turn, and must never pin
         a genuinely idle session "busy" forever. :meth:`ScreenState.bottom_line`
         reads exactly that row without materializing the whole grid.
+
+        Presence is not enough: a crashed or dead claude leaves that same
+        phrase frozen on its last frame. So a footer hit is trusted only
+        while the turn's own animation is still moving — see
+        :meth:`_turn_marker_fresh`. A stale marker degrades to the heuristic
+        like a missing one: never to a false "busy".
 
         Only meaningful for the claude harness, and only consulted when the
         quiescence heuristic already reads idle — the one case where the
@@ -463,7 +481,35 @@ class Session:
         """
         if self.sdef.harness != CLAUDE_HARNESS:
             return False
-        return _CLAUDE_TURN_MARKER in self.screen.bottom_line()
+        if _CLAUDE_TURN_MARKER not in self.screen.bottom_line():
+            return False
+        return self._turn_marker_fresh()
+
+    def _turn_marker_fresh(self) -> bool:
+        """Whether the marker on screen is from a *live* turn, not a fossil.
+
+        A genuine turn animates one row above the footer region: the spinner
+        and elapsed-time/token counter spin there. A TUI that died or wedged
+        mid-turn leaves the same ``esc to interrupt`` text frozen on its last
+        frame — and that frame's marker must NOT keep a dead session reading
+        busy forever (see the exited panes that still carry the phrase).
+
+        We must NOT ask "did the footer row change": the footer is static for
+        long stretches in a *genuinely idle* session too (a held cflow prompt,
+        a context-low notice), so a frozen footer would misread a live,
+        awaiting-input session. The discriminating signal is narrower — the
+        spinner row at ``rows - 2``, which moves only while a turn is in
+        flight. Ask the idle tracker (which timestamps every row's last
+        change) whether that row moved within ``TURN_MARKER_FRESH_FOR``; if
+        not, the marker is a fossil and the session falls back to the
+        heuristic.
+        """
+        now = time.monotonic()
+        spinner_row = self.screen.rows - 2
+        if spinner_row < 0:
+            return False
+        last = self.tracker.last_change_at(spinner_row)
+        return last is not None and (now - last) <= TURN_MARKER_FRESH_FOR
 
     def _compute_status(self, threshold: float) -> str:
         heur = self._heuristic_status(threshold)
