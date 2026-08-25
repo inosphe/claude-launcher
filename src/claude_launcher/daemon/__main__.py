@@ -125,6 +125,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     reminder_clock.start()
     ping_clock = cflow_clock.StallPingClock(manager)
     ping_clock.start()
+    window_clock = cflow_clock.WindowClock(manager)
+    window_clock.start()
     event_clock = cflow_clock.RunEventClock(manager, mesh_manager)
     event_clock.start()
     # Last, and only now: the sessions restore brought back are alive but

@@ -5,7 +5,7 @@ of one repository), and THIS repository's machine checks live in its
 ``.claunch/workflows/`` overrides instead. These tests pin that arrangement:
 the two override files must parse, and each must carry exactly the one
 verify its layer exists to add — the worker's simplified suite on ``review``,
-the leader's full sweep on ``integrate``. A later edit that breaks the yaml
+the leader's full sweep on ``sweep`` (the batch sweep step after the merge). A later edit that breaks the yaml
 or drops a verify would otherwise only be discovered by a run blocking on it.
 
 Both run under a *bounded* ``-n``: the suite is parallel safe (the heavy
@@ -33,12 +33,14 @@ OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
 #: edited together; the leader's suite is checked by prefix, so a change to
 #: its workflow does not paint this suite red before it lands.
 #:
-#: The leader arms two, and they are different kinds of check: ``integrate``
-#: runs this repository's suite over the merge result, and ``reflect`` asks
+#: The leader arms two, and they are different kinds of check: ``sweep``
+#: runs this repository's suite over the batch's merge result (it used to
+#: sit on ``integrate`` itself, when every merge was its own sweep; the
+#: 5-minute integration window split the two), and ``reflect`` asks
 #: whether the live daemon was actually restarted onto that merge. The second
 #: exists because the step used to be prose alone -- a round could be filed
 #: as deployed while the daemon kept serving pre-merge code.
-ARMED = {"improv-worker": ("review",), "improv-leader": ("integrate", "reflect")}
+ARMED = {"improv-worker": ("review",), "improv-leader": ("sweep", "reflect")}
 
 # Both gates run against a venv that is already there. A worker's worktree
 # builds its venv once during the work ('uv sync --extra test'), and that one
@@ -72,7 +74,7 @@ def test_the_worker_override_verifies_without_touching_the_environment():
     "stem, step_id, suite",
     [
         ("improv-worker", "review", WORKER_SUITE),
-        ("improv-leader", "integrate", LEADER_SUITE),
+        ("improv-leader", "sweep", LEADER_SUITE),
     ],
 )
 def test_the_override_carries_this_repos_suite_as_its_verify(
@@ -96,7 +98,7 @@ def test_each_override_still_arms_its_step(stem="improv-leader"):
         assert wf.steps[step_id].verify is not None, (
             f"{stem}:{step_id} lost its verify"
         )
-    suite = wf.steps["integrate"].verify.command
+    suite = wf.steps["sweep"].verify.command
     assert "pytest" in suite and "--basetemp=" in suite
 
 
@@ -197,7 +199,7 @@ def test_the_verify_basetemp_leaves_room_for_xdist(stem):
     is not a gate, so keep the room explicit.
     """
     wf = model.load(OVERRIDES / f"{stem}.yaml")
-    verify = wf.steps["review" if stem == "improv-worker" else "integrate"].verify
+    verify = wf.steps["review" if stem == "improv-worker" else "sweep"].verify
     basetemp = verify.command.split('--basetemp="')[1].split('"')[0]
     # cmd leaves %CLAUNCH_SESSION% standing when the daemon — which cannot
     # see it — runs the verify, and that literal is longer than most session
@@ -233,7 +235,7 @@ def test_the_verify_runs_bounded_parallel(stem):
     mesh: 6x8 fits this machine, 6x32 does not.
     """
     wf = model.load(OVERRIDES / f"{stem}.yaml")
-    verify = wf.steps["review" if stem == "improv-worker" else "integrate"].verify
+    verify = wf.steps["review" if stem == "improv-worker" else "sweep"].verify
     width = re.search(r" -n (\S+)", verify.command)
     assert width, f"{stem}'s verify lost its -n; the gate is serial again"
     assert width.group(1) != "auto", (

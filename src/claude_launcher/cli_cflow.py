@@ -166,7 +166,10 @@ def _cmd_show(args: argparse.Namespace) -> int:
                 chooser = s.select.delegate.describe()
             print(f"- {s.id} [select, chooser={chooser}]{suffix}")
             for name, opt in s.select.options.items():
-                print(f"    {name}: {opt.description}  -> {opt.next or 'end'}")
+                # A paced option: the agent's take of it is held until this
+                # long has passed since the last one (see model "Cadence").
+                pace = f"  [at most every {opt.interval:g}s]" if opt.interval else ""
+                print(f"    {name}: {opt.description}  -> {opt.next or 'end'}{pace}")
         else:
             title = f": {s.title}" if s.title else ""
             print(f"- {s.id}{title}{suffix}  -> {s.next or 'end'}")
@@ -275,6 +278,20 @@ def _cmd_status(args: argparse.Namespace) -> int:
         _print_block("decision", payload.get("prompt"))
         _print_options(payload.get("options", []))
         print(f"pending:  {payload.get('chooser')} decides this one")
+    if status == "waiting_window":
+        # The agent chose; the workflow paces that option. Nobody is asked
+        # anything — but a person CAN take it now: a confirm from here is not
+        # paced, and is journaled as the override it is.
+        _print_block(
+            "held",
+            f"{payload.get('option')!r} — this option runs at most every "
+            f"{payload.get('interval'):g}s; its window opens at "
+            f"{payload.get('opens_at')} (~{payload.get('remaining')}s). The "
+            f"daemon releases it then (or the agent's next 'next' after that "
+            f"moment does)",
+        )
+        print(f"override: claunch cflow select {payload.get('option')}   "
+              f"(takes it now, unpaced)")
     if pending:
         _print_pending(pending)
     return 0

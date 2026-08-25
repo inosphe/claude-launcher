@@ -44,6 +44,10 @@ and loops need no duplicated content::
           options:
             ok:     {description: done,    next: ship}
             rework: {description: loop back, next: impl}   # a cycle — warned
+      # an option may carry `interval: <seconds>` — a cadence: taken by the
+      # driving agent, it is HELD until that long has passed since it was
+      # last taken (across rounds of a recurring run), then released by the
+      # daemon's clock. See "Cadence" below.
       ship:
         ask:                    # approval to ENTER, re-required per visit
           prompt: ship it?
@@ -81,6 +85,22 @@ graph: every round still reaches a real end, and a run that terminates
 normally files the start request for its next round (see the engine). The
 repetition is a property of the run's lifecycle, stopped by a human — never
 a cycle the reachability rule would have to excuse.
+
+Cadence
+-------
+A select option may declare ``interval: <seconds>``: the driving agent may
+take that option at most once per interval, measured from the last time it
+was taken in this slot — across rounds of a recurring run, since the record
+outlives the run (``state.windows``). Chosen inside the interval, the choice
+is *held* rather than refused: the run reports ``waiting_window`` with the
+moment the window opens, the daemon's clock releases it then (moving the run
+and waking the driver), and the reason recorded at release is the latest one
+the agent filed — re-selecting the same option while held only updates it,
+selecting another option cancels the hold. It is how "merge what has
+accumulated every N minutes" is written without a timer in the agent: the
+first take is immediate (nothing to pace against yet), the rest batch. A
+human confirming the option (CLI, dashboard) is not paced — that is the
+override, and it is journaled as one.
 
 Delegated decisions
 -------------------
@@ -185,6 +205,10 @@ class Option:
     name: str
     description: str
     next: Optional[str] = None  # None = termination
+    #: Cadence in seconds: the driving agent's take of this option is held
+    #: until this long has passed since it was last taken (see "Cadence" in
+    #: the module docstring). ``None`` = no pacing.
+    interval: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -706,6 +730,24 @@ def _parse_verify(raw, step_id: str) -> Optional[Verify]:
     )
 
 
+def _parse_interval(raw, where: str) -> Optional[float]:
+    """An option's cadence, in seconds. ``None`` when it declares none."""
+    if raw is None:
+        return None
+    if isinstance(raw, bool):
+        raise WorkflowError(f"option {where!r}: 'interval' must be a number of seconds")
+    try:
+        interval = float(raw)
+    except (TypeError, ValueError):
+        raise WorkflowError(
+            f"option {where!r}: 'interval' must be a number of seconds — how "
+            f"long must pass between two takes of this option"
+        ) from None
+    if interval <= 0:
+        raise WorkflowError(f"option {where!r}: 'interval' must be greater than 0")
+    return interval
+
+
 def _parse_select(raw, step_id: str) -> Optional[Select]:
     if raw is None:
         return None
@@ -742,10 +784,17 @@ def _parse_select(raw, step_id: str) -> Optional[Select]:
         name = str(name)
         if not isinstance(spec, dict):
             raise WorkflowError(f"step {step_id!r}: option {name!r} must be a mapping")
+        unknown = sorted(set(spec) - {"description", "next", "interval"})
+        if unknown:
+            raise WorkflowError(
+                f"step {step_id!r}: option {name!r} has unknown key(s): "
+                f"{', '.join(unknown)} (allowed: description, next, interval)"
+            )
         options[name] = Option(
             name=name,
             description=str(spec.get("description") or ""),
             next=_parse_next(spec.get("next"), f"{step_id}.{name}"),
+            interval=_parse_interval(spec.get("interval"), f"{step_id}.{name}"),
         )
     return Select(
         prompt=str(prompt), chooser=chooser, options=options, delegate=delegate

@@ -132,11 +132,15 @@ def test_the_leader_owns_the_board_lifecycle(layer):
     assert "issue: <id>" in standby                  # spawn carries the id
     assert "BLOCKED:" in standby
     assert "REBASE REQUESTED" in wf.steps["integrate-preflight"].instructions
-    integrate = wf.steps["integrate"].instructions
-    assert "claunch beads close" in integrate
-    assert "sync --flush-only" in integrate
-    assert "chore(beads)" in integrate
-    assert "chore(beads)" in wf.steps["integrate"].done_when
+    # The close reason carries the sweep count, so the board is closed where
+    # that number exists: the batch sweep step after the merge, not the
+    # merge itself.
+    sweep = wf.steps["sweep"].instructions
+    assert "claunch beads close" in sweep
+    assert "sync --flush-only" in sweep
+    assert "chore(beads)" in sweep
+    assert "chore(beads)" in wf.steps["sweep"].done_when
+    assert "claunch beads close" not in wf.steps["integrate"].instructions
     assert "claunch beads list" in wf.steps["wrapup"].instructions
     assert "claunch beads list" in wf.steps["wrapup"].ask.prompt
 

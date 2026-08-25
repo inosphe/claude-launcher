@@ -1,8 +1,8 @@
 """The clocks cflow cannot carry itself.
 
 Everything else in cflow happens because somebody called a tool: the agent
-advances, a human approves, a responder answers. Four things have nobody to
-call them, so the daemon carries all four, scanning the same machine-local
+advances, a human approves, a responder answers. Five things have nobody to
+call them, so the daemon carries all five, scanning the same machine-local
 run registry the dashboard lists runs from:
 
 * :class:`AskClock` — a delegated decision's ``timeout``. The one agent that
@@ -19,6 +19,10 @@ run registry the dashboard lists runs from:
   human gate entered, a recurring round finished, a driver that exited. The
   session that would want to know — the overseer that spawned the driver —
   is precisely not the one anything happens in, so nothing else tells it.
+* :class:`WindowClock` — a paced select option's window opening. The agent
+  chose, and the workflow said "not more often than every N seconds", so
+  the choice is parked; the one agent that would notice the moment is the
+  one that ended its turn to wait for it.
 
 Two consequences worth stating plainly, because both are deliberate:
 
@@ -600,6 +604,128 @@ def ping_block(payload: dict, message: str, stalled_for: float) -> str:
     )
     lines.append("---")
     return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------- #
+# the window clock
+# --------------------------------------------------------------------------- #
+#: How often the window clock looks. A cadence is minutes; a quarter-minute
+#: of lateness is invisible next to it, and the scan is one read per run.
+WINDOW_POLL = 15.0
+
+
+class WindowClock:
+    """Releases held choices whose window has opened, and wakes the driver.
+
+    A paced select option (``interval:`` on the option) parks the driver's
+    choice until the interval since the option's last take has passed
+    (:func:`cflow.engine.release_window`). The one agent that would notice
+    the moment is the one that stopped its turn to wait for it — the same
+    shape as an ask's timeout, so the same answer: the daemon carries the
+    clock. What lands in the driver's terminal is a machine-generated frame
+    saying the run moved and where, so an agent whose context lost the hold
+    reads its position instead of guessing it.
+
+    Nothing here decides anything. The choice was the agent's, made and
+    journaled when it was held; this clock only lets it through at the
+    moment the workflow declared. Without a daemon the hold is late, never
+    lost: the driver's own next ``next`` past the moment releases it.
+    """
+
+    def __init__(self, manager, *, poll: float = WINDOW_POLL) -> None:
+        self.manager = manager
+        self.poll = poll
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.poll)
+                for cwd, scope, block in await asyncio.to_thread(self.scan):
+                    await self._deliver(cwd, scope, block)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One unreadable run must not stop the clock for the rest.
+                log.exception("cflow window clock tick failed")
+
+    def scan(self) -> List[Tuple[str, str, str]]:
+        """Release every due hold on the machine. Blocking (it writes run
+        state); call it in a thread. Public for the tests."""
+        released: List[Tuple[str, str, str]] = []
+        for cwd, scope in cflow_state.known_runs():
+            try:
+                moved = cflow_engine.release_window(cwd=cwd, scope=scope)
+            except Exception as exc:
+                # Includes the slot being locked by the agent mid-transition:
+                # the window stays open, so the next tick is soon enough.
+                log.debug("cflow window release skipped for %s/%s: %s", cwd, scope, exc)
+                continue
+            if moved:
+                log.info(
+                    "cflow window opened for %s/%s: %r at step %s -> %s",
+                    cwd, scope, moved.get("option"), moved.get("step"),
+                    moved.get("now_at") or moved.get("status"),
+                )
+                released.append((cwd, scope, window_block(moved)))
+        return released
+
+    async def _deliver(self, cwd: str, scope: str, block: str) -> None:
+        session = session_for(self.manager, cwd, scope)
+        if session is None:
+            # A CLI-driven run, or a driver that exited: the run has moved
+            # regardless, and whoever picks it up reads the new position.
+            return
+        try:
+            delivered = await session.deliver(block)
+        except Exception:
+            log.exception("cflow window notice delivery to %r failed", scope)
+            return
+        if delivered:
+            log.info("cflow window notice delivered to %r (%s)", scope, cwd)
+
+
+def window_block(moved: dict) -> str:
+    """The text the driver hears when its held choice went through.
+
+    Framed like the stall ping, for the same reason: it lands in a session
+    that ended its turn, and an unframed line reads as a user message. It
+    says what was released and that the run has ALREADY moved — the reader's
+    next act is to read the new step, not to choose again.
+    """
+    position = (
+        "the run finished"
+        if moved.get("status") == "done"
+        else f"step '{moved.get('now_at')}'"
+    )
+    return "\n".join(
+        [
+            "---",
+            "# claunch cflow: window opened -- machine-generated, not typed by "
+            "the user",
+            f"workflow: {moved.get('workflow')}",
+            f"released: your held choice {moved.get('option')!r} at step "
+            f"'{moved.get('step')}' (held since {moved.get('held_since')}, "
+            f"window opened {moved.get('opens_at')})",
+            f"position: {position}",
+            "protocol: the run has moved on the choice you recorded -- nothing "
+            "was decided for you, and choosing again is not the next act. Call "
+            "the cflow 'status' tool for the step you are now on and continue "
+            "per the /cflow protocol.",
+            "---",
+        ]
+    )
 
 
 # --------------------------------------------------------------------------- #
