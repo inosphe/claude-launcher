@@ -17,6 +17,7 @@ from pathlib import Path
 from . import (
     __version__,
     bootstrap,
+    cli_beads,
     cli_cflow,
     cli_mesh,
     cli_sessions,
@@ -979,6 +980,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_cflow.register(sub)
     cli_sync.register(sub)
     cli_workspace.register(sub)
+    cli_beads.register(sub)
 
     return parser
 

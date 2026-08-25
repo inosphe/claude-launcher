@@ -53,10 +53,54 @@ steps:
         교대 종료만 사용자 승인을 지난다
       - 사용자에게 올릴 에스컬레이션의 기준(가치·우선순위·범위·권한에
         해당하는 것만, 선택지+권고안 형태로)
-      합의(또는 무변경 확인)를 보고에 남긴다.
+      - 보드 대조(회차의 첫 행동 — 컴팩션·재기동 뒤의 복구가 이것이다):
+        `claunch beads list --status in_progress,in_review --json`의 이슈마다
+        assignee 세션의 런 위치(claunch cflow status -t <세션> --json)와
+        맞춰 본다. assignee 세션이 exited인 in_progress 이슈는 고아다 —
+        `claunch beads comments add <id> "ORPHANED: <세션> exited, branch
+        <브랜치>"` 후 `update <id> --status open`으로 되돌린다(재배정은
+        관제 대기에서). 보드에 없는데 돌고 있는 워커 런이 있으면 그 워커에게
+        이슈를 만들어 올리라고 한다 — 리더가 대신 만들지 않는다.
+      합의(또는 무변경 확인)와 보드 대조 결과를 보고에 남긴다.
+
+      ── beads(br) 규칙 — 공통 ──
+      일감의 정본은 beads다: 세션이 한 회차를 쓸 일, 다른 세션·회차로 넘어갈
+      일은 이슈로 존재해야 한다(존재·제목·범위·완료 기준·assignee·상태·
+      의존·부모). beads에 두지 않는 것: 실행 기록(cflow 저널), 대화·답장
+      (mesh), 승인·선택(cflow ask/select), 머지 가능 판정(통합 단계의 git
+      증거). 코멘트에는 포인터와 판정만 — run id, 커밋 해시, 테스트 수치,
+      `REBASE REQUESTED @ <hash>` / `HOLD: <이유>` / `BLOCKED: <게이트>` /
+      `merged <hash>`.
+      호출은 항상 `claunch beads <br 인자>` — 워크트리에서도 저장소 루트의
+      .beads/beads.db 하나를 쓰고(--db를 대신 붙인다), 쓰기에 --actor
+      $CLAUNCH_SESSION을 붙이며, DB가 없으면 issues.jsonl에서 스스로
+      만든다. 조회는 --json.
+      이슈가 없을 때 만드는 자 = 그 일을 사람에게서 처음 받은 세션, 또는
+      발견한 세션이다 — 리더가 아니다. 만들기 전에 `claunch beads search
+      "<핵심어>" --json`과 open/in_progress/in_review 목록으로 중복을 본다;
+      있으면 create 대신 comments add. 규격: 제목 한 줄「무엇을 어떻게」,
+      --description은 `## 목표 / ## 범위(포함·제외) / ## 완료 증거 기준 /
+      ## 출처(누가·언제·원문)`, --labels에 출처 하나(user | user-direct |
+      leader | handoff | found | review). 우선순위: P1 사용자가 보고한
+      라이브 데몬·UI 고장과 master 빨강 / P2 사용자 지시·리더 배정(기본) /
+      P3 인수인계·발견·후속·후보 / P4 아이디어. type은 task 기본, bug는
+      회귀·결함, epic은 스택 부모, doc은 참조 전용(ready에서 빼고 배정하지
+      않는다). staged 순서: description이 먼저, --assignee가 마지막.
+      상태 전이의 주인: open→in_progress는 assignee 워커(intake 끝,
+      --external-ref에 run id) / in_progress→in_review는 assignee 워커
+      (landing request) / in_review→in_progress는 리더(rebase 재요청) /
+      in_review→closed는 리더만(`claunch beads close <id> --reason "merged
+      <hash>, sweep N/M"`; 중간 워커는 자기 --parent 자식만) / 아무
+      상태→blocked는 그 게이트에 걸린 세션(`BLOCKED: <스텝>`), 해소되면
+      같은 세션이 되돌린다 / reopen은 리더만. update --status closed는
+      없다 — close뿐이다.
+      br가 실패하면(잠금·바이너리 없음) --lock-timeout 5000으로 한 번 더,
+      그래도 안 되면 mesh fyi 첫 줄에 `NO-BEAD:` + 위 규격 그대로 — 리더가
+      다음 관제 대기에서 대신 만들고 id를 답한다. 이슈 없이 착수하는
+      것만은 금지다.
     done_when: |
-      운영 조건 합의(첫 회차) 또는 무변경 확인(이후 회차)이 보고에 기록되어
-      있다.
+      운영 조건 합의(첫 회차) 또는 무변경 확인(이후 회차)과 보드 대조 결과
+      (고아 처리 포함)가 보고에 기록되어 있다.
     next: standby
 
   standby:
@@ -80,21 +124,32 @@ steps:
         근거를 대조해 단일 규칙으로 확정하고 메시 전체에 fyi로 기록한다 —
         합의 인증 전에 실제 근거를 심사한다(한쪽이 끝내려고 접은 합의는
         합의가 아니다)
-      - 증거 수합: 워커 완료 보고에서 브랜치·커밋 해시·테스트 수치를
-        수합 표로 관리한다. 워커 수치는 간소화 스위트 기준이므로 표에
-        그렇게 표기하고, 수치마다 (트리 해시, 축, 값)과 시작 시각을 함께
-        적는다 — 축을 빼면 서로 다른 축의 수가 섞여 다음 사람이 엉뚱한
-        차이를 얻는다. 이 표가 통합 심사의 근거다. 동결 브랜치는
-        통합 대기 목록에 올린다.
+      - 일감 등록(리더 손에 들어온 것만 — 워커 터미널로 간 지시는 그
+        워커가 만든다): 사용자가 준 목표, 후보로 떠오른 것, 워커가 메시로만
+        넘긴 인수인계·발견은 컨텍스트에 두지 말고 그 자리에서 이슈로 만든다
+        — `claunch beads create "<제목>" --priority <P> --labels <user|leader>
+        --description "<규격>"`. 배정은 description을 완성한 뒤 `claunch beads
+        update <id> --assignee <세션>`이 마지막이고, spawn의 context에
+        `issue: <id>`를 싣는다(워커는 show로 읽는다). 사람 게이트에 걸린
+        이슈는 `update <id> --status blocked` + `comments add <id> "BLOCKED:
+        <게이트>"`, 풀리면 되돌린다.
+      - 증거 수합: 통합 대기 표는 보드다 —
+        `claunch beads list --status in_review --json`. 워커가 in_review로
+        넘기며 남긴 코멘트(브랜치·tip·수치·run id)가 표의 행이고, 워커
+        수치는 간소화 스위트 기준이다.
+        수치를 옮겨 적을 때는 (트리 해시, 축, 값)과 시작 시각을 함께 적는다
+        — 축을 빼면 서로 다른 축의 수가 섞여 다음 사람이 엉뚱한 차이를
+        얻는다. fyi로만 오고 보드에 없는 완료 보고는 표에 없는 것이다 —
+        그 워커에게 in_review 전이를 요구한다(리더가 대신 만들지 않는다).
       - 분기 심사: 통합 대기로 올릴 때 master와의 분기(뒤처짐)를 함께
         재고, 뚜렷하게 벌어진(충돌 위험·큰 격차) 브랜치는 대기에서 분리해
         워커에게 rebase 후 재요청을 보낸다 — 만날 수 없는 기준선 위의
         브랜치가 통합 심사까지 오지 않게 한다.
-        **이 표를 남기는 자리는 이 단계를 떠나는 select의 reason이다** —
-        관제 대기는 select 단계라 report가 거부되고(결정 단계의 기록은
-        그 reason이다), 이 단계는 거절 때마다 다시 들어오므로 통합 시도
-        1회당 표 하나가 저널에 쌓인다. 관제 중의 중간 상태는 저널에
-        남길 자리가 없으니, 떠날 때 그 회차분을 reason에 실어라
+        **이 단계를 떠나는 select의 reason에는 통합 후보 이슈 id 목록과
+        id마다 증거 한 줄(브랜치·tip·수치)을 싣는다** — 표의 본체는 보드에
+        있고, reason은 그 회차에 무엇을 심사했는지의 저널 기록이다. 관제
+        대기는 select 단계라 report가 거부되고, 거절 때마다 다시 들어오므로
+        통합 시도 1회당 기록 하나가 저널에 쌓인다
       - 스윕 배치: 전체 스윕이 필요해지면(통합 대기가 쌓였거나, 워커가
         전체 확인을 요청하거나, 정본 규칙 변경처럼 파급이 넓은 커밋이
         보이면) 워커에게 시키지도, 자기 턴에서 돌리지도 말고 subagent를
@@ -186,8 +241,11 @@ steps:
       뒤처짐이 0(또는 소수)이고 미리 병합이 깨끗하면 통합 후보다. 충돌이
       있거나 뒤처짐이 뚜렷하면(예: master가 수 개 이상 커밋 앞섬) 그
       브랜치는 이번 머지에서 제외하고, 워커에게 rebase 후 다시 요청하라고
-      메시로 재요청을 보낸다(통합 대기 표에 그 브랜치를 "rebase 요청됨"으로
-      표기). 워커 세션이 이미 끝났으면 사용자에게 respawn(claunch respawn)으로
+      메시로 재요청을 보낸다 — 보드에는 `claunch beads update <id> --status
+      in_progress`와 `comments add <id> "REBASE REQUESTED: master @ <hash>"`
+      (통합 대기 표에서 "rebase 요청됨"으로 빠지는 것이 이것이다; 워커가
+      재정렬 후 다시 in_review로 올린다). 워커 세션이 이미 끝났으면
+      사용자에게 respawn(claunch respawn)으로
       되살려 재요청을 이어가게 할지 알린다. 뒤처진 기준선을 master에 조용히
       얹지 않는다 — rebase된 브랜치가 다시 심사에 오른 뒤 머지다.
     done_when: |
@@ -300,12 +358,20 @@ steps:
       다르므로 정본은 명령을 박지 않는다. 되확인한 머지 커밋 해시·diffstat을
       보고에 남기고, 메시 전체에 fyi로 알린다: master가 움직였고, 머지된
       브랜치는 동결이며, 신규 작업은 새 master 기준 브랜치로.
+      ── 보드 마감 (리더만 닫는다) ──
+      머지와 스윕이 끝난 이슈마다 `claunch beads close <id> --reason "merged
+      <머지 해시>, sweep N/M"`. 그 다음 보드를 저장소에 싣는다 — `claunch
+      beads sync --flush-only` 후 master에서 `git add .beads/issues.jsonl`,
+      `git commit -m "chore(beads): close <id들>"`; 이 커밋도 subagent가
+      실행하고 리더가 해시를 되확인한다. `.beads/`를 커밋하는 자리는 여기
+      하나다(워커 브랜치는 그 파일을 건드리지 않으므로 충돌이 없다).
     done_when: |
       이번에 승인된 통합 대기 브랜치가 전부 --no-ff로 master에 머지되었고,
       머지 결과 트리의 전체 스윕 수치와 머지 커밋 해시·diffstat이 보고에
       있으며 메시 전체 fyi 공지가 나갔다. 머지와 스윕은 리더의 턴이 아니라
       spawn된 subagent가 실행했고, 보고에 적힌 해시는 리더가 읽기 명령으로
-      되확인한 값이다.
+      되확인한 값이다. 머지된 이슈는 close되었고 chore(beads) 커밋 해시가
+      보고에 있다.
     # 저장소 특화 verify는 정본이 아니라 프로젝트 레이어(.claunch/workflows/)에.
     next: reflect
 
@@ -338,7 +404,8 @@ steps:
       prompt: |
         교대 종료를 확정하는가? 확정하면 워커들의 유휴 여부를 확인한 뒤
         세션을 종료(kill)하고 최종 보고를 남긴다. 통합 대기 브랜치가 남아
-        있다면 저널의 수합 표에 보인다 — 남긴 채 종료해도 브랜치는 유지된다.
+        있다면 보드(claunch beads list --status in_review)에 보인다 — 남긴
+        채 종료해도 브랜치도 이슈도 유지된다.
       timeout: 900
       on_decline: standby
     instructions: |
@@ -354,7 +421,8 @@ steps:
       트리와 무관하다**(스윕의 시작·소요·워커 수·실행량이 거기에만 남는다;
       지워야 한다면 그 네 값을 먼저 보고에 적는다). 최종 보고: 교대 동안의 회차
       요약 — 처리한 요청, 확정한 규칙, 머지 커밋, 반영 여부, 남은 통합
-      대기 브랜치 — 를 저널 기반으로 남긴다. 이 런은 recur라서 종료 후에도
+      대기 브랜치 — 를 저널 기반으로 남기고, 보드의 잔량(`claunch beads list
+      --status open,in_progress,in_review --json`)을 붙인다. 이 런은 recur라서 종료 후에도
       다음 회차 요청이 접수된다 — 교대를 정말 끝내려면 사용자가 요청을
       철회해야 함을 안내한다(claunch cflow request --cancel).
     done_when: |
