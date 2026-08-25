@@ -301,6 +301,24 @@ ctx.setMeshes([
   check("only the directory line, the one-line, the context line, the cflow line and the briefing card break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
+  /* The one-line summary is the exception to this rail's ellipsis habit: it
+     wraps, because it is the only line that says what a session is DOING and
+     a cut one says it half. Its full-width base (asserted above) is what
+     makes that affordable — it takes rows off the rail's scroll, never width
+     off the name line. Any of the three truncating declarations coming back
+     puts the tail back out of reach: nothing carries it, the element's title
+     is a fixed label (briefrow_check pins that the text goes in whole). */
+  check("the one-line summary wraps instead of being cut",
+        decl("#session-list .rail-brief", "white-space"), "pre-wrap");
+  for (const prop of ["text-overflow", "overflow"]) {
+    check(`the one-line summary declares no ${prop} — it is not truncated`,
+          decl("#session-list .rail-brief", prop), undefined);
+  }
+  /* A recorded opening task carries paths and branch names, which offer no
+     break opportunity — without this the rail scrolls sideways instead. */
+  check("a long unbreakable token breaks rather than widening the rail",
+        decl("#session-list .rail-brief", "overflow-wrap"), "anywhere");
+
   const toggleOrder = Number(decl("#session-list .sess-brief-toggle", "order"));
   ok("the ▸ toggle declares an order", Number.isFinite(toggleOrder));
   for (const sel of BREAKERS) {

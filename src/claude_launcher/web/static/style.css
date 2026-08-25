@@ -216,11 +216,27 @@ option:disabled { color: #6b7280; }
 }
 /* The one-line job description, always on the row — folded or open. A
    full-width line under the name like the cflow line, so it never squeezes
-   the name group; a long one is ellipsised, the whole text on hover. */
+   the name group.
+
+   It WRAPS rather than ellipsising, and that is the point of the line: this
+   is the one place the rail says what a session is actually DOING, and a
+   summary cut at 260px says it about half. Nothing carried the tail either:
+   the rule this replaced promised "the whole text on hover", but the
+   element's title is a fixed label ("one-line job description — ▸ opens the
+   full briefing", app.js decorateBriefingRow) and never the text — so what
+   the ellipsis ate was simply gone. Height is the price, and it is the cheap
+   one: the row is already allowed to grow (the cflow line and the briefing
+   card are full-width lines under this one), so a long summary costs rows in
+   a rail that scrolls, not shape in a row that must not break. `anywhere`
+   because the fallback text is the recorded opening task, which carries
+   paths and branch names offering no break opportunity — one of those would
+   otherwise push the whole rail into a horizontal scroll. `pre-wrap` because
+   that same fallback runs to several lines, and its own breaks are structure
+   the writer put there. */
 #session-list .rail-brief {
   flex-basis: 100%; order: 2; min-width: 0; padding-left: 16px;
-  font-size: 11px; color: #8b949e; white-space: nowrap;
-  overflow: hidden; text-overflow: ellipsis;
+  font-size: 11px; color: #8b949e; line-height: 1.45;
+  white-space: pre-wrap; overflow-wrap: anywhere;
 }
 /* The row's ⟳: refresh the summary without opening it. Same glyph family
    as the card's. Sits at the end of the name line, before the ▸ toggle. */
