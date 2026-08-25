@@ -425,6 +425,9 @@ class FakeTerminal {
    rebuilt from every two seconds. */
 let SESSIONS = [];
 let LLM_ON = false;
+// Which incarnation the summariser is describing. A name can be reused, so
+// this is how the check tells a fresh briefing from the dead session's one.
+let BRIEF_TAG = "first";
 function sessionPayload(n) {
   return {
     name: n, status: "idle", pid: 1000 + n.length, cwd: "/tmp",
@@ -442,7 +445,7 @@ function answer(pathname) {
     const who = /sessions\/([^/]+)\/briefing/.exec(pathname);
     return {
       "one-line-job-description": `what ${who ? who[1] : "?"} is for`,
-      goal: "g", now: "n", progress: "p", state: "working",
+      goal: BRIEF_TAG, now: "n", progress: "p", state: "working",
     };
   }
   if (pathname.endsWith("/api/sessions")) {
@@ -703,6 +706,36 @@ async function main() {
     "the rail is not carrying rows for sessions that are gone",
     churned.rows === SESSIONS.length, { rows: churned.rows },
   );
+
+  /* ---- 3b. the same name, a different session ---------------------------
+     The other half of what an unswept name-keyed cache costs. `claunch
+     respawn` puts a NEW session behind an OLD name, which is why the link
+     already re-checks pid and boot id rather than trusting the name. A
+     briefing that outlived its session has no such test: left in the cache
+     it is served under the new session's name and reads as a summary of
+     work this session never did. Memory is the cheap half of this bug. */
+  BRIEF_TAG = "first";
+  SESSIONS = ["reused"];
+  await ticks(1);
+  await vm.runInContext('toggleBriefing("reused")', ctx);
+  await flush();
+  check("the first incarnation's briefing is what is cached",
+        read('(briefingCache.get("reused")||{}).data.goal') === "first",
+        { got: read('JSON.stringify(briefingCache.get("reused"))') });
+
+  SESSIONS = [];                 // killed
+  await ticks(1);
+  BRIEF_TAG = "second";
+  SESSIONS = ["reused"];         // respawned under the same name
+  await ticks(1);
+  check("a respawn under the same name does not inherit the dead session's briefing",
+        !read('briefingCache.has("reused")'),
+        { cached: read('JSON.stringify(briefingCache.get("reused"))') });
+  await vm.runInContext('toggleBriefing("reused")', ctx);
+  await flush();
+  check("and folding it open now summarises the session that is actually there",
+        read('(briefingCache.get("reused")||{}).data.goal') === "second",
+        { got: read('JSON.stringify(briefingCache.get("reused"))') });
 
   /* ---- 4. an outage every few minutes, all day --------------------------
      A laptop that sleeps, a phone that loses its tunnel, a daemon that is
