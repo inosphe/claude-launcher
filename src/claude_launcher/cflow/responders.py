@@ -381,6 +381,61 @@ def deliver(
     return None
 
 
+def withdraw(
+    ask: dict,
+    *,
+    mesh: str,
+    sender: str,
+    workflow: str,
+    to: List[str],
+    decision: str,
+) -> Optional[str]:
+    """Tell the responders a person answered the question out from under them.
+
+    The engine has always let a human settle an ask that was out with an
+    agent, and the responder found out by having its answer refused —
+    a whole turn spent on a decision that was no longer anyone's to make.
+    This is the other half of that rule: the override is announced to the
+    people it overrode, in the same thread the question arrived in.
+
+    Best-effort and silent about it, like :func:`deliver`: the answer is
+    already recorded and the run has already moved, so a message that does
+    not send costs a wasted turn, not correctness.
+    """
+    client = daemon_client.connect()
+    if client is None:
+        return "the claunch daemon is not running, so nobody was told"
+    body = (
+        f"cflow: the question I sent you ({ask.get('id')}, "
+        f"{workflow}/{ask.get('step')}) is closed — the user answered it "
+        f"themselves: {decision!r}. A person's answer lands over a "
+        f"responder's, so there is nothing left to decide here. Drop it and "
+        f"carry on with your own work; do not answer it."
+    )
+    try:
+        client.post(
+            f"/api/mesh/{mesh}/messages",
+            {
+                "from": sender,
+                "to": to,
+                "body": body,
+                # `fyi`: this closes a debt rather than opening one — the
+                # responder owes nothing now, and the mesh must not chase it
+                # for an answer to a question that no longer exists.
+                "type": "fyi",
+                "ref": {
+                    "kind": "cflow.ask.withdrawn",
+                    "id": ask.get("id"),
+                    "step": ask.get("step"),
+                },
+            },
+            timeout=CALL_TIMEOUT,
+        )
+    except daemon_client.DaemonClientError as exc:
+        return f"the withdrawal could not be delivered: {exc}"
+    return None
+
+
 def nudge(session: str, message: str, *, cwd: str) -> List[str]:
     """Type a resume nudge into the run's own session. Returns who was nudged.
 

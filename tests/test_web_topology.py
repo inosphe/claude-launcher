@@ -201,6 +201,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "pollselect_check.js",
         "beads_check.js",
         "wfdpace_check.js",
+        "askdoor_check.js",
     ],
 )
 def test_topology_diagram_logic(script):

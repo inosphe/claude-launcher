@@ -6112,21 +6112,34 @@ function wfActions(data, opts = {}) {
     msgs.appendChild(el("p", "wf-gate", run.ask ? run.ask.prompt : "waiting for a decision"));
     msgs.appendChild(el("p", "wf-note",
       "this is with another agent; you do not have to do anything. Take it " +
-      "over only if it is stuck."));
-    const btn = el("button", "wf-btn", "Decide it myself");
-    btn.addEventListener("click", () => {
-      if (!confirm(
-        `Take '${run.step_id}' away from ${askWho(run.ask)} and decide it yourself?`
-      )) return;
-      if (run.ask && run.ask.kind === "branch") {
-        // A branch needs an option, so send them back to the buttons the
-        // human-facing path already draws rather than inventing a second one.
-        alert("Use 'claunch cflow select <option>' to pick the branch.");
-        return;
-      }
-      cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
-    });
-    main.appendChild(btn);
+      "over only if it is stuck — your answer lands over theirs, and they " +
+      "are told the question is closed."));
+    const branch = run.ask && run.ask.kind === "branch";
+    // A branch needs an option, not an approval. This used to say so in an
+    // alert and send the reader to the CLI — a dead end on the one screen
+    // that had every part of the question already in hand. The takeover is
+    // the same press as any other selection; only the confirm differs,
+    // because this one is taken away from somebody.
+    const opts = branch ? (run.ask.options || []) : [null];
+    for (const o of opts) {
+      const btn = el("button", "wf-btn" + (o ? " option" : ""),
+        o ? o.name : "Decide it myself");
+      if (o) btn.title = o.description || "";
+      btn.addEventListener("click", () => {
+        if (!confirm(
+          `Take '${run.step_id}' away from ${askWho(run.ask)} and ` +
+          (o ? `answer '${o.name}'` : "decide it") + " yourself?"
+        )) return;
+        if (o) {
+          cflowAction("/api/cflow/select", {
+            cwd: data.cwd, scope: data.scope, option: o.name,
+          }, after);
+        } else {
+          cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
+        }
+      });
+      main.appendChild(btn);
+    }
   } else if (run.status === "waiting_approval") {
     const isLoop = run.reason === "loop_limit";
     if (run.reason === "declined" && run.declined) {

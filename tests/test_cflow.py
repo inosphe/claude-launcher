@@ -9,7 +9,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from claude_launcher import daemon_client
+from claude_launcher import cli, daemon_client
 from claude_launcher.cflow import engine, mcp, model, responders, state as state_mod
 from claude_launcher.cflow.engine import CflowError
 from claude_launcher.cflow.model import WorkflowError
@@ -2143,6 +2143,163 @@ def test_a_human_can_settle_a_delegated_branch(flow_dir, monkeypatch):
     assert engine.status()["status"] == "done"
     events = [e["event"] for e in state_mod.read_journal()]
     assert "ask_answered" in events and "ask_discarded" not in events
+
+
+def _journal(event):
+    return [e for e in state_mod.read_journal() if e["event"] == event]
+
+
+def test_a_person_answers_over_the_agent_that_is_holding_the_branch(
+    flow_dir, monkeypatch
+):
+    """The second door on a delegated decision, and who wins when both open.
+
+    Delegation takes the decision away from the *run*, never from the user:
+    the CLI has always been able to settle an open ask (it is the trusted
+    channel by construction — whoever holds it can already ``goto`` the run
+    anywhere). What was never pinned is the rule that makes the two doors
+    safe to have at once — a person's answer lands over the responder's,
+    whether or not the responder was about to answer.
+    """
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("reviewer", "rev"))
+    _write(flow_dir, "branch", DELEGATED_BRANCH)
+    told = []
+    monkeypatch.setattr(
+        responders, "withdraw", lambda ask, **kw: told.append(kw) or None
+    )
+
+    payload = engine.start("branch")
+    assert payload["status"] == "waiting_answer"          # out with the reviewer
+    ask_id = payload["ask"]["id"]
+
+    engine.select("ready", "not waiting on it", by="user")
+
+    assert engine.status()["status"] == "done"
+    answered = _journal("ask_answered")[-1]
+    assert answered["by"] == "user" and answered["by_session"] is None
+    # `in_group` false and `override` naming the holder: this was not the
+    # ask falling to a human, it was a human taking it off one.
+    assert answered["in_group"] is False
+    assert answered["override"] == ["reviewer-rev"]
+    assert "ask_discarded" not in [e["event"] for e in state_mod.read_journal()]
+
+    # ...and the reviewer is told, in the thread the question arrived in,
+    # rather than finding out by having a turn's work refused.
+    assert told and told[-1]["to"] == ["reviewer-rev"]
+    assert told[-1]["decision"] == "ready"
+
+    with pytest.raises(CflowError, match="not open any more"):
+        engine.answer(ask_id, "rework", by_session="rev")
+
+
+def test_a_person_approving_takes_the_gate_off_its_holder_too(
+    flow_dir, monkeypatch
+):
+    """The same rule at the other door: an entry approval, not a branch."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss"))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    told = []
+    monkeypatch.setattr(
+        responders, "withdraw", lambda ask, **kw: told.append(kw) or None
+    )
+    engine.start("askflow")
+    engine.report("implemented")
+    assert engine.next_step()["status"] == "waiting_answer"
+
+    engine.approve(by="user")
+
+    answered = _journal("ask_answered")[-1]
+    assert answered["in_group"] is False
+    assert answered["override"] == ["leader-boss"]
+    assert told and told[-1]["to"] == ["leader-boss"]
+    assert engine.next_step()["step_id"] == "ship"
+
+
+def test_an_ask_that_fell_to_a_human_is_not_recorded_as_an_override(
+    flow_dir, monkeypatch
+):
+    """Nobody was holding it, so nobody was overridden — and nobody is told.
+
+    The distinction is the whole reason ``override`` is a separate key: a
+    journal that called both cases the same would make "the user took this
+    off somebody" unreadable, which is exactly what the entry exists to say.
+    """
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)  # no reviewer above us: the ask reaches nobody
+    _write(flow_dir, "branch", DELEGATED_BRANCH)
+    told = []
+    monkeypatch.setattr(
+        responders, "withdraw", lambda ask, **kw: told.append(kw) or None
+    )
+    assert engine.start("branch")["status"] == "waiting_selection"
+
+    engine.select("ready", "I looked myself", by="user")
+
+    answered = _journal("ask_answered")[-1]
+    assert answered["in_group"] is True and "override" not in answered
+    assert told == []
+
+
+def test_the_delegated_payload_names_the_door_a_person_can_use(
+    flow_dir, monkeypatch
+):
+    """The door existed for as long as the delegation did; nothing said so.
+
+    The payload told the driver "you cannot answer it yourself" and stopped
+    there — so the one party who *could* answer it was the only one never
+    told, and a run out with a responder read as unreachable from the
+    terminal it was started in.
+    """
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("reviewer", "rev"))
+    _write(flow_dir, "branch", DELEGATED_BRANCH)
+    payload = engine.start("branch")
+
+    door = payload["user_door"]
+    assert door["command"] == "claunch cflow select <ready|rework>"
+    assert door["wins"] is True
+    unblock = payload["how_to_unblock"]
+    assert "cannot answer it yourself" in unblock      # still not the driver's
+    assert door["command"] in unblock
+    assert "lands over the responder" in unblock
+    # A door, not a gate: the run is not stopped on the user, and the driver
+    # must not start standing them up every visit — that cost is the whole
+    # reason the decision was delegated in the first place.
+    assert "do not stand them up" in unblock
+    assert "theirs to take" not in unblock
+
+
+def test_the_approval_door_names_the_approve_press(flow_dir, monkeypatch):
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("leader", "boss"))
+    _write(flow_dir, "askflow", ASK_FLOW)
+    engine.start("askflow")
+    engine.report("implemented")
+    payload = engine.next_step()
+    assert payload["user_door"]["command"] == "claunch cflow approve"
+
+
+def test_status_shows_a_delegated_decision_and_the_press_that_takes_it(
+    flow_dir, monkeypatch, capsys
+):
+    """``claunch cflow status`` is the human channel, and on a delegated ask
+    it used to print the status word and nothing else — not the question,
+    not the options, not the way in. A person watching a run go quiet could
+    not see what it had gone quiet *on*."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("reviewer", "rev"))
+    _write(flow_dir, "branch", DELEGATED_BRANCH)
+    engine.start("branch")
+
+    assert cli.main(["cflow", "status"]) == 0
+    out = capsys.readouterr().out
+    assert "ready?" in out                        # the question
+    assert "ship it" in out                       # what an option does
+    assert "reviewer-rev" in out                  # who is holding it
+    assert "claunch cflow select <ready|rework>" in out
+    assert "yours lands over theirs" in out
 
 
 # --------------------------------------------------------------------------- #

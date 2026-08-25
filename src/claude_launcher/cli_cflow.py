@@ -263,6 +263,38 @@ def _cmd_status(args: argparse.Namespace) -> int:
     if status == "waiting_approval":
         _print_block("gate", payload.get("gate"))
         print("unblock:  claunch cflow approve")
+    if status == "waiting_answer":
+        # Delegated, and until now invisible from here: the CLI printed the
+        # status word and stopped, so the one channel a person can actually
+        # answer through showed neither the question nor the way in. It is
+        # still not the reader's move — the wording says who holds it before
+        # it says what they could do — but the door is named, because a
+        # person's answer lands over a responder's and only they can decide
+        # this run has waited long enough.
+        ask = payload.get("ask") or {}
+        kind = ask.get("kind") or payload.get("reason")
+        _print_block(
+            "decision" if kind == "branch" else "gate",
+            ask.get("prompt") or payload.get("prompt"),
+        )
+        _print_options(ask.get("options") or payload.get("options") or [])
+        holders = ", ".join(
+            str(e.get("handle") or e.get("kind") or "?")
+            for e in ask.get("asked") or []
+        )
+        print(f"with:     {holders or 'nobody — nothing will answer it but you'}")
+        if ask.get("deadline"):
+            print(f"          moves on after {ask['deadline']}")
+        for entry in ask.get("skipped") or []:
+            print(f"skipped:  {entry.get('candidate')} — {entry.get('reason')}")
+        door = payload.get("user_door") or {}
+        if door.get("command"):
+            print(f"yours:    {door['command']}")
+            print(
+                "          you can answer it now — yours lands over theirs"
+                if holders
+                else "          it is yours: nobody else was asked"
+            )
     if status == "waiting_selection":
         # Everything a person needs to answer this, in the order they need
         # it: the question, what each answer means, and only then what the
