@@ -161,7 +161,8 @@ new Function(
   + slice("spawnMeshNow") + slice("spawnAutoWorktree")
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
   + slice("syncSpawnGates") + slice("spawnPayload")
-  + slice("spawnReport") + slice("spawnPreflightNote") + slice("postSpawn")
+  + slice("spawnReport") + slice("spawnPreflightNote")
+  + slice("spawnHardBlocks") + slice("postSpawn")
   + slice("spawnMissingSources") + slice("spawnSourceNote")
   + slice("qjStamp") + slice("fillSpawnSelect") + slice("spawnRow") + slice("spawnCheckRow")
   + slice("refillSpawnWorkflows") + slice("spawnConnectNow")
@@ -591,6 +592,81 @@ async function main() {
   await settle();
   check("a healthy load raises no source warning",
     !texts(modalEls["modal-body"]).includes("could not load"));
+
+  /* ---- the child cap is a crossing, not a dead end ----------------------
+     spawn.py folds the SOFT cap into `blocked_by` as well, so `can_spawn` is
+     false at the limit — and reading that alone used to stop the load dead:
+     no Workflow picker, no Over-limit row, a modal that said "child limit
+     reached" over an empty dropdown. The cap is exactly what a busy fleet
+     runs into, which is how "no workflows in the spawn modal" kept coming
+     back. */
+  const CAP = "child limit reached (4/4)";
+  routes["GET /api/sessions/lead1/children"] = { doc: {
+    can_spawn: false, blocked_by: [CAP], soft_blocked_by: [CAP],
+    children_used: 4, children_remaining: 0,
+    may_choose: ["worktree"], spawnable_harnesses: [],
+  } };
+  sent = [];
+  await ctx.openSpawnModal("lead1", { seed: { role: "worker" } });
+  await settle();
+  await settle();
+  const capSel = nodeSel(modalEls["modal-body"], "select") || [];
+  const capWf = capSel.find((sel) => (sel.options || [])
+    .some((o) => o.text === "(no workflow)"));
+  check("at the cap the workflow picker is still filled",
+    capWf && (capWf.options || []).some((o) => o.value === "improv-worker"),
+    capWf && (capWf.options || []).map((o) => o.value));
+  check("...and the role's own default is still auto-picked",
+    capWf && capWf.value === "improv-worker", capWf && capWf.value);
+  const capOverRow = walk(modalEls["modal-body"]).find((n) =>
+    n.tag === "div" && n.classes.has("sess-spawn-row") &&
+    texts(n).includes("spawn over the child limit"));
+  check("the over-limit row is on offer at the cap",
+    capOverRow && capOverRow.hidden === false, capOverRow && capOverRow.hidden);
+  check("the note quotes the cap and names the crossing",
+    texts(modalEls["modal-body"]).includes(CAP) &&
+      texts(modalEls["modal-body"]).includes("tick 'spawn over the child limit'"),
+    texts(modalEls["modal-body"]).slice(-200));
+  const capActs = buttons(modalEls["modal-actions"]);
+  const capBtn = capActs.find((b) => b.text.startsWith("Spawn"));
+  check("the button stays dead until the cap is crossed",
+    capBtn && capBtn.disabled === true);
+  const capBox = capOverRow && capOverRow._find((k) => k.tag === "input");
+  if (capBox) { capBox.checked = true; await capBox.fire("change"); }
+  check("...and the crossing arms it", capBtn && capBtn.disabled === false);
+  await capBtn.fire("click");
+  await settle();
+  const capPost = sent.find((x) => x.method === "POST");
+  check("the crossing travels as over_limit",
+    capPost && capPost.body.over_limit === true, capPost && capPost.body);
+
+  /* ---- a parent whose own record never arrived is not guessed at ---------
+     The workflow and git questions are both about where the CHILD will
+     stand, and the daemon resolves an absent cwd to its OWN directory
+     (api.py h_cflow_workflows) — so asking with "" does not fail, it
+     succeeds about the wrong directory and fills the pickers with workflows
+     the child will never see. */
+  routes["GET /api/sessions/lead1/meta"] = { throw: true };
+  routes["GET /api/sessions/lead1/children"] = { doc: {
+    can_spawn: true, children_remaining: 2, may_choose: [],
+    spawnable_harnesses: [],
+  } };
+  ctx.setSessions([]);        // ...and the rail's cache has no row either
+  sent = [];
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  check("an unknown parent is not asked about on the daemon's behalf",
+    !sent.some((x) => /\/api\/(cflow\/workflows|git)\?cwd=$/.test(x.path)),
+    sent.map((x) => x.path));
+  check("...and the empty pickers say why",
+    texts(modalEls["modal-body"]).includes("could not load"),
+    texts(modalEls["modal-body"]).slice(-220));
+  ctx.setSessions([{ name: "lead1", cwd: "C:/repo", harness: "claude", status: "idle" }]);
+  routes["GET /api/sessions/lead1/meta"] = { doc: {
+    session: { name: "lead1", cwd: "C:/repo", harness: "claude" },
+    meshes: [{ mesh: "m0", handle: "lead1", role: "leader" }],
+  } };
 
   /* ---- a denied parent is told before the button can be pressed ---------- */
   routes["GET /api/sessions/lead1/children"] = { doc: {
