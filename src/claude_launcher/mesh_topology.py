@@ -1,4 +1,4 @@
-"""The two topology skills a lead reaches for once its team outgrows a star.
+"""The topology skills a lead reaches for once its team outgrows a star.
 
 Every child a session spawns starts connected to that session and to nobody
 else (see :mod:`mesh_install`), and every spawn hangs off the spawner — so a
@@ -20,7 +20,11 @@ rules for re-drawing the team, and the lead who does needs them whole.
 other through you.  ``mesh-delegate`` — spawn a nested worker for a crowded
 area and move that area's workers under it, so their branches land on its
 branch as a stacked pull request (the ``improv-mid`` workflow) and you
-integrate once.
+integrate once.  ``mesh-retopology`` — every other re-drawing of the tree
+that ``reparent`` does: take a finished tier's workers back, adopt the
+children of a parent that exited, move a worker to the tier its work
+belongs to, undo a delegation — and the briefing that has to follow each
+move, because the moved session's own briefing still names its old parent.
 """
 
 from __future__ import annotations
@@ -213,12 +217,136 @@ master ← MID branch (stack base; merge commits only)
 """
 
 
+RETOPOLOGY_SKILL_MD = """\
+---
+name: mesh-retopology
+description: >-
+  Re-draw your team's tree with the reparent tool: take a nested worker's
+  members back once its stack has landed, adopt the live children of a
+  parent that exited, move a worker to the tier its work actually belongs
+  to, or undo a delegation that did not pay off. Use when `children` shows
+  a mid-worker that has handed off and still holds members, a session
+  marked exited that still has live children, or a worker reporting to the
+  wrong parent for the branch it is on. A lead's skill: only sessions you
+  spawned (or their descendants) can be moved. mesh-delegate is the one
+  case of adding a tier; this is every other move. Usage: /mesh-retopology
+  — or decide the need is there and follow the procedure without being
+  asked.
+---
+
+# Procedure: re-draw the tree
+
+A team's shape is a tree of who reports to whom, and `reparent` moves one
+session — with everything under it — from one parent to another in a single
+call. The call is cheap; what costs is everything the tree implied: which
+branch a worker measures its diff against, who receives its integration
+request, whose restack notices it must obey, and the briefing it was spawned
+with, which still names the old parent and will keep naming it. This skill
+is the moves a lead makes with `reparent` outside of delegating an area
+(that one has its own skill, `mesh-delegate`), and the sentence that has to
+follow each move.
+
+## Triggers (any one)
+
+- **A tier is done.** A mid-worker's stack landed on master (you merged its
+  ONE branch) but `children` still shows members under it — they finished
+  and are wrapping up, or they hold frozen branches. Take them back so their
+  next round (if any) reports to you and their hold-branches sit in your
+  queue, not a retired tier's.
+- **A parent died.** `children` shows a session as `exited` with live
+  children beneath it (a mid that crashed, a worker that spawned helpers and
+  was killed). Those children are orphans: their requests go to a terminal
+  nobody reads. Adopt them.
+- **Wrong tier.** A worker's branch belongs to an area a mid owns (it edits
+  the same surface, or was cut from that mid's stack base), but it reports
+  to you — or the reverse. Move it to where its integration target is.
+- **Undo.** A delegation that did not pay off — the mid is idle, the area
+  thinned out to one worker, or the stack is blocking more than it batches.
+  Move the members back, then `kill` the mid once its report is in.
+
+Do not move a session mid-landing (its `landing` gate is waiting on the
+user, or its request is on a mid's stack and about to land): let the landing
+finish, then move. And do not move to "tidy" — every move costs a briefing.
+
+## Procedure
+
+1. **Read the tree.** `children` (MCP) — the subtree you command, each
+   session's status, its cflow run and step, `depth`/`max_depth`. For a
+   fuller view of who stands where: `claunch sessions`. Name the move in
+   one line: *who*, from *whom*, to *whom*, and *why* — it becomes the
+   briefing and the standby-report entry.
+2. **Pick a live target you command.** Yourself, or a session in your
+   subtree. An exited session cannot receive; a session cannot be moved
+   under itself or its own descendant.
+3. **Check the room.** The moved session and its whole subtree go to the
+   target's depth + 1. `reparent` refuses a move that pushes any of them
+   past `spawn.max_depth`; moving *up* (back to you) always fits.
+4. **Read the moved session's run before touching it:** `claunch cflow
+   status -t SESSION --json`. A run at `landing` (`waiting_selection`) or
+   in `rebase`/`integration-request` against a specific base is mid-flight
+   — wait, or accept that the briefing below must include a new base and a
+   restack.
+5. **Move:** `reparent` (MCP: `{session: SESSION, parent: TARGET}`), one
+   call per session; each carries its subtree. What the daemon does for
+   you: opens the SESSION↔TARGET edge in every mesh the two share. What it
+   leaves: the edge to the old parent (cut it with `disconnect` if that
+   parent is live and should stop hearing from the session), and every
+   file, branch and run the session had. What it does not do: tell anyone.
+6. **Brief, in ONE batch send** with a section each — this is the step
+   that makes the move real:
+   - to the moved session: "your parent is now TARGET; send completion
+     reports and integration requests to it; your integration target is
+     `<branch>` (master when TARGET is the lead; TARGET's stack base when
+     it is a mid); if your branch was cut from the old base, rebase onto
+     the new one before requesting" — and, when it is mid-flight, what to
+     do with the request it already sent;
+   - to TARGET (unless it is you): the session it now owns, its branch,
+     its base, and where it stands in its run;
+   - to the old parent, if live: that the session left, so it stops
+     waiting on it.
+   Its own briefing still names the old parent and `rebrief` will only show
+   the new one from now on; nothing else corrects it.
+7. **The board.** The moved session's issue keeps its assignee. If TARGET
+   is a mid with a stack issue, hang the issue under it (`claunch beads
+   update <id> --parent <mid's issue>`); if the session came back to you
+   from a mid, clear that parent link the same way. A frozen branch that
+   moved with the session stays `in_progress` with its `HOLD:` comment —
+   it is now on your `in_review` horizon, not the mid's.
+8. **Record** the new shape in your standby report: who, under whom, why —
+   and, for an adoption, which exited session they came from.
+
+## The four moves, side by side
+
+| move | reparent to | integration target after | extra |
+|---|---|---|---|
+| tier done | you | master (via you) | `kill` the mid once its report is in |
+| parent died | you (or a live mid) | master / that mid's base | check each orphan's run first — one may be at a human gate nobody is watching; surface it |
+| wrong tier | the mid | the mid's stack base | the worker rebases onto the base (`spawn`'s `rebase_onto` did this for children the mid spawned; a moved one does it by hand) |
+| undo delegate | you | master | the mid's landed stack is already on master; unlanded child branches come back as your queue |
+
+## Refusals (the daemon's words)
+
+- "does not command": the session is not in your subtree — only what you
+  spawned, or what your children spawned, is yours to move. The operator's
+  form, `claunch reparent SESSION PARENT`, is not scoped.
+- "cannot move itself": a session is moved by the one that commands it,
+  never by itself.
+- "has exited": the target must be live. Orphans are moved *from* an exited
+  parent, never *to* one.
+- "make a cycle": the target is the session itself or something under it.
+- "would put a session N level(s) deep": the subtree does not fit under the
+  target. Move fewer or shallower sessions, or ask the user to raise
+  `spawn.max_depth` in `~/.claunch.yaml`.
+"""
+
+
 def write_skills(skills_dir: Path) -> List[Path]:
-    """Write both topology skills into ``skills_dir``; return their paths."""
+    """Write the topology skills into ``skills_dir``; return their paths."""
     out: List[Path] = []
     for name, text in (
         ("mesh-wire", WIRE_SKILL_MD),
         ("mesh-delegate", DELEGATE_SKILL_MD),
+        ("mesh-retopology", RETOPOLOGY_SKILL_MD),
     ):
         path = skills_dir / name / "SKILL.md"
         path.parent.mkdir(parents=True, exist_ok=True)
