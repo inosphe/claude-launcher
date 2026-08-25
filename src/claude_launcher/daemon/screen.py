@@ -154,11 +154,13 @@ class ScreenState:
         cols = self._screen.columns
         out: List[str] = []
         for line in self._screen.history.top:
-            # History lines keep the width they had when they scrolled off, so
-            # a resize that grew the screen can leave them shorter than cols.
-            out.append(
-                "".join(line[x].data for x in range(min(len(line), cols))).rstrip()
-            )
+            # A row is a column-keyed mapping, not a list: ``len(line)`` counts
+            # the cells that were *written*, which is smaller than the row's
+            # width whenever the program drew it sparsely (a cursor jump to a
+            # right-aligned element leaves the cells between untouched). The
+            # width is ``cols``; reading past the written cells yields the
+            # default char without storing it.
+            out.append("".join(line[x].data for x in range(cols)).rstrip())
         return out
 
     @property
@@ -251,9 +253,17 @@ class ScreenState:
 
     def _row_with_attrs(self, row) -> str:
         cols = self._screen.columns
-        # History lines keep the width they scrolled off with, so a resize
-        # that grew the screen can leave them shorter than cols.
-        end = min(cols, len(row))
+        # ``row`` is pyte's StaticDefaultDict — a mapping keyed by column, so
+        # ``len(row)`` is the number of cells ever written, NOT the row's
+        # width. A row drawn sparsely (a cursor jump past untouched cells to a
+        # right-aligned element) has far fewer written cells than its rightmost
+        # column, and clamping to that count silently drops everything to the
+        # right of it: the live PTY bytes carry that region fine, but every
+        # repaint rebuilt from the grid loses it until the program redraws.
+        # The width is ``cols``; the trim below walks back over the blank tail,
+        # and reading an unwritten cell yields the default char without
+        # storing it, so the mapping does not grow.
+        end = cols
         while end and row[end - 1].data in ("", " ") and _sgr(row[end - 1]) == "0":
             end -= 1
         out: List[str] = []
