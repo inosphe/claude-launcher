@@ -227,6 +227,34 @@ def default_name(now: Optional[datetime] = None) -> str:
     return f"{pane_token()}-{stamp}"
 
 
+def child_name(parent: str, child: str, now: Optional[datetime] = None) -> str:
+    """The name of a worktree cut FOR a spawned child, when nobody names one.
+
+    ``<parent>-<child>-<stamp>``: the session that asked for the checkout, the
+    session that gets it, and the second it was cut.
+    :func:`default_name` answers the same question for a human at a Herdr
+    pane and can only name the pane; a child has no pane, and the browser
+    that opens the spawn form does not yet know the child's name either --
+    so what a fleet used to leave behind was a repository full of
+    ``s45-<stamp>`` checkouts, every one of them named after the *parent*
+    that dispatched them and none of them saying which worker's it was.
+
+    The stamp stays even though a live session name is already unique here:
+    ``clear-sessions --logs`` frees the numbers again while the checkouts and
+    branches they cut stay on disk, so a recycled ``s45-s110`` would be
+    RESOLVED to the previous child's checkout (see :func:`resolve`) and the
+    new worker would wake up on someone else's branch.
+    """
+    stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")
+    parts = [_fragment(parent), _fragment(child), stamp]
+    return "-".join(p for p in parts if p)
+
+
+def _fragment(text: str) -> str:
+    """``text`` reduced to what :func:`validate_name` accepts, or ``""``."""
+    return re.sub(r"[^A-Za-z0-9._]+", "-", str(text or "")).strip("-.")
+
+
 def validate_name(name: str) -> str:
     """``name`` if it works as both a directory and a branch, else raise."""
     name = (name or "").strip().strip("/")

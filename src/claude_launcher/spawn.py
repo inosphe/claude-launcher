@@ -109,6 +109,15 @@ _GATED_FIELDS = (
     ("worktree", "allow_worktree"),
 )
 
+#: What ``worktree: true`` becomes between :func:`check` and
+#: :func:`make_worktree`. "A checkout of its own, you name it" is a question
+#: neither of them can answer alone: the name is ``<parent>-<child>-<stamp>``
+#: and the child has no name until the manager stages it, so the request
+#: travels as this sentinel and is resolved where both halves are known. It
+#: is not a legal worktree name (``validate_name`` refuses ``@``), which is
+#: why it cannot collide with one a caller typed.
+AUTO_WORKTREE = "@auto"
+
 #: Refusals for keys that do not name a field of the child's definition.
 #: ``workspace`` resolves to ``cwd``, so the generic "inherits its parent's
 #: workspace" would name something the child does not have.
@@ -305,7 +314,7 @@ def check(
 
     for key, gate in _GATED_FIELDS:
         value = request.get(key)
-        if value in (None, "", [], {}):
+        if value in (None, "", [], {}) or value is False:
             continue
         if not getattr(policy, gate):
             raise SpawnDenied(
@@ -334,7 +343,18 @@ def check(
             # a directory is not deciding, and a request that is refused
             # further down must not leave a checkout on disk behind it. See
             # `make_worktree`, which the manager calls once staging is sure.
-            child["worktree"] = worktree_mod.validate_name(str(value))
+            #
+            # `true` is "one of its own, you name it" -- the language the
+            # `quick_job` YAML default and the dashboard's quick-job form
+            # already speak, and the only answer available to a caller that
+            # cannot name the checkout because it does not yet know which
+            # session will get it. Read as a name it used to cut a worktree
+            # called `True`, on a branch called `True`.
+            child["worktree"] = (
+                AUTO_WORKTREE
+                if value is True
+                else worktree_mod.validate_name(str(value))
+            )
         else:
             child[key] = str(value)
 
@@ -440,7 +460,9 @@ def _fork_parents_conversation(child: dict, parent: dict, request: dict) -> None
 
 
 
-def make_worktree(child: dict, request: dict) -> dict:
+def make_worktree(
+    child: dict, request: dict, *, parent: str = "", name: str = ""
+) -> dict:
     """Cut the checkout ``check`` recorded, and point the child at it.
 
     Split from :func:`check` because they answer different questions and fail
@@ -464,13 +486,20 @@ def make_worktree(child: dict, request: dict) -> dict:
     a path an agent named. What it buys is the thing a fleet needs and a
     shared checkout cannot give -- two children of one parent editing the
     same repository without editing each other's files.
+
+    ``parent`` and ``name`` are the two session names, and they are what
+    :data:`AUTO_WORKTREE` is resolved with -- which is why the manager settles
+    the child's name *before* calling this rather than letting
+    :meth:`~claude_launcher.daemon.manager.Manager.stage` invent one after.
     """
-    name = child.pop("worktree", "")
-    if not name:
+    wanted = child.pop("worktree", "")
+    if not wanted:
         return child
+    if wanted == AUTO_WORKTREE:
+        wanted = worktree_mod.child_name(parent, name)
     tree = worktree_mod.resolve(
         child.get("cwd") or "",
-        name,
+        wanted,
         rebase_onto=str(request.get("rebase_onto") or ""),
     )
     if tree is not None:

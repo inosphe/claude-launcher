@@ -8272,13 +8272,34 @@ function spawnMeshNow(ui) {
   return picked || ui.parentMesh || "";
 }
 
-/* SpawnWizard.auto_worktree_name in the browser: the child's own name, or
-   its parent's, plus a stamp fixed once at build — a name that ticked over
-   between being shown and being sent would cut a worktree nobody read. */
+/* worktree._fragment in the browser: what survives as part of a name. */
+function spawnWtFragment(text) {
+  return String(text || "").replace(/[^\w.]+/g, "-").replace(/^[-.]+|[-.]+$/g, "");
+}
+
+/* worktree.child_name in the browser: `<parent>-<child>-<stamp>`, the two
+   sessions the checkout is between plus a stamp fixed once at build — a name
+   that ticked over between being shown and being sent would cut a worktree
+   nobody read.
+
+   `""` when the child has no name yet, which is the QUICK JOB's normal case:
+   the daemon picks the child's `sN`, so nothing here can finish the name, and
+   naming the checkout after the parent alone (which is what this used to do)
+   is how a repository fills up with `s45-<stamp>` directories that no longer
+   say which worker each one belongs to. `spawnPayload` asks the daemon to
+   name it instead of guessing. */
 function spawnAutoWorktree(ui) {
-  const base = ((ui.name.value || "").trim() || ui.parent.value || "child")
-    .replace(/[^\w.-]+/g, "-");
-  return `${base}-${ui.stamp}`;
+  const kid = spawnWtFragment((ui.name.value || "").trim());
+  if (!kid) return "";
+  return `${spawnWtFragment(ui.parent.value) || "child"}-${kid}-${ui.stamp}`;
+}
+
+/* What the blank-name placeholder reads: the generated name when this side
+   can compute it, and its SHAPE when it cannot. Spelling out an exact string
+   the daemon is going to pick differently is worse than naming the hole. */
+function spawnAutoWorktreeHint(ui) {
+  return spawnAutoWorktree(ui) ||
+    `${spawnWtFragment(ui.parent.value) || "child"}-<the child's name>-<time cut>`;
 }
 
 /* One workflow the daemon offered, normalized — a bare name (an older
@@ -8419,8 +8440,10 @@ function syncSpawnGates(ui) {
   const mode = ui.wtMode.value || "";
   ui.wtNameRow.hidden = wtDead || mode !== "new";
   // The name a blank field would cut, spelt out: the operator reads the
-  // generated name instead of pressing Spawn to discover it.
-  ui.wtName.placeholder = `blank = ${spawnAutoWorktree(ui)}`;
+  // generated name instead of pressing Spawn to discover it -- or, when the
+  // child is not named on this form either, its shape, because the session
+  // name in the middle of it is the daemon's to pick.
+  ui.wtName.placeholder = `blank = ${spawnAutoWorktreeHint(ui)}`;
   ui.wtPickRow.hidden = wtDead || mode !== "existing";
   // Only a REUSED checkout can be behind: a new one is cut from the
   // repository as it stands, so there is nothing to catch up on.
@@ -8495,7 +8518,12 @@ function spawnPayload(ui) {
   const mode = ui.wtMode.value || "";
   if (!ui.wtRow.hidden && !ui.wtMode.disabled && mode) {
     if (mode === "new") {
-      body.worktree = (ui.wtName.value || "").trim() || spawnAutoWorktree(ui);
+      // A typed name is the whole name. Blank is the generated one — spelled
+      // out here when the child is named on this form (so what the
+      // placeholder read is what gets cut), and otherwise handed to the
+      // daemon as `true`, the only side that knows the child's session name.
+      body.worktree =
+        (ui.wtName.value || "").trim() || spawnAutoWorktree(ui) || true;
     } else if (mode === "existing" && ui.wtPick.value) {
       body.worktree = ui.wtPick.value;
       if (!ui.rebaseRow.hidden && ui.rebase.value) {

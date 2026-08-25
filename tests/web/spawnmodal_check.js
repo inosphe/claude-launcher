@@ -158,7 +158,8 @@ new Function(
   + sliceStmt("const SPAWN_RECALL_FIELDS =")
   + sliceStmt("const SPAWN_RECALL_KEY =")
   + slice("spawnRecall") + slice("saveSpawnRecall")
-  + slice("spawnMeshNow") + slice("spawnAutoWorktree")
+  + slice("spawnMeshNow") + slice("spawnWtFragment")
+  + slice("spawnAutoWorktree") + slice("spawnAutoWorktreeHint")
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
   + slice("syncSpawnGates") + slice("spawnPayload")
   + slice("spawnReport") + slice("spawnPreflightNote")
@@ -173,7 +174,8 @@ new Function(
   + `
 Object.assign(exports, {
   spawnPayload, syncSpawnGates, spawnRankWorkflows, spawnWorkflowAdmits,
-  spawnWorkflowEntry, spawnAutoWorktree, spawnMeshNow, spawnRadioGroup,
+  spawnWorkflowEntry, spawnAutoWorktree, spawnAutoWorktreeHint,
+  spawnMeshNow, spawnRadioGroup,
   spawnRecall, saveSpawnRecall, buildSpawnForm, openSpawnModal, spawnModalClose,
   refillSpawnWorkflows, spawnConnectNow,
   spawnMissingSources, spawnSourceNote,
@@ -258,11 +260,25 @@ async function main() {
   check("ranking marks the refusal in the option detail",
     ranked.options.some((o) => /filter_roles turns 'worker' away/.test(o.detail)), ranked.options);
 
+  /* The auto name carries BOTH sessions. It used to be `<child or parent>-
+     <stamp>`, so an unnamed child -- the quick job's every child -- was named
+     after its PARENT, and a fleet of them left a repository full of
+     `lead1-<stamp>` checkouts that no longer said whose each one was. */
   const auto = ctx.spawnAutoWorktree(uiStub({ name: ctl({ value: "w7" }) }));
-  check("the auto name is name-stamped", auto === "w7-20260824-210000", auto);
+  check("the auto name is parent-child-stamped",
+    auto === "lead1-w7-20260824-210000", auto);
   const autoParent = ctx.spawnAutoWorktree(uiStub());
-  check("...falling back to the parent's name",
-    autoParent === "lead1-20260824-210000", autoParent);
+  check("...and is EMPTY when the child has no name yet — only the daemon " +
+    "can finish it", autoParent === "", autoParent);
+  check("...whose hint names the hole instead of promising a string",
+    ctx.spawnAutoWorktreeHint(uiStub()) ===
+      "lead1-<the child's name>-<time cut>",
+    ctx.spawnAutoWorktreeHint(uiStub()));
+  const odd = ctx.spawnAutoWorktree(uiStub({
+    name: ctl({ value: "w 1" }), parent: ctl({ value: "lead/x" }),
+  }));
+  check("...and a session name git would refuse is reduced to one it takes",
+    odd === "lead-x-w-1-20260824-210000", odd);
   check("mesh picks the explicit mesh over the parent's",
     ctx.spawnMeshNow(uiStub({ mesh: ctl({ value: "m1" }), parentMesh: "m0" })) === "m1");
   check("'-' means no mesh at all",
@@ -395,13 +411,37 @@ async function main() {
     fresh.wtNameRow.hidden === false && fresh.wtPickRow.hidden === true &&
       fresh.updateRow.hidden === true,
     [fresh.wtNameRow.hidden, fresh.wtPickRow.hidden]);
-  // The generated name is READ on the form, not discovered by pressing Spawn.
+  // The generated name is READ on the form, not discovered by pressing Spawn
+  // -- and it can be, because THIS child is named on this form.
   check("...spelling the generated name into the blank field's placeholder",
-    fresh.wtName.placeholder === "blank = w7-20260824-210000",
+    fresh.wtName.placeholder === "blank = lead1-w7-20260824-210000",
     fresh.wtName.placeholder);
   check("...and a blank name sends that generated one",
-    ctx.spawnPayload(fresh).worktree === "w7-20260824-210000",
+    ctx.spawnPayload(fresh).worktree === "lead1-w7-20260824-210000",
     ctx.spawnPayload(fresh).worktree);
+
+  /* The quick job's own case: a task is typed and nothing else, so the child
+     has no name here and the name cannot be finished on this side. It travels
+     as `true` -- "one of its own, you name it" -- and the daemon, which picks
+     the child's `sN`, completes it. Sending a guess instead is what named
+     every quick job's checkout after the leader that dispatched it. */
+  const unnamed = wtCase({ wtMode: wtGroup("new") });
+  check("an unnamed child hands the naming to the daemon",
+    ctx.spawnPayload(unnamed).worktree === true,
+    ctx.spawnPayload(unnamed).worktree);
+  check("...and never as the string 'true', which would cut a worktree " +
+    "called True", typeof ctx.spawnPayload(unnamed).worktree === "boolean");
+  check("...with a placeholder that says so rather than naming a checkout " +
+    "nobody will find",
+    unnamed.wtName.placeholder ===
+      "blank = lead1-<the child's name>-<time cut>",
+    unnamed.wtName.placeholder);
+  const typed = wtCase({
+    wtMode: wtGroup("new"), wtName: ctl({ value: "my-own" }),
+  });
+  check("a typed name is still the whole name",
+    ctx.spawnPayload(typed).worktree === "my-own",
+    ctx.spawnPayload(typed).worktree);
 
   const reuse = wtCase({
     wtMode: wtGroup("existing"), wtPick: ctl({ value: "oak" }),
@@ -661,8 +701,13 @@ async function main() {
   check("the ticked peer still travels while inheriting",
     post && JSON.stringify(post.body.connect || []) === JSON.stringify(["w2"]),
     post && post.body.connect);
-  check("the worktree is a stamped @auto under the parent",
-    post && /^lead1-\d{8}-\d{6}$/.test(post.body.worktree || ""), post && post.body);
+  /* The quick job types a task and nothing else, so nothing on this side
+     knows which session gets the checkout. It used to send `lead1-<stamp>`
+     -- the LEADER's name -- and a fleet of quick jobs then sat in a rail of
+     `lead1-...` worktrees that no longer said whose each one was. It now
+     asks the daemon, which knows the child's `sN` by the time it cuts. */
+  check("the quick job hands the worktree's name to the daemon",
+    post && post.body.worktree === true, post && post.body);
   check("success closes the modal", modalEls["modal-overlay"].classList.contains("hidden"));
   const counted = ctx.counters();
   check("success refreshes the roster and the rail",
@@ -755,8 +800,8 @@ async function main() {
   await spawn3.fire("click");
   await settle();
   const newPost = sent.find((x) => x.method === "POST");
-  check("...and Spawn cuts the generated name, not the checkout it left",
-    newPost && /^lead1-\d{8}-\d{6}$/.test(newPost.body.worktree || ""),
+  check("...and Spawn cuts a generated name, not the checkout it left",
+    newPost && newPost.body.worktree === true,
     newPost && newPost.body.worktree);
 
   await ctx.openSpawnModal("lead1", { seed: { worktree: "s45-fresh" } });

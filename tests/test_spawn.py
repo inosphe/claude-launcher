@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from claude_launcher import lineage, profile, spawn, store, workspaces
+from claude_launcher import lineage, profile, spawn, store, workspaces, worktree
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
 
@@ -864,3 +864,60 @@ def test_outside_a_session_new_session_is_untouched(monkeypatch, tmp_path):
 
     assert cli.main(["new-session", "--profile", "nc", "-c", str(tmp_path)]) == 0
     assert reached["body"]["profile"] == "nc"
+
+
+# --------------------------------------------------------------------------- #
+# naming a child's worktree
+# --------------------------------------------------------------------------- #
+def test_worktree_true_is_recorded_as_the_auto_sentinel():
+    """"One of its own, you name it" is a question `check` cannot answer.
+
+    The name is `<parent>-<child>-<stamp>` and the child has no name until the
+    manager stages it, so the request has to survive the policy as a marker
+    and be resolved where both session names are known. Read as a *name* --
+    which is what it used to be -- `True` cut a worktree called `True`, on a
+    branch called `True`.
+    """
+    child = spawn.check(
+        _policy(), {"worktree": True}, parent=PARENT, depth=0, children=0
+    )
+    assert child["worktree"] == spawn.AUTO_WORKTREE
+    assert spawn.AUTO_WORKTREE != "True"
+
+
+def test_worktree_false_asks_for_no_worktree_at_all():
+    """The other half of the same bug: `False` is not the name of anything."""
+    child = spawn.check(
+        _policy(), {"worktree": False}, parent=PARENT, depth=0, children=0
+    )
+    assert "worktree" not in child
+
+
+def test_the_auto_sentinel_still_needs_the_policy():
+    """Asking the daemon to pick the name is not a way around allow_worktree."""
+    with pytest.raises(spawn.SpawnDenied) as exc:
+        spawn.check(
+            _policy(allow_worktree=False),
+            {"worktree": True},
+            parent=PARENT, depth=0, children=0,
+        )
+    assert "allow_worktree" in str(exc.value)
+
+
+def test_the_auto_name_carries_both_session_names():
+    """What the whole change is for: a fleet of quick jobs used to leave a
+    repository full of `s45-<stamp>` checkouts, every one named after the
+    PARENT that dispatched them and none of them saying whose it was."""
+    name = worktree.child_name("s45", "s110")
+    assert name.startswith("s45-s110-")
+    # The stamp stays: `clear-sessions --logs` frees the session numbers again
+    # while the checkouts they cut stay on disk, and a recycled `s45-s110`
+    # would resolve to the previous child's branch instead of cutting a fresh
+    # one.
+    assert name != "s45-s110"
+    assert worktree.validate_name(name) == name
+
+
+def test_the_auto_name_survives_a_session_name_git_would_refuse():
+    """Session names and worktree names are not the same alphabet."""
+    assert worktree.validate_name(worktree.child_name("lead/x", "w 1"))

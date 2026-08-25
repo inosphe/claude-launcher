@@ -261,14 +261,21 @@ class SessionManager:
             depth=self.depth(parent),
             children=len(self.live_children(parent)),
         )
+        # Settled here rather than left to :meth:`stage`, because the child's
+        # worktree is named after the child (``<parent>-<child>-<stamp>``) and
+        # the checkout is cut before the record exists. Checked here too: a
+        # name already taken must refuse BEFORE a directory is on disk, which
+        # is the same rule the worktree's own placement below keeps.
+        name = str(request.get("name") or "").strip() or self._auto_name()
+        self._check_name(name)
         # After the policy and before the record: a checkout is a thing on
         # disk, so it is made only once nothing left can refuse the request.
-        child = spawn_mod.make_worktree(child, request)
+        child = spawn_mod.make_worktree(child, request, parent=parent, name=name)
         return self.stage(
             SessionDef.from_dict(
                 {
                     **child,
-                    "name": str(request.get("name") or "").strip(),
+                    "name": name,
                     "cols": int(request.get("cols") or session.sdef.cols),
                     "rows": int(request.get("rows") or session.sdef.rows),
                     "role": self._spawn_role(
