@@ -181,6 +181,12 @@ option:disabled { color: #6b7280; }
   min-width: 0; padding-left: 16px; font-size: 11px; color: #7d8590;
 }
 #session-list .sess-cflow .dot { width: 6px; height: 6px; }
+/* `#session-list .dot` rounds every dot on this rail to a circle, and an id
+   outweighs any number of classes — so without this line the run's diamond is
+   silently a circle again, which is the whole bug. It lives here, next to the
+   rule it is overriding, rather than beside .dot.wf-mark where it looks like
+   a duplicate. */
+#session-list .sess-cflow .dot.wf-mark { border-radius: 1px; }
 #session-list .sess-cflow-text {
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
@@ -501,6 +507,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .dot.wf-delegated { background: #a371f7; }
 .dot.wf-done { background: #3fb950; }
 .dot.wf-error { background: #ff7b72; }
+/* ...and the shape that says the colour above belongs to a RUN, not to the
+   session it is drawn beside. The two palettes are the same palette: wf-done
+   and a live idle session are both #3fb950, wf-running and a starting session
+   are both #58a6ff. In the rail they land one line apart at 8px and 6px, so
+   read as colour alone a finished run is indistinguishable from a session
+   sitting idle — which is exactly how it was reported. Circle: the session.
+   Diamond: its run. Colour keeps saying which state; shape now says whose. */
+.dot.wf-mark { display: inline-block; border-radius: 1px; transform: rotate(45deg); }
 
 #new-session { padding: 0; max-width: 520px; }
 #new-session label { display: block; font-size: 12px; color: #9da5b0; margin-bottom: 6px; }

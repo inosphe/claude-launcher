@@ -663,7 +663,7 @@ function applyCflowBadges() {
     line.className = `sess-cflow${gated ? " gated" : ""}`;
     line.textContent = "";
     const dot = document.createElement("span");
-    dot.className = `dot ${wfDotClass(r.status, r)}`;
+    dot.className = wfDotClasses(r.status, r);
     const txt = document.createElement("span");
     txt.className = "sess-cflow-text";
     txt.textContent =
@@ -1295,6 +1295,22 @@ function wfDotClass(status, run) {
   return "wf-running";
 }
 
+/* The full class list for a workflow-state DOT — the colour above, plus the
+   `wf-mark` that makes it a diamond instead of a circle.
+
+   The shape is the load-bearing part, not decoration. In the rail a run's
+   marker sits one line under the session's liveness dot at nearly the same
+   size, and the two palettes overlap exactly: a finished run and an idle
+   session are both #3fb950, a starting session and a running step are both
+   #58a6ff. Colour therefore cannot say WHOSE state is being shown, only
+   WHICH — so shape says whose. Circle: the session. Diamond: its run.
+   (Reported by the terminal user, who read a green wf-done dot as a second
+   idle dot.) Badges keep the colour class on its own: `.badge.wf-*` is
+   already a different object and nothing beside it is round. */
+function wfDotClasses(status, run) {
+  return `dot wf-mark ${wfDotClass(status, run)}`;
+}
+
 /* Who an open ask is with, in a few words. */
 function askWho(ask) {
   const asked = (ask && ask.asked) || [];
@@ -1514,7 +1530,7 @@ async function refreshCflow() {
     const head = document.createElement("div");
     head.className = "cflow-head";
     const dot = document.createElement("span");
-    dot.className = `dot ${wfDotClass(r.status, r)}`;
+    dot.className = wfDotClasses(r.status, r);
     const name = document.createElement("span");
     // A run is keyed by (directory, session), so a team working one workflow
     // in one tree makes cards that differ ONLY by the session. That makes the
@@ -7739,7 +7755,7 @@ function sessWorkflow(data) {
 
   if (flow.status && flow.status !== "idle") {
     const line = el("div", "sess-wf-run");
-    line.appendChild(el("span", `dot ${wfDotClass(flow.status, flow)}`));
+    line.appendChild(el("span", wfDotClasses(flow.status, flow)));
     line.appendChild(el("span", "sess-wf-name", flow.workflow || "(workflow)"));
     line.appendChild(el("span", "meta",
       flow.status +

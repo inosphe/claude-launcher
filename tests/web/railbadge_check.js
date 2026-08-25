@@ -5,16 +5,20 @@
    session; a run stopped on a HUMAN (gate approval, branch choice) is
    flagged as the reader's move, while one delegated to another agent is
    not; after a migrate-session leaves a stale run under the old cwd, the
-   run whose canonical cwd still holds the live session wins; and the badge
+   run whose canonical cwd still holds the live session wins; the badge
    element survives re-application, because its click listener (the walk to
-   the run page) is attached once for its lifetime. */
+   the run page) is attached once for its lifetime; and the marker the line
+   opens with is a DIAMOND, never the circle the session's own liveness dot
+   is — the two palettes are one palette (a done run and an idle session are
+   both #3fb950), so shape is the only thing that says which of the two a
+   reader is looking at. That one is held on both sides: the class here, and
+   the rule in style.css that keeps the rail from rounding it back. */
 const fs = require("fs");
 const path = require("path");
-const src = fs.readFileSync(
-  path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "static",
-            "app.js"),
-  "utf8"
-);
+const staticDir = path.join(__dirname, "..", "..", "src", "claude_launcher",
+                            "web", "static");
+const src = fs.readFileSync(path.join(staticDir, "app.js"), "utf8");
+const css = fs.readFileSync(path.join(staticDir, "style.css"), "utf8");
 
 function slice(name) {
   const start = src.indexOf(`function ${name}(`);
@@ -76,8 +80,8 @@ const ctx = {};
    which the sliced functions and setRuns share as one binding. */
 new Function(
   "exports", "$", "document", "location", "cflowCache",
-  [slice("wfDotClass"), slice("askWho"), slice("answerFellToUs"),
-   slice("sessCflowRun"),
+  [slice("wfDotClass"), slice("wfDotClasses"), slice("askWho"),
+   slice("answerFellToUs"), slice("sessCflowRun"),
    slice("sessCflowGated"), slice("sessCflowLabel"),
    slice("applyCflowBadges")].join("\n") + `
 exports.apply = applyCflowBadges;
@@ -109,8 +113,8 @@ ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "step", workflow: "ship",
 ctx.apply();
 check("a running step is named on its session's row",
       badgeText(rows.s19), "ship · Build it");
-check("the dot carries the running colour",
-      badge(rows.s19).children[0].className, "dot wf-running");
+check("the marker carries the running colour, on the diamond shape",
+      badge(rows.s19).children[0].className, "dot wf-mark wf-running");
 check("a session with no run grows no badge", badge(rows.quiet), null);
 check("a running step is not flagged as the reader's move",
       badge(rows.s19).className, "sess-cflow");
@@ -204,7 +208,7 @@ ctx.setRuns(answerRow({ prompt: "ship?", asked: [{ handle: "lead" }] }));
 ctx.apply();
 check("a delivered ask names its holder", badgeText(rows.s19), "ship · with lead");
 check("...and keeps the delegated colour, not the gate's amber",
-      badge(rows.s19).children[0].className, "dot wf-delegated");
+      badge(rows.s19).children[0].className, "dot wf-mark wf-delegated");
 
 ctx.setRuns(answerRow({ prompt: "ship?", asked: [] }));
 ctx.apply();
@@ -213,12 +217,29 @@ ctx.apply();
 check("an ask that reached nobody says so, and is flagged as yours", badgeText(rows.s19),
       "ship · ⚑ asked of nobody — approve to continue");
 check("...and takes the gate's amber, because it IS the reader's",
-      badge(rows.s19).children[0].className, "dot wf-waiting");
+      badge(rows.s19).children[0].className, "dot wf-mark wf-waiting");
 
 ctx.setRuns(answerRow(undefined));
 ctx.apply();
 check("no ask at all reads the same way (a forced goto leaves this)",
       badgeText(rows.s19), "ship · ⚑ asked of nobody — approve to continue");
+
+/* ---- the marker is not a circle ---------------------------------------- */
+/* The class alone proves nothing: `#session-list .dot` rounds every dot on
+   this rail to 50%, and an id outweighs any number of classes — so a diamond
+   declared only as `.dot.wf-mark` renders as a circle and the bug is back
+   with the tests still green. Both halves are pinned: the shape itself, and
+   the override that survives the rail's own rule. */
+/* Anchored at the start of a line: the rail's override below is also spelled
+   `.dot.wf-mark {`, and it is the one that comes first in the file. */
+const markRule = (css.match(/\n\.dot\.wf-mark \{([^}]*)\}/) || [])[1] || "";
+check("the run marker is turned off the circle", /border-radius:\s*(?!50%)/.test(markRule), true);
+check("...and rotated into a diamond", /transform:\s*rotate\(45deg\)/.test(markRule), true);
+const railMark = (css.match(/#session-list \.sess-cflow \.dot\.wf-mark \{([^}]*)\}/) || [])[1];
+check("...and the rail, which rounds its dots at id specificity, is overridden",
+      railMark !== undefined && !/border-radius:\s*50%/.test(railMark), true);
+check("the session's own liveness dot stays a circle",
+      /#session-list \.dot \{[^}]*border-radius:\s*50%/.test(css), true);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);
