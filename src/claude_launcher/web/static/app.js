@@ -8704,15 +8704,32 @@ function sessQuickJob(data) {
 
     // The policy's own verdict, before the button is pressed: a form that
     // lets you type a task and then refuses the press taught you nothing.
-    const verdict = spawnPreflightNote(kids);
-    if (!verdict.ok) {
-      say(verdict.msg, verdict.cls);
+    // Only a HARD block takes the button away, though -- the same subtraction
+    // the wizard now makes. The child cap is soft, and the wizard this button
+    // opens is where it is crossed (spawnModalLoad arms Spawn on the
+    // Over-limit tick), so a leader standing at 4/4 that lost the button here
+    // never reached the one control that would have let it through.
+    const hard = spawnHardBlocks(kids);
+    if (hard.length) {
+      say(hard.join("; ") || "this session may not spawn", "wf-warning");
       return; // spawnBtn stays disabled
     }
-    // A source warning outranks the slot count: the slots are the happy
-    // news, and overwriting the warning with it would hide the only line
-    // that explains why a picker is blank.
-    if (verdict.msg && !srcNote) say(verdict.msg);
+    const verdict = spawnPreflightNote(kids);
+    const capped = !verdict.ok;   // soft-only: the child cap, and nothing else
+    // A source warning outranks the SLOT COUNT: the slots are the happy news,
+    // and overwriting the warning with it would hide the only line that
+    // explains why a picker is blank. The cap is not happy news, so it stands
+    // beside that note instead of being dropped behind it.
+    const lines = [];
+    if (srcNote) lines.push(srcNote);
+    if (verdict.msg && (capped || !srcNote)) {
+      lines.push(capped
+        ? `${verdict.msg} — the wizard's 'spawn over the child limit' box crosses it`
+        : verdict.msg);
+    }
+    if (lines.length) {
+      say(lines.join(" · "), (srcNote || capped) ? "wf-warning" : "wf-note");
+    }
     spawnBtn.disabled = false;
   })();
 
