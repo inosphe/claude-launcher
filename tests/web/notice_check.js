@@ -7,12 +7,14 @@
    like nothing having happened — which is the complaint this harness pins
    the fix for.
 
-   So what is checked here is not "does a card appear" but the four things
+   So what is checked here is not "does a card appear" but the things
    that make the card worth having: a restart is told apart from a blip
    (different sentence, different persistence), the first page load is not
    an event, a flapping daemon replaces its own card instead of stacking
-   them, and the sentence a person needs after the card is gone (when this
-   daemon started) survives on the home card. Time, the timers and the
+   them, the restart card names when the daemon itself came up (not just
+   when the page noticed — the question after an absence), and the
+   sentence a person needs after the card is gone (when this daemon
+   started) survives on the home card. Time, the timers and the
    network belong to the harness, so none of it is waited for. */
 const fs = require("fs");
 const path = require("path");
@@ -89,12 +91,18 @@ function build(opts) {
   class FakeDate {
     constructor(ms) { this.ms = ms === undefined ? clock.at : ms; }
     toLocaleTimeString() { return `T${this.ms}`; }
+    // isNaN() is how app.js tells an unparseable started_at apart; a real
+    // Date would answer from its own clock, the stub answers from what it
+    // was handed (a string it cannot parse is still "a time it was given").
+    valueOf() { return typeof this.ms === "number" ? this.ms : 1; }
   }
   FakeDate.now = () => clock.at;
 
-  const daemon = { up: o.up !== false, boot: "b1", version: "9.9", uptime: 42 };
+  const daemon = { up: o.up !== false, boot: "b1", version: "9.9", uptime: 42,
+                   started: "t-start-1" };
   const daemonHealth = async () =>
-    (daemon.up ? { status: "ok", version: daemon.version, boot_id: daemon.boot } : null);
+    (daemon.up ? { status: "ok", version: daemon.version, boot_id: daemon.boot,
+                   started_at: daemon.started } : null);
   const apiCalls = [];
   const apiStub = async (p) => {
     apiCalls.push(p);
@@ -156,11 +164,15 @@ function build(opts) {
     await w.api.pollOnce();
     w.daemon.boot = "b2";              // the successor answers
     w.daemon.version = "9.10";
+    w.daemon.started = "t-start-2";    // ...and says when it came up
     await w.api.pollOnce();
     check("a boot id it has not seen is announced", w.strip().length === 1, w.said());
     check("in words that name what happened", /restarted/.test(w.said()), w.said());
     check("with the version that answered", /9\.10/.test(w.said()), w.said());
     check("and the time it answered at", /T\d/.test(w.said()), w.said());
+    check("and the time the daemon itself came up — the question the " +
+          "card exists to answer after an absence",
+          w.said().includes("restarted at Tt-start-2"), w.said());
     check("it warns rather than alarms",
           w.strip()[0].className.includes("warn"), w.strip()[0].className);
     check("nothing is scheduled to take it away: the tab was unwatched, " +
@@ -173,6 +185,21 @@ function build(opts) {
     w.strip()[0].click();
     check("and a person clicking it is how it goes away",
           w.strip().length === 0, w.said());
+  })();
+}
+
+/* --- a daemon that does not say when it started ------------------------- */
+{
+  const w = build();
+  (async () => {
+    await w.api.pollOnce();
+    w.daemon.boot = "b2";
+    w.daemon.started = undefined;      // an older daemon has no such field
+    await w.api.pollOnce();
+    check("the restart is still announced", /restarted/.test(w.said()), w.said());
+    check("with the time it answered at, and no half-sentence where the " +
+          "boot time would have been",
+          /T\d/.test(w.said()) && !/restarted at/.test(w.said()), w.said());
   })();
 }
 

@@ -12573,9 +12573,16 @@ async function pollOnce() {
     // silently is indistinguishable from nothing having happened. `booted`
     // keeps the first load quiet: arriving is not an event.
     if (booted && restarted) {
+      // Two times, because they answer two questions: when the daemon itself
+      // came up (what "did it restart while I was away" asks — health
+      // publishes it) and when this page noticed (what the card otherwise
+      // is). An older daemon without the field still gets the old sentence.
+      const bootAt = health.started_at ? new Date(health.started_at) : null;
+      const bootText = bootAt && !isNaN(bootAt) ? bootAt.toLocaleTimeString() : null;
       notify(
         "daemon restarted",
-        `a different daemon answered at ${noticeClock()}` +
+        (bootText ? `restarted at ${bootText}, ` : "") +
+          `a different daemon answered at ${noticeClock()}` +
           (health.version ? ` (v${health.version})` : "") +
           " — sessions were relaunched, this page re-read everything, and " +
           "your login cookie died with the old process",
