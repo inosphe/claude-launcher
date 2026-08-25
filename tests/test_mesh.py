@@ -1174,15 +1174,27 @@ def test_mesh_install_project(tmp_path, home):
     from claude_launcher import install
 
     done = install.install_into_project(tmp_path)
-    # one server, six skills — and nothing outside the project: workflow
+    # one server, seven skills — and nothing outside the project: workflow
     # seeding is the global/profile installs' business
-    assert len([line for line in done if line.startswith("skill ->")]) == 6
-    # the two topology skills (wire peers, delegate a domain) land beside mesh
-    for name in ("mesh-wire", "mesh-delegate"):
+    assert len([line for line in done if line.startswith("skill ->")]) == 7
+    # the topology skills (wire peers, delegate a domain, re-draw the tree)
+    # land beside mesh
+    for name in ("mesh-wire", "mesh-delegate", "mesh-retopology"):
         text = (tmp_path / ".claude" / "skills" / name / "SKILL.md").read_text(
             encoding="utf-8"
         )
         assert text.startswith(f"---\nname: {name}\n")
+    retopo = (
+        tmp_path / ".claude" / "skills" / "mesh-retopology" / "SKILL.md"
+    ).read_text(encoding="utf-8")
+    # every other reparent: the four moves, the briefing that must follow,
+    # and the daemon's own refusal words so a lead recognises them
+    assert "reparent" in retopo and "ONE batch send" in retopo
+    for move in ("tier done", "parent died", "wrong tier", "undo delegate"):
+        assert move in retopo
+    for refusal in ("does not command", "cannot move itself", "has exited",
+                    "make a cycle", "level(s) deep"):
+        assert refusal in retopo
     delegate = (
         tmp_path / ".claude" / "skills" / "mesh-delegate" / "SKILL.md"
     ).read_text(encoding="utf-8")
@@ -1240,7 +1252,7 @@ def test_global_install_targets_the_user_scope(tmp_path, home, monkeypatch):
 
     cfg = Path(os.environ["CLAUDE_CONFIG_DIR"])
     done = install.install_into_user()
-    assert len([line for line in done if line.startswith("skill ->")]) == 6
+    assert len([line for line in done if line.startswith("skill ->")]) == 7
     assert [line for line in done if line.startswith("workflow ->")]
     assert (cfg / "skills" / "mesh" / "SKILL.md").is_file()
     doc = json.loads((cfg / ".claude.json").read_text(encoding="utf-8"))

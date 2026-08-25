@@ -805,6 +805,7 @@ def test_both_leader_layers_teach_the_topology_skills():
         standby = wf.steps["standby"].instructions
         assert "mesh-wire" in standby
         assert "mesh-delegate" in standby
+        assert "mesh-retopology" in standby      # every other reparent
         assert "reparent" in standby
         assert "self-decision" in standby  # not a user gate
         assert "mesh-delegate" in wf.steps["intake"].instructions
