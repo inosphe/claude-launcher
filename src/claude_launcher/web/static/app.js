@@ -452,6 +452,11 @@ async function refreshSessions() {
     // it, and nothing at all where a harness keeps no transcript.
     ctxNoteOnRow(li, label, s);
     const railCtx = ctxRailLine(s);
+    // And where it runs — the checkout, which on this rail is usually a
+    // worktree, and is the one fact that tells two sessions doing the same
+    // job apart. A full-width line like the gauge below it; always drawn,
+    // because every session runs somewhere.
+    const railCwd = railCwdLine(s);
     // The row attaches — that is what the session is doing. This opens what
     // it *is* (definition, meshes, its cflow run) beside it, so the two are
     // not two places you have to travel between.
@@ -492,7 +497,7 @@ async function refreshSessions() {
     const head = document.createElement("span");
     head.className = "rail-head";
     head.append(label, ...(role ? [role] : []), ...(meshBox ? [meshBox] : []));
-    li.append(dot, head, meta, ...(railCtx ? [railCtx] : []),
+    li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
               ...(plus ? [plus] : []), info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
@@ -884,6 +889,60 @@ function ctxRailLine(s) {
     : "";
   line.title = [note, scale].filter(Boolean).join("\n");
   return line;
+}
+
+/* Where a session runs: the checkout its harness was started in.
+
+   A worktree is the interesting case. This launcher spawns most of its
+   agents into `<repo>/.claude/worktrees/<name>`, so a rail full of sessions
+   from one repository differs only in that last segment — and the segment
+   before it, "worktrees", is the same on every row and says nothing. The
+   plain tail-of-path shortening ("…/worktrees/s84-scroll-restore") keeps the
+   noise and drops the repository, which is the one word that tells a
+   worktree of THIS repo from a worktree of another. So a worktree path is
+   read as the two facts it is — which repository, which checkout — and any
+   other path keeps the ordinary "…/last/two" form. `null` when the path is
+   not a worktree, so a caller can tell the two shapes apart. */
+function cwdSplit(p) {
+  const parts = (p || "").split(/[\\/]+/).filter(Boolean);
+  const i = parts.lastIndexOf("worktrees");
+  if (i < 2 || parts[i - 1] !== ".claude" || i + 1 >= parts.length) return null;
+  return { repo: parts[i - 2], worktree: parts.slice(i + 1).join("/") };
+}
+
+function cwdShort(p) {
+  const wt = cwdSplit(p);
+  return wt ? `${wt.repo} › ${wt.worktree}` : (p ? shortenPath(p) : "");
+}
+
+/* One line saying WHERE the session is, drawn wherever its name is: under
+   the name on its rail row (`rail-cwd`) and under the name in the detail
+   panel's head (`sess-cwd`). Short form on the line (a 260px rail has no
+   width for `F:\works\claude-launcher\.claude\worktrees\…`) and the full
+   path on its title, so nothing is lost, only folded. A session created
+   without a directory runs in the daemon's own, and the line says so in
+   words rather than printing an empty string that reads as "no directory" —
+   the form that created it offers the same choice under the same name,
+   "(daemon cwd)". `cls` is the place-specific class; the `worktree` and
+   `unknown` markers ride along so each place can dress them. */
+function cwdLine(s, cls) {
+  const cwd = (s && s.cwd) || "";
+  const wt = cwdSplit(cwd);
+  const line = el(
+    "span",
+    cls + (wt ? " worktree" : "") + (cwd ? "" : " unknown"),
+    cwd ? cwdShort(cwd) : "(daemon cwd)"
+  );
+  line.title = cwd
+    ? (wt ? `worktree ${wt.worktree} of ${wt.repo}\n` : "directory\n") + cwd
+    : "directory: the daemon's own — none was given when the session was created";
+  return line;
+}
+
+/* The rail row's copy: a full-width line right under the name, above the
+   context gauge. */
+function railCwdLine(s) {
+  return cwdLine(s, "rail-cwd");
 }
 
 /* ------------------------------------------------------------------ */
@@ -6013,6 +6072,13 @@ function sessHead(s) {
       `'${currentName}'`;
     head.appendChild(other);
   }
+  // Where it runs, under the name — the rail row's line again, here so the
+  // panel says it whichever tab is lit (the Details list's `directory` row
+  // is the full path, and it is not on the Workflow tab at all). Appended
+  // before the early return below because it belongs to every arrangement
+  // of this head, not only the ones that keep the buttons; the stylesheet
+  // orders it last so it is the head's own bottom line.
+  head.appendChild(cwdLine(s, "sess-cwd"));
   if (mine && terminalOnScreen() && !MOBILE_MQ.matches) return head;
 
   // The spawn wizard, aimed at this session: the panel's verb for growing a

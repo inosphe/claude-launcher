@@ -141,7 +141,11 @@ new Function(
   stubs +
   [slice("parseHash"), slice("syncDetailPanel"), slice("markDetailRow"),
    slice("dropDetail"), slice("openDetail"), slice("repointDetail"),
-   slice("closeDetail"), slice("route"), slice("sessHead")].join("\n") +
+   slice("closeDetail"), slice("route"),
+   // The head now carries the session's directory line (railcwd_check's
+   // subject); here these are only calls that have to resolve.
+   slice("shortenPath"), slice("cwdSplit"), slice("cwdShort"), slice("cwdLine"),
+   slice("sessHead")].join("\n") +
   `
 Object.assign(exports, {
   parseHash, syncDetailPanel, openDetail, closeDetail, dropDetail, showView,

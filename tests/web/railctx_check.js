@@ -128,6 +128,10 @@ new Function(
   // needs the shortener too. What that name is, and where it lands, is
   // railmodel_check's subject; here it is only a call that has to resolve.
   + slice("modelShort")
+  // The row also spends a line on its directory now (railcwd_check's
+  // subject); here it is only a call that has to resolve.
+  + slice("shortenPath") + slice("cwdSplit") + slice("cwdShort")
+  + slice("cwdLine") + slice("railCwdLine")
   + slice("ctxRailLine") + slice("refreshSessions")
   + `
 Object.assign(exports, {
