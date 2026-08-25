@@ -1167,6 +1167,21 @@ function applyBriefingTop() {
   pane.innerHTML = "";
   if (open) pane.appendChild(renderBriefingCard(currentName, briefingCache.get(currentName)));
   pane.classList.toggle("hidden", !open);
+  // The card and the terminal share one flex column, so opening it, closing
+  // it, or its text arriving from the summariser all change the height the
+  // grid has to draw into. Without a refit the session keeps the rows it had
+  // and the ones the card pushed past the bottom edge are simply gone: the
+  // stylesheet clips #terminal (overflow: hidden) and the wheel browses the
+  // daemon's history rather than that overflow, so there is nothing to scroll
+  // to reach them — the foot of the screen stays missing until some unrelated
+  // event happens to refit. Guarded by a signature for the same reason
+  // renderTermQueued's strip is: this runs on every 2s poll, and refitting on
+  // an unchanged card would resize the session twice a second.
+  const sig = open ? `open:${currentName}:${pane.textContent.length}` : "shut";
+  if (pane.dataset.sig !== sig) {
+    pane.dataset.sig = sig;
+    refitSoon(60);
+  }
 }
 
 /* What a rail row says whether folded or open: the briefing's one-line job
