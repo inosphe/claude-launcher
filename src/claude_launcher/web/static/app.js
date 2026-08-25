@@ -1410,6 +1410,11 @@ async function refreshHarnesses() {
     // Declared but missing: shown, not hidden. Hiding it would read as
     // "claunch does not support pi", which is the wrong thing to learn.
     opt.disabled = !h.available;
+    // Remembered on the option itself, because a second reason to grey it
+    // comes and goes: a child may only be spawned onto a harness the policy
+    // unlocked, and handing the row back when the parent is cleared must not
+    // re-offer a harness that is not installed.
+    opt.available = h.available;
     opt.title = h.available
       ? h.description || h.name
       : `${h.description || h.name}\n\n'${h.program || h.name}' is not on PATH`;
@@ -1418,6 +1423,7 @@ async function refreshHarnesses() {
   const first = [...select.options].find((o) => !o.disabled);
   select.value = first ? first.value : "";
   syncForkAvailability();  // role/resume/fork only apply to the claude harness
+  syncSpawnMode();         // ...and a child may only have the ones it may spawn
 }
 
 async function refreshWorkspaces() {
@@ -1476,6 +1482,10 @@ async function refreshWorkspaces() {
     ? ""
     : "no workspaces yet — register one with: claunch workspace add <dir>";
   hint.classList.toggle("hidden", list.length > 0);
+  // The registry is polled, so this row is rebuilt behind the form's back:
+  // whatever the spawn mode had done to it (the "inherit" wording) goes with
+  // the old options and has to be said again.
+  syncSpawnMode();
 }
 
 async function refreshRoles() {
@@ -1551,6 +1561,9 @@ function syncForkAvailability() {
     f.null_token.checked = false;
     renderRoleStance();
   }
+  // This function speaks for the create form; on a child the spawn policy
+  // has the last word, and it has just been overruled row by row above.
+  if (spawnParent()) syncSpawnMode();
 }
 
 /* ------------------------------------------------------------------ */
@@ -1558,14 +1571,83 @@ function syncForkAvailability() {
 /* ------------------------------------------------------------------ */
 /* Naming a parent turns Create into a spawn. A child inherits everything
    that decides what runs — harness, profile, auth, directory, args — so
-   those rows are not asked here: the daemon would refuse most of them
-   anyway (the per-field unlocks in ~/.claunch.yaml), and a form that offers
-   what it cannot send teaches the policy wrong. What is left is what makes
-   the child a different worker: its name, its mesh arrangement, its run,
-   its opening task — and whether it starts from a copy of the parent's
-   conversation. */
+   those rows start greyed. WHICH of them it may still be asked is not this
+   form's opinion though: it is the spawn policy's, field by field (the
+   per-field unlocks in ~/.claunch.yaml), and the daemon publishes exactly
+   that, per parent. So the form asks, and hands back the rows the policy
+   opens — the same rows, from the same report, as the CLI wizard and the
+   spawn modal. A form that offers what it cannot send teaches the policy
+   wrong; one that withholds what the policy opened teaches it just as
+   wrong, and lies to the person who set 'allow_profile: true'. */
 const SPAWN_INHERITS = ["harness", "profile", "borrow", "null_token", "cwd",
                         "args", "resume", "fork"];
+
+/* The picked parent's spawn capabilities, and which parent they are about:
+   one report per parent, kept until the pick moves. */
+let newSpawnReport = null;
+let newSpawnReportFor = null;
+/* The parent the inherited rows were last seeded for, so entering child mode
+   can default them (to the parent's own harness, to "inherit") without a
+   poll stamping on what the operator picked afterwards. */
+let newSpawnDefaultsFor = null;
+
+/* Which inherited rows a report hands back, keyed like SPAWN_INHERITS. No
+   report — none fetched yet, or the fetch failed — opens nothing, so the
+   form behaves exactly as it did before it asked: the reading that cannot
+   invent a permission. */
+function spawnUnlocked(report) {
+  const may = (report && report.may_choose) || [];
+  return {
+    harness: !!(report && (report.spawnable_harnesses || []).length),
+    profile: may.includes("profile"),
+    borrow: may.includes("borrow"),
+    // Ungated by the policy — it takes a credential away rather than
+    // granting one — but still claude-only machinery (see syncSpawnMode).
+    null_token: may.includes("null_token"),
+    // The directory travels as a workspace NAME: 'allow_cwd' is the
+    // free-text path this form never sends, while the registry the picker
+    // is built from is exactly what 'allow_workspace' opens. The report
+    // omits the list rather than emptying it when that is shut.
+    cwd: !!(report && report.workspaces),
+    args: may.includes("args"),
+    // Not the policy's: a spawn has no --resume of its own, and the one
+    // conversation a child can start from is its parent's — the fork row,
+    // which is where that question is actually asked.
+    resume: false,
+    fork: false,
+  };
+}
+
+/* The spawn policy for the parent now named, fetched once per parent. The
+   answer arrives after the form is on screen, so the rows stay inherited
+   until it does, and a failed fetch simply leaves them that way. */
+async function refreshSpawnPolicy() {
+  const f = $("new-session");
+  const name = f.parent ? f.parent.value : "";
+  if (name === newSpawnReportFor) return;
+  newSpawnReportFor = name;
+  newSpawnReport = null;
+  syncSpawnMode();
+  // A child's workflows are the ones declared where the child will stand,
+  // which is its parent's directory unless the policy lets it be moved.
+  if (!name) { refreshWorkflowChoices(); return; }
+  const report = await spawnReport(name);
+  if (newSpawnReportFor !== name) return;   // the pick moved on while we asked
+  newSpawnReport = report;
+  syncSpawnMode();
+  refreshWorkflowChoices();
+}
+
+/* The workspace a picked directory IS, by name. The picker's values are
+   paths, because that is what the create form sends; a child's directory
+   travels as the registry name the policy vouched for instead. A path with
+   no entry — a registry edited between the fill and the submit — answers
+   "", and the caller sends the path so the daemon's own refusal explains it
+   rather than the form quietly dropping the pick. */
+function spawnWorkspaceName(path) {
+  const hit = (workspacesCache || []).find((w) => w.path === path);
+  return hit ? hit.name : "";
+}
 
 /* The sessions a child can be a child of: the live ones. An exited session
    is refused by the daemon ("an exited session cannot spawn children"), so
@@ -1592,19 +1674,62 @@ function spawnParent() {
   return name ? sessionsCache.find((s) => s.name === name) || null : null;
 }
 
-/* Grey what a child inherits, and offer the fork only where there is a
-   conversation to copy. Claude keeps transcripts per working directory and
-   a child stays in its parent's, so the fork here is always the parent's
-   own — there is no directory question to contradict it. */
+/* Grey what a child inherits AND the policy keeps shut, and offer the fork
+   only where there is a conversation to copy. Claude keeps transcripts per
+   working directory and a child stays in its parent's, so the fork here is
+   always the parent's own — there is no directory question to contradict
+   it. */
 function syncSpawnMode() {
   const f = $("new-session");
   const parent = spawnParent();
   const hint = $("parent-hint");
-  for (const key of SPAWN_INHERITS) if (f[key]) f[key].disabled = !!parent;
+  // A report is only about the parent it was fetched for; a pick that moved
+  // on since is no report at all.
+  const report =
+    parent && newSpawnReportFor === parent.name ? newSpawnReport : null;
+  const open = spawnUnlocked(report);
+  for (const key of SPAWN_INHERITS) {
+    if (f[key]) f[key].disabled = !!parent && !open[key];
+  }
+  // Seeding happens once per parent, not on every poll: the second call
+  // would be the one that throws away the operator's own pick.
+  const fresh = (parent ? parent.name : null) !== newSpawnDefaultsFor;
+  newSpawnDefaultsFor = parent ? parent.name : null;
+  syncSpawnHarnessRow(f, parent, report, fresh);
+  syncSpawnProfileRow(f, !!parent);
+  syncSpawnCwdRow(f, !!parent);
   if (parent) {
+    // Auth is claude's token machinery: on a child running anything else
+    // both rows are moot however the policy is set, and a yes on --null greys
+    // the borrow row rather than provoking the daemon's refusal of the pair.
+    // The same two rules the spawn modal applies.
+    const childHarness =
+      (open.harness && f.harness.value) || parent.harness || "";
+    const claude = !childHarness || childHarness === "claude";
+    f.role.disabled = !claude;
+    if (!claude) {
+      f.null_token.checked = false;
+      f.null_token.disabled = true;
+      f.borrow.value = "";
+      f.borrow.disabled = true;
+      f.role.value = "";
+      renderRoleStance();
+    } else if (f.null_token.checked && !f.null_token.disabled) {
+      f.borrow.value = "";
+      f.borrow.disabled = true;
+    }
+    // Named, not merely greyed: "inherits everything" is true of a locked
+    // form and of an open one alike, and the operator who unlocked profile
+    // in ~/.claunch.yaml needs to see which rows are still shut to know the
+    // daemon read the file.
+    const shut = SPAWN_INHERITS.filter(
+      (k) => f[k] && f[k].disabled && k !== "resume" && k !== "fork");
     hint.textContent =
-      `a child of ${parent.name}: it inherits that session's harness, ` +
-      `profile, login, directory and args — only the rows below travel`;
+      `a child of ${parent.name}: it inherits that session's setup, and the ` +
+      `rows left open below are what may differ` +
+      (shut.length
+        ? ` — ${shut.join(", ")} stay its parent's (the spawn.* unlocks in ~/.claunch.yaml)`
+        : "");
     hint.classList.remove("hidden");
   } else {
     hint.classList.add("hidden");
@@ -1612,6 +1737,7 @@ function syncSpawnMode() {
     // reasons to grey some of them (a non-claude harness, --null).
     syncForkAvailability();
   }
+  syncSpawnOverRow(f, report);
   const row = $("new-fork-row");
   row.classList.toggle("hidden", !parent);
   const forkable =
@@ -1623,13 +1749,120 @@ function syncSpawnMode() {
     : "the parent has no claude conversation to copy";
 }
 
+/* The harness row in child mode: only the harnesses the policy unlocked are
+   choosable, plus the parent's own — which is not an override at all, it is
+   what the child gets by saying nothing. Being installed is the option's
+   other reason to be greyed and outlives this one, so it is read back off
+   the option rather than recomputed. */
+function syncSpawnHarnessRow(f, parent, report, fresh) {
+  const sel = f.harness;
+  if (!sel || !sel.options) return;
+  const allowed = parent
+    ? new Set([...((report && report.spawnable_harnesses) || []),
+               parent.harness || ""])
+    : null;
+  for (const o of sel.options) {
+    o.disabled = o.available === false || (!!allowed && !allowed.has(o.value));
+  }
+  // Entering child mode seeds the row with what the child would be anyway.
+  if (parent && fresh &&
+      [...sel.options].some((o) => o.value === parent.harness)) {
+    sel.value = parent.harness;
+  }
+}
+
+/* The profile row means different things in the two modes: a session of its
+   own always runs SOME profile, while a child runs its parent's unless it is
+   told otherwise. So the inherit entry exists only while a parent is named,
+   and is what the row starts on — without it every unlocked child would be
+   spawned onto whichever profile happens to sort first. */
+function syncSpawnProfileRow(f, child) {
+  const sel = f.profile;
+  if (!sel || !sel.options) return;
+  const at = [...sel.options].findIndex((o) => o.value === "");
+  if (child && at < 0) {
+    sel.insertBefore(new Option("(inherit the parent's profile)", ""),
+                     sel.options[0] || null);
+    sel.value = "";
+  } else if (!child && at >= 0) {
+    sel.remove(at);
+    if (!sel.value) {
+      const first = [...sel.options].find((o) => !o.disabled);
+      sel.value = first ? first.value : "";
+    }
+  }
+}
+
+/* Same shape for the directory row: "" is the daemon's own directory when
+   the session is its own, and the parent's when it is a child. One option,
+   two truths — said in words rather than left for the operator to guess. */
+function syncSpawnCwdRow(f, child) {
+  const sel = f.cwd;
+  const first = sel && sel.options && sel.options[0];
+  if (!first || first.value !== "") return;
+  first.textContent = child ? "(inherit the parent's directory)" : "(daemon cwd)";
+}
+
+/* The child cap is SOFT (spawn.py: a request carrying over_limit crosses
+   it), so a parent standing at its limit is offered the crossing instead of
+   a dead end — and only while the daemon actually reports the cap reached,
+   the same condition the CLI wizard's Over limit row is shown under. */
+function syncSpawnOverRow(f, report) {
+  const soft = (report && report.soft_blocked_by) || [];
+  const row = $("new-over-row");
+  if (!row) return;
+  row.classList.toggle("hidden", !soft.length);
+  const text = $("new-over-text");
+  if (text) {
+    text.textContent = soft.length
+      ? `${soft.join("; ")} — spawn anyway (the daemon counts it against you)`
+      : "";
+  }
+  // A yes given while the row was up, on a parent that then freed a slot,
+  // must not survive as a silent override.
+  if (!soft.length && f.over_limit) f.over_limit.checked = false;
+}
+
+/* What a child carries beyond its name, read through the disables: every
+   row the policy left open and the operator actually filled in. The keys are
+   the spawn API's, which is not always the picker's — the directory travels
+   as the workspace NAME the registry vouched for, never as a path. */
+function spawnChildFields(f, body) {
+  const put = (k, v) => { if (v) body[k] = v; };
+  if (!f.harness.disabled) put("harness", f.harness.value);
+  if (!f.profile.disabled) put("profile", f.profile.value);
+  if (!f.borrow.disabled) put("borrow", f.borrow.value);
+  if (!f.null_token.disabled && f.null_token.checked) body.null_token = true;
+  if (!f.args.disabled && f.args.value.trim()) {
+    body.args = f.args.value.trim().split(/\s+/);
+  }
+  if (!f.cwd.disabled && f.cwd.value) {
+    const name = spawnWorkspaceName(f.cwd.value);
+    // No entry for the path (a registry edited under the form): send it as
+    // the path so the daemon says why, instead of dropping the pick here.
+    if (name) body.workspace = name;
+    else body.cwd = f.cwd.value;
+  }
+  const over = $("new-over-row");
+  if (over && !over.classList.contains("hidden") &&
+      f.over_limit && f.over_limit.checked) {
+    body.over_limit = true;
+  }
+  return body;
+}
+
 document
   .querySelector("#new-session select[name=parent]")
-  .addEventListener("change", syncSpawnMode);
+  .addEventListener("change", () => { syncSpawnMode(); refreshSpawnPolicy(); });
 
 document
   .querySelector("#new-session select[name=role]")
-  .addEventListener("change", renderRoleStance);
+  .addEventListener("change", () => {
+    renderRoleStance();
+    // Picking a role picks its workflow, the way the CLI wizard's Role row
+    // does — see syncOnboardPickers for what survives the change.
+    syncOnboardPickers();
+  });
 $("new-session").resume.addEventListener("change", syncForkAvailability);
 $("new-session").harness.addEventListener("change", syncForkAvailability);
 $("new-session").null_token.addEventListener("change", syncForkAvailability);
@@ -1648,6 +1881,10 @@ $("new-session").addEventListener("submit", async (e) => {
     cwd: f.cwd.value,  // a registered workspace path, or "" = the daemon's cwd
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
+  // A child sends what the spawn policy left open, and nothing else: a value
+  // standing on a greyed row is not an answer anybody gave, and sending it
+  // provokes a 403 naming a field nobody in this form could still choose.
+  if (parent) spawnChildFields(f, body);
   if (parent && f.fork_parent.checked) body.fork = true;
   if (f.role.value) body.role = f.role.value;
   if (!parent && f.borrow.value) body.borrow = f.borrow.value;
@@ -3836,28 +4073,56 @@ function syncOnboardPickers() {
   mesh.value = [...mesh.options].some((o) => o.value === keptMesh) ? keptMesh : "";
   $("new-handle-row").classList.toggle("hidden", !mesh.value);
 
+  // Ranked by the picked role, exactly as the CLI wizard's Workflow row and
+  // the spawn modal's rank it: the role's own defaults first, then the rest,
+  // the ones its filter_roles refuses last.
   const wf = form.workflow;
-  const keptWf = wf.value;
+  const { options, auto } = spawnRankWorkflows(workflowsCache, form.role.value);
+  // Choosing a role chooses its workflow — but only over a row nobody has
+  // touched. A workflow the operator picked survives every later role change,
+  // and so does "(none)": an auto-pick that came back after somebody chose to
+  // start no run at all would be the form overruling them, which is the CLI
+  // wizard's rule as well.
+  const keptWf = newWfPicked ? wf.value : auto;
   wf.innerHTML = "";
   wf.appendChild(new Option("(none)", ""));
-  for (const name of workflowsCache) wf.appendChild(new Option(name, name));
+  for (const o of options) {
+    wf.appendChild(new Option(o.detail ? `${o.name} — ${o.detail}` : o.name,
+                              o.name));
+  }
   wf.value = [...wf.options].some((o) => o.value === keptWf) ? keptWf : "";
   $("new-context-row").classList.toggle("hidden", !wf.value);
 }
 
 /* Workflows are declared per directory, so the list follows the Directory
-   picker rather than being fetched once. */
+   picker rather than being fetched once. Kept as the daemon serves them —
+   name, default_role, priority, filter_roles — because the picker ranks them
+   by the chosen role, and a list of bare names cannot be ranked at all. */
 let workflowsCache = [];
 let workflowsFor = null;
+/* Whether the Workflow row has been touched by hand. Until it has, the
+   picked role decides it (see syncOnboardPickers). */
+let newWfPicked = false;
+
+/* Where the session being created will actually stand: its own directory, or
+   its parent's when it is a child that may not be moved. Asking for the
+   form's cwd alone would list the daemon directory's workflows for a child
+   that will boot somewhere else entirely. */
+function newSessionCwd() {
+  const f = $("new-session");
+  const parent = spawnParent();
+  if (!parent) return f.cwd.value;
+  if (!f.cwd.disabled && f.cwd.value) return f.cwd.value;
+  return parent.cwd || "";
+}
+
 async function refreshWorkflowChoices() {
-  const cwd = document.querySelector("#new-session select[name=cwd]").value;
+  const cwd = newSessionCwd();
   if (cwd === workflowsFor) return;
   workflowsFor = cwd;
   try {
     const resp = await api(`/api/cflow/workflows?cwd=${encodeURIComponent(cwd)}`);
-    workflowsCache = resp.ok
-      ? ((await resp.json()).workflows || []).map((w) => w.name || w)
-      : [];
+    workflowsCache = resp.ok ? ((await resp.json()).workflows || []) : [];
   } catch {
     workflowsCache = [];
   }
@@ -3865,7 +4130,11 @@ async function refreshWorkflowChoices() {
 }
 
 $("new-session").mesh.addEventListener("change", syncOnboardPickers);
-$("new-session").workflow.addEventListener("change", syncOnboardPickers);
+$("new-session").workflow.addEventListener("change", () => {
+  // From here on this row is the operator's, not the role's.
+  newWfPicked = true;
+  syncOnboardPickers();
+});
 document
   .querySelector("#new-session select[name=cwd]")
   .addEventListener("change", refreshWorkflowChoices);
