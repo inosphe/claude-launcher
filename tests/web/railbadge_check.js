@@ -7,12 +7,14 @@
    not; after a migrate-session leaves a stale run under the old cwd, the
    run whose canonical cwd still holds the live session wins; the badge
    element survives re-application, because its click listener (the walk to
-   the run page) is attached once for its lifetime; and the marker the line
-   opens with is a DIAMOND, never the circle the session's own liveness dot
-   is — the two palettes are one palette (a done run and an idle session are
-   both #3fb950), so shape is the only thing that says which of the two a
-   reader is looking at. That one is held on both sides: the class here, and
-   the rule in style.css that keeps the rail from rounding it back. */
+   the run page) is attached once for its lifetime; and the mark the line
+   opens with carries NO colour of its own — it is a glyph, one per state,
+   inheriting the line's colour. That last one is the reported bug: it used
+   to be a coloured dot, the palettes are one palette (a done run and an idle
+   session are both #3fb950), and a reader scanning the rail took the second
+   green circle for another session. It is held on both sides here — the
+   glyphs, which must stay distinct from each other, and the stylesheet,
+   which must not paint them. */
 const fs = require("fs");
 const path = require("path");
 const staticDir = path.join(__dirname, "..", "..", "src", "claude_launcher",
@@ -29,6 +31,13 @@ function slice(name) {
     else if (src[j] === "}") { depth--; if (!depth) return src.slice(start, j + 1); }
   }
   throw new Error(`unbalanced ${name}`);
+}
+
+/* WF_GLYPH is a const table, not a function, so it needs its own cut. */
+function wfGlyphTable() {
+  const start = src.indexOf("const WF_GLYPH = {");
+  if (start < 0) throw new Error("cannot locate WF_GLYPH in app.js");
+  return src.slice(start, src.indexOf("};", start) + 2);
 }
 
 /* ---- stub DOM ---- */
@@ -80,7 +89,7 @@ const ctx = {};
    which the sliced functions and setRuns share as one binding. */
 new Function(
   "exports", "$", "document", "location", "cflowCache",
-  [slice("wfDotClass"), slice("wfDotClasses"), slice("askWho"),
+  [wfGlyphTable(), slice("wfDotClass"), slice("wfMark"), slice("askWho"),
    slice("answerFellToUs"), slice("sessCflowRun"),
    slice("sessCflowGated"), slice("sessCflowLabel"),
    slice("applyCflowBadges")].join("\n") + `
@@ -113,8 +122,10 @@ ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "step", workflow: "ship",
 ctx.apply();
 check("a running step is named on its session's row",
       badgeText(rows.s19), "ship · Build it");
-check("the marker carries the running colour, on the diamond shape",
-      badge(rows.s19).children[0].className, "dot wf-mark wf-running");
+check("the mark says running by its class...",
+      badge(rows.s19).children[0].className, "wf-mark wf-running");
+check("...and by a glyph, which is all it says on its own",
+      badge(rows.s19).children[0].textContent, "▸");
 check("a session with no run grows no badge", badge(rows.quiet), null);
 check("a running step is not flagged as the reader's move",
       badge(rows.s19).className, "sess-cflow");
@@ -207,8 +218,9 @@ const answerRow = (ask) => [{
 ctx.setRuns(answerRow({ prompt: "ship?", asked: [{ handle: "lead" }] }));
 ctx.apply();
 check("a delivered ask names its holder", badgeText(rows.s19), "ship · with lead");
-check("...and keeps the delegated colour, not the gate's amber",
-      badge(rows.s19).children[0].className, "dot wf-mark wf-delegated");
+check("...and is marked as somebody else's: hollow, not filled",
+      [badge(rows.s19).children[0].className,
+       badge(rows.s19).children[0].textContent], ["wf-mark wf-delegated", "◇"]);
 
 ctx.setRuns(answerRow({ prompt: "ship?", asked: [] }));
 ctx.apply();
@@ -216,29 +228,50 @@ ctx.apply();
    reader's move, so the rail marks it like any other gate. */
 check("an ask that reached nobody says so, and is flagged as yours", badgeText(rows.s19),
       "ship · ⚑ asked of nobody — approve to continue");
-check("...and takes the gate's amber, because it IS the reader's",
-      badge(rows.s19).children[0].className, "dot wf-mark wf-waiting");
+check("...and is marked as the reader's: the filled twin of the same shape",
+      [badge(rows.s19).children[0].className,
+       badge(rows.s19).children[0].textContent], ["wf-mark wf-waiting", "◆"]);
 
 ctx.setRuns(answerRow(undefined));
 ctx.apply();
 check("no ask at all reads the same way (a forced goto leaves this)",
       badgeText(rows.s19), "ship · ⚑ asked of nobody — approve to continue");
 
-/* ---- the marker is not a circle ---------------------------------------- */
-/* The class alone proves nothing: `#session-list .dot` rounds every dot on
-   this rail to 50%, and an id outweighs any number of classes — so a diamond
-   declared only as `.dot.wf-mark` renders as a circle and the bug is back
-   with the tests still green. Both halves are pinned: the shape itself, and
-   the override that survives the rail's own rule. */
-/* Anchored at the start of a line: the rail's override below is also spelled
-   `.dot.wf-mark {`, and it is the one that comes first in the file. */
-const markRule = (css.match(/\n\.dot\.wf-mark \{([^}]*)\}/) || [])[1] || "";
-check("the run marker is turned off the circle", /border-radius:\s*(?!50%)/.test(markRule), true);
-check("...and rotated into a diamond", /transform:\s*rotate\(45deg\)/.test(markRule), true);
-const railMark = (css.match(/#session-list \.sess-cflow \.dot\.wf-mark \{([^}]*)\}/) || [])[1];
-check("...and the rail, which rounds its dots at id specificity, is overridden",
-      railMark !== undefined && !/border-radius:\s*50%/.test(railMark), true);
-check("the session's own liveness dot stays a circle",
+/* ---- one glyph per state, and no colour anywhere ----------------------- */
+/* Every state has to be told from every other by shape alone now, so the
+   glyphs must not collide — two states sharing one would be invisible in
+   every check above, which only ever looks at one state at a time. */
+const glyphs = ["step", "waiting_approval", "done", "error"].map((st) => {
+  ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: st, workflow: "ship",
+                 sessions: ["s19"] }]);
+  ctx.apply();
+  return badge(rows.s19).children[0].textContent;
+});
+ctx.setRuns(answerRow({ prompt: "ship?", asked: [{ handle: "lead" }] }));
+ctx.apply();
+glyphs.push(badge(rows.s19).children[0].textContent);
+check("every state gets its own glyph — none reused, none empty",
+      [new Set(glyphs).size, glyphs.filter(Boolean).length], [5, 5]);
+
+/* The stylesheet is the other half. The class and the glyph prove nothing on
+   their own: a `background` on .wf-mark, or a surviving `.dot.wf-*` rule,
+   puts the colour straight back with every check above still green. */
+const markRule = (css.match(/\n\.wf-mark \{([^}]*)\}/) || [])[1] || "";
+check("the mark takes the line's colour rather than one of its own",
+      /color:\s*inherit/.test(markRule), true);
+check("...and paints nothing itself",
+      /background|#[0-9a-fA-F]{3}/.test(markRule), false);
+/* Comments stripped, because this file argues about `.dot.wf-*` in prose
+   right where it stopped declaring it — matching the prose would make the
+   check pass forever. */
+const rules = css.replace(/\/\*[\s\S]*?\*\//g, "");
+check("the run's old dot colours are gone, not merely unused",
+      /\.dot\.wf-/.test(rules), false);
+/* The session's dot is the one thing on this rail that still speaks in
+   colour, and it has to keep doing so — the fix is that it is now alone in
+   it, not that everything went grey. */
+check("the session's own liveness dot keeps its colour and its circle",
+      /\.dot\.idle \{[^}]*#3fb950/.test(css) &&
       /#session-list \.dot \{[^}]*border-radius:\s*50%/.test(css), true);
 
 if (failures) {

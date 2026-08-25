@@ -662,8 +662,10 @@ function applyCflowBadges() {
     const gated = sessCflowGated(r);
     line.className = `sess-cflow${gated ? " gated" : ""}`;
     line.textContent = "";
-    const dot = document.createElement("span");
-    dot.className = wfDotClasses(r.status, r);
+    const [markCls, markGlyph] = wfMark(r.status, r);
+    const mark = document.createElement("span");
+    mark.className = markCls;
+    mark.textContent = markGlyph;
     const txt = document.createElement("span");
     txt.className = "sess-cflow-text";
     txt.textContent =
@@ -672,7 +674,7 @@ function applyCflowBadges() {
       ? (r.gate || r.prompt || "") +
         (r.options ? ` — options: ${r.options.join(", ")}` : "")
       : (r.title || r.step_id || "");
-    line.append(dot, txt);
+    line.append(mark, txt);
   }
 }
 
@@ -1295,20 +1297,46 @@ function wfDotClass(status, run) {
   return "wf-running";
 }
 
-/* The full class list for a workflow-state DOT — the colour above, plus the
-   `wf-mark` that makes it a diamond instead of a circle.
+/* The mark that stands in front of a workflow run's name — a glyph, and
+   deliberately COLOURLESS.
 
-   The shape is the load-bearing part, not decoration. In the rail a run's
-   marker sits one line under the session's liveness dot at nearly the same
-   size, and the two palettes overlap exactly: a finished run and an idle
-   session are both #3fb950, a starting session and a running step are both
-   #58a6ff. Colour therefore cannot say WHOSE state is being shown, only
-   WHICH — so shape says whose. Circle: the session. Diamond: its run.
-   (Reported by the terminal user, who read a green wf-done dot as a second
-   idle dot.) Badges keep the colour class on its own: `.badge.wf-*` is
-   already a different object and nothing beside it is round. */
-function wfDotClasses(status, run) {
-  return `dot wf-mark ${wfDotClass(status, run)}`;
+   It used to be a coloured dot, and that is the bug: the rail draws a run's
+   mark one line under the session's own liveness dot, and the two palettes
+   are the same palette — a finished run and an idle session are both
+   #3fb950, a running step and a starting session are both #58a6ff. A reader
+   scanning the rail saw two green circles and read the second as another
+   session. Colour cannot say WHOSE state it is showing, only which.
+
+   So the run's mark gives colour up entirely: it inherits the line's colour
+   (grey, or the amber the whole line takes when the run is the reader's
+   move), which leaves the saturated dots on this rail meaning exactly one
+   thing — a session. Its own state it says by SHAPE, which nothing else in
+   the rail speaks in:
+
+     ▸  running       — moving
+     ◆  your move     — stopped, filled: it is on the person reading this
+     ◇  with a peer   — stopped, hollow: it is on somebody else
+     ✓  done
+     ✕  error/aborted
+
+   Filled/hollow is the pair that matters, because the two are the same word
+   ("waiting") and opposite meanings for the reader. Badges are untouched:
+   `.badge.wf-*` keeps its colour, being a labelled pill that no dot sits
+   near. */
+const WF_GLYPH = {
+  "wf-running": "▸",
+  "wf-waiting": "◆",
+  "wf-delegated": "◇",
+  "wf-done": "✓",
+  "wf-error": "✕",
+};
+
+/* [class, glyph] for a run's mark. Two values rather than a built element:
+   the three places that draw one build their nodes in their own idiom, and
+   one of them goes through `el`. */
+function wfMark(status, run) {
+  const state = wfDotClass(status, run);
+  return [`wf-mark ${state}`, WF_GLYPH[state] || WF_GLYPH["wf-running"]];
 }
 
 /* Who an open ask is with, in a few words. */
@@ -1529,8 +1557,10 @@ async function refreshCflow() {
 
     const head = document.createElement("div");
     head.className = "cflow-head";
-    const dot = document.createElement("span");
-    dot.className = wfDotClasses(r.status, r);
+    const [markCls, markGlyph] = wfMark(r.status, r);
+    const mark = document.createElement("span");
+    mark.className = markCls;
+    mark.textContent = markGlyph;
     const name = document.createElement("span");
     // A run is keyed by (directory, session), so a team working one workflow
     // in one tree makes cards that differ ONLY by the session. That makes the
@@ -1550,7 +1580,7 @@ async function refreshCflow() {
         : r.status === "waiting_answer"
         ? (answerFellToUs(r) ? "asked of nobody" : `with ${askWho(r.ask)}`)
         : r.status;
-    head.append(dot, name, st);
+    head.append(mark, name, st);
     li.appendChild(head);
 
     if (r.step_id) {
@@ -7755,7 +7785,7 @@ function sessWorkflow(data) {
 
   if (flow.status && flow.status !== "idle") {
     const line = el("div", "sess-wf-run");
-    line.appendChild(el("span", wfDotClasses(flow.status, flow)));
+    line.appendChild(el("span", ...wfMark(flow.status, flow)));
     line.appendChild(el("span", "sess-wf-name", flow.workflow || "(workflow)"));
     line.appendChild(el("span", "meta",
       flow.status +
