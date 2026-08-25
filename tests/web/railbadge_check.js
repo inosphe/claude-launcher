@@ -89,9 +89,9 @@ const ctx = {};
    which the sliced functions and setRuns share as one binding. */
 new Function(
   "exports", "$", "document", "location", "cflowCache",
-  [wfGlyphTable(), slice("wfDotClass"), slice("wfMark"), slice("askWho"),
+  [wfGlyphTable(), slice("wfDotClass"), slice("wfMarkState"), slice("wfMark"), slice("askWho"),
    slice("answerFellToUs"), slice("sessCflowRun"),
-   slice("sessCflowGated"), slice("sessCflowLabel"),
+   slice("sessCflowGated"), slice("sessCflowLabel"), slice("fmtOpensAt"),
    slice("applyCflowBadges")].join("\n") + `
 exports.apply = applyCflowBadges;
 exports.setRuns = (runs) => { cflowCache = runs; };
@@ -123,7 +123,7 @@ ctx.apply();
 check("a running step is named on its session's row",
       badgeText(rows.s19), "ship · Build it");
 check("the mark says running by its class...",
-      badge(rows.s19).children[0].className, "wf-mark wf-running");
+      badge(rows.s19).children[0].className, "wf-mark wf-mark-running");
 check("...and by a glyph, which is all it says on its own",
       badge(rows.s19).children[0].textContent, "▸");
 check("a session with no run grows no badge", badge(rows.quiet), null);
@@ -220,7 +220,7 @@ ctx.apply();
 check("a delivered ask names its holder", badgeText(rows.s19), "ship · with lead");
 check("...and is marked as somebody else's: hollow, not filled",
       [badge(rows.s19).children[0].className,
-       badge(rows.s19).children[0].textContent], ["wf-mark wf-delegated", "◇"]);
+       badge(rows.s19).children[0].textContent], ["wf-mark wf-mark-peer", "◇"]);
 
 ctx.setRuns(answerRow({ prompt: "ship?", asked: [] }));
 ctx.apply();
@@ -230,28 +230,46 @@ check("an ask that reached nobody says so, and is flagged as yours", badgeText(r
       "ship · ⚑ asked of nobody — approve to continue");
 check("...and is marked as the reader's: the filled twin of the same shape",
       [badge(rows.s19).children[0].className,
-       badge(rows.s19).children[0].textContent], ["wf-mark wf-waiting", "◆"]);
+       badge(rows.s19).children[0].textContent], ["wf-mark wf-mark-yours", "◆"]);
 
 ctx.setRuns(answerRow(undefined));
 ctx.apply();
 check("no ask at all reads the same way (a forced goto leaves this)",
       badgeText(rows.s19), "ship · ⚑ asked of nobody — approve to continue");
 
+/* ---- a paced hold is nobody's move, not a peer's ----------------------- */
+/* `waiting_window` shares wf-delegated with an ask sitting on a peer, because
+   one colour could only say "not yours". The shape says the rest: a peer can
+   be chased, the clock cannot, so the two must not read alike. The wording is
+   shared with the diagram (s107) — one state, one word. */
+ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: "waiting_window",
+               workflow: "ship", option: "fast",
+               opens_at: "2026-08-25T10:52:00Z", sessions: ["s19"] }]);
+ctx.apply();
+check("a held choice takes the pause of the play/pause pair, not the peer's ◇",
+      badge(rows.s19).children[0].className, "wf-mark wf-mark-held");
+check("...and says so in the word the other surfaces use",
+      badgeText(rows.s19).startsWith("ship · 'fast' held → "), true);
+check("...and is not flagged as the reader's move — nobody can hurry a clock",
+      badge(rows.s19).className, "sess-cflow");
+
 /* ---- one glyph per state, and no colour anywhere ----------------------- */
 /* Every state has to be told from every other by shape alone now, so the
    glyphs must not collide — two states sharing one would be invisible in
    every check above, which only ever looks at one state at a time. */
-const glyphs = ["step", "waiting_approval", "done", "error"].map((st) => {
-  ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: st, workflow: "ship",
-                 sessions: ["s19"] }]);
-  ctx.apply();
-  return badge(rows.s19).children[0].textContent;
-});
+const glyphs = ["step", "waiting_approval", "waiting_window", "done", "error"]
+  .map((st) => {
+    ctx.setRuns([{ scope: "s19", cwd: "F:/repo", status: st, workflow: "ship",
+                   option: "fast", opens_at: "2026-08-25T10:52:00Z",
+                   sessions: ["s19"] }]);
+    ctx.apply();
+    return badge(rows.s19).children[0].textContent;
+  });
 ctx.setRuns(answerRow({ prompt: "ship?", asked: [{ handle: "lead" }] }));
 ctx.apply();
 glyphs.push(badge(rows.s19).children[0].textContent);
 check("every state gets its own glyph — none reused, none empty",
-      [new Set(glyphs).size, glyphs.filter(Boolean).length], [5, 5]);
+      [new Set(glyphs).size, glyphs.filter(Boolean).length], [6, 6]);
 
 /* The stylesheet is the other half. The class and the glyph prove nothing on
    their own: a `background` on .wf-mark, or a surviving `.dot.wf-*` rule,

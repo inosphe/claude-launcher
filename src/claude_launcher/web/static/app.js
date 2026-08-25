@@ -620,8 +620,10 @@ function sessCflowLabel(r) {
     return answerFellToUs(r) ? "asked of nobody — approve to continue"
                              : `with ${askWho(r.ask)}`;
   if (r.status === "report_required") return "report required";
+  // "held → 19:52", the short form s107 draws on the diagram and the flow
+  // card. One state, one wording, wherever a reader meets it.
   if (r.status === "waiting_window")
-    return `'${r.option}' held — opens ${fmtOpensAt(r.opens_at)}`;
+    return `'${r.option}' held → ${fmtOpensAt(r.opens_at)}`;
   if (r.status === "done" || r.status === "error" || r.status === "aborted")
     return r.status;
   return r.title || r.step_id || "running";
@@ -1313,30 +1315,56 @@ function wfDotClass(status, run) {
    thing — a session. Its own state it says by SHAPE, which nothing else in
    the rail speaks in:
 
-     ▸  running       — moving
-     ◆  your move     — stopped, filled: it is on the person reading this
-     ◇  with a peer   — stopped, hollow: it is on somebody else
+     ▸  running     — moving
+     ‖  held        — stopped by the clock: a paced option waiting for its
+                      window, which the daemon opens. Nobody can hurry it,
+                      so it must not look like either kind of "waiting"
+     ◆  your move   — stopped, filled: it is on the person reading this
+     ◇  with a peer — stopped, hollow: it is on somebody else
      ✓  done
      ✕  error/aborted
 
-   Filled/hollow is the pair that matters, because the two are the same word
-   ("waiting") and opposite meanings for the reader. Badges are untouched:
-   `.badge.wf-*` keeps its colour, being a labelled pill that no dot sits
-   near. */
+   ▸/‖ is the play/pause pair, and ◆/◇ is the filled/hollow one; the latter
+   matters because those two are the same status word ("waiting") and
+   opposite meanings for the reader. Badges are untouched: `.badge.wf-*`
+   keeps its colour, being a labelled pill that no dot sits near. */
 const WF_GLYPH = {
-  "wf-running": "▸",
-  "wf-waiting": "◆",
-  "wf-delegated": "◇",
-  "wf-done": "✓",
-  "wf-error": "✕",
+  running: "▸",
+  held: "‖",
+  yours: "◆",
+  peer: "◇",
+  done: "✓",
+  error: "✕",
 };
+
+/* Which SHAPE a run wears — deliberately its own vocabulary, not a re-use of
+   the colour classes above.
+
+   The two axes stopped agreeing the moment colour left. `wfDotClass` answers
+   "which colour does a badge paint" and hands `waiting_window` the same
+   `wf-delegated` as an ask sitting with a peer, because neither is the
+   operator's move and one colour said that much. Shape can afford the
+   distinction the colour could not: a peer can be chased and a clock cannot.
+   Keeping them separate also means a new shape costs nothing — the mark has
+   no per-state rule to add, having no colour to declare. (Agreed with s107,
+   who draws the same state on the workflow diagram: the word for it is
+   "held", the thing that releases it is the daemon.) */
+function wfMarkState(status, run) {
+  if (status === "waiting_window") return "held";
+  if (status === "waiting_answer") return answerFellToUs(run) ? "yours" : "peer";
+  if (status === "waiting_approval" || status === "waiting_selection" ||
+      status === "report_required") return "yours";
+  if (status === "done") return "done";
+  if (status === "error" || status === "aborted") return "error";
+  return "running";
+}
 
 /* [class, glyph] for a run's mark. Two values rather than a built element:
    the three places that draw one build their nodes in their own idiom, and
    one of them goes through `el`. */
 function wfMark(status, run) {
-  const state = wfDotClass(status, run);
-  return [`wf-mark ${state}`, WF_GLYPH[state] || WF_GLYPH["wf-running"]];
+  const state = wfMarkState(status, run);
+  return [`wf-mark wf-mark-${state}`, WF_GLYPH[state]];
 }
 
 /* Who an open ask is with, in a few words. */
