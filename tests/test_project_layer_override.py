@@ -150,8 +150,8 @@ def test_the_override_adds_no_other_verify(stem):
     assert armed == list(ARMED[stem])
 
 
-def test_the_leader_override_is_canonical_plus_verify():
-    """Field for field the bundled leader, verify excluded — no other drift.
+def test_the_leader_override_is_canonical_plus_its_grafted_fields():
+    """Field for field the bundled leader, the grafted fields excluded.
 
     The override is a whole copy with a verify grafted on, so it goes stale
     silently the moment the canonical file is edited alone. It did: commit
@@ -166,6 +166,13 @@ def test_the_leader_override_is_canonical_plus_verify():
     The worker pair drifted the same way and is deliberately NOT covered
     here yet — resyncing it would rewrite a workflow other sessions are
     mid-run on, so it is reported rather than fixed in passing.
+
+    Two fields are excluded, not one, and they are the two the project layer
+    owns (``tools/sync_project_layer.py``'s ``GRAFT_RE``): ``verify`` and
+    ``awaits``. Both answer "what does THIS repository check, with which tool"
+    — a question the packaged copy, which ships everywhere, cannot answer. The
+    exclusion list has to stay exactly that set: widen it and this stops being
+    a drift check.
     """
     from dataclasses import replace
 
@@ -182,12 +189,13 @@ def test_the_leader_override_is_canonical_plus_verify():
         "the override gained or lost a step against the canonical leader"
     )
     for step_id, canonical_step in canonical.steps.items():
-        assert replace(override.steps[step_id], verify=None) == replace(
-            canonical_step, verify=None
+        grafted = {"verify": None, "awaits": None}
+        assert replace(override.steps[step_id], **grafted) == replace(
+            canonical_step, **grafted
         ), (
             f"{step_id!r} differs from the canonical leader by more than its "
-            f"verify — the override drifted, and a run here would follow the "
-            f"override's version of the rule"
+            f"grafted fields — the override drifted, and a run here would "
+            f"follow the override's version of the rule"
         )
 
 

@@ -164,6 +164,13 @@ def _cmd_show(args: argparse.Namespace) -> int:
             if len(done_when) > 72:
                 done_when = done_when[:72] + "…"
             flags.append(f"done_when: {done_when}")
+        if s.awaits:
+            # What the step WAITS for, and how often the daemon re-measures
+            # it. Shown next to verify because the two are read together: an
+            # `awaits: verify` is only legible beside the command it names.
+            flags.append(
+                f"awaits: {s.awaits.command(s)} (every {s.awaits.poll:g}s)"
+            )
         suffix = f"  ({'; '.join(flags)})" if flags else ""
         if s.select:
             chooser = s.select.chooser

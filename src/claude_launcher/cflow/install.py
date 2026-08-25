@@ -56,6 +56,12 @@ workflow to be started here), that is the answer; otherwise list candidates
    belong in the report too. If the payload carries `done_when`, that is the
    step's completion criterion: before calling `next`, check the statement is
    actually TRUE — and if it is not yet, keep working instead of advancing.
+   If the payload carries `awaits`, the step declares something it is waiting
+   for and the daemon is re-measuring it for you: end your turn rather than
+   polling it by hand, and you will be sent a `signal` block the moment it
+   changes. Silence there means "nothing new", NOT "still unmet" — and if no
+   daemon is running, nothing measures it, so check it yourself before you
+   conclude anything from quiet.
 3. Act on the returned `status`:
    - `step` — do the work, then `report {summary, details}`, then `next {}`.
    - `report_required` — you called `next` without filing the step's

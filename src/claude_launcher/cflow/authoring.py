@@ -204,6 +204,69 @@ it at once (journaled as an override). Put it on the option whose cost is
 per-take — a merge, a deploy, a sweep — never on one whose delay loses
 information.
 
+## `awaits:` — what the step is WAITING for
+
+`verify` and `done_when` both answer "may this step be left?". `awaits`
+answers "what is it standing still *for*?", and it is the only one of the
+three the driving agent never acts on — the daemon does.
+
+Without it a stalled run is on a clock: the reminder repeats the step's
+instructions every interval and has no opinion about whether what the step
+waits for has arrived. That is how a run ends up quoting a `verify` that went
+green ten minutes ago. With `awaits`, the daemon runs the probe every `poll`
+seconds and speaks **once, when its exit code changes** — and says nothing at
+all while it does not.
+
+```yaml
+reflect:
+  instructions: restart the live server onto the merge, then confirm it serves it.
+  verify: "python tools/deploy_check.py --branch master"
+  awaits: verify             # re-measure THIS step's verify; signal on change
+```
+
+Three forms, and there is no bare-command shorthand — a command is always
+written under `probe`, so the reserved word can never be mistaken for one:
+
+```yaml
+awaits: verify                                   # this step's own verify
+awaits: {probe: verify, poll: 30}                # the same, with knobs
+awaits:
+  probe: "python tools/queue_depth.py --zero"    # something else entirely
+  poll: 30                                       # seconds; floor 15
+  timeout: 10                                    # seconds; hard cap 30
+  describe: the review queue has drained         # one line, for the signal
+```
+
+The exit code is the fact. Output rides into the signal as evidence and is
+**not** compared, so a probe may print a timestamp without "changing" every
+sample. The first measurement at a position is a baseline and never fires:
+the state a step arrives in is not news about it.
+
+Write the probe as a cheap question about state something *else* changes —
+read a file, ask git, poke a status endpoint. The ceilings enforce that
+rather than asking for it: `timeout` may not exceed 30s and `poll` may not go
+below 15s, both parse errors. "Wait until the suite is green" is the shape
+this field invites and the one thing it must not become — a test run hung on
+a probe is re-run for as long as the step sits there. Ask a cheap question
+*about* the suite (did it run? is the marker newer than the tip?) instead.
+
+`awaits: verify` is per step and never a default, deliberately. A `verify` is
+contracted to run once, on the way out; sampling one every minute also demands
+it be read-only and idempotent, and that is fair to ask of a command an author
+nominated and unfair to impose on every `verify` already written. Nothing is
+taken on trust either: the probe runs under `awaits.timeout`, never the
+verify's own, so a suite nominated by mistake times out into "cannot measure"
+instead of running on a loop.
+
+What happens when it breaks is the safety story. A probe that cannot be
+launched, or does not finish in time, is **no answer** — not the answer "not
+yet" — so the ordinary clock reminder resumes for that step. Silence is only
+ever granted while something is actually watching, and with no daemon running
+nothing is: then `awaits` does nothing at all and the run behaves exactly as
+it does today. The same is true of a run already in flight when the workflow
+gains the field — a run reads the snapshot it started on, and an absent
+`awaits` is today's clock.
+
 ## `ask:` gates ENTRY
 
 An `ask` withholds the step's `instructions` until it is answered, so it goes
@@ -265,6 +328,8 @@ Cycles are legal and are warned about (`cflow show` prints them). Two rules:
   A select step takes neither.
 - `done_when` states the leave criterion where no command can check it —
   see its section above.
+- `awaits` states what a step WAITS for, so the daemon can signal the change
+  instead of repeating the step on a clock — see its section above.
 - Steps should say what **evidence** to file in the report. Reports are
   journaled, shown live on the dashboard, and become the PR text; a step whose
   report is "done" has taught the agent nothing about what to record.
