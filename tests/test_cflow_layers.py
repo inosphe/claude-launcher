@@ -287,6 +287,50 @@ def test_the_project_override_leader_requests_a_rebase_for_stale_branches():
     assert "재요청" in wf.steps["integrate"].instructions
 
 
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_leader_delegates_every_sweep_and_merge_to_a_subagent(layer):
+    """The leader judges; a spawned subagent executes. Both layers say so.
+
+    A leader session's context is the control room — the tally table, the
+    rules it has settled, who is waiting on what. A full sweep's output and
+    a merge's diff are the two largest things that can land in it, and what
+    they evict is exactly that state. So the two executions this workflow
+    owns are delegated: the leader decides *what* to merge and *which*
+    sweep to run, spawns a subagent to run it, and keeps only the numbers
+    that come back.
+
+    Which makes the returned text the weak point — a subagent's report is
+    prose, and prose is not evidence of a merge. The rule therefore carries
+    its own re-check (``git rev-parse HEAD`` and friends): the leader reads
+    the tree itself before writing a hash into a report.
+
+    The route this replaces was a resident ``tester`` session, spawned over
+    the mesh to answer sweep requests. Sweeps are one-shot work; a session
+    is a slot, a mesh wiring, and an idle-state to manage, all of which came
+    back to the leader. Both layers are pinned because this repository runs
+    the override, not the bundled file.
+    """
+    if layer == "bundled":
+        wf = model.load(dict(state_mod.bundled_workflows())["improv-leader"])
+    else:
+        wf = model.load(PROJECT_OVERRIDES / "improv-leader.yaml")
+
+    integrate = wf.steps["integrate"].instructions
+    standby = wf.steps["standby"].instructions
+
+    assert "한 subagent = 한 일" in integrate, (
+        "the leader's merge step lost the one-job-per-subagent rule"
+    )
+    assert "git rev-parse HEAD" in integrate, (
+        "nothing tells the leader to re-check what the subagent claims it did"
+    )
+    for step_id, text in (("integrate", integrate), ("standby", standby)):
+        assert "subagent" in text, f"{step_id} lost the subagent rule"
+        assert "tester에게" not in text, (
+            f"{step_id} still routes work to a resident tester session"
+        )
+
+
 def test_the_leader_does_not_hide_a_human_decision_behind_an_agent_chooser():
     """``standby``'s exit must be a fact the agent can see for itself.
 
