@@ -23,10 +23,15 @@ who already knows, including every caller that cannot be asked. See
 Worktrees live under ``<repo>/.claude/worktrees/<name>`` -- beside the ones
 Claude Code makes itself, so one ``git worktree list`` shows every checkout an
 agent is working in, whoever created it.
+
+One thing does not come along with the checkout, and :func:`inherit_mcp_approval`
+carries it: which ``.mcp.json`` servers the person has approved. See that
+function for why the omission stops an agent dead.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -64,6 +69,15 @@ ASK: Choice = None
 
 #: What ``--no-worktree`` resolves to.
 NEVER: Choice = False
+
+
+#: Claude Code's per-directory settings file, relative to a checkout's root.
+#: Its ``enabledMcpjsonServers`` is where the answer to "New MCP server found
+#: in this project" is recorded -- see :func:`inherit_mcp_approval`.
+LOCAL_SETTINGS = Path(".claude") / "settings.local.json"
+
+#: The one key a new worktree inherits from the checkout it was cut from.
+MCP_APPROVAL_KEY = "enabledMcpjsonServers"
 
 
 class WorktreeError(Exception):
@@ -277,9 +291,66 @@ def create(root: Path, name: str, *, start: str = "") -> Worktree:
     if done.returncode != 0:
         detail = (done.stderr or done.stdout or "").strip()
         raise WorktreeError(f"git worktree add failed: {detail}")
+    inherit_mcp_approval(root, path)
     return Worktree(
         path=path, name=name, branch=current_branch(path) or name, created=True
     )
+
+
+def inherit_mcp_approval(root: Path, path: Path) -> None:
+    """Carry ``root``'s approved ``.mcp.json`` servers into the new worktree.
+
+    A project's MCP servers are declared in the repository's ``.mcp.json``,
+    and Claude Code resolves that file from the repository -- so a worktree
+    inherits the *declaration* without holding a copy. The *approval* does
+    not travel with it: the answer to "New MCP server found in this project"
+    is recorded per directory, in that directory's
+    ``.claude/settings.local.json``. A fresh worktree is a fresh directory,
+    so the question is asked again, every time.
+
+    Asked of whom, is the problem. An agent launched into a worktree meets
+    that modal on its first screen and cannot answer it -- the one question
+    in the launch path with nobody able to reply. Carrying the answer over is
+    not a new trust decision either; the person already made it in the
+    checkout this worktree was cut from, for the very same ``.mcp.json``.
+
+    So exactly the answer is copied, and only where there is one to copy:
+
+    - the ``enabledMcpjsonServers`` list alone, never the rest of the file
+      (permissions and env live there too, and inheriting those silently
+      would leave nobody able to say what a worktree is running under);
+    - never ``enableAllProjectMcpServers``, which answers for servers the
+      person has not seen;
+    - nothing at all when ``root`` has no approval recorded -- inventing one
+      *would* be a new decision;
+    - nothing when the worktree already has a settings file, which is where
+      a reused checkout's own answers live.
+
+    Failure here is not worth a failed launch: the worst case is the modal
+    the person was already getting, so an unreadable or unwritable settings
+    file leaves the worktree as ``git worktree add`` made it.
+    """
+    try:
+        doc = json.loads((root / LOCAL_SETTINGS).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    approved = doc.get(MCP_APPROVAL_KEY) if isinstance(doc, dict) else None
+    if not isinstance(approved, list):
+        return
+    names = [server for server in approved if isinstance(server, str) and server]
+    if not names:
+        return
+    target = path / LOCAL_SETTINGS
+    if target.exists():
+        return
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps({MCP_APPROVAL_KEY: names}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    except OSError:
+        return
 
 
 

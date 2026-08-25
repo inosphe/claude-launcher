@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -203,6 +204,97 @@ def test_a_reused_worktree_reports_the_branch_it_is_actually_on(repo):
         f"api · other · {again.path}"
     )
 
+
+# --------------------------------------------------------------------------- #
+# inheriting the MCP approval
+# --------------------------------------------------------------------------- #
+def approve(checkout: Path, doc: dict) -> Path:
+    """Write ``doc`` as ``checkout``'s Claude Code local settings."""
+    path = checkout / worktree.LOCAL_SETTINGS
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    return path
+
+
+def settings_of(checkout: Path) -> dict:
+    return json.loads(
+        (checkout / worktree.LOCAL_SETTINGS).read_text(encoding="utf-8")
+    )
+
+
+def test_a_new_worktree_inherits_the_approved_servers(repo):
+    """The person answered the modal once; the worktree must not re-ask.
+
+    `.mcp.json` is resolved from the repository, so a worktree inherits the
+    declaration -- but the approval is recorded per directory, so without
+    this it is asked again in a checkout no human is watching.
+    """
+    approve(repo, {worktree.MCP_APPROVAL_KEY: ["claunch"]})
+    wt = worktree.resolve(str(repo), "inherits")
+    assert settings_of(wt.path) == {worktree.MCP_APPROVAL_KEY: ["claunch"]}
+
+
+def test_only_the_approval_is_inherited(repo):
+    """Everything else in that file stays behind.
+
+    Permissions and env live there too. Inheriting them silently would leave
+    nobody able to say what a worktree is running under -- and
+    `enableAllProjectMcpServers` answers for servers nobody has seen yet.
+    """
+    approve(
+        repo,
+        {
+            worktree.MCP_APPROVAL_KEY: ["claunch"],
+            "enableAllProjectMcpServers": True,
+            "disabledMcpjsonServers": ["cflow"],
+            "permissions": {"deny": ["Bash(rm:*)"]},
+            "env": {"SECRET": "1"},
+        },
+    )
+    wt = worktree.resolve(str(repo), "narrow")
+    assert list(settings_of(wt.path)) == [worktree.MCP_APPROVAL_KEY]
+
+
+def test_no_approval_to_inherit_writes_nothing(repo):
+    """Inventing an approval would be a new decision, not an inherited one."""
+    for doc in ({}, {worktree.MCP_APPROVAL_KEY: []}, {"permissions": {}}):
+        approve(repo, doc)
+        wt = worktree.resolve(str(repo), f"bare{abs(hash(str(doc))) % 1000}")
+        assert not (wt.path / worktree.LOCAL_SETTINGS).exists()
+
+
+def test_a_checkout_with_no_settings_file_at_all_writes_nothing(repo):
+    assert not (repo / worktree.LOCAL_SETTINGS).exists()
+    wt = worktree.resolve(str(repo), "none")
+    assert not (wt.path / worktree.LOCAL_SETTINGS).exists()
+
+
+def test_an_unreadable_settings_file_does_not_fail_the_launch(repo):
+    """The worst case is the modal the person was already getting."""
+    approve(repo, {})
+    (repo / worktree.LOCAL_SETTINGS).write_text("{not json", encoding="utf-8")
+    wt = worktree.resolve(str(repo), "broken")
+    assert wt is not None and wt.created
+    assert not (wt.path / worktree.LOCAL_SETTINGS).exists()
+
+
+def test_a_worktrees_own_settings_are_never_overwritten(repo):
+    """A reused checkout's answers are its own -- including a later refusal."""
+    approve(repo, {worktree.MCP_APPROVAL_KEY: ["claunch"]})
+    wt = worktree.resolve(str(repo), "review")
+    approve(wt.path, {worktree.MCP_APPROVAL_KEY: [], "disabledMcpjsonServers": ["claunch"]})
+    again = worktree.resolve(str(repo), "review")
+    assert not again.created
+    assert settings_of(again.path)["disabledMcpjsonServers"] == ["claunch"]
+
+
+def test_a_reused_branch_still_inherits(repo):
+    """`created` covers a new checkout of an existing branch, and it re-asks too."""
+    git("branch", "already", cwd=repo)
+    approve(repo, {worktree.MCP_APPROVAL_KEY: ["claunch"]})
+    wt = worktree.resolve(str(repo), "already")
+    assert wt.created
+    assert settings_of(wt.path) == {worktree.MCP_APPROVAL_KEY: ["claunch"]}
 
 # --------------------------------------------------------------------------- #
 # who gets asked
