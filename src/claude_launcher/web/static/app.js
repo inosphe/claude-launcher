@@ -1679,7 +1679,91 @@ function syncForkAvailability() {
   // This function speaks for the create form; on a child the spawn policy
   // has the last word, and it has just been overruled row by row above.
   if (spawnParent()) syncSpawnMode();
+  // The fold below hides these rows; the summary line has to keep saying
+  // what they hold, so every path that changes one of them lands here.
+  // After syncSpawnMode, never before: on a child the policy decides which
+  // of them speak for themselves, and the summary reads that answer.
+  renderRuntimeSummary();
 }
+
+/* What the folded "How it runs" rows currently say, written onto the fold's
+   own summary line.
+
+   A fold that hides the directory would be a trap: an agent started in the
+   wrong checkout does not complain, it quietly works on the wrong tree, and
+   the user finds out from a commit. So the values ride on the face of the
+   fold — the harness, the profile and the directory always, the rest only
+   when they are set to something other than their default, because a
+   summary that lists every row is the fold nobody opens AND the line nobody
+   reads.
+
+   On a child only the rows the spawn policy left OPEN may speak for
+   themselves. A greyed row still holds whatever the form was last showing,
+   and that value is not what gets created — the parent's is. Reporting it
+   would be the fold's face telling a lie about the very thing the fold is
+   hiding, so a locked row is left out and the parent is named instead.
+   Which rows are shut is the parent hint's job, above the fold and always
+   visible; this line says what would be used, not what is forbidden. */
+function renderRuntimeSummary() {
+  const out = $("new-runtime-sum");
+  if (!out) return;  // the fold is markup; a page that predates it still runs
+  const f = $("new-session");
+  const parent = spawnParent();
+  const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
+  const bits = [];
+  if (speaks("harness")) bits.push(f.harness.value || "claude");
+  if (speaks("profile") && f.profile.value) bits.push(f.profile.value);
+  if (speaks("cwd")) {
+    // The option's label is "name — path"; the name is what the user
+    // registered the directory as, and the path is what the fold shows.
+    // In child mode the first entry says "(inherit the parent's directory)",
+    // which is the honest answer until a workspace is picked.
+    // With no options yet — the workspace list has not arrived, or its
+    // fetch failed — the row itself does not know where it would go, so the
+    // line says nothing rather than naming a directory it made up.
+    const dir = f.cwd.options[f.cwd.selectedIndex];
+    if (dir) bits.push(dir.text.split(" — ")[0]);
+  }
+  if (speaks("borrow") && f.borrow.value) bits.push(`borrow ${f.borrow.value}`);
+  if (speaks("null_token") && f.null_token.checked) bits.push("--null");
+  if (speaks("resume") && f.resume.value) {
+    bits.push(f.resume.value === PICKER ? "resume (picker)" : `resume ${f.resume.value}`);
+  }
+  if (speaks("args") && f.args.value.trim()) bits.push("+args");
+  if (parent) {
+    out.textContent = bits.length
+      ? `— ${parent.name}'s setup · ${bits.join(" · ")}`
+      : `— inherited from ${parent.name}`;
+    return;
+  }
+  out.textContent = `— ${bits.join(" · ")}`;
+}
+
+/* The fold is shut on arrival, which is right for as long as everything
+   inside it is the parent's — and wrong the moment the spawn policy hands a
+   row back, because an unlocked row is a decision the operator cannot see is
+   theirs while it is folded away. So entering a state where something inside
+   is editable opens the fold.
+
+   Opening is the only move it makes. It never shuts the fold, and it does
+   not re-open on the next poll: the stamp remembers the parent and the exact
+   set of rows that were open, so a fold the operator shut stays shut until
+   the parent — or what the policy opens for it — actually changes. Without
+   that latch the two-second poll would fight whoever tried to close it. */
+let runtimeFoldOpenedFor = null;
+function syncRuntimeFold(f, parent) {
+  const fold = $("new-runtime");
+  const openRows = parent
+    ? SPAWN_INHERITS.filter((k) => f[k] && !f[k].disabled)
+    : [];
+  const stamp = parent ? `${parent.name}:${openRows.join(",")}` : "";
+  if (fold && openRows.length && stamp !== runtimeFoldOpenedFor) fold.open = true;
+  runtimeFoldOpenedFor = stamp;
+}
+
+/* One listener for the whole form rather than one per folded row: `input`
+   bubbles from every control in it, and the summary is cheap to rebuild. */
+$("new-session").addEventListener("input", renderRuntimeSummary);
 
 /* ------------------------------------------------------------------ */
 /* the create form as `claunch spawn`: a CHILD of a session            */
@@ -1846,12 +1930,20 @@ function syncSpawnMode() {
         ? ` — ${shut.join(", ")} stay its parent's (the spawn.* unlocks in ~/.claunch.yaml)`
         : "");
     hint.classList.remove("hidden");
+    // The policy has just decided which folded rows are the operator's, and
+    // the summary line reports exactly that — so it is re-rendered HERE, not
+    // left to syncForkAvailability. The other branch reaches it through that
+    // call instead, which is why this one is inside the child arm.
+    renderRuntimeSummary();
   } else {
     hint.classList.add("hidden");
     // The rows go back to the form that owns them, which has its own
     // reasons to grey some of them (a non-claude harness, --null).
     syncForkAvailability();
   }
+  // The policy has had its say on every folded row by now, so this is
+  // where the fold can tell whether anything inside is the operator's.
+  syncRuntimeFold(f, parent);
   syncSpawnOverRow(f, report);
   const row = $("new-fork-row");
   row.classList.toggle("hidden", !parent);

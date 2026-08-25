@@ -67,7 +67,11 @@ header and the terminal) and the detail panel's section, bound to the same
 open-set and off-state — ``briefrow_check`` on the row's always-on face —
 the one-line job description the /api/sessions poll pours into every row
 (digest first, the opening task as fallback) and the collapsed ⟳ that
-refreshes without opening — ``spawnform_check`` on the create form
+refreshes without opening — ``newform_check`` on that same form's reading
+order — the arrangement rows (parent, mesh, role, workflow) asked before the
+machinery rows, which fold shut under them and must hold exactly what a child
+inherits, and the opening task left alone at the bottom, with the summary line
+that keeps the folded directory visible — ``spawnform_check`` on the create form
 turned into a spawn — what a child may be asked once a parent is named
 (the spawn policy's answer, per parent, rather than the form's own), what
 its payload therefore carries, the soft child cap offered as a crossing,
@@ -164,6 +168,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "typing_check.js",
         "leak_check.js",
         "pingbox_check.js",
+        "newform_check.js",
     ],
 )
 def test_topology_diagram_logic(script):

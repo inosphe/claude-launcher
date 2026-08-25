@@ -119,6 +119,7 @@ const ctx = {};
 new Function(
   "exports", "$", "document", "Option", "sessionsCache", "syncForkAvailability",
   "renderRoleStance", "refreshWorkflowChoices", "spawnReport", "workspacesCache",
+  "syncRuntimeFold", "renderRuntimeSummary",
   [sliceConst("SPAWN_INHERITS"), sliceLet("newSpawnReport"),
    sliceLet("newSpawnReportFor"), sliceLet("newSpawnDefaultsFor"),
    slice("spawnUnlocked"), slice("refreshSpawnPolicy"),
@@ -142,7 +143,12 @@ exports.setSessions = (s) => { sessionsCache = s; };
    () => { stances++; },
    () => { wfRefreshes++; },
    async (name) => { fetched.push(name); return reports[name] || null; },
-   [{ name: "repo", path: "F:/repo", exists: true }]);
+   [{ name: "repo", path: "F:/repo", exists: true }],
+   // The "How it runs" fold opens itself when the policy hands a row back.
+   // That rule reads the fold element, which this stub page does not have,
+   // and it is newform_check's to hold — here it only has to exist. The
+   // summary line the fold carries is the same story.
+   () => {}, () => {});
 
 let failures = 0;
 function check(what, got, want) {
