@@ -50,3 +50,8 @@ redirect
 # accident)
 *.db-lock-*
 *.db-wal-lock-*
+
+# Import/vacuum leftovers (zero-byte temp journals and their lock sidecars)
+*.tmp-journal*
+*.tmp-lock-*
+.beads.vacuum.*
