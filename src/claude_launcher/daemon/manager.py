@@ -397,6 +397,75 @@ class SessionManager:
                 "on its siblings or its parent"
             )
 
+    def reparent(self, child: str, parent: str, *, actor: str = "") -> dict:
+        """Move ``child`` — and everything under it — under ``parent``.
+
+        The tree is nothing but ``SessionDef.parent`` (see above), so the move
+        itself is one field and a persist; the guards are the substance:
+
+        * no cycle: ``parent`` may not be ``child`` or anything under it;
+        * an exited ``parent`` is refused, as it is refused a spawn — a
+          subtree hung from a dead session is a subtree nobody commands;
+        * ``spawn.max_depth`` still holds for the DEEPEST session moved, so a
+          re-parent cannot carry a subtree past the limit a spawn respects;
+        * with an ``actor`` (an agent; an operator passes none) authority runs
+          down the tree as it does everywhere else: the actor must command
+          ``child``, and ``parent`` must be the actor itself or a session it
+          commands. That is exactly what lets a lead hand its own workers to a
+          nested worker it spawned for their domain — and nothing else: a
+          worker cannot adopt a sibling, a session cannot move itself, and
+          nobody can push a session under a stranger.
+
+        What does not change: the child's terminal, conversation, mesh
+        handle and cflow run. Only who it answers to — and the mesh edge to
+        that new parent is the caller's to open (:meth:`MeshManager.link_lineage`),
+        since the tree does not know which meshes the pair share.
+        """
+        if child == parent:
+            raise ManagerError(f"session {child!r} cannot be its own parent")
+        if actor and actor == child:
+            raise ManagerError(
+                f"session {child!r} cannot move itself: a re-parent is done by "
+                "the session that commands it, or by an operator"
+            )
+        target = self.get(child)
+        new_parent = self.get(parent)
+        if new_parent.exited:
+            raise ManagerError(
+                f"session {parent!r} has exited — an exited session cannot "
+                "take children"
+            )
+        if parent in self.descendants(child):
+            raise ManagerError(
+                f"session {parent!r} is under {child!r}: re-parenting would "
+                "make a cycle"
+            )
+        if actor:
+            self.require_commands(actor, child)
+            if parent != actor:
+                self.require_commands(actor, parent)
+        policy = spawn_mod.SpawnPolicy.load()
+        below = max(
+            (self.depth(d) - self.depth(child) for d in self.descendants(child)),
+            default=0,
+        )
+        deepest = self.depth(parent) + 1 + below
+        if deepest > policy.max_depth:
+            raise ManagerError(
+                f"re-parenting {child!r} under {parent!r} would put a session "
+                f"{deepest} level(s) deep and the limit is {policy.max_depth} "
+                "(spawn.max_depth) — move fewer or shallower sessions"
+            )
+        previous = target.sdef.parent
+        target.sdef = replace(target.sdef, parent=parent)
+        self.persist()
+        return {
+            "session": child,
+            "parent": parent,
+            "previous": previous,
+            "depth": self.depth(child),
+        }
+
     def kill(self, name: str, *, force: bool = False) -> AnySession:
         """Kill a running session; deregister an already-exited one.
 

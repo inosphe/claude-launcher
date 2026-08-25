@@ -1195,6 +1195,33 @@ def _cmd_web(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_reparent(args: argparse.Namespace) -> int:
+    """Move a session under another parent, as an operator.
+
+    The agents' ``reparent`` tool sends the same request with an ``actor``,
+    which scopes it to the caller's own subtree; this command sends none, so
+    it can move anything — the same split as ``kill-session`` against the
+    tool's ``kill``. The daemon's own refusals (a cycle, an exited parent, the
+    depth limit) apply to both.
+    """
+    client = daemon_client.ensure_running()
+    try:
+        result = client.post(
+            f"/api/sessions/{args.session}/parent", {"parent": args.parent}
+        )
+    except daemon_client.DaemonClientError as exc:
+        print(exc)
+        return 1
+    was = result.get("previous") or "a root"
+    print(
+        f"{result.get('session')}: now a child of {result.get('parent')} "
+        f"(was {was}), depth {result.get('depth')}"
+    )
+    for edge in result.get("connected") or []:
+        print(f"  mesh {edge['mesh']}: connected {edge['a']} <-> {edge['b']}")
+    return 0
+
+
 # --------------------------------------------------------------------------- #
 # parser wiring
 # --------------------------------------------------------------------------- #
@@ -1420,6 +1447,16 @@ def register(sub) -> None:
              "spawn.allow_args)",
     )
     p_spawn.set_defaults(func=_cmd_spawn)
+
+    p_reparent = sub.add_parser(
+        "reparent",
+        help="move a session (and its subtree) under another parent -- the "
+             "operator's form of the agents' 'reparent' tool, which is scoped "
+             "to their own subtree; this one is not",
+    )
+    p_reparent.add_argument("session", help="the session to move")
+    p_reparent.add_argument("parent", help="its new parent")
+    p_reparent.set_defaults(func=_cmd_reparent)
 
     p_ls = sub.add_parser("sessions", aliases=["lss"], help="list daemon-managed sessions")
     p_ls.set_defaults(func=_cmd_sessions)

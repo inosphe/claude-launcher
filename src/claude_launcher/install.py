@@ -52,7 +52,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from . import commit_stamp, config, mesh_install, settings
+from . import commit_stamp, config, mesh_install, mesh_topology, settings
 from .cflow import authoring as cflow_authoring, install as cflow_install
 from .cflow import state as cflow_state
 from .profile import Profile
@@ -115,6 +115,7 @@ def _skill_lines(skills_dir: Path) -> List[str]:
         f"skill -> {cflow_install.write_skill(skills_dir)}",
         f"skill -> {cflow_authoring.write_skill(skills_dir)}",
         f"skill -> {mesh_install.write_skill(skills_dir)}",
+        *(f"skill -> {p}" for p in mesh_topology.write_skills(skills_dir)),
         f"skill -> {commit_stamp.write_skill(skills_dir)}",
     ]
 

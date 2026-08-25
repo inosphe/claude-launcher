@@ -1154,6 +1154,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
 | `rebrief [--session S]` | Print the session's briefing re-derived from current daemon state: mesh memberships and roster, replies it owes, the cflow run it drives, parent/children, and its recorded opening `--task`. Managed claude sessions run it **automatically** — a `SessionStart` hook injected at spawn fires it after `/compact` and `/clear`, and claude reads the output back into context — so an agent's lost context is restored without the agent having to remember to ask. Defaults to `$CLAUNCH_SESSION`; also a **rebrief** button in the web UI, which types the same block into the session's terminal. |
 | `kill-session S`      | Terminate a running session, or drop the record of an exited one (`--force` skips graceful terminate). |
+| `reparent S PARENT`   | Move a session — with everything spawned under it — under another parent. The operator's form of the agents' `reparent` MCP tool, which is scoped to the caller's own subtree; this one is not. Refused for a cycle, an exited parent, or a move that would push any session past `spawn.max_depth`. Opens the session's edge to its new parent in every mesh the two share. |
 | `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their output logs, freeing their auto-generated names. |
 | `resize S COLS ROWS`  | Resize the session's terminal. |
 | `harnesses`           | List the declared harnesses (`claude`, `codex`, `pi`, plus your own) and whether each is installed here. |
@@ -1834,8 +1835,13 @@ claunch install                   # MCP tools + the /mesh and /cflow skills
 ### Agents that build their own team (spawn · hierarchy · member graph)
 
 An agent inside a session can create **more** sessions, enrol them in its
-mesh and decide who they may talk to — via the `spawn`, `children`,
-`connect` and `disconnect` MCP tools, or `claunch spawn` by hand.
+mesh, decide who they may talk to, and re-draw the tree it built — via the
+`spawn`, `children`, `connect`, `disconnect` and `reparent` MCP tools, or
+`claunch spawn` / `claunch reparent` by hand. Two skills carry the
+procedure for the re-drawing: `mesh-wire` (when to connect two peers who
+keep needing each other through you) and `mesh-delegate` (spawn a nested
+worker for a crowded area and `reparent` that area's workers under it, so
+their branches fold into one and the lead integrates once).
 
 - **`spawn` is the door from inside a session; `new-session` is yours.**
   They build the same thing by different rights: `new-session` spells every
@@ -1930,6 +1936,24 @@ mesh and decide who they may talk to — via the `spawn`, `children`,
                                /    \                        lead
                              w1      w2                     /    \
                           (w1 and w2 cannot talk)         w1 ---- w2
+  ```
+
+- **`reparent` re-draws the tree after the fact.** A lead whose workers
+  crowded into one area spawns a nested worker for it and moves those
+  workers under it — `reparent` (MCP, scoped to the caller's own subtree)
+  or `claunch reparent S PARENT` (the operator's, unscoped). The moved
+  session keeps its terminal, conversation, handle, worktree and cflow run;
+  its edge to the new parent is opened in every shared mesh, its edge to
+  the old one is left for the mover to cut. Refused for a cycle, an exited
+  parent, or any moved session landing past `spawn.max_depth`.
+
+  ```
+  lead spawns w1, w2, w3 (all on app.js)     then: spawn mid; reparent w1..w3 -> mid
+                lead                                      lead
+             /   |   \                                     |
+           w1   w2    w3                                  mid  (folds w1..w3 into one branch)
+        (three branches, three sweeps)                  / | \
+                                                      w1 w2  w3
   ```
 
 ### Nudge policies (heartbeat · task-poll · stall warnings)
