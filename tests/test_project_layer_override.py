@@ -28,11 +28,17 @@ from claude_launcher.cflow import model, state as state_mod
 
 OVERRIDES = Path(__file__).resolve().parents[1] / ".claunch" / "workflows"
 
-#: Which step each override arms, and how strictly this file may say so.
+#: Which steps each override arms, and how strictly this file may say so.
 #: The worker's is pinned to the letter here because this file and it are
-#: edited together; the leader's is checked by prefix, so a change to its
-#: workflow does not paint this suite red before it lands.
-ARMED = {"improv-worker": "review", "improv-leader": "integrate"}
+#: edited together; the leader's suite is checked by prefix, so a change to
+#: its workflow does not paint this suite red before it lands.
+#:
+#: The leader arms two, and they are different kinds of check: ``integrate``
+#: runs this repository's suite over the merge result, and ``reflect`` asks
+#: whether the live daemon was actually restarted onto that merge. The second
+#: exists because the step used to be prose alone -- a round could be filed
+#: as deployed while the daemon kept serving pre-merge code.
+ARMED = {"improv-worker": ("review",), "improv-leader": ("integrate", "reflect")}
 
 # Both gates run against a venv that is already there. A worker's worktree
 # builds its venv once during the work ('uv sync --extra test'), and that one
@@ -84,10 +90,35 @@ def test_the_override_carries_this_repos_suite_as_its_verify(
 
 def test_each_override_still_arms_its_step(stem="improv-leader"):
     """The leader half, held to the one thing that is this file's business:
-    the override exists to add a machine check, so it must have one."""
-    verify = model.load(OVERRIDES / f"{stem}.yaml").steps[ARMED[stem]].verify
-    assert verify is not None, f"{stem} lost its verify"
-    assert "pytest" in verify.command and "--basetemp=" in verify.command
+    the override exists to add machine checks, so it must have them."""
+    wf = model.load(OVERRIDES / f"{stem}.yaml")
+    for step_id in ARMED[stem]:
+        assert wf.steps[step_id].verify is not None, (
+            f"{stem}:{step_id} lost its verify"
+        )
+    suite = wf.steps["integrate"].verify.command
+    assert "pytest" in suite and "--basetemp=" in suite
+
+
+def test_the_leader_override_gates_the_deploy_on_a_real_restart():
+    """``reflect`` closes a round, so something has to check it happened.
+
+    The step says "restart the live server and confirm it is serving the
+    merge", and for as long as that was only a sentence the run could not
+    tell a restart from no restart: no signal reaches a leader when the
+    daemon comes back, so the round sat there collecting its 300-second
+    reminders while a human eventually thought to check by hand.
+
+    ``tools/deploy_check.py`` compares the daemon's recorded boot time with
+    the tip it is meant to serve; ``tests/test_deploy_check.py`` pins its
+    behaviour. What this test keeps is the wiring -- that the gate is armed
+    on the step that ends the round, and reads the branch the leader merges
+    to.
+    """
+    verify = model.load(OVERRIDES / "improv-leader.yaml").steps["reflect"].verify
+    assert verify is not None, "the deploy gate is gone from reflect"
+    assert "tools/deploy_check.py" in verify.command
+    assert "--branch master" in verify.command
 
 
 @pytest.mark.parametrize("stem", sorted(ARMED))
@@ -96,7 +127,48 @@ def test_the_override_adds_no_other_verify(stem):
     every other step stays verify-free exactly like the file it shadows."""
     wf = model.load(OVERRIDES / f"{stem}.yaml")
     armed = [s.id for s in wf.steps.values() if s.verify is not None]
-    assert armed == [ARMED[stem]]
+    assert armed == list(ARMED[stem])
+
+
+def test_the_leader_override_is_canonical_plus_verify():
+    """Field for field the bundled leader, verify excluded — no other drift.
+
+    The override is a whole copy with a verify grafted on, so it goes stale
+    silently the moment the canonical file is edited alone. It did: commit
+    6dc8602 added the ``integrate-preflight`` step — the "who else is
+    standing in this tree" check, and the rebase screening for drifted
+    branches — to the canonical leader only. Every merge in THIS repository
+    runs the override, so every merge for the days after it ran with no
+    preflight step at all, and nothing was red: the two files simply said
+    different things under one name. Comparing them is the only check that
+    sees that, because each file on its own is valid.
+
+    The worker pair drifted the same way and is deliberately NOT covered
+    here yet — resyncing it would rewrite a workflow other sessions are
+    mid-run on, so it is reported rather than fixed in passing.
+    """
+    from dataclasses import replace
+
+    canonical = model.load(dict(state_mod.bundled_workflows())["improv-leader"])
+    override = model.load(OVERRIDES / "improv-leader.yaml")
+
+    assert override.name == canonical.name
+    assert override.description == canonical.description
+    assert override.start == canonical.start
+    assert override.recur == canonical.recur
+    assert override.default_role == canonical.default_role
+    assert override.filter_roles == canonical.filter_roles
+    assert list(override.steps) == list(canonical.steps), (
+        "the override gained or lost a step against the canonical leader"
+    )
+    for step_id, canonical_step in canonical.steps.items():
+        assert replace(override.steps[step_id], verify=None) == replace(
+            canonical_step, verify=None
+        ), (
+            f"{step_id!r} differs from the canonical leader by more than its "
+            f"verify — the override drifted, and a run here would follow the "
+            f"override's version of the rule"
+        )
 
 
 #: Windows refuses a path this long; the run that broke measured exactly 260.
