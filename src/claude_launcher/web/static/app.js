@@ -452,6 +452,11 @@ async function refreshSessions() {
     // it, and nothing at all where a harness keeps no transcript.
     ctxNoteOnRow(li, label, s);
     const railCtx = ctxRailLine(s);
+    // And where it runs — the checkout, which on this rail is usually a
+    // worktree, and is the one fact that tells two sessions doing the same
+    // job apart. A full-width line like the gauge below it; always drawn,
+    // because every session runs somewhere.
+    const railCwd = railCwdLine(s);
     // The row attaches — that is what the session is doing. This opens what
     // it *is* (definition, meshes, its cflow run) beside it, so the two are
     // not two places you have to travel between.
@@ -492,7 +497,7 @@ async function refreshSessions() {
     const head = document.createElement("span");
     head.className = "rail-head";
     head.append(label, ...(role ? [role] : []), ...(meshBox ? [meshBox] : []));
-    li.append(dot, head, meta, ...(railCtx ? [railCtx] : []),
+    li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
               ...(plus ? [plus] : []), info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
@@ -883,6 +888,52 @@ function ctxRailLine(s) {
       (win ? `; the tick is the auto-compact window at ${ctxShort(win)}` : "")
     : "";
   line.title = [note, scale].filter(Boolean).join("\n");
+  return line;
+}
+
+/* Where a session runs: the checkout its harness was started in.
+
+   A worktree is the interesting case. This launcher spawns most of its
+   agents into `<repo>/.claude/worktrees/<name>`, so a rail full of sessions
+   from one repository differs only in that last segment — and the segment
+   before it, "worktrees", is the same on every row and says nothing. The
+   plain tail-of-path shortening ("…/worktrees/s84-scroll-restore") keeps the
+   noise and drops the repository, which is the one word that tells a
+   worktree of THIS repo from a worktree of another. So a worktree path is
+   read as the two facts it is — which repository, which checkout — and any
+   other path keeps the ordinary "…/last/two" form. `null` when the path is
+   not a worktree, so a caller can tell the two shapes apart. */
+function cwdSplit(p) {
+  const parts = (p || "").split(/[\\/]+/).filter(Boolean);
+  const i = parts.lastIndexOf("worktrees");
+  if (i < 2 || parts[i - 1] !== ".claude" || i + 1 >= parts.length) return null;
+  return { repo: parts[i - 2], worktree: parts.slice(i + 1).join("/") };
+}
+
+function cwdShort(p) {
+  const wt = cwdSplit(p);
+  return wt ? `${wt.repo} › ${wt.worktree}` : (p ? shortenPath(p) : "");
+}
+
+/* The one full-width line a rail row spends on WHERE the session is — right
+   under the name, above the context gauge. Short form on the row (a 260px
+   rail has no width for `F:\works\claude-launcher\.claude\worktrees\…`) and
+   the full path on the line's title, so nothing is lost, only folded. A
+   session created without a directory runs in the daemon's own, and the
+   line says so in words rather than printing an empty string that reads as
+   "no directory" — the form that created it offers the same choice under
+   the same name, "(daemon cwd)". */
+function railCwdLine(s) {
+  const cwd = (s && s.cwd) || "";
+  const wt = cwdSplit(cwd);
+  const line = el(
+    "span",
+    "rail-cwd" + (wt ? " worktree" : "") + (cwd ? "" : " unknown"),
+    cwd ? cwdShort(cwd) : "(daemon cwd)"
+  );
+  line.title = cwd
+    ? (wt ? `worktree ${wt.worktree} of ${wt.repo}\n` : "directory\n") + cwd
+    : "directory: the daemon's own — none was given when the session was created";
   return line;
 }
 

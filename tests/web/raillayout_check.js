@@ -135,6 +135,9 @@ function ctxNoteOnRow(row, name, s) {
    Returned for every session, since the harness's sessions carry no harness
    field and so are all "claude" to ctxKnowable. */
 function ctxRailLine(s) { return el("span", "rail-ctx-line unknown"); }
+/* The directory line, fixed the same way: one more deliberate full-width
+   breaker under the name (its wording is railcwd_check's). */
+function railCwdLine(s) { return el("span", "rail-cwd"); }
 /* The briefing's per-row decoration (the one-line and the collapsed ⟳) is
    its own harness (briefrow_check); here, like applyBriefingCards, it is a
    no-op so what this harness pins — the row's own parts — stays about the
@@ -183,12 +186,12 @@ ctx.setMeshes([
      line has to be a full-width child, so counting the direct children is
      how many things are competing for that line. The name, its role and its
      rooms must not be three of them. */
-  check("the row's parts are the dot, the name group, the profile, the context line, the spawn + and the ⓘ",
+  check("the row's parts are the dot, the name group, the profile, the directory line, the context line, the spawn + and the ⓘ",
         kidClasses(row("s21")),
-        ["dot busy", "rail-head", "meta", "rail-ctx-line unknown", "sess-plus", "sess-info"]);
-  check("a session with no role and one room keeps the same six parts",
+        ["dot busy", "rail-head", "meta", "rail-cwd", "rail-ctx-line unknown", "sess-plus", "sess-info"]);
+  check("a session with no role and one room keeps the same seven parts",
         kidClasses(row("loner")),
-        ["dot idle", "rail-head", "meta", "rail-ctx-line unknown", "sess-plus", "sess-info"]);
+        ["dot idle", "rail-head", "meta", "rail-cwd", "rail-ctx-line unknown", "sess-plus", "sess-info"]);
 
   /* The point of the change: role and rooms are siblings inside one box, not
      loose on the row where they wrapped. */
@@ -281,11 +284,13 @@ ctx.setMeshes([
   }
   const decl = (sel, prop) => (rules.get(sel) || {})[prop];
 
-  /* A full-width child is a line break. Only the four deliberate ones may
+  /* A full-width child is a line break. Only the five deliberate ones may
      be, and each must sort after the toggle — a breaker at the default
      order 0 ends the line before the toggle can land on it, which is the
-     bug. (.rail-brief and .rail-ctx-line are the two always-on one-liners.) */
+     bug. (.rail-cwd, .rail-brief and .rail-ctx-line are the always-on
+     one-liners.) */
   const BREAKERS = [
+    "#session-list .rail-cwd",
     "#session-list .rail-brief", "#session-list .rail-ctx-line",
     "#session-list .sess-cflow", "#session-list .sess-brief",
   ];
@@ -293,7 +298,7 @@ ctx.setMeshes([
     sel.startsWith("#session-list") &&
     (d["flex-basis"] === "100%" || /(^|\s)100%$/.test(d.flex || ""))
   ).map(([sel]) => sel);
-  check("only the one-line, the context line, the cflow line and the briefing card break the row",
+  check("only the directory line, the one-line, the context line, the cflow line and the briefing card break the row",
         fullWidth.sort(), [...BREAKERS].sort());
 
   const toggleOrder = Number(decl("#session-list .sess-brief-toggle", "order"));
