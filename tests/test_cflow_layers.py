@@ -265,15 +265,26 @@ def test_the_leader_requests_a_rebase_when_a_branch_has_drifted():
 
 def test_the_project_override_leader_requests_a_rebase_for_stale_branches():
     """The project-layer leader override screens the same way — a repository
-    that shadows the bundled leader must not merge a drifted branch either."""
+    that shadows the bundled leader must not merge a drifted branch either.
+
+    The screening reads in ``integrate-preflight``, which is where the
+    bundled leader keeps it. It did not always: the override was copied
+    before that step existed and then edited alongside the canonical file
+    without it, so for days this repository merged with no preflight at all
+    while this test stayed green against the old copy's ``integrate``. The
+    override is a full resync now — see
+    ``test_project_layer_override.test_the_leader_override_is_canonical_plus_verify``
+    — so the pin follows the rule to the step that holds it.
+    """
     wf = model.load(PROJECT_OVERRIDES / "improv-leader.yaml")
 
-    integrate = wf.steps["integrate"]
-    for anchor in ("재요청", "rev-list --count", "merge-tree"):
-        assert anchor in integrate.instructions, (
-            f"project leader integrate lost its {anchor!r} rule"
+    preflight = wf.steps["integrate-preflight"]
+    for anchor in ("rebase 재요청", "rev-list --count", "merge-tree"):
+        assert anchor in preflight.instructions, (
+            f"project leader integrate-preflight lost its {anchor!r} rule"
         )
     assert "재요청" in wf.steps["standby"].instructions
+    assert "재요청" in wf.steps["integrate"].instructions
 
 
 def test_the_leader_does_not_hide_a_human_decision_behind_an_agent_chooser():

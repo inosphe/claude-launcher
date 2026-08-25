@@ -99,6 +99,47 @@ def test_the_override_adds_no_other_verify(stem):
     assert armed == [ARMED[stem]]
 
 
+def test_the_leader_override_is_canonical_plus_verify():
+    """Field for field the bundled leader, verify excluded — no other drift.
+
+    The override is a whole copy with a verify grafted on, so it goes stale
+    silently the moment the canonical file is edited alone. It did: commit
+    6dc8602 added the ``integrate-preflight`` step — the "who else is
+    standing in this tree" check, and the rebase screening for drifted
+    branches — to the canonical leader only. Every merge in THIS repository
+    runs the override, so every merge for the days after it ran with no
+    preflight step at all, and nothing was red: the two files simply said
+    different things under one name. Comparing them is the only check that
+    sees that, because each file on its own is valid.
+
+    The worker pair drifted the same way and is deliberately NOT covered
+    here yet — resyncing it would rewrite a workflow other sessions are
+    mid-run on, so it is reported rather than fixed in passing.
+    """
+    from dataclasses import replace
+
+    canonical = model.load(dict(state_mod.bundled_workflows())["improv-leader"])
+    override = model.load(OVERRIDES / "improv-leader.yaml")
+
+    assert override.name == canonical.name
+    assert override.description == canonical.description
+    assert override.start == canonical.start
+    assert override.recur == canonical.recur
+    assert override.default_role == canonical.default_role
+    assert override.filter_roles == canonical.filter_roles
+    assert list(override.steps) == list(canonical.steps), (
+        "the override gained or lost a step against the canonical leader"
+    )
+    for step_id, canonical_step in canonical.steps.items():
+        assert replace(override.steps[step_id], verify=None) == replace(
+            canonical_step, verify=None
+        ), (
+            f"{step_id!r} differs from the canonical leader by more than its "
+            f"verify — the override drifted, and a run here would follow the "
+            f"override's version of the rule"
+        )
+
+
 #: Windows refuses a path this long; the run that broke measured exactly 260.
 MAX_PATH = 260
 
