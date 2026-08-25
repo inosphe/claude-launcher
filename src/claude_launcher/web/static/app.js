@@ -699,6 +699,51 @@ function ctxKnowable(s) {
   return !!s && (s.harness || "claude") === "claude";
 }
 
+/* ---- which model this session is actually answering on ---- */
+/* The same reading carries the model id the harness sent that turn to, and
+   that is the one fact here nobody can get from anywhere else: a session's
+   model is chosen inside the terminal (/model), not at spawn, so the
+   launcher's own definition cannot know it and neither can the operator
+   without attaching. It was already travelling in `context.model` and being
+   spent entirely on tooltips; these two functions are what put it on screen.
+
+   It is the LAST COMPLETED TURN's model, exactly like the count beside it.
+   A session switched with /model mid-answer still reads as the old one until
+   it finishes a turn — which is why the age of the reading is what the
+   detail row says beside the name, rather than a bare present tense. */
+
+/* The rail's version of the id: short enough for a row, still recognisable.
+
+   Three things are dropped, each because it is the same model either way —
+   the host path a gateway prefixes (`accounts/fireworks/models/glm-5p2`),
+   the dated release (`claude-haiku-4-5-20251001`), and the vendor word every
+   row in a claude fleet would otherwise repeat. What is left is the name and
+   its version, and the version is why the hyphens are not simply spaced out:
+   `4-5` is one number, and "haiku 4 5" would read as two. The full id is
+   never thrown away — it is what the tooltip and the detail row say. */
+function modelShort(id) {
+  const raw = String(id || "").trim();
+  if (!raw) return "";
+  const tail = raw.split("/").pop() || raw;
+  return tail
+    .replace(/-\d{8}$/, "")
+    .replace(/^claude-/, "")
+    .replace(/(\d)-(?=\d)/g, "$1.")
+    .replace(/-/g, " ");
+}
+
+/* The detail panel's version: the full id and how old the reading is, or the
+   honest absence. Empty — no row at all — where the session is not one that
+   could have a model to report, on the same terms as `ctxKnowable`: another
+   harness keeps no transcript, and "unknown" there would read as a fault. */
+function modelSentence(s) {
+  if (!ctxKnowable(s)) return "";
+  const c = s && s.context;
+  if (!c || !c.model) return "not known yet — no completed turn to read";
+  const age = ctxAgeOf(c.at);
+  return `${c.model}${age ? ` (as of its turn ${age} ago)` : ""}`;
+}
+
 /* The whole sentence, for a tooltip or a details row. Empty where there is
    nothing to say at all. */
 function ctxSentence(s) {
@@ -794,8 +839,10 @@ const CTX_DOMAIN = 1_000_000;
    window where one is configured (against the domain otherwise), because
    compaction fires at the tick, not at 1M. Where a claude session has not
    answered yet the track stays empty beside a greyed "?", and a harness
-   that keeps no transcript gets no line at all. The story (model, age,
-   breakdown) stays in the tooltip — this is the glance, not the reading. */
+   that keeps no transcript gets no line at all. The model's short name
+   leads the line, because it is what the fill has to be read against; the
+   rest of the story (the full id, the age, the breakdown) stays in the
+   tooltip — this is the glance, not the reading. */
 function ctxRailLine(s) {
   if (!ctxKnowable(s)) return null;
   const c = s && s.context;
@@ -819,7 +866,17 @@ function ctxRailLine(s) {
   }
   const num = el("span", "rail-ctx" + (c ? "" : " unknown"),
                  c ? ctxShort(c.tokens) : "?");
-  line.append(bar, num);
+  // The model, first on the line, because it is what the count is read
+  // against: the bar's fill is only "a lot" relative to the window the model
+  // has, and the operator scanning twenty rows for the expensive one is
+  // looking for this word, not for a number. Short form here (the row has no
+  // width for a dated id) with the full id in the line's tooltip, and
+  // nothing at all rather than a placeholder where no turn has been answered
+  // yet — the "?" beside the empty track already says that once.
+  const short = c ? modelShort(c.model) : "";
+  const model = short ? el("span", "rail-model", short) : null;
+  if (model) model.title = c.model;
+  line.append(...(model ? [model] : []), bar, num);
   const note = ctxTooltip(s);
   const scale = c
     ? "bar spans 0–1M tokens" +
@@ -6065,6 +6122,17 @@ function renderSession(data) {
     s.cwd
   );
   metaRow(dl, "conversation", s.conversation_id, "claude --session-id");
+  // Which model is answering in it — above the size for the same reason the
+  // gauge line leads with it: the count means different things on different
+  // models, and this is the only place outside the terminal that says. Its
+  // own row rather than a clause inside the context sentence, because it is
+  // the fact people open this panel to check, and a full dated id has no
+  // business being read out of the middle of a sentence about tokens.
+  metaRow(
+    dl, "model", modelSentence(s),
+    "the model of the last completed turn, read from the transcript — a " +
+    "/model switch shows here once the next turn finishes"
+  );
   // Under the conversation, because it is a fact about the conversation and
   // not about the process: how much of it the harness last carried.
   metaRow(dl, "context", ctxSentence(s), ctxBreakdown(s.context));

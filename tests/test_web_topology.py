@@ -93,7 +93,12 @@ be (a count with no percentage beside it, because no denominator exists to
 make one from, and an absence that must never be drawn as a zero) and
 ``railctx_check`` on where that ends up on a rail row, which is a separate
 failure — a note that stops being hung on anything leaves no trace at all —
-and ``detailsplit_check`` on the docked detail rail's width: the drag bar
+and ``railmodel_check`` on the third fact the same reading carries, which
+until now only tooltips ever showed: WHICH MODEL the session is answering
+on, shortened onto the rail row beside the gauge and spelled out in full in
+the detail panel, where a version number torn in half ("haiku 4 5") or a row
+that quietly stops being appended would both name the wrong thing in
+silence — and ``detailsplit_check`` on the docked detail rail's width: the drag bar
 opposite the session list's, which resizes the ``#sess-view`` column once it
 docks and is carried with it and hidden on a phone, and ``railhome_check``
 on the rail's own wordmark, which doubles as the link back to the root
@@ -168,6 +173,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "flowrender_check.js",
         "ctxsize_check.js",
         "railctx_check.js",
+        "railmodel_check.js",
         "wfscroll_check.js",
         "railhome_check.js",
         "typing_check.js",

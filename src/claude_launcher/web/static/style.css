@@ -300,6 +300,16 @@ option:disabled { color: #6b7280; }
   position: absolute; top: -2px; bottom: -2px; width: 2px; margin-left: -1px;
   background: #8b949e; border-radius: 1px;
 }
+/* The model the reading was taken on, leading the same line. `flex: none` so
+   the bar and not this gives up the width — a truncated model name is worth
+   less than the gauge it qualifies — and `max-width` so an unfamiliar id
+   from a gateway cannot push the count off the row; the full id is on its
+   title either way. Dimmer than the count and not monospaced: it is the
+   label on the scale, not another figure to compare across rows. */
+#session-list .rail-model {
+  flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; font-size: 10px; color: #6e7681; line-height: 16px;
+}
 #session-list .rail-ctx {
   flex: none; font-family: SFMono-Regular, Consolas, monospace;
   font-size: 11px; color: #7d8590; line-height: 16px;
