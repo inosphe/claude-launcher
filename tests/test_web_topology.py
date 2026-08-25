@@ -51,6 +51,9 @@ the picture is allowed to claim about where each message got to —
 the header's text-size knob — which sizes the session's grid and not merely
 this tab's view — ``reconnect_check`` on the terminal's link, the one thing
 here that is not a poll and so has to repair itself deliberately,
+``notice_check`` on the corner strip that is the page's only voice — the
+daemon restart that used to be repaired in complete silence, told apart
+from a link that merely blipped, and kept from stacking a card per flap —
 ``wheel_check`` on the terminal's virtual scroll — the wheel on the
 alternate screen (where xterm's own scrollback is empty and its fallback
 is arrow keys) becoming ``scroll`` controls answered with repaints over
@@ -152,6 +155,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "seqrender_check.js",
         "zoom_check.js",
         "reconnect_check.js",
+        "notice_check.js",
         "termcache_check.js",
         "briefcard_check.js",
         "briefingtop_check.js",

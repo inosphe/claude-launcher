@@ -34,6 +34,16 @@
   </div>
 </div>
 
+<!-- Where the page speaks up on its own. Everything else on this dashboard
+     is a poll: it repaints and the change is *there*, which is fine for a
+     number that moved and useless for an event that happened while nobody
+     was looking. A daemon restart is exactly that event — the lists refill,
+     the terminals reconnect, and until this strip existed the only trace was
+     a token prompt nobody could explain. Above the auth overlay (z-index) on
+     purpose: that prompt is the restart's most confusing symptom, so the
+     sentence explaining it has to be readable over the top of it. -->
+<div id="notices" aria-live="polite" aria-atomic="false"></div>
+
 <div id="layout">
   <!-- Mobile only: the status line that stands in for the rail while a page
        is on screen. Its ☰ flips the whole screen over to the rail. -->
