@@ -152,6 +152,12 @@ def _fake_session(*, bracketed: bool, ready: bool = True):
         def status(self, threshold=None):
             return session_mod.STATUS_IDLE
 
+        # _await_readable gates on the heuristic, not the marker-augmented
+        # status() (so a starting session that has not painted the footer is
+        # not stalled): the stub mirrors the idle default for both.
+        def _heuristic_status(self, threshold=None):
+            return session_mod.STATUS_IDLE
+
         async def write_bytes(self, data: bytes) -> None:
             writes.append(data)
 
@@ -256,7 +262,7 @@ def test_deliver_waits_out_the_startup_that_follows_the_keyboard(monkeypatch):
     monkeypatch.setattr(session_mod, "INPUT_SETTLE", 0.5)
     s, writes = _fake_session(bracketed=True, ready=False)
     busy = {"now": True}
-    s.status = lambda threshold=None: (
+    s._heuristic_status = lambda threshold=None: (
         session_mod.STATUS_BUSY if busy["now"] else session_mod.STATUS_IDLE
     )
 

@@ -175,6 +175,27 @@ class ScreenState:
         """A cheap per-row fingerprint of the visible grid (for idle detection)."""
         return tuple(hash(line) for line in self._screen.display)
 
+    def bottom_line(self) -> str:
+        """The bottom row of the visible grid, right-trimmed.
+
+        A TUI's footer / status line lives here. Read straight from the
+        emulator buffer — only this one row is materialized, where
+        :meth:`render_screen` would rebuild every cell of the whole grid. The
+        claude in-turn marker check reads only the footer, so a marker phrase
+        that appears anywhere above (in transcript content) cannot be mistaken
+        for a footer signal.
+
+        Joining every cell's text needs no wide-char bookkeeping: a wide
+        glyph's stub cell — and the stub a DCH shift can push to column 0 —
+        carries an empty ``data``, so it contributes nothing to the join.
+        (The same way :meth:`render_history` already reads this grid.)
+        """
+        screen = self._screen
+        line = screen.buffer.get(screen.lines - 1)
+        if not line:
+            return ""
+        return "".join(line[x].data for x in range(screen.columns)).rstrip()
+
     def repaint_sequence(self, offset: int = 0) -> bytes:
         """An ANSI sequence that repaints the current grid on a fresh terminal.
 

@@ -81,9 +81,10 @@ def test_provider_without_base_url_still_uses_stored_token(home):
     assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
 
 
-def test_profile_env_base_url_alone_does_not_trigger(home):
+def test_profile_env_base_url_alone_does_not_trigger(home, monkeypatch):
     # Only a provider override switches auth handling; a base URL in the
     # profile's env (with the default provider) keeps normal OAuth injection.
+    monkeypatch.delenv("ANTHROPIC_AUTH_TOKEN", raising=False)
     p = profile.create("work")
     settings.set_env(p, {"ANTHROPIC_BASE_URL": BASE})
     credentials.save_token(p, "sk-ant-oat01-abc")

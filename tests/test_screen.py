@@ -69,7 +69,36 @@ def test_line_hashes_change_with_content():
     s.feed(b"x")
     after = s.line_hashes()
     assert before != after
-    assert len(after) == 5
+
+
+def test_bottom_line_is_only_the_footer_row():
+    # A transcript row (top) carries an English phrase that must never be
+    # mistaken for the footer signal; the footer (bottom row) is clean.
+    s = ScreenState(60, 5)
+    s.feed(b"Whisking... the esc to interrupt phrase in content\r\n")
+    s.feed(b"another line of content\r\n")
+    s.feed(b"\x1b[5;1H  auto mode on  |  install gh for PR status  |  1 agent")
+    assert "esc to interrupt" in s.render_screen()[0]  # content really has it
+    assert "esc to interrupt" not in s.bottom_line()  # footer clean
+    assert s.bottom_line().endswith("1 agent")
+
+
+def test_bottom_line_matches_render_screen_tail():
+    s = ScreenState(60, 5)
+    s.feed(b"Whisking... (9m 54s / 16.2k tokens)\r\n")
+    s.feed(b"\x1b[5;1H  auto mode on  |  esc to interrupt  |  1 agent")
+    assert "esc to interrupt" in s.bottom_line()
+    assert s.bottom_line() == s.render_screen()[-1]
+
+
+def test_bottom_line_survives_a_leading_stub_cell():
+    # A DCH (delete-char) shift can push a wide glyph's stub cell to column 0,
+    # where its data is "" — reading its width would explode. The footer read
+    # must not, and must return the visible text (the wide glyphs intact).
+    s = ScreenState(20, 3)
+    s.feed("\x1b[3;1H가나다".encode())
+    s.feed(b"\x1b[3;1H\x1b[1P")  # DCH: delete the leading cell -> stub at col 0
+    assert s.bottom_line() == "나다"
 
 
 def test_repaint_sequence_contains_content():
