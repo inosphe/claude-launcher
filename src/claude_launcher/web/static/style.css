@@ -2190,6 +2190,30 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   grid-column: 1 / -1; padding-left: 22px;
 }
 .sess-spawn-note { grid-column: 2; color: #7d8590; font-size: 11.5px; }
+/* A folded row is folded. Every row in this form is `display: grid` (or
+   flex), and an author `display` beats the UA sheet's `[hidden] { display:
+   none }` — which is not !important — so `row.hidden = true` left the row on
+   screen. The gates fold six rows that way (the worktree detail, the mesh
+   handle, the connect list, the context, the over-limit crossing), so the
+   fold-out this row now depends on has to say it outright. */
+.sess-spawn-row[hidden] { display: none; }
+/* The worktree row's three modes, stacked in the control column so the
+   labels read down one edge, and each mode's hint set beside its own name
+   rather than in the note column shared with the policy's locks. */
+.sess-spawn-radios { grid-column: 2; display: flex; flex-direction: column; gap: 4px; }
+.sess-spawn label.check.sess-spawn-radio {
+  grid-column: auto; display: flex; gap: 7px; align-items: baseline;
+}
+.sess-spawn input[type=radio] { width: auto; accent-color: #238636; flex: none; }
+.sess-spawn-hint { color: #7d8590; font-size: 11.5px; }
+/* A sub-row details the mode above it: indented, and hung off it by a rule
+   down the gutter, so the fold-out is read as part of that answer rather
+   than as the next question the form asks. */
+.sess-spawn-row.sess-spawn-sub {
+  margin-left: 14px; padding-left: 12px; border-left: 1px solid #2a313b;
+  grid-template-columns: 104px minmax(0, 1fr);
+}
+.sess-spawn-row.sess-spawn-sub .sess-spawn-label { color: #6e7681; }
 .sess-spawn-connect {
   display: flex; flex-wrap: wrap; gap: 4px 18px; align-items: center;
 }

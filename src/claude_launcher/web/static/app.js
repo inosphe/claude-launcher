@@ -8247,24 +8247,34 @@ function syncSpawnGates(ui) {
   lock(ui.args, ui.argsNote, may.includes("args") ? "" :
     "the child runs its parent's args (spawn.allow_args)");
 
-  // The worktree rows: a locked row is greyed with the key that opens it,
-  // while a directory that is no repository takes the rows away entirely.
+  // The worktree rows: a locked row greys every mode with the key that opens
+  // it, while a directory that is no repository takes the rows away entirely.
   const git = ui.git || {};
   if (!may.includes("worktree")) {
     ui.wtRow.hidden = false;
-    lock(ui.worktree, ui.worktreeNote,
+    lock(ui.wtMode, ui.worktreeNote,
       "a child inherits its parent's directory (spawn.allow_worktree)");
   } else {
     ui.wtRow.hidden = !git.repo;
-    lock(ui.worktree, ui.worktreeNote, "");
+    lock(ui.wtMode, ui.worktreeNote, "");
   }
-  const choice = ui.worktree.value || "";
-  const wtDead = ui.wtRow.hidden || ui.worktree.disabled;
-  const reusing = !!choice && choice !== "@auto" && choice !== "@named";
-  ui.wtNameRow.hidden = wtDead || choice !== "@named";
+  const wtDead = ui.wtRow.hidden || ui.wtMode.disabled;
+  // Reuse is an answer only where there is something to reuse. Greying the
+  // one mode — rather than offering it over an empty picker — is the whole
+  // reason the row is three radios and not a <select>.
+  const reusable = (git.worktrees || []).length > 0;
+  if (typeof ui.wtMode.enable === "function") {
+    ui.wtMode.enable("existing", reusable);
+  }
+  const mode = ui.wtMode.value || "";
+  ui.wtNameRow.hidden = wtDead || mode !== "new";
+  // The name a blank field would cut, spelt out: the operator reads the
+  // generated name instead of pressing Spawn to discover it.
+  ui.wtName.placeholder = `blank = ${spawnAutoWorktree(ui)}`;
+  ui.wtPickRow.hidden = wtDead || mode !== "existing";
   // Only a REUSED checkout can be behind: a new one is cut from the
   // repository as it stands, so there is nothing to catch up on.
-  ui.updateRow.hidden = wtDead || !reusing;
+  ui.updateRow.hidden = ui.wtPickRow.hidden;
   ui.rebaseRow.hidden = ui.updateRow.hidden || !ui.update.checked;
 
   // Forking needs a parent holding a claude conversation AND a child that
@@ -8273,7 +8283,7 @@ function syncSpawnGates(ui) {
   // child opening a conversation that is not there.
   const elsewhere =
     (!ui.workspace.disabled && ui.workspace.value) ? "a workspace"
-      : (!wtDead && choice) ? "a worktree of its own" : "";
+      : (!wtDead && mode) ? "a worktree of its own" : "";
   if (nonClaude) {
     lock(ui.fork, ui.forkNote, "the claude harness only");
   } else if (!may.includes("fork")) {
@@ -8329,15 +8339,18 @@ function spawnPayload(ui) {
   // resolves, and the child's worktree is cut by the daemon from the
   // parent's own repository.
   if (!ui.workspace.disabled) put("workspace", ui.workspace.value);
-  const choice = ui.worktree.value || "";
-  if (!ui.wtRow.hidden && !ui.worktree.disabled && choice) {
-    const auto = spawnAutoWorktree(ui);
-    body.worktree =
-      choice === "@auto" ? auto
-        : choice === "@named" ? ((ui.wtName.value || "").trim() || auto)
-          : choice;
-    if (!ui.rebaseRow.hidden && ui.rebase.value) {
-      body.rebase_onto = ui.rebase.value;
+  // The three modes collapse back into the ONE key the API has: a name.
+  // "new" with a blank field is the generated one; "existing" travels as the
+  // checkout it names, and only that mode may carry a rebase.
+  const mode = ui.wtMode.value || "";
+  if (!ui.wtRow.hidden && !ui.wtMode.disabled && mode) {
+    if (mode === "new") {
+      body.worktree = (ui.wtName.value || "").trim() || spawnAutoWorktree(ui);
+    } else if (mode === "existing" && ui.wtPick.value) {
+      body.worktree = ui.wtPick.value;
+      if (!ui.rebaseRow.hidden && ui.rebase.value) {
+        body.rebase_onto = ui.rebase.value;
+      }
     }
   }
   const mesh = ui.mesh.value || "";
@@ -8378,6 +8391,16 @@ function spawnRow(label, control, note) {
   return wrap;
 }
 
+/* A row that belongs to the answer above it rather than to the form. Same
+   grid, one class more: the stylesheet indents it and hangs it off the
+   answer it details, so a fold-out is read as part of its mode and not as
+   the next question. */
+function spawnSubRow(label, control, note) {
+  const wrap = spawnRow(label, control, note);
+  wrap.classList.add("sess-spawn-sub");
+  return wrap;
+}
+
 function spawnCheckRow(label, note) {
   const inp = document.createElement("input");
   inp.type = "checkbox";
@@ -8391,6 +8414,79 @@ function spawnCheckRow(label, note) {
     wrap.appendChild(n);
   }
   return wrap;
+}
+
+/* ---- a radio group the gates can drive like a <select> ------------------
+   Three answers that are not one list. The worktree row used to be a single
+   picker holding "(no worktree)", "@auto", "@named" and every checkout the
+   repository already has — four different KINDS of answer racked as if they
+   were four values of one, so the reader had to open the popup to find out
+   that two of them were modes and the rest were names. Radios say the three
+   modes on the face of the form and leave the detail of each to its own
+   sub-rows.
+
+   The rest of the wizard must not learn a second widget for that, so the
+   group answers to `.value` and `.disabled` exactly as the <select> did:
+   syncSpawnGates' `lock()` writes `.disabled`, spawnPayload reads `.value`,
+   and neither knows the difference. `enable(v, on)` is the one thing a
+   <select> could not do — greying ONE answer (there is nothing to reuse in a
+   repository with no worktrees) while the others stay live. */
+function spawnRadioGroup(name, items) {
+  const wrap = el("div", "sess-spawn-radios");
+  const inputs = {};
+  for (const [value, label, hint] of items) {
+    const inp = document.createElement("input");
+    inp.type = "radio";
+    inp.name = name;
+    inp.value = value;
+    const lab = el("label", "check sess-spawn-radio");
+    lab.append(inp, el("span", null, label));
+    if (hint) lab.appendChild(el("span", "sess-spawn-hint", hint));
+    wrap.appendChild(lab);
+    inputs[value] = inp;
+  }
+  const keys = () => Object.keys(inputs);
+  const off = {};          // per-answer greying, on top of the row's own
+  const group = {
+    el: wrap, inputs,
+    get value() {
+      for (const k of keys()) if (inputs[k].checked) return k;
+      return "";
+    },
+    set value(v) {
+      // An unknown answer falls back to the FIRST, which is why "no worktree"
+      // is declared first: clearing the group must land on the harmless one.
+      const want = inputs[v] ? v : keys()[0];
+      for (const k of keys()) inputs[k].checked = (k === want);
+    },
+    get disabled() { return !!group._off; },
+    set disabled(v) {
+      group._off = !!v;
+      for (const k of keys()) inputs[k].disabled = !!v || !!off[k];
+    },
+    /* Grey one answer. A greyed answer that was the current one is dropped
+       rather than left standing: a checked radio nobody can uncheck would
+       send a value the form is telling the operator they may not have. */
+    enable(v, on) {
+      off[v] = !on;
+      if (!inputs[v]) return;
+      inputs[v].disabled = !on || !!group._off;
+      if (!on && group.value === v) group.value = "";
+    },
+    /* One handler over the three buttons. The browser unchecks the siblings
+       itself (they share `name`); the assignment repeats that so a stub DOM —
+       and any node that drifted out of the group — reads the same. */
+    listen(fn) {
+      for (const k of keys()) {
+        inputs[k].addEventListener("change", () => {
+          if (inputs[k].checked) group.value = k;
+          fn(group.value);
+        });
+      }
+    },
+  };
+  group.value = "";
+  return group;
 }
 
 function fillSpawnSelect(sel, pairs, noneLabel, want) {
@@ -8522,23 +8618,35 @@ function buildSpawnForm(parentName, seed) {
   ui.workspace = document.createElement("select");
   box.appendChild(spawnRow("Directory", ui.workspace, (ui.workspaceNote = el("span", "sess-spawn-note"))));
 
-  /* worktree: the daemon cuts it from the parent's repository */
+  /* worktree: the daemon cuts it from the parent's repository.
+     Three modes on the face of the form, each with its own sub-rows folded
+     under it — the name for a fresh checkout, the picker and its catch-up
+     for a reused one. Only the picked mode's sub-rows are on screen, so what
+     is asked is never a question about a mode nobody chose. */
   ui.worktreeNote = el("span", "sess-spawn-note");
-  ui.worktree = document.createElement("select");
-  ui.wtRow = spawnRow("Worktree", ui.worktree, ui.worktreeNote);
-  ui.rebase = document.createElement("input");
-  ui.rebase.placeholder = "branch to fold this reused checkout onto";
-  ui.rebaseRow = spawnRow("Rebase onto", ui.rebase, null);
-  ui.rebaseRow.hidden = true;
+  ui.wtMode = spawnRadioGroup("spawn-wt", [
+    ["", "no worktree", "the child runs in the parent's directory"],
+    ["new", "new worktree", "cut fresh from this repository, on a branch of its own"],
+    ["existing", "existing worktree", "reuse a checkout that is already here"],
+  ]);
+  ui.wtRow = spawnRow("Worktree", ui.wtMode.el, ui.worktreeNote);
+  ui.wtName = document.createElement("input");
+  ui.wtNameRow = spawnSubRow("Name", ui.wtName, null);
+  ui.wtNameRow.hidden = true;
+  ui.wtPick = document.createElement("select");
+  ui.wtPickRow = spawnSubRow("Reuse", ui.wtPick, null);
+  ui.wtPickRow.hidden = true;
   ui.update = null; ui.updateRow = null;
   const updRow = spawnCheckRow("bring the reused checkout up to date", null);
+  updRow.classList.add("sess-spawn-sub");
   ui.update = updRow.querySelector("input");
   ui.updateRow = updRow;
   ui.updateRow.hidden = true;
-  ui.wtName = document.createElement("input");
-  ui.wtNameRow = spawnRow("Worktree name", ui.wtName, null);
-  ui.wtNameRow.hidden = true;
-  box.append(ui.wtRow, ui.wtNameRow, ui.rebaseRow, updRow);
+  ui.rebase = document.createElement("input");
+  ui.rebase.placeholder = "branch to fold this reused checkout onto";
+  ui.rebaseRow = spawnSubRow("Rebase onto", ui.rebase, null);
+  ui.rebaseRow.hidden = true;
+  box.append(ui.wtRow, ui.wtNameRow, ui.wtPickRow, updRow, ui.rebaseRow);
 
   ui.fork = null; ui.forkNote = null;
   const forkRow = spawnCheckRow("start from a copy of the parent's conversation", null);
@@ -8754,14 +8862,20 @@ async function spawnModalLoad(st) {
   fillSpawnSelect(ui.workspace,
     (wsp || []).map((w) => [w.name, w.exists ? `${w.name} — ${w.path}` : `${w.name} (missing)`, !w.exists]),
     "(inherit the parent's directory)", seed.workspace || "");
+  /* The seed still speaks the API's language — `true` for "one of its own",
+     a name for a particular checkout — and this is where that becomes a mode.
+     A name the repository already has is a REUSE; a name it does not have is
+     a new checkout carrying its name, which is what the quick job's saved
+     default means when it names one. */
+  const wts = ui.git.worktrees || [];
   const wt = seed.worktree;
-  const wtVal = wt === true ? "@auto"
-    : (typeof wt === "string" && wt ? wt : "");
-  fillSpawnSelect(ui.worktree,
-    [["@auto", "@auto — a worktree of its own, so siblings never collide"],
-     ["@named", "@named — I will name it"]]
-      .concat((ui.git.worktrees || []).map((n) => [n, `reuse ${n}`])),
-    "(no worktree — the parent's directory)", wtVal);
+  const named = (typeof wt === "string" && wt) ? wt : "";
+  const reuse = named && wts.includes(named);
+  fillSpawnSelect(ui.wtPick, wts.map((n) => [n, n]),
+    wts.length ? null : "(no worktree here yet)", reuse ? named : "");
+  ui.wtMode.value = wt === true || (named && !reuse) ? "new"
+    : reuse ? "existing" : "";
+  if (named && !reuse) ui.wtName.value = named;
   if (seed.wtName) ui.wtName.value = seed.wtName;
   if (seed.context) ui.context.value = seed.context;
   if (seed.rebase) ui.rebase.value = seed.rebase;
@@ -8824,7 +8938,8 @@ async function spawnModalLoad(st) {
   // The choices that re-gate their neighbours:
   ui.profile.addEventListener("change", () => syncSpawnGates(ui));
   ui.nullTok.addEventListener("change", () => syncSpawnGates(ui));
-  ui.worktree.addEventListener("change", () => syncSpawnGates(ui));
+  ui.wtMode.listen(() => syncSpawnGates(ui));
+  ui.wtPick.addEventListener("change", () => syncSpawnGates(ui));
   ui.update.addEventListener("change", () => syncSpawnGates(ui));
   ui.workspace.addEventListener("change", () => syncSpawnGates(ui));
   ui.workflow.addEventListener("change", () => syncSpawnGates(ui));
