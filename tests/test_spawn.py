@@ -589,20 +589,22 @@ def test_capabilities_answers_before_a_refusal_is_provoked():
 def _tree() -> SessionManager:
     """lead -> (w1 -> w1a, w2), plus an unrelated root."""
     mgr = SessionManager(idle_threshold=1.0, scrollback=10, restore_default=False)
-    for name, parent in (
+    for i, (name, parent) in enumerate((
         ("lead", None), ("w1", "lead"), ("w2", "lead"), ("w1a", "w1"), ("solo", None),
-    ):
-        mgr._sessions[name] = _FakeSession(name, parent)
+    )):
+        mgr._sessions[name] = _FakeSession(name, parent, i)
     return mgr
 
 
 class _FakeSession:
-    """Just enough of a session for the tree walks — they read only the def."""
+    """Just enough of a session for the tree walks: the def, and the creation
+    stamp they are ordered by (a real session always carries one)."""
 
     exited = False
 
-    def __init__(self, name: str, parent):
+    def __init__(self, name: str, parent, made: int = 0):
         self.sdef = SessionDef(name=name, harness="py", parent=parent)
+        self.created_at = "2020-01-01T00:00:%02d+00:00" % made
 
 
 def test_children_and_descendants():

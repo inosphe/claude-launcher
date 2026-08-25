@@ -64,7 +64,13 @@ class SessionManager:
     # ------------------------------------------------------------------ #
     # lifecycle
     # ------------------------------------------------------------------ #
-    def stage(self, sdef: SessionDef, *, restoring: bool = False) -> Session:
+    def stage(
+        self,
+        sdef: SessionDef,
+        *,
+        restoring: bool = False,
+        created_at: Optional[str] = None,
+    ) -> Session:
         """Register a session without starting it.
 
         The first half of :meth:`create`, separated because onboarding has to
@@ -76,6 +82,12 @@ class SessionManager:
 
         Every staged session must be either :meth:`launch`ed or
         :meth:`discard`ed; nothing else should be handed one.
+
+        ``created_at`` carries an existing session's creation time into the
+        object replacing it. Only the relaunch paths pass it (restore,
+        respawn, redefine): those keep the name, the conversation, the mesh
+        memberships and the parent edge, so the creation time is one more
+        thing that must survive them — see :meth:`list`.
         """
         name = (sdef.name or "").strip() or self._auto_name()
         self._check_name(name)
@@ -86,6 +98,7 @@ class SessionManager:
             harness_mod.normalize(sdef, restoring=restoring),
             idle_threshold=self.idle_threshold,
             scrollback=self.scrollback,
+            created_at=created_at,
         )
         session.on_exit = self._session_exited
         self._sessions[name] = session
@@ -142,14 +155,21 @@ class SessionManager:
             raise ManagerError(f"session {name!r} already exists")
 
     def create(
-        self, sdef: SessionDef, *, restoring: bool = False, opening: str = ""
+        self,
+        sdef: SessionDef,
+        *,
+        restoring: bool = False,
+        opening: str = "",
+        created_at: Optional[str] = None,
     ) -> Session:
         """Build and start a session.
 
         ``opening`` is a first user message for harnesses that take one on
         their command line; see :func:`harness.takes_opening_argv`.
+        ``created_at`` is :meth:`stage`'s: the creation time of the session
+        this one is continuing, on the relaunch paths.
         """
-        session = self.stage(sdef, restoring=restoring)
+        session = self.stage(sdef, restoring=restoring, created_at=created_at)
         try:
             return self.launch(session, restoring=restoring, opening=opening)
         except Exception:
@@ -329,8 +349,28 @@ class SessionManager:
         except KeyError:
             raise ManagerError(f"no session named {name!r}") from None
 
+    def _by_creation(self) -> List[Tuple[str, AnySession]]:
+        """The registry, oldest session first.
+
+        The one ordering every listing surface takes: ``claunch ls``, the web
+        dashboard, the agent-facing tree. Names cannot carry it — they are
+        auto-generated with a counter (:meth:`_auto_name`), so a string sort
+        files ``s100`` between ``s10`` and ``s11`` and a fleet past nine reads
+        as no order at all.
+
+        ``created_at`` is a fixed-width UTC ISO stamp (``timespec="seconds"``,
+        always a ``+00:00`` offset), so comparing the strings *is* comparing
+        the times — no parsing, and a missing one sorts first as the oldest
+        thing the daemon can say about a record it has no stamp for. Second
+        resolution means sessions made in the same second tie; ``sorted`` is
+        stable, so they keep registry insertion order, which is creation
+        order as well.
+        """
+        return sorted(self._sessions.items(), key=lambda kv: kv[1].created_at or "")
+
     def list(self) -> List[AnySession]:
-        return [self._sessions[k] for k in sorted(self._sessions)]
+        """Every session, live or exited, oldest first (see :meth:`_by_creation`)."""
+        return [session for _, session in self._by_creation()]
 
     # ------------------------------------------------------------------ #
     # hierarchy
@@ -349,10 +389,15 @@ class SessionManager:
     # a daemon hang into a wrong-but-finite answer.
     # ------------------------------------------------------------------ #
     def children(self, name: str) -> List[str]:
-        """Direct children of ``name``, live or exited, in name order."""
-        return sorted(
-            n for n, s in self._sessions.items() if s.sdef.parent == name and n != name
-        )
+        """Direct children of ``name``, live or exited, oldest first.
+
+        Siblings are ordered like the top level (:meth:`_by_creation`): a
+        listing indents them under their parent, so name order here would
+        put the tenth child of a lead ahead of its second just as visibly.
+        """
+        return [
+            n for n, s in self._by_creation() if s.sdef.parent == name and n != name
+        ]
 
     def live_children(self, name: str) -> List[str]:
         """Direct children of ``name`` that are still running.
@@ -374,10 +419,10 @@ class SessionManager:
         report clamps ``children_remaining`` at zero and says the limit is
         reached, which is true.
         """
-        return sorted(
-            n for n, s in self._sessions.items()
+        return [
+            n for n, s in self._by_creation()
             if s.sdef.parent == name and n != name and not s.exited
-        )
+        ]
 
     def ancestors(self, name: str) -> List[str]:
         """``name``'s ancestors, nearest first, stopping at the first one that
@@ -566,7 +611,9 @@ class SessionManager:
             )
         del self._sessions[name]
         try:
-            return self.create(session.sdef, restoring=True)
+            return self.create(
+                session.sdef, restoring=True, created_at=session.created_at
+            )
         except Exception:
             self._sessions[name] = session  # keep the exited record on failure
             raise
@@ -610,7 +657,9 @@ class SessionManager:
         """
         del self._sessions[name]
         try:
-            return self.create(new_def, restoring=True)
+            return self.create(
+                new_def, restoring=True, created_at=session.created_at
+            )
         except Exception:
             self._sessions[name] = session  # keep the record, as it was
             self.persist()
@@ -850,7 +899,13 @@ class SessionManager:
                 continue  # a duplicated record must not clobber a live session
             if sdef.restore and entry.get("was_running"):
                 try:
-                    self.create(sdef, restoring=True)
+                    # Its own creation time, not this restart's: the listings
+                    # are ordered by it, and a restart that restamped every
+                    # relaunched session would flatten the whole fleet into
+                    # one moment and lose the order for good.
+                    self.create(
+                        sdef, restoring=True, created_at=entry.get("created_at")
+                    )
                     if entry.get("was_busy"):
                         self.resumed_busy.append(sdef.name)
                     continue
