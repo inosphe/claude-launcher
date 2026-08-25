@@ -320,11 +320,16 @@ option:disabled { color: #6b7280; }
    the bar and not this gives up the width — a truncated model name is worth
    less than the gauge it qualifies — and `max-width` so an unfamiliar id
    from a gateway cannot push the count off the row; the full id is on its
-   title either way. Dimmer than the count and not monospaced: it is the
-   label on the scale, not another figure to compare across rows. */
+   title either way. Not monospaced — it is the label on the scale, not
+   another figure to compare across rows — but in a teal of its own, a shade
+   brighter and bolder than the count beside it: which model a session is
+   answering on is the fact people scan the rail for, and a hue no other
+   rail element uses (blue is the accent, purple is mesh, amber/red/green
+   are status) lets the eye pick it out of twenty rows without reading. */
 #session-list .rail-model {
   flex: none; max-width: 40%; overflow: hidden; text-overflow: ellipsis;
-  white-space: nowrap; font-size: 10px; color: #6e7681; line-height: 16px;
+  white-space: nowrap; font-size: 11px; font-weight: 600; color: #56d4dd;
+  line-height: 16px;
 }
 #session-list .rail-ctx {
   flex: none; font-family: SFMono-Regular, Consolas, monospace;
