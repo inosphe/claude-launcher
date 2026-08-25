@@ -406,6 +406,134 @@ def test_delivery_waits_for_respawn(home, tmp_path):
     asyncio.run(run())
 
 
+def test_send_to_an_exited_member_says_so_and_how_to_revive(home, tmp_path):
+    """The sender is told at SEND time, with the command and the condition.
+
+    Delivery still queues the message (that contract is
+    :func:`test_delivery_waits_for_respawn`); what changes is that 'sent to
+    bob' no longer reads like bob got it.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05)
+        mm.create("m3")
+        a = mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+        b = mgr.create(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+        await _wait_screen(a, "READY")
+        await _wait_screen(b, "READY")
+        await mm.join("m3", "lead", handle="leader")
+        await mm.join("m3", "w1", handle="bob")
+
+        alive = await mm.send("m3", "leader", "bob", "still here?")
+        assert alive["undeliverable"] == []
+        assert alive["notice"] is None
+
+        await b.send_keys(["quit", "Enter"])
+        await b.wait_for("exited", timeout=10.0, threshold=0.5)
+
+        dead = await mm.send("m3", "leader", "bob", "and now?")
+        assert dead["recipients"] == ["bob"]  # still accepted, still queued
+        assert dead["undeliverable"] == [
+            {"handle": "bob", "session": "w1", "state": "exited"}
+        ]
+        notice = dead["notice"]
+        assert "has exited" in notice
+        assert "claunch respawn w1" in notice      # how to revive it
+        assert "ONLY if this message must actually land" in notice  # and when
+
+        # A broadcast narrows to neighbours the same way and reports the same.
+        cast = await mm.send("m3", "leader", "*", "everyone")
+        assert [e["handle"] for e in cast["undeliverable"]] == ["bob"]
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_member_that_dies_holding_mail_is_reported_to_its_senders(home, tmp_path):
+    """The other order of events: accepted into a live terminal, then it died.
+
+    Nobody is holding a send result to read in that case, so the daemon goes
+    and tells the senders — once per death, from ``policy``, as ``fyi``.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, busy_hold=5.0)
+        mm.create("m4")
+        a = mgr.create(SessionDef(name="lead2", harness="py", cwd=str(tmp_path)))
+        b = mgr.create(SessionDef(name="w2", harness="py", cwd=str(tmp_path)))
+        c = mgr.create(SessionDef(name="w3", harness="py", cwd=str(tmp_path)))
+        for s in (a, b, c):
+            await _wait_screen(s, "READY")
+        await mm.join("m4", "lead2", handle="leader")
+        await mm.join("m4", "w2", handle="bob")
+        await mm.join("m4", "w3", handle="carol")
+
+        mesh = mm.get("m4")
+        # Two senders, so the report has to find both and neither twice.
+        await mm.send("m4", "leader", "bob", "one")
+        await mm.send("m4", "carol", "bob", "two")
+        assert len(mesh.pending("bob")) == 2
+
+        await b.send_keys(["quit", "Enter"])
+        await b.wait_for("exited", timeout=10.0, threshold=0.5)
+
+        member = mesh.members["bob"]
+        await mm._deliver_to(mesh, member)
+        reports = [m for m in mesh.messages if m["from"] == "policy"]
+        assert len(reports) == 1
+        report = reports[0]
+        assert sorted(report["to"]) == ["carol", "leader"]
+        assert report["type"] == "fyi"          # informs, never asks
+        assert "claunch respawn w2" in report["body"]
+        assert "2 message(s) of yours are waiting" in report["body"]
+        assert "bob" not in report["to"]        # bob is not told about bob
+        # Reporting changes nothing about the mail: it is still held for the
+        # respawn, which is the contract test_delivery_waits_for_respawn pins.
+        assert len(mesh.pending("bob")) == 2
+
+        # The delivery worker runs every few seconds and the backlog never
+        # drains on its own: without a latch this is a message per tick.
+        for _ in range(3):
+            await mm._deliver_to(mesh, member)
+        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 1
+
+        # Respawn re-arms it: a second death is news again.
+        revived = mgr.respawn("w2")
+        await revived.wait_for("idle", timeout=20.0, threshold=0.5)
+        await mm._deliver_to(mesh, mesh.members["bob"], force=True)
+        await _wait_drained(mesh, "bob", timeout=20.0)
+        await mm.send("m4", "leader", "bob", "three")
+        await revived.send_keys(["quit", "Enter"])
+        await revived.wait_for("exited", timeout=10.0, threshold=0.5)
+        await mm._deliver_to(mesh, mesh.members["bob"])
+        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 2
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_stranded_notice_separates_revivable_from_gone():
+    """``exited`` and ``missing`` need opposite advice, so they read apart."""
+    exited = mesh_mod.stranded_notice(
+        [{"handle": "bob", "session": "w1", "state": "exited"}]
+    )
+    assert "claunch respawn w1" in exited
+    missing = mesh_mod.stranded_notice(
+        [{"handle": "bob", "session": "w1", "state": "missing"}]
+    )
+    assert "gone from the registry" in missing
+    assert "respawn" not in missing  # nothing to respawn; do not offer it
+    assert mesh_mod.stranded_notice([]) is None
+
+
 # --------------------------------------------------------------------------- #
 # CLI (daemon-free paths only; the rest is thin plumbing over the API)
 # --------------------------------------------------------------------------- #

@@ -185,10 +185,18 @@ def _cmd_send(args: argparse.Namespace) -> int:
     if sections:
         payload["sections"] = sections
     result = client.post(f"/api/mesh/{args.mesh}/messages", payload)
+    # Recipients with no terminal left to read this. Named on the RESULT
+    # line, not only in the notice: "sent ... to bob" is the sentence a
+    # sender acts on, and it is the one that is wrong when bob is dead.
+    dead = [str(e.get("handle")) for e in (result.get("undeliverable") or [])]
     if result.get("queued"):
         # mirror with its primary unreachable: durably queued, not yet sent
-        print(f"queued {result.get('id')} -- primary daemon unreachable; "
-              "will forward on reconnect")
+        line = (f"queued {result.get('id')} -- primary daemon unreachable; "
+                "will forward on reconnect")
+        if dead:
+            line += f"; NOT READING: {', '.join(dead)}"
+        print(line)
+        _print_notice(result)
         _print_relay(result.get("relay"))
         return 0
     recipients = result.get("recipients", [])
@@ -198,11 +206,17 @@ def _cmd_send(args: argparse.Namespace) -> int:
         line += f" [{args.type}]"
     if queued:
         line += f" -- queued for remote: {', '.join(queued)}"
+    if dead:
+        line += f" -- NOT READING: {', '.join(dead)} (see notice)"
     print(line)
-    if result.get("notice"):
-        print(f"notice: {result['notice']}", file=sys.stderr)
+    _print_notice(result)
     _print_relay(result.get("relay"))
     return 0
+
+
+def _print_notice(result: dict) -> None:
+    if result.get("notice"):
+        print(f"notice: {result['notice']}", file=sys.stderr)
 
 
 def _cmd_invite(args: argparse.Namespace) -> int:

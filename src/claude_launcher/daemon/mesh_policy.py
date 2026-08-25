@@ -56,6 +56,13 @@ TASK_POLL_FALLBACK_BODY = (
 #: other mesh message — including to remote leaders over federation).
 POLICY_SENDER = "policy"
 
+#: How a daemon report names the command that brings a dead session back.
+#: Kept here beside :data:`POLICY_SENDER` rather than at either use site:
+#: this module is already where the daemon's *voice* about sessions lives,
+#: and a report that reaches an agent with two different revival commands
+#: gets both of them tried. Format with ``session=``.
+RESUME_HINT = "claunch respawn {session}"
+
 _MIN_SECS, _MAX_SECS = 1.0, 86400.0
 
 
