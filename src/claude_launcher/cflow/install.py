@@ -98,6 +98,13 @@ workflow to be started here), that is the answer; otherwise list candidates
      have so far and say who is deciding. You cannot answer it — not with
      `select`, not with `answer`, not by asking them over the mesh and
      acting on the reply. They record it themselves; you will be nudged.
+     The user is not shut out of it, though, and the payload's `user_door`
+     carries the press that settles it (`claunch cflow select <option>`, or
+     `claunch cflow approve` for an approval): add ONE line saying who holds
+     it and that they can answer it now if they want it — a person's answer
+     lands over a responder's and closes the question. That is a door, not a
+     gate: do not write them the decision brief, do not wait for them, do not
+     raise it again. The run is not stopped on them.
    - `status: step` or `select` where the payload says the decision was
      meant to be somebody else's — the workflow declared `otherwise: self`
      and nobody could be reached, so it is yours by default. Say so plainly

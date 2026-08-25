@@ -674,23 +674,134 @@ def _escalate(state: dict, step: Step, ask: dict, cwd, why: str) -> Optional[dic
     )
 
 
+def _user_door(kind: str, options: Optional[List[dict]] = None) -> dict:
+    """The command a person can settle this ask with, while an agent holds it.
+
+    Delegating a decision takes it away from the *run*, never from the user:
+    :func:`select` and :func:`approve` have always let a human answer over an
+    open ask, because the CLI is the trusted channel by construction (anyone
+    holding it can already ``goto`` the run anywhere). What was missing was
+    anybody saying so — the payload told the driver "you cannot answer it
+    yourself" and stopped there, so the one person who *could* answer it was
+    the only party never told the door existed.
+
+    Announcing it does not turn the ask back into a gate. The run is not
+    waiting on this and the driver must not stand the user up on it; it is a
+    door held open beside the delegation, and it is the user's to use or
+    ignore.
+    """
+    if kind == "branch":
+        names = "|".join(o["name"] for o in options or [])
+        command = f"claunch cflow select <{names}>"
+    else:
+        command = "claunch cflow approve"
+    return {
+        "command": command,
+        # Stated as a fact about the engine, not a promise about manners: an
+        # answer through this door closes the ask where it stands, so a
+        # responder answering after it is told the question is gone.
+        "wins": True,
+        "note": (
+            "a person may settle this at any time while it is out; their "
+            "answer lands over the responder's and closes the question"
+        ),
+    }
+
+
+def _settled_by_person(
+    state: dict, ask: dict, *, decision: str, by: str, cwd
+) -> None:
+    """Record a person's answer to an open ask, and tell whoever was holding it.
+
+    One path for both doors (``select`` for a branch, ``approve`` for an entry
+    approval), because to the run they are the same event: the question is
+    closed by somebody who was not asked. Two cases hide under that, and the
+    journal has to keep them apart —
+
+    * the ask had fallen to a human already (nobody in the group): this IS the
+      intended answer, ``in_group`` true, nobody to tell;
+    * responders are still holding it: the person **overrode** them. The entry
+      names who was preempted, and they are told so in the thread the question
+      arrived in rather than finding out by having their answer refused.
+
+    The authority is not new and not checked here: the CLI is the trusted
+    channel by construction — anyone holding it can already ``goto`` the run
+    anywhere — so the honest thing is to record the override, not to pretend
+    it is impossible.
+    """
+    held = [e for e in ask.get("asked") or [] if e.get("kind") == "member"]
+    who = [str(e.get("handle") or e.get("session") or "?") for e in held]
+    state_mod.journal(
+        "ask_answered",
+        {
+            "run": state["run_id"],
+            "ask": ask.get("id"),
+            "step": ask.get("step"),
+            "decision": decision,
+            "by": by,
+            "by_session": None,
+            "in_group": not held,
+            **({"override": who} if held else {}),
+        },
+        cwd,
+    )
+    if not held:
+        return
+    session = state_mod.current_scope()
+    if session == state_mod.DEFAULT_SCOPE:
+        session = ""
+    reach = responders.pool(
+        session=session, mesh=str(state.get("mesh") or ""), cwd=cwd
+    )
+    failure = (
+        reach.problem
+        or responders.withdraw(
+            ask,
+            mesh=reach.mesh,
+            sender=reach.me,
+            workflow=str(state.get("workflow") or ""),
+            to=who,
+            decision=decision,
+        )
+    )
+    if failure:
+        # Not an error for the person at the CLI: their answer is recorded and
+        # the run has moved. It is a fact the responder's wasted turn will be
+        # explained by, so it goes in the journal rather than nowhere.
+        state_mod.journal(
+            "ask_withdraw_failed",
+            {"run": state["run_id"], "ask": ask.get("id"), "to": who,
+             "reason": failure},
+            cwd,
+        )
+
+
 def _ask_payload(base: dict, ask: dict) -> dict:
     """How an open ask is described to whoever reads the run.
 
-    A question waiting on an *agent* is its own status, because it is a state
-    no operator control resolves — the run is not stuck on a person. Once it
-    falls to a human it is reported as the plain approval/selection it has
+    A question waiting on an *agent* is its own status, because it is not the
+    operator's move — the run is not stopped on a person, and painting it as a
+    gate grows a queue of things that look like work and are not. It is not
+    beyond their reach either: ``user_door`` carries the press that settles it
+    anyway, for the reader who decides this one is theirs after all. Once the
+    ask falls to a human it is reported as the plain approval/selection it has
     become, so the CLI and the dashboard keep working on it unchanged.
     """
     payload = {**base, "ask": ask}
     if not _awaits_human(ask):
         who = ", ".join(e.get("handle", "?") for e in ask["asked"])
+        door = _user_door(ask["kind"], ask.get("options"))
         payload["status"] = "waiting_answer"
         payload["reason"] = ask["kind"]
+        payload["user_door"] = door
         payload["how_to_unblock"] = (
             f"{who} was asked to decide this and has not answered yet. You "
             f"cannot answer it yourself. Stop your turn, present what you have "
-            f"so far, and wait to be nudged."
+            f"so far, and wait to be nudged. The user is not shut out of it: "
+            f"say in one line who holds it and that they can settle it now "
+            f"with '{door['command']}' — a person's answer lands over the "
+            f"responder's. That is a door, not a gate: do not stand them up "
+            f"on it, do not wait for them, and do not ask twice."
         )
         return payload
     unresolved = bool(ask["skipped"]) and not ask["asked"]
@@ -979,6 +1090,7 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
                     "status": "waiting_answer",
                     "reason": "approval",
                     "prompt": step.ask.prompt,
+                    "user_door": _user_door("approval"),
                     "note": "this approval has not been put to anyone yet",
                 }
             ask = _open_ask(
@@ -1017,6 +1129,7 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
                         "reason": "branch",
                         "prompt": step.select.prompt,
                         "options": options,
+                        "user_door": _user_door("branch", options),
                         "note": "this decision has not been put to anyone yet",
                     }
                 ask = _open_ask(
@@ -1813,17 +1926,11 @@ def select(
 
     open_ask = _current_ask(state, step.id, _visits(state, step.id), "branch")
     if open_ask:
-        # A human settling a delegated decision — from the dashboard, or
-        # because the responders never got to it. Close the question here so
-        # `_move_to` does not log it as one the run walked away from.
+        # A human settling a delegated decision — from the dashboard, from the
+        # CLI, or because the responders never got to it. Close the question
+        # here so `_move_to` does not log it as one the run walked away from.
         state["ask"] = None
-        state_mod.journal(
-            "ask_answered",
-            {"run": state["run_id"], "ask": open_ask["id"], "step": step.id,
-             "decision": option, "by": by, "by_session": None,
-             "in_group": _awaits_human(open_ask)},
-            cwd,
-        )
+        _settled_by_person(state, open_ask, decision=option, by=by, cwd=cwd)
     state_mod.journal(
         "select_confirmed",
         {"run": state["run_id"], "step": step.id, "option": option,
@@ -2322,18 +2429,9 @@ def approve(*, by: str = "user", cwd: Optional[str] = None) -> dict:
         open_ask = _current_ask(state, step.id, visit, "approval")
         if open_ask:
             # The human is answering the delegated question, whether or not
-            # they were one of the candidates. That is not a hole to close:
-            # the CLI is the trusted channel by construction — anyone holding
-            # it can already `goto` the run anywhere — so the honest thing is
-            # to record whether the answer came from inside the asked group,
-            # not to pretend the override is impossible.
-            state_mod.journal(
-                "ask_answered",
-                {"run": state["run_id"], "ask": open_ask["id"], "step": step.id,
-                 "decision": APPROVE, "by": by, "by_session": None,
-                 "in_group": _awaits_human(open_ask)},
-                cwd,
-            )
+            # they were one of the candidates — see `_settled_by_person`, which
+            # records which of the two that was and tells anyone it overrode.
+            _settled_by_person(state, open_ask, decision=APPROVE, by=by, cwd=cwd)
         state["ask"] = None
         overridden = state.get("declined") if blocked == "declined" else None
         state["declined"] = None
