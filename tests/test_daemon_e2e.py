@@ -1077,6 +1077,76 @@ def test_ws_hands_the_wheel_to_a_program_that_takes_the_mouse(home, tmp_path):
     asyncio.run(run())
 
 
+def test_api_transcript_pages_the_conversation(home, tmp_path, monkeypatch):
+    """The route behind the transcript pane, paged newest-last.
+
+    The pane exists because the terminal cannot answer this: a claude session
+    repaints the alternate screen instead of scrolling it, so the readable
+    record of what it said lives only in claude's own jsonl.
+    """
+    _register_py_harness()
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+    from claude_launcher.daemon import transcript_view
+
+    conv = tmp_path / "conv.jsonl"
+    conv.write_text(
+        "".join(
+            json.dumps({
+                "type": "user" if i % 2 == 0 else "assistant",
+                "timestamp": "2026-08-25T00:00:00Z",
+                "message": {"role": "user" if i % 2 == 0 else "assistant",
+                            "content": f"turn {i}"},
+            }) + "\n"
+            for i in range(30)
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(transcript_view, "locate_transcript", lambda sdef: conv)
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            mgr.create(SessionDef(name="tx", harness="py", cwd=str(tmp_path)))
+
+            r = await client.get(
+                "/api/sessions/tx/transcript?limit=10", headers=bearer
+            )
+            assert r.status == 200
+            tail = await r.json()
+            assert tail["total"] == 30
+            assert [b["text"] for rec in tail["records"] for b in rec["blocks"]][-1] \
+                == "turn 29"
+            assert tail["has_more"] is True
+
+            r2 = await client.get(
+                f"/api/sessions/tx/transcript?limit=10&before={tail['cursor']}",
+                headers=bearer,
+            )
+            older = await r2.json()
+            assert [b["text"] for rec in older["records"] for b in rec["blocks"]][0] \
+                == "turn 10"
+
+            # The index is the storage the daemon keeps for this session: it
+            # sits beside the session's log and survives a restart, so the
+            # next page is a seek rather than a re-read of the whole file.
+            assert transcript_view.index_path("tx").is_file()
+
+            bad = await client.get(
+                "/api/sessions/tx/transcript?before=nope", headers=bearer
+            )
+            assert bad.status == 400
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_shutdown_not_blocked_by_open_websocket(home, tmp_path):
     """A dashboard tab left open must not stall daemon teardown (it used to
     wait aiohttp's 60s shutdown timeout per lingering terminal socket)."""

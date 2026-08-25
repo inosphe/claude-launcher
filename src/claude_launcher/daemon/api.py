@@ -26,6 +26,7 @@ from .. import lineage, profile as profile_mod, quickjob, spawn as spawn_mod, st
 from .. import worktree as worktree_mod
 from . import beads as beads_mod
 from . import briefing, cflow_clock, clipty, ctxsize, onboard, rebrief
+from . import transcript_view
 from ..cli_beads import BeadsError
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
 from ..cflow.engine import CflowError
@@ -311,6 +312,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/rebrief", h_session_rebrief)
     r.add_post("/api/sessions/{name}/rebrief", h_session_rebrief)
     r.add_get("/api/sessions/{name}/capture", h_session_capture)
+    r.add_get("/api/sessions/{name}/transcript", h_session_transcript)
     r.add_get("/api/sessions/{name}/wait", h_session_wait)
     r.add_post("/api/sessions/{name}/resize", h_session_resize)
     r.add_get("/api/sessions/{name}/ws", ws_mod.terminal_ws)
@@ -2859,6 +2861,41 @@ async def h_session_capture(request: web.Request) -> web.Response:
         )
     text = "\n".join(lines)
     return web.Response(text=text + ("\n" if text else ""), content_type="text/plain")
+
+
+async def h_session_transcript(request: web.Request) -> web.Response:
+    """One page of the session's conversation, for a pane that scrolls itself.
+
+    The terminal cannot answer this. A claude session repaints the alternate
+    screen rather than scrolling it, so its history never reaches any
+    scrollback — the daemon's included — and the readable record of what the
+    session said lives only in claude's own jsonl. See
+    :mod:`~claude_launcher.daemon.transcript_view`.
+
+    ``before`` is the cursor a reader walks backwards as they scroll up;
+    omitted, the page is the tail. Run in a thread: the index scan touches a
+    file that reaches tens of megabytes the first time it is asked, and the
+    event loop has terminals to pump.
+    """
+    session = _session(request)
+    try:
+        limit = int(request.query.get("limit", transcript_view.PAGE_DEFAULT))
+    except ValueError:
+        return json_error(400, "'limit' must be an integer")
+    before_raw = request.query.get("before")
+    try:
+        before = int(before_raw) if before_raw not in (None, "") else None
+    except ValueError:
+        return json_error(400, "'before' must be an integer")
+
+    page = await asyncio.to_thread(
+        transcript_view.page,
+        session.sdef.name,
+        session.sdef,
+        before=before,
+        limit=limit,
+    )
+    return web.json_response(page)
 
 
 async def h_session_wait(request: web.Request) -> web.Response:

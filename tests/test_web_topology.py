@@ -60,7 +60,13 @@ scrollback we could keep) getting its ticks forwarded untouched, the main
 buffer scrolling natively out of the scrollback the daemon seeds at attach,
 and only the third case — the alternate screen with the mouse left alone —
 still becoming ``scroll`` controls answered with repaints over the daemon's
-history, with the chip that says so, ``termcache_check`` on the
+history, with the chip that says so — ``transcript_check`` on the pane that
+answers what none of those three can, "what did this session say an hour ago":
+claude's own conversation jsonl, served in pages and read in an ordinary
+overflow scroller, so the browser owns the wheel. Its checks are mostly about
+not disturbing the reader — prepending an older page must leave the text they
+are looking at exactly where it was, and the follow-forward must move only
+someone already sitting at the bottom — ``termcache_check`` on the
 keep-alive that makes switching between sessions cheap — the terminal you
 walk away from stays up with its socket shimmed to buffer-only, and
 returning to it is a swap of state and a re-fit rather than a new socket
@@ -171,6 +177,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "sessrun_check.js",
         "wfstart_check.js",
         "wheel_check.js",
+        "transcript_check.js",
         "sesslayout_check.js",
         "rolepanel_check.js",
         "spawnmodal_check.js",

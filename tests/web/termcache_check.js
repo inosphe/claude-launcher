@@ -155,6 +155,7 @@ function build() {
 let currentName = null, term = null, ws = null, fitAddon = null;
 let attachedPid = null, attachedBoot = null;
 let scrollOffset = 0, altScreen = false, sessionEnded = false;
+let mouseTracking = false;
 let linkState = "idle", linkName = null, linkTry = 0, linkTimer = null;
 let linkTicket = 0, linkQueue = [], lastLocalKey = 0;
 let wheelTimer = null, wheelAccum = 0, applyingRemoteResize = false;

@@ -150,6 +150,14 @@
              glyph and the disabled state are owned by applyBriefingTop. -->
         <button id="term-brief" class="term-btn"
                 title="briefing: goal, current work, state — summarised">briefing</button>
+        <!-- The conversation, as a page that scrolls itself. The terminal
+             cannot answer "what did this session say an hour ago": claude
+             repaints the alternate screen instead of scrolling it, so nothing
+             reaches any scrollback and the record lives only in claude's own
+             jsonl. This reads that, paged, in an ordinary scroller — with a
+             scrollbar, momentum, PgUp and find-in-page behind it. -->
+        <button id="term-log" class="term-btn" type="button" aria-pressed="false"
+                title="this session's conversation — scrollable, the whole of it">transcript</button>
         <button id="term-rebrief" class="term-btn"
                 title="re-type this session's briefing (mesh, run, parent, task) into its terminal — for an agent whose context was cleared or compacted">rebrief</button>
         <button id="term-kill" class="term-btn">kill</button>
@@ -186,6 +194,12 @@
          current session's briefing is open. -->
     <div id="term-brief-pane" class="hidden"></div>
     <div id="terminal"></div>
+    <!-- The transcript pane, over the terminal's own space while it is open
+         (the terminal stays live underneath, socket and all — this is a
+         reading mode, not a detach). One ordinary overflow scroller: the
+         browser owns the wheel here, and older pages are fetched as the
+         reader reaches the top. Rendered by renderTranscript(). -->
+    <div id="term-log-pane" class="hidden"></div>
     <!-- Split mode's bar and pane, under the terminal they halve. The pane
          renders the same material as #/wf/<scope|cwd>; both stay hidden
          unless the header's ⬒ run toggle is on for the attached session
