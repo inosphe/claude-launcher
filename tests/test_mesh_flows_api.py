@@ -54,6 +54,21 @@ steps:
 """
 
 
+PACED = """name: paced
+start: standby
+steps:
+  standby:
+    select:
+      prompt: what now?
+      chooser: agent
+      options:
+        integrate: {description: merge the batch, next: sweep, interval: 300}
+        hold: {description: keep waiting, next: standby}
+  sweep:
+    instructions: sweep it
+"""
+
+
 def _register_py_harness() -> None:
     store.update(
         lambda doc: doc.update(
@@ -199,6 +214,52 @@ def test_a_stopped_session_still_carries_the_run_it_stopped_in(home, tmp_path):
             resp = await client.get("/api/mesh/team/flows", headers=BEARER)
             body = await resp.json()
             assert body["flows"]["lead"] == {"session": "lead", "status": "no_session"}
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_a_paced_option_carries_its_interval_into_the_graph(home, tmp_path):
+    """`interval` is what makes a branch paced, and the flow view *draws* the
+    graph. Served without it, the drawing has no way to know: a branch the run
+    may take once every five minutes renders exactly like one it may take at
+    will, and the only place the pacing surfaces is the run page's prose,
+    which speaks solely while a choice is actually held.
+
+    So the field travels with the option. Its absence on the others is part of
+    the contract too — the drawing dashes on truthiness, and a `0` or a `""`
+    smuggled in for "none" would dash every branch in the workflow.
+    """
+    _register_py_harness()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    d = proj / ".claunch" / "workflows"
+    d.mkdir(parents=True)
+    (d / "paced.yaml").write_text(PACED, encoding="utf-8")
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(proj)))
+            await mm.join("team", "lead", handle="lead")
+            cwd = str(proj.resolve())
+            cflow_engine.start("paced", cwd=cwd, scope="lead")
+
+            resp = await client.get("/api/mesh/team/flows", headers=BEARER)
+            body = await resp.json()
+            wf = body["workflows"][body["flows"]["lead"]["key"]]
+            standby = next(s for s in wf["steps"] if s["id"] == "standby")
+            opts = {o["name"]: o for o in standby["select"]["options"]}
+
+            assert opts["integrate"]["interval"] == 300
+            # Declared on one branch only, and null — not 0 — on the other.
+            assert opts["hold"]["interval"] is None
 
             await mgr.shutdown_all()
         finally:

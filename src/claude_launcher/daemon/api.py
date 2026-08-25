@@ -683,7 +683,19 @@ def _serialize_workflow(wf) -> dict:
                     s.select.delegate.otherwise if s.select.delegate else None
                 ),
                 "options": [
-                    {"name": o.name, "description": o.description, "next": o.next}
+                    {
+                        "name": o.name,
+                        "description": o.description,
+                        "next": o.next,
+                        # The cadence, so a *drawing* can say what the run
+                        # page's prose already says: this branch is paced,
+                        # and a choice made inside its interval is held
+                        # rather than taken. Without it the graph has no way
+                        # to know, and a reader looking at the picture sees
+                        # an ordinary branch. Null on the options (most of
+                        # them) that declare none.
+                        "interval": o.interval,
+                    }
                     for o in s.select.options.values()
                 ],
             }
