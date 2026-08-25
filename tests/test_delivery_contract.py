@@ -46,6 +46,7 @@ RAW_WRITER_ALLOWLIST = {
     ("daemon/session.py", "send_keys"): "implements the raw keystroke path",
     ("daemon/api.py", "h_session_keys"): "raw keyboard passthrough over HTTP",
     ("daemon/ws.py", "terminal_ws"): "raw keyboard passthrough over WebSocket",
+    ("daemon/ws.py", "cli_ws"): "raw keystroke passthrough to the CLI tab's own shell pty",
 }
 
 #: Same rule across the process boundary: the keys endpoint is the passthrough,
