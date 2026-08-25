@@ -342,6 +342,17 @@ steps:
     done_when: |
       라이브 서버가 재기동되었고, 새 머지 커밋의 기능이 실제로 서빙됨을
       확인한 증거(방법과 결과)가 보고에 있다.
+    # 이 문장을 받치는 기계. reflect는 오래 서술문뿐이었고, 그래서 재기동이
+    # 실제로 있었는지 아무것도 재지 않았다 — 리더에게는 재기동을 인지할
+    # 경로조차 없어 300초 리마인더만 반복됐다(사용자 신고).
+    # tools/deploy_check.py가 daemon.json의 started_at(부팅마다 기록된다)과
+    # master tip의 커밋 시각을 견준다: 데몬이 그 머지보다 먼저 떠 있었다면
+    # 그 머지를 서빙할 수 없다. 0=머지 이후 재기동 확인, 1=재기동 없음,
+    # 2=판정 불가(데몬 파일 없음·브랜치 없음) — 0이 아니면 회차가 닫히지
+    # 않는다. 이 검사가 증명하지 못하는 절반(재기동한 데몬이 정말 새 코드를
+    # 서빙하는가)은 위 done_when이 계속 사람에게 요구한다.
+    # tests/test_deploy_check.py가 양방향과 판정 불가 두 갈래를 못박는다.
+    verify: 'uv run --no-sync python tools/deploy_check.py --branch master'
     next: end
 
   wrapup:
