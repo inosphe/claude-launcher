@@ -185,6 +185,57 @@ def _separable_notice(body: str, recipients: List[str]) -> Optional[str]:
     )
 
 
+#: What ``exited`` and ``missing`` mean to a sender, and what to do about
+#: each. Split because the two need opposite actions: an exited session is
+#: waiting to be respawned, a missing one has had its record cleared and
+#: never will be.
+_STRANDED_WHAT = {
+    "exited": (
+        "session {session!r} has exited — nothing is reading that terminal. "
+        "The message is QUEUED, not delivered, and stays queued until that "
+        "session is respawned"
+    ),
+    "missing": (
+        "session {session!r} is gone from the registry — the message is "
+        "queued against a session nothing can bring back"
+    ),
+}
+
+
+def stranded_notice(entries: List[dict]) -> Optional[str]:
+    """What to tell a sender whose recipients cannot read anything.
+
+    Delivery holds the cursor for an exited member and says nothing (see
+    :meth:`MeshManager._deliver_to`) — right for the message, wrong for the
+    sender, who is told ``recipients: [bob]`` and goes on typing into a
+    terminal that no longer exists. This is the sentence that stops that.
+
+    It deliberately does NOT offer to respawn: reviving a session costs a
+    real terminal and a real agent's context, and most stranded messages are
+    a report the sender no longer needs. So the hint is paired with the
+    condition under which it is worth spending — the judgement stays with
+    whoever knows what the message was for.
+    """
+    if not entries:
+        return None
+    parts = []
+    for e in entries:
+        what = _STRANDED_WHAT.get(e.get("state") or "", _STRANDED_WHAT["exited"])
+        parts.append(f"{e['handle']}: " + what.format(session=e["session"]))
+    revivable = [e for e in entries if e.get("state") == "exited"]
+    tail = (
+        " Revive it ONLY if this message must actually land: "
+        + "; ".join(
+            mesh_policy.RESUME_HINT.format(session=e["session"]) for e in revivable
+        )
+        + ". Otherwise stop sending there — take the work to a live peer, or "
+        "spawn a replacement."
+        if revivable
+        else " Drop the handle from the mesh, or route the work to a live peer."
+    )
+    return ". ".join(parts) + "." + tail
+
+
 def _normalize_sections(
     sections, recipients: List[str], sender: str
 ) -> Optional[dict]:
@@ -1813,10 +1864,23 @@ class MeshManager:
                         break
         if note:
             advisories.append(note)
+        # A recipient whose terminal is gone is the one advisory the sender
+        # cannot work out for itself: delivery accepts the message either
+        # way, so 'sent' looks identical whether bob is reading or bob died
+        # an hour ago. Said FIRST — it changes what the sender does next,
+        # while the others only change how it phrases the next message.
+        stranded = self.stranded_recipients(mesh, recipients)
+        stranded_note = stranded_notice(stranded)
+        if stranded_note:
+            advisories.insert(0, stranded_note)
         return {
             **msg,
             "recipients": recipients,
             "queued": False,
+            # Accepted and queued, but nothing there to read it — see
+            # stranded_notice(). Structured as well as prose so a dashboard
+            # can mark the row without parsing the sentence.
+            "undeliverable": stranded,
             # Remote recipients ride the guest fanout; when the relay is down
             # they are queued (durably, via the guest cursor) until reconnect.
             "queued_remote": remote if not self.relay_connected() else [],
@@ -1899,6 +1963,11 @@ class MeshManager:
                 pass  # fall through to the outbox
             else:
                 result.setdefault("queued", False)
+                # The authority judged liveness for the members IT hosts;
+                # ours are remote from there and came back unjudged. Merge
+                # our half in, so a sender on a mirror hears about a dead
+                # peer in the same room it is standing in.
+                self._merge_stranded(mesh, result, recipients)
                 return result
         mesh.outbox.append(entry)
         self._persist_outbox(mesh)
@@ -1912,12 +1981,13 @@ class MeshManager:
             except Exception:  # noqa: BLE001 — the send is already queued
                 log.exception("mesh %r: fast-path delivery failed", mesh.name)
         direct = list(entry.get("fast_sent") or [])
-        return {
+        result = {
             **entry,
             "queued": True,
             "recipients": [],
             "remote": [],
             "queued_remote": [],
+            "undeliverable": [],
             "batched": norm_sections is not None,
             "expects_reply": expects_reply(intent),
             "notice": (
@@ -1929,6 +1999,30 @@ class MeshManager:
                 )
             ),
         }
+        self._merge_stranded(mesh, result, recipients)
+        return result
+
+    def _merge_stranded(
+        self, mesh: Mesh, result: dict, recipients: Iterable[str]
+    ) -> None:
+        """Fold this daemon's own liveness judgement into a send ``result``.
+
+        Only ever ADDS: the entries already there were judged by whichever
+        daemon hosts those members, and it is the one that can see them.
+        The notice goes in front of whatever else the send had to say —
+        'the recipient is dead' outranks 'this looks like a batch'.
+        """
+        mine = self.stranded_recipients(mesh, recipients)
+        if not mine:
+            result.setdefault("undeliverable", [])
+            return
+        known = {e.get("handle") for e in (result.get("undeliverable") or [])}
+        merged = list(result.get("undeliverable") or [])
+        merged += [e for e in mine if e["handle"] not in known]
+        result["undeliverable"] = merged
+        note = stranded_notice(mine)
+        prior = result.get("notice")
+        result["notice"] = f"{note} {prior}" if prior else note
 
     @staticmethod
     def _nobody_to_deliver_to(mesh: Mesh, from_handle: str) -> str:
@@ -1942,6 +2036,39 @@ class MeshManager:
             f"{len(others)} other member(s) of mesh {mesh.name!r} — ask the "
             "session that spawned you to connect you to a peer"
         )
+
+    def stranded_recipients(self, mesh: Mesh, recipients: Iterable[str]) -> List[dict]:
+        """Which of ``recipients`` have no terminal left to read a message.
+
+        Only LOCAL members can be answered here: a guest member's liveness is
+        its own daemon's to know, and the roster already reports that through
+        ``reachability`` (remote-connected / remote-disconnected). Guessing on
+        their behalf would put a respawn hint in front of a sender who cannot
+        run it.
+
+        Each entry is ``{handle, session, state}`` with ``state`` one of
+        ``exited`` (respawnable — the record is kept) or ``missing`` (the
+        record itself is gone, so nothing can revive it). Both are states
+        :meth:`_deliver_to` already refuses to deliver into; this is the same
+        judgement, made where the SENDER can still act on it.
+        """
+        out: List[dict] = []
+        for handle in recipients:
+            member = mesh.members.get(handle)
+            if member is None or not self._is_local(mesh, member):
+                continue
+            try:
+                session = self.manager.get(member.session)
+            except ManagerError:
+                out.append(
+                    {"handle": handle, "session": member.session, "state": "missing"}
+                )
+                continue
+            if session.exited:
+                out.append(
+                    {"handle": handle, "session": member.session, "state": "exited"}
+                )
+        return out
 
     def _resolve_recipients(
         self,
@@ -4797,6 +4924,65 @@ class MeshManager:
         except asyncio.CancelledError:
             pass
 
+    async def _report_stranded(
+        self, mesh: Mesh, member: Member, pending: List[dict], state: str
+    ) -> None:
+        """Tell the senders of ``pending`` that ``member`` cannot read them.
+
+        The send-time notice (:func:`stranded_notice`) covers the sender who
+        is standing right there; this covers the other order of events — the
+        message was accepted into a live terminal and the terminal died
+        before delivery. Nobody is holding a result to read in that case, so
+        the daemon has to go and say it.
+
+        Exactly ONE report per death: the delivery worker runs every few
+        seconds and a stranded backlog never drains on its own, so anything
+        less than a latch is a message every tick forever. The latch clears
+        when the session comes back (see :meth:`_deliver_to`), which is what
+        makes a second death reportable.
+
+        Sent as ``fyi`` from the policy handle, like a stall warning: the
+        senders are being told something, not asked for anything, and an
+        answer here would only be owed back to a daemon.
+        """
+        st = mesh.activity.setdefault(member.handle, {"anchor": time.monotonic()})
+        if st.get("stranded_told"):
+            return
+        # Only members can be messaged back. An external sender (the operator
+        # at a dashboard, or the policy engine itself) has no terminal in this
+        # mesh, and a self-report would be a daemon talking to itself.
+        senders = sorted(
+            {
+                str(m.get("from") or "")
+                for m in pending
+                if str(m.get("from") or "") in mesh.members
+                and str(m.get("from") or "") != member.handle
+            }
+        )
+        st["stranded_told"] = True  # set even with nobody to tell: retrying
+        if not senders:             # every tick would not find one either
+            return
+        held = stranded_notice(
+            [{"handle": member.handle, "session": member.session, "state": state}]
+        )
+        body = (
+            f"{member.handle} is not reading you: {held} "
+            f"{len(pending)} message(s) of yours are waiting there."
+        )
+        try:
+            self._send_core(mesh, mesh_policy.POLICY_SENDER, senders, body,
+                            external=True, type="fyi")
+            self._flush_guests_soon(mesh)
+        except MeshError as exc:
+            log.debug("mesh %r: stranded report failed: %s", mesh.name, exc)
+            st.pop("stranded_told", None)  # unreported; let a later tick retry
+            return
+        log.info(
+            "mesh %r: told %s that %r (session %r) is %s with %d message(s) held",
+            mesh.name, ", ".join(senders), member.handle, member.session,
+            state, len(pending),
+        )
+
     async def _deliver_to(
         self, mesh: Mesh, member: Member, *, force: bool = False
     ) -> None:
@@ -4807,9 +4993,21 @@ class MeshManager:
         try:
             session = self.manager.get(member.session)
         except ManagerError:
-            return  # session removed; hold the cursor, deliver on rejoin/respawn
+            # Session removed; hold the cursor, deliver on rejoin/respawn.
+            await self._report_stranded(mesh, member, pending, "missing")
+            return
         if session.exited:
-            return  # hold until respawn (same name, same cursor)
+            # Hold until respawn (same name, same cursor) — and tell whoever
+            # is waiting on this member, ONCE. Holding is right; holding in
+            # silence is what lets a sender spend its next ten turns talking
+            # to a terminal that closed an hour ago.
+            await self._report_stranded(mesh, member, pending, "exited")
+            return
+        # Alive again: arm the report, so a second death is reported afresh
+        # rather than swallowed by the first one's latch.
+        mesh.activity.setdefault(
+            member.handle, {"anchor": time.monotonic()}
+        ).pop("stranded_told", None)
         # ``force`` is a human at the dashboard saying "type it in now" (see
         # :meth:`flush_session`). It drops THIS gate and nothing below it: the
         # gate exists to keep an automated paste out of a running turn, and
