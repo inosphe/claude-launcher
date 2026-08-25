@@ -190,8 +190,14 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--out", default=str(
         Path(tempfile.gettempdir()) / "gate_bench.jsonl"))
     ap.add_argument("--basetemp-root", default="C:/t/s24b")
-    ap.add_argument("--gate", default=(
-        'uv run --no-sync pytest tests -q -m "not worktree" -n 8'))
+    # The default used to be the worker's gate, back when that gate ran
+    # `-m "not worktree" -n 8` on leaving every review step. It does not any
+    # more -- workers select the tests their own change can affect
+    # (tools/changed_tests.py), and the only run that still sweeps the suite
+    # is the leader's batch sweep. So the default follows the suite: this is
+    # tools/sweep.py's DEFAULT_COMMAND, minus the per-session basetemp that
+    # --basetemp-root supplies here.
+    ap.add_argument("--gate", default="uv run --no-sync pytest tests -q -n 8")
     return ap
 
 

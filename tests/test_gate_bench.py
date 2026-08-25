@@ -34,21 +34,29 @@ def _default(dest):
 
 
 def test_the_gate_string_survives_splitting_with_its_quotes_intact():
-    """``-m "not worktree"`` must reach pytest as ONE argument.
+    """A quoted argument must reach pytest as ONE argument.
 
     Naive ``str.split()`` hands pytest a ``-m`` of ``'"not'`` and an extra
     path argument ``worktree"``; pytest then collects nothing and exits 5.
     That failure is nasty because it looks like success in the only way most
     people check — zero failures — while having run zero tests.
+
+    The command is spelled out here rather than taken from ``--gate``'s
+    default. It used to come from the default, which carried
+    ``-m "not worktree"`` back when the worker's gate ran that; when the
+    default stopped carrying a quoted argument this test lost its subject
+    and went red without anything about the splitting having changed. What
+    is under test is ``gate_argv``, so the input belongs to the test.
     """
     mod = _load()
-    argv = mod.gate_argv(_default("gate"))
+    quoted = 'uv run --no-sync pytest tests -q -m "not worktree" -n 8'
+    argv = mod.gate_argv(quoted)
 
     assert "not worktree" in argv, argv
     assert argv[argv.index("-m") + 1] == "not worktree"
     assert '"not' not in argv  # the naive-split signature
     # and the split the tool must NOT use really does produce it
-    assert '"not' in _default("gate").split()
+    assert '"not' in quoted.split()
 
 
 def test_the_default_gate_still_names_the_width_under_test():
