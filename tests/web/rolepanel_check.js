@@ -122,7 +122,8 @@ new Function(
   "exports", "document", "el", "api",
   stubs
   + sliceConst("const QUICKJOB_FALLBACK = {")
-  + slice("spawnReport") + slice("spawnPreflightNote") + slice("postSpawn")
+  + slice("spawnReport") + slice("spawnPreflightNote") + slice("spawnHardBlocks")
+  + slice("postSpawn")
   + slice("spawnMissingSources") + slice("spawnSourceNote")
   + slice("qjStamp") + slice("idleNudgeText")
   + slice("sessQuickJob") + slice("renderSessKids")
@@ -256,6 +257,61 @@ async function main() {
   await settle();
   check("a blocked spawn opens no wizard", ctx.opens().length === 0,
     ctx.opens().length);
+
+  /* ---- the child cap is a warning here, not a wall ----------------------
+     spawn.py reports the SOFT cap the same way it reports a hard refusal --
+     can_spawn false, the cap named in blocked_by -- and only soft_blocked_by
+     separates them. Reading the verdict alone cost a leader at 4/4 the whole
+     button, which is the one press that reaches the wizard, and the wizard
+     is where the Over-limit tick crosses the cap. So: keep the button, name
+     the cap, point at the crossing, and open. */
+  ctx.drop();
+  routes = QJ_ROUTES();
+  routes["GET /api/sessions/lead1/children"] = {
+    doc: {
+      can_spawn: false,
+      blocked_by: ["child limit reached (4/4)"],
+      soft_blocked_by: ["child limit reached (4/4)"],
+      children_remaining: 0,
+    },
+  };
+  ctx.resetOpens();
+  const capped = ctx.sessQuickJob(data);
+  await settle();
+  check("the child cap keeps the button alive",
+    qjParts(capped).spawn.disabled === false);
+  check("...and says which cap was reached",
+    texts(capped).includes("child limit reached (4/4)"),
+    texts(capped).slice(-260));
+  check("...and points at the box that crosses it",
+    texts(capped).includes("spawn over the child limit"),
+    texts(capped).slice(-260));
+  await qjParts(capped).spawn.fire("click");
+  await settle();
+  check("a capped leader still reaches the wizard", ctx.opens().length === 1,
+    ctx.opens().length);
+
+  /* A hard block sitting UNDER the soft one still closes the panel: an
+     over_limit tick crosses the cap, it does not undo the depth ceiling. */
+  ctx.drop();
+  routes = QJ_ROUTES();
+  routes["GET /api/sessions/lead1/children"] = {
+    doc: {
+      can_spawn: false,
+      blocked_by: ["depth limit reached (3/3)", "child limit reached (4/4)"],
+      soft_blocked_by: ["child limit reached (4/4)"],
+      children_remaining: 0,
+    },
+  };
+  ctx.resetOpens();
+  const both = ctx.sessQuickJob(data);
+  await settle();
+  check("a hard block outranks the soft cap",
+    qjParts(both).spawn.disabled === true);
+  check("...and the note quotes the HARD one",
+    texts(both).includes("depth limit reached"), texts(both).slice(-200));
+  check("...and the soft cap alone opens no wizard",
+    ctx.opens().length === 0, ctx.opens().length);
 
   /* ---- a picker emptied by a failed fetch says so, and refuses to save ---
      The panel's two pickers are also what "Save as defaults" WRITES to
