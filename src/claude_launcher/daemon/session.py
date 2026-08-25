@@ -253,6 +253,18 @@ class Session:
         #: into a half-written line is the corruption all of this exists to
         #: prevent, and the human's own Enter is what says it is safe again.
         self._draft_open = False
+        #: A person's standing "don't type anything in here" — set from the
+        #: dashboard, not derived from the keyboard. Every hold above is the
+        #: daemon *guessing* from timing that now is a bad moment; this one
+        #: is somebody saying so, and it does not expire, because a guess
+        #: that lapses after five seconds is right and a decision that
+        #: lapses after five seconds is broken. Read by the delivery gate
+        #: (:meth:`MeshManager._deliver_to`) and reported by the queued view;
+        #: cleared by :meth:`set_delivery_hold` and by nothing else.
+        #:
+        #: In memory only, and deliberately: it says "I am at this keyboard
+        #: right now", which a daemon restart has already ended.
+        self._delivery_hold = False
 
         session_dir = paths.session_dir(sdef.name)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -699,6 +711,28 @@ class Session:
             return False
         return True
 
+    def delivery_held(self) -> bool:
+        """Whether a person has pinned this session shut.
+
+        Distinct in kind from every other hold in this class, not in degree:
+        those are inferred from timing and release themselves, this one was
+        chosen and releases when it is un-chosen. Which is also why it is the
+        only one worth putting a button on — a guess does not need an
+        override, a decision needs a way back.
+        """
+        return self._delivery_hold
+
+    def set_delivery_hold(self, held: bool) -> bool:
+        """Pin this session shut, or let it go again; returns the new state.
+
+        Nothing is dropped either way. Held messages stay in their mesh log
+        with the recipient's cursor where it was — exactly as they do while
+        the daemon waits out a busy turn — so resuming types in the backlog
+        that built up rather than resuming from the next arrival.
+        """
+        self._delivery_hold = bool(held)
+        return self._delivery_hold
+
     def keyboard_busy(
         self, guard: Optional[float] = None, *, terminal_only: bool = False
     ) -> bool:
@@ -1077,6 +1111,12 @@ class DeadSession:
         self, guard: Optional[float] = None, *, terminal_only: bool = False
     ) -> bool:
         return False
+
+    def delivery_held(self) -> bool:
+        return False  # nothing to hold back from a terminal that is gone
+
+    def set_delivery_hold(self, held: bool) -> bool:
+        return False  # and no way to hold it: the answer is always "open"
 
     def capture(self, *, history: bool = False) -> List[str]:
         return self.screen.render_history() if history else self.screen.render_screen()

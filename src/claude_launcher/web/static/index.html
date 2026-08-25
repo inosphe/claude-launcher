@@ -117,6 +117,14 @@
     <div id="term-header" class="hidden">
       <span id="term-title"></span>
       <span id="term-status" class="badge"></span>
+      <!-- What would happen to a message arriving RIGHT NOW: typed straight
+           in, or queued — and, when it is queued, by what. The badge before
+           it says what the session is doing; this says what that means for
+           anything trying to reach it, which is a different question and the
+           one nothing on this page used to answer until a backlog had
+           already built up. Also the button that pins delivery shut and lets
+           it go again. Rendered by renderHoldChip(). -->
+      <button id="term-hold" class="term-btn hold-chip hidden" type="button"></button>
       <!-- Up only while the socket is down: reconnecting (with the try it is
            on) or given up. Pressing it retries at once, which is the whole
            reason it is a button — the automatic retries are bounded, and after

@@ -3097,7 +3097,11 @@ function localTyping() {
    the session panel. `mine` says whether this tab's typing can be the
    keyboard in question (false when the panel describes another session). */
 function queuedReason(q, mine) {
-  switch (q.reason) {
+  // `state`, not `reason`: the daemon fills it unconditionally (it is the
+  // gate's one-word answer even before anything has queued), so a payload
+  // carrying it says the same thing here, in the banner, and in the header
+  // chip. `reason` is kept for the old clients that asked about a backlog.
+  switch (q.state !== undefined ? q.state : q.reason) {
     case "keyboard":
       // A draft is a different wait from a recent keystroke, and saying so
       // matters: "wait a few seconds" is true of the second and never of the
@@ -3117,6 +3121,9 @@ function queuedReason(q, mine) {
         : "held: the agent is mid-turn — typed in when it goes idle";
     case "exited":
       return "held: the session has exited — delivered if it is respawned";
+    case "hold":
+      return "held: delivery is pinned shut here (the hold chip) — press it " +
+        "again to resume";
     default:
       return "delivering…";
   }
@@ -3187,6 +3194,10 @@ function queuedMsgRow(m) {
 function renderTermQueued(q) {
   const box = $("term-queued");
   const msgs = (q && q.messages) || [];
+  // `reason` names a backlog's hold, so it is null while there is none; the
+  // banner only ever draws with a backlog, so either field would do here —
+  // but `state` is the one-word truth the daemon now always fills in, and
+  // reading it is what keeps this strip and the header chip in agreement.
   const show = msgs.length > 0 && currentPage === "terminal" && !!currentName;
   // The banner and the terminal share a column, so appearing, disappearing
   // and folding all change the grid the session draws into — refit on any of
@@ -3260,6 +3271,118 @@ async function refreshTermQueued() {
   }
   if (name !== currentName || currentPage !== "terminal") return;
   renderTermQueued(q);
+  renderHoldChip(q);
+}
+
+/* ---- delivery chip (#term-hold) ----
+   The answer to the question this page could not ask before: if a message
+   arrived at this session right now, would it be typed in or queued — and,
+   when it is queued, by what. The status badge beside it says what the
+   session is DOING; the chip says what that means for anything trying to
+   reach it, which is a different question and the one the operator staring
+   at a quiet terminal is actually asking. It is a chip, not a banner,
+   because the answer must be readable while the backlog is still empty —
+   "nothing queued yet, because I have this session pinned shut" and
+   "nothing queued, and the next arrival goes straight in" are the same
+   empty backlog and opposite situations.
+
+   Clicking toggles the manual hold: "type nothing in here until I say" —
+   the case every automatic signal is blind to, since they all watch the
+   keyboard and the turn and nobody is at the keyboard. A hold you cannot
+   get out of from the panel that set it would be a trap, so the same click
+   that set it unsets it. "deliver now" still goes through (see the banner):
+   two instructions from the same person, and the later one is the live one.
+
+   Fed by the same poll as the queued banner (refreshTermQueued), and kept
+   to one sentence: the WHY, when a click would not fit it, is the banner's
+   job — this only ever has to answer "is it coming in or not". */
+let holdBusy = false;   // one toggle at a time; a double-click is one flip
+
+/* One sentence for the chip, from the daemon's state word. The ladder here
+   mirrors the delivery gate's order in _deliver_to, so the chip never names
+   a hold the daemon is not applying. `draft` sharpens the keyboard hold the
+   way the banner does — the fix for an unsent line (send it or clear it)
+   is different from the fix for a recent keystroke (just wait). */
+function holdChipText(q, msgs) {
+  switch (q.state) {
+    case "exited":
+      return "delivery: exited";
+    case "hold":
+      return msgs > 0 ? `delivery: held — pinned (${msgs} queued)` : "delivery: held — pinned";
+    case "busy":
+      return msgs > 0 ? `delivery: queued — busy (${msgs})` : "delivery: would queue — busy";
+    case "keyboard":
+      return q.draft_open
+        ? (msgs > 0 ? `delivery: queued — unsent line (${msgs})` : "delivery: would queue — unsent line")
+        : (msgs > 0 ? `delivery: queued — typing (${msgs})` : "delivery: would queue — typing");
+    default:
+      return msgs > 0 ? `delivery: live (${msgs} queued)` : "delivery: live";
+  }
+}
+
+function renderHoldChip(q) {
+  const chip = $("term-hold");
+  if (!chip) return;   // markup from before the chip existed
+  if (!chip.dataset.holdBound) {
+    // Bound here, not at load: the chip lives in the terminal page's markup,
+    // and a load-time `$("term-hold")` throws the moment app.js is evaluated
+    // with that page absent (the stub DOMs in tests/web, which carry only the
+    // elements they exercise). First render is also first real use.
+    chip.dataset.holdBound = "1";
+    chip.addEventListener("click", toggleHold);
+  }
+  const show = !!q && currentPage === "terminal" && !!currentName;
+  if (!show) {
+    chip.classList.add("hidden");
+    holdBusy = false;
+    return;
+  }
+  const msgs = ((q && q.messages) || []).length;
+  chip.textContent = holdChipText(q, msgs);
+  chip.className = "term-btn hold-chip";
+  chip.classList.toggle("hold-pinned", q.state === "hold");
+  chip.classList.toggle("hold-blocked", q.state !== "settling" && q.state !== "hold");
+  chip.disabled = holdBusy;
+  chip.title = chipTitle(q);
+}
+
+function chipTitle(q) {
+  const pinned = q.state === "hold";
+  const lines = [
+    "would a message arriving right now be typed in, or queued — and by what.",
+    "Click to " + (pinned
+      ? "RESUME: let deliveries type in again (the backlog goes first)."
+      : "HOLD: type nothing in here until you say — even while you are reading, hands off the keys."),
+  ];
+  if (pinned && (q.messages || []).length) {
+    lines.push("The queued strip below is what is waiting; \"deliver now\" there still goes through.");
+  }
+  return lines.join("\n");
+}
+
+async function toggleHold() {
+  const chip = $("term-hold");
+  if (holdBusy) return;
+  holdBusy = true;
+  if (chip) chip.disabled = true;
+  let q = null;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(currentName)}/queued/hold`,
+      { method: "POST", headers: { "content-type": "application/json" }, body: "{}" }
+    );
+    if (resp.ok) {
+      const doc = await resp.json().catch(() => ({}));
+      q = doc.queued || null;
+    }
+    // not ok: older daemon without the route — fall through and re-poll,
+    // so the chip tells the truth it can rather than the one it wished for
+  } catch {
+    // offline — the health poll owns saying so; re-poll to keep the last truth
+  }
+  holdBusy = false;
+  if (q) { renderTermQueued(q); renderHoldChip(q); }
+  else refreshTermQueued();
 }
 // The network coming back is the one event that says "try now" without a
 // person having to be there. Guarded like the rest: it does nothing unless
@@ -7181,10 +7304,10 @@ function sessQueued(data) {
   if (!q || !(q.messages || []).length) return null;
   const s = data.session || {};
   const box = el("div", "sess-queued");
-  if (q.reason === "keyboard") box.className += " held";
+  if (q.state === "keyboard") box.className += " held";
   box.appendChild(el("h3", null, `Queued deliveries (${q.messages.length})`));
   box.appendChild(el(
-    "p", q.reason === "keyboard" ? "wf-warning" : "wf-note",
+    "p", q.state === "keyboard" ? "wf-warning" : "wf-note",
     "accepted by the mesh, not yet typed into the terminal — " +
     queuedReason(q, s.name === currentName)
   ));

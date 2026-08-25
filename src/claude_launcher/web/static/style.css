@@ -678,6 +678,25 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 /* A viewer scrolled back into history (virtual scroll). Informational, so a
    quiet blue like the resume button — it explains why the grid is frozen. */
 .scroll-chip { color: #9ecbff; border-color: #1f4272; cursor: default; }
+/* Delivery chip: would a message arriving now be typed in or queued, and by
+   what. Filled rather than outlined exactly when something would stand in
+   the way — the link chip's rule ("only ever up when something is wrong")
+   restated one question down, about delivery instead of the socket. Grey at
+   rest ("live" is the answer that needs no colour), amber while anything
+   automatic would hold it, and the hold a PERSON pinned is red-tinted, not
+   amber: a guess that lapses is information, a decision that is still
+   standing is a state the reader is expected to act on, and the chip is
+   also the button that undoes it. */
+.hold-chip { font-variant-numeric: tabular-nums; }
+.hold-chip.hold-blocked {
+  background: #221b07; color: #d29922; border-color: #4d3800;
+}
+.hold-chip.hold-blocked:hover { background: #2e2408; border-color: #6e5000; }
+.hold-chip.hold-pinned {
+  background: #442022; color: #ff7b72; border-color: #8b2e2e;
+}
+.hold-chip.hold-pinned:hover { background: #552528; color: #ff9c9c; }
+.hold-chip:disabled { opacity: 0.6; cursor: wait; }
 /* The briefing card's strip, between the header and the terminal: padding
    and a rule like the queued strip's, in the panel's own grey so a summary
    reads as something to read, not as a wait the reader caused. The card

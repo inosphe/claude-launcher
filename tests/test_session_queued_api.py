@@ -398,3 +398,221 @@ def test_flush_delivers_nothing_to_an_exited_session_and_keeps_the_backlog(
             await client.close()
 
     asyncio.run(run())
+
+
+def test_a_human_hold_stops_delivery_and_resuming_lets_it_through(home, tmp_path):
+    """The hold a person sets, at the one gate that decides whether a message
+    is typed in.
+
+    Every other hold in this system is the daemon *inferring* from status and
+    keystroke timing that now is a bad moment. This is the case that timing
+    cannot see: somebody reading their scrollback, hands off the keys, screen
+    quiet — every automatic signal says "deliverable" and the person would
+    rather it were not. So the premise here is deliberately the *most*
+    deliverable state there is (idle screen, quiet keyboard, a message
+    already waiting): nothing but the hold itself can explain a message that
+    does not move, and nothing but its removal can explain one that then
+    does.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        # Constructed without a daemon, so no delivery worker runs and the
+        # gate is only ever entered by this test — one pass, one assertion.
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("team")
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+        await mm.join("team", "s1", handle="worker")
+        session = mgr.get("s1")
+        await _wait_idle(session)
+        _pin_status(session, session_mod.STATUS_IDLE)
+        mesh = mm.get("team")
+        member = mesh.members["worker"]
+
+        await mm.send("team", "operator", "worker", "hold me",
+                      external=True, type="fyi")
+        assert len(mesh.pending("worker")) == 1
+
+        session.set_delivery_hold(True)
+        await mm._deliver_to(mesh, member)
+        # Held, and held WITHOUT loss: the cursor has not moved, so this is a
+        # message still waiting rather than one quietly dropped.
+        assert [m["body"] for m in mesh.pending("worker")] == ["hold me"]
+
+        session.set_delivery_hold(False)
+        await mm._deliver_to(mesh, member)
+        assert mesh.pending("worker") == []
+
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_hold_is_named_before_a_message_has_arrived_and_toggles_from_the_route(
+    home, tmp_path
+):
+    """``state`` answers the question the header chip asks and ``reason``
+    cannot: what would happen to a message arriving *now*.
+
+    ``reason`` explains an existing backlog, so it is null while there is
+    none — correct for the banner, useless for a chip that has to be readable
+    when nothing is queued yet. An empty backlog under a hold and an empty
+    backlog under nothing at all are the same empty list and opposite
+    situations, and only ``state`` tells them apart. The route toggles when
+    asked for no particular value, which is what lets the chip be one button
+    instead of a read followed by a racing write.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            session = mgr.get("s1")
+            await _wait_idle(session)
+            _pin_status(session, session_mod.STATUS_IDLE)
+
+            body = await (await client.get(
+                "/api/sessions/s1/queued", headers=BEARER)).json()
+            assert (body["hold"], body["state"], body["reason"]) == (
+                False, "settling", None
+            )
+
+            resp = await client.post(
+                "/api/sessions/s1/queued/hold", json={"hold": True},
+                headers=BEARER,
+            )
+            assert resp.status == 200
+            body = await resp.json()
+            # The answer carries the re-read backlog, so one round trip is
+            # enough to render the truth after the change.
+            assert body["hold"] is True
+            assert body["queued"]["state"] == "hold"
+            assert body["queued"]["reason"] is None   # nothing queued yet
+            assert session.delivery_held() is True
+
+            # No value = toggle: the chip is a button, not a form.
+            body = await (await client.post(
+                "/api/sessions/s1/queued/hold", json={}, headers=BEARER)).json()
+            assert body["hold"] is False
+            assert body["queued"]["state"] == "settling"
+
+            resp = await client.post(
+                "/api/sessions/nope/queued/hold", json={"hold": True},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_hold_outranks_the_timing_holds_but_not_a_dead_session(
+    home, tmp_path, monkeypatch
+):
+    """Where a human's hold sits in the one-word ladder.
+
+    It is reported ahead of ``busy`` and ``keyboard`` because the gate reads
+    it first — a chip saying "held by your typing" about a session somebody
+    deliberately pinned shut sends them to the wrong fix (wait a moment)
+    instead of the right one (press resume). It stays behind ``exited``,
+    which is not a hold anyone can lift. The raw signals ride along either
+    way, so a client can still see that both applied.
+    """
+    _register_py_harness()
+    monkeypatch.setattr(session_mod, "TYPING_GUARD", 3600.0)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            await mm.join("team", "s1", handle="worker")
+            session = mgr.get("s1")
+            await _wait_idle(session)
+            await mm.send("team", "operator", "worker", "hello there",
+                          external=True, type="ask")
+            session.set_delivery_hold(True)
+
+            # Busy AND held: the blunter automatic hold must not hide the
+            # deliberate one, because only one of the two has a button.
+            _pin_status(session, session_mod.STATUS_BUSY)
+            body = await (await client.get(
+                "/api/sessions/s1/queued", headers=BEARER)).json()
+            assert body["state"] == "hold"
+            assert body["reason"] == "hold"
+            assert body["status"] == session_mod.STATUS_BUSY   # both visible
+
+            # Keyboard AND held: same order, same reason.
+            _pin_status(session, session_mod.STATUS_IDLE)
+            await client.post(
+                "/api/sessions/s1/keys",
+                json={"keys": ["x"], "literal": True}, headers=BEARER,
+            )
+            body = await (await client.get(
+                "/api/sessions/s1/queued", headers=BEARER)).json()
+            assert body["keyboard_busy"] is True
+            assert body["reason"] == "hold"
+
+            # Exited outranks it: nobody can lift that one.
+            await session.shutdown()
+            body = await (await client.get(
+                "/api/sessions/s1/queued", headers=BEARER)).json()
+            assert body["reason"] == "exited"
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_flush_overrules_a_hold_without_lifting_it(home, tmp_path):
+    """"Deliver now" goes through a held session, and the hold survives it.
+
+    Two different instructions: "let this one in" and "stop holding". Folding
+    the second into the first would mean every use of the button silently
+    un-pinned the session, so the next arrival lands in the terminal somebody
+    is still reading — the exact interruption the hold was set to prevent.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            await mm.join("team", "s1", handle="worker")
+            session = mgr.get("s1")
+            await _wait_idle(session)
+            _pin_status(session, session_mod.STATUS_IDLE)
+            await mm.send("team", "operator", "worker", "let me in",
+                          external=True, type="fyi")
+            session.set_delivery_hold(True)
+
+            body = await (await client.post(
+                "/api/sessions/s1/queued/flush", headers=BEARER)).json()
+            assert body["flushed"] == 1
+            assert body["handles"] == ["worker@team"]
+            assert body["queued"]["messages"] == []
+            # Still pinned: the button delivered one message, it did not
+            # revoke the standing instruction.
+            assert body["queued"]["hold"] is True
+            assert body["queued"]["state"] == "hold"
+            assert session.delivery_held() is True
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())

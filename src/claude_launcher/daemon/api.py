@@ -279,6 +279,7 @@ def build_app(
     r.add_get("/api/sessions/{name}/briefing", h_session_briefing)
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
+    r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
     r.add_get("/api/sessions/{name}/children", h_session_children)
     r.add_post("/api/sessions/{name}/children", h_session_spawn)
     r.add_delete("/api/sessions/{name}/children/{child}", h_session_child_kill)
@@ -2244,6 +2245,12 @@ def _session_queued(request: web.Request, session) -> dict:
     banner drawn from this cannot claim a hold the daemon is not applying:
 
     * ``exited``   — nobody to type into; held until the session respawns.
+    * ``hold``     — a person pinned this session shut (``hold`` below, set
+      via :func:`h_session_hold`). Ahead of ``busy`` and ``keyboard`` because
+      the gate reads it first, and unlike them it does not time out: the
+      others give up after ``busy_hold`` and type in anyway, which is the
+      right ending for a guess drawn from timing and the wrong one for a
+      decision somebody made.
     * ``busy``     — mid-turn (or still starting); held until it goes idle.
     * ``keyboard`` — the screen is idle but someone is typing here (the web
       terminal or an attach). This is the hold a human causes *themselves*
@@ -2260,28 +2267,42 @@ def _session_queued(request: web.Request, session) -> dict:
     The raw signals ride along so a client can sharpen the wording (the web
     UI says "your typing" when its own keystrokes are recent), and
     ``busy_hold`` says when a busy/keyboard hold gives up and types anyway.
+
+    ``reason`` stays null while the backlog is empty — there is no backlog to
+    explain — but ``state`` is always filled in, and that is the difference
+    the header chip needed: "nothing is queued *and* the next message would
+    go straight in" and "nothing is queued *yet*, because I have this session
+    pinned shut" are the same empty list and opposite situations. ``state``
+    is what ``reason`` would be if a message arrived this instant, so a
+    reader can see the hold before it has cost them anything.
     """
     mm = _mesh_mgr(request)
     messages = mm.queued_for_session(session.sdef.name)
     status = session.status()
     keyboard = session.keyboard_busy()
     draft = session.draft_open()
-    if not messages:
-        reason = None
-    elif session.exited:
-        reason = "exited"
+    hold = session.delivery_held()
+    # One ladder, walked in the delivery gate's own order (see
+    # :meth:`MeshManager._deliver_to`), so the banner can never name a hold
+    # the daemon is not applying — or miss the one it is.
+    if session.exited:
+        state = "exited"
+    elif hold:
+        state = "hold"
     elif status != STATUS_IDLE:
-        reason = "busy"
+        state = "busy"
     elif keyboard:
-        reason = "keyboard"
+        state = "keyboard"
     else:
-        reason = "settling"
+        state = "settling"
     return {
         "messages": messages,
         "status": status,
         "keyboard_busy": keyboard,
         "draft_open": draft,
-        "reason": reason,
+        "hold": hold,
+        "state": state,
+        "reason": state if messages else None,
         "busy_hold": mm.busy_hold,
     }
 
@@ -2315,6 +2336,39 @@ async def h_session_queued_flush(request: web.Request) -> web.Response:
     result = await _mesh_mgr(request).flush_session(session.sdef.name)
     return web.json_response(
         {**result, "queued": _session_queued(request, session)}
+    )
+
+
+async def h_session_hold(request: web.Request) -> web.Response:
+    """Pin this session shut, or let it go again, because a person said so.
+
+    The other half of :func:`h_session_queued_flush`, and its opposite: that
+    one is "type it in now, I know what is running", this one is "type
+    nothing in here until I say". Both exist for the same reason — the daemon
+    guesses from status and keystroke timing whether a moment is a good one,
+    and a guess is all it can do. Flush overrules a guess that is too
+    cautious; hold covers the one that is too eager, the case the timing
+    signals cannot see at all: somebody reading the scrollback, or thinking
+    with their hands off the keys, where nothing on the wire says "not now"
+    and every automatic hold has already lapsed.
+
+    ``{"hold": true|false}``; omitting the field toggles, so the button in
+    the header needs no read-then-write race. Answers with the re-read
+    backlog so the caller renders the truth after the change in one trip.
+
+    Nothing is dropped: held messages stay in their mesh log with the
+    recipient's cursor where it was, and resuming types in the backlog that
+    built up. Nothing is *promised* either — resume returns the session to
+    the ordinary gate, so a message still waits out a running turn.
+    """
+    session = _session(request)
+    body = await _json_body(request)
+    want = body.get("hold")
+    held = session.set_delivery_hold(
+        not session.delivery_held() if want is None else bool(want)
+    )
+    return web.json_response(
+        {"hold": held, "queued": _session_queued(request, session)}
     )
 
 
