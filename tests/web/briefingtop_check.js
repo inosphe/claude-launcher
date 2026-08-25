@@ -63,8 +63,12 @@ function mkel(tag) {
     },
   };
   let text = "";
+  // Aggregating, like a real node: a node either holds text or holds
+  // children (the setter clears them), and applyBriefingTop measures the
+  // pane by the text under it — a card that grows from "summarising…" to a
+  // filled summary is a taller pane, and the stub has to be able to say so.
   Object.defineProperty(node, "textContent", {
-    get() { return text; },
+    get() { return text + node.children.map((c) => c.textContent).join(""); },
     set(v) { text = v; node.children.length = 0; node.attrs.textContent = v; },
   });
   Object.defineProperty(node, "innerHTML", {
@@ -109,8 +113,17 @@ const flush = () => new Promise((r) => setImmediate(r));
 
 const ctx = {};
 const noChip = () => null;
+/* The pane and the terminal share one flex column, so every change to the
+   pane's height has to be followed by a refit — otherwise the session keeps
+   the rows it had and the ones the card pushed past the bottom edge are
+   clipped away by #terminal's overflow:hidden, with no scrollbar and no
+   wheel (it browses the daemon's history) to reach them. Counted here so the
+   checks can hold both halves of the rule: refit when the height changed,
+   and NOT on the 2s poll that re-renders the same card. */
+let refits = 0;
+const refitSoon = () => { refits += 1; };
 new Function(
-  "exports", "$", "document", "api", "ctxChip",
+  "exports", "$", "document", "api", "ctxChip", "refitSoon",
   [slice("el"), slice("fmtAge"), slice("briefingStateClass"),
    slice("fetchBriefing"), slice("toggleBriefing"),
    slice("renderBriefingCard"), slice("applyBriefingTop"),
@@ -130,7 +143,7 @@ exports.apply = applyBriefingTop;
 exports.section = sessBriefSection;
 exports.setCurrent = (n) => { currentName = n; };
 exports.setLLM = (v) => { briefingLLM = v; };
-`)(ctx, (id) => byId[id] || null, { createElement: mkel }, api, noChip);
+`)(ctx, (id) => byId[id] || null, { createElement: mkel }, api, noChip, refitSoon);
 
 let failures = 0;
 function check(what, got, want) {
@@ -200,6 +213,25 @@ function findTag(node, tag) {
   check("the pane is no longer folded", pane.className.includes("hidden"), false);
   check("the card's sandwich is the row renderer's", card().className, "sess-brief");
 
+  /* The refit rule. The card is drawn between the header and the terminal in
+     one flex column, so its height comes straight out of the grid: opening it
+     without a refit leaves the session at the rows it had and the stylesheet
+     clips the bottom ones away — no scrollbar, and the wheel is the daemon's
+     history rather than that overflow, so the foot of the screen is simply
+     gone until some unrelated event happens to refit. The summariser landing
+     is the same event again: "summarising…" is one line and the answer is
+     several, and the pane grows under a grid that has not been told. */
+  check("opening the card refits, and the summary landing refits again",
+        refits >= 2, true);
+
+  /* ...and the other half of the rule: applyBriefingCards runs on every 2s
+     poll, so an unchanged card must cost nothing. A refit is a session
+     resize; firing it twice a second would churn the program's grid. */
+  const quiet = refits;
+  ctx.apply();
+  ctx.apply();
+  check("a poll that re-renders the same card does not refit", refits, quiet);
+
   /* The card's own ⟳ refreshes with refresh=1. */
   answer = { status: 200, body: {
     session: "s1", generated_at: new Date().toISOString(), cached: true,
@@ -217,6 +249,8 @@ function findTag(node, tag) {
   check("closing removes the card and flips the glyph",
         [pane.className.includes("hidden"), btn.textContent],
         [true, "▸ briefing"]);
+  check("and closing refits too — the column just got its height back",
+        refits > quiet, true);
 
   /* No llm: block — the button goes inert, its tooltip pointing at the
      config to write, and any open card folded away. Configuring brings it
