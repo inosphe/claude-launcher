@@ -164,25 +164,6 @@ def clear_harness(profile: Profile) -> None:
     store.set_profile_field(profile.name, "harness", None)
 
 
-def effective_api_key_env(profile: Profile) -> Optional[str]:
-    """Environment variable receiving this profile's stored API key.
-
-    Kept separate from ``env`` because the value itself lives in a 0600 local
-    secret file, while this non-secret routing choice belongs in syncable YAML.
-    The nearest declaration wins just like ``harness``.
-    """
-    name: Optional[str] = None
-    for item in chain(profile):
-        raw = str(store.profile_entry(item.name).get("api_key_env") or "").strip()
-        if raw:
-            name = raw
-    return name
-
-
-def set_api_key_env(profile: Profile, name: Optional[str]) -> None:
-    store.set_profile_field(profile.name, "api_key_env", name)
-
-
 def injectable_token(profile: Profile) -> Optional[str]:
     """Token to inject as ``CLAUDE_CODE_OAUTH_TOKEN`` for ``run``.
 
@@ -231,10 +212,9 @@ def stored_auth_token(profile: Profile) -> Optional[str]:
     distinction existed, so the nearest launcher token remains a fallback.
     Native ``.credentials.json`` OAuth is never treated as a provider key.
     """
-    if effective_api_key_env(profile) == "ANTHROPIC_AUTH_TOKEN":
-        key = stored_api_key(profile)
-        if key:
-            return key
+    key = stored_api_key(profile)
+    if key:
+        return key
     for p in [profile, *_ancestors_nearest_first(profile)]:
         token = credentials.stored_token(p)
         if token:
@@ -266,10 +246,7 @@ def login_state(profile: Profile) -> str:
         # We do not parse undocumented credential formats merely to paint a
         # status cell; ``claunch login``/the harness is authoritative.
         return "managed"
-    if (
-        effective_api_key_env(profile) == "ANTHROPIC_AUTH_TOKEN"
-        and stored_api_key(profile)
-    ):
+    if stored_api_key(profile):
         return "ok"
     own = credentials.token_state(profile)
     if own != "none":

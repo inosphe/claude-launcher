@@ -496,7 +496,7 @@ def build_command(
     # it, mapping each session 1:1 to its own workflow run.
     env["CLAUNCH_SESSION"] = sdef.name
     env.update(sdef.env)
-    if prof is not None and entry is not None and sdef.harness != CLAUDE_HARNESS:
+    if prof is not None and entry is not None:
         try:
             runner.finalize_harness_env(prof, entry, env)
         except runner.RunnerError as exc:

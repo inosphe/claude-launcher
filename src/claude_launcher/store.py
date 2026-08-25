@@ -21,7 +21,6 @@ Schema::
       <name>:
         parent: <other>         # optional
         harness: <name>         # optional; inherited, default claude
-        api_key_env: <ENV_VAR>  # optional API-key injection route
         provider: <name>        # optional; Claude Code only
         env: {KEY: VALUE, ...}
     workspaces:                 # machine-local; see :mod:`workspaces`

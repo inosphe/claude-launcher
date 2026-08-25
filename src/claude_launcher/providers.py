@@ -23,9 +23,10 @@ provider contributes its env as a *low-priority backend default*: it sits above
 the launching shell but below the profile's own ``env`` (applied last), so a
 profile key always beats a provider key — only keys a profile never sets fall
 through to the provider's value. Selecting a non-default provider also swaps
-auth: the profile's stored ``set-token`` secret (own, inherited, or borrowed)
-is exported as ``ANTHROPIC_AUTH_TOKEN`` instead of the launcher injecting the
-profile's OAuth ``CLAUDE_CODE_OAUTH_TOKEN``.
+auth: the profile's separate ``set-key`` secret (own, inherited, or borrowed)
+is exported through the Claude harness's packaged ``ANTHROPIC_AUTH_TOKEN``
+route instead of injecting ``CLAUDE_CODE_OAUTH_TOKEN``. Historical
+``set-token`` values remain a fallback for existing profiles.
 """
 
 from __future__ import annotations

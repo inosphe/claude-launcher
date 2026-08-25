@@ -87,7 +87,7 @@ claunch usage work      # show this profile's subscription usage
 
 # Other harnesses are selected by the profile, never by a session:
 claunch create pi-work --harness pi --no-seed
-claunch set-key pi-work ANTHROPIC_API_KEY
+claunch set-key pi-work
 claunch run pi-work
 
 claunch create kimi-work --harness kimi --no-seed
@@ -101,7 +101,7 @@ claunch login kimi-work                  # kimi login (OAuth)
 | `create <name>`        | Create a profile (`--harness`, `--parent` to inherit). Claude profiles seed/apply Claude config; other harnesses start clean. |
 | `set-harness <name> [h]` | Show or pin the profile's harness; `--clear` inherits from its parent/default. |
 | `login <name>`         | Run the selected OAuth harness's login flow (Claude setup-token, Codex/Kimi/Cursor login). |
-| `set-key <name> ENV [key]` | Store an API-key harness secret separately and inject it only as `ENV` (Pi). |
+| `set-key <name> [key]` | Store an API key separately; the selected harness declares its injection variable. |
 | `run <name> [args...]` | Launch the profile's harness. Claude-only launcher flags are `--borrow`, `--null`, `--provider`, `--add-prompt`; other args pass through untouched. |
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
@@ -493,7 +493,7 @@ the profile's OAuth token as usual. For any other provider the launcher applies 
 `env`, so a per-profile (or template/inherited) value always wins over the
 provider for the same key. The provider carries its own auth, so the launcher
 does **not** inject `CLAUDE_CODE_OAUTH_TOKEN` — supply the backend key with
-`claunch set-key PROFILE ANTHROPIC_AUTH_TOKEN` (recommended; see *keeping
+`claunch set-key PROFILE` (recommended; see *keeping
 backend keys out of the config file* below) or as a plaintext
 `ANTHROPIC_AUTH_TOKEN` in the provider's `env`
 (clearing `CLAUDE_CODE_OAUTH_TOKEN`/`ANTHROPIC_API_KEY` as above).
@@ -504,11 +504,13 @@ The resulting precedence for a run is: shell env < provider `env` < profile `env
 **Keeping backend keys out of the config file.** Whenever a **non-default
 provider is active** for the run (selected on the profile, inherited, the
 global default, or forced with `run --provider`), the launcher looks up the
-profile's **stored provider key** — the `set-key ... ANTHROPIC_AUTH_TOKEN`
-value in the per-machine `.launcher-api-key` file, resolved own first and then
+profile's **stored provider key** — the `set-key` value in the per-machine
+`.launcher-api-key` file, resolved own first and then
 inherited (`--borrow` uses the lender's) — and injects it as
-`ANTHROPIC_AUTH_TOKEN`, **overriding** any plaintext value in the yaml. So a
-provider needs no secret in the file at all. For compatibility, an existing
+`ANTHROPIC_AUTH_TOKEN`, **overriding** any plaintext value in the yaml. While
+that bearer token is active, the packaged Claude harness also forces
+`ANTHROPIC_API_KEY=""` so Claude Code cannot send a competing `X-Api-Key`
+header. A provider therefore needs no secret in the file. For compatibility, an existing
 `.launcher-token`/`set-token` value remains the fallback when no separate key
 exists:
 
@@ -523,7 +525,7 @@ providers:
 
 ```bash
 claunch set-provider work fireworks-glm5p2
-claunch set-key work ANTHROPIC_AUTH_TOKEN fw_...  # separate backend API key
+claunch set-key work fw_...  # harness routes it to ANTHROPIC_AUTH_TOKEN
 claunch run work
 ```
 
@@ -607,7 +609,7 @@ or `--mcp` to narrow it.
 Every launcher-managed setting lives in **one file, `~/.claunch.yaml`**, which
 the launcher reads live at launch — there is no separate "export" step, because
 this file *is* the state. It holds the profile list, each profile's `harness`,
-`env`, `parent`, `api_key_env` and Claude `provider`, the default `template`,
+`env`, `parent` and Claude `provider`, the default `template`,
 and provider/harness definitions:
 
 ```yaml
@@ -627,7 +629,6 @@ profiles:
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: "200000"
   personal:
     harness: pi
-    api_key_env: ANTHROPIC_API_KEY   # routing only; the key is not in YAML
     env: {}
 ```
 
@@ -1580,8 +1581,14 @@ log; `--logs` is what frees those numbers again.
 ### Other harnesses (codex, pi, ...)
 
 Which harnesses exist is **declared, not hard-coded**. The packaged set ships
-`claude`, `codex`, `pi`, `kimi` and Cursor's `agent`; `claunch harnesses` shows it, along with whether
-this machine can actually run each one:
+`claude`, `codex`, `pi`, `kimi` and Cursor's `agent`; `claunch harnesses` shows
+whether this machine can actually run each one.
+
+The packaged source is `claude_launcher/harnesses.yaml`. It carries command,
+storage, auth mode, API-key route and conflicting-key rules together and is
+included in the wheel alongside the existing packaged workflow YAML files.
+
+For example:
 
 ```
 $ claunch harnesses
@@ -1612,6 +1619,8 @@ harnesses:
     env: {KEY: VALUE}       # optional overrides
     home_env: CODEX_HOME     # optional isolated per-profile home
     auth: oauth              # claude, oauth, api-key, or none
+    clear_env:               # variables forbidden by this auth mode
+      - OPENAI_API_KEY
     login_args: [login]      # optional interactive login argv
     description: "..."      # optional, shown in status surfaces
   pi: null                  # a tombstone: drop a packaged harness
@@ -1629,15 +1638,23 @@ claunch new-session -s cdx --profile cdx -c ~/proj
 
 `claude` is the one harness whose executable is `CLAUDE_LAUNCHER_BIN`; it uses
 the profile root as `CLAUDE_CONFIG_DIR` for backwards compatibility. Other
-packaged harnesses get namespaced storage below that root:
+packaged harnesses receive a namespaced home/config path below that root when
+their CLI documents an override. The external CLI decides exactly which files
+follow that variable (Cursor documents it for CLI config, not every credential):
 
-| Harness | Authentication | Isolated home |
+| Harness | Authentication | Profile-specific path |
 | --- | --- | --- |
 | Claude Code | launcher token or Claude provider | profile root (`CLAUDE_CONFIG_DIR`) |
 | Codex | `codex login` OAuth | `codex/` (`CODEX_HOME`) |
-| Pi | `claunch set-key PROFILE ENV_VAR` | `pi/` (`PI_CODING_AGENT_DIR`) |
+| Pi | `claunch set-key PROFILE` → packaged `ANTHROPIC_API_KEY` | `pi/` (`PI_CODING_AGENT_DIR`) |
 | Kimi harness | `kimi login` OAuth | `kimi/` (`KIMI_CODE_HOME`) |
-| Cursor agent | `agent login` OAuth | `agent/` (`CURSOR_CONFIG_DIR`) |
+| Cursor agent | `agent login` OAuth | `agent/` (`CURSOR_CONFIG_DIR`, CLI config) |
+
+The packaged harness document also owns API-key routing. Claude routes
+`set-key` to `ANTHROPIC_AUTH_TOKEN` and, whenever that bearer token is active,
+forces `ANTHROPIC_API_KEY=""`. Pi routes it to `ANTHROPIC_API_KEY`. A custom
+API-key harness declares its own `api_key_env`; OAuth harnesses instead declare
+the ambient API-key variables they remove. Profiles store none of this routing.
 
 Kimi has two deliberately separate uses. A `harness: kimi` profile runs the
 Kimi CLI with OAuth. A `harness: claude` profile may still use a Kimi-compatible
@@ -1646,7 +1663,8 @@ API endpoint through the existing Claude provider mechanism (`ANTHROPIC_*` and
 precedence.
 
 Pi's managed key lives in `.launcher-api-key`, separate from Claude's
-`.launcher-token`; only its non-secret `api_key_env` route is syncable YAML.
+`.launcher-token`; its `ANTHROPIC_API_KEY` route is part of the packaged Pi
+harness declaration rather than repeated in every profile.
 Codex/Kimi/Cursor never receive this managed key. Existing Claude-oriented
 `ANTHROPIC_*` and `CLAUDE_CODE_*` profile values remain intact for Claude, but
 are filtered from non-Claude harness environments. This prevents changing a
@@ -2687,12 +2705,13 @@ outside — a supervising script or another agent can watch
 
 - Profiles live under `~/.claude-launcher/profiles/<name>` (override the base
   with `CLAUDE_LAUNCHER_HOME`). That directory is the profile storage root.
-- Claude uses the root as `CLAUDE_CONFIG_DIR`; Codex, Pi, Kimi and Cursor use
-  their namespaced child directory through their documented home variable.
+- Claude uses the root as `CLAUDE_CONFIG_DIR`; Codex, Pi, Kimi and Cursor
+  receive a namespaced child directory through their documented home/config
+  variable (the external harness determines which data follows it).
 - `run` exports the profile's safe `env` plus the authentication appropriate
   to its harness. Claude keeps the existing `ANTHROPIC_*`/`CLAUDE_CODE_*`
   precedence; those namespaces are not copied to unrelated harnesses.
-- Launcher config (`harness`, `env`, `parent`, `api_key_env`, Claude provider,
+- Launcher config (`harness`, `env`, `parent`, Claude provider,
   templates/definitions) lives in `~/.claunch.yaml`. Secrets stay local.
 
 A profile directory typically holds:

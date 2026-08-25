@@ -92,6 +92,28 @@ def test_claude_command_uses_profile_env(home, monkeypatch, tmp_path):
     assert cwd == str(tmp_path)
 
 
+def test_session_env_cannot_restore_api_key_beside_claude_auth_token(
+    home, tmp_path
+):
+    p = profile.create("work")
+    from claude_launcher import settings
+
+    settings.set_env(p, {"ANTHROPIC_AUTH_TOKEN": "gateway-token"})
+    sdef = harness.normalize(
+        SessionDef(
+            name="x",
+            profile="work",
+            cwd=str(tmp_path),
+            env={"ANTHROPIC_API_KEY": "must-not-win"},
+        )
+    )
+
+    _, env, _ = harness.build_command(sdef)
+
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "gateway-token"
+    assert env["ANTHROPIC_API_KEY"] == ""
+
+
 def test_session_identity_env_exported(home, tmp_path):
     """CLAUNCH_SESSION (tmux's $TMUX equivalent) marks every session; cflow
     keys run state by it so sessions get 1:1 workflow runs."""
