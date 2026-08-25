@@ -5900,6 +5900,8 @@ function renderWfInto(view, data, ui) {
     "p", "wf-note",
     "click a step to inspect its reports (click again to clear)"
   ));
+  const pacedNote = wfPacedNote(wf, run);
+  if (pacedNote) dia.appendChild(pacedNote);
 
   const forceBtn = el(
     "button", "wf-btn force",
@@ -6617,12 +6619,29 @@ function escXml(s) {
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/* A cadence in the largest unit that still reads whole: 300 -> "5m",
+   90 -> "90s", 5400 -> "1.5h". The diagram has about ten pixels of type to
+   say it in, so "300 seconds" is not an option and neither is "00:05:00". */
+function fmtPace(sec) {
+  const n = Number(sec);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  if (n < 60) return `${+n.toFixed(2)}s`;
+  if (n < 3600) return `${+(n / 60).toFixed(2)}m`;
+  return `${+(n / 3600).toFixed(2)}h`;
+}
+
 function wfDiagramSvg(wf, run, selected) {
   const steps = wf.steps || [];
   const byId = {};
   for (const s of steps) byId[s.id] = s;
+  // Each way out carries the option it came from, not just its name: an
+  // option may be PACED (`interval`), and pacing is a property of the branch
+  // — this edge is passable at most once per interval — so the drawing has
+  // to reach the option itself to draw it.
   const outsOf = (s) =>
-    s.select ? s.select.options.map((o) => [o.next, o.name]) : [[s.next, null]];
+    s.select
+      ? s.select.options.map((o) => [o.next, o.name, o])
+      : [[s.next, null, null]];
 
   const order = [];
   const seen = new Set();
@@ -6642,11 +6661,22 @@ function wfDiagramSvg(wf, run, selected) {
   const edges = [];
   let hasEnd = false;
   for (const s of steps) {
-    outsOf(s).forEach(([t, label], i) => {
-      if (t) edges.push({ from: s.id, to: t, label, i });
-      else { hasEnd = true; edges.push({ from: s.id, to: "end", label, i }); }
+    outsOf(s).forEach(([t, label, opt], i) => {
+      const pace = (opt && opt.interval) || null;
+      if (t) edges.push({ from: s.id, to: t, label, i, pace });
+      else { hasEnd = true; edges.push({ from: s.id, to: "end", label, i, pace }); }
     });
   }
+
+  /* The one branch the run is parked on, if there is one. A paced option
+     chosen inside its interval is HELD rather than taken: the engine records
+     the choice, reports `waiting_window`, and the daemon's clock releases it.
+     That is a state of one branch of one step — not of the step, which is why
+     it is drawn on the edge — and `run.option` names which. */
+  const held = run && run.status === "waiting_window"
+    ? { step: run.step_id, option: run.option }
+    : null;
+  const isHeld = (e) => !!held && held.step === e.from && held.option === e.label;
 
   const NW = 210, NH = 44, ROWH = 82, W = 480;
   const NX = (W - NW) / 2;
@@ -6689,11 +6719,27 @@ function wfDiagramSvg(wf, run, selected) {
       d = `M ${NX} ${y1} C ${b} ${y1}, ${b} ${y2}, ${NX - 2} ${y2}`;
       lx = NX - 8; ly = (y1 + y2) / 2 + 4; anchor = "end";
     }
-    parts.push(`<path class="wfd-edge" d="${d}" marker-end="url(#arrow)"/>`);
+    const hold = isHeld(e);
+    // Dashed for as long as the pacing exists, not only while it bites: that
+    // this branch runs at most once per interval is a fact about the
+    // workflow, and a reader planning a run needs it before anything is held.
+    const ecls = `wfd-edge${e.pace ? " paced" : ""}${hold ? " held" : ""}`;
+    parts.push(`<path class="${ecls}" d="${d}" marker-end="url(#arrow)"/>`);
     if (e.label) {
       parts.push(
         `<text class="wfd-elabel" x="${lx}" y="${ly}" text-anchor="${anchor}">` +
         `${escXml(e.label)}</text>`
+      );
+    }
+    // Under the option's own name, in its column: what the pacing costs this
+    // branch — and, while it is actually held, when the window opens.
+    if (e.pace) {
+      const word = hold
+        ? `held → ${fmtOpensAt(run.opens_at)}`
+        : `every ${fmtPace(e.pace)}`;
+      parts.push(
+        `<text class="wfd-epace${hold ? " held" : ""}" x="${lx}" ` +
+        `y="${ly + 11}" text-anchor="${anchor}">${escXml(word)}</text>`
       );
     }
   }
@@ -6707,11 +6753,21 @@ function wfDiagramSvg(wf, run, selected) {
       && run.status !== "done" && run.status !== "aborted";
     if (active) cls.push("current");
     else if (visits[id]) cls.push("visited");
+    // Standing here, but on the clock rather than on the work. Distinct from
+    // `current` because the two want opposite readings out of a reader: one
+    // says "this is being worked", the other "this is not, and no press of
+    // yours is owed".
+    if (active && held) cls.push("holding");
     if (id === selected) cls.push("selected");
     const flags = [];
     if (s.gate) flags.push("gate");
     if (s.verify) flags.push("verify");
     if (s.select) flags.push(`select:${s.select.chooser}`);
+    // A step is paced if any way out of it is. The box says the property
+    // exists; the edges say which branch carries it, and at what cadence.
+    if (s.select && (s.select.options || []).some((o) => o.interval)) {
+      flags.push("paced");
+    }
     const title = s.title && s.title !== s.id ? `${s.id} — ${s.title}` : s.id;
     parts.push(`<g class="${cls.join(" ")}" data-step="${escXml(s.id)}">`);
     parts.push(`<rect x="${NX}" y="${y}" width="${NW}" height="${NH}" rx="8"/>`);
@@ -6743,6 +6799,26 @@ function wfDiagramSvg(wf, run, selected) {
   }
   parts.push("</svg>");
   return parts.join("");
+}
+
+/* The key to the dashes, offered only by the drawings that have any. A dashed
+   branch means nothing on its own, and pacing is the one thing in this picture
+   a reader has no other way to learn: the run page's prose says it while a
+   choice is held, and says nothing at all the rest of the time. */
+function wfPacedNote(wf, run) {
+  const paced = (wf.steps || []).some(
+    (s) => s.select && (s.select.options || []).some((o) => o.interval)
+  );
+  if (!paced) return null;
+  const held = run && run.status === "waiting_window"
+    ? ` — '${run.option}' is held now, and opens ${fmtOpensAt(run.opens_at)}`
+    : "";
+  return el(
+    "p", "wf-note",
+    "a dashed branch is paced: the run may take it at most once per the " +
+    "interval on it, and a choice made inside that interval is held until " +
+    "the window opens — the daemon releases it, not you" + held
+  );
 }
 
 /* ------------------------------------------------------------------ */
@@ -11783,6 +11859,13 @@ function flowState(f) {
   // Waiting, but on a peer rather than on us — a distinct word, or the card
   // reads as "running" while nothing is happening.
   if (f.status === "waiting_answer") return "delegated";
+  // Held for a paced option's window. Its own word for the same reason
+  // "delegated" is: nothing is happening. But not delegated either — no peer
+  // holds this, the daemon's clock does, and a reader who cannot tell the two
+  // apart will go looking for an agent to chase. Below flowNeedsHuman on
+  // purpose: a person cannot clear this, so it must not join the queue of
+  // things that are theirs to clear.
+  if (f.status === "waiting_window") return "held";
   if (f.status === "select") return "deciding";
   if (!f.status || f.status === "idle" ||
       f.status === "no_session" || f.status === "no_cwd") return "none";
@@ -11792,10 +11875,21 @@ function flowState(f) {
 const FLOW_WORDS = {
   blocked: "waiting on you", running: "running", deciding: "agent deciding",
   delegated: "waiting on a peer",
+  held: "held for its window",
   done: "done", aborted: "aborted", error: "error",
   stopped: "session stopped", none: "no run",
   unknown: "run lives on its own daemon",
 };
+
+/* The state word, sharpened by the run when the run has more to say. Held is
+   the one state whose word is incomplete on its own: "held for its window"
+   invites exactly one question, and the payload already answers it. */
+function flowStateWord(state, f) {
+  if (state === "held" && f && f.opens_at) {
+    return `held → ${fmtOpensAt(f.opens_at)}`;
+  }
+  return FLOW_WORDS[state];
+}
 
 /* ---- drawing ---------------------------------------------------------- */
 function flowPipShape(pip, x, y) {
@@ -11914,12 +12008,12 @@ function flowCardSvg(member, f, wf, m) {
       "text", { class: "flow-foot", x: left, y: m.cardH / 2 - 10 },
       track.offGraph
         ? `${f.step_id} — not in this workflow snapshot`
-        : (f.step_id || FLOW_WORDS[state])
+        : (f.step_id || flowStateWord(state, f))
     ));
     g.appendChild(svg(
       "text", { class: `flow-state ${state}`, x: right, y: m.cardH / 2 - 10,
                 "text-anchor": "end" },
-      FLOW_WORDS[state]
+      flowStateWord(state, f)
     ));
   } else {
     // Nothing to track. The card says why in the space the track would have
@@ -11927,14 +12021,14 @@ function flowCardSvg(member, f, wf, m) {
     // line through it is the thing a reader stops at.
     g.appendChild(svg(
       "text", { class: `flow-foot none ${state}`, x: left, y: 10 },
-      f && f.graph_error ? "workflow snapshot unreadable" : FLOW_WORDS[state]
+      f && f.graph_error ? "workflow snapshot unreadable" : flowStateWord(state, f)
     ));
   }
   g.appendChild(svg("title", {}, [
     `${member.handle} (${member.role})`,
     member.session,
     wfName ? `workflow ${wfName}` : "no workflow run",
-    FLOW_WORDS[state],
+    flowStateWord(state, f),
     member.parent ? `spawned by ${member.parent}` : null,
   ].filter(Boolean).join(" · ")));
   g.addEventListener("click", () => {
@@ -12214,6 +12308,8 @@ function flowDetail(info, member, f, wf) {
   const dia = el("div", "wf-diagram");
   dia.innerHTML = wfDiagramSvg(wf, f, null);
   box.appendChild(dia);
+  const pacedNote = wfPacedNote(wf, f);
+  if (pacedNote) box.appendChild(pacedNote);
   return box;
 }
 

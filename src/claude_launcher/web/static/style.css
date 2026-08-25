@@ -1292,6 +1292,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wfd-node rect { fill: #1b1e24; stroke: #30363d; stroke-width: 1.5; }
 .wfd-node.visited rect { stroke: #2f6f43; }
 .wfd-node.current rect { fill: #14233a; stroke: #58a6ff; stroke-width: 2; }
+.wfd-node.holding rect { stroke: #8fa1b3; stroke-dasharray: 7 4; }
 .wfd-node.selected rect { stroke: #d29922; stroke-width: 2.5; stroke-dasharray: 6 3; }
 .wfd-node.current.selected rect { fill: #14233a; }
 .wfd-node.end rect { fill: none; stroke: #4d5566; stroke-dasharray: 4 3; }
@@ -1299,7 +1300,18 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wfd-flags { fill: #7d8590; font-size: 10px; }
 .wfd-visits { fill: #d29922; font-size: 11px; }
 .wfd-edge { fill: none; stroke: #4d5566; stroke-width: 1.5; }
+/* Paced: this branch is passable at most once per its interval. Dashed for as
+   long as the pacing is declared, not only while it bites. */
+.wfd-edge.paced { stroke-dasharray: 5 4; }
+/* ...and the one branch a run is parked on right now. Deliberately NOT the
+   gate's amber (#d29922): amber on these pages means "your move", and nobody
+   can press this open — the daemon's clock does. Nor the delegated purple,
+   which means a peer holds it. A brighter grey is the honest reading: the
+   live one, and nothing owed. */
+.wfd-edge.held { stroke: #8fa1b3; stroke-width: 2.2; }
 .wfd-elabel { fill: #8fa1b3; font-size: 10px; }
+.wfd-epace { fill: #6e7681; font-size: 9px; }
+.wfd-epace.held { fill: #c6cdd5; }
 
 .wf-reports { margin-top: 14px; }
 .wf-reports h3 {
@@ -1702,6 +1714,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
    Dashed like the empty cards — nothing is going to move on its own — but
    not dimmed, because there IS something to read. */
 .flow-card.stopped .flow-card-box { stroke: #4a5160; stroke-dasharray: 5 3; }
+/* Held for its window: dashed like a stopped card because neither is moving,
+   but lit rather than dimmed — the run is alive and the clock is counting. */
+.flow-card.held .flow-card-box { stroke: #8fa1b3; stroke-dasharray: 7 4; }
 .flow-handle { fill: #d8dbe0; font-size: 12.5px; font-weight: 600; }
 .flow-wf { fill: #7d8590; font-size: 10.5px; }
 .flow-foot { fill: #8fa1b3; font-size: 10.5px; }
@@ -1712,6 +1727,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .flow-state.deciding { fill: #58a6ff; }
 .flow-state.error { fill: #ff7b72; }
 .flow-state.stopped { fill: #8b949e; }
+.flow-state.held { fill: #c6cdd5; }
 .flow-dot { fill: #6e7681; }
 .flow-dot.idle { fill: #3fb950; }
 .flow-dot.busy { fill: #d29922; }
