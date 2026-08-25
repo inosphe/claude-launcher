@@ -136,6 +136,25 @@ const click = (n) => n.listeners.click({ stopPropagation() {} });
   ctx.decorate(s3, { name: "s3" });
   check("neither digest nor task: no one-line at all", oneLine(s3), null);
 
+  /* The row carries the WHOLE summary, however long — the stylesheet wraps
+     it (raillayout_check pins that) and nothing here may shorten it first.
+     A cut made in JS would be the worse half of the same bug: invisible to
+     the CSS check, and unrecoverable, because the element's title is a fixed
+     label rather than the text. The fallback task is the long case in
+     practice — it is a briefing paragraph, newlines and all, so its own line
+     breaks have to survive the trip too. */
+  const long = "긴 요약: " + "여러 줄로 접혀야 하는 문장. ".repeat(12)
+    + "\n두 번째 줄 — F:\\works\\claude-launcher\\.claude\\worktrees\\s82-railbrief-full";
+  const s5 = row("s5");
+  ctx.decorate(s5, { name: "s5", task: long });
+  check("a long task goes on the row whole, newlines included",
+        [oneLine(s5).textContent === long, oneLine(s5).textContent.length],
+        [true, long.length]);
+  const s6 = row("s6");
+  ctx.decorate(s6, { name: "s6", briefing: { one_line: long, state: "working" }, task: "짧은 태스크" });
+  check("a long digest one-line is not shortened either",
+        oneLine(s6).textContent, long);
+
   /* The collapsed ⟳ refreshes without opening: asks, does not fold in. */
   answer = { status: 200, body: {
     session: "s1", generated_at: new Date().toISOString(), cached: true,
