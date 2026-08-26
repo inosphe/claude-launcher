@@ -22,8 +22,41 @@ from pathlib import Path
 from . import reports
 
 
+def _run_scope() -> str:
+    """The session name a cflow run here is keyed to, if exactly one is.
+
+    The last resort of :func:`_session`, and it exists for one concrete case:
+    ``claunch report check`` is written to be a workflow's ``verify``. The
+    engine runs a verify with the MCP server's environment, where
+    ``CLAUNCH_SESSION`` is set — but a *human* advancing the same run from
+    their own shell (``claunch cflow next``) runs that same command without
+    it, and a verify that failed only because a person pressed the button
+    would be a gate on the wrong thing. Resolution order matches
+    ``claunch cflow``'s own (``cli_cflow._resolve_run``): flag, env, then the
+    directory's single run. More than one run here is ambiguity, so it is
+    declined rather than guessed.
+    """
+    try:
+        from .cflow import state as cflow_state
+    except Exception:
+        return ""
+    here = Path(cflow_state.resolve_cwd())
+    for cwd in (here, *here.parents):
+        scopes = cflow_state.scopes_in(str(cwd))
+        if len(scopes) == 1:
+            return scopes[0]
+        if scopes:
+            return ""
+    return ""
+
+
 def _session(args: argparse.Namespace) -> str:
-    name = (getattr(args, "session", None) or os.environ.get("CLAUNCH_SESSION") or "").strip()
+    name = (
+        getattr(args, "session", None)
+        or os.environ.get("CLAUNCH_SESSION")
+        or _run_scope()
+        or ""
+    ).strip()
     if not name:
         raise reports.ReportError(
             "no session: run this inside a claunch session (CLAUNCH_SESSION is "

@@ -3064,10 +3064,18 @@ async def h_session_beads_create(request: web.Request) -> web.Response:
 
 async def h_session_reports(request: web.Request) -> web.Response:
     """A session's round reports, newest first — the same list the beads view
-    carries, for a caller that wants only the files."""
-    manager: SessionManager = request.app["manager"]
-    session = manager.get(request.match_info["name"])
-    name = session.sdef.name
+    carries, for a caller that wants only the files.
+
+    No session lookup, like the page route below and for the same reason: the
+    point of keeping reports outside ``sessions/<name>/`` is that they outlive
+    the record, and a listing that 404'd once ``clear-sessions`` ran would
+    hand back exactly nothing at the moment the files matter most.
+    """
+    name = request.match_info["name"]
+    try:
+        reports_mod.check_session(name)
+    except reports_mod.ReportError as exc:
+        return json_error(400, str(exc))
     return web.json_response({"session": name, "reports": reports_mod.listing(name)})
 
 
