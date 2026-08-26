@@ -197,6 +197,12 @@ def _cmd_send(args: argparse.Namespace) -> int:
     # line, not only in the notice: "sent ... to bob" is the sentence a
     # sender acts on, and it is the one that is wrong when bob is dead.
     dead = [str(e.get("handle")) for e in (result.get("undeliverable") or [])]
+    # Recipients the mesh REFUSED for: their backlog is at the cap, so this
+    # message was not queued for them and never will be. Named on the result
+    # line for the same reason `dead` is — "sent to a, b, c" is what the
+    # sender acts on, and it is a lie about c. A send refused for EVERY
+    # recipient is a 429 and never reaches this line at all.
+    busy = [str(e.get("handle")) for e in (result.get("deferred") or [])]
     if result.get("queued"):
         # mirror with its primary unreachable: durably queued, not yet sent
         line = (f"queued {result.get('id')} -- primary daemon unreachable; "
@@ -216,6 +222,8 @@ def _cmd_send(args: argparse.Namespace) -> int:
         line += f" -- queued for remote: {', '.join(queued)}"
     if dead:
         line += f" -- NOT READING: {', '.join(dead)} (see notice)"
+    if busy:
+        line += f" -- REFUSED (backlog full): {', '.join(busy)} (see notice)"
     print(line)
     _print_notice(result)
     _print_relay(result.get("relay"))

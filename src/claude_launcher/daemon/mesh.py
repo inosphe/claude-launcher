@@ -236,6 +236,35 @@ def stranded_notice(entries: List[dict]) -> Optional[str]:
     return ". ".join(parts) + "." + tail
 
 
+def _busy_notice(entries: List[dict]) -> str:
+    """What to tell a sender whose recipients are too far behind to accept.
+
+    The counterpart of :func:`stranded_notice`, for the opposite problem: a
+    stranded recipient has no terminal, a congested one has a terminal with
+    more waiting for it than a turn can act on. Both are the same surprise
+    from where the sender stands — ``sent`` came back and nothing happened —
+    and both are only fixable by saying so at send time.
+
+    Written to be acted on by an agent reading it in its own terminal: what
+    did not happen, why, and the ONE thing to do about it. It says "wait"
+    rather than "retry", because an agent told to retry retries at once, and
+    a burst of retries against a congested member is the flood this gate
+    exists to stop.
+    """
+    who = ", ".join(
+        f"{e['handle']} ({e['queued']} waiting, cap {e['inbox_max']})"
+        for e in entries
+    )
+    wait = max((e.get("retry_after") or 0.0 for e in entries), default=0.0)
+    when = f" Wait about {int(wait)}s before sending there again" if wait else ""
+    return (
+        f"NOT DELIVERED to {who}: that terminal has not read what it already "
+        f"has, so the mesh is not accepting more for it.{when} — do other "
+        "work meanwhile, and re-send then. Nothing was queued: this message "
+        "does not exist anywhere and will not arrive on its own."
+    )
+
+
 def _normalize_sections(
     sections, recipients: List[str], sender: str
 ) -> Optional[dict]:
@@ -289,6 +318,13 @@ DEFAULT_SETTLE = 2.0
 #: harnesses like claude queue text typed during a turn, so this is safe; the
 #: hold just avoids interleaving with short turns. Seconds.
 DEFAULT_BUSY_HOLD = 60.0
+
+#: How long a refusal stays on a member's record, and how many are kept.
+#: Long enough for a person who walks back to the dashboard to see that the
+#: quiet terminal was quiet because the mesh was turning senders away, short
+#: enough that it says "right now" rather than "at some point today".
+_REFUSED_WINDOW = 600.0
+_REFUSED_KEEP = 40
 
 #: Worker rescan cadence while messages are pending (seconds).
 _POLL = 1.0
@@ -969,6 +1005,201 @@ class MeshManager:
                         }
                     )
         return out
+
+    # ------------------------------------------------------------------ #
+    # backpressure
+    # ------------------------------------------------------------------ #
+    def backpressure(self, mesh: Mesh) -> dict:
+        """This mesh's backpressure settings: ``{enabled, inbox_max,
+        min_gap, retry_after}``.
+
+        Read defensively rather than indexed: a ``mesh.json`` written before
+        the section existed has no ``backpressure`` key, and a delivery
+        worker must not raise over a config that is merely old.
+        """
+        pol = mesh.policy.get("backpressure") or {}
+        try:
+            return {
+                "enabled": bool(pol.get("enabled", False)),
+                "inbox_max": max(0, int(pol.get("inbox_max", 0) or 0)),
+                "min_gap": max(0.0, float(pol.get("min_gap", 0.0) or 0.0)),
+                "retry_after": max(0.0, float(pol.get("retry_after", 0.0) or 0.0)),
+            }
+        except (TypeError, ValueError):
+            return {
+                "enabled": False, "inbox_max": 0,
+                "min_gap": 0.0, "retry_after": 0.0,
+            }
+
+    def inbox_depth(self, mesh: Mesh, handle: str) -> Optional[int]:
+        """Undelivered messages waiting for ``handle`` — or None if this
+        daemon cannot know.
+
+        For a LOCAL member it is the same list delivery is about to type in
+        (:meth:`Mesh.pending`), so the door and the worker agree by
+        construction. For a member hosted elsewhere the cursor lives on that
+        daemon and the freshest reading we have is the one its sync ack
+        piggybacked (``remote_activity``) — lagged by up to a sync interval,
+        which makes the cap soft there rather than exact. None (a member we
+        have never had a report for) is NOT congestion: refusing on an
+        absence of evidence would cut a peer off for being new.
+        """
+        member = mesh.members.get(handle)
+        if member is None:
+            return None
+        if self._is_local(mesh, member):
+            return len(mesh.pending(handle))
+        depth = (mesh.remote_activity.get(handle) or {}).get("pending")
+        if isinstance(depth, bool) or not isinstance(depth, (int, float)):
+            return None
+        return max(0, int(depth))
+
+    def congested_recipients(
+        self, mesh: Mesh, recipients: Iterable[str]
+    ) -> List[dict]:
+        """Which of ``recipients`` are too far behind to accept another
+        message, as ``{handle, queued, inbox_max, retry_after, remote}``.
+
+        Empty whenever backpressure is off or uncapped — the caller then
+        behaves exactly as it did before the gate existed.
+        """
+        bp = self.backpressure(mesh)
+        if not bp["enabled"] or not bp["inbox_max"]:
+            return []
+        out: List[dict] = []
+        for handle in recipients:
+            depth = self.inbox_depth(mesh, handle)
+            if depth is None or depth < bp["inbox_max"]:
+                continue
+            member = mesh.members.get(handle)
+            out.append(
+                {
+                    "handle": handle,
+                    "queued": depth,
+                    "inbox_max": bp["inbox_max"],
+                    "retry_after": bp["retry_after"],
+                    "remote": bool(
+                        member is not None and not self._is_local(mesh, member)
+                    ),
+                }
+            )
+        return out
+
+    def _record_refusal(self, mesh: Mesh, handle: str, sender: str) -> None:
+        """Remember that ``sender`` was turned away from ``handle``.
+
+        The refusal is the only trace a bounce leaves on this side — the
+        message was never appended, so the log cannot show it, and the
+        sender's own terminal is the only other place it is written down.
+        Without this the dashboard would show a terminal with an empty
+        backlog and no way to tell that the emptiness IS the mesh holding
+        the door shut.
+        """
+        st = mesh.activity.setdefault(handle, {"anchor": time.monotonic()})
+        rec = st.setdefault("refused", [])
+        rec.append({"at": time.monotonic(), "from": sender})
+        del rec[:-_REFUSED_KEEP]
+
+    def refusals(self, mesh: Mesh, handle: str) -> List[dict]:
+        """Recent refusals against ``handle``, oldest first, window-trimmed.
+
+        Trimmed on read rather than on a timer: nothing else wakes for a
+        refusal, and a list nobody is looking at does not need to be tidy.
+        """
+        st = mesh.activity.get(handle) or {}
+        rec = st.get("refused") or []
+        now = time.monotonic()
+        keep = [r for r in rec if now - r.get("at", 0.0) <= _REFUSED_WINDOW]
+        if len(keep) != len(rec):
+            if keep:
+                st["refused"] = keep
+            else:
+                st.pop("refused", None)
+        return keep
+
+    def paced_for(self, mesh: Mesh, handle: str) -> float:
+        """Seconds left on ``handle``'s delivery pacing gate (0.0 = none).
+
+        The read half of the gate in :meth:`_deliver_to`, so the chip that
+        says "paced" and the worker that is pacing cannot disagree.
+        """
+        bp = self.backpressure(mesh)
+        if not bp["enabled"] or not bp["min_gap"]:
+            return 0.0
+        last = (mesh.activity.get(handle) or {}).get("last_delivered")
+        if last is None:
+            return 0.0
+        return max(0.0, bp["min_gap"] - (time.monotonic() - last))
+
+    def backpressure_for_session(self, session: str) -> dict:
+        """What backpressure is doing to ``session`` right now, across every
+        mesh it is a member of.
+
+        Aggregated at the top (``queued``/``congested``/``refused``/
+        ``paced_for``) because that is the question the header chip asks —
+        "is anything being turned away from this terminal, and is delivery
+        into it being paced" — and broken out per handle below, because a
+        session in two meshes can be congested in one and quiet in the
+        other, and the two meshes may be configured differently.
+        """
+        handles: List[dict] = []
+        enabled = False
+        queued = refused = 0
+        congested = False
+        paced = 0.0
+        senders: Dict[str, dict] = {}
+        now = time.monotonic()
+        for mesh in self.list():
+            bp = self.backpressure(mesh)
+            for handle in sorted(mesh.members):
+                member = mesh.members[handle]
+                if member.session != session or not self._is_local(mesh, member):
+                    continue
+                depth = len(mesh.pending(handle))
+                gate = self.paced_for(mesh, handle)
+                recs = self.refusals(mesh, handle)
+                hot = bool(
+                    bp["enabled"] and bp["inbox_max"] and depth >= bp["inbox_max"]
+                )
+                enabled = enabled or bp["enabled"]
+                queued += depth
+                refused += len(recs)
+                congested = congested or hot
+                paced = max(paced, gate)
+                for r in recs:
+                    who = str(r.get("from") or "?")
+                    ent = senders.setdefault(
+                        who, {"from": who, "count": 0, "ago": None}
+                    )
+                    ent["count"] += 1
+                    ago = max(0.0, now - r.get("at", now))
+                    if ent["ago"] is None or ago < ent["ago"]:
+                        ent["ago"] = ago
+                handles.append(
+                    {
+                        "mesh": mesh.name,
+                        "handle": handle,
+                        "queued": depth,
+                        "congested": hot,
+                        "paced_for": gate or None,
+                        "refused": len(recs),
+                        **bp,
+                    }
+                )
+        return {
+            "enabled": enabled,
+            "queued": queued,
+            "congested": congested,
+            "paced_for": paced or None,
+            "refused": refused,
+            # Who is being turned away, worst offender first — the answer to
+            # "who is flooding this session", which is why a person opens
+            # this panel at all.
+            "refused_from": sorted(
+                senders.values(), key=lambda e: (-e["count"], e["from"])
+            ),
+            "handles": handles,
+        }
 
     def queued_for_session(self, session: str) -> List[dict]:
         """Messages accepted for ``session``'s handles but not yet typed into
@@ -1828,6 +2059,49 @@ class MeshManager:
                         "from 'to'"
                     )
         intent = str(type or "say").strip().lower() or "say"
+        # ---- backpressure: the door ---------------------------------- #
+        # Everything above decided whether the message is well-formed and
+        # who it is FOR; this decides whether they can take it. A recipient
+        # whose backlog has already reached ``inbox_max`` is not accepting,
+        # and the honest answer to its sender is "not delivered, try again"
+        # — said here, synchronously, while the sender can still do
+        # something else with the turn it was about to spend.
+        #
+        # Two carve-outs, both deliberate:
+        #  * an EXTERNAL sender is the human at the dashboard. They are not
+        #    the fan-in this gate exists to bound, they send one message and
+        #    read the answer, and they already have "deliver now" for the
+        #    backlog. Turning a person away to protect an agent's turn gets
+        #    the priority exactly backwards.
+        #  * a send that ARRIVED over the wire (``msg_id`` set: a guest's
+        #    forward, or a resequenced outbox entry) has already been
+        #    accepted somewhere. Refusing it here would not un-send it; it
+        #    would only lose it, and lose it silently.
+        deferred: List[dict] = []
+        if not external and msg_id is None:
+            deferred = self.congested_recipients(mesh, recipients)
+            if deferred:
+                for entry in deferred:
+                    self._record_refusal(mesh, entry["handle"], from_handle)
+                open_to = [r for r in recipients
+                           if r not in {e["handle"] for e in deferred}]
+                if not open_to:
+                    raise MeshBusy(
+                        _busy_notice(deferred), deferred,
+                        max((e["retry_after"] for e in deferred), default=0.0),
+                    )
+                # Some had room. Narrow the ADDRESS rather than the
+                # recipient list alone: the log stores the address and
+                # delivery re-derives from it (see Mesh.addressed_to), so a
+                # ``"*"`` left intact would reach the refused members on the
+                # next tick anyway and make the bounce a lie.
+                recipients = open_to
+                to = open_to
+                if norm_sections is not None:
+                    norm_sections = {
+                        h: sec for h, sec in norm_sections.items()
+                        if h in open_to
+                    } or None
         msg = {
             "id": msg_id or ("msg-" + uuid.uuid4().hex[:12]),
             "ts": str(ts or "") or utcnow(),
@@ -1897,10 +2171,20 @@ class MeshManager:
         stranded_note = stranded_notice(stranded)
         if stranded_note:
             advisories.insert(0, stranded_note)
+        # Ahead of even the stranded note: a partial send is the one outcome
+        # where "sent" is true and incomplete at the same time, and the
+        # sender has to resend to the rest or it never arrives.
+        if deferred:
+            advisories.insert(0, _busy_notice(deferred))
         return {
             **msg,
             "recipients": recipients,
             "queued": False,
+            # Recipients this send was refused for — their backlog is at the
+            # cap. Not an error here (others took it); the whole-send
+            # refusal is MeshBusy. Same shape either way, so a caller marks
+            # the rows the same way in both.
+            "deferred": deferred,
             # Accepted and queued, but nothing there to read it — see
             # stranded_notice(). Structured as well as prose so a dashboard
             # can mark the row without parsing the sentence.
@@ -2012,6 +2296,10 @@ class MeshManager:
             "remote": [],
             "queued_remote": [],
             "undeliverable": [],
+            # Shape parity with the sequenced path: nothing was refused here
+            # because nothing was judged here — the authority is down, and
+            # it is the authority that holds the door.
+            "deferred": [],
             "batched": norm_sections is not None,
             "expects_reply": expects_reply(intent),
             "notice": (
@@ -5060,6 +5348,21 @@ class MeshManager:
             )
             if held < self.busy_hold:
                 return  # idle-gate: don't interleave with a running turn
+        # Pacing, and deliberately LAST of the automatic gates: it is the one
+        # that still binds after the idle-gate has given up and decided to
+        # type into a running turn. That is the whole point — ``busy_hold``
+        # bounds how long one message waits, and nothing before this bounded
+        # how OFTEN a terminal is written to. Everything pending goes in one
+        # block, so the wait is never lost work: it is the next burst
+        # coalescing into the block after this one instead of arriving as
+        # three separate interruptions.
+        #
+        # ``force`` drops it like every other automatic gate — the operator
+        # pressing "deliver now" is declining exactly this wait.
+        if not force:
+            gap = self.paced_for(mesh, member.handle)
+            if gap > 0:
+                return  # paced: the last delivery into this terminal is recent
         block = format_delivery(mesh.name, member.handle, pending)
         if not await session.deliver(block):
             return  # undelivered: hold the cursor, the next tick retries

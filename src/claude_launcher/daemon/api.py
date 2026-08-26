@@ -38,7 +38,7 @@ from . import mesh_roles
 from . import restart_notice
 from .harness import CLAUDE_HARNESS, HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
-from .mesh import MeshConflict, MeshError, MeshManager
+from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
 from . import ws as ws_mod
 
@@ -85,6 +85,24 @@ async def revalidate_middleware(request: web.Request, handler):
 async def error_middleware(request: web.Request, handler):
     try:
         return await handler(request)
+    except MeshBusy as exc:
+        # Backpressure, not a bad request: the send was well-formed and the
+        # recipients exist — they are simply too far behind to take it. 429
+        # with Retry-After is the one status a caller can act on without
+        # reading prose, and the entries let a dashboard mark the rows.
+        # Ahead of the MeshError arm below, which would otherwise swallow it
+        # (MeshBusy is a MeshError) and report a retryable condition as 400.
+        resp = web.json_response(
+            {
+                "error": str(exc),
+                "deferred": exc.entries,
+                "retry_after": exc.retry_after,
+            },
+            status=429,
+        )
+        if exc.retry_after:
+            resp.headers["Retry-After"] = str(int(exc.retry_after))
+        return resp
     except (SessionGone, MeshConflict, LockBusy, KeyboardHeld) as exc:
         # LockBusy is transient by construction (the other writer is mid-
         # transition), so it gets a retryable status, not a flat 400.
@@ -2724,11 +2742,27 @@ def _session_queued(request: web.Request, session) -> dict:
       after the last keystroke. A banner that told someone to "leave the
       keyboard alone" while their own half-written line is what holds the
       message would be advice that never comes true.
+    * ``paced``    — nothing about the SESSION is holding it: the mesh is,
+      because it typed a block into this terminal less than ``min_gap`` ago
+      (mesh policy ``backpressure.min_gap``). Last of the automatic holds
+      because that is where the delivery gate puts it — it is the one that
+      still binds after ``busy_hold`` has given up and decided to interrupt
+      a running turn, and it is what turns a burst of arrivals into one
+      later block instead of three interruptions.
     * ``settling`` — nothing is holding it; the next worker tick delivers.
 
     The raw signals ride along so a client can sharpen the wording (the web
     UI says "your typing" when its own keystrokes are recent), and
     ``busy_hold`` says when a busy/keyboard hold gives up and types anyway.
+
+    ``backpressure`` is the other half of the same subject and does not fit
+    the ladder, because it is about the DOOR rather than the hold: a member
+    at ``inbox_max`` is no longer accepting mail at all, and its senders are
+    being turned away with a retry-after (see
+    :meth:`MeshManager.backpressure_for_session`). That is invisible from
+    everything above — the backlog stops growing, which looks exactly like
+    calm — so it is reported as its own object, with who has been refused
+    and how recently.
 
     ``reason`` stays null while the backlog is empty — there is no backlog to
     explain — but ``state`` is always filled in, and that is the difference
@@ -2744,6 +2778,7 @@ def _session_queued(request: web.Request, session) -> dict:
     keyboard = session.keyboard_busy()
     draft = session.draft_open()
     hold = session.delivery_held()
+    bp = mm.backpressure_for_session(session.sdef.name)
     # One ladder, walked in the delivery gate's own order (see
     # :meth:`MeshManager._deliver_to`), so the banner can never name a hold
     # the daemon is not applying — or miss the one it is.
@@ -2755,6 +2790,8 @@ def _session_queued(request: web.Request, session) -> dict:
         state = "busy"
     elif keyboard:
         state = "keyboard"
+    elif bp.get("paced_for"):
+        state = "paced"
     else:
         state = "settling"
     return {
@@ -2766,6 +2803,7 @@ def _session_queued(request: web.Request, session) -> dict:
         "state": state,
         "reason": state if messages else None,
         "busy_hold": mm.busy_hold,
+        "backpressure": bp,
     }
 
 
