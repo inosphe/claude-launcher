@@ -198,6 +198,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "rolepanel_check.js",
         "spawnmodal_check.js",
         "queued_check.js",
+        "sendinput_check.js",
         "holdchip_check.js",
         "seq_check.js",
         "seqrender_check.js",
