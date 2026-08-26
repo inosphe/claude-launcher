@@ -160,10 +160,14 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     for key, value in (
         ("mesh", args.mesh), ("handle", args.handle),
         ("workflow", args.workflow), ("context", args.context),
-        ("task", args.task),
+        ("task", args.task), ("issue", getattr(args, "issue", None)),
     ):
         if value:
             body[key] = value
+    # Only sent when it is the answer: a missing key means "mint one", which
+    # is what every caller that has never heard of this flag wants.
+    if getattr(args, "no_issue", False):
+        body["beads"] = False
     if args.connect:
         body["connect"] = args.connect
     # `--resume` with no value is the picker, which argparse hands back as the
@@ -286,7 +290,7 @@ def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
     for flag, value in (
         ("--mesh", args.mesh), ("--as", args.handle), ("--role", args.role),
         ("--workflow", args.workflow), ("--context", args.context),
-        ("--task", args.task),
+        ("--task", args.task), ("--issue", getattr(args, "issue", None)),
     ):
         if value:
             out.append(f"{flag} {value!r}" if " " in str(value) else f"{flag} {value}")
@@ -418,6 +422,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("workflow", args.workflow),
             ("context", args.context),
             ("task", args.task),
+            ("issue", getattr(args, "issue", None)),
             ("profile", args.profile),
             ("borrow", args.borrow),
             ("null_token", args.null_token),
@@ -433,6 +438,11 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         )
         if v
     }
+    # `beads: False` is a falsey answer, and the comprehension above keeps
+    # only truthy values — it has to be set after, or "no issue" would read
+    # as "you did not say".
+    if getattr(args, "no_issue", False):
+        payload["beads"] = False
     try:
         result = client.post(f"/api/sessions/{parent}/children", payload)
     except daemon_client.DaemonClientError as exc:
@@ -496,6 +506,21 @@ def _print_onboarding(result: dict) -> None:
             f"  workflow {flow.get('workflow')}: "
             + ("started" if flow.get("ok") else f"failed -- {flow.get('error')}")
         )
+    board = result.get("beads") or {}
+    if board.get("issue"):
+        mode = board.get("mode")
+        if mode == "joined":
+            # The one outcome a human must not have to go looking for: the
+            # session is NOT the assignee, and somebody else still is.
+            held = board.get("held_by") or "another session"
+            went = board.get("notified")
+            print(f"  issue {board['issue']}: JOINED -- {held} holds it and "
+                  "keeps the assignment; the two settle ownership"
+                  + (f" (told {held} on mesh {went})" if went else ""))
+        elif mode == "assigned":
+            print(f"  issue {board['issue']}: assigned to it")
+        else:
+            print(f"  issue {board['issue']}: created from the task")
     if result.get("task"):
         print("  opening task will be typed in once it settles")
 
@@ -1320,6 +1345,22 @@ def _cmd_reparent(args: argparse.Namespace) -> int:
 # --------------------------------------------------------------------------- #
 # parser wiring
 # --------------------------------------------------------------------------- #
+#: The board answer, worded once because ``new-session`` and ``spawn`` ask it
+#: the same way. Three shapes: say nothing and the daemon mints an issue from
+#: the task, name one and it is adopted, ``--no-issue`` and there is none.
+ISSUE_HELP = (
+    "put this session on an EXISTING board issue instead of minting one from "
+    "the task. What that means is the daemon's call, not the flag's: an issue "
+    "nobody holds is assigned to the session, one a running session holds is "
+    "joined without moving the assignment, and both sessions are told "
+    "('claunch beads list --status open')"
+)
+NOISSUE_HELP = (
+    "no board issue at all -- neither minted nor adopted (without this, a "
+    "session created with --task gets one minted for it)"
+)
+
+
 def register(sub) -> None:
     """Attach all session/daemon subparsers to ``claunch``'s subparsers."""
     p_new = sub.add_parser(
@@ -1420,6 +1461,15 @@ def register(sub) -> None:
     p_new.add_argument(
         "--task", help="opening instruction typed in once it has booted"
     )
+    # The board answer, in the three shapes it has: say nothing and the daemon
+    # mints an issue from --task, name one and it is adopted, --no-issue and
+    # there is none. Mutually exclusive because "this issue, and also none" is
+    # not a question the daemon could answer.
+    n_issue = p_new.add_mutually_exclusive_group()
+    n_issue.add_argument("--issue", metavar="ID", help=ISSUE_HELP)
+    n_issue.add_argument(
+        "--no-issue", action="store_true", dest="no_issue", help=NOISSUE_HELP,
+    )
     p_new.add_argument(
         "-a", "--attach", action="store_true",
         help="attach this terminal to the new session right away (detach: Ctrl+])",
@@ -1493,6 +1543,11 @@ def register(sub) -> None:
     )
     p_spawn.add_argument("--context", help="context string for that workflow run")
     p_spawn.add_argument("--task", help="opening instruction typed into the child")
+    s_issue = p_spawn.add_mutually_exclusive_group()
+    s_issue.add_argument("--issue", metavar="ID", help=ISSUE_HELP)
+    s_issue.add_argument(
+        "--no-issue", action="store_true", dest="no_issue", help=NOISSUE_HELP,
+    )
     p_spawn.add_argument(
         "--harness", help="deprecated/read-only: the selected profile owns it"
     )

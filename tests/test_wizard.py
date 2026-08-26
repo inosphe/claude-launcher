@@ -20,11 +20,20 @@ from claude_launcher.cflow import model, state as cflow_state
 class FakeSources(wizard.Sources):
     """Everything the daemon would publish, decided by the test instead."""
 
-    def __init__(self, *, repo=True, workflows=None, meshes=True):
+    def __init__(self, *, repo=True, workflows=None, meshes=True, issues=None):
         self._repo = repo
         self._workflows = workflows if workflows is not None else {}
         self._meshes = meshes
+        # The board as the daemon publishes it: each row already carries the
+        # verdict the creation path would take (see daemon/beads.adoption).
+        self._issues = issues if issues is not None else [
+            {"id": "cl-1", "title": "wire the rail", "status": "open",
+             "assignee": "", "mode": "assigned", "held_by": None},
+            {"id": "cl-2", "title": "the leader's own", "status": "in_progress",
+             "assignee": "lead", "mode": "joined", "held_by": "lead"},
+        ]
         self.workflow_calls = []
+        self.issue_calls = []
 
     def harnesses(self):
         return [
@@ -59,6 +68,10 @@ class FakeSources(wizard.Sources):
     def workflows(self, cwd):
         self.workflow_calls.append(cwd)
         return self._workflows.get(cwd, [])
+
+    def issues(self, cwd, parent=""):
+        self.issue_calls.append((cwd, parent))
+        return list(self._issues)
 
     def git(self, cwd):
         if not self._repo:
@@ -1783,3 +1796,123 @@ def test_an_explicit_parent_still_wins_over_the_ordering():
 )
 def test_natural_sort_key(names, expected):
     assert sorted(names, key=wizard._natural) == expected
+
+
+# --------------------------------------------------------------------------- #
+# the board rows
+# --------------------------------------------------------------------------- #
+def test_the_board_question_has_three_answers_and_only_one_opens_the_picker():
+    wiz = form()
+    mode = wiz.field("beads")
+    assert isinstance(mode, wizard.ChoiceField)
+    assert [o.value for o in mode.options] == [
+        wizard.BEADS_NEW, wizard.BEADS_PICK, wizard.BEADS_NONE,
+    ]
+    # minting from the task is what every release before this did, so it is
+    # what a form nobody touched still answers
+    assert mode.value == wizard.BEADS_NEW
+    assert wiz.field("issue").hidden
+
+    pick(wiz, "beads", "an existing issue")
+    assert not wiz.field("issue").hidden
+    pick(wiz, "beads", "no issue")
+    assert wiz.field("issue").hidden
+
+
+def test_the_issue_picker_says_which_rows_would_only_be_joined():
+    wiz = form()
+    pick(wiz, "beads", "an existing issue")
+    rows = {o.value: o for o in wiz.field("issue").options}
+    assert set(rows) == {"cl-1", "cl-2"}
+    assert rows["cl-1"].label.startswith("cl-1")
+    assert "wire the rail" in rows["cl-1"].label
+    assert "JOIN" not in rows["cl-1"].detail
+    # the one a running session holds says so, and says what it means
+    assert "held by lead" in rows["cl-2"].detail
+    assert "JOIN, not assign" in rows["cl-2"].detail
+
+
+def test_the_three_answers_travel_as_the_flags_the_command_takes():
+    wiz = form()
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.issue is None and args.no_issue is False  # mint one
+
+    wiz = form()
+    pick(wiz, "beads", "no issue")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.issue is None and args.no_issue is True
+
+    wiz = form()
+    pick(wiz, "beads", "an existing issue")
+    pick(wiz, "issue", "cl-2")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.issue == "cl-2" and args.no_issue is False
+    assert "issue cl-2" in wiz.summary()
+    assert "held by lead" in wiz.summary()
+
+
+def test_flags_typed_alongside_the_wizard_prefill_the_board_rows():
+    wiz = wizard.Wizard(
+        FakeSources(), cwd="/work/repo",
+        defaults=argparse.Namespace(issue="cl-2", no_issue=False),
+    )
+    assert wiz.value("beads") == wizard.BEADS_PICK
+    assert wiz.value("issue") == "cl-2"
+
+    wiz = wizard.Wizard(
+        FakeSources(), cwd="/work/repo",
+        defaults=argparse.Namespace(issue=None, no_issue=True),
+    )
+    assert wiz.value("beads") == wizard.BEADS_NONE
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.no_issue is True
+
+
+def test_an_id_this_board_does_not_have_is_kept_and_marked_rather_than_dropped():
+    """A preset the daemon cannot see must not be silently replaced by
+    whatever happens to be first in the list."""
+    wiz = wizard.Wizard(
+        FakeSources(), cwd="/work/repo",
+        defaults=argparse.Namespace(issue="elsewhere-9", no_issue=False),
+    )
+    row = wiz.field("issue").options[0]
+    assert row.value == "elsewhere-9" and row.detail == "not on this board"
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.issue == "elsewhere-9"
+
+
+def test_the_board_is_read_for_the_directory_that_is_actually_picked():
+    src = FakeSources()
+    wiz = form(sources=src)
+    pick(wiz, "beads", "an existing issue")
+    # the Directory row absolutises what it holds, so compare the way the
+    # form itself does rather than to the literal the test typed
+    assert src.issue_calls[-1] == (wiz.value("cwd"), "")
+    pick(wiz, "cwd", "api")
+    assert src.issue_calls[-1] == (wiz.value("cwd"), "")
+    assert src.issue_calls[-1][0].endswith("api")
+    # and not re-read on every keystroke while the answer it follows stands
+    before = len(src.issue_calls)
+    wiz.handle("down")
+    assert len(src.issue_calls) == before
+
+
+def test_a_spawn_asks_the_board_of_the_directory_the_child_lands_in():
+    src = FakeSpawnSources()
+    wiz = spawn_form(sources=src)
+    pick(wiz, "beads", "an existing issue")
+    # no workspace: the child inherits the parent's directory, so the daemon
+    # is asked by parent and resolves it the same way the spawn will
+    assert src.issue_calls[-1] == ("/work/repo", "lead")
+    pick(wiz, "workspace", "api")
+    assert src.issue_calls[-1] == ("/srv/api", "")
+
+    pick(wiz, "issue", "cl-2")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.issue == "cl-2" and args.no_issue is False
