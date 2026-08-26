@@ -229,6 +229,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "railmodel_check.js",
         "railcwd_check.js",
         "wfscroll_check.js",
+        "wfhead_check.js",
         "railhome_check.js",
         "typing_check.js",
         "leak_check.js",
