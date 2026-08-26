@@ -100,18 +100,49 @@ def test_the_worker_creates_its_own_issue_and_claims_it(layer):
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
-def test_the_worker_is_never_told_to_close_or_sync(layer):
-    """Closing is the leader's, after the merge; so is flushing the JSONL.
-    The shared block names both as the leader's — outside it, the worker's
-    text must not spell either command."""
+def test_the_worker_closes_only_its_own_landed_issue(layer):
+    """The assignee closes its own issue; the leader still owns the JSONL.
+
+    Closing used to be the leader's for two reasons, and only one of them
+    survived: the sweep numbers that made up half the close reason, and the
+    single ``.beads/issues.jsonl`` every worker branch would collide on.
+    ``landed`` now proves the merge from git in the worker's own hands, so
+    the first reason is met where the worker stands — while the second is
+    untouched, because ``br close`` writes the DB and committing the JSONL
+    is a separate step the leader keeps.
+
+    So the pin moves rather than lifts. The worker may spell ``beads
+    close`` in exactly one step — ``wrapup``, where the board is tidied —
+    and nowhere else: spelling it in ``landed`` or ``integration-request``
+    would close an issue before or without the proof. ``beads sync`` stays
+    out of the worker's text entirely.
+    """
     path = (
         _bundled("improv-worker") if layer == "bundled"
         else PROJECT_OVERRIDES / "improv-worker.yaml"
     )
     own = _without_block(path.read_text(encoding="utf-8"))
-    assert "claunch beads close" not in own
     assert "claunch beads sync" not in own
-    assert "워커가 하지 않는 것 셋" in own
+    assert "워커가 하지 않는 것 둘" in own
+
+    wf = model.load(path)
+    # The shared block lives inside `intake`'s instructions and states the
+    # rule for every role, so it is stripped here too: what is under test is
+    # the worker's own text, step by step.
+    spells = sorted(
+        sid for sid, step in wf.steps.items()
+        if "claunch beads close" in _without_block(
+            (step.instructions or "")
+            + ((step.select.prompt if step.select else "") or "")
+        )
+    )
+    assert spells == ["wrapup"], f"beads close is spelled in {spells}"
+
+    tidy = wf.steps["wrapup"].instructions
+    # The reason has to come from the gate, not from a message: `landed`
+    # exists because a notification is not evidence.
+    assert "landed" in tidy and "merged <머지 해시>" in tidy
+    assert "hold" in tidy  # ...and the frozen branch is still not closed
 
 
 # --------------------------------------------------------------------------- #
