@@ -52,7 +52,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
-from .. import cli_beads, store
+from .. import cli_beads, reports as reports_mod, store
 from .session import STATUS_BUSY, STATUS_IDLE, Session
 
 log = logging.getLogger("claude_launcher.daemon.beads")
@@ -420,6 +420,18 @@ class Board:
             "root": None,
             "issue": sdef.issue,
             "issues": [],
+            # The round reports this session has left on disk, newest first.
+            # A file index in the board view looks like a category error until
+            # you ask what a reader of this panel wants: the issue says what
+            # the round was FOR, and the report says what came of it. Reading
+            # the directory is the whole index (the filenames carry the time
+            # and the issue), so this costs one listdir and needs no registry
+            # to keep in sync with the files. It is filled before any of the
+            # early returns below, because a report outlives the board -- a
+            # machine with no 'br' installed still has its reports, and a
+            # panel that hid them because the board was unavailable would be
+            # hiding the one thing it could still show.
+            "reports": reports_mod.listing(sdef.name),
             "error": None,
         }
         if not view["available"]:
