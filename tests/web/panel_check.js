@@ -125,11 +125,13 @@ function stopMeshPoll() {}
 function stopFlowPoll() {}
 function closeWorkspaces() {}
 function stopBeadsPoll() {}
+function stopReportsPoll() {}
 function closeTranscript() {}
 function openWorkflow() {}
 function openMesh() {}
 function openFlowTopology() {}
 function openWorkspaces() {}
+function openReports() {}
 function openHome() {}
 function refreshMeshList() {}
 function refreshWorkflowChoices() {}

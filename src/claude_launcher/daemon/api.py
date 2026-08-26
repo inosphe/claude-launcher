@@ -357,6 +357,10 @@ def build_app(
     # what a link in that panel actually opens.
     r.add_get("/api/sessions/{name}/reports", h_session_reports)
     r.add_get("/api/sessions/{name}/reports/{file}", h_session_report_file)
+    # And every report on this machine at once — the Reports page, which is
+    # the only reading of these that does not start from a session or an
+    # issue the reader already has in hand.
+    r.add_get("/api/reports", h_reports_index)
     r.add_get("/", h_index)
     if _STATIC_DIR.is_dir():
         r.add_static("/static", _STATIC_DIR)
@@ -3636,6 +3640,30 @@ async def h_session_reports(request: web.Request) -> web.Response:
     except reports_mod.ReportError as exc:
         return json_error(400, str(exc))
     return web.json_response({"session": name, "reports": reports_mod.listing(name)})
+
+
+async def h_reports_index(request: web.Request) -> web.Response:
+    """Every round report on this machine, newest first — the Reports page.
+
+    The rows come off the disk (:func:`reports.index`), which is what lets
+    this answer at all: of the sessions that have written one, only a couple
+    are usually still running, and the rest were cleared long ago. Asking the
+    registry for the list would have returned the two.
+
+    So the registry is asked the other way round — not "which sessions are
+    there" but "does the daemon still know THIS one", per row. A live session
+    gets its status, a record that has exited gets ``"exited"``, and a session
+    the daemon has never heard of (or has cleared) gets ``None``. None of the
+    three is a reason to drop the row; the field exists so the page can say
+    which link is worth following.
+    """
+    manager: SessionManager = request.app["manager"]
+    known = {s.sdef.name: s.status() for s in manager.list()}
+    rows = [
+        {**row, "session_status": known.get(row["session"])}
+        for row in reports_mod.index()
+    ]
+    return web.json_response({"reports": rows})
 
 
 async def h_session_report_file(request: web.Request) -> web.StreamResponse:

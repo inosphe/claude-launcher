@@ -1204,17 +1204,47 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .sess-beads > .wf-note, .sess-beads > .wf-warning { margin: 0 0 8px; line-height: 1.5; }
 .sess-beads .wf-btn.option { margin-top: 8px; }
-.sess-reports { margin: 0 0 12px; }
-.sess-reports h3 {
-  font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 8px;
+/* A round report, in the rail and in an issue's pane — the same block, and
+   it must stay the same block: the two screens share one function, so one of
+   them getting better on its own is the bug this replaced.
+
+   A card rather than a line of links. This sits above a stack of comment
+   blocks tens of lines long, and as 13px blue text it went missing in them;
+   the weight lives here, in the border and the ground, so the heading can sit
+   at the same level as the section beside it instead of shouting over it.
+   Drawn on the block itself — a wrapper would change the first class of the
+   pane's child here, and an order check places this block by exactly that. */
+.sess-reports {
+  margin: 14px 0 16px; padding: 10px 12px 6px;
+  background: #171c22; border: 1px solid #2a2e36;
+  border-left: 3px solid #58a6ff; border-radius: 6px;
+}
+.sess-reports-mark { color: #58a6ff; }
+.sess-reports-count {
+  padding: 0 7px; border-radius: 9px; background: #172947; color: #79c0ff;
+  font-size: 11px; text-transform: none;
+}
+.sess-reports-what {
+  color: #8b949e; font-size: 11.5px; line-height: 1.5; margin: 0 0 8px;
 }
 .sess-report {
   display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
-  padding: 4px 0; border-bottom: 1px solid #23262d;
+  padding: 6px 8px; margin: 0 -4px; border-radius: 5px; text-decoration: none;
 }
-.sess-report:last-child { border-bottom: none; }
-.sess-report-link { color: #6cb6ff; text-decoration: none; font-size: 13px; }
-.sess-report-link:hover { text-decoration: underline; }
+.sess-report:hover { background: #1b2430; }
+.sess-report-name {
+  color: #6cb6ff; font-size: 13px; font-family: ui-monospace, monospace;
+}
+.sess-report:hover .sess-report-name { text-decoration: underline; }
+.sess-report-bits {
+  color: #7d8590; font-size: 11px; margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+/* The rail can be dragged down to 220px, and at that width the card's gutter
+   costs 18% of the line. Same card, tighter gutter — a density, not a second
+   design. */
+.sess-beads .sess-reports { padding: 8px 9px 4px; }
+.sess-beads .sess-report { padding: 5px; margin: 0 -3px; }
 .sess-beads-create { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 .sess-beads-create input {
   flex: 1 1 200px; min-width: 0; padding: 6px 8px; background: #0d1117;
@@ -1265,7 +1295,14 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .beads-detail-head h3 { font-family: ui-monospace, monospace; font-size: 12px; color: #58a6ff; flex: 1; }
 .beads-detail-title { font-size: 16px; margin: 6px 0 8px; }
 .beads-detail-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
-.beads-detail h4 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin: 14px 0 6px; }
+/* One rule for a section heading in this pane. Reports used to bring its own
+   (an h3, from when this block was only ever in the rail), so two sections at
+   the same level were drawn at two different levels. */
+.beads-detail h4, .sess-reports-head {
+  font-size: 12px; text-transform: uppercase; color: #7d8590;
+  margin: 14px 0 6px; display: flex; align-items: baseline; gap: 8px;
+}
+.sess-reports .sess-reports-head { margin: 0 0 6px; }
 .beads-desc {
   white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit;
   font-size: 13px; line-height: 1.5; color: #c6cdd5; margin: 0;
@@ -2751,4 +2788,64 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
    mobile bar instead of floating over the session it is reporting on. */
 @media (max-width: 700px) {
   #notices { top: 8px; right: 8px; left: 8px; width: auto; }
+}
+
+/* ------------------------------------------------------------------ */
+/* the Reports page: every round report on this machine               */
+/* ------------------------------------------------------------------ */
+/* Its own prefix, deliberately. The page borrows the dashboard's shared
+   parts (.wf-head, .wf-note, .seq-tab) and owns its own table, so a change
+   to the board's rows cannot reach in and restyle this one. */
+.reports-filters { align-items: center; margin-bottom: 12px; flex-wrap: wrap; }
+.reports-pick {
+  padding: 4px 8px; background: #0d1117; color: #e6edf3;
+  border: 1px solid #30363d; border-radius: 6px; font-size: 12px;
+}
+.reports-order { margin-left: auto; }
+.reports-list { max-width: 980px; }
+.reports-count { color: #7d8590; font-size: 11px; margin: 0 0 6px; }
+.reports-row {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 10px; border-top: 1px solid #22262d; border-radius: 6px;
+}
+.reports-row:first-of-type { border-top: none; }
+.reports-row:hover { background: #161b22; }
+/* The report itself leads the row and takes the room, because opening it is
+   the only reason anybody came to this page. */
+.reports-open {
+  display: flex; align-items: baseline; gap: 8px; min-width: 0;
+  flex: 1 1 220px; text-decoration: none;
+}
+.reports-mark { color: #58a6ff; font-size: 13px; }
+.reports-issue {
+  font-family: ui-monospace, monospace; font-size: 13px; color: #6cb6ff;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.reports-open:hover .reports-issue { text-decoration: underline; }
+.reports-sess {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  padding: 2px 9px; border-radius: 10px; font-size: 11px; text-decoration: none;
+  background: #30363d; color: #c6cdd5; white-space: nowrap;
+  border: 1px solid transparent;
+}
+.reports-sess.live { background: #1f4428; color: #3fb950; }
+.reports-sess.ended { background: #30363d; color: #8b949e; }
+/* Nothing left of the session and the round still here — that IS this page,
+   so it is drawn as a state rather than as a fault: dimmer than the two that
+   still have a record, outlined rather than filled, and never red. */
+.reports-sess.gone { background: #21262d; color: #6e7681; border-color: #30363d; border-style: dashed; }
+.reports-sess-name { font-family: ui-monospace, monospace; }
+.reports-sess-state { opacity: 0.75; font-size: 10px; }
+.reports-when { color: #7d8590; font-size: 11px; font-variant-numeric: tabular-nums; }
+.reports-size {
+  color: #7d8590; font-size: 11px; min-width: 54px; text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+.reports-board { color: #58a6ff; text-decoration: none; font-size: 11px; margin-left: auto; }
+.reports-board:hover { text-decoration: underline; }
+/* A phone reads a round as two lines: what it is, then when and how big. */
+@media (max-width: 700px) {
+  .reports-row { gap: 8px; padding: 8px 4px; }
+  .reports-open { flex: 1 1 100%; }
+  .reports-order, .reports-board { margin-left: 0; }
 }

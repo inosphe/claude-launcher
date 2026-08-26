@@ -280,6 +280,58 @@ def test_strays_in_the_reports_root_do_not_become_sessions(home):
 def test_an_absent_reports_root_answers_empty(home):
     assert reports.sessions_with_reports() == []
     assert reports.for_issue("i-1") == []
+    assert reports.index() == []
+
+
+# --------------------------------------------------------------------------- #
+# every report at once — the reading with no key in hand
+# --------------------------------------------------------------------------- #
+def test_the_index_is_every_session_at_once_newest_first(home):
+    """The other two lookups need something in hand: a session, or an issue.
+    This one is for the reader who has neither and is asking what has been
+    written at all."""
+    write(reports.dir_for("s99", create=True) / "20260825T090000Z-claunch-j31.html")
+    write(reports.dir_for("s121", create=True) / "20260826T051322Z-claunch-j31.html")
+    write(reports.dir_for("s121", create=True) / "20260824T010000Z-claunch-tak.html")
+    rows = reports.index()
+    assert [(r["session"], r["issue"]) for r in rows] == [
+        ("s121", "claunch-j31"),
+        ("s99", "claunch-j31"),
+        ("s121", "claunch-tak"),
+    ]
+
+
+def test_the_index_rows_are_the_rows_the_other_lookups_hand_back(home):
+    """One row shape for all three readings — the page that lists everything
+    must not have to learn a second one."""
+    write(reports.target("s1", "i-1"))
+    assert reports.index() == reports.listing("s1") == reports.for_issue("i-1")
+
+
+def test_the_index_does_not_ask_the_session_registry(home):
+    """The reason this page exists at all. Of the sessions that have written
+    a report, the ones still in the registry are the minority; a listing that
+    asked would be hiding the majority of its own subject."""
+    write(reports.dir_for("s-long-gone", create=True) / "20260826T090000Z-i-1.html")
+    assert not paths.sessions_json().exists()
+    assert not paths.session_dir("s-long-gone").exists()
+    assert [r["session"] for r in reports.index()] == ["s-long-gone"]
+
+
+def test_the_index_applies_the_same_readable_check(home):
+    """A stub is not a report here either — a page that listed one would be
+    sending its reader to an empty tab."""
+    write(reports.dir_for("s1", create=True) / "20260826T090000Z-i-1.html", "<html></html>")
+    write(reports.dir_for("s2", create=True) / "20260826T090001Z-i-2.html")
+    assert [r["session"] for r in reports.index()] == ["s2"]
+
+
+def test_a_round_that_named_no_issue_is_still_indexed(home):
+    """``for_issue`` refuses to hand these back to a caller with no id, but
+    they are rounds and this is the list of rounds."""
+    write(reports.target("s1", None))
+    rows = reports.index()
+    assert [(r["session"], r["issue"]) for r in rows] == [("s1", None)]
 
 
 # --------------------------------------------------------------------------- #
@@ -500,6 +552,84 @@ def test_the_index_route_lists_what_the_board_view_lists(home):
     asyncio.run(run())
 
 
+class _Known:
+    """A session the daemon still has a record of. The route reads two things
+    off one — its name and its status — and standing a real PTY up to hand it
+    those is not what is under test."""
+
+    def __init__(self, name, status):
+        self.sdef = _Sdef(name)
+        self._status = status
+
+    def status(self):
+        return self._status
+
+
+def test_the_whole_index_route_serves_every_report_on_the_machine(home):
+    """The Reports page's one fetch. Same rows as the module's index — the
+    page must not have to reconcile two shapes of the same thing."""
+    write(reports.dir_for("s99", create=True) / "20260825T090000Z-claunch-j31.html")
+    write(reports.dir_for("s121", create=True) / "20260826T051322Z-claunch-tak.html")
+
+    async def run():
+        client = await _client()
+        try:
+            resp = await client.get("/api/reports", headers=BEARER)
+            assert resp.status == 200
+            rows = (await resp.json())["reports"]
+            assert [r["session"] for r in rows] == ["s121", "s99"]
+            assert [{k: v for k, v in r.items() if k != "session_status"}
+                    for r in rows] == reports.index()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_whole_index_route_says_which_sessions_the_daemon_still_knows(home):
+    """Three states, and none of them hides a row. Most of what this route
+    serves was written by sessions ``clear-sessions`` has already dropped —
+    they are the majority of the page, not an edge case, so a cleared session
+    is marked rather than omitted."""
+    write(reports.dir_for("s-live", create=True) / "20260826T090002Z-i-1.html")
+    write(reports.dir_for("s-ended", create=True) / "20260826T090001Z-i-2.html")
+    write(reports.dir_for("s-cleared", create=True) / "20260826T090000Z-i-3.html")
+
+    async def run():
+        client = await _client()
+        try:
+            client.app["manager"].list = lambda: [
+                _Known("s-live", "busy"), _Known("s-ended", "exited"),
+            ]
+            resp = await client.get("/api/reports", headers=BEARER)
+            rows = (await resp.json())["reports"]
+            assert [(r["session"], r["session_status"]) for r in rows] == [
+                ("s-live", "busy"),
+                ("s-ended", "exited"),
+                ("s-cleared", None),
+            ]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_whole_index_route_answers_an_empty_machine_with_a_list(home):
+    """Nothing written yet is a normal state of a fresh install, and the page
+    draws an empty table for it — not an error."""
+
+    async def run():
+        client = await _client()
+        try:
+            resp = await client.get("/api/reports", headers=BEARER)
+            assert resp.status == 200
+            assert await resp.json() == {"reports": []}
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_a_missing_report_is_404_and_a_bad_name_is_400(home):
     async def run():
         client = await _client()
@@ -595,6 +725,7 @@ def test_the_report_routes_need_authentication(home):
         try:
             assert (await client.get("/api/sessions/s1/reports")).status == 401
             assert (await client.get(f"/api/sessions/s1/reports/{path.name}")).status == 401
+            assert (await client.get("/api/reports")).status == 401
         finally:
             await client.close()
 
