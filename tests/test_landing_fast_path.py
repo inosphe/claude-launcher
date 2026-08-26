@@ -146,6 +146,50 @@ def test_the_checks_are_commands_not_adjectives(layer):
     assert "리더의 턴" in prompt or "상위 세션의 턴" in prompt
 
 
+def test_a_round_with_nothing_to_land_does_not_request(layer):
+    """The five checks all pass when there is nothing to land at all.
+
+    They ask "is it clean", and a zero-commit round is trivially clean on
+    every one: the tree has no changes (1), the numbers describe the tip
+    because nothing moved (2), ``merge-base == HEAD`` so the preview merge
+    cannot conflict (3), and no marker or freeze exists (4, 5). Five for
+    five, and nothing to merge.
+
+    That is not hypothetical. On 2026-08-26 a session ran an analysis round
+    (``claunch-ggfd`` / ``run-bd6e63b8``): no production change, its branch
+    already contained in master, and the leader answered ``hold``. Under the
+    fast path that round would have requested by itself and spent a rebase,
+    an evidence bundle, a peer review and the parent's refusal -- four turns
+    to save the one this step exists to save.
+
+    So a sixth question comes first, and it asks something different from
+    the other five: is there anything to land? ``escalate``, never ``hold``,
+    because hold is still the parent's word.
+
+    The discriminator is not this file's to invent. The board settled it in
+    ``claunch-hold-round-cannot-close-hkkh``, and the same value has to be
+    read the same way in both places -- otherwise fixing one leaves the
+    other measuring something else.
+    """
+    label, wf, _ = layer
+    prompt = " ".join(wf.steps["landing"].select.prompt.split())
+    assert "git rev-list --count" in prompt, (
+        f"{label}: the delta check must name the command that answers it"
+    )
+    assert "git merge-base" in prompt
+    # ...routed to escalate, and explicitly NOT to hold: a worker that could
+    # reach hold here could end its own round by declaring it had nothing.
+    assert "0이면 **escalate**다" in prompt, (
+        f"{label}: a zero-delta round must escalate, not request"
+    )
+    assert "hold가 아니다" in prompt
+    # ...and tied to the board's definition rather than a second one.
+    assert "claunch-hold-round-cannot-close-hkkh" in prompt, (
+        f"{label}: the delta discriminator must point at the board's ruling, "
+        "so the two places cannot drift apart"
+    )
+
+
 def test_the_escalated_question_says_why_it_arrived(layer):
     """The parent's first move is reading what broke, not re-judging the branch.
 
