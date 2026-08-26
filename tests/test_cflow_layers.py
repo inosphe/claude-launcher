@@ -205,6 +205,12 @@ def test_the_worker_rebases_onto_the_target_before_a_request():
     divergence (``git merge-base`` / ``git rev-list``), that a rebased branch
     re-runs the simplified suite before asking, and that rebasing is not an
     exception to the master prohibition.
+
+    ``peer-review`` sits between the rebase and the request, and belongs
+    there: the reviewer must read the tree that gets merged, not the one
+    before the rebase resolved its conflicts. What this pins is that nothing
+    between them commits — the review's only other exit is back to ``work``,
+    which reaches the request through ``rebase`` again.
     """
     bundled = dict(state_mod.bundled_workflows())
     wf = model.load(bundled["improv-worker"])
@@ -213,7 +219,10 @@ def test_the_worker_rebases_onto_the_target_before_a_request():
     assert request.next == "rebase"
 
     rebase = wf.steps["rebase"]
-    assert rebase.next == "integration-request"
+    assert rebase.next == "peer-review"
+    review = wf.steps["peer-review"].select.options
+    assert review["pass"].next == "integration-request"
+    assert review["changes"].next == "work"
     for anchor in (
         "pull request",
         "merge-base",
@@ -237,7 +246,10 @@ def test_the_project_override_worker_requests_through_a_rebase():
 
     request = wf.steps["landing"].select.options["request"]
     assert request.next == "rebase"
-    assert wf.steps["rebase"].next == "integration-request"
+    assert wf.steps["rebase"].next == "peer-review"
+    assert (
+        wf.steps["peer-review"].select.options["pass"].next == "integration-request"
+    )
     for anchor in ("rebase", "merge-base", "다시 돌려"):
         assert anchor in wf.steps["rebase"].instructions, (
             f"project worker rebase lost its {anchor!r} rule"
