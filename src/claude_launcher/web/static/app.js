@@ -2226,8 +2226,10 @@ function syncForkAvailability() {
   // The fold below hides these rows; the summary line has to keep saying
   // what they hold, so every path that changes one of them lands here.
   // After syncSpawnMode, never before: on a child the policy decides which
-  // of them speak for themselves, and the summary reads that answer.
+  // of them speak for themselves, and the summary reads that answer. The
+  // profile hint reads the same disables, for the same reason.
   renderRuntimeSummary();
+  renderProfileHint();
 }
 
 /* What the folded "How it runs" rows currently say, written onto the fold's
@@ -2236,10 +2238,15 @@ function syncForkAvailability() {
    A fold that hides the directory would be a trap: an agent started in the
    wrong checkout does not complain, it quietly works on the wrong tree, and
    the user finds out from a commit. So the values ride on the face of the
-   fold — the harness, the profile and the directory always, the rest only
-   when they are set to something other than their default, because a
-   summary that lists every row is the fold nobody opens AND the line nobody
-   reads.
+   fold — the directory always, the rest only when they are set to something
+   other than their default, because a summary that lists every row is the
+   fold nobody opens AND the line nobody reads.
+
+   It does NOT name the promoted rows (RUNTIME_PROMOTED — the profile and the
+   harness it selects). Those are on the face of the form now, with labels, so
+   a copy here would be noise at best and, since the two are written by
+   different code paths, a contradiction at worst. The rule is the same one
+   the fold's face has always followed: say what the reader cannot see.
 
    On a child only the rows the spawn policy left OPEN may speak for
    themselves. A greyed row still holds whatever the form was last showing,
@@ -2255,9 +2262,6 @@ function renderRuntimeSummary() {
   const parent = spawnParent();
   const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
   const bits = [];
-  // Read-only, but still part of the launch contract and worth previewing.
-  bits.push(f.harness.value || "claude");
-  if (speaks("profile") && f.profile.value) bits.push(f.profile.value);
   if (speaks("cwd")) {
     // The option's label is "name — path"; the name is what the user
     // registered the directory as, and the path is what the fold shows.
@@ -2281,7 +2285,58 @@ function renderRuntimeSummary() {
       : `— inherited from ${parent.name}`;
     return;
   }
-  out.textContent = `— ${bits.join(" · ")}`;
+  // Nothing left to hide is nothing to say: with the profile promoted out,
+  // a form whose workspace list has not arrived yet has no folded value at
+  // all, and a bare "—" is a label pointing at nothing.
+  out.textContent = bits.length ? `— ${bits.join(" · ")}` : "";
+}
+
+/* The one line the promoted Profile row cannot say for itself.
+
+   Promoting the row answers "which profile", and that is the question people
+   get wrong — but three rows still inside the fold change what the answer
+   MEANS, and each of them is the same class of silent mistake:
+
+   - --borrow runs the session on ANOTHER profile's token. The Profile row
+     goes on naming the profile whose config and skills are used, which is
+     true and, on its own, misleading about the credential.
+   - --null runs it on no token at all; the profile is still real, but
+     nothing is logged in until someone types /login inside.
+   - a profile whose harness this machine has not installed cannot boot at
+     all (profile_details[].harness_available), and the read-only harness row
+     says the program's name, not that it is missing.
+
+   Silent when none of them applies: a hint that is always up is a hint
+   nobody reads, and this one has to be legible on the one launch in fifty
+   where it matters. On a child, a row the spawn policy locked is the
+   parent's and says nothing here — same rule as the summary line's. */
+function renderProfileHint() {
+  const box = $("profile-hint");
+  if (!box) return;  // a page that predates the row still runs
+  const f = $("new-session");
+  if (!f || !f.profile) return;
+  const parent = spawnParent();
+  const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
+  const picked = f.profile.value || "";
+  const details = typeof profileDetails === "object" ? profileDetails : {};
+  const detail = picked ? details[picked] : null;
+  const whose = picked || (parent ? `${parent.name}'s profile` : "this profile");
+  let text = "";
+  if (speaks("null_token") && f.null_token && f.null_token.checked) {
+    text = `--null: it boots with no token at all — ${whose}'s config and ` +
+           `skills, but somebody has to run /login inside before it works.`;
+  } else if (speaks("borrow") && f.borrow && f.borrow.value) {
+    text = `--borrow ${f.borrow.value}: it runs on ${f.borrow.value}'s token ` +
+           `and provider — only the credential is theirs, the config and ` +
+           `skills stay ${whose}'s.`;
+  } else if (detail && detail.error) {
+    text = `${picked}: ${detail.error}`;
+  } else if (detail && detail.harness_available === false) {
+    text = `${detail.harness || "its harness"} is not installed on this ` +
+           `machine — a session on ${picked} will not start until it is.`;
+  }
+  box.textContent = text;
+  box.classList.toggle("hidden", !text);
 }
 
 /* The fold is shut on arrival, which is right for as long as everything
@@ -2298,8 +2353,13 @@ function renderRuntimeSummary() {
 let runtimeFoldOpenedFor = null;
 function syncRuntimeFold(f, parent) {
   const fold = $("new-runtime");
+  // Only the rows the fold actually hides count. A promoted row the policy
+  // hands back is already visible and already labelled, so springing the
+  // fold open for it would open it on rows that stayed the parent's — the
+  // operator reads them as theirs and they are not.
   const openRows = parent
-    ? SPAWN_INHERITS.filter((k) => f[k] && !f[k].disabled)
+    ? SPAWN_INHERITS.filter(
+        (k) => f[k] && !f[k].disabled && !RUNTIME_PROMOTED.includes(k))
     : [];
   const stamp = parent ? `${parent.name}:${openRows.join(",")}` : "";
   if (fold && openRows.length && stamp !== runtimeFoldOpenedFor) fold.open = true;
@@ -2307,8 +2367,11 @@ function syncRuntimeFold(f, parent) {
 }
 
 /* One listener for the whole form rather than one per folded row: `input`
-   bubbles from every control in it, and the summary is cheap to rebuild. */
-$("new-session").addEventListener("input", renderRuntimeSummary);
+   bubbles from every control in it, and both lines are cheap to rebuild. */
+$("new-session").addEventListener("input", () => {
+  renderRuntimeSummary();
+  renderProfileHint();
+});
 
 /* ------------------------------------------------------------------ */
 /* the create form as `claunch spawn`: a CHILD of a session            */
@@ -2325,6 +2388,22 @@ $("new-session").addEventListener("input", renderRuntimeSummary);
    wrong, and lies to the person who set 'allow_profile: true'. */
 const SPAWN_INHERITS = ["harness", "profile", "borrow", "null_token", "cwd",
                         "args", "resume", "fork"];
+
+/* Of those, the ones that no longer live in the fold. They are still
+   inherited — the spawn policy still governs them exactly as before, and
+   spawnChildFields still reads them through their disables — but they are
+   asked on the face of the form, because what they decide is WHOSE
+   credentials the session runs on rather than merely how it runs. A profile
+   picked wrong is not caught by anything downstream: the session boots, on
+   the wrong token, and reports nothing.
+
+   Everything that reasons about "what the fold hides" subtracts this list —
+   the summary line does not repeat a visible row (renderRuntimeSummary) and
+   the fold does not spring open for one (syncRuntimeFold). The markup is
+   held to the same partition by tests/web/newform_check.js: the fold's rows
+   plus these must be exactly SPAWN_INHERITS, so promoting a row means moving
+   it, never copying it. */
+const RUNTIME_PROMOTED = ["profile", "harness"];
 
 /* The picked parent's spawn capabilities, and which parent they are about:
    one report per parent, kept until the pick moves. */
@@ -2493,6 +2572,7 @@ function syncSpawnMode() {
     // left to syncForkAvailability. The other branch reaches it through that
     // call instead, which is why this one is inside the child arm.
     renderRuntimeSummary();
+    renderProfileHint();
   } else {
     hint.classList.add("hidden");
     // The rows go back to the form that owns them, which has its own
@@ -2639,6 +2719,10 @@ $("new-session").profile.addEventListener("change", () => {
   syncProfileHarness();
   syncForkAvailability();
   syncSpawnMode();
+  // Both of the above end in renderProfileHint, but only after the harness
+  // row has been rebuilt from the new pick — which is what the hint reads
+  // for "not installed on this machine".
+  renderProfileHint();
 });
 $("new-session").null_token.addEventListener("change", syncForkAvailability);
 
