@@ -17,6 +17,15 @@ member's terminal and when that member last *sent*:
   (idle+caught-up, or undeliverable-behind): a real mesh message to every
   member whose role is a ``stall_watch`` role in the mesh's vocabulary
   (the leader by default), so it also crosses machines over federation.
+* **ack_timeout** — the other non-nudge, and the clock the rest of this
+  module was missing. Everything above ACCOUNTS for unanswered mail; nothing
+  aged it. A debt was discharged only by the member speaking or an operator
+  dismissing it by hand, and a queued message stopped weighing on the door
+  only by being delivered — so a member whose session exited could do
+  neither, forever. ``owed_secs`` writes off a delivered question nobody
+  answered; ``door_secs`` stops undelivered mail counting toward
+  ``inbox_max`` (without dropping it — it still lands on respawn). See
+  :meth:`Mesh.ack_timeout` and :meth:`MeshManager.countable_inbox`.
 * **backpressure** — the odd one out: not a nudge at all, but the gate that
   keeps the three above (and every member's traffic) from arriving faster
   than a terminal can read. A recipient whose undelivered backlog has hit
@@ -91,6 +100,22 @@ def default_policy() -> dict:
         "stall_warn": {
             "enabled": False,
             "warn_secs": 600.0,
+        },
+        # ON by default for the same reason backpressure below is, and it is
+        # the release valve for exactly that gate: a cap with no clock on it
+        # is a door that can only ever shut. See :func:`Mesh.ack_timeout`.
+        "ack_timeout": {
+            "enabled": True,
+            # A DELIVERED reply-expecting message older than this stops
+            # counting as owed. The member may be gone, restarted, or simply
+            # past caring; an obligation nobody can discharge is not one.
+            # 0 disables (debts last forever, the pre-timeout behaviour).
+            "owed_secs": 3600.0,
+            # An UNDELIVERED message older than this stops counting toward
+            # ``backpressure.inbox_max``. The message is NOT dropped — it
+            # still lands on respawn — it just stops holding the door shut
+            # against every later sender. 0 disables.
+            "door_secs": 900.0,
         },
         # ON by default, unlike the three nudges above, and for the opposite
         # reason: those SPEND a recipient's turn, so switching one on is a
@@ -172,6 +197,8 @@ def merge_policy(base: dict, patch: dict) -> dict:
             elif key in ("interval", "max_interval"):
                 out[section][key] = _num(value)
             elif key == "warn_secs":
+                out[section][key] = _num(value, lo=0.0)  # 0 disables
+            elif key in ("owed_secs", "door_secs"):
                 out[section][key] = _num(value, lo=0.0)  # 0 disables
             elif key == "inbox_max":
                 out[section][key] = _count(value)
@@ -294,7 +321,18 @@ async def tick(mm, mesh) -> None:
             # last_asked marks the newest *reply-expecting* delivery (fyi/ack
             # traffic never arms the heartbeat — expects_reply in mesh.py).
             last_asked = st.get("last_asked", 0.0)
-            unanswered = last_asked > 0 and last_sent < last_asked
+            # The watermark is the cheap precondition; ``owed`` is the
+            # authority. It is what ``mesh owed`` and the dashboard print,
+            # and it is where the ack timeout writes a debt off — so
+            # chasing on the watermark alone would nudge a member about mail
+            # the ledger has already forgiven, which is exactly the
+            # disagreement Mesh.owed's docstring forbids in the other
+            # direction.
+            unanswered = (
+                last_asked > 0
+                and last_sent < last_asked
+                and bool(mesh.owed(handle))
+            )
             pending = len(mesh.pending(handle))
             caught_up = not unanswered and pending == 0
             active_at = max(last_sent, last_delivered, st["anchor"])

@@ -71,6 +71,7 @@ from claude_launcher import store
 from claude_launcher.daemon import mesh_policy
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
+from claude_launcher.daemon.mesh import utcnow
 from claude_launcher.daemon.mesh import (
     Member,
     MeshConflict,
@@ -729,7 +730,21 @@ def test_remote_heartbeat_decided_by_primary_injected_by_guest(home, tmp_path):
         mm_a.set_policy("m", {"heartbeat": {"enabled": True, "interval": 1.0}})
         mm_a.report_interval = 0.0
 
-        # bob owes an answer (his daemon's delivery bookkeeping says so)
+        # bob owes an answer: the reply-expecting message itself, delivered,
+        # AND the bookkeeping his daemon stamps beside it. Both halves,
+        # because `unanswered` is the watermark confirmed against the ledger
+        # (``Mesh.owed``) rather than the watermark alone — the two are not
+        # allowed to disagree (see ``_mark_member_edge``/``dismiss``, which
+        # settle the watermark by hand for the same reason), and a stamp with
+        # no message behind it is a state delivery cannot produce.
+        mesh_b.messages.append({
+            "id": "msg-owedbybob", "ts": utcnow(), "from": "alice",
+            "to": "bob", "type": "ask", "body": "answer me",
+            "epoch": mesh_b.authority_epoch, "seq": mesh_b.next_seq,
+        })
+        mesh_b.next_seq += 1
+        mesh_b.cursors["bob"] = len(mesh_b.messages)   # as delivery would
+        assert mesh_b.owed("bob"), "setup: bob must actually owe an answer"
         now = time.monotonic()
         mesh_b.activity["bob"] = {"anchor": now, "last_asked": now, "last_sent": 0.0}
         await _wait_for(
