@@ -453,34 +453,6 @@ option:disabled { color: #6b7280; }
 /* The two that make a session unresumable read as what they are. */
 #clear-exited:hover, .bulk.danger:hover { color: #ff7b72; }
 
-/* The nudge countdown, on the shelf above the nav. One line, never two: it
-   sits between the session list and the nav on a rail that is 260px wide and
-   already full, so it takes a fixed row's worth of height and clips rather
-   than pushing the nav down when a workflow has a long name. The whole strip
-   is a click target — it walks to the run whose clock it is reporting. */
-#rail-timer {
-  flex: none; display: flex; align-items: baseline; gap: 6px;
-  padding: 5px 8px; cursor: pointer;
-  background: #1b1e24; border-top: 1px solid #2a2e36;
-  font-size: 11px; color: #7d8590; white-space: nowrap; overflow: hidden;
-}
-#rail-timer:hover { background: #22262d; }
-#rail-timer .rt-glyph { flex: none; font-size: 12px; line-height: 1; }
-#rail-timer .rt-scope {
-  flex: none; max-width: 84px; overflow: hidden; text-overflow: ellipsis;
-  color: #adbac7;
-}
-#rail-timer .rt-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-/* Four states earn a colour, and they are the four a reader would act on:
-   about to fire, armed and held by a session that stopped, switched off, and
-   a tick that is not running at all. `counting` deliberately keeps the rail's
-   own grey — the common case must not glow. */
-#rail-timer.due { color: #d29922; }
-#rail-timer.due .rt-glyph { color: #d29922; }
-#rail-timer.held { color: #a371f7; }
-#rail-timer.off { color: #6e7681; }
-#rail-timer.stopped { color: #ff7b72; }
-
 /* The rail's nav. Everything you *do* is a page behind one of these; the
    list above is the only thing that stays, because it moves on its own and
    is meant to be watched while you work in the terminal beside it. */

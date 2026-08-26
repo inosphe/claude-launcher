@@ -871,90 +871,24 @@ function railTimerTitle(pick, state) {
   return lines.join("\n");
 }
 
-/* Which run the strip is about: the attached session's, or — when nothing is
-   attached, or what is attached drives no run — whichever run on this machine
-   is closest to being spoken to. The scope is always drawn beside it, so the
-   fallback can never be mistaken for the session on screen. */
-function railTimerRun() {
-  const mine = typeof currentName === "string" && currentName
-    ? sessCflowRun(currentName) : null;
-  if (mine && mine.timers) return mine;
-  let best = null;
-  for (const r of cflowCache || []) {
-    const p = railTimerPick(r);
-    if (!p || (p.state !== "counting" && p.state !== "due")) continue;
-    const due = p.due_in === null || p.due_in === undefined ? Infinity : p.due_in;
-    if (!best || due < best.due) best = { run: r, due };
-  }
-  return best ? best.run : null;
-}
-
-/* When the numbers currently on screen were read, so the second-by-second
-   repaint can age them. Set by renderRailTimer (the 2s poll), consumed by
-   paintRailTimer (the 1s tick). */
-let railTimerRead = null;
-let railTimerTicker = null;
-
-function renderRailTimer() {
-  railTimerRead = { pick: railTimerPick(railTimerRun()), at: Date.now() };
-  paintRailTimer();
-}
-
-function paintRailTimer() {
-  const box = $("rail-timer");
-  if (!box) return;
-  const read = railTimerRead;
-  const line = read && railTimerLine(read.pick, (Date.now() - read.at) / 1000);
-  if (!line) {
-    box.className = "hidden";
-    box.textContent = "";
-    box.removeAttribute("title");
-    return;
-  }
-  box.className = `rail-timer ${line.state}`;
-  box.title = line.title;
-  box.textContent = "";
-  box.append(
-    el("span", "rt-glyph", line.glyph),
-    el("span", "rt-scope", read.pick.scope || "default"),
-    el("span", "rt-text", line.text)
-  );
-  // The run page for the run being timed — where the interval is actually
-  // editable. Wired once for the node's lifetime: textContent above wipes the
-  // children, not the box, so a listener added per repaint would stack.
-  if (!box.dataset.wired) {
-    box.dataset.wired = "1";
-    box.addEventListener("click", () => {
-      const p = railTimerRead && railTimerRead.pick;
-      if (!p) return;
-      location.hash =
-        "#/wf/" + encodeURIComponent(`${p.scope || "default"}|${p.cwd}`);
-    });
-  }
-}
-
 /* ------------------------------------------------------------------ */
-/* the same clock, on the session's own header                        */
+/* the clock, on the session's own header                             */
 /* ------------------------------------------------------------------ */
-/* The rail's strip answers "is the daemon about to type into something on
-   this machine, and when". A person watching one terminal is asking a
-   narrower question — "is it about to type into THIS one" — and the strip
-   cannot answer it: when the attached session drives no run of its own it
-   falls back to whichever run on the machine fires soonest (railTimerRun),
-   which is the right answer for a rail and the wrong one for a header. A
-   countdown drawn beside a session's name is read as that session's.
-
-   So the chip below shares every judgement with the strip — the same pick,
-   the same words, the same ageing — and differs in exactly two ways, both
-   of them consequences of having a subject:
+/* The countdown's one home is the chip in the session's header: it answers
+   "is the daemon about to type into THIS session, and when". The attached
+   session's run, or nothing at all — a countdown drawn beside a session's
+   name is read as that session's, so any other run's clock would be a
+   confident lie. That is what the two differences from the rail's old strip
+   were for, and both stay because the reasoning survives the strip's
+   removal:
 
    * no fallback. The attached session's run or nothing;
-   * no scope label. The strip prints the scope because it may be speaking
-     for a run the reader is not looking at; here the name is already at the
-     other end of the same row, and repeating it would be noise.
+   * no scope label. The chip needs no "whose clock" tag — the name is
+     already at the other end of the same row, and repeating it would be
+     noise.
 
-   Reusing railTimerLine rather than writing a second one is the point: two
-   wordings for one clock drift, and the strip's words are the tested ones. */
+   Reusing railTimerLine rather than writing a second one is the point: one
+   vocabulary and one wording for one clock, tested through the chip. */
 
 /* The run the header's chip speaks for: the attached session's, or null. */
 function termTimerRun() {
@@ -968,6 +902,7 @@ function termTimerRun() {
    session's countdown left on the new session's header would be the one
    mistake this chip exists to avoid. */
 let termTimerRead = null;
+let termTimerTicker = null;
 
 function renderTermTimer() {
   termTimerRead = {
@@ -2007,11 +1942,11 @@ async function refreshCflow() {
   const runs = data.runs || [];
   cflowCache = runs;
   applyCflowBadges();  // the rail rows may have painted before this cache filled
-  renderRailTimer();   // ...and the nudge countdown above the nav reads it too
-  renderTermTimer();   // ...as does the attached session's own header chip
+  renderTermTimer();   // the attached session's own header chip
   if (currentPage === "home") renderHome();
-  // Everything above is what the *rail* reads: badges on rows, the nudge
-  // countdown, the home card's count. What follows rebuilds the Flows page's
+  // Everything above is what feeds the rail and the header: badges on rows,
+  // the attached session's countdown, the home card's count. What follows
+  // rebuilds the Flows page's
   // whole list from scratch — one card per run, a hundred of them on a
   // working machine — and this runs on the two-second tick from whatever page
   // you are on. Off the flows page there is nobody to see it, and the tick
@@ -16062,10 +15997,8 @@ document.addEventListener("pointercancel", releaseRail, true);
 // The countdown, between polls. It fetches nothing — it ages the last
 // /api/cflow reading — so it is a second's worth of arithmetic, and it is
 // separate from the 2s poll because a clock that only moves every other
-// second reads as a clock that has stopped, which is the exact thing this
-// strip exists to tell apart. One interval, both faces of the same clock:
-// the rail's strip and the attached session's header chip must not be able
-// to drift a second apart from each other.
-railTimerTicker = setInterval(() => { paintRailTimer(); paintTermTimer(); }, 1000);
+// second reads as a clock that has stopped, which is the exact thing the
+// header chip exists to tell apart.
+termTimerTicker = setInterval(() => { paintTermTimer(); }, 1000);
 
 boot();

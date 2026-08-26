@@ -1,31 +1,34 @@
-/* The nudge countdown above the rail's nav, run against the real functions
-   from app.js.
+/* The nudge countdown's shared clock vocabulary, run against the real
+   functions from app.js — and the guard that the rail carries no timer
+   strip of its own.
 
-   The strip answers two questions a dashboard could not answer before: is the
-   daemon's automatic nudge going to happen, and how long is left of it. Two
-   clocks can produce it (the step reminder, which types into a session that
-   is WORKING, and the stall ping, which wakes one that STOPPED), and the
-   whole difficulty is that at any moment at most one of them applies. Showing
-   only the reminder reports "off" precisely when the ping is the live clock —
-   a confident wrong answer, which is worse than no strip at all.
+   The countdown exists once, as a chip in the session's own header
+   (#term-timer, rendered and wired in termtimer_check.js): the rail's strip
+   was its duplicate and is gone. What stays is the machinery both faces
+   shared — the pick that ranks the two clocks (the step reminder, which
+   types into a session that is WORKING, and the stall ping, which wakes one
+   that STOPPED, at most one of them live at any moment), the line that
+   words the countdown and each of its silences, and the formatting that
+   keeps seconds visible under a minute. All of it now serves the chip, and
+   this file tests it directly while termtimer_check tests it through the
+   chip's rendering.
 
    What has to hold here:
 
-   * the clock the strip speaks for is the one a reader needs, not the first
-     in the object — something about to fire outranks something counting,
-     which outranks a clock that is armed and deliberately quiet;
+   * the clock the countdown speaks for is the one a reader needs, not the
+     first in the object — something about to fire outranks something
+     counting, which outranks a clock that is armed and deliberately quiet;
    * the countdown keeps running between the 2s polls, and CANNOT run past
      zero into negative time — the state is recomputed from the aged number
      rather than trusted, so "counting, 3s" becomes "due" four seconds later;
-   * the several ways a clock can be silent stay told apart in words: off, not
-     running, held by a session that stopped, and paused because the run is on
-     a gate the clock is not allowed to touch. Collapsing any of those into
-     "off" sends somebody to switch on a thing that is already on;
+   * the several ways a clock can be silent stay told apart in words: off,
+     not running, held by a session that stopped, and paused because the run
+     is on a gate the clock is not allowed to touch. Collapsing any of those
+     into "off" sends somebody to switch on a thing that is already on;
    * a run the daemon published no timers for (an older daemon) draws nothing
      rather than a zero;
-   * the strip sits ABOVE the nav in the shipped markup, and the common case
-     (a clock quietly counting) takes no colour — the rail already has one
-     thing that speaks in colour and it is the session's liveness dot. */
+   * and the shipped page ships that countdown exactly once — on the
+     session's header, never on the rail. */
 const fs = require("fs");
 const path = require("path");
 const staticDir = path.join(__dirname, "..", "..", "src", "claude_launcher",
@@ -54,18 +57,17 @@ function table(name) {
 }
 
 const ctx = {};
-/* `currentName` and `cflowCache` are app.js globals; here they are parameters
-   of the wrapper, so the sliced functions and the setters share one binding. */
+/* The wrapper's parameters mirror app.js's globals, though the vocabulary
+   under test here reads none of them — it sees only the run object it is
+   handed. The signature is kept so the slices stay drop-in-faithful. */
 new Function(
   "exports", "currentName", "cflowCache",
   [table("RAIL_TIMER_RANK"), table("RAIL_TIMER_GLYPH"),
    slice("fmtCountdown"), slice("railTimerPick"), slice("railTimerTitle"),
-   slice("railTimerLine"), slice("sessCflowRun"), slice("railTimerRun")].join("\n") + `
+   slice("railTimerLine")].join("\n") + `
 exports.fmtCountdown = fmtCountdown;
 exports.pick = railTimerPick;
 exports.line = railTimerLine;
-exports.run = railTimerRun;
-exports.setWorld = (name, runs) => { currentName = name; cflowCache = runs; };
 `)(ctx, null, []);
 
 let failures = 0;
@@ -187,68 +189,31 @@ check("...the clock it is reporting, with its cadence and last firing",
 check("...and the other clock, so 'why not the ping' is answerable here",
       title.split("\n")[2], "stall ping · waiting · every 15:00");
 
-/* ---- no timers, no strip -------------------------------------------- */
-/* An older daemon publishes no `timers` at all. Drawing a zero there would be
-   inventing a countdown; the strip has to disappear instead. */
+/* ---- no timers, no countdown ------------------------------------------ */
+/* An older daemon publishes no `timers` at all. Drawing a zero there would
+   be inventing a countdown; nothing must be drawn instead. */
 check("a run with no timers yields no pick",
       ctx.pick({ scope: "s19", cwd: "F:/repo", status: "step" }), null);
 check("...and no pick yields no line", ctx.line(null), null);
 check("an empty timers object is not a clock either",
       ctx.pick({ scope: "s19", cwd: "F:/repo", timers: {} }), null);
 
-/* ---- which run the strip is about ------------------------------------ */
-/* The attached session's, when it drives one. */
-const attached = timers(REM(), PING());
-const other = Object.assign(timers(REM({ due_in: 30 }), PING()),
-                            { scope: "s20", cwd: "F:/other" });
-ctx.setWorld("s19", [other, attached]);
-check("the attached session's run wins even when another fires sooner",
-      ctx.run().scope, "s19");
-/* Nothing attached: the run closest to being spoken to, so the strip is
-   still answering a real question rather than going blank. */
-ctx.setWorld(null, [attached, other]);
-check("with nothing attached, the soonest run is shown", ctx.run().scope, "s20");
-/* A run that is not counting is not a candidate for that fallback — a fleet
-   of switched-off clocks must not put an arbitrary one on the rail. */
-ctx.setWorld(null, [timers(REM({ enabled: false, state: "off", due_in: null }),
-                           PING())]);
-check("switched-off runs are not fallback candidates", ctx.run(), null);
-ctx.setWorld(null, []);
-check("no runs at all, no strip", ctx.run(), null);
-/* The attached session drives a run the daemon published no timers for: fall
-   through to the fleet rather than showing an empty strip for it. */
-ctx.setWorld("s19", [Object.assign(timers(REM(), PING()), { timers: undefined }),
-                     other]);
-check("an attached run without timers falls through to the fleet",
-      ctx.run().scope, "s20");
-
-/* ---- the shipped page and stylesheet -------------------------------- */
-/* The placement is the request: above the nav, in the rail. Held against the
-   markup because every check above would pass just as well with the strip
-   rendered into a page nobody has open. */
-const railTimerAt = html.indexOf('id="rail-timer"');
-const railNavAt = html.indexOf('id="rail-nav"');
-const sessListAt = html.indexOf('id="session-list"');
-check("the strip exists in the shipped markup", railTimerAt >= 0, true);
-check("...above the nav", railTimerAt < railNavAt, true);
-check("...and below the session list it belongs to",
-      railTimerAt > sessListAt, true);
-check("it starts hidden — an empty strip must not reserve a row",
-      /id="rail-timer"\s+class="hidden"/.test(html), true);
-
-/* The stylesheet's half: the common case stays the rail's own grey. A
-   `counting` colour would put a second permanently-lit thing on a rail whose
-   only colour is the session's liveness dot. */
+/* ---- the rail carries no timer strip --------------------------------- */
+/* The countdown's one home is the header chip (#term-timer); the rail's
+   strip was the duplicate this task removed. The guard is the absence —
+   every check above would pass just as well if the countdown were rendered
+   into a strip nobody asked about. */
 const rules = css.replace(/\/\*[\s\S]*?\*\//g, "");
-check("counting takes no colour of its own", /#rail-timer\.counting/.test(rules),
-      false);
-check("but due, held and a dead tick do",
-      ["due", "held", "stopped"].every(
-        (s) => new RegExp(`#rail-timer\\.${s} \\{[^}]*color:`).test(rules)),
-      true);
-check("the strip is one row and clips rather than shoving the nav down",
-      /#rail-timer \{[^}]*white-space:\s*nowrap/.test(rules) &&
-      /#rail-timer \{[^}]*overflow:\s*hidden/.test(rules), true);
+check("no timer strip ships in the rail's markup",
+      html.indexOf('id="rail-timer"') < 0, true);
+check("...nor a rail-timer rule in the stylesheet",
+      /#rail-timer/.test(rules), false);
+check("...nor a renderer for one in the script",
+      /function renderRailTimer\(\)/.test(src), false);
+/* and the countdown is still on the page once, on the session's header —
+   the monotony that makes "duplicate" a meaningful verdict. */
+check("the countdown lives once, on the session's header",
+      /id="term-timer"/.test(html), true);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);
