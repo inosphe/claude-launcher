@@ -29,6 +29,15 @@ CHILD = (
     "    if line == 'quit':\n"
     "        print('BYE')\n"
     "        break\n"
+    # Stand-in for a TUI taking (and releasing) the mouse the way claude does:
+    # the wheel changes hands on these, and the daemon has to notice.
+    "    if line in ('mouseon', 'mouseoff'):\n"
+    "        h = 'h' if line == 'mouseon' else 'l'\n"
+    "        sys.stdout.write(''.join('\\x1b[?%s%s' % (m, h)\n"
+    "                                 for m in (1000, 1002, 1003, 1006)))\n"
+    "        sys.stdout.flush()\n"
+    "        print('mouse:' + h)\n"
+    "        continue\n"
     "    print('echo:' + line)\n"
 )
 
@@ -930,6 +939,22 @@ def test_ws_scroll_control_serves_history_and_freezes_data(home, tmp_path):
                     if pred(data):
                         return data
 
+            # A client that asks for the scrollback gets it before the grid,
+            # so its own terminal can serve the wheel natively.
+            asked = await client.ws_connect(
+                "/api/sessions/wsc/ws?scrollback=1", headers=bearer
+            )
+            try:
+                assert json.loads((await asked.receive(timeout=10)).data)["type"] == "init"
+                hist = await asked.receive(timeout=10)
+                assert hist.type == aiohttp.WSMsgType.BINARY
+                assert hist.data.startswith(b"\x1b[?1049l")
+                assert b"echo:l0" in hist.data, "the seed carries real history"
+                grid = await asked.receive(timeout=10)
+                assert grid.type == aiohttp.WSMsgType.BINARY
+            finally:
+                await asked.close()
+
             ws = await client.ws_connect("/api/sessions/wsc/ws", headers=bearer)
             try:
                 msg = await ws.receive(timeout=10)
@@ -937,8 +962,14 @@ def test_ws_scroll_control_serves_history_and_freezes_data(home, tmp_path):
                 init = json.loads(msg.data)
                 assert init["type"] == "init"
                 assert init["alt"] is False  # the echo harness lives in the main buffer
+                assert init["mouse"] is False  # and it never asks for the mouse
+
+                # A client that asked for nothing gets nothing: the very next
+                # binary frame is the grid, not five thousand lines of history
+                # it never opted into. `claunch attach` is that client.
                 seed = await ws.receive(timeout=10)
                 assert seed.type == aiohttp.WSMsgType.BINARY
+                assert b"echo:l0" not in seed.data, "no unrequested scrollback"
 
                 await ws.send_str(json.dumps({"type": "scroll", "lines": 5}))
                 scrolled = await next_json(lambda d: d.get("type") == "scrolled")
@@ -968,6 +999,160 @@ def test_ws_scroll_control_serves_history_and_freezes_data(home, tmp_path):
                 assert b"echo:fresh" in repaint0.data
             finally:
                 await ws.close()
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_ws_hands_the_wheel_to_a_program_that_takes_the_mouse(home, tmp_path):
+    """A program asserting ``?1000h`` is asking for wheel ticks itself.
+
+    Two things have to reach the viewer for that to work: the ``mouse`` frame
+    (so the page stops spending ticks on scroll controls) and the modes
+    themselves in every repaint (so a terminal that attached late reports the
+    wheel like one that watched the program start). Without the second, a
+    viewer's xterm swallows the wheel and the session reads as unscrollable —
+    which is how it read before.
+    """
+    _register_py_harness()
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            session = mgr.create(
+                SessionDef(name="wsm", harness="py", cwd=str(tmp_path), rows=10)
+            )
+            await _wait_screen(session, "READY")
+
+            ws = await client.ws_connect("/api/sessions/wsm/ws", headers=bearer)
+            try:
+                init = json.loads((await ws.receive(timeout=10)).data)
+                assert init["mouse"] is False, "premise: nobody has the mouse yet"
+                await ws.receive(timeout=10)          # the repaint seed
+
+                await session.send_keys(["mouseon", "Enter"])
+                await _wait_screen(session, "mouse:h")
+
+                # The frame that tells the page the wheel changed hands.
+                deadline = time.monotonic() + 10
+                took = None
+                while took is None and time.monotonic() < deadline:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=10)
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        data = json.loads(msg.data)
+                        if data.get("type") == "mouse":
+                            took = data
+                assert took == {"type": "mouse", "tracking": True}
+                assert session.screen.mouse_tracking is True
+                assert session.screen.wheel_is_the_programs is True
+
+                # And a viewer arriving now learns the modes from the repaint.
+                late = await client.ws_connect(
+                    "/api/sessions/wsm/ws", headers=bearer
+                )
+                try:
+                    late_init = json.loads((await late.receive(timeout=10)).data)
+                    assert late_init["mouse"] is True
+                    repaint = await late.receive(timeout=10)
+                    assert repaint.type == aiohttp.WSMsgType.BINARY
+                    for mode in (b"?1000h", b"?1002h", b"?1003h", b"?1006h"):
+                        assert mode in repaint.data, mode
+                finally:
+                    await late.close()
+
+                # Handing it back is announced too.
+                await session.send_keys(["mouseoff", "Enter"])
+                await _wait_screen(session, "mouse:l")
+                deadline = time.monotonic() + 10
+                gave = None
+                while gave is None and time.monotonic() < deadline:
+                    msg = await asyncio.wait_for(ws.receive(), timeout=10)
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        data = json.loads(msg.data)
+                        if data.get("type") == "mouse":
+                            gave = data
+                assert gave == {"type": "mouse", "tracking": False}
+                assert session.screen.mouse_tracking is False
+            finally:
+                await ws.close()
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_api_transcript_pages_the_conversation(home, tmp_path, monkeypatch):
+    """The route behind the transcript pane, paged newest-last.
+
+    The pane exists because the terminal cannot answer this: a claude session
+    repaints the alternate screen instead of scrolling it, so the readable
+    record of what it said lives only in claude's own jsonl.
+    """
+    _register_py_harness()
+    import aiohttp
+    from aiohttp.test_utils import TestClient, TestServer
+    from claude_launcher.daemon import transcript_view
+
+    conv = tmp_path / "conv.jsonl"
+    conv.write_text(
+        "".join(
+            json.dumps({
+                "type": "user" if i % 2 == 0 else "assistant",
+                "timestamp": "2026-08-25T00:00:00Z",
+                "message": {"role": "user" if i % 2 == 0 else "assistant",
+                            "content": f"turn {i}"},
+            }) + "\n"
+            for i in range(30)
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(transcript_view, "locate_transcript", lambda sdef: conv)
+
+    async def run():
+        mgr = _manager()
+        app = build_app(mgr, "sekrit", started_at=time.monotonic())
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        bearer = {"Authorization": "Bearer sekrit"}
+        try:
+            mgr.create(SessionDef(name="tx", harness="py", cwd=str(tmp_path)))
+
+            r = await client.get(
+                "/api/sessions/tx/transcript?limit=10", headers=bearer
+            )
+            assert r.status == 200
+            tail = await r.json()
+            assert tail["total"] == 30
+            assert [b["text"] for rec in tail["records"] for b in rec["blocks"]][-1] \
+                == "turn 29"
+            assert tail["has_more"] is True
+
+            r2 = await client.get(
+                f"/api/sessions/tx/transcript?limit=10&before={tail['cursor']}",
+                headers=bearer,
+            )
+            older = await r2.json()
+            assert [b["text"] for rec in older["records"] for b in rec["blocks"]][0] \
+                == "turn 10"
+
+            # The index is the storage the daemon keeps for this session: it
+            # sits beside the session's log and survives a restart, so the
+            # next page is a seek rather than a re-read of the whole file.
+            assert transcript_view.index_path("tx").is_file()
+
+            bad = await client.get(
+                "/api/sessions/tx/transcript?before=nope", headers=bearer
+            )
+            assert bad.status == 400
         finally:
             await mgr.shutdown_all()
             await client.close()

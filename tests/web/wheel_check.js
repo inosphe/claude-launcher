@@ -1,14 +1,24 @@
-/* The terminal's virtual scroll, run against a stub socket.
+/* Who owns the terminal's wheel, run against a stub socket.
 
-   The session's history lives in the daemon's pyte scrollback and nowhere
-   else: xterm's alt-screen wheel becomes arrow keys over an empty local
-   scrollback, and on the main buffer a freshly attached socket's local
-   scrollback is just as empty (its seed is a repaint of the grid alone). The
-   contract is therefore buffer-blind: the wheel always becomes `scroll`
-   controls the daemon answers with history repaints. The real functions are
-   sliced out of the shipped app.js and driven here with stub events, a stub
-   socket and a fake timer wheel, exactly like reconnect_check does for the
-   link. */
+   Three regimes, and the contract is that only one of them is ours:
+
+   1. The program took the mouse (`?1000h` and friends — claude asserts them
+      behind the alternate screen and never lets go). Wheel ticks are its own;
+      xterm encodes the SGR report and the page must not spend the tick on
+      anything else. Measured on real sessions, such a terminal yields one or
+      two lines of daemon-side history for four hundred kilobytes of output —
+      it repaints the grid rather than scrolling it — so the virtual scroll
+      had nothing to serve it anyway.
+   2. The main buffer. xterm's own scrollback holds the history (the daemon
+      seeds it at attach), so the browser scrolls natively: scrollbar,
+      momentum, find-in-page.
+   3. The alternate screen with the mouse left alone — a pager reading arrow
+      keys. Nothing scrolls off the alt buffer, so the daemon's history window
+      is all there is and the `scroll` control serves it. This one is ours.
+
+   The real functions are sliced out of the shipped app.js and driven here
+   with stub events, a stub socket and a fake timer wheel, exactly like
+   reconnect_check does for the link. */
 const fs = require("fs");
 const path = require("path");
 const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher", "web",
@@ -90,8 +100,12 @@ function build(opts) {
   const apiStub = async () => ({ ok: true, json: async () => ({}) });
   const statuses = [];
   const winOn = {};
+  // `modes` is xterm's own view of the private modes it has parsed out of the
+  // byte stream. The page reads it first and falls back to the daemon's flag,
+  // so the harness can drive either side.
   const term = {
     cols: 80, rows: 24, disposed: false,
+    modes: { mouseTrackingMode: "none" },
     write: () => {},
     resize: () => {},
     dispose: () => { term.disposed = true; },
@@ -103,13 +117,14 @@ function build(opts) {
   // wheel handlers sit in their own block near attach(), past the text-size
   // section, so the slice is the link machine plus that block.
   const code = slice("/* ---- the link ----", "/* ---- text size ----")
-    + "\n" + slice("/* ---- virtual scroll ----", "/* Bind the terminal to a session");
+    + "\n" + slice("/* ---- who owns the wheel ----", "/* Bind the terminal to a session");
   const api = new Function(
     "$", "url", "api", "fetch", "WebSocket", "window", "document", "location",
     "ws", "term", "fitAddon", "attachedPid", "applyingRemoteResize",
     "setStatusBadge", "refitSoon", "setTimeout", "clearTimeout", "Math", "Date",
     "fitView", "resyncTerminal", "terminalOnScreen",
     "let altScreen = false;\n" +
+    "let mouseTracking = false;\n" +
     "let scrollOffset = 0;\n" +
     "let wheelAccum = 0;\n" +
     "let wheelTimer = null;\n" +
@@ -120,9 +135,10 @@ function build(opts) {
     "const WHEEL_LINE_PX = 20;\n" +
     code +
     "\nreturn {openSocket, handleFrame, sendInput, detach, handleWheel," +
-    " flushWheel, updateScrollChip, syncLinkChip," +
+    " flushWheel, updateScrollChip, syncLinkChip, wheelBelongsToProgram," +
     " get state() { return linkState; }," +
     " get alt() { return altScreen; }," +
+    " get mouse() { return mouseTracking; }," +
     " get offset() { return scrollOffset; }," +
     " get accum() { return wheelAccum; }," +
     " get chip() { return $('term-scroll'); }," +
@@ -154,40 +170,99 @@ function build(opts) {
   );
 
   return { api, nodes, sockets, statuses, term, pending, fire, settle,
-           live: async (alt) => {
+           live: async (init) => {
+             const o = init || {};
              api.openSocket("s8");
              const s = sockets[sockets.length - 1];
              s.opened();
              s.text({ type: "init", cols: 80, rows: 24, status: "idle",
                       pid: 4242, boot_id: "b1",
-                      alt: alt === undefined ? false : alt });
+                      alt: !!o.alt, mouse: !!o.mouse });
              await settle();
              return s;
            } };
 }
 
 function wheel(dy, dm) {
-  return { deltaY: dy, deltaMode: dm, preventDefault: () => {} };
+  let prevented = false;
+  return { deltaY: dy, deltaMode: dm,
+           preventDefault: () => { prevented = true; },
+           get prevented() { return prevented; } };
 }
 
-/* --- the main buffer drives the daemon's history too --------------------- */
+/* --- (2) the main buffer scrolls itself ---------------------------------- */
 {
   const w = build();
   (async () => {
     const s = await w.live();
     check("a fresh socket knows the main buffer", w.api.alt === false, w.api.alt);
-    check("the wheel is taken over even here — xterm's local scrollback never"
-          + " holds the history a fresh attach missed",
-          w.api.handleWheel(wheel(-100, 0)) === false);
-    check("and the delta banks as lines", Math.abs(w.api.accum + 5) < 1e-9,
-          w.api.accum);
-    w.api.flushWheel();
-    check("asking the daemon exactly as the alt screen does",
-          JSON.parse(s.sent[s.sent.length - 1]).lines === 5, s.sent);
+    const e = wheel(-100, 0);
+    check("the wheel is left to xterm — its own scrollback holds the history"
+          + " the daemon seeded at attach",
+          w.api.handleWheel(e) === true);
+    check("nothing is prevented, so the browser scrolls natively", !e.prevented);
+    check("no delta is banked", w.api.accum === 0, w.api.accum);
+    check("and no control frame goes out",
+          s.sent.filter((m) => typeof m === "string").length === 0, s.sent);
   })();
 }
 
-/* --- on the alt screen the wheel drives the daemon's history ------------- */
+/* --- (1) a program that took the mouse keeps the wheel -------------------- */
+{
+  const w = build();
+  (async () => {
+    const s = await w.live({ alt: true, mouse: true });
+    check("init carries the mouse flag", w.api.mouse === true && w.api.alt === true,
+          { mouse: w.api.mouse, alt: w.api.alt });
+    check("the page agrees the wheel is the program's",
+          w.api.wheelBelongsToProgram() === true);
+    const e = wheel(-40, 0);
+    check("so the tick passes through to xterm, which reports it as a mouse"
+          + " event and lets claude scroll its own view",
+          w.api.handleWheel(e) === true);
+    check("no preventDefault", !e.prevented);
+    check("no accumulation, no daemon round trip",
+          w.api.accum === 0
+          && s.sent.filter((m) => typeof m === "string").length === 0,
+          { accum: w.api.accum, sent: s.sent });
+  })();
+}
+
+/* --- xterm's own mode view is enough, without the daemon's flag ---------- */
+{
+  const w = build();
+  (async () => {
+    const s = await w.live({ alt: true });
+    check("without tracking, an alt-screen wheel is the daemon's",
+          w.api.handleWheel(wheel(-20, 0)) === false);
+    w.term.modes.mouseTrackingMode = "any";
+    check("once xterm has parsed the assertion out of the byte stream, the"
+          + " wheel is the program's even before a control frame says so",
+          w.api.wheelBelongsToProgram() === true
+          && w.api.handleWheel(wheel(-20, 0)) === true);
+  })();
+}
+
+/* --- the mouse frame hands the wheel over mid-session --------------------- */
+{
+  const w = build();
+  (async () => {
+    const s = await w.live({ alt: true });
+    s.text({ type: "scrolled", offset: 6 });
+    check("scrolled back on the daemon's history", w.api.offset === 6, w.api.offset);
+    s.text({ type: "mouse", tracking: true });
+    check("the program taking the mouse drops the viewer to live — nothing"
+          + " would ever have scrolled them out of that frozen window",
+          w.api.offset === 0 && w.api.mouse === true, w.api.offset);
+    check("and the chip goes down with it",
+          w.api.chip.className.includes("hidden"), w.api.chip.className);
+    s.text({ type: "mouse", tracking: false });
+    check("giving it back returns the wheel to the daemon",
+          w.api.mouse === false && w.api.handleWheel(wheel(-20, 0)) === false);
+  })();
+}
+
+/* --- (3) on the alt screen the wheel drives the daemon's history ---------- */
 {
   const w = build();
   (async () => {
@@ -264,10 +339,12 @@ function wheel(dy, dm) {
     const s = await w.live();
     s.text({ type: "scrolled", offset: 5 });
     s.text({ type: "init", cols: 80, rows: 24, status: "idle", pid: 4242,
-             boot_id: "b1", alt: true });
-    check("an init frame resets to live at whatever buffer the program is in",
-          w.api.offset === 0 && w.api.alt === true && w.api.accum === 0,
-          { offset: w.api.offset, alt: w.api.alt });
+             boot_id: "b1", alt: true, mouse: true });
+    check("an init frame resets to live at whatever buffer the program is in,"
+          + " and with whoever owns the mouse owning it",
+          w.api.offset === 0 && w.api.alt === true && w.api.mouse === true
+          && w.api.accum === 0,
+          { offset: w.api.offset, alt: w.api.alt, mouse: w.api.mouse });
   })();
 }
 
@@ -311,12 +388,14 @@ function wheel(dy, dm) {
 {
   const w = build();
   (async () => {
-    const s = await w.live();
-    s.text({ type: "buffer", alt: true });
+    const s = await w.live({ alt: true, mouse: true });
+    s.text({ type: "mouse", tracking: false });
     s.text({ type: "scrolled", offset: 3 });
     s.text({ type: "exit", code: 0 });
-    check("an exit frame resets buffer and scroll",
-          w.api.offset === 0 && w.api.alt === false, w.api.offset);
+    check("an exit frame resets buffer, mouse and scroll — no program is left"
+          + " to own any of them",
+          w.api.offset === 0 && w.api.alt === false && w.api.mouse === false,
+          { offset: w.api.offset, alt: w.api.alt, mouse: w.api.mouse });
   })();
 }
 
@@ -335,7 +414,7 @@ function wheel(dy, dm) {
   })();
 }
 
-/* --- the markup the code reaches for ------------------------------------- */
+/* --- the markup and the wiring the code reaches for ---------------------- */
 check("index.html declares #term-scroll", html.includes('id="term-scroll"'));
 check("it sits in the terminal header, beside the socket chip",
       html.indexOf('id="term-scroll"') > html.indexOf('id="term-link"')
@@ -348,6 +427,25 @@ check("the wheel handler is wired to the terminal by the builder freshAttach " +
       && src.indexOf("attachCustomWheelEventHandler(handleWheel)")
          > src.indexOf("function freshAttach(name)")
       && src.indexOf("freshAttach(name);") > src.indexOf("function attach(name)"));
+check("the session terminal is built with a real scrollback, so the main"
+      + " buffer has something for a native wheel to move",
+      /scrollback:\s*5000/.test(slice("function freshAttach(name)",
+                                      "term.onData(sendInput)")));
+
+/* --- and this page asks the daemon to fill that scrollback --------------- */
+{
+  const w = build();
+  (async () => {
+    await w.live();
+    const u = w.sockets[w.sockets.length - 1].url;
+    check("the socket asks for the seed explicitly — the daemon sends none"
+          + " without it, so `claunch attach` is not handed five thousand"
+          + " lines it never opted into",
+          /[?&]scrollback=1\b/.test(u), u);
+    check("and it is still the session's own terminal socket",
+          /\/api\/sessions\/s8\/ws/.test(u), u);
+  })();
+}
 
 /* The checks run in async blocks, so the tally is only complete once the
    microtask queue has drained — and a throw inside one of them must not be

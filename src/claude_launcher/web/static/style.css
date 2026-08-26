@@ -781,6 +781,52 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
 
+/* ---- the transcript pane ----
+   An ordinary scroller, on purpose. The terminal above it cannot hold the
+   conversation — claude repaints the alternate screen rather than scrolling
+   it, so nothing reaches any scrollback — and every attempt to serve that
+   history through the wheel cost a full-grid repaint per tick to move a
+   couple of lines. Here the browser scrolls: a real scrollbar, momentum, a
+   touch drag, PgUp/Home/End, find-in-page, and selection that spans the whole
+   conversation instead of one screenful. */
+#term-log-pane {
+  flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 10px 14px 40px; background: #14161a;
+  font-size: 13px; line-height: 1.5; color: #c6cdd5;
+}
+/* The terminal keeps its socket and its grid while the pane is over it; only
+   its box gives up the height, so nothing is torn down to read and nothing is
+   refit on the way back. */
+#terminal.under-log { display: none; }
+
+.log-rec { padding: 8px 0; border-top: 1px solid #23272f; }
+.log-rec:first-child { border-top: 0; }
+.log-head {
+  display: flex; align-items: baseline; gap: 8px; margin-bottom: 4px;
+}
+.log-role { font-weight: 600; font-size: 12px; letter-spacing: .02em; }
+.log-user .log-role { color: #7fb2f0; }
+.log-asst .log-role { color: #7fd0a6; }
+.log-ts { color: #6b7280; font-size: 11px; }
+/* Prose keeps the newlines the model wrote, and wraps: a conversation is read
+   as text, so it must never grow a sideways scrollbar. */
+.log-text { white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-think { margin: 4px 0; padding-left: 10px; border-left: 2px solid #3a3f4a; color: #8b93a1; }
+.log-kind { font-size: 11px; color: #8b93a1; margin-bottom: 2px; }
+.log-tool { margin: 4px 0; }
+/* Tool traffic is preformatted, so it is the one thing here allowed its own
+   sideways scroll — clipped to a height, because a reader scrolling a
+   conversation is not scrolling a file dump. */
+.log-pre {
+  margin: 0; padding: 6px 8px; background: #1b1e24; border-radius: 4px;
+  max-height: 260px; overflow: auto; overscroll-behavior: contain;
+  white-space: pre; font-size: 12px; color: #aab3bf;
+}
+.log-err .log-kind { color: #e88; }
+.log-err .log-pre { background: #241b1b; }
+.log-note { color: #8b93a1; padding: 12px 0; }
+
 /* ---- the CLI tab: one raw shell, one terminal ---- */
 /* Column like #main itself, so the terminal box (not the page) owns the
    free height; the header is the session header's sibling, same grey. */

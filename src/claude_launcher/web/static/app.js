@@ -12,6 +12,7 @@ let attachedPid = null;           // pid of the incarnation this socket is bound
 let applyingRemoteResize = false; // guards against echoing a server-driven resize
 let fitTimer = null;              // debounces viewport-driven fit() calls
 let altScreen = false;      // the program is drawing the alternate screen
+let mouseTracking = false;  // the program asked for the mouse — the wheel is its own
 let scrollOffset = 0;       // daemon history offset this viewer is reading (0 = live)
 let wheelAccum = 0;         // unflushed wheel delta, accumulated in lines
 let wheelTimer = null;      // debounce timer for wheel -> scroll control
@@ -2671,6 +2672,12 @@ $("term-brief").addEventListener("click", () => {
   if (currentName) toggleBriefing(currentName);
 });
 
+/* The transcript button: fold the conversation over the terminal's space.
+   The session underneath stays attached and live — this is a reading mode,
+   not a detach — and what it reads is the one record of the session that is
+   actually whole (see the transcript pane's own block). */
+$("term-log").addEventListener("click", toggleTranscript);
+
 /* Rebrief: have the daemon re-derive this session's briefing (mesh roster,
    owed replies, cflow position, parent/children, opening task) and type it
    into the terminal — the operator's push for an agent whose context was
@@ -2829,8 +2836,15 @@ function openSocket(name) {
   setLink("opening");
 
   const proto = location.protocol === "https:" ? "wss" : "ws";
+  // `scrollback=1` asks the daemon to seed this socket with its scrollback
+  // before the grid repaint. This page is the client that wants it: its xterm
+  // is built with a real scrollback (buildSessionTerm), so the seeded lines
+  // land somewhere and the wheel over them is the browser's own. The daemon
+  // sends nothing without the flag — `claunch attach` never asked for five
+  // thousand lines, and a client that says nothing must keep what it had.
   const sock = new WebSocket(
-    `${proto}://${location.host}${url(`/api/sessions/${encodeURIComponent(name)}/ws`)}`
+    `${proto}://${location.host}`
+    + url(`/api/sessions/${encodeURIComponent(name)}/ws?scrollback=1`)
   );
   sock.binaryType = "arraybuffer";
   ws = sock;
@@ -2889,8 +2903,9 @@ function handleFrame(msg) {
     // Adopt the viewer's size once attached.
     refitSoon(50);
     // A fresh socket always starts live, in whatever buffer the program is
-    // drawing.
+    // drawing — and with whoever owns the mouse still owning it.
     altScreen = !!msg.alt;
+    mouseTracking = !!msg.mouse;
     scrollOffset = 0;
     updateScrollChip();
   } else if (msg.type === "buffer") {
@@ -2899,8 +2914,14 @@ function handleFrame(msg) {
       // The TUI left the alternate screen: xterm's own scrollback takes over
       // for the wheel, and the daemon has already unfrozen us (ws.py).
       scrollOffset = 0;
-      updateScrollChip();
     }
+    updateScrollChip();
+  } else if (msg.type === "mouse") {
+    // The program took the mouse, or gave it back. Either way the wheel
+    // changes hands; the daemon has already unfrozen us if it had to.
+    mouseTracking = !!msg.tracking;
+    if (mouseTracking) scrollOffset = 0;
+    updateScrollChip();
   } else if (msg.type === "scrolled") {
     // The daemon's clamped answer to a scroll control — the truth for the
     // chip and for sendInput's snap-to-live.
@@ -2941,6 +2962,7 @@ function handleFrame(msg) {
     setLink("idle");
     setStatusBadge("exited");
     altScreen = false;
+    mouseTracking = false;
     scrollOffset = 0;
     updateScrollChip();
     term.write(
@@ -3143,6 +3165,7 @@ function detach() {
   wheelAccum = 0;
   scrollOffset = 0;
   altScreen = false;
+  mouseTracking = false;
   if (term) { term.dispose(); term = null; fitAddon = null; }
   updateScrollChip();
 }
@@ -3628,17 +3651,56 @@ function setSessLayout(name, patch) {
   syncSplitPane();
 }
 
-/* ---- virtual scroll ----
-   The session's real scrollback lives in the daemon's pyte history
-   (ScreenState.render_history) — xterm's own never holds it. On the alt
-   screen xterm turns wheel events into arrow keys and its scrollback is
-   empty by construction; on the main buffer it only hoards what scrolled
-   past while THIS socket was open, which for a viewer that just attached
-   (whose seed is a repaint of the grid alone) is nothing — the wheel spun
-   and nothing moved, on either buffer. So the wheel always becomes `scroll`
-   controls, and the daemon repaints a window over the one history that is
-   actually whole. */
+/* ---- who owns the wheel ----
+
+   Three regimes, and the whole trick is telling them apart before spending a
+   tick.
+
+   1. The program took the mouse. claude does — it asserts `?1000h ?1002h
+      ?1003h ?1006h` behind the alternate screen and never lets go — and that
+      is a program saying "send me the wheel, I scroll myself". It does, from
+      its own model, to a depth no terminal keeps. This is the common case and
+      it wants exactly one thing from us: to get out of the way. xterm.js
+      already encodes the SGR report; returning true lets it.
+
+   2. The main buffer, no mouse. A plain shell, a build log. Here xterm's OWN
+      scrollback is the right answer, and the terminal is built with one (see
+      buildSessionTerm) seeded from the daemon at attach — so, again, hands
+      off: native scrolling, a real scrollbar, momentum, find-in-page.
+
+   3. The alternate screen with the mouse left alone. A pager that reads arrow
+      keys. Nothing scrolls off the alt buffer, so neither xterm's scrollback
+      nor a native wheel has anything to move; the daemon's history window is
+      all there is, and the `scroll` control below serves it.
+
+   Only (3) is ours. Until now every tick went through (3)'s path, including
+   claude's — which is why the wheel felt dead: the daemon spends ~18 ms and
+   22 KB repainting a 233x77 grid per tick to move a history that, measured on
+   real sessions, is one or two lines deep. */
+function wheelBelongsToProgram() {
+  // xterm's own view of the modes, learned from the byte stream — including
+  // the re-assertion the daemon puts in every repaint, so a terminal that
+  // attached mid-session knows as much as one that watched it start.
+  const m = term && term.modes;
+  if (m && m.mouseTrackingMode && m.mouseTrackingMode !== "none") return true;
+  // The daemon's `init.mouse` / `mouse` frames, as the fallback for an xterm
+  // that has not parsed the assertion yet (the flag arrives with `init`,
+  // ahead of the repaint that carries the escapes).
+  return mouseTracking;
+}
+
+/* True when the wheel is xterm's to spend on its own scrollback: the main
+   buffer, where a seeded scrollback actually holds something. */
+function wheelIsNative() {
+  return !altScreen;
+}
+
 function handleWheel(e) {
+  if (wheelBelongsToProgram() || wheelIsNative()) {
+    // Not ours. No preventDefault, no accumulator, no control frame — xterm
+    // forwards the mouse report, or scrolls its own buffer, natively.
+    return true;
+  }
   e.preventDefault();
   let delta = e.deltaY;
   if (e.deltaMode === 2) {                 // DOM_DELTA_PAGE
@@ -3671,7 +3733,13 @@ function sendScroll(lines) {
 
 /* The header says why the terminal is not advancing while the session keeps
    running: the viewer scrolled into history, and the wheel below it (or a
-   keystroke) is the way back to live. */
+   keystroke) is the way back to live.
+
+   Only the daemon-served regime gets a chip. When the program owns the wheel
+   it is scrolling its own view and the terminal is not frozen at all — there
+   is nothing to explain and nothing to come back from — and when xterm owns
+   it the scrollbar is the affordance, which is the whole point of giving the
+   wheel back. */
 function updateScrollChip() {
   const chip = $("term-scroll");
   if (!chip) return;
@@ -3725,7 +3793,8 @@ function suspendActive() {
   const b = {
     name: currentName, term, fitAddon, ws,
     pid: attachedPid, boot: attachedBoot,
-    alt: altScreen, scroll: scrollOffset, exited: sessionEnded,
+    alt: altScreen, mouse: mouseTracking,
+    scroll: scrollOffset, exited: sessionEnded,
   };
   if (ws) {
     ws.onopen = null;
@@ -3758,6 +3827,7 @@ function resetLive() {
   attachedBoot = null;
   scrollOffset = 0;
   altScreen = false;
+  mouseTracking = false;
   applyingRemoteResize = false;
   currentName = null;
   term = null;
@@ -3800,8 +3870,12 @@ function shimFrame(b, ev) {
       b.pid = msg.pid || null;
       b.boot = msg.boot_id || null;
       b.alt = !!msg.alt;
+      b.mouse = !!msg.mouse;
     } else if (msg.type === "buffer") {
       b.alt = !!msg.alt;
+    } else if (msg.type === "mouse") {
+      b.mouse = !!msg.tracking;
+      if (b.mouse) b.scroll = 0;
     } else if (msg.type === "scrolled") {
       b.scroll = msg.offset || 0;
     } else if (msg.type === "resize") {
@@ -3809,6 +3883,7 @@ function shimFrame(b, ev) {
     } else if (msg.type === "exit") {
       b.exited = true;
       b.alt = false;
+      b.mouse = false;
       b.scroll = 0;
       if (b.term) {
         b.term.write(
@@ -3869,6 +3944,7 @@ function restoreTerminal(b) {
   attachedBoot = b.boot;
   scrollOffset = b.scroll;
   altScreen = b.alt;
+  mouseTracking = !!b.mouse;
   sessionEnded = b.exited;
   // The same header seeding a fresh attach does, so the previous session's
   // controls never linger on this one.
@@ -4095,10 +4171,17 @@ function freshAttach(name) {
     fontFamily: "Cascadia Mono, Consolas, Menlo, monospace",
     fontSize: fontSize,
     theme: { background: "#14161a" },
-    // No local scrollback: the wheel always browses the daemon's history
-    // (handleWheel), so lines xterm would hoard here are unreachable — and a
-    // hoard it cannot show is a scrollbar it must not grow.
-    scrollback: 0,
+    // A real scrollback, like the CLI tab's. It used to be 0, on the reading
+    // that the daemon's history served the wheel instead — but that history
+    // is one or two lines deep for a session running claude (it repaints the
+    // grid rather than scrolling it), so the trade bought nothing and cost
+    // the browser's own scrolling: the scrollbar, the momentum, the touch
+    // drag, PgUp/Home, find-in-page, selection across more than one screen.
+    // On the alternate screen xterm keeps this empty by construction, which
+    // is right — there the program owns the wheel (see handleWheel). This is
+    // for the main buffer: a plain shell, a build log, a session after its
+    // TUI has exited.
+    scrollback: 5000,
   });
   fitAddon = new FitAddon.FitAddon();
   term.loadAddon(fitAddon);
@@ -4215,6 +4298,271 @@ window.addEventListener("focus", resyncCli);
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden) resyncCli();
 });
+
+/* ---- the transcript pane ----
+
+   What the terminal cannot answer: "what did this session say an hour ago".
+   claude repaints the alternate screen every frame instead of scrolling it,
+   so nothing scrolls off into any scrollback — measured on this fleet's own
+   sessions, four hundred kilobytes of output leaves two lines behind in the
+   daemon's history — and no amount of wheel plumbing over that history was
+   ever going to find the rest. It is not in the pipe. It is on disk, in the
+   conversation jsonl claude keeps, and the daemon serves it in pages
+   (/api/sessions/<name>/transcript).
+
+   The pane is deliberately an ordinary div with `overflow-y: auto`. That is
+   the whole feature: the browser owns the wheel, so a scrollbar, momentum,
+   a touch drag, PgUp/Home/End, find-in-page and selection across the whole
+   conversation all come for free and none of them cost a frame of daemon
+   time. Older pages are fetched as the reader nears the top; while they are
+   sitting at the bottom the poll follows the session forward. */
+const TRANSCRIPT_PAGE = 40;
+const TRANSCRIPT_NEAR_TOP = 400;   // px from the top that triggers an older page
+const TRANSCRIPT_NEAR_END = 40;    // px from the bottom that still counts as "live"
+let transcriptName = null;         // the session whose conversation is open
+let transcriptCursor = null;       // oldest seq loaded; the next page ends here
+let transcriptSeen = -1;           // newest seq loaded, for the follow-forward
+let transcriptMore = false;        // is there anything above what is loaded
+let transcriptBusy = false;        // one fetch at a time, or a flick sends ten
+
+function transcriptIsOpen() {
+  return !!transcriptName && transcriptName === currentName;
+}
+
+/* The button owns the pane. Opening reads the tail; closing forgets the
+   cursor, so coming back lands at the bottom rather than wherever the reader
+   left off in a conversation that has moved on since. */
+function toggleTranscript() {
+  if (transcriptIsOpen()) {
+    transcriptName = null;
+  } else {
+    if (!currentName) return;
+    transcriptName = currentName;
+    transcriptCursor = null;
+    transcriptSeen = -1;
+    transcriptMore = false;
+    const pane = $("term-log-pane");
+    if (pane) pane.innerHTML = "";
+    loadTranscriptPage({ older: false });
+  }
+  applyTranscript();
+}
+
+/* Reconcile the button and the pane with (is it open, is a terminal up).
+   Safe to call any time — the view system hides both when no session is
+   attached, and walking to another session closes the pane with it. */
+function applyTranscript() {
+  const btn = $("term-log");
+  const pane = $("term-log-pane");
+  if (!btn || !pane) return;
+  if (transcriptName && transcriptName !== currentName) transcriptName = null;
+  const open = transcriptIsOpen();
+  btn.disabled = !currentName;
+  btn.setAttribute("aria-pressed", open ? "true" : "false");
+  btn.textContent = (open ? "▾ " : "▸ ") + "transcript";
+  pane.classList.toggle("hidden", !open);
+  // The pane covers the terminal's space rather than sharing it, so the grid
+  // keeps the size it had and needs no refit on the way in or out — the
+  // session underneath is still live, still attached, still being typed to.
+  $("terminal").classList.toggle("under-log", open);
+  if (open && !pane.dataset.wired) {
+    pane.dataset.wired = "1";
+    pane.addEventListener("scroll", onTranscriptScroll);
+  }
+  if (open) startTranscriptPoll();
+  else stopTranscriptPoll();
+}
+
+/* Near the top, reach for the page above. Nothing else: this fires on every
+   frame of a scroll, and the browser is doing the scrolling. */
+function onTranscriptScroll() {
+  const pane = $("term-log-pane");
+  if (!pane || !transcriptIsOpen()) return;
+  if (pane.scrollTop < TRANSCRIPT_NEAR_TOP && transcriptMore && !transcriptBusy) {
+    loadTranscriptPage({ older: true });
+  }
+}
+
+function transcriptAtEnd(pane) {
+  return pane.scrollHeight - pane.scrollTop - pane.clientHeight < TRANSCRIPT_NEAR_END;
+}
+
+/* One page, prepended (older) or appended (the tail, and the follow-forward).
+
+   Prepending has to hold the reader still: the browser measures scrollTop
+   from the top of the content, so inserting above them would slide the text
+   they are reading down by exactly the height of what arrived. Taking the
+   height before and after and restoring the difference is what makes an
+   infinite scroller feel like a long page instead of a trapdoor. */
+async function loadTranscriptPage(opts) {
+  const older = !!(opts && opts.older);
+  const name = transcriptName;
+  if (!name || transcriptBusy) return;
+  transcriptBusy = true;
+  const pane = $("term-log-pane");
+  if (pane && !pane.children.length) {
+    pane.appendChild(el("div", "log-note", "reading the conversation…"));
+  }
+  try {
+    const q = `limit=${TRANSCRIPT_PAGE}`
+      + (older && transcriptCursor !== null ? `&before=${transcriptCursor}` : "");
+    const res = await api(`/api/sessions/${encodeURIComponent(name)}/transcript?${q}`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    // The reader may have closed it, or walked to another session, while this
+    // was in flight; its answer is not theirs any more.
+    if (transcriptName !== name) return;
+    renderTranscriptPage(data, older);
+  } catch (err) {
+    if (transcriptName !== name) return;
+    const box = $("term-log-pane");
+    if (box && !box.querySelector(".log-rec")) {
+      box.innerHTML = "";
+      box.appendChild(el("div", "log-note",
+                         `could not read the conversation — ${err.message}`));
+    }
+  } finally {
+    transcriptBusy = false;
+  }
+}
+
+function renderTranscriptPage(data, older) {
+  const pane = $("term-log-pane");
+  if (!pane) return;
+  const note = pane.querySelector(".log-note");
+  if (note) note.remove();
+
+  const records = (data.records || []).filter(
+    (r) => older || r.seq > transcriptSeen
+  );
+  if (older) {
+    transcriptMore = !!data.has_more;
+    transcriptCursor = data.cursor === undefined ? transcriptCursor : data.cursor;
+  } else {
+    // The first page also establishes the top cursor; a follow-forward must
+    // not move it, or scrolling up would re-fetch from the wrong place.
+    if (transcriptCursor === null) {
+      transcriptCursor = data.cursor === undefined ? null : data.cursor;
+      transcriptMore = !!data.has_more;
+    }
+  }
+  for (const r of records) {
+    if (r.seq > transcriptSeen) transcriptSeen = r.seq;
+  }
+
+  if (!records.length) {
+    if (!pane.querySelector(".log-rec")) {
+      pane.appendChild(el("div", "log-note", data.source
+        ? "this conversation has nothing to show yet"
+        : "no conversation on file for this session"));
+    }
+    return;
+  }
+
+  const frag = document.createDocumentFragment();
+  for (const r of records) frag.appendChild(renderTranscriptRecord(r));
+
+  if (older) {
+    const before = pane.scrollHeight;
+    const top = pane.scrollTop;
+    pane.insertBefore(frag, pane.firstChild);
+    pane.scrollTop = top + (pane.scrollHeight - before);
+  } else {
+    const follow = !pane.querySelector(".log-rec") || transcriptAtEnd(pane);
+    pane.appendChild(frag);
+    // Only if they were already at the bottom. A reader who has scrolled up
+    // to read something is not asking to be dragged back down every time the
+    // session says another word.
+    if (follow) pane.scrollTop = pane.scrollHeight;
+  }
+}
+
+function renderTranscriptRecord(r) {
+  const box = el("div", `log-rec log-${r.role === "assistant" ? "asst" : "user"}`);
+  box.dataset.seq = String(r.seq);
+  const head = el("div", "log-head");
+  head.appendChild(el("span", "log-role", r.role));
+  if (r.ts) {
+    const when = el("span", "log-ts", fmtLogTime(r.ts));
+    when.title = r.ts;
+    head.appendChild(when);
+  }
+  box.appendChild(head);
+  for (const b of r.blocks || []) box.appendChild(renderTranscriptBlock(b));
+  return box;
+}
+
+function renderTranscriptBlock(b) {
+  if (b.type === "text") return el("div", "log-text", b.text);
+  if (b.type === "thinking") {
+    const d = el("div", "log-think");
+    d.appendChild(el("div", "log-kind", "thinking"));
+    d.appendChild(el("div", "log-text", b.text));
+    return d;
+  }
+  if (b.type === "tool_use") {
+    const d = el("div", "log-tool");
+    d.appendChild(el("div", "log-kind", `▸ ${b.name}`));
+    d.appendChild(el("pre", "log-pre", transcriptClipped(b)));
+    return d;
+  }
+  if (b.type === "tool_result") {
+    const d = el("div", `log-tool${b.error ? " log-err" : ""}`);
+    d.appendChild(el("div", "log-kind", b.error ? "◂ error" : "◂ result"));
+    d.appendChild(el("pre", "log-pre", transcriptClipped(b)));
+    return d;
+  }
+  return el("div", "log-text", "");
+}
+
+/* A clipped block says so, and says how much it is holding back — the page
+   carries two thousand characters of a tool result, not the megabyte of file
+   content some of them are. */
+function transcriptClipped(b) {
+  if (!b.clipped) return b.text || "";
+  const rest = (b.full || 0) - (b.text || "").length;
+  return `${b.text}\n… ${ctxShort(rest)} more characters`;
+}
+
+/* The clock time a turn landed at, in the reader's own zone. The date is
+   dropped — a conversation is read as a sequence, not a calendar — and the
+   full ISO stamp rides the title for the one time somebody needs the day. */
+function fmtLogTime(iso) {
+  const t = Date.parse(iso);
+  if (!Number.isFinite(t)) return "";
+  return new Date(t).toLocaleTimeString();
+}
+
+/* The follow-forward: while the pane is open and the reader is sitting at the
+   bottom of it, new turns arrive under them the way the terminal's own output
+   does. Scrolled up, nothing moves — a reader who went looking for something
+   is not asking to be dragged back to the present every few seconds.
+
+   Its own timer rather than a ride on the session poll: the pane is open for
+   one session at a time and closed most of the time, and a conversation turn
+   is a slower thing than a rail row. Started when it opens, stopped when it
+   closes, so a closed pane costs nothing. */
+const TRANSCRIPT_POLL_MS = 4000;
+let transcriptTimer = null;
+
+function startTranscriptPoll() {
+  if (transcriptTimer) return;
+  transcriptTimer = setInterval(pollTranscript, TRANSCRIPT_POLL_MS);
+}
+
+function stopTranscriptPoll() {
+  if (!transcriptTimer) return;
+  clearInterval(transcriptTimer);
+  transcriptTimer = null;
+}
+
+function pollTranscript() {
+  if (!transcriptIsOpen() || transcriptBusy) return;
+  const pane = $("term-log-pane");
+  if (!pane || pane.classList.contains("hidden")) return;
+  if (!transcriptAtEnd(pane)) return;
+  loadTranscriptPage({ older: false });
+}
 
 /* ------------------------------------------------------------------ */
 /* layout: the one place that knows how wide the screen is             */
@@ -4503,6 +4851,11 @@ function showView(name) {
   // detach() own that object's life.
   $("term-header").classList.toggle("hidden", !(showTerm && currentName));
   $("terminal").classList.toggle("hidden", !showTerm);
+  // The transcript pane stands in the terminal's own space, so it leaves with
+  // it. applyTranscript re-opens it on the way back if the reader left it
+  // open on this session; off the terminal page there is nothing to be over.
+  if (!showTerm) $("term-log-pane").classList.add("hidden");
+  else applyTranscript();
   // The queued-deliveries banner belongs to the terminal under it: gone with
   // the terminal, re-asked-for on the way back in (the 2s poll would repaint
   // it anyway, but a page swap should not flash a stale backlog first).
