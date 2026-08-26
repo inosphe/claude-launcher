@@ -86,20 +86,28 @@ TOOLS = [
             "File the completion report for the current step BEFORE advancing: "
             "what actually happened, including failures. Journaled and shown "
             "live on the daemon web dashboard; 'next' is refused until it is "
-            "filed. Re-filing overwrites (e.g. after fixing a failed verify)."
+            "filed. Re-filing overwrites (e.g. after fixing a failed verify). "
+            "Both fields are MARKDOWN and are rendered as markdown on the "
+            "dashboard: line breaks are kept, so write evidence as '- ' list "
+            "items one per line, put commands/paths/test ids in `backticks` "
+            "and multi-line output in a fenced block. Not one wall of prose."
         ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "summary": {
                     "type": "string",
-                    "description": "2-4 honest sentences on the step's outcome",
+                    "description": (
+                        "markdown: 2-4 honest sentences on the step's outcome"
+                    ),
                 },
                 "details": {
                     "type": "string",
                     "description": (
-                        "optional evidence/specifics: commands run, test names, "
-                        "failure lines, files touched"
+                        "optional evidence/specifics as markdown: commands run, "
+                        "test names, failure lines, files touched. A '- ' list "
+                        "one fact per line, `backticks` for identifiers, a "
+                        "fenced ``` block for output that must keep its spacing"
                     ),
                 },
             },

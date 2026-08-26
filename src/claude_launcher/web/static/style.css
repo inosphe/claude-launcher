@@ -1459,6 +1459,7 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .wf-actions .wf-btn { margin: 0; }
 .wf-gate { font-size: 14px; }
 .wf-proposal { color: #9da5b0; font-size: 13px; }
+.wf-proposal-head { color: #c6cdd5; margin-bottom: 4px; }
 /* A background in the base class, not only in the modifiers: a .wf-btn with
    no modifier ("Set for this run", "Decide it myself", the pane's "Open the
    run page") otherwise wears the browser's own button face — near-white,
@@ -1627,10 +1628,66 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wf-report-at { font-size: 11px; color: #6e7681; }
 .wf-report-summary { font-size: 13px; color: #c6cdd5; }
 .wf-report-details {
-  margin-top: 6px; padding: 6px 9px; font-size: 11px; color: #8b949e;
+  margin-top: 6px; padding: 6px 9px; font-size: 12px; color: #8b949e;
   background: #14161a; border-radius: 5px; overflow-x: auto;
-  font-family: Cascadia Mono, Consolas, Menlo, monospace; white-space: pre-wrap;
 }
+
+/* Markdown, as a report is written in it. The rules are scoped to `.md` so
+   that only the blocks fed through mdInto() get them — nothing else on the
+   page grows a <p> margin because a report needed one.
+
+   `.md-p` is pre-wrap on purpose: a report that pastes command output
+   without fencing it keeps its columns, and the renderer emits <br> for the
+   line breaks itself, so pre-wrap never doubles them. */
+.md > :first-child { margin-top: 0; }
+.md > :last-child { margin-bottom: 0; }
+.md-p {
+  margin: 0 0 8px; line-height: 1.55;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.md-h {
+  margin: 12px 0 6px; color: #e6edf3; font-weight: 600; line-height: 1.4;
+}
+.md-h1, .md-h2 { font-size: 1.08em; }
+.md-h3, .md-h4 { font-size: 1em; }
+.md-h5, .md-h6 { font-size: 1em; color: #9da5b0; }
+.md-list { margin: 0 0 8px; padding-left: 20px; }
+.md-list .md-list { margin-bottom: 0; }
+.md-item { margin: 2px 0; line-height: 1.5; overflow-wrap: anywhere; }
+.md-pre {
+  margin: 0 0 8px; padding: 8px 10px; background: #0f1115;
+  border: 1px solid #262b33; border-radius: 5px; overflow-x: auto;
+  font-family: Cascadia Mono, Consolas, Menlo, monospace;
+  font-size: 0.92em; line-height: 1.45; color: #c6cdd5; white-space: pre;
+}
+.md-code {
+  padding: 1px 4px; background: #22262e; border-radius: 4px;
+  font-family: Cascadia Mono, Consolas, Menlo, monospace;
+  font-size: 0.92em; color: #c9d1d9; overflow-wrap: anywhere;
+}
+.md-pre .md-code, .md-pre code { padding: 0; background: none; font-size: 1em; }
+.md-quote {
+  margin: 0 0 8px; padding: 2px 0 2px 10px;
+  border-left: 2px solid #3d4451; color: #8b949e;
+}
+.md-hr { margin: 10px 0; border: none; border-top: 1px solid #2a2e36; }
+.md-table {
+  margin: 0 0 8px; border-collapse: collapse; display: block;
+  max-width: 100%; overflow-x: auto;
+}
+.md-table th, .md-table td {
+  border: 1px solid #2a2e36; padding: 3px 8px; text-align: left;
+  line-height: 1.45;
+}
+.md-table th { background: #1b1e24; color: #c6cdd5; font-weight: 600; }
+.md-strong { color: #e6edf3; font-weight: 600; }
+.md-em { font-style: italic; }
+.md-strike { color: #6e7681; }
+.md-link { color: #58a6ff; text-decoration: none; }
+.md-link:hover { text-decoration: underline; }
+/* A link the page will not follow (javascript:, data:) still shows its text
+   — dropping it silently would hide that the report said something. */
+.md-link-inert { color: #9da5b0; text-decoration: underline dotted; }
 .wf-journal { margin-top: 18px; color: #7d8590; font-size: 12px; }
 .wf-journal summary { cursor: pointer; margin-bottom: 6px; }
 .wf-journal-line { padding: 1px 0; color: #6e7681; }

@@ -40,6 +40,23 @@ new Function("exports", sliceLine("const SESS_RUN_REPORTS") +
              sliceLine("const SESS_RUN_JOURNAL") +
              "Object.assign(exports, { SESS_RUN_REPORTS, SESS_RUN_JOURNAL });")(CAPS);
 
+/* The report cards render markdown now. Its grammar is mdrender_check's to
+   hold; sliced in here so this file still drives the REAL render path and
+   not a lookalike that would hide a card wired to nothing. */
+function sliceTo(decl, end) {
+  const start = src.indexOf(decl);
+  if (start < 0) throw new Error("missing " + decl);
+  const stop = src.indexOf(end, start);
+  if (stop < 0) throw new Error("unterminated " + decl);
+  return src.slice(start, stop + end.length) + "\n";
+}
+const MARKDOWN =
+  ["const MD_BULLET", "const MD_RULE", "const MD_FENCE", "const MD_BLOCK_START",
+   "const MD_SAFE_HREF", "const mdCells ="].map((d) => sliceTo(d, ";")).join("") +
+  sliceTo("const MD_INLINE = [", "\n];") +
+  ["mdWrap", "mdLink", "mdInline", "mdList", "mdTable", "mdBlocks", "mdInto"]
+    .map(slice).join("\n");
+
 function sliceConst(decl) {
   const start = src.indexOf(decl);
   if (start < 0) throw new Error("missing " + decl);
@@ -86,6 +103,8 @@ const texts = (n) => walk(n).map((k) => k.text).join(" | ");
 const document = {
   createElementNS: (_ns, tag) => node(tag),
   createElement: (tag) => node(tag),
+  // the markdown renderer's leaves; textContent is what walk() reads
+  createTextNode: (v) => Object.assign(node("#text"), { text: String(v) }),
 };
 function el(tag, cls, text) {
   const n = node(tag);
@@ -122,6 +141,7 @@ new Function(
   stubs +
   sliceConst("const FLOW = {") + "\n" +
   sliceLine("const SESS_RUN_REPORTS") + sliceLine("const SESS_RUN_JOURNAL") +
+  MARKDOWN +
   [slice("flowOrder"), slice("flowTrack"), slice("flowNeedsHuman"),
    slice("flowState"), slice("flowMetrics"), slice("flowPipShape"),
    slice("flowTrackSvg"), slice("svg"), slice("askWho"),
