@@ -39,6 +39,11 @@ class _Fake:
     pid = None
     created_at = 0.0
     last_output_at = 0.0
+    # When a person last looked in and last typed here. persist() records
+    # both, so a double that leaves them off makes persist() raise rather
+    # than fail an assertion — which reads as a defect in the tree walk.
+    last_visited_at = None
+    last_input_at = None
     exited_at = None
 
     def __init__(self, name: str, parent, exited: bool = False):

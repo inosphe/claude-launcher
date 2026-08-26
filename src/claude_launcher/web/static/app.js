@@ -552,8 +552,13 @@ async function refreshSessions() {
     const head = document.createElement("span");
     head.className = "rail-head";
     head.append(label, ...(role ? [role] : []), ...(meshBox ? [meshBox] : []));
+    // Where it runs, then how full it is, then who has been near it: the two
+    // identity lines first and the state line under them, so a reader
+    // scanning for "which of these has nobody touched" finds it in one
+    // column rather than hunting a different offset on every row.
+    const railSeen = railSeenLine(s);
     li.append(dot, head, meta, railCwd, ...(railCtx ? [railCtx] : []),
-              ...(plus ? [plus] : []), info);
+              railSeen, ...(plus ? [plus] : []), info);
     li.addEventListener("click", () => {
       location.hash = "#/s/" + encodeURIComponent(s.name);
     });
@@ -1295,6 +1300,105 @@ function cwdLine(s, cls) {
    context gauge. */
 function railCwdLine(s) {
   return cwdLine(s, "rail-cwd");
+}
+
+/* ------------------------------------------------------------------ */
+/* has anyone been here: the rail row's attention line                 */
+/* ------------------------------------------------------------------ */
+/* Three readings that a rail of twenty sessions otherwise hides completely:
+   when a person last LOOKED at this session, when a person last TYPED into
+   it, and when the session itself last DID something visible.
+
+   They are three facts, not three views of one, and collapsing them is
+   exactly the mistake. A session can be grinding away with nobody watching;
+   another can have been open in a tab all afternoon while its agent has not
+   moved since lunch; a third was last typed into an hour before it was last
+   read. "Active" is a word that answers none of those, and the row the
+   operator is hunting for — the one they handed a task to and then forgot —
+   is only findable by the gap between the three.
+
+   The dash is not padding. Every row draws all three pairs whether or not
+   each has an answer, because the value of a rail is that the same fact sits
+   at the same place on every line; a pair that vanished when unknown would
+   shift the two beside it and make the column unreadable at the moment it is
+   most worth reading.
+
+   No timer runs for this. The session poll rebuilds these rows every couple
+   of seconds and the labels are recomputed from the stamps then — which is
+   also the whole of what "does not need to be real time" buys: nothing in
+   the browser and nothing in the daemon ticks on this line's behalf. */
+
+/* Days, where fmtAge stops at hours. `fmtAge` is shared with the mesh log and
+   the owed ledger, where a value is minutes old and an "h" is already the
+   long tail; these stamps run to days routinely (that is the point of them),
+   and "51h00m" is a number the reader has to do arithmetic on. */
+function seenAgo(iso) {
+  const t = Date.parse(iso || "");
+  if (!Number.isFinite(t)) return null;
+  const secs = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  if (secs < 10) return { secs, text: "now" };
+  if (secs >= 86400) return { secs, text: `${Math.floor(secs / 86400)}d` };
+  return { secs, text: fmtAge(secs) };
+}
+
+/* How stale a reading has to be before the row says so in colour. One step
+   only: this line is a glance, and a three-colour gradient on three pairs
+   would be nine states to learn for a row that is trying to say one thing. */
+const SEEN_COLD = 3600;  // an hour without the reader, or without the agent
+
+function seenPair(label, iso, title, opts) {
+  const pair = el("span", "rail-seen-pair");
+  pair.appendChild(el("span", "rail-seen-key", label));
+  const live = opts && opts.live;
+  const ago = seenAgo(iso);
+  const val = el(
+    "span",
+    "rail-seen-val" + (live ? " live" : ago ? (ago.secs >= SEEN_COLD ? " cold" : "") : " unknown"),
+    live ? "now" : ago ? ago.text : "\u2013"
+  );
+  pair.appendChild(val);
+  pair.title = ago || live
+    ? `${title}\n${live ? "right now" : new Date(Date.parse(iso)).toLocaleString()}`
+    : `${title}\nnot recorded — see the line's own note`;
+  return pair;
+}
+
+/* The line itself. Always drawn, on every row, live or exited: an exited
+   session is one of the ones this is most often asked about ("when did I
+   last look at the one that died"), and its record keeps both human stamps
+   across the restart that retired it. */
+function railSeenLine(s) {
+  const line = el("span", "rail-seen");
+  const watching = Number(s && s.viewers) > 0;
+  line.append(
+    // Looked at. "now" while a socket is actually open, because a stamp that
+    // says "4m" about a terminal being read this second is simply wrong, and
+    // the daemon cannot fix that by stamping more often — only by saying
+    // that somebody is still there.
+    seenPair("seen", s && s.last_visited_at,
+             "when a person last had this session open — the web terminal " +
+             "or `claunch attach`", { live: watching }),
+    // Typed into. A human at a keyboard only: `claunch send-keys` and mesh
+    // deliveries type into this session too, and counting those would answer
+    // "when was this session last written to", which is a different question
+    // and one the row's own busy/idle dot already gestures at.
+    seenPair("typed", s && s.last_input_at,
+             "when a person last typed here — deliveries and `send-keys` " +
+             "do not count"),
+    // Moved. Not raw output: claude animates a spinner and a clock while it
+    // waits for you, so bytes never stop arriving; this is the last time a
+    // row that is NOT an animation changed.
+    seenPair("moved", s && s.last_activity_at,
+             "when the screen last changed for real — spinners and the " +
+             "elapsed-time counter do not count")
+  );
+  line.title =
+    "who has been here: last looked at / last typed into / last moved on " +
+    "its own.\n" +
+    "A dash means no reading: nobody has visited or typed since this " +
+    "session started, and 'moved' is read off the running screen, so a " +
+    "daemon restart leaves it blank until the session paints again.";
+  return line;
 }
 
 /* ------------------------------------------------------------------ */

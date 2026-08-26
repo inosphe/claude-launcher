@@ -70,6 +70,8 @@ class SessionManager:
         *,
         restoring: bool = False,
         created_at: Optional[str] = None,
+        last_visited_at: Optional[str] = None,
+        last_input_at: Optional[str] = None,
     ) -> Session:
         """Register a session without starting it.
 
@@ -88,6 +90,11 @@ class SessionManager:
         respawn, redefine): those keep the name, the conversation, the mesh
         memberships and the parent edge, so the creation time is one more
         thing that must survive them — see :meth:`list`.
+        ``last_visited_at``/``last_input_at`` ride along on the same argument
+        and for the same reason: when a person last looked in on this session
+        and last typed into it are facts about the session, not about the
+        process, and a relaunch that dropped them would tell the rail that
+        nobody has ever been near a session somebody was reading a minute ago.
         """
         name = (sdef.name or "").strip() or self._auto_name()
         self._check_name(name)
@@ -99,6 +106,8 @@ class SessionManager:
             idle_threshold=self.idle_threshold,
             scrollback=self.scrollback,
             created_at=created_at,
+            last_visited_at=last_visited_at,
+            last_input_at=last_input_at,
         )
         session.on_exit = self._session_exited
         self._sessions[name] = session
@@ -161,15 +170,24 @@ class SessionManager:
         restoring: bool = False,
         opening: str = "",
         created_at: Optional[str] = None,
+        last_visited_at: Optional[str] = None,
+        last_input_at: Optional[str] = None,
     ) -> Session:
         """Build and start a session.
 
         ``opening`` is a first user message for harnesses that take one on
         their command line; see :func:`harness.takes_opening_argv`.
         ``created_at`` is :meth:`stage`'s: the creation time of the session
-        this one is continuing, on the relaunch paths.
+        this one is continuing, on the relaunch paths — as are the two
+        attention stamps beside it.
         """
-        session = self.stage(sdef, restoring=restoring, created_at=created_at)
+        session = self.stage(
+            sdef,
+            restoring=restoring,
+            created_at=created_at,
+            last_visited_at=last_visited_at,
+            last_input_at=last_input_at,
+        )
         try:
             return self.launch(session, restoring=restoring, opening=opening)
         except Exception:
@@ -654,7 +672,11 @@ class SessionManager:
         del self._sessions[name]
         try:
             return self.create(
-                session.sdef, restoring=True, created_at=session.created_at
+                session.sdef,
+                restoring=True,
+                created_at=session.created_at,
+                last_visited_at=session.last_visited_at,
+                last_input_at=session.last_input_at,
             )
         except Exception:
             self._sessions[name] = session  # keep the exited record on failure
@@ -700,7 +722,11 @@ class SessionManager:
         del self._sessions[name]
         try:
             return self.create(
-                new_def, restoring=True, created_at=session.created_at
+                new_def,
+                restoring=True,
+                created_at=session.created_at,
+                last_visited_at=session.last_visited_at,
+                last_input_at=session.last_input_at,
             )
         except Exception:
             self._sessions[name] = session  # keep the record, as it was
@@ -899,6 +925,12 @@ class SessionManager:
                     "pid": session.pid,
                     "created_at": session.created_at,
                     "last_output_at": session.last_output_at,
+                    # When a person last looked in and last typed. Kept across
+                    # the restart because that is exactly when the question
+                    # gets asked: the sessions worth finding after a daemon
+                    # comes back are the ones nobody has been near.
+                    "last_visited_at": session.last_visited_at,
+                    "last_input_at": session.last_input_at,
                     "exited_at": session.exited_at,
                 }
             )
@@ -946,7 +978,11 @@ class SessionManager:
                     # relaunched session would flatten the whole fleet into
                     # one moment and lose the order for good.
                     self.create(
-                        sdef, restoring=True, created_at=entry.get("created_at")
+                        sdef,
+                        restoring=True,
+                        created_at=entry.get("created_at"),
+                        last_visited_at=entry.get("last_visited_at"),
+                        last_input_at=entry.get("last_input_at"),
                     )
                     if entry.get("was_busy"):
                         self.resumed_busy.append(sdef.name)
@@ -965,6 +1001,8 @@ class SessionManager:
             pid=entry.get("pid"),
             created_at=entry.get("created_at"),
             last_output_at=entry.get("last_output_at"),
+            last_visited_at=entry.get("last_visited_at"),
+            last_input_at=entry.get("last_input_at"),
             exited_at=entry.get("exited_at"),
             scrollback=self.scrollback,
             idle_threshold=self.idle_threshold,

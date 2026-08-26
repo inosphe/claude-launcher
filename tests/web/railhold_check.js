@@ -114,6 +114,10 @@ function setStatusBadge() {}
 function ctxNoteOnRow() {}
 function ctxRailLine(s) { return el("span", "rail-ctx-line unknown"); }
 function railCwdLine(s) { return el("span", "rail-cwd"); }
+/* ...and the attention line beside them, stubbed for the same reason: this
+   harness is about what a press does to a rebuild, not about what any of
+   the row's lines say (railseen_check holds that one). */
+function railSeenLine(s) { return el("span", "rail-seen"); }
 function railMeshTags(name) { return []; }
 function openSpawnModal() {}
 function openDetail() {}

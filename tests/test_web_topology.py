@@ -146,6 +146,22 @@ on the rail's own wordmark, which doubles as the link back to the root
 route ("#/") and so has to look like a title and not like a browser's
 default link.
 
+``railseen_check`` on the fourth line a rail row spends, and the only one
+about the reader rather than the session: WHO HAS BEEN NEAR IT — last looked
+at, last typed into, last moved on its own. Three facts that a lazier line
+would fold into one "active" word, and folding them is exactly the failure
+worth a harness: a session grinding away with nobody watching and a session
+watched all afternoon while its agent has not moved since lunch are the two
+rows an operator is actually hunting for, and only the GAP between the three
+readings tells them from the eighteen that are fine. So the checks pin each
+pair to its own field and several pin what a pair must not react to — that a
+viewer count does not make the screen look busy, that "typed" does not drift
+onto the visit stamp — plus the two shapes that are not durations at all: the
+green "now" that means somebody has the terminal open this second (no stamp
+taken in the past can say that), and the dash that means no reading, drawn on
+every row whether or not it has one so the three columns stay where the eye
+left them.
+
 ``railtimer_check`` on the strip that sits above that nav — the countdown
 for the daemon's automatic nudge, which is the one thing on this dashboard
 nobody could see coming: two clocks can produce it (a reminder into a
@@ -250,6 +266,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "askdoor_check.js",
         "railtimer_check.js",
         "termtimer_check.js",
+        "railseen_check.js",
     ],
 )
 def test_topology_diagram_logic(script):

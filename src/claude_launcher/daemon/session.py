@@ -218,6 +218,8 @@ class Session:
         idle_threshold: float,
         scrollback: int,
         created_at: Optional[str] = None,
+        last_visited_at: Optional[str] = None,
+        last_input_at: Optional[str] = None,
     ) -> None:
         self.sdef = sdef
         self.argv: List[str] = []
@@ -234,6 +236,29 @@ class Session:
         #: the sessions were actually created (see SessionManager.list).
         self.created_at = created_at or _utcnow()
         self.last_output_at: Optional[str] = None
+        #: The last moment a person was *here* — a viewer socket attached to
+        #: this session (the web terminal, or ``claunch attach``). Stamped
+        #: when the socket opens and again when it closes, so a tab left open
+        #: for an hour is a visit that ended an hour later rather than one
+        #: that ended the second it began; while a socket is still open,
+        #: :meth:`viewers` says so and the reader should trust that over the
+        #: stamp. Wall clock rather than monotonic because it is shown to a
+        #: human and survives a daemon restart through
+        #: :meth:`SessionManager.persist`.
+        #:
+        #: Carried in on the relaunch paths for the same reason
+        #: ``created_at`` is: a restore, a respawn or a redefine is this
+        #: session continuing, and starting it over with "never visited"
+        #: would quietly wipe the very reading these exist to give.
+        self.last_visited_at: Optional[str] = last_visited_at
+        #: The last moment a person *typed* here, at a terminal they were
+        #: sitting at. Deliberately not ``send-keys`` and not a delivery: the
+        #: question this answers is "when did I last say something to this
+        #: agent", and a script or another session typing into it is not an
+        #: answer to that. The monotonic twin of this
+        #: (``_last_terminal_input``) is what the delivery gate reads; this
+        #: one exists to be read by a person, and is persisted with the visit.
+        self.last_input_at: Optional[str] = last_input_at
         self.exit_code: Optional[int] = None
         self.exited_at: Optional[str] = None
         self.exited = False
@@ -739,6 +764,12 @@ class Session:
         if not at_terminal:
             return
         self._last_terminal_input = now
+        # ...and the same fact on a clock a person can read. Only here, in
+        # the terminal branch: `send-keys` types into this session too, but
+        # it is another agent doing it, and a card that answered "you last
+        # typed here 20 seconds ago" because a script did would be worse
+        # than saying nothing.
+        self.last_input_at = _utcnow()
         if composing:
             self._draft_open = True
         if data:
@@ -1003,6 +1034,58 @@ class Session:
     def unsubscribe(self, q: asyncio.Queue) -> None:
         self._subscribers.discard(q)
 
+    def note_visit(self) -> None:
+        """Record that a person is (or just was) looking at this session.
+
+        Called by the viewer socket on both edges — when it opens and when it
+        closes — because either edge alone tells the wrong story. Stamping
+        only the open leaves a tab that has been watched all afternoon
+        claiming a visit from this morning; stamping only the close means a
+        session being watched right now has never been visited at all. Both,
+        plus :meth:`viewers` for the "right now" case, and the reading is
+        complete without the daemon having to tick anything.
+        """
+        self.last_visited_at = _utcnow()
+
+    def viewers(self) -> int:
+        """How many viewer sockets are attached to this session right now.
+
+        The subscriber set *is* the viewer set: ``subscribe`` has exactly one
+        caller, the terminal WebSocket. So this counts eyes on the terminal —
+        a browser tab or a ``claunch attach`` — and nothing else.
+        """
+        return len(self._subscribers)
+
+    def last_activity_at(self) -> Optional[str]:
+        """When the screen last changed in a way that was not an animation.
+
+        Derived here rather than stamped in the sampling loop, and that is the
+        whole performance story: :meth:`_sample_loop` already asks the tracker
+        this question every SAMPLE_INTERVAL, so keeping a wall-clock copy up
+        to date would mean formatting a timestamp several times a second for
+        every session on the machine, forever, for a line nobody is reading
+        most of the time. Instead the tracker's monotonic answer is converted
+        the moment somebody actually asks — once per session per poll —
+        against the offset between the two clocks.
+
+        ``last_output_at`` cannot stand in for this. It moves on every byte,
+        and claude's TUI animates a spinner and an elapsed-time counter while
+        it waits for you, so raw output never goes quiet and that stamp reads
+        "just now" on a session that has done nothing for an hour. The
+        tracker exists precisely to tell those apart.
+
+        ``None`` before the first sample, and after a daemon restart: this is
+        read off *this* incarnation's screen history, which a restarted
+        session does not have. Empty is the honest answer there.
+        """
+        mono = self.tracker.last_meaningful_change()
+        if mono is None:
+            return None
+        ago = max(0.0, time.monotonic() - mono)
+        return datetime.fromtimestamp(time.time() - ago, timezone.utc).isoformat(
+            timespec="seconds"
+        )
+
     def _broadcast(self, item: Tuple[str, object]) -> None:
         dead = []
         for q in self._subscribers:
@@ -1024,6 +1107,16 @@ class Session:
             "exit_code": self.exit_code,
             "created_at": self.created_at,
             "last_output_at": self.last_output_at,
+            # The three "has anyone been here" readings the rail draws: when
+            # a person last looked, when a person last typed, and when the
+            # session itself last did something visible. Separate facts —
+            # a session can be working hard with nobody watching, or watched
+            # all day while doing nothing — and the row shows all three
+            # rather than collapsing them into one "active" word.
+            "last_visited_at": self.last_visited_at,
+            "last_input_at": self.last_input_at,
+            "last_activity_at": self.last_activity_at(),
+            "viewers": self.viewers(),
             "exited_at": self.exited_at,
         }
 
@@ -1068,6 +1161,8 @@ class DeadSession:
         pid: Optional[int] = None,
         created_at: Optional[str] = None,
         last_output_at: Optional[str] = None,
+        last_visited_at: Optional[str] = None,
+        last_input_at: Optional[str] = None,
         exited_at: Optional[str] = None,
         scrollback: int = 5000,
         idle_threshold: float = 2.0,
@@ -1077,6 +1172,11 @@ class DeadSession:
         self.pid = pid
         self.created_at = created_at or _utcnow()
         self.last_output_at = last_output_at
+        # Carried across the restart with the rest of the record: "when did I
+        # last look in on this one" is a question about a session that is
+        # mostly worth asking once it has stopped answering for itself.
+        self.last_visited_at = last_visited_at
+        self.last_input_at = last_input_at
         self.exited_at = exited_at
         self.idle_threshold = idle_threshold
         self._scrollback = scrollback
@@ -1182,6 +1282,18 @@ class DeadSession:
     def unsubscribe(self, q: asyncio.Queue) -> None:
         return None
 
+    def note_visit(self) -> None:
+        # Reading the last screen of a session that is over still counts as
+        # looking in on it — that is most of what these records are opened
+        # for — so the visit is recorded here exactly as on a live one.
+        self.last_visited_at = _utcnow()
+
+    def viewers(self) -> int:
+        return 0  # subscribe() hands out a queue nothing publishes to
+
+    def last_activity_at(self) -> Optional[str]:
+        return None  # no tracker, no screen history: nothing honest to say
+
     def info(self) -> dict:
         return {
             **self.sdef.to_dict(),
@@ -1190,5 +1302,9 @@ class DeadSession:
             "exit_code": self.exit_code,
             "created_at": self.created_at,
             "last_output_at": self.last_output_at,
+            "last_visited_at": self.last_visited_at,
+            "last_input_at": self.last_input_at,
+            "last_activity_at": self.last_activity_at(),
+            "viewers": self.viewers(),
             "exited_at": self.exited_at,
         }

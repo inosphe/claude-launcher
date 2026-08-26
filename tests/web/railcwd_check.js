@@ -122,6 +122,10 @@ function attach() {}
 function setStatusBadge() {}
 function ctxNoteOnRow() {}
 function ctxRailLine(s) { return el("span", "rail-ctx-line unknown"); }
+/* The attention line ("seen / typed / moved"), stubbed for the same reason:
+   it is one more full-width breaker under the name, and what it SAYS is
+   railseen_check's. */
+function railSeenLine(s) { return el("span", "rail-seen"); }
 function $(id) { return list; }
 /* The panel head's other callers (panel_check's subject): the arrangement
    is steered from here so the line can be shown to survive every one. */

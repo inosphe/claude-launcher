@@ -126,6 +126,11 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
 
     request.app["websockets"].add(ws)
     queue = session.subscribe()
+    # Someone is looking at this session. This route is the only way to watch
+    # one — the web terminal and `claunch attach` both arrive here — so this
+    # is where a visit is, and the rail's "last looked in" line is stamped on
+    # the socket's two edges rather than on a timer.
+    session.note_visit()
     state = ViewerState()
     try:
         await ws.send_str(
@@ -211,6 +216,9 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
     finally:
         request.app["websockets"].discard(ws)
         session.unsubscribe(queue)
+        # ...and the visit ended now, not when it started. A tab open all
+        # afternoon would otherwise report this morning.
+        session.note_visit()
         if not ws.closed:
             await ws.close()
     return ws
