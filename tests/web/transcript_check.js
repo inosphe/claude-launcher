@@ -400,6 +400,26 @@ const texts = (pane) => pane.children
         !!kinds.find((c) => c.includes("log-err")), kinds);
 })();
 
+/* --- a tool result is the assistant's output, not the user's ------------- */
+(async () => {
+  const w = build();
+  w.script([{ status: 200, body: { total: 1, has_more: false, cursor: 0, records: [{
+    seq: 4, role: "user", ts: "", blocks: [
+      { type: "tool_result", id: "t1", text: "the output", clipped: false },
+    ],
+  }] } }]);
+  w.api.open("s8");
+  await flush(); await flush();
+
+  const rec = w.pane.querySelector(".log-rec");
+  check("a tool result does not read as the user's turn",
+        rec && rec.classList.contains("log-asst") && !rec.classList.contains("log-user"),
+        rec && rec.className);
+  const role = w.pane.querySelector(".log-role");
+  check("and carries the assistant's label",
+        role && role.textContent === "assistant", role && role.textContent);
+})();
+
 /* --- the markup and wiring the code reaches for -------------------------- */
 {
   const html = fs.readFileSync(
