@@ -104,6 +104,12 @@ function dropKept() {}
    away. It has its own harness (leak_check, which counts what a tab left
    open all day is still holding); here it is a no-op so the rail stays
    the subject. */
+/* The rail hold's state, which refreshSessions now consults before it tears
+   the rows down (app.js railHeld). Nothing here is about a press, so the
+   answer is always "no press in flight" and the rebuild happens as before —
+   railhold_check is the harness that drives the held case. */
+function railHeld() { return false; }
+let railRedrawPending = false;
 function forgetDeadSessions() {}
 function refreshResumeChoices() {}
 function renderHome() {}

@@ -79,7 +79,15 @@ header and the terminal) and the detail panel's section, bound to the same
 open-set and off-state — ``briefrow_check`` on the row's always-on face —
 the one-line job description the /api/sessions poll pours into every row
 (digest first, the opening task as fallback) and the collapsed ⟳ that
-refreshes without opening — ``newform_check`` on that same form's reading
+refreshes without opening — ``railhold_check`` on why those two glyphs used
+to swallow a press: the rail is rebuilt whole on every poll, and a rebuild
+landing between a pointerdown and its pointerup takes the pressed node out
+of the document, leaving the browser no common ancestor to send the click
+to. It pins that a poll arriving mid-press leaves the rows as the SAME
+objects rather than equal ones, that the data still lands, that the skipped
+redraw is paid back after the click and not before it, that the hold expires
+on its own so a lost pointerup cannot freeze the rail, and that a failed poll
+is not read as "this daemon has no sessions" — ``newform_check`` on that same form's reading
 order — the arrangement rows (parent, mesh, role, workflow) asked before the
 machinery rows, which fold shut under them and must hold exactly what a child
 inherits, and the opening task left alone at the bottom, with the summary line
@@ -192,6 +200,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "briefcard_check.js",
         "briefingtop_check.js",
         "briefrow_check.js",
+        "railhold_check.js",
         "spawnform_check.js",
         "newflow_check.js",
         "spawnsize_check.js",

@@ -371,10 +371,55 @@ function forgetDeadSessions() {
   }
 }
 
+/* The rail holds still while a pointer is down on it.
+
+   Every poll rebuilds the whole list from scratch (`list.innerHTML` below,
+   driven by setInterval(pollTick, 2000)). A press is not an instant, though:
+   pointerdown, then pointerup, and only then the click the handler is
+   waiting for. A rebuild landing between the first two takes the node the
+   press started on out of the document, and the browser is then left with no
+   common ancestor to dispatch the click to -- so the press produces nothing
+   at all, with no sign it was ever taken. It reads as "the button does
+   nothing", intermittently, and it lands hardest on the row's small glyphs:
+   the briefing toggle and its refresh, the details button, the spawn +.
+
+   Only the teardown waits. Everything else the poll does still happens on
+   time -- the caches are refreshed, and the cflow badges and briefing cards
+   are applied in place onto the rows that already exist (both are written
+   idempotently for exactly that reason). The redraw runs the moment the
+   press ends.
+
+   The hold carries its own deadline instead of trusting a pointerup to
+   arrive. One can be lost -- the pointer leaves the window, another element
+   captures it, the tab is hidden mid-press -- and a rail frozen for the rest
+   of the session would be a far worse bug than the one this fixes. */
+const RAIL_HOLD_MS = 1200;
+let railHeldUntil = 0;
+let railRedrawPending = false;
+
+function railHeld() { return Date.now() < railHeldUntil; }
+
+function holdRail() { railHeldUntil = Date.now() + RAIL_HOLD_MS; }
+
+/* Released on pointerup, but the redraw it owes is deferred by a task: the
+   click is dispatched after this handler returns, and a redraw run first
+   would remove the very node that click is still on its way to. */
+function releaseRail() {
+  if (!railHeldUntil) return;
+  railHeldUntil = 0;
+  if (railRedrawPending) setTimeout(refreshSessions, 0);
+}
+
 async function refreshSessions() {
   let data;
   try {
     const resp = await api("/api/sessions");
+    // An error response carries a JSON body of its own, so `resp.json()`
+    // succeeds and `data.sessions` is simply absent -- which used to read as
+    // "this daemon has no sessions" and empty the rail, drop every parked
+    // terminal and forget every briefing (forgetDeadSessions works off this
+    // very list). A failed poll must leave the page as it was.
+    if (!resp.ok) return;
     data = await resp.json();
   } catch {
     return;
@@ -383,8 +428,12 @@ async function refreshSessions() {
   briefingLLM = data.llm_configured !== false;
   forgetDeadSessions();
   const list = $("session-list");
-  list.innerHTML = "";
-  for (const [s, depth] of byLineage(sessionsCache)) {
+  // See the hold above: a press in flight keeps the rows it started on, and
+  // the redraw it postpones is owed back the moment the press ends.
+  const rebuild = !railHeld();
+  railRedrawPending = !rebuild;
+  if (rebuild) list.innerHTML = "";
+  for (const [s, depth] of rebuild ? byLineage(sessionsCache) : []) {
     const li = document.createElement("li");
     li.dataset.name = s.name;
     if (s.name === currentName) li.classList.add("active");
@@ -13832,4 +13881,14 @@ async function pollOnce() {
 }
 
 pollTimer = setInterval(pollTick, 2000);
+
+/* What the rail hold listens to (its state and functions live beside
+   refreshSessions, which consults them). pointerdown covers mouse, pen and
+   touch; the release is caught on the document in the capture phase because
+   the pointer may well come up somewhere else entirely — a drag off the row,
+   a press that ends over the terminal. */
+$("session-list").addEventListener("pointerdown", holdRail);
+document.addEventListener("pointerup", releaseRail, true);
+document.addEventListener("pointercancel", releaseRail, true);
+
 boot();
