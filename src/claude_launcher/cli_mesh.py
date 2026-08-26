@@ -443,6 +443,12 @@ def _cmd_connect(args: argparse.Namespace) -> int:
     )
     verb = "connected" if result.get("enabled") else "disconnected"
     print(f"{verb} {result['a']} <-> {result['b']}")
+    granted = result.get("granted")
+    if granted:
+        print(
+            f"this answers a wire request: {granted['by']} had asked to reach "
+            f"{granted['other']} {granted['asks']}x and has been told"
+        )
     if not result.get("enabled"):
         print(
             "they can no longer message each other -- sends between them are "
@@ -453,6 +459,51 @@ def _cmd_connect(args: argparse.Namespace) -> int:
 
 def _cmd_disconnect(args: argparse.Namespace) -> int:
     return _cmd_connect(args)
+
+
+def _cmd_wire_requests(args: argparse.Namespace) -> int:
+    """Standing asks for edges the member graph does not have.
+
+    Deliberately not spelled ``requests``: that subcommand is the join queue
+    (a daemon asking to enrol a session), and two different approvals under
+    one word is how an operator grants the wrong one.
+    """
+    client = daemon_client.ensure_running()
+    if args.decline:
+        a, b = args.decline
+        row = client.post(
+            f"/api/mesh/{args.mesh}/wire-requests/decline",
+            {"a": a, "b": b, "reason": args.reason or ""},
+        )
+        if row.get("already"):
+            print(f"already {row['already']}: {row['a']} <-> {row['b']}")
+            return 0
+        print(f"declined {row['a']} <-> {row['b']}")
+        print(f"{row['by']} has been told, and will not be asked again")
+        return 0
+    rows = client.get(
+        f"/api/mesh/{args.mesh}/wire-requests"
+        + (f"?state={args.state}" if args.state else "")
+    ).get("requests") or []
+    if not rows:
+        print(f"no wire requests in mesh {args.mesh!r}")
+        return 0
+    for row in rows:
+        other = row["b"] if row["by"] == row["a"] else row["a"]
+        detail = f"[{row['state']}] {row['by']} -> {other}  asked {row['count']}x"
+        if row["state"] == "open":
+            detail += (
+                f", with {row['approver']}" if row.get("approver")
+                else ", NOBODY ASKED (no session here commands either end)"
+            )
+        else:
+            detail += f" by {row.get('decided_by') or 'an operator'}"
+            if row.get("reason"):
+                detail += f": {row['reason']}"
+        print(detail)
+    print()
+    print("grant one with: claunch mesh connect MESH A B")
+    return 0
 
 
 def _cmd_requests(args: argparse.Namespace) -> int:
@@ -951,6 +1002,21 @@ def register(sub) -> None:
     p.add_argument("a", metavar="HANDLE-A")
     p.add_argument("b", metavar="HANDLE-B")
     p.set_defaults(func=_cmd_disconnect)
+
+    p = msub.add_parser(
+        "wire-requests",
+        help="members that were refused a peer and are waiting on an edge; "
+             "grant one with 'connect', or --decline it",
+    )
+    p.add_argument("mesh")
+    p.add_argument("--state", choices=["open", "granted", "declined"],
+                   help="show only requests in this state")
+    p.add_argument("--decline", nargs=2, metavar=("HANDLE-A", "HANDLE-B"),
+                   help="answer this pair with no, once and for good")
+    p.add_argument("--reason", default="",
+                   help="why, carried to the requester and into the refusal "
+                        "it gets if it asks again")
+    p.set_defaults(func=_cmd_wire_requests)
 
     p = msub.add_parser(
         "requests",

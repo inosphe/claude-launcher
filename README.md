@@ -1879,6 +1879,8 @@ claunch spawn --mesh dev --as worker_2 --role worker --task "take the API"
                                   # ...an agent can do this itself (MCP 'spawn')
 claunch mesh connect dev worker_1 worker_2      # let two MEMBERS talk directly
 claunch mesh disconnect dev worker_1 worker_2   # ...or stop them (send refused)
+claunch mesh wire-requests dev    # ...who was refused a peer and is waiting on
+                                  # you; 'connect' grants one, --decline says no
 claunch mesh invite dev           # optional ticket that pre-approves one join
 claunch mesh join dev@work-pc --code <ticket>   # ...admitted without waiting
 claunch mesh revoke dev other-pc  # unlink a guest machine (persistent until then)

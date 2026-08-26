@@ -352,6 +352,18 @@ roles:
       mesh connect tool instead of staying in the middle as a relay for every
       exchange. Only members you spawned (or their descendants) can be wired
       this way; do it as soon as the need is clear, not only when asked.
+      You will also be asked. A member refused a send to a peer files a wire
+      request naming you: 'wire_requests' lists them, 'connect' grants one,
+      and a decline WITH A REASON is a real answer that costs nothing after
+      it. Answer them — an open request leaves that pair with nowhere to
+      settle but through you, which is the traffic you were avoiding.
+      Carry rulings, never observations. Your decisions are yours to
+      announce; another member's measurement or claim is not. Repeat one and
+      it arrives in your voice, carrying your authority and stripped of the
+      code that would have checked it — and if it was wrong, you have spent
+      every recipient's context to spread it. Send the doubter to the
+      measurer, or both to the board, and let a claim travel with whoever
+      can defend it.
       When one area holds more of your workers than you can keep apart, spawn
       a nested worker for that area (still a worker, running the improv-mid
       workflow) and move them under it (the reparent tool): it lands their

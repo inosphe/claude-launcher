@@ -41,7 +41,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Union
 
 import yaml
 
-from . import mesh_policy, mesh_roles, paths
+from . import mesh_policy, mesh_roles, paths, wire
 from .manager import ManagerError, SessionManager
 from .session import STATUS_IDLE
 
@@ -326,6 +326,21 @@ DEFAULT_BUSY_HOLD = 60.0
 _REFUSED_WINDOW = 600.0
 _REFUSED_KEEP = 40
 
+#: Longest stance the join briefing will paste inline, for the members whose
+#: system prompt does not carry one (see :meth:`MeshManager._stance_lines`).
+#: Set to fit every PACKAGED stance whole — the leader's is much the longest
+#: at ~3.8k, and it is also the one a truncation would hurt most, since a
+#: leader that never read its stance is the failure this whole path is about.
+#: ``test_every_packaged_stance_fits_the_inline_cap_whole`` is what keeps the
+#: two in step when either moves.
+#:
+#: Still a cap, because ``mesh_roles.MAX_STANCE`` is 8000: a custom
+#: vocabulary that writes a novel gets a starting position and the pointer to
+#: the rest rather than pushing the roster out of the block it rides in. The
+#: re-briefing has a harder budget than the join does and drops back to the
+#: pointer instead of trimming anything else (see :func:`rebrief.compose`).
+_INLINE_STANCE = 4000
+
 #: Worker rescan cadence while messages are pending (seconds).
 _POLL = 1.0
 
@@ -492,6 +507,18 @@ class Mesh:
         #: the authority and shipped to every peer, so a guest cannot let
         #: through what the authority forbids.
         self.member_edges: Dict[str, bool] = {}
+        #: Standing asks for an edge this graph does not have, pair key ->
+        #: :class:`wire.WireRequest`. Written when a send is refused for want
+        #: of a connection (see :meth:`MeshManager.file_wire_request`), so the
+        #: one moment an agent names the peer it needs is recorded instead of
+        #: being spent on a refusal string.
+        #:
+        #: Persisted, like ``pending_requests`` and for the same reason: an
+        #: ask nobody has answered yet is exactly the thing a restart must not
+        #: drop. Losing one puts the requester back to waiting on a channel
+        #: that will never be decided, which is the outcome this whole path
+        #: exists to prevent.
+        self.wire_requests: Dict[str, "wire.WireRequest"] = {}
         #: Bumped on every authority handover; messages carry it alongside
         #: ``seq`` so a forced takeover cannot silently interleave with the
         #: old authority's late traffic.
@@ -1785,26 +1812,106 @@ class MeshManager:
             return
         asyncio.ensure_future(self._brief(mesh, member))
 
-    def _stance_lines(self, mesh: Mesh, member: Member) -> str:
+    def _stance_lines(
+        self, mesh: Mesh, member: Member, *, inline: bool = True
+    ) -> str:
         """The briefing's stance section for this member — possibly empty.
 
-        A POINTER, not the prose. Pasting the stance inline was tried and is
-        wrong twice over: it doubles the length of a block that is typed into
-        a live terminal, and — the part that actually matters — it freezes the
-        stance into the agent's context at join time, so every later upload
-        would leave the member acting on a vocabulary the mesh no longer has.
-        ``mesh stance`` always prints the current text, and doubles as the
-        recovery path after a compaction drops this block.
+        A POINTER **when something else already holds the prose**, and the
+        prose itself when nothing does.
+
+        Pointing is right, and was right for the reason first written down
+        here: pasting doubles the length of a block typed into a live
+        terminal, and it freezes the stance into the agent's context at join
+        time, so a later upload would leave the member acting on a vocabulary
+        the mesh no longer has. ``mesh stance`` always prints the current
+        text, and doubles as the recovery path after a compaction.
+
+        What that reasoning assumed is that the agent has the stance from
+        somewhere else — and for the common case it does: a session spawned
+        with a role carries it in an appended system prompt, re-injected on
+        every spawn and restore (:func:`harness.build_command`), which is why
+        a ``/compact`` cannot take it. But three shapes carry no such copy,
+        and for them a pointer is the *only* place the stance ever appears —
+        one command away, on a turn the agent has to decide to spend, and
+        gone again at the next compaction with only another pointer to
+        replace it:
+
+        * a session with no role at all (a human started it, then it joined);
+        * a mesh that replaced the vocabulary, whose role names the packaged
+          set cannot resolve — ``SessionManager._spawn_role`` drops those
+          rather than fail the spawn, so nothing reaches the system prompt;
+        * a member whose mesh role is not the role its session was spawned
+          as, where the system prompt holds a *different* stance and both
+          claim to bind.
+
+        There the prose goes in. Capped (:data:`_INLINE_STANCE`) so a long
+        one cannot crowd out the roster it arrives with, or overrun the
+        re-briefing's hook budget when this block is composed again
+        (:mod:`rebrief`); the pointer rides along either way, because the
+        capped copy is a starting position and ``mesh stance`` is still the
+        current text.
         """
         role = mesh.roleset.get(member.role)
         if not (role and role.stance.strip()):
             return ""
-        return (
+        pointer = (
             f"stance: run 'claunch mesh stance {mesh.name}' now — it prints "
             f"what a {member.role} is on this mesh, and it is binding\n"
         )
+        if not inline:
+            # The caller has a harder budget than the join does and would
+            # rather cut this than anything else it carries. Right ordering:
+            # the stance is the one section with a guaranteed alternative
+            # one command away — the owed ledger and the opening task have
+            # none. See :func:`rebrief.compose`.
+            return pointer
+        carried = self._stance_in_system_prompt(mesh, member)
+        if carried is None:
+            return pointer  # unanswerable here: assume carried, paste nothing
+        spawned_as, prompt_stance = carried
+        if prompt_stance.strip() == role.stance.strip():
+            return pointer
+        body = role.stance.strip()
+        if len(body) > _INLINE_STANCE:
+            body = body[:_INLINE_STANCE].rstrip() + " [...]"
+        clash = ""
+        if prompt_stance.strip():
+            clash = (
+                f"note: this session was spawned as a {spawned_as!r} and its "
+                f"system prompt carries THAT stance. On this mesh you are a "
+                f"{member.role} and the text below is what binds — a role is "
+                "per mesh, and an appended prompt cannot be re-written.\n"
+            )
+        return f"{pointer}{clash}stance ({member.role}), binding:\n{body}\n"
 
-    def briefing_block(self, mesh: Mesh, member: Member) -> str:
+    def _stance_in_system_prompt(self, mesh: Mesh, member: Member):
+        """``(spawned_as, stance)`` for this member's session, or ``None``.
+
+        ``None`` when the question cannot be answered here — a member hosted
+        on another daemon, or a session this one no longer has a record of.
+        The caller treats unanswerable as "carried", deliberately: a remote
+        daemon briefs its own members, and guessing on its behalf would paste
+        a stance into a terminal that already has one.
+
+        A session with no role answers ``("", "")`` rather than ``None``:
+        that is a real, knowable answer — it carries nothing — and it is the
+        commonest of the three shapes the caller pastes for.
+        """
+        if not self._is_local(mesh, member):
+            return None
+        try:
+            sdef = self.manager.get(member.session).sdef
+        except ManagerError:
+            return None
+        if not sdef.role:
+            return "", ""
+        packaged = mesh_roles.resolve().get(sdef.role)
+        return sdef.role, (packaged.stance if packaged is not None else "")
+
+    def briefing_block(
+        self, mesh: Mesh, member: Member, *, inline_stance: bool = True
+    ) -> str:
         """The briefing's *text*: what this member is here, and how to speak.
 
         Split from :meth:`_brief` — which waits for idle and pastes it — so a
@@ -1835,7 +1942,7 @@ class MeshManager:
                 "connected to and cannot message\n" if hidden > 0 else ""
             ) +
             f"send: claunch mesh send {mesh.name} <to|*> \"...\"\n"
-            + self._stance_lines(mesh, member) +
+            + self._stance_lines(mesh, member, inline=inline_stance) +
             f"protocol: activate your 'mesh' skill NOW (/mesh {mesh.name}) to "
             "load the member protocol; if you have no such skill, run "
             "'claunch install' first and retry\n"
@@ -2448,11 +2555,19 @@ class MeshManager:
             return [t for t in targets if t not in set(cut)]
         if cut:
             reachable = ", ".join(mesh.neighbours(from_handle)) or "(nobody)"
+            # The refusal stands — the graph is an ACL, and nothing here
+            # delivers the message. What changes is that the ask is not thrown
+            # away with it: this is the one moment an agent names, unprompted,
+            # the exact peer it needs, and it used to be spent on a string
+            # telling it to relay through somebody. See :mod:`wire`.
+            filed = [self.file_wire_request(mesh, from_handle, t) for t in sorted(cut)]
+            notes = "\n".join(
+                wire.filed_note(req, mesh.name) for req in filed if req is not None
+            )
             raise MeshError(
                 f"{from_handle!r} has no connection to {', '.join(sorted(cut))} "
-                f"in mesh {mesh.name!r} — it can reach: {reachable}. Ask the "
-                "session that spawned you to connect you, or route through a "
-                "peer you share."
+                f"in mesh {mesh.name!r} — it can reach: {reachable}."
+                + (f"\n{notes}" if notes else "")
             )
         return targets
 
@@ -2879,6 +2994,12 @@ class MeshManager:
         may only edit an edge that touches a session it commands — the
         children it spawned, and their descendants. So a lead wires its own
         workers together, and a worker cannot wire itself to anybody.
+
+        Connecting a pair that had a standing wire request also **grants** it
+        and tells the requester (see :meth:`_grant_wire_request`). There is no
+        separate approve verb: the request asks for an edge, so the edge is
+        the answer, and a second state saying "approved" could only ever
+        disagree with the graph.
         """
         mesh = self.get(name)
         self._validate_member_edge(mesh, a, b)
@@ -2891,9 +3012,14 @@ class MeshManager:
             # Optimistic, as with a machine edge: the authority accepted, and
             # the next sync re-sends the whole table anyway.
             self._mark_member_edge(mesh, a, b, enabled)
+            granted = self._grant_wire_request(mesh, a, b, actor) if enabled else None
             self._persist_def(mesh)
-            return {"a": a, "b": b, "enabled": bool(enabled)}
+            return {
+                "a": a, "b": b, "enabled": bool(enabled),
+                **({"granted": granted} if granted else {}),
+            }
         self._mark_member_edge(mesh, a, b, enabled)
+        granted = self._grant_wire_request(mesh, a, b, actor) if enabled else None
         self._persist_def(mesh)
         self._roster_changed(mesh)
         self._flush_guests_soon(mesh)
@@ -2901,7 +3027,220 @@ class MeshManager:
             "mesh %r: %s the member edge %s <-> %s",
             mesh.name, "connected" if enabled else "disconnected", a, b,
         )
-        return {"a": a, "b": b, "enabled": bool(enabled)}
+        return {
+            "a": a, "b": b, "enabled": bool(enabled),
+            **({"granted": granted} if granted else {}),
+        }
+
+    # ------------------------------------------------------------------ #
+    # wire requests: the refusal, kept instead of spent
+    #
+    # Local to this daemon and deliberately not federated. A refusal happens
+    # on the SENDER's daemon, the lineage that decides who may grant it is
+    # only knowable there, and the approver it names is a session with a
+    # terminal there. Shipping the table to the authority would move a record
+    # away from every party that can act on it. See :mod:`wire`.
+    # ------------------------------------------------------------------ #
+    def file_wire_request(
+        self, mesh: Mesh, requester: str, target: str
+    ) -> Optional["wire.WireRequest"]:
+        """Record that ``requester`` needs ``target``, and ask who can grant it.
+
+        Called from the one place a named send is refused for want of an edge
+        (:meth:`_resolve_recipients`). Returns the request as it now stands —
+        the refusal message is built from it — or ``None`` when there is
+        nothing to record (an unknown handle, or a self-send, both of which
+        the caller has already rejected on their own terms).
+
+        Never raises. This runs *inside* an exception path that is about to
+        raise something better, and a bookkeeping failure that replaced the
+        real refusal with a stack trace would take a legible answer away from
+        the agent standing there.
+        """
+        try:
+            if requester == target or target not in mesh.members:
+                return None
+            key = wire.pair_key(requester, target)
+            now = wire.now()
+            req = mesh.wire_requests.get(key)
+            if req is None:
+                req = wire.WireRequest(
+                    a=requester, b=target, by=requester, at=now
+                )
+                mesh.wire_requests[key] = req
+            else:
+                # ``by`` is never re-pointed: the requester of record is
+                # whoever asked FIRST. A pair where both ends try to reach
+                # each other is one need, not two, and crediting the latest
+                # asker would lose who has been waiting — and would send the
+                # grant notice to the wrong one of them.
+                req.count += 1
+            silent = req.silent(now)
+            if not silent:
+                handle, kind = self._wire_approver(mesh, req)
+                req.approver = handle
+                if handle:
+                    req.notified_at = now
+                    self._notify_wire_request_soon(mesh, req, kind)
+            wire.trim(mesh.wire_requests)
+            self._persist_def(mesh)
+            return req
+        except Exception as exc:  # noqa: BLE001 — see the docstring
+            log.warning("mesh %r: cannot file a wire request: %s", mesh.name, exc)
+            return None
+
+    def _wire_approver(self, mesh: Mesh, req: "wire.WireRequest") -> tuple:
+        """``(handle, kind)`` for the session that may open this pair.
+
+        Resolves both ends to sessions before asking, because authority is a
+        property of the session tree; a handle is only what a session is
+        called inside one mesh.
+        """
+        by = mesh.members.get(req.by)
+        other = mesh.members.get(req.other)
+        if by is None or other is None or not self._is_local(mesh, by):
+            return "", ""
+
+        def handle_of(session: str) -> str:
+            member = self.member_for_session(mesh, session)
+            return member.handle if member is not None else ""
+
+        return wire.approver(
+            by.session,
+            other.session,
+            ancestors_of=self.manager.ancestors,
+            handle_of=handle_of,
+        )
+
+    def _notify_wire_request_soon(
+        self, mesh: Mesh, req: "wire.WireRequest", kind: str
+    ) -> None:
+        """Schedule the approver's notice, or send it inline with no loop.
+
+        Scheduled rather than awaited because the caller is a synchronous
+        resolver inside a raise path: the refusal must reach the sender now,
+        not after a message round-trip to somebody else.
+        """
+        body = wire.notice_body(req, mesh.name, kind=kind)
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            self._say_as_policy(mesh, [req.approver], body, type="decide")
+            return
+        asyncio.ensure_future(
+            self._notify_wire_request(mesh, req.approver, body)
+        )
+
+    async def _notify_wire_request(
+        self, mesh: Mesh, approver: str, body: str
+    ) -> None:
+        self._say_as_policy(mesh, [approver], body, type="decide")
+
+    def _say_as_policy(
+        self, mesh: Mesh, to: List[str], body: str, *, type: str = "fyi"
+    ) -> None:
+        """One message from the daemon's own handle, failure logged not raised.
+
+        The same voice a stall warning speaks in (:meth:`_report_stranded`),
+        and for the same reason it is external: the policy engine has no
+        terminal in this mesh, so nothing can be owed back to it.
+        """
+        targets = [h for h in to if h and h in mesh.members]
+        if not targets:
+            return
+        try:
+            self._send_core(
+                mesh, mesh_policy.POLICY_SENDER, targets, body,
+                external=True, type=type,
+            )
+            self._flush_guests_soon(mesh)
+        except MeshError as exc:
+            log.debug("mesh %r: policy message failed: %s", mesh.name, exc)
+
+    def _grant_wire_request(
+        self, mesh: Mesh, a: str, b: str, actor: str
+    ) -> Optional[dict]:
+        """Settle an open request because this pair just got connected.
+
+        Granting has no verb of its own: connecting IS the grant. That is not
+        a shortcut, it is the honest model — the request asks for an edge, and
+        the edge existing is the whole of what was asked for. A separate
+        "approve" that then had to open the edge would be two states to keep
+        in step and one of them would eventually be wrong.
+
+        Returns a small record for the caller's result, or ``None`` when this
+        pair had nothing pending — which is the ordinary case for a human or
+        an agent wiring two members nobody asked about.
+        """
+        req = mesh.wire_requests.get(wire.pair_key(a, b))
+        if req is None or req.state != wire.OPEN:
+            return None
+        req.state = wire.GRANTED
+        req.decided_by = actor or "an operator"
+        req.decided_at = wire.now()
+        self._say_as_policy(mesh, [req.by], wire.granted_note(req, mesh.name))
+        log.info(
+            "mesh %r: wire request %s <-> %s granted by %s after %d ask(s)",
+            mesh.name, req.a, req.b, req.decided_by, req.count,
+        )
+        return {"by": req.by, "other": req.other, "asks": req.count}
+
+    def decline_wire_request(
+        self, name: str, a: str, b: str, *, actor: str = "", reason: str = ""
+    ) -> dict:
+        """Answer a wire request with no, once and for good.
+
+        A decline is the half of this that makes the whole thing safe to
+        leave running. Without it the only answers are "connect" and
+        "silence", and silence is what a refused agent retries against
+        forever. Recorded so the refusal itself can carry the answer: the
+        next time the requester tries, its own error message tells it that
+        this was decided and by whom, without another message crossing the
+        mesh.
+
+        Subject to the same authority as connecting (an agent edits only
+        edges touching a session it commands) — saying no to a channel is as
+        much a decision about that pair as saying yes.
+        """
+        mesh = self.get(name)
+        self._validate_member_edge(mesh, a, b)
+        if actor:
+            self._require_member_authority(mesh, actor, a, b)
+        req = mesh.wire_requests.get(wire.pair_key(a, b))
+        if req is None:
+            raise MeshError(
+                f"no wire request for {a!r} <-> {b!r} in mesh {name!r} — "
+                f"`claunch mesh wire-requests {name}` lists the open ones"
+            )
+        if req.state != wire.OPEN:
+            return {"already": req.state, **req.to_dict()}
+        req.state = wire.DECLINED
+        req.decided_by = actor or "an operator"
+        req.decided_at = wire.now()
+        req.reason = str(reason or "").strip()
+        self._say_as_policy(mesh, [req.by], wire.declined_note(req, mesh.name))
+        self._persist_def(mesh)
+        log.info(
+            "mesh %r: wire request %s <-> %s declined by %s (%s)",
+            mesh.name, req.a, req.b, req.decided_by, req.reason or "no reason given",
+        )
+        return req.to_dict()
+
+    def wire_request_rows(self, name: str, *, state: str = "") -> List[dict]:
+        """The mesh's wire requests, open ones first then most recent.
+
+        ``state`` filters to one of ``open``/``granted``/``declined``. The
+        rows carry the approver each was routed to, so a reader can tell "no
+        one has answered" from "no one was asked" — different problems with
+        different fixes, and they look identical in a bare count.
+        """
+        mesh = self.get(name)
+        rows = [
+            r.to_dict() for r in mesh.wire_requests.values()
+            if not state or r.state == state
+        ]
+        rows.sort(key=lambda r: (r["state"] != wire.OPEN, -float(r["at"] or 0.0)))
+        return rows
 
     async def link_lineage(self, child: str, parent: str) -> List[dict]:
         """Open the parent edge a re-parented session now needs, in every mesh
@@ -5507,6 +5846,7 @@ class MeshManager:
         mesh.member_edges = {
             str(k): bool(v) for k, v in (doc.get("member_edges") or {}).items()
         }
+        mesh.wire_requests = wire.load(doc.get("wire_requests"))
         try:
             mesh.authority_epoch = int(doc.get("authority_epoch") or 0)
         except (TypeError, ValueError):
@@ -5610,6 +5950,12 @@ class MeshManager:
                 # never cuts a member edge writes exactly the file it always
                 # did — and an older daemon reading it sees no new key.
                 **({"member_edges": mesh.member_edges} if mesh.member_edges else {}),
+                # Absent while nobody has been refused for want of an edge,
+                # for the same reason as the line above it.
+                **(
+                    {"wire_requests": wire.dump(mesh.wire_requests)}
+                    if mesh.wire_requests else {}
+                ),
                 "members": {h: m.to_dict() for h, m in sorted(mesh.members.items())},
                 "invites": mesh.invites,
                 "requests": mesh.pending_requests,

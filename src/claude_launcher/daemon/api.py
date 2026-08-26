@@ -270,6 +270,8 @@ def build_app(
     r.add_put("/api/mesh/{mesh}/peers", h_mesh_peers_reorder)
     r.add_patch("/api/mesh/{mesh}/links/{a}/{b}", h_mesh_link_set)
     r.add_patch("/api/mesh/{mesh}/members/{a}/links/{b}", h_mesh_member_link_set)
+    r.add_get("/api/mesh/{mesh}/wire-requests", h_mesh_wire_requests)
+    r.add_post("/api/mesh/{mesh}/wire-requests/decline", h_mesh_wire_decline)
     r.add_get("/api/mesh/{mesh}/policy", h_mesh_policy_get)
     r.add_put("/api/mesh/{mesh}/policy", h_mesh_policy_set)
     r.add_get("/api/mesh/{mesh}/roles", h_mesh_roles_get)
@@ -2050,6 +2052,33 @@ async def h_mesh_member_link_set(request: web.Request) -> web.Response:
         request.match_info["b"],
         enabled=bool(body.get("enabled")),
         actor=str(body.get("actor") or ""),
+    )
+    return web.json_response(result)
+
+
+async def h_mesh_wire_requests(request: web.Request) -> web.Response:
+    """The standing asks for edges this mesh does not have.
+
+    A GET rather than part of the roster: a request is not a property of a
+    member, it is a decision waiting on one, and folding it into
+    ``/members`` would put it in front of every reader of the topology
+    instead of the one session that can answer it.
+    """
+    rows = _mesh_mgr(request).wire_request_rows(
+        request.match_info["mesh"], state=request.query.get("state") or ""
+    )
+    return web.json_response({"requests": rows})
+
+
+async def h_mesh_wire_decline(request: web.Request) -> web.Response:
+    """Answer a wire request with no. ``actor`` gates it like a link edit."""
+    body = await _json_body(request)
+    result = _mesh_mgr(request).decline_wire_request(
+        request.match_info["mesh"],
+        str(body.get("a") or ""),
+        str(body.get("b") or ""),
+        actor=str(body.get("actor") or ""),
+        reason=str(body.get("reason") or ""),
     )
     return web.json_response(result)
 

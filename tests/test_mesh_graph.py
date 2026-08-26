@@ -189,7 +189,12 @@ async def _trio(mgr, tmp_path):
     }
     _wire(mms)
     for s in ("sa", "sb", "sc"):
-        mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
+        # rows=80: these sessions are joined to a mesh and the tests wait on
+        # the briefing's HEADER. A member whose harness takes no system
+        # prompt now has its stance pasted into that block, which is taller
+        # than a default screen — the header would scroll off before the
+        # wait saw it. See MeshManager._stance_lines.
+        mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path), rows=80))
     mms["pcA"].create("m")
     await mms["pcA"].join("m", "sa", handle="alice")
     await mms["pcB"].join(
@@ -320,7 +325,7 @@ def test_a_peer_edits_its_own_edge_and_only_its_own(home, tmp_path):
         # authority edge and B6 would answer first.
         mms["pcD"] = MeshManager(mgr, settle=0.05, root=tmp_path / "meshpcD")
         _wire(mms)
-        mgr.create(SessionDef(name="sd", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sd", harness="py", cwd=str(tmp_path), rows=80))
         await mms["pcD"].join(
             "m@pcA", "sd", handle="dave", code=mm_a.invite("m")["code"]
         )
@@ -751,7 +756,7 @@ def test_deleting_a_mesh_survives_a_reload(home, tmp_path):
         root = tmp_path / "mesh"
         mm = MeshManager(mgr, settle=0.05, root=root)
         mm.machine = "pcA"
-        mgr.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path), rows=80))
         mm.create("doomed")
         await mm.join("doomed", "sa", handle="alice")
         mm.delete("doomed")
