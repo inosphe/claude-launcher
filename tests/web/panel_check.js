@@ -125,6 +125,7 @@ function stopMeshPoll() {}
 function stopFlowPoll() {}
 function closeWorkspaces() {}
 function stopBeadsPoll() {}
+function closeTranscript() {}
 function openWorkflow() {}
 function openMesh() {}
 function openFlowTopology() {}
