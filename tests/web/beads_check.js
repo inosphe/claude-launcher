@@ -290,6 +290,27 @@ check("and still counts what is in the block",
 check("Comments is drawn at that same level",
       pane.all().filter((n) => n.tag === "h4" && n.text.startsWith("Comments")).length, 1);
 
+/* And the third: the issue's own text, which had no heading at all, so a
+   reader scrolling in landed in prose with nothing naming it. All three are
+   drawn by one rule now -- that is the half of this the card cannot do. */
+ctx.setDetail({ issue: { id: "claunch-j31", title: "the round", comments: [],
+                         description: "what the round was for." },
+                reports: ROWS });
+const withDesc = ctx.pane();
+const headings = withDesc.kids.filter((k) => k.tag === "h4").map((k) => k.text);
+check("the description gets a heading like its neighbours",
+      headings.includes("Description"), true);
+check("and the pane's three sections are the three headings, in reading order",
+      [headings[0], headings[headings.length - 1].startsWith("Comments")],
+      ["Description", true]);
+/* The order the family block above depends on: its own check places itself
+   against beads-desc, so the heading must go before the text, not after it. */
+const descOrder = withDesc.kids.map((k) => [...k.classes][0] || k.tag);
+check("the heading precedes the text it names",
+      descOrder.indexOf("h4") < descOrder.indexOf("beads-desc"), true);
+check("and the rounds still come after the description",
+      descOrder.indexOf("beads-desc") < descOrder.indexOf("sess-reports"), true);
+
 /* Neither half of a row says what a row is, so the block says it once. */
 const what = pane.find("sess-reports-what")[0].text;
 check("the block says what these pages are, and that they open elsewhere",

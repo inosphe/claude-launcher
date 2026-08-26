@@ -1240,8 +1240,8 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
    blocks tens of lines long, and as 13px blue text it went missing in them;
    the weight lives here, in the border and the ground, so the heading can sit
    at the same level as the section beside it instead of shouting over it.
-   Drawn on the block itself — a wrapper would change what the pane's first
-   child is called, and an order check reads exactly that. */
+   Drawn on the block itself — a wrapper would change the first class of the
+   pane's child here, and an order check places this block by exactly that. */
 .sess-reports {
   margin: 14px 0 16px; padding: 10px 12px 6px;
   background: #171c22; border: 1px solid #2a2e36;

@@ -7311,7 +7311,14 @@ function beadsDetailPane() {
   pane.appendChild(meta);
   const rel = beadsRelationBlock(i.id || beadsFocus);
   if (rel) pane.appendChild(rel);
-  if (i.description) pane.appendChild(el("pre", "beads-desc", i.description));
+  // The third section of this pane, and the last one still drawn without a
+  // heading. Reports and Comments both announce themselves; the issue's own
+  // text just began, so a reader scrolling in landed in the middle of prose
+  // with nothing saying what it was. One rule draws all three now.
+  if (i.description) {
+    pane.appendChild(el("h4", null, "Description"));
+    pane.appendChild(el("pre", "beads-desc", i.description));
+  }
   if (i.close_reason) pane.appendChild(el("p", "wf-note", "closed: " + i.close_reason));
   // The rounds that were written up for this issue. Keyed by issue across
   // every session, so a closed issue whose session ended long ago still hands
