@@ -19,6 +19,7 @@ import time
 import pytest
 
 from claude_launcher import store
+from claude_launcher.cflow import responders
 from claude_launcher.daemon import paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
@@ -277,3 +278,88 @@ def test_the_tool_sends_the_caller_as_the_actor(home, monkeypatch):
     with pytest.raises(mesh_mcp.MeshMcpError):
         mesh_mcp.call_tool("reparent", {"session": "w1"})
     assert [t["name"] for t in mesh_mcp.TOOLS if t["name"] == "reparent"] == ["reparent"]
+
+
+# --------------------------------------------------------------------------- #
+# after the move: the reads that have to be live, and the one that is not
+# --------------------------------------------------------------------------- #
+def test_every_read_of_the_tree_follows_the_move(home, tmp_path):
+    """The move is one field; what makes it a *re-parenting* is that nothing
+    downstream kept a copy of the old answer.
+
+    ``mesh-retopology`` promises a lead that a moved worker now answers to its
+    new parent — so the three places that tell anyone who a session reports to
+    must all re-derive from ``SessionDef.parent`` rather than from something
+    stamped at join or spawn time:
+
+    * the **mesh roster** (``members[].parent``), which is what a delegated
+      cflow decision resolves its chain of command from
+      (``cflow.responders._ancestors``);
+    * the **re-briefing** the child itself reads after a compaction, which
+      names its parent and the command that reaches it;
+    * **authority** (``SessionManager.commands``) — the new parent may now end
+      and re-parent the session it was handed.
+
+    And the one thing the move does not touch: the child's *existing* briefing
+    is already in its context, which is why the skill makes the batch send to
+    the moved workers a step and not an option.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            for name, parent in (("lead", None), ("mid", "lead"), ("w1", "lead")):
+                mgr.create(
+                    SessionDef(name=name, harness="py", cwd=str(tmp_path), parent=parent)
+                )
+                await mm.join("team", name, handle=name)
+
+            async def roster() -> dict:
+                resp = await client.get("/api/mesh/team", headers=BEARER)
+                return {
+                    str(m["handle"]): m for m in (await resp.json()).get("members") or []
+                }
+
+            async def brief(name: str) -> str:
+                resp = await client.get(f"/api/sessions/{name}/rebrief", headers=BEARER)
+                return (await resp.json()).get("block") or ""
+
+            # before: w1 hangs off the lead everywhere, and mid commands nobody
+            assert (await roster())["w1"]["parent"] == "lead"
+            assert responders._ancestors(await roster(), "w1") == ["lead"]
+            assert "parent: lead" in await brief("w1")
+            resp = await client.post(
+                "/api/sessions/mid/children/w1/kill", headers=BEARER
+            )
+            assert resp.status == 403
+            assert "may not end 'w1'" in (await resp.json())["error"]
+
+            resp = await client.post(
+                "/api/sessions/w1/parent",
+                json={"parent": "mid", "actor": "lead"},
+                headers=BEARER,
+            )
+            assert resp.status == 200, await resp.text()
+
+            # after: the roster, the chain a delegated decision walks, and the
+            # re-briefing all name mid — nothing had cached "lead"
+            rows = await roster()
+            assert rows["w1"]["parent"] == "mid"
+            assert responders._ancestors(rows, "w1") == ["mid", "lead"]
+            block = await brief("w1")
+            assert "parent: mid" in block
+            assert 'claunch mesh send team mid "..."' in block
+            # authority moved *to* mid without leaving the lead: the lead is
+            # still above both, which is what makes the delegate move legal in
+            # the first place (a worker may only be handed to the actor or to
+            # something the actor commands).
+            assert mgr.commands("mid", "w1") and mgr.commands("lead", "w1")
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
