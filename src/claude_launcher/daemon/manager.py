@@ -22,7 +22,7 @@ import shutil
 from dataclasses import replace
 from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
-from .. import profile as profile_mod
+from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
 from . import harness as harness_mod
@@ -751,17 +751,18 @@ class SessionManager:
         made at creation — and the token is still looked up fresh at every
         relaunch.
 
-        Refused while nothing has been stopped: a non-claude session (auth
-        is spelled in claude's own env), a borrow paired with ``--null``
-        (creation's own refusal — the two flags answer "whose token" with
-        opposite answers), an unknown lender, and a no-op.
+        Refused while nothing has been stopped: a harness with no shared-token
+        route, a borrow paired with ``--null`` (creation's own refusal — the
+        two flags answer "whose token" with opposite answers), an unknown or
+        qualified lender, and a no-op. ``--null`` itself remains Claude-only.
         """
         session = self.get(name)
         old = session.sdef
-        if old.harness != harness_mod.CLAUDE_HARNESS:
+        entry = harness_registry.get(old.harness)
+        if entry is None or not entry.borrowable:
             raise ManagerError(
-                f"--borrow only applies to the claude harness, "
-                f"not {old.harness!r}"
+                f"--borrow is not supported by harness {old.harness!r}; "
+                "OAuth harnesses use their profile's own namespaced login"
             )
         lender = (borrow or "").strip() or None
         if lender is not None and null_token:
@@ -769,14 +770,22 @@ class SessionManager:
                 "--null launches without any OAuth token; it cannot be "
                 f"combined with --borrow {lender}"
             )
+        if null_token and old.harness != harness_mod.CLAUDE_HARNESS:
+            raise ManagerError(
+                f"--null only applies to the claude harness, not {old.harness!r}"
+            )
         if lender is not None:
             # Checked now rather than left for the relaunch to discover: a
             # typo must cost a 400, not a stopped session. (The token itself
             # is *not* required — same terms as creation, where a tokenless
             # lender simply starts unauthenticated.)
             try:
-                profile_mod.require(lender)
-            except profile_mod.ProfileError as exc:
+                runtime = profile_mod.require_selector(old.profile or "")
+                resolved, _report = borrowing.require_allowed(
+                    runtime, lender, entry=entry
+                )
+                lender = resolved.name
+            except (profile_mod.ProfileError, borrowing.BorrowError) as exc:
                 raise ManagerError(str(exc)) from exc
         if lender == old.borrow and null_token == old.null_token:
             if lender:

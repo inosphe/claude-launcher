@@ -22,7 +22,7 @@ import uuid
 from dataclasses import dataclass, field, replace
 from typing import Dict, Iterable, List, Optional, Tuple
 
-from .. import harnesses as harness_registry
+from .. import borrowing, harnesses as harness_registry
 from .. import lineage, profile as profile_mod, runner, store, transcripts
 from .. import config as launcher_config
 from . import mesh_roles
@@ -123,9 +123,10 @@ class SessionDef:
     identity: Optional[str] = None
     #: Run with another profile's auth (``--borrow``): this session keeps its
     #: own profile's config dir, env and skills, but the token — and the
-    #: backend it talks to — comes from the named profile. Applied on every
-    #: spawn, restores included: the arrangement is the session's, not the
-    #: first launch's. claude harness only.
+    #: backend it talks to — comes from the named profile. API-key harnesses
+    #: borrow only the shared token through their declared ``token_env``.
+    #: Applied on every spawn, restores included: the arrangement is the
+    #: session's, not the first launch's.
     borrow: Optional[str] = None
     #: Launch with no OAuth token at all (``--null``): nothing is injected and
     #: any inherited ``CLAUDE_CODE_OAUTH_TOKEN`` is cleared, so claude starts
@@ -251,6 +252,7 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
     # creation never accepts it as an independent choice. Profile-less custom
     # definitions remain supported for the Python embedding API and old saved
     # records; the HTTP and CLI creation doors require a profile.
+    prof = None
     if sdef.profile:
         prof = profile_mod.require_selector(sdef.profile)
         try:
@@ -258,17 +260,37 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
         except lineage.LineageError as exc:
             raise HarnessError(str(exc)) from exc
         sdef = replace(sdef, profile=prof.selector, harness=selected)
+    entry = harness_registry.get(sdef.harness)
+    if entry is None:
+        known = ", ".join(harness_registry.names())
+        raise HarnessError(
+            f"unknown harness {sdef.harness!r} (known: {known}); "
+            f"declare it under 'harnesses:' in {store.path()}"
+        )
+    if sdef.null_token and sdef.borrow:
+        # Both answer the same question (whose credential) and the pair is
+        # invalid before lender lookup: a typo or deleted lender must not hide
+        # the contradictory request behind a different error.
+        raise HarnessError(
+            "--null launches without any OAuth token; "
+            f"it cannot be combined with --borrow {sdef.borrow}"
+        )
+    if sdef.borrow:
+        if prof is None:
+            raise HarnessError("--borrow needs a profile that selects the harness")
+        try:
+            lender, _report = borrowing.require_allowed(
+                prof, sdef.borrow, entry=entry
+            )
+        except borrowing.BorrowError as exc:
+            raise HarnessError(str(exc)) from exc
+        # Persist only the base profile identity. A lender's harness setting is
+        # irrelevant and a qualified selector was rejected above.
+        sdef = replace(sdef, borrow=lender.name)
     if sdef.harness == CLAUDE_HARNESS:
         if not sdef.profile:
             raise HarnessError(
                 "the claude harness needs a profile (pass --profile NAME)"
-            )
-        if sdef.null_token and sdef.borrow:
-            # The same refusal `run` gives, for the same reason: the two flags
-            # answer the one question "whose token" with opposite answers.
-            raise HarnessError(
-                "--null launches without any OAuth token; "
-                f"it cannot be combined with --borrow {sdef.borrow}"
             )
         sdef = _normalize_role(sdef)
         sdef = _normalize_resume(sdef)
@@ -293,13 +315,6 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
             else:
                 sdef = replace(sdef, conversation_id=str(uuid.uuid4()))
     else:
-        entry = harness_registry.get(sdef.harness)
-        if entry is None:
-            known = ", ".join(harness_registry.names())
-            raise HarnessError(
-                f"unknown harness {sdef.harness!r} (known: {known}); "
-                f"declare it under 'harnesses:' in {store.path()}"
-            )
         if not entry.available():
             # Declared but not installed — the state 'pi' ships in. Saying so
             # here is the difference between "install pi" and a PtyError that
@@ -319,7 +334,7 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
                 ("role", sdef.role),
                 ("resume", sdef.resume is not None),
                 ("fork_session", sdef.fork_session),
-                ("borrow", sdef.borrow),
+                ("borrow", sdef.borrow and not entry.borrowable),
                 ("null", sdef.null_token),
             )
             if given
@@ -412,12 +427,21 @@ def build_command(
         k: v for k, v in os.environ.items() if k not in _NESTED_SESSION_MARKERS
     }
     entry = harness_registry.get(sdef.harness)
+    borrow_prof = None
+    if sdef.borrow:
+        if prof is None or entry is None:
+            raise HarnessError("--borrow needs a declared profile harness")
+        try:
+            borrow_prof, _report = borrowing.require_allowed(
+                prof, sdef.borrow, entry=entry
+            )
+        except borrowing.BorrowError as exc:
+            raise HarnessError(str(exc)) from exc
     if sdef.harness == CLAUDE_HARNESS:
         assert prof is not None
         # Resolved at spawn time like the profile itself, so a lender deleted
         # between restarts fails the restore loudly instead of silently
         # falling back to the session's own token.
-        borrow_prof = profile_mod.require(sdef.borrow) if sdef.borrow else None
         env = runner.child_env(
             prof, with_token=True, base_env=base,
             borrow=borrow_prof, null_token=sdef.null_token,
@@ -507,7 +531,9 @@ def build_command(
             env.update(entry.env)
         else:
             try:
-                env = runner.harness_child_env(prof, entry, base_env=base)
+                env = runner.harness_child_env(
+                    prof, entry, base_env=base, borrow=borrow_prof
+                )
             except runner.RunnerError as exc:
                 raise HarnessError(str(exc)) from exc
     # The session's identity, tmux's ``$TMUX`` equivalent. Children (claude,
@@ -517,7 +543,9 @@ def build_command(
     env.update(sdef.env)
     if prof is not None and entry is not None:
         try:
-            runner.finalize_harness_env(prof, entry, env)
+            runner.finalize_harness_env(
+                prof, entry, env, borrow=borrow_prof
+            )
         except runner.RunnerError as exc:
             raise HarnessError(str(exc)) from exc
     # Storage isolation is launcher-owned and cannot be escaped through

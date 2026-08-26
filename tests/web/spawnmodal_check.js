@@ -161,7 +161,7 @@ new Function(
   + slice("spawnMeshNow") + slice("spawnWtFragment")
   + slice("spawnAutoWorktree") + slice("spawnAutoWorktreeHint")
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
-  + slice("syncSpawnGates") + slice("spawnPayload")
+  + slice("profileBorrowCapability") + slice("syncSpawnGates") + slice("spawnPayload")
   + slice("spawnReport") + slice("spawnPreflightNote")
   + slice("spawnHardBlocks") + slice("postSpawn")
   + slice("spawnMissingSources") + slice("spawnSourceNote")
@@ -556,9 +556,10 @@ async function main() {
     [grp.value, grp.inputs[""].checked, heard]);
 
   const g3 = uiStub({
-    report: { may_choose: ["fork"] }, git: {},
+    report: { may_choose: ["fork", "borrow"] }, git: {},
     harness: ctl({ value: "" }), profile: ctl({ value: "pi-profile" }),
-    profileDetails: { "pi-profile": { harness: "pi" } },
+    profileDetails: { "pi-profile": { harness: "pi", borrow_allowed: true,
+                                       borrow_mode: "token" } },
     parentSess: { harness: "claude" },
     nullTok: ctl(), borrow: ctl(), wtMode: wtGroup(""),
     over: ctl(), update: ctl(),
@@ -567,10 +568,24 @@ async function main() {
   ctx.syncSpawnGates(g3);
   check("a non-claude child cannot --null",
     g3.nullTok.disabled === true && /claude harness only/.test(g3.nullNote.textContent));
-  check("...nor borrow a token",
-    g3.borrow.disabled === true && /claude harness only/.test(g3.borrowNote.textContent));
+  check("...but its declared API-key route can borrow a token",
+    g3.borrow.disabled === false, g3.borrowNote.textContent);
   check("mesh '-' takes handle and connect away",
     g3.handleRow.hidden === true && g3.connectRow.hidden === true);
+
+  const g4 = uiStub({
+    report: { may_choose: ["borrow"] }, git: {},
+    harness: ctl({ value: "" }), profile: ctl({ value: "kimi-profile" }),
+    profileDetails: { "kimi-profile": { harness: "kimi", borrow_allowed: false,
+                                         borrow_mode: "none" } },
+    parentSess: { harness: "claude" }, nullTok: ctl(), borrow: ctl({ value: "p2" }),
+    wtMode: wtGroup(""), over: ctl(), update: ctl(), mesh: ctl({ value: "-" }),
+  });
+  ctx.syncSpawnGates(g4);
+  check("an OAuth child clears and locks an inherited borrow",
+    g4.borrow.disabled === true && g4.borrow.value === "" &&
+      /own profile storage/.test(g4.borrowNote.textContent),
+    [g4.borrow.value, g4.borrowNote.textContent]);
 
   /* ---- inheriting a mesh: when it resolves, and when it cannot ---------- */
   /* Sitting on "(inherit the parent's mesh)" is an answer the DAEMON settles
@@ -672,10 +687,14 @@ async function main() {
       profiles: ["p1", "p2"],
       profile_selectors: ["p1:claude", "p1:pi", "p2:claude", "p2:pi"],
       profile_details: [
-        { name: "p1:claude", harness: "claude", harness_available: true },
-        { name: "p1:pi", harness: "pi", harness_available: true },
-        { name: "p2:claude", harness: "claude", harness_available: true },
-        { name: "p2:pi", harness: "pi", harness_available: true },
+        { name: "p1:claude", harness: "claude", harness_available: true,
+          borrow_allowed: true, borrow_mode: "provider-token" },
+        { name: "p1:pi", harness: "pi", harness_available: true,
+          borrow_allowed: true, borrow_mode: "token" },
+        { name: "p2:claude", harness: "claude", harness_available: true,
+          borrow_allowed: true, borrow_mode: "provider-token" },
+        { name: "p2:pi", harness: "pi", harness_available: true,
+          borrow_allowed: true, borrow_mode: "token" },
       ],
     } },
     "GET /api/mesh": { doc: { meshes: [{ name: "m0" }] } },

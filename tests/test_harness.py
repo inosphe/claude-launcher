@@ -385,16 +385,50 @@ def test_role_and_resume_rejected_on_a_non_claude_harness(home, tmp_path):
 
 
 def test_borrow_and_null_rejected_on_a_non_claude_harness(home, tmp_path):
-    """Auth arrangements are the profile machinery's, which only claude has."""
+    """A harness with no token route cannot borrow; --null remains Claude-only."""
     _declare_harness("h")
     _profile_for("custom", "h")
-    with pytest.raises(HarnessError, match="claude harness"):
+    with pytest.raises(HarnessError, match="own storage"):
         harness.normalize(
             SessionDef(name="x", profile="custom", cwd=str(tmp_path), borrow="lender")
         )
     with pytest.raises(HarnessError, match="claude harness"):
         harness.normalize(
             SessionDef(name="x", profile="custom", cwd=str(tmp_path), null_token=True)
+        )
+
+
+def test_api_key_session_borrows_lender_token_not_lender_harness(home, tmp_path):
+    _declare_harness(
+        "keyed", auth="api-key", token_env="KEYED_API_KEY", home_env="KEYED_HOME"
+    )
+    runtime = _profile_for("work", "keyed")
+    lender = _profile_for("lender", "claude")
+    credentials.save_token(runtime, "own-secret")
+    credentials.save_token(lender, "lender-secret")
+
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work", cwd=str(tmp_path), borrow="lender")
+    )
+    _, env, _ = harness.build_command(sdef)
+
+    assert sdef.harness == "keyed"
+    assert sdef.borrow == "lender"
+    assert env["KEYED_API_KEY"] == "lender-secret"
+    assert env["KEYED_HOME"] == str(runtime.config_dir / "keyed")
+
+
+def test_borrow_selector_is_rejected_even_when_its_harness_matches(home, tmp_path):
+    _declare_harness("keyed", auth="api-key", token_env="KEYED_API_KEY")
+    _profile_for("work", "keyed")
+    _profile_for("lender", "keyed")
+
+    with pytest.raises(HarnessError, match="base profile"):
+        harness.normalize(
+            SessionDef(
+                name="x", profile="work", cwd=str(tmp_path),
+                borrow="lender:keyed",
+            )
         )
 
 

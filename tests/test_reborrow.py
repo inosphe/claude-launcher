@@ -17,8 +17,7 @@ import time
 
 import pytest
 
-from claude_launcher import profile as profile_mod
-from claude_launcher import store
+from claude_launcher import credentials, profile as profile_mod, store
 from claude_launcher.daemon import harness as harness_mod
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
@@ -39,6 +38,22 @@ def _register_py_harness() -> None:
     store.update(
         lambda doc: doc.update(
             {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
+        )
+    )
+
+
+def _register_key_harness() -> None:
+    store.update(
+        lambda doc: doc.update(
+            {
+                "harnesses": {
+                    "keyed": {
+                        "command": [sys.executable, "-u", "-c", CHILD],
+                        "auth": "api-key",
+                        "token_env": "KEYED_API_KEY",
+                    }
+                }
+            }
         )
     )
 
@@ -80,6 +95,26 @@ def test_reborrow_relaunches_a_live_session_on_the_new_borrow(home, tmp_path, mo
         assert not relaunched.exited  # relaunched, not just redefined
         assert relaunched.sdef.conversation_id == session.sdef.conversation_id
         assert mgr.get("s1") is relaunched
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_reborrow_supports_a_declared_api_key_harness(home, tmp_path, monkeypatch):
+    _register_key_harness()
+    profile_mod.create("p1")
+    profile_mod.create("p2")
+    store.set_profile_field("p1", "harness", "keyed")
+    monkeypatch.setattr(harness_mod, "build_command", _fake_claude_build_command)
+
+    async def run():
+        mgr = _manager()
+        mgr.create(SessionDef(name="s1", profile="p1", cwd=str(tmp_path)))
+        relaunched = await mgr.reborrow("s1", "p2")
+        assert relaunched.sdef.harness == "keyed"
+        assert relaunched.sdef.borrow == "p2"
+        with pytest.raises(ManagerError, match="--null only applies"):
+            await mgr.reborrow("s1", None, null_token=True)
         await mgr.shutdown_all()
 
     asyncio.run(run())
@@ -148,7 +183,7 @@ def test_reborrow_refusals_touch_nothing(home, tmp_path, monkeypatch):
                 cwd=str(tmp_path), null_token=True,
             )
         )
-        with pytest.raises(ManagerError, match="only applies to the claude"):
+        with pytest.raises(ManagerError, match="not supported"):
             await mgr.reborrow("s2", "p2")
         with pytest.raises(ManagerError, match="does not exist"):
             await mgr.reborrow("s1", "nosuch")
@@ -311,7 +346,8 @@ def test_reborrow_survives_a_daemon_restart(home, tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 def test_api_reborrow_sets_and_clears(home, tmp_path, monkeypatch):
     profile_mod.create("p1")
-    profile_mod.create("p2")
+    lender = profile_mod.create("p2")
+    credentials.save_token(lender, "borrowed-secret")
     monkeypatch.setattr(harness_mod, "build_command", _fake_claude_build_command)
 
     async def run():
@@ -329,6 +365,23 @@ def test_api_reborrow_sets_and_clears(home, tmp_path, monkeypatch):
             assert resp.status == 200
             assert (await resp.json())["borrow"] == "p2"
             assert mgr.get("s1").sdef.borrow == "p2"
+            # The detail pane receives a live, secret-free validation of the
+            # borrowed credential and its concrete injection route.
+            resp = await client.get("/api/sessions/s1/meta", headers=BEARER)
+            validation = (await resp.json())["borrowed_auth"]
+            assert validation["valid"] is True
+            assert validation["lender"] == "p2"
+            assert validation["token_env"] == "CLAUDE_CODE_OAUTH_TOKEN"
+            assert "borrowed-secret" not in str(validation)
+
+            # It is not a creation-time badge: removing the token turns the
+            # next detail poll into a warning while the session still exists.
+            (lender.config_dir / credentials.TOKEN_FILENAME).unlink()
+            resp = await client.get("/api/sessions/s1/meta", headers=BEARER)
+            validation = (await resp.json())["borrowed_auth"]
+            assert validation["allowed"] is True
+            assert validation["ready"] is False
+            assert validation["status"] == "missing-token"
             # "" clears, exactly like null
             resp = await client.post(
                 "/api/sessions/s1/reborrow", json={"borrow": ""}, headers=BEARER
@@ -382,6 +435,7 @@ def test_api_reborrow_refusals(home, tmp_path, monkeypatch):
             # went down for any of them
             for body in (
                 {"borrow": "nosuch"},
+                {"borrow": "p1:claude"},
                 {"borrow": "p1", "null_token": True},
                 {"borrow": None},
             ):

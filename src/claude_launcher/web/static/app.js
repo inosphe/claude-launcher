@@ -2159,6 +2159,22 @@ async function refreshCflow() {
 
 let profileDetails = {};
 
+/* Borrow is a property of the selected harness's auth contract, not of its
+   name. Old daemons did not publish borrow_allowed, so Claude remains the
+   compatibility fallback while a new daemon also opens API-key harnesses. */
+function profileBorrowCapability(detail, harnessName) {
+  if (detail && typeof detail.borrow_allowed === "boolean") {
+    return {
+      allowed: detail.borrow_allowed,
+      mode: detail.borrow_mode || (detail.borrow_allowed ? "token" : "none"),
+    };
+  }
+  return {
+    allowed: harnessName === "claude",
+    mode: harnessName === "claude" ? "provider-token" : "none",
+  };
+}
+
 function syncProfileHarness() {
   const f = $("new-session");
   if (!f || !f.harness || !f.profile) return;
@@ -2395,15 +2411,20 @@ function syncForkAvailability() {
   const f = $("new-session");
   const resuming = f.resume.value !== "";
   const claude = (f.harness.value || "claude") === "claude";
+  const parent = spawnParent();
+  const selector = f.profile.value || (parent && parent.profile) || "";
+  const borrowCap = profileBorrowCapability(
+    profileDetails[selector], f.harness.value || "claude"
+  );
   f.fork.disabled = !resuming || !claude;
   if (f.fork.disabled) f.fork.checked = false;
   f.role.disabled = !claude;
   f.resume.disabled = !claude;
-  // Auth arrangements are the profile machinery's, which only claude has —
-  // and --null with --borrow is a pair the daemon refuses, so ticking null
-  // locks the borrow picker instead of provoking that refusal.
+  // Claude and declared API-key harnesses consume the shared profile token.
+  // OAuth harnesses keep auth in their own profile home. --null remains a
+  // Claude-only answer and cannot coexist with a borrow.
   f.null_token.disabled = !claude;
-  f.borrow.disabled = !claude || f.null_token.checked;
+  f.borrow.disabled = !borrowCap.allowed || (claude && f.null_token.checked);
   if (f.borrow.disabled) f.borrow.value = "";
   if (!claude) {
     f.role.value = "";
@@ -2732,15 +2753,21 @@ function syncSpawnMode() {
     // the borrow row rather than provoking the daemon's refusal of the pair.
     // The same two rules the spawn modal applies.
     const childHarness = f.harness.value || parent.harness || "";
+    const selector = f.profile.value || parent.profile || "";
+    const borrowCap = profileBorrowCapability(
+      profileDetails[selector], childHarness
+    );
     const claude = !childHarness || childHarness === "claude";
     f.role.disabled = !claude;
     if (!claude) {
       f.null_token.checked = false;
       f.null_token.disabled = true;
-      f.borrow.value = "";
-      f.borrow.disabled = true;
       f.role.value = "";
       renderRoleStance();
+    }
+    if (!borrowCap.allowed) {
+      f.borrow.value = "";
+      f.borrow.disabled = true;
     } else if (f.null_token.checked && !f.null_token.disabled) {
       f.borrow.value = "";
       f.borrow.disabled = true;
@@ -9407,21 +9434,26 @@ function renderSession(data) {
    so changing it is a restart, not an edit: the daemon stops the session and
    relaunches it with the auth swapped. Same name, same conversation, same
    directory — unlike a migrate there is nothing to carry. The picker asks
-   the one question creation asks: its own token, a borrowed one, or none
-   (--null) — and picking any clears the others, so a borrow chosen on a
-   --null session turns the token back on. */
+   the same question creation asks: its own token or a borrowed one; Claude
+   additionally offers none (--null). Picking any clears the others, so a
+   borrow chosen on a --null Claude session turns the token back on. */
 function sessReborrow(data) {
   const s = data.session || {};
+  const harness = data.harness || {};
   const box = el("div", "sess-reborrow");
   box.appendChild(el("h3", null, "Borrowed auth"));
 
-  // A claude-only affair: another harness has no OAuth token to swap, and the
-  // daemon refuses the restart — said here as a note rather than a dead form.
-  if (s.harness !== "claude") {
+  // Borrowability comes from the packaged/custom harness auth contract. Keep
+  // Claude as the old-daemon fallback, but do not infer every other harness is
+  // OAuth: API-key harnesses consume the same base-profile token.
+  const borrowable = typeof harness.borrowable === "boolean"
+    ? harness.borrowable : s.harness === "claude";
+  if (!borrowable) {
     sessReborrowBox = null;
     box.appendChild(el(
       "p", "wf-note",
-      `--borrow is a claude-harness flag — this session runs ${s.harness || "?"}`
+      `harness ${s.harness || "?"} keeps ${harness.auth || "its"} auth in ` +
+      "the selected profile's own storage — there is no shared token to borrow"
     ));
     return box;
   }
@@ -9429,7 +9461,11 @@ function sessReborrow(data) {
   // Rebuilt only when the auth state changes — the 2s poll must not wipe a
   // picked answer, and a successful restart changes the key, which is what
   // re-aims the picker at the new current.
-  const key = `${s.name}|${s.borrow || ""}|${s.null_token ? 1 : 0}`;
+  const validation = data.borrowed_auth || null;
+  const validationKey = validation
+    ? `${validation.status || ""}:${validation.ready ? 1 : 0}:${validation.message || ""}`
+    : "own";
+  const key = `${s.name}|${s.borrow || ""}|${s.null_token ? 1 : 0}|${validationKey}`;
   if (sessReborrowBox && sessReborrowBox.dataset.slot === key) {
     box.appendChild(sessReborrowBox);   // appending moves the live node here
     return box;
@@ -9441,8 +9477,10 @@ function sessReborrow(data) {
 
   // Whose token it runs on now — one accurate sentence for each of the
   // three modes — plus the warning that changing it costs a restart.
+  const providerBorrow = (harness.borrow_mode || "provider-token") === "provider-token";
   const current = s.borrow
-    ? `borrowing ${s.borrow}'s token (and provider) — the config and skills stay ${s.profile}'s`
+    ? `borrowing ${s.borrow}'s token${providerBorrow ? " and provider/backend" : ""}` +
+      ` — the config and skills stay ${s.profile}'s`
     : s.null_token
       ? "started --null — no token is injected at all"
       : `running on ${s.profile}'s own token`;
@@ -9450,6 +9488,14 @@ function sessReborrow(data) {
     "p", "wf-note",
     `${current}. Changing it stops the session and relaunches it — same name, same conversation`
   ));
+  if (s.borrow) {
+    const good = !!(validation && validation.valid);
+    form.appendChild(el(
+      "p", good ? "wf-note" : "wf-warning",
+      `${good ? "✓" : "⚠"} validation: ` +
+      (validation ? validation.message : "the daemon did not report a borrow check")
+    ));
+  }
 
   const row = el("div", "sess-send-row");
   const dest = document.createElement("select");
@@ -9488,7 +9534,7 @@ function sessReborrow(data) {
     dest.innerHTML = "";
     const choices = [
       ["own", `its own token (${s.profile})`],
-      ["null", "no token (--null)"],
+      ...(s.harness === "claude" ? [["null", "no token (--null)"]] : []),
       ...profiles.map((p) => [`b:${p}`, `borrow: ${p}`]),
     ];
     for (const [value, label] of choices) {
@@ -10606,22 +10652,28 @@ function syncSpawnGates(ui) {
   lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
     "the child runs under its parent's profile (spawn.allow_profile)");
 
-  // Auth is claude's token machinery: for a child on another harness both
-  // rows are moot however the policy is set, and a yes on null greys the
-  // borrow row rather than provoking the daemon's refusal of the pair.
+  // Null is Claude-only. Borrow follows the selected harness's declared auth
+  // capability: Claude borrows token+provider, API-key harnesses borrow only
+  // the shared token, OAuth harnesses borrow neither.
   const nonClaude = !!childHarness && childHarness !== "claude";
+  const effectiveDetail = pickedDetail ||
+    (ui.profileDetails || {})[(ui.parentSess || {}).profile || ""];
+  const borrowCap = profileBorrowCapability(effectiveDetail, childHarness);
   if (nonClaude) {
     lock(ui.nullTok, ui.nullNote, "the claude harness only");
-    lock(ui.borrow, ui.borrowNote, "the claude harness only");
   } else {
     lock(ui.nullTok, ui.nullNote, "");
-    if (ui.nullTok.checked) {
-      ui.borrow.value = "";
-      lock(ui.borrow, ui.borrowNote, "--null launches without any token");
-    } else {
-      lock(ui.borrow, ui.borrowNote, may.includes("borrow") ? "" :
-        "the child authenticates as its parent does (spawn.allow_profile)");
-    }
+  }
+  if (!borrowCap.allowed) {
+    ui.borrow.value = "";
+    lock(ui.borrow, ui.borrowNote,
+      `harness ${childHarness || "?"} keeps auth in its own profile storage`);
+  } else if (!nonClaude && ui.nullTok.checked) {
+    ui.borrow.value = "";
+    lock(ui.borrow, ui.borrowNote, "--null launches without any token");
+  } else {
+    lock(ui.borrow, ui.borrowNote, may.includes("borrow") ? "" :
+      "the child authenticates as its parent does (spawn.allow_profile)");
   }
 
   // Absent, not empty, when the policy has it locked: the report only

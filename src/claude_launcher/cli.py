@@ -18,6 +18,7 @@ from pathlib import Path
 from . import (
     __version__,
     bootstrap,
+    borrowing,
     cli_beads,
     cli_cflow,
     cli_mesh,
@@ -438,10 +439,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
     # --borrow / --add-prompt that appear after the profile name; pull those out
     # here, then drop a leading `--` separator before forwarding the rest.
     wt_choice, rest = _extract_worktree(list(args.args or []))
-    borrow_name = provider_name = None
+    borrow_name, rest = _extract_borrow(rest)
+    provider_name = None
     null_token = add_prompt = False
     if selected == harnesses.CLAUDE_HARNESS:
-        borrow_name, rest = _extract_borrow(rest)
         null_token, rest = _extract_null(rest)
         if null_token and borrow_name is not None:
             raise profile.ProfileError(
@@ -481,13 +482,22 @@ def _cmd_run(args: argparse.Namespace) -> int:
                 "no prompt entered; launching without --append-system-prompt",
                 file=sys.stderr,
             )
-    borrow = profile.require(borrow_name) if borrow_name else None
     if provider_name:
         providers.provider_env(provider_name)  # fail fast on an unknown name
+    borrow = None
+    borrow_report = None
+    if borrow_name:
+        borrow, borrow_report = borrowing.require_allowed(
+            p,
+            borrow_name,
+            entry=harnesses.get(selected),
+            provider_override=provider_name,
+        )
     if borrow is not None:
-        prov = provider_name or providers.resolve_name(borrow)
-        what = "token" if prov == providers.DEFAULT_PROVIDER else "auth"
-        print(f"borrowing {borrow.name!r} {what} for this run", file=sys.stderr)
+        print(
+            f"borrowing {borrow.name!r} for this run: {borrow_report.message}",
+            file=sys.stderr,
+        )
     # `run` occupies the pane for as long as claude lives, so the pane says so
     # for exactly that long: the profile (run's nearest thing to a session
     # name), the branch, and the directory it is all happening in. Cleared
@@ -1289,6 +1299,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return args.func(args)
     except (
         profile.ProfileError,
+        borrowing.BorrowError,
         runner.RunnerError,
         usage.UsageError,
         CredentialsError,

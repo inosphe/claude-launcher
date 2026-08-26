@@ -21,9 +21,13 @@ def test_packaged_set_declares_supported_harnesses(home):
     assert reg["agent"].home_env == "CURSOR_CONFIG_DIR"
     assert reg["pi"].auth == "api-key"
     assert reg["pi"].token_env == "ANTHROPIC_API_KEY"
+    assert reg["pi"].borrowable is True
+    assert reg["pi"].borrow_mode == "token"
     assert reg["claude"].token_env == "ANTHROPIC_AUTH_TOKEN"
+    assert reg["claude"].borrow_mode == "provider-token"
     assert reg["claude"].empty_env == ["ANTHROPIC_API_KEY"]
     assert "OPENAI_API_KEY" in reg["codex"].clear_env
+    assert reg["codex"].borrowable is False
     # Claude leads displays; it is the default and the only builtin one.
     assert harnesses.names()[0] == "claude"
 
