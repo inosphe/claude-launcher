@@ -435,7 +435,11 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         k: v
         for k, v in (
             ("name", args.name),
-            ("over_limit", getattr(args, "over_limit", False)),
+            # True only. The cap crosses by default, so "did not say" has to
+            # reach the daemon as an ABSENT key -- and the False that
+            # --within-limit sets is put back below, past the truthy filter
+            # that would otherwise swallow it.
+            ("over_limit", getattr(args, "over_limit", None)),
             ("fork", getattr(args, "fork", False)),
             ("mesh", args.mesh),
             ("handle", args.handle),
@@ -466,12 +470,22 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     # as "you did not say".
     if getattr(args, "no_issue", False):
         payload["beads"] = False
+    # Same shape, same reason as `beads` above: `over_limit: False` is the
+    # answer --within-limit gives, and the comprehension keeps only truthy
+    # values, so it has to be set after or "hold me to the cap" would read as
+    # "you did not say" and cross it.
+    if getattr(args, "over_limit", None) is False:
+        payload["over_limit"] = False
     try:
         result = client.post(f"/api/sessions/{parent}/children", payload)
     except daemon_client.DaemonClientError as exc:
         print(exc)
         return 1
     child = result.get("session") or {}
+    # Before the success line, not after: a warning that scrolls past the
+    # thing it is about reads as being about whatever came next.
+    for warning in result.get("warnings") or ():
+        print(f"warning: {warning}")
     print(f"spawned {child.get('name')} (child of {parent})")
     if args.worktree:
         landed = os.path.basename(str(child.get("cwd") or "").rstrip("/\\"))
@@ -1698,10 +1712,17 @@ def register(sub) -> None:
         "so a child started elsewhere would find nothing to open",
     )
     p_spawn.add_argument(
-        "--over-limit", dest="over_limit", action="store_true",
-        help="spawn past the parent's child cap (spawn.max_children) -- the "
-        "cap is soft, but crossing it takes this explicit flag; the wizard "
-        "asks the same question on its Over limit row",
+        "--over-limit", dest="over_limit", action="store_true", default=None,
+        help="spawn past the parent's child cap (spawn.max_children). This "
+        "is what happens anyway -- the cap is soft and warns rather than "
+        "refusing -- so the flag only says it out loud",
+    )
+    p_spawn.add_argument(
+        "--within-limit", dest="over_limit", action="store_false", default=None,
+        help="be REFUSED at the parent's child cap instead of warned past it "
+        "-- the strict reading of spawn.max_children, which a fan-out loop "
+        "should be stopped dead by; the wizard asks the same question on its "
+        "Over limit row",
     )
     p_spawn.add_argument("-s", "--name", help="child session name")
     p_spawn.add_argument(

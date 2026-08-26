@@ -327,23 +327,46 @@ async function main() {
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled],
         [false, false, false]);
 
-  /* The soft child cap: offered as a crossing, and only while the daemon
-     says the cap is reached. */
+  /* The soft child cap: shown, PRE-TICKED, and only while the daemon says
+     the cap is reached. The cap warns rather than refusing, so the row is
+     there to report the crossing and to let anyone who wants the strict
+     reading untick it — not to collect a permission the daemon no longer
+     asks for. */
   check("no cap reached, no over-limit row",
         box_["new-over-row"].classList.contains("hidden"), true);
-  reports.lead.soft_blocked_by = ["child limit reached (4/4)"];
+  reports.lead.soft_blocked_by = ["child limit reached (4 running/4)"];
   await reread("lead");
-  check("a parent at its limit is offered the crossing",
+  check("a parent at its limit is told, and the crossing is pre-answered",
         [box_["new-over-row"].classList.contains("hidden"),
-         box_["new-over-text"].textContent.startsWith("child limit reached (4/4)")],
-        [false, true]);
-  form.over_limit.checked = true;
-  check("the tick travels", ctx.fields(form, {}).over_limit, true);
-  /* ...and a slot freed while the form stood open takes the tick with it: a
-     yes to a question no longer asked must not travel as a silent override. */
+         box_["new-over-text"].textContent
+           .startsWith("child limit reached (4 running/4)"),
+         form.over_limit.checked],
+        [false, true, true]);
+  check("the pre-tick travels", ctx.fields(form, {}).over_limit, true);
+  /* Untick = "hold me to the cap", and THAT has to travel too: it is the one
+     answer that changes what the daemon does, and a falsy-dropping payload
+     builder would swallow it into "you did not say", which crosses. */
+  form.over_limit.checked = false;
+  check("an untick travels as a false, not as nothing",
+        ctx.fields(form, {}).over_limit, false);
+  /* A re-sync on the SAME parent must not put the tick back over that
+     untick: the row is synced by more than the parent changing under it (the
+     session list refreshing does it too), and re-answering yes on every
+     sync would quietly undo the one answer that changes anything.
+     Deliberately not `reread`, which clears the parent first: that hides the
+     row, and a hidden row's answer is cleared on purpose — see below. */
+  ctx.sync();
+  await ctx.policy();
+  check("a re-sync on the same parent leaves the untick alone",
+        [box_["new-over-row"].classList.contains("hidden"),
+         form.over_limit.checked],
+        [false, false]);
+  /* ...and a slot freed while the form stood open takes the row and every
+     answer with it: an answer to a question no longer asked must not travel
+     as a silent override, in either direction. */
   reports.lead.soft_blocked_by = [];
   await reread("lead");
-  check("a freed slot takes the row and the tick with it",
+  check("a freed slot takes the row and the answer with it",
         [box_["new-over-row"].classList.contains("hidden"),
          form.over_limit.checked, ctx.fields(form, {}).over_limit],
         [true, false, undefined]);

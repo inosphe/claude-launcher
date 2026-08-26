@@ -1038,10 +1038,14 @@ def test_the_parent_row_names_role_and_directory():
 
 
 def _full_report(**extra):
-    """A parent at its child cap, on a daemon that reports the cap as soft."""
+    """A parent at its child cap, as a current daemon reports it.
+
+    ``can_spawn`` is TRUE and ``blocked_by`` is empty: the cap warns and lets
+    the spawn through, so it is named in ``soft_blocked_by`` alone.
+    """
     return {
-        "can_spawn": False,
-        "blocked_by": ["child limit reached (4/4)"],
+        "can_spawn": True,
+        "blocked_by": [],
         "soft_blocked_by": ["child limit reached (4/4)"],
         "depth": 1, "max_depth": 3, "children_used": 4, "children_remaining": 0,
         "may_choose": [], "spawnable_harnesses": [],
@@ -1049,15 +1053,15 @@ def _full_report(**extra):
     }
 
 
-def test_a_soft_child_cap_offers_the_override_row():
-    """The cap interrupts fan-out loops, it does not forbid a fifth child
-    somebody wanted: the form asks the deliberate yes and only then sends
-    over_limit along."""
+def test_a_soft_child_cap_shows_the_row_already_answered_yes():
+    """The cap warns rather than refusing, so the row reports a crossing that
+    is about to happen — it does not collect permission for one.
+
+    That means the form submits straight through: nobody has to find the row
+    and tick it to get the child the daemon would have made anyway.
+    """
     wiz = spawn_form(report=_full_report())
     assert not wiz.field("over_limit").hidden
-    assert wiz.handle("submit") is None
-    assert "soft cap" in wiz.error
-    pick(wiz, "over_limit", "yes")
     assert wiz.handle("submit") == "create"
     args = argparse.Namespace()
     wiz.apply(args)
@@ -1065,31 +1069,64 @@ def test_a_soft_child_cap_offers_the_override_row():
     assert "over the child cap" in wiz.summary()
 
 
-def test_the_override_waives_only_the_child_cap():
+def test_answering_no_on_the_row_asks_to_be_refused():
+    """The strict reading is still reachable, and it is this row that reaches
+    it — the form stops, and says which answer is stopping it."""
+    wiz = spawn_form(report=_full_report())
+    pick(wiz, "over_limit", "no")
+    assert wiz.handle("submit") is None
+    assert "child limit reached (4/4)" in wiz.error
+    assert "answer yes" in wiz.error
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.over_limit is False
+    assert "held to the child cap" in wiz.summary()
+
+
+def test_the_cap_row_does_not_waive_the_hard_limits():
     """Depth (and enabled) stay exactly as refused: recursion is the mistake
-    the limits are for, and depth is the axis it runs away on."""
+    the limits are for, and depth is the axis it runs away on. A yes on this
+    row is about the child cap and nothing else."""
     wiz = spawn_form(report=_full_report(
-        blocked_by=["depth limit reached (3/3)", "child limit reached (4/4)"],
+        blocked_by=["depth limit reached (3/3)"],
     ))
-    pick(wiz, "over_limit", "yes")
     assert wiz.handle("submit") is None
     assert "depth limit" in wiz.error
-    assert "child limit" not in wiz.error
 
 
-def test_the_override_row_stays_hidden_while_slots_remain():
-    """A row that is always there stops being read — and a yes given to a
-    full parent must not travel once the pick moves to one with slots."""
+def test_the_cap_row_stays_hidden_while_slots_remain():
+    """A row that is always there stops being read — and an answer given to a
+    full parent must not travel once the pick moves to one with slots.
+
+    Hidden means "did not say", which is ``None`` and not ``False``: sending
+    False would ask the daemon for a refusal nobody asked for.
+    """
     wiz = spawn_form()
     assert wiz.field("over_limit").hidden
     args = argparse.Namespace()
     wiz.apply(args)
-    assert args.over_limit is False
+    assert args.over_limit is None
+
+
+def test_a_daemon_that_folds_the_cap_into_both_lists_is_still_crossable():
+    """The shape in between: ``soft_blocked_by`` named AND folded into
+    ``blocked_by``, which is how the cap was reported before it stopped
+    refusing. That daemon honours the ``over_limit: true`` this form sends,
+    so the fold must not stop the submit."""
+    wiz = spawn_form(report=_full_report(
+        can_spawn=False, blocked_by=["child limit reached (4/4)"],
+    ))
+    assert not wiz.field("over_limit").hidden
+    assert wiz.handle("submit") == "create"
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.over_limit is True
 
 
 def test_an_older_daemon_keeps_the_cap_hard():
-    """No soft_blocked_by in the report means a daemon that would refuse the
-    override anyway, so the form does not offer what it cannot deliver."""
+    """No soft_blocked_by in the report means a daemon old enough to refuse at
+    the cap outright, so the form does not offer a crossing it cannot
+    deliver — it reports the refusal that daemon will give."""
     wiz = spawn_form(report={
         "can_spawn": False,
         "blocked_by": ["child limit reached (4/4)"],

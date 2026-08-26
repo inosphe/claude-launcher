@@ -2858,23 +2858,31 @@ function syncSpawnCwdRow(f, child) {
   first.textContent = child ? "(inherit the parent's directory)" : "(daemon cwd)";
 }
 
-/* The child cap is SOFT (spawn.py: a request carrying over_limit crosses
-   it), so a parent standing at its limit is offered the crossing instead of
-   a dead end — and only while the daemon actually reports the cap reached,
-   the same condition the CLI wizard's Over limit row is shown under. */
+/* The child cap is SOFT (spawn.py: it warns and lets the spawn through), so
+   a parent standing at its limit gets the crossing PRE-TICKED rather than a
+   dead end — the row is there to say the cap was reached and to let anyone
+   who wants the strict reading untick it, not to collect permission the
+   daemon no longer asks for. Shown only while the daemon actually reports
+   the cap reached, the same condition the CLI wizard's Over limit row is
+   shown under. */
 function syncSpawnOverRow(f, report) {
   const soft = (report && report.soft_blocked_by) || [];
   const row = $("new-over-row");
   if (!row) return;
+  const wasHidden = row.classList.contains("hidden");
   row.classList.toggle("hidden", !soft.length);
   const text = $("new-over-text");
   if (text) {
     text.textContent = soft.length
-      ? `${soft.join("; ")} — spawn anyway (the daemon counts it against you)`
+      ? `${soft.join("; ")} — untick to be refused at the cap instead`
       : "";
   }
-  // A yes given while the row was up, on a parent that then freed a slot,
-  // must not survive as a silent override.
+  // Pre-answered on the way UP only. Re-ticking it on every sync would undo
+  // an untick the operator had just made, the row being synced by more than
+  // the parent changing under it.
+  if (soft.length && wasHidden && f.over_limit) f.over_limit.checked = true;
+  // An answer given while the row was up, on a parent that then freed a
+  // slot, must not survive as a silent override either way.
   if (!soft.length && f.over_limit) f.over_limit.checked = false;
 }
 
@@ -2897,10 +2905,13 @@ function spawnChildFields(f, body) {
     if (name) body.workspace = name;
     else body.cwd = f.cwd.value;
   }
+  // Both answers travel, and only from a VISIBLE row. `false` is the one
+  // that changes anything now — it asks the daemon for the refusal it no
+  // longer gives by default — so it cannot be dropped as falsy the way the
+  // `put` helper above drops empty strings.
   const over = $("new-over-row");
-  if (over && !over.classList.contains("hidden") &&
-      f.over_limit && f.over_limit.checked) {
-    body.over_limit = true;
+  if (over && !over.classList.contains("hidden") && f.over_limit) {
+    body.over_limit = !!f.over_limit.checked;
   }
   return body;
 }
@@ -11157,6 +11168,13 @@ function spawnPreflightNote(kids) {
     };
   }
   if (kids && typeof kids.children_remaining === "number") {
+    // Zero left is not a refusal any more — the cap warns and lets it
+    // through — so it gets the daemon's own sentence about the crossing
+    // rather than "0 child slot(s) left", which reads as a dead end.
+    const soft = (kids.soft_blocked_by || []).join("; ");
+    if (!kids.children_remaining && soft) {
+      return { ok: true, cls: "wf-warning", msg: soft };
+    }
     return {
       ok: true, cls: "wf-note",
       msg: `${kids.children_remaining} child slot(s) left`,
@@ -11165,16 +11183,14 @@ function spawnPreflightNote(kids) {
   return { ok: true, msg: "", cls: "wf-note" };
 }
 
-/* The blocks that are actually final. spawn.py folds the SOFT child cap into
-   `blocked_by` as well as into `soft_blocked_by` (capabilities(), "Kept IN
-   blocked_by too"), so that a client which reads only the one list refuses by
-   default. This client does not read only the one list: it has a person in
-   front of it and an Over-limit row to offer them, which is the crossing
-   spawn.py's own comment says such a client should offer "instead of a dead
-   end". So it subtracts the soft ones and asks what is LEFT — spawning
-   switched off, the depth ceiling — because only those two are worth stopping
-   a form load for. Reading `can_spawn` alone is how a parent standing at its
-   child cap came up with every picker unfilled. */
+/* The blocks that are actually final: spawning switched off, the depth
+   ceiling. Those two are all `blocked_by` carries now — the SOFT child cap
+   left it when the cap stopped refusing (spawn.py, capabilities()) and lives
+   in `soft_blocked_by` alone, where it is a thing to SAY rather than a thing
+   to stop a form load for. The subtraction stays anyway, because it costs
+   nothing and it is what keeps this form usable against a daemon old enough
+   to still fold the cap into both lists — that fold is exactly how a parent
+   standing at its child cap once came up with every picker unfilled. */
 function spawnHardBlocks(report) {
   const soft = new Set((report && report.soft_blocked_by) || []);
   return ((report && report.blocked_by) || []).filter((b) => !soft.has(b));
@@ -11367,7 +11383,17 @@ function syncSpawnGates(ui) {
   // policy's bare "this session may not spawn", which names no crossing and
   // so opens the gate on its reason alone rather than on an empty box.
   const overCap = !!(report.soft_blocked_by || []).length;
+  // `!== false`, not truthiness: the row is built without a `hidden` at all,
+  // and an undefined one is a row nobody has shown yet -- which is exactly
+  // the way-up this pre-tick is for.
+  const capRowWasHidden = ui.overRow.hidden !== false;
   ui.overRow.hidden = !overCap;
+  // Pre-answered on the way UP only, like the new-session form's row: the
+  // cap warns rather than refusing, so the crossing is the default and the
+  // tick is there to be TAKEN AWAY by anyone who wants the strict reading.
+  // Re-ticking on every sync would undo that untick.
+  if (overCap && capRowWasHidden) ui.over.checked = true;
+  if (!overCap) ui.over.checked = false;
   if (ui.capGate) ui.capGate.hidden = !(overCap || ui.capped);
 
   const pickedProfile = ui.profile.value || "";
@@ -11534,7 +11560,10 @@ function spawnPayload(ui) {
   put("name", (ui.name.value || "").trim());
   // Read through the hidden flag: a yes given while the row was shown, on a
   // parent that then changed to one with slots free, must not travel.
-  if (!ui.overRow.hidden && ui.over.checked) body.over_limit = true;
+  // Both answers travel, from a VISIBLE row only. The `false` is the one
+  // that does something now — it asks for the refusal the cap no longer
+  // gives by default — so it cannot ride the falsy-dropping `put` below.
+  if (!ui.overRow.hidden) body.over_limit = !!ui.over.checked;
   if (!ui.profile.disabled) put("profile", ui.profile.value);
   if (!ui.borrow.disabled) put("borrow", ui.borrow.value);
   if (!ui.nullTok.disabled && ui.nullTok.checked) body.null_token = true;
@@ -12207,17 +12236,26 @@ async function spawnModalLoad(st) {
   // gate's heading, one line above the crossing that revives it. Carrying it
   // in both places would only teach the operator to read neither.
   const capped = !verdict.ok;
+  // The cap has its own home now -- the gate down in the action bar, beside
+  // the button it is about. Saying it up here as well is the three-places
+  // layout that gate was built to end: in both places would only teach the
+  // operator to read neither.
+  const softCap = !!(report.soft_blocked_by || []).length;
   const lines = [];
   if (srcNote) lines.push(srcNote);
-  if (verdict.msg && !capped) lines.push(verdict.msg);
+  if (verdict.msg && !capped && !softCap) lines.push(verdict.msg);
   if (lines.length) {
     st.noteShow(lines.join(" · "), srcNote ? "wf-warning" : "wf-note");
   }
   ui.capped = capped;
+  // Two sentences for two situations, and they are no longer the same one.
+  // A hard block (spawning off, depth) leaves Spawn dead and no box can
+  // change that. The soft cap leaves Spawn alive and says so — the box under
+  // it is how someone asks to be refused, which is the opposite errand from
+  // the one the old "until this box is ticked" sent them on.
   ui.capNote.textContent = capped
-    ? `${verdict.msg || "this session may not spawn"} — Spawn stays dead${
-        (report.soft_blocked_by || []).length ? " until this box is ticked" : ""}`
-    : "";
+    ? `${verdict.msg || "this session may not spawn"} — Spawn stays dead`
+    : (report.soft_blocked_by || []).join("; ");
 
   // The workflow picker's first fill: a seed names the workflow outright (the
   // quick-job default), otherwise the parent's own pair is offered.
@@ -12227,20 +12265,15 @@ async function spawnModalLoad(st) {
   syncSpawnGates(ui);
   st.lastWfAuto = refillSpawnWorkflows(ui, seed.role || re.role || ui.role.value, "").auto;
   syncSpawnGates(ui);
-  // Past the cap the press is armed by the crossing and by nothing else: the
-  // daemon would refuse a payload without `over_limit`, and a button that
-  // provokes that refusal taught the operator nothing the form already knew.
-  // The title carries the same sentence to the one place the gate cannot
-  // reach: a pointer already resting on the dead button.
-  const syncCap = () => {
-    const shut = capped && !ui.over.checked;
-    st.spawnBtn.disabled = shut;
-    st.spawnBtn.title = shut
-      ? "at the child limit — tick 'spawn over the child limit' above to cross it"
-      : "";
-  };
-  ui.over.addEventListener("change", syncCap);
-  syncCap();
+  // The child cap no longer shuts the button, so the tick no longer opens
+  // it: what is left in `capped` is spawning switched off and the depth
+  // ceiling, and neither of those is a thing a checkbox waives. The button
+  // follows the hard verdict alone, and the title says which one it is
+  // instead of pointing at a box that would not help.
+  st.spawnBtn.disabled = capped;
+  st.spawnBtn.title = capped
+    ? (verdict.msg || "this session may not spawn")
+    : "";
   // The default mesh's own members, fetched once so the connect offers are
   // standing before anyone touches the mesh picker.
   refreshSpawnConnect(st).then(() => {
@@ -12593,28 +12626,23 @@ function sessQuickJob(data) {
     // The policy's own verdict, before the button is pressed: a form that
     // lets you type a task and then refuses the press taught you nothing.
     // Only a HARD block takes the button away, though -- the same subtraction
-    // the wizard now makes. The child cap is soft, and the wizard this button
-    // opens is where it is crossed (spawnModalLoad arms Spawn on the
-    // Over-limit tick), so a leader standing at 4/4 that lost the button here
-    // never reached the one control that would have let it through.
+    // the wizard now makes. The child cap does not refuse at all any more; it
+    // warns, and a leader standing at 4/4 that lost the button here never
+    // reached the wizard that would have spawned anyway.
     const hard = spawnHardBlocks(kids);
     if (hard.length) {
       say(hard.join("; ") || "this session may not spawn", "wf-warning");
       return; // spawnBtn stays disabled
     }
     const verdict = spawnPreflightNote(kids);
-    const capped = !verdict.ok;   // soft-only: the child cap, and nothing else
+    const capped = !!(kids && (kids.soft_blocked_by || []).length);
     // A source warning outranks the SLOT COUNT: the slots are the happy news,
     // and overwriting the warning with it would hide the only line that
     // explains why a picker is blank. The cap is not happy news, so it stands
     // beside that note instead of being dropped behind it.
     const lines = [];
     if (srcNote) lines.push(srcNote);
-    if (verdict.msg && (capped || !srcNote)) {
-      lines.push(capped
-        ? `${verdict.msg} — the wizard's 'spawn over the child limit' box crosses it`
-        : verdict.msg);
-    }
+    if (verdict.msg && (capped || !srcNote)) lines.push(verdict.msg);
     if (lines.length) {
       say(lines.join(" · "), (srcNote || capped) ? "wf-warning" : "wf-note");
     }

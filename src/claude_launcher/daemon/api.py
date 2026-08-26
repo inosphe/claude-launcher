@@ -2541,6 +2541,10 @@ async def h_session_spawn(request: web.Request) -> web.Response:
     Everything past the session itself is optional and reported back
     individually, so a partial success is legible: the caller is told the
     child exists even when the mesh join is what failed.
+
+    ``warnings`` is the same idea one step earlier: what the policy allowed
+    and still wants said. A crossed child cap lands there instead of in a 403,
+    so the caller gets the child AND the sentence about it in one answer.
     """
     manager: SessionManager = request.app["manager"]
     parent = request.match_info["name"]
@@ -2549,8 +2553,9 @@ async def h_session_spawn(request: web.Request) -> web.Response:
         manager.get(parent)
     except ManagerError as exc:
         return json_error(404, str(exc))
+    warnings: list = []
     try:
-        session = manager.stage_child(parent, body)
+        session = manager.stage_child(parent, body, warnings=warnings)
     except spawn_mod.SpawnDenied as exc:
         return json_error(403, str(exc))
     except worktree_mod.WorktreeError as exc:
@@ -2569,9 +2574,12 @@ async def h_session_spawn(request: web.Request) -> web.Response:
         return json_error(400, str(exc))
     except (HarnessError, ValueError, TypeError) as exc:
         return json_error(400, f"bad spawn request: {exc}")
-    return web.json_response(
-        {"session": session.info(), "parent": parent, **result}, status=201
-    )
+    body_out = {"session": session.info(), "parent": parent, **result}
+    # Only when there is one: an always-present empty list would read, to a
+    # client eyeballing the response, as a field that never says anything.
+    if warnings:
+        body_out["warnings"] = warnings
+    return web.json_response(body_out, status=201)
 
 
 async def h_session_reparent(request: web.Request) -> web.Response:

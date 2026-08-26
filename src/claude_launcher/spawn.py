@@ -53,11 +53,21 @@ not as a security boundary against a hostile session.
 
 ``max_children`` is a **soft** cap for exactly that reason: it exists to
 interrupt a fan-out loop, not to forbid a fifth child anyone actually wanted.
-A request carrying ``over_limit: true`` crosses it deliberately — the spawn
-wizard's *Over limit* row and the CLI's ``--over-limit`` are the two places
-that say it — and a parent standing at 5/4 afterwards is fine. ``max_depth``
-stays hard: runaway recursion is the mistake the limits are for, and depth is
-the axis it runs away on.
+So it does not refuse — it *warns*. A request that says nothing about the cap
+crosses it and comes back carrying :func:`over_limit_warning`, and a parent
+standing at 5/4 afterwards is fine. The strict reading is still available, but
+it has to be asked for: ``over_limit: false`` (the CLI's ``--within-limit``,
+the wizard's *Over limit* row answered *no*) is refused at the cap, which is
+what a fleet that wants the fan-out loop stopped dead sets.
+
+That default is the way round it is because of who pays for each mistake. A
+cap that refuses costs a real turn every time it is wrong — the agent that
+wanted a fifth child has to read the refusal, decide, and ask again — while a
+cap that warns costs one extra session when it is wrong, which is cheap and
+visible in ``children``. ``max_depth`` stays hard on the same reasoning read
+the other way: runaway recursion is the mistake the limits are for, depth is
+the axis it runs away on, and there the cheap-when-wrong direction is the
+refusal.
 """
 
 from __future__ import annotations
@@ -160,6 +170,39 @@ class SpawnDenied(Exception):
     """
 
 
+def over_limit_warning(max_children: int, children: int) -> str:
+    """The one sentence a crossed child cap says, wherever it is reported.
+
+    Written once because it travels: :func:`check` hands it to the daemon,
+    which puts it in the spawn response, which the CLI prints and an agent's
+    ``spawn`` tool reads back. A warning phrased three different ways would
+    read as three different conditions.
+    """
+    return (
+        f"child limit crossed: {children} direct child(ren) were already "
+        f"RUNNING and the cap is {max_children} (spawn.max_children) — the "
+        "child was created anyway, because the cap is soft. Ended children "
+        "are not in that count and do not hold a slot, so a roster listing "
+        "exited ones will show more than this number. End one you no longer "
+        "need with 'kill' to free its slot; send 'over_limit: false' "
+        "('--within-limit') to be refused at the cap instead"
+    )
+
+
+def over_limit_notice(max_children: int, children: int) -> str:
+    """The same fact stated *before* the spawn, for a form that is offering it.
+
+    :func:`over_limit_warning` is past tense — it reports a crossing that has
+    happened. A picker showing the cap has not crossed anything yet, so it
+    gets its own wording rather than a warning about a child that does not
+    exist.
+    """
+    return (
+        f"child limit reached ({children} running/{max_children}) — spawning "
+        "anyway is allowed and the daemon counts it against you"
+    )
+
+
 @dataclass(frozen=True)
 class SpawnPolicy:
     enabled: bool = True
@@ -251,6 +294,7 @@ def check(
     parent: dict,
     depth: int,
     children: int,
+    warnings: Optional[List[str]] = None,
 ) -> dict:
     """Validate a spawn request and return the child's inherited overrides.
 
@@ -260,6 +304,20 @@ def check(
     so an ended one does not hold its slot. The return value is the subset of a
     :class:`SessionDef` the child should be built from — inherited values,
     with any *permitted* override applied.
+
+    ``children`` is the RUNNING count and nothing else — an ended child does
+    not hold a slot (see ``Manager.live_children``). Worth saying twice
+    because the number leaves here and is read next to rosters that DO list
+    exited sessions, and a reader who folds the two together concludes the
+    cap is counting the dead and goes looking for a bug in the filter. The
+    warning this raises says "running" out loud for that reason.
+
+    ``warnings`` is a list this appends to: a request that is *allowed* but
+    worth saying something about leaves its sentence there. An out-parameter
+    rather than a second return value because the only such case today is the
+    soft child cap, and a caller that does not care about it — every test that
+    only asks "was this permitted" — should not have to unpack a tuple to find
+    out. Passing nothing discards the warnings; it never changes the verdict.
 
     Raises :class:`SpawnDenied` with a message written for the agent that will
     read it: what was refused, and which config key would allow it.
@@ -275,17 +333,28 @@ def check(
             f"{policy.max_depth} (spawn.max_depth) — give the work to an "
             "existing session instead of nesting further"
         )
-    if children >= policy.max_children and not request.get("over_limit"):
-        # A SOFT cap: it interrupts a fan-out loop, it does not forbid a
-        # child somebody wanted on purpose. Saying so takes an explicit
-        # over_limit in the request, which the UI only sends after asking.
-        raise SpawnDenied(
-            f"this session already has {children} direct child(ren) running, "
-            f"the limit is {policy.max_children} (spawn.max_children) — reuse "
-            "one of them, or end one first ('kill'), which frees its slot; "
-            "it is a soft cap, crossed only by a request that says so "
-            "explicitly ('--over-limit', over_limit: true)"
-        )
+    if children >= policy.max_children:
+        # A SOFT cap: it interrupts a fan-out loop, it does not forbid a child
+        # somebody wanted on purpose. So the default is to cross it and SAY
+        # so; only a request that asked for the strict reading outright is
+        # refused. ``.get(key, True)`` and not ``.get(key)``: absent means
+        # "did not say", which takes the default, while a present ``false``
+        # is an answer and has to be honoured — the two are the same falsy
+        # value to a plain ``get`` and mean opposite things here.
+        if request.get("over_limit", True):
+            if warnings is not None:
+                warnings.append(
+                    over_limit_warning(policy.max_children, children)
+                )
+        else:
+            raise SpawnDenied(
+                f"this session already has {children} direct child(ren) "
+                f"running, the limit is {policy.max_children} "
+                "(spawn.max_children) and this request asked to be held to it "
+                "('over_limit: false') — reuse one of them, or end one first "
+                "('kill'), which frees its slot; drop that field and the cap "
+                "warns instead of refusing"
+            )
 
     child = {
         "harness": parent.get("harness") or "",
@@ -538,17 +607,18 @@ def capabilities(
         blocked.append("spawning is disabled (spawn.enabled)")
     if depth >= policy.max_depth:
         blocked.append(f"depth limit reached ({depth}/{policy.max_depth})")
-    # Soft, and reported apart: the child cap can be crossed by a request
-    # that says so (over_limit: true), so a client with a person to ask --
-    # the spawn wizard's Over limit row -- offers the override instead of a
-    # dead end. Kept IN blocked_by too, so a client that only reads that
-    # still refuses by default.
+    # Soft, and reported apart: the child cap does not refuse, it warns, so a
+    # client that reads only ``blocked_by`` must not find it there and put up
+    # a dead end over a spawn the daemon would have allowed. It stays in
+    # ``soft_blocked_by`` because a form with a person in front of it should
+    # still SAY the cap is reached -- offering the crossing, pre-answered
+    # yes, rather than hiding that anything is unusual.
     soft = []
     if not remaining:
-        soft.append(f"child limit reached ({children}/{policy.max_children})")
+        soft.append(over_limit_notice(policy.max_children, children))
     report = {
-        "can_spawn": not (blocked or soft),
-        "blocked_by": blocked + soft,
+        "can_spawn": not blocked,
+        "blocked_by": blocked,
         "soft_blocked_by": soft,
         "depth": depth,
         "max_depth": policy.max_depth,

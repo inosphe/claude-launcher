@@ -559,53 +559,132 @@ def test_depth_limit_stops_runaway_nesting():
     assert "max_depth" in str(exc.value)
 
 
-def test_child_limit_stops_runaway_fanout():
-    policy = _policy(max_children=2)
-    with pytest.raises(spawn.SpawnDenied) as exc:
-        spawn.check(policy, {}, parent=PARENT, depth=0, children=2)
-    assert "max_children" in str(exc.value)
-    # ...and the refusal teaches the way past it: the cap is soft
-    assert "over_limit" in str(exc.value)
+def test_the_child_cap_warns_rather_than_refusing():
+    """A request that says nothing about the cap crosses it.
 
-
-def test_the_child_cap_is_soft_for_a_request_that_says_so():
-    """It exists to interrupt a fan-out loop, not to forbid a fifth child
-    anyone actually wanted — over_limit: true crosses it deliberately, and
-    a parent standing at 3/2 afterwards is fine."""
+    The soft cap exists to interrupt a fan-out loop, not to forbid a fifth
+    child anyone actually wanted, and refusing costs a turn every time it is
+    wrong. So the default is to spawn and SAY so.
+    """
     policy = _policy(max_children=2)
+    warnings: list = []
     child = spawn.check(
-        policy, {"over_limit": True}, parent=PARENT, depth=0, children=2
+        policy, {}, parent=PARENT, depth=0, children=2, warnings=warnings
     )
     assert child["harness"] == "py"  # the spawn went through, inherited
+    assert len(warnings) == 1
+    assert "spawn.max_children" in warnings[0]
 
 
-def test_over_limit_does_not_waive_the_depth_limit():
-    """Depth is the axis recursion runs away on, so it stays hard."""
-    policy = _policy(max_depth=2)
+def test_the_crossing_warning_names_the_axis_its_number_is_on():
+    """'2' next to a roster that lists exited sessions reads as a miscount.
+
+    The count is the RUNNING children — an ended one does not hold a slot —
+    and the warning has to say which, because the number is read beside
+    rosters that do show the exited and a reader who folds the two together
+    goes looking for a bug in a filter that is correct.
+    """
+    warnings: list = []
+    spawn.check(
+        _policy(max_children=2), {},
+        parent=PARENT, depth=0, children=2, warnings=warnings,
+    )
+    assert "RUNNING" in warnings[0]
+    assert "do not hold a slot" in warnings[0]
+
+
+def test_a_crossing_needs_nowhere_to_put_its_warning():
+    """``warnings`` is optional, and omitting it never changes the verdict."""
+    child = spawn.check(_policy(max_children=2), {}, parent=PARENT, depth=0, children=2)
+    assert child["harness"] == "py"
+
+
+def test_the_child_cap_still_refuses_a_request_that_asks_to_be_held_to_it():
+    """The strict reading survives, but it has to be asked for outright.
+
+    ``over_limit: false`` is what a fleet that wants a fan-out loop stopped
+    dead sends — and it is a real answer, not the absence of one, which is
+    why it cannot be read with a plain falsy ``get``.
+    """
+    policy = _policy(max_children=2)
     with pytest.raises(spawn.SpawnDenied) as exc:
         spawn.check(
-            policy, {"over_limit": True}, parent=PARENT, depth=2, children=0
+            policy, {"over_limit": False}, parent=PARENT, depth=0, children=2
         )
-    assert "max_depth" in str(exc.value)
+    assert "max_children" in str(exc.value)
+    assert "over_limit: false" in str(exc.value)
 
 
-def test_capabilities_reports_the_child_cap_as_the_soft_block_it_is():
-    """A subset of blocked_by, so a client that only reads blocked_by still
-    refuses by default — and one with a person to ask can offer the
-    override instead of a dead end."""
+def test_saying_yes_to_the_cap_is_the_same_as_saying_nothing():
+    policy = _policy(max_children=2)
+    warnings: list = []
+    child = spawn.check(
+        policy, {"over_limit": True},
+        parent=PARENT, depth=0, children=2, warnings=warnings,
+    )
+    assert child["harness"] == "py"
+    assert len(warnings) == 1
+
+
+def test_no_warning_while_there_are_slots_left():
+    warnings: list = []
+    spawn.check(
+        _policy(max_children=2), {},
+        parent=PARENT, depth=0, children=1, warnings=warnings,
+    )
+    assert warnings == []
+
+
+def test_the_soft_cap_does_not_waive_the_depth_limit():
+    """Depth is the axis recursion runs away on, so it stays hard — and it
+    refuses whether or not the child cap was in play."""
+    policy = _policy(max_depth=2)
+    for request in ({}, {"over_limit": True}):
+        with pytest.raises(spawn.SpawnDenied) as exc:
+            spawn.check(policy, request, parent=PARENT, depth=2, children=0)
+        assert "max_depth" in str(exc.value)
+
+
+def test_capabilities_keeps_the_child_cap_out_of_the_blocks():
+    """It does not block, so it is not a block.
+
+    A client that reads only ``blocked_by`` must not put up a dead end over a
+    spawn the daemon would have allowed — but the cap still has to be SAID,
+    so it stays in ``soft_blocked_by`` for the forms that show it.
+    """
     report = spawn.capabilities(_policy(max_children=2), depth=0, children=2)
-    assert report["can_spawn"] is False
-    assert report["soft_blocked_by"] == ["child limit reached (2/2)"]
-    assert report["blocked_by"] == ["child limit reached (2/2)"]
+    assert report["can_spawn"] is True
+    assert report["blocked_by"] == []
+    assert report["soft_blocked_by"] == [
+        "child limit reached (2 running/2) — spawning anyway is allowed "
+        "and the daemon counts it against you"
+    ]
+    assert report["children_remaining"] == 0
 
+
+def test_capabilities_still_blocks_on_the_hard_limits():
+    """Depth and the off switch are what ``blocked_by`` is for now."""
+    deep = spawn.capabilities(_policy(max_depth=2), depth=2, children=0)
+    assert deep["can_spawn"] is False
+    assert deep["blocked_by"] == ["depth limit reached (2/2)"]
+    assert deep["soft_blocked_by"] == []
+
+    off = spawn.capabilities(_policy(enabled=False), depth=0, children=0)
+    assert off["can_spawn"] is False
+    assert off["blocked_by"] == ["spawning is disabled (spawn.enabled)"]
+
+    # Both at once: the hard one is the only one that reaches blocked_by,
+    # and the soft one is still reported beside it rather than swallowed.
     hard = spawn.capabilities(
         _policy(max_children=2, max_depth=1), depth=1, children=2
     )
-    assert "depth limit reached (1/1)" in hard["blocked_by"]
-    assert hard["soft_blocked_by"] == ["child limit reached (2/2)"]
+    assert hard["blocked_by"] == ["depth limit reached (1/1)"]
+    assert any("child limit reached" in n for n in hard["soft_blocked_by"])
+    assert hard["can_spawn"] is False
 
     open_report = spawn.capabilities(_policy(), depth=0, children=0)
     assert open_report["soft_blocked_by"] == []
+    assert open_report["can_spawn"] is True
 
 
 def test_spawning_can_be_switched_off_entirely():
@@ -626,9 +705,11 @@ def test_a_malformed_spawn_block_reads_as_the_defaults():
 def test_capabilities_answers_before_a_refusal_is_provoked():
     policy = _policy(max_children=2, allow_cwd=True)
     report = spawn.capabilities(policy, depth=0, children=2)
-    assert report["can_spawn"] is False
+    # Standing AT the cap and still able to spawn: that is the answer the
+    # agent needs before it asks, and the reason it no longer has to.
+    assert report["can_spawn"] is True
     assert report["children_remaining"] == 0
-    assert any("child limit" in b for b in report["blocked_by"])
+    assert any("child limit" in n for n in report["soft_blocked_by"])
     assert "cwd" in report["may_choose"]
 
 
