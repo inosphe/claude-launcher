@@ -149,6 +149,12 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     window_clock.start()
     event_clock = cflow_clock.RunEventClock(manager, mesh_manager)
     event_clock.start()
+    # Published so the dashboard can report what these two are holding. Only
+    # the two that type into a driving session on a timer: those are the ones
+    # a person watching a terminal has no way to see coming, and the ones
+    # whose silence is ambiguous — configured-and-armed and
+    # configured-but-dead look identical from outside.
+    app["cflow_clocks"] = {"reminder": reminder_clock, "ping": ping_clock}
     # Last, and only now: the sessions restore brought back are alive but
     # nothing is driving them. Started after the server is up because a nudge
     # can send an agent straight back to the API it was using.

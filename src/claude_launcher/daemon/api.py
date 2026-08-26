@@ -637,6 +637,138 @@ def _scope_sessions(manager: SessionManager, cwd: str, scope: str) -> list:
     return []
 
 
+# --------------------------------------------------------------------------- #
+# what the typing clocks are about to do
+# --------------------------------------------------------------------------- #
+#: The two clocks that type into a driving session on a timer. Every other
+#: clock in :mod:`.cflow_clock` fires on an event a reader can already see —
+#: a gate entered, a window opening at a stated time. These two fire out of
+#: silence, which is why they are the ones worth publishing a countdown for.
+_CLOCK_KINDS = ("reminder", "ping")
+
+
+def _clock_snapshots(app) -> dict:
+    """Both clocks' timer tables, read once per request.
+
+    Missing whenever the daemon was built without them — the test app, and
+    any embedding that never started the ticks. That absence is reported as
+    ``running: false`` below rather than hidden: "no clock" and "a clock that
+    is not going to fire" are the same fact to somebody reading a countdown,
+    and inventing a number for either is worse than saying so.
+    """
+    clocks = app.get("cflow_clocks") or {}
+    out = {}
+    for kind in _CLOCK_KINDS:
+        clock = clocks.get(kind)
+        if clock is None:
+            out[kind] = {"running": False, "timers": {}}
+            continue
+        try:
+            out[kind] = {"running": bool(clock.running), "timers": clock.timers()}
+        except Exception:  # noqa: BLE001 — a readout must never break the poll
+            # Swallowed without a trace on purpose: this module keeps no
+            # logger, and the failure it can actually take is a table read
+            # while the clock's worker thread rewrites it. Reporting "no
+            # timers" for one poll is the correct degradation — the next
+            # poll, two seconds later, has them.
+            out[kind] = {"running": False, "timers": {}}
+    return out
+
+
+def _cflow_timers(
+    manager: SessionManager, snaps: dict, cfg: Optional[dict],
+    cwd: str, scope: str, payload: dict,
+) -> dict:
+    """The two clocks' standing with one run, as the dashboard states it.
+
+    Three sources, deliberately kept apart. The *policy* (on? how often?)
+    comes from the config read this instant, through the same
+    :func:`cflow_clock.reminder_policy` the clock itself uses — so a reader
+    and the clock cannot disagree about the interval, floor included. The
+    *timer* comes from the clock's in-memory table. The *reason it is quiet*
+    comes from the run's own position and its session's status, because the
+    honest answer to "is the nudge timer working" is usually neither yes nor
+    no: it is armed and correctly saying nothing, and which of the several
+    ways that happens is the whole content of the answer.
+
+    ``due_in`` may be negative. That is not a bug to clamp away: past zero
+    the clock is due and has not delivered — held for a session that stopped,
+    or inside the fifteen seconds until the next poll — and a floor of zero
+    would hide exactly the stretch a reader is trying to see.
+    """
+    cfg = cfg or {}
+    key = (cwd, scope)
+    actionable = cflow_clock._actionable(payload)
+    session = cflow_clock.session_for(manager, cwd, scope)
+    try:
+        busy = session is not None and session.status() != STATUS_IDLE
+    except Exception:  # noqa: BLE001 — raced with an exit
+        busy = False
+
+    def base(kind, enabled, interval):
+        snap = snaps.get(kind) or {}
+        timer = (snap.get("timers") or {}).get(key)
+        view = {
+            "running": bool(snap.get("running")),
+            "enabled": bool(enabled),
+            "interval": interval,
+            "due_in": None,
+            "fired_ago": (timer or {}).get("fired_ago"),
+            "state": "",
+        }
+        if timer is not None and interval > 0:
+            view["due_in"] = interval - timer["armed_ago"]
+        return view, timer
+
+    awaits = payload.get("awaits") or {}
+    enabled, interval = cflow_clock.reminder_policy(payload, cfg)
+    rem, timer = base("reminder", enabled, interval)
+    if not rem["running"]:
+        rem["state"] = "stopped"
+    elif not enabled:
+        rem["state"] = "off"
+    elif not actionable:
+        # A gate, a selection, a responder's answer. The clock stays out of
+        # these on purpose (see cflow_clock._ACTIONABLE); reporting "off"
+        # here would blame the configuration for a silence the protocol owns.
+        rem["state"] = "blocked"
+    elif timer is None:
+        rem["state"] = "arming"
+    elif interval <= 0:
+        # The one configuration where this clock says nothing but news: no
+        # repeat, and an `awaits` probe watching for the thing to move.
+        rem["state"] = "watching"
+    elif rem["due_in"] > 0:
+        rem["state"] = "counting"
+    else:
+        rem["state"] = "held" if not busy else "due"
+    if awaits.get("probe"):
+        rem["awaits"] = awaits.get("describe") or awaits.get("probe")
+        rem["probe_code"] = (timer or {}).get("probe_code")
+
+    enabled, interval = cflow_clock.ping_policy(cfg)
+    ping, timer = base("ping", enabled, interval)
+    if not ping["running"]:
+        ping["state"] = "stopped"
+    elif not enabled:
+        ping["state"] = "off"
+    elif not actionable or session is None:
+        ping["state"] = "blocked"
+    elif timer is None:
+        ping["state"] = "arming"
+    elif timer.get("working"):
+        # Armed but not counting: this clock measures an unbroken stretch of
+        # *stopped*, and somebody is at work. The number is real, it is just
+        # being reset every pass, and a countdown drawn without this reads as
+        # a clock that has frozen.
+        ping["state"] = "waiting"
+    elif ping["due_in"] > 0:
+        ping["state"] = "counting"
+    else:
+        ping["state"] = "due"
+    return {"reminder": rem, "ping": ping}
+
+
 async def h_cflow_runs(request: web.Request) -> web.Response:
     """All monitorable cflow runs, keyed by (directory, scope): the
     machine-local run registry, plus every scope with state in an explicit
@@ -659,6 +791,14 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
             if (explicit, scope) not in keys:
                 keys.append((explicit, scope))
 
+    # Read once for the whole sweep, not per run: the config is one file and
+    # the clocks are two tables, and this handler is on a two-second poll.
+    snaps = _clock_snapshots(request.app)
+    try:
+        cfg = store.daemon_config()
+    except store.StoreError:
+        cfg = None  # unreadable config: the clocks read "off", never a guess
+
     runs = []
     for cwd, scope in keys:
         entry = _cflow_entry(manager, cwd, scope)
@@ -670,6 +810,8 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
             and not entry.get("pending_start")
         ):
             continue
+        if entry.get("status") not in ("idle", "error"):
+            entry["timers"] = _cflow_timers(manager, snaps, cfg, cwd, scope, entry)
         runs.append(entry)
     return web.json_response({"runs": runs})
 
@@ -824,6 +966,12 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
         reminder_defaults = _reminder_defaults()
     except store.StoreError:
         reminder_defaults = None  # broken config must not hide the run page
+
+    def _cfg_or_none():
+        try:
+            return store.daemon_config()
+        except store.StoreError:
+            return None
     reports = [
         {
             "step": e.get("step"),
@@ -851,6 +999,13 @@ async def h_cflow_run_detail(request: web.Request) -> web.Response:
             # so the run page's reminder control can show the effective
             # values without a second fetch (the override rides in `run`)
             "reminder_defaults": reminder_defaults,
+            # ...and what those settings are actually doing right now: armed,
+            # counting, held, or not running at all. The settings alone cannot
+            # say which.
+            "timers": _cflow_timers(
+                manager, _clock_snapshots(request.app), _cfg_or_none(),
+                cwd, scope, payload,
+            ),
         }
     )
 

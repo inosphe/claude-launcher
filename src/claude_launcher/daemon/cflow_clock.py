@@ -159,6 +159,38 @@ def _actionable(payload: dict) -> bool:
 _INSTRUCTIONS_LIMIT = 1200
 
 
+def reminder_policy(payload: dict, cfg: dict) -> Tuple[bool, float]:
+    """Effective ``(enabled, interval)`` for one run: the machine defaults
+    with the run's own override laid over them, floor applied.
+
+    Split out of :meth:`ReminderClock.scan` because the dashboard has to
+    answer the same question — *is this clock going to fire here, and how
+    often* — and a second copy of the rule is a second rule. The floor is
+    part of the answer, not a detail of enforcement: a run overridden to 5s
+    does not get reminded every 5 seconds, and a readout that said so would
+    be wrong in the one direction a reader cannot check.
+    """
+    override = payload.get("reminder") or {}
+    enabled = bool(override.get("enabled", bool(cfg.get("cflow_reminder"))))
+    interval = float(
+        override.get("interval", cfg.get("cflow_reminder_interval") or 0) or 0
+    )
+    if interval > 0:
+        interval = max(interval, cflow_engine.REMINDER_MIN_INTERVAL)
+    return enabled, interval
+
+
+def ping_policy(cfg: dict) -> Tuple[bool, float]:
+    """Effective ``(enabled, interval)`` for the stall ping. Machine-wide —
+    unlike the reminder there is no per-run override — and floored the same
+    way, for the same reason."""
+    enabled = bool(cfg.get("cflow_ping"))
+    interval = float(cfg.get("cflow_ping_interval") or 0)
+    if interval > 0:
+        interval = max(interval, PING_MIN_INTERVAL)
+    return enabled and interval > 0, interval
+
+
 class ReminderClock:
     """Re-types the current step's instructions into runs that stopped moving.
 
@@ -239,8 +271,6 @@ class ReminderClock:
         except store.StoreError as exc:
             log.warning("cflow reminder: config unreadable, skipping: %s", exc)
             return []
-        default_on = bool(cfg.get("cflow_reminder"))
-        default_interval = float(cfg.get("cflow_reminder_interval") or 0)
         due: List[Tuple[str, str, str, str]] = []
         live = set()
         for cwd, scope in cflow_state.known_runs():
@@ -254,9 +284,7 @@ class ReminderClock:
             if not _actionable(payload):
                 self._seen.pop(key, None)
                 continue
-            override = payload.get("reminder") or {}
-            enabled = bool(override.get("enabled", default_on))
-            interval = float(override.get("interval", default_interval) or 0)
+            enabled, interval = reminder_policy(payload, cfg)
             awaits = payload.get("awaits") or {}
             if not enabled or (interval <= 0 and not awaits.get("probe")):
                 # `enabled` is this clock's master switch: off, it says
@@ -267,8 +295,6 @@ class ReminderClock:
                 # that changes.
                 self._seen.pop(key, None)
                 continue
-            if interval > 0:
-                interval = max(interval, cflow_engine.REMINDER_MIN_INTERVAL)
             pos = (
                 payload.get("run"), payload.get("status"),
                 payload.get("step_id"), payload.get("visit"),
@@ -281,7 +307,17 @@ class ReminderClock:
                 # instructions already — and, for the same reason, the first
                 # probe below is a baseline and never a signal: the state a
                 # step arrives in is not news about it.
-                entry = {"pos": pos, "at": now, "probed_at": None, "probe": None}
+                entry = {
+                    "pos": pos, "at": now, "probed_at": None, "probe": None,
+                    # Kept across the arming: "when did this run last hear
+                    # from me" is a fact about the run, not about this
+                    # stretch of it, and it is the one thing a reader has to
+                    # tell a clock that is working from one that is merely
+                    # configured.
+                    "fired_at": (entry or {}).get("fired_at"),
+                    "fired_kind": (entry or {}).get("fired_kind"),
+                    "held_at": (entry or {}).get("held_at"),
+                }
                 self._seen[key] = entry
             if awaits.get("probe"):
                 before, after = entry["probe"], self._measure(cwd, awaits, entry, now)
@@ -365,6 +401,13 @@ class ReminderClock:
             # to remove. So a signal wakes an idle session, as a released
             # window does (:class:`WindowClock`).
             log.debug("cflow reminder held for %r: session is not working", scope)
+            entry = self._seen.get((cwd, scope))
+            if entry is not None:
+                # Stamped, not merely logged: "due, but the session stopped"
+                # is the one state where this clock is configured, armed and
+                # correctly silent — indistinguishable from broken to anyone
+                # reading a countdown, unless the hold itself is reported.
+                entry["held_at"] = time.monotonic()
             return
         try:
             delivered = await session.deliver(block)
@@ -377,7 +420,54 @@ class ReminderClock:
             entry = self._seen.get((cwd, scope))
             if entry is not None:
                 entry["at"] = time.monotonic()
+                entry["fired_at"] = entry["at"]
+                entry["fired_kind"] = kind
+                entry["held_at"] = None
             log.info("cflow %s delivered to %r (%s)", kind, scope, cwd)
+
+    @property
+    def running(self) -> bool:
+        """Whether the tick is actually alive.
+
+        The difference between "reminders are on" and "reminders happen" is
+        this attribute, and nothing else on the machine records it: the
+        config says what was asked for, and a clock whose task died to an
+        unhandled cancel keeps every configured value saying yes.
+        """
+        return self._task is not None and not self._task.done()
+
+    def timers(self, now: Optional[float] = None) -> Dict[Tuple[str, str], dict]:
+        """What this clock is holding for each run, in plain seconds.
+
+        Read-only and cheap on purpose — no config, no state file, no probe.
+        Just the monotonic stamps already in memory, turned into ages the
+        caller can subtract from an interval it looks up itself. The policy
+        is deliberately NOT copied in here: this class re-reads it every
+        pass, and a copy taken at the last scan would be up to a poll stale
+        exactly when somebody has just changed it.
+
+        A key missing from the result means this clock is keeping no timer
+        for that run — because it is not enabled there, or because the
+        position is not the agent's to move. Which of the two is a question
+        for the policy, not for this.
+        """
+        at = time.monotonic() if now is None else now
+
+        def ago(stamp):
+            return None if stamp is None else max(0.0, at - stamp)
+
+        out: Dict[Tuple[str, str], dict] = {}
+        for key, entry in list(self._seen.items()):
+            probe = entry.get("probe") or {}
+            out[key] = {
+                "armed_ago": ago(entry.get("at")),
+                "fired_ago": ago(entry.get("fired_at")),
+                "fired_kind": entry.get("fired_kind"),
+                "held_ago": ago(entry.get("held_at")),
+                "probed_ago": ago(entry.get("probed_at")),
+                "probe_code": probe.get("code"),
+            }
+        return out
 
     def _session_for(self, cwd: str, scope: str):
         return session_for(self.manager, cwd, scope)
@@ -618,15 +708,11 @@ class StallPingClock:
         except store.StoreError as exc:
             log.warning("cflow stall ping: config unreadable, skipping: %s", exc)
             return []
-        if not bool(cfg.get("cflow_ping")):
+        enabled, interval = ping_policy(cfg)
+        if not enabled:
             # Off: keep no timers, so turning it on does not fire a backlog.
             self._seen.clear()
             return []
-        interval = float(cfg.get("cflow_ping_interval") or 0)
-        if interval <= 0:
-            self._seen.clear()
-            return []
-        interval = max(interval, PING_MIN_INTERVAL)
         message = str(cfg.get("cflow_ping_message") or "").strip()
         due: List[Tuple[str, str, str]] = []
         live = set()
@@ -655,11 +741,19 @@ class StallPingClock:
                 payload.get("step_id"), payload.get("visit"),
             )
             entry = self._seen.get(key)
-            if entry is None or entry["pos"] != pos or self._working(session):
+            working = self._working(session)
+            if entry is None or entry["pos"] != pos or working:
                 # Working, or moved, or first sight: arm, never fire. Only an
                 # unbroken stretch of *stopped at the same position* counts.
-                self._seen[key] = {"pos": pos, "at": now}
+                self._seen[key] = {
+                    "pos": pos, "at": now, "working": working,
+                    # Survives the re-arm: a reader asking "has this clock
+                    # ever actually spoken here" is asking about the run, not
+                    # about the stretch the re-arm just ended.
+                    "fired_at": (entry or {}).get("fired_at"),
+                }
                 continue
+            entry["working"] = working
             if now - entry["at"] >= interval:
                 due.append((cwd, scope, ping_block(payload, message, now - entry["at"])))
         for key in list(self._seen):
@@ -696,7 +790,34 @@ class StallPingClock:
             entry = self._seen.get((cwd, scope))
             if entry is not None:
                 entry["at"] = time.monotonic()
+                entry["fired_at"] = entry["at"]
             log.info("cflow stall ping delivered to %r (%s)", scope, cwd)
+
+    @property
+    def running(self) -> bool:
+        """Whether the tick is alive — see :attr:`ReminderClock.running`."""
+        return self._task is not None and not self._task.done()
+
+    def timers(self, now: Optional[float] = None) -> Dict[Tuple[str, str], dict]:
+        """What this clock is holding for each run, in plain seconds.
+
+        Same contract as :meth:`ReminderClock.timers`, plus ``working``:
+        this clock re-arms every pass while somebody is at work in the
+        session, so a countdown drawn from ``armed_ago`` alone would look
+        stuck at the top and read as broken. It is not counting down because
+        there is nothing to count — that is the answer, and it has to travel
+        with the number.
+        """
+        at = time.monotonic() if now is None else now
+        out: Dict[Tuple[str, str], dict] = {}
+        for key, entry in list(self._seen.items()):
+            fired = entry.get("fired_at")
+            out[key] = {
+                "armed_ago": max(0.0, at - entry["at"]),
+                "fired_ago": None if fired is None else max(0.0, at - fired),
+                "working": bool(entry.get("working")),
+            }
+        return out
 
 
 def ping_block(payload: dict, message: str, stalled_for: float) -> str:
