@@ -996,12 +996,10 @@ EVENT_POLL = 20.0
 _RUNNING = ("step", "select")
 
 #: Kill-on-end's timing (the same wind-down shape the beads hook uses — no
-#: immediate kill). After the durable ending record lands, the clock waits for
-#: the driver's CURRENT turn to end before terminating it: ``_END_REACT`` is
-#: how long an idle-at-done session is given to prove it is not about to pick
-#: the record up, and ``_END_MAX`` the cap those two waits share. Checked
-#: against ``cflow_kill_on_end_grace``, read live like the rest.
-_END_REACT = 20.0
+#: immediate kill). The done run's own final turn may still be running (the
+#: agent advanced to end and is crossing the finish line), so the clock waits
+#: out a busy driver before terminating, capped at ``cflow_kill_on_end_grace``
+#: (below the beads default, this is the only clock reading it, read live).
 _END_MAX = 120.0
 
 
@@ -1304,21 +1302,19 @@ class RunEventClock:
         cfg = store.daemon_config()
         grace = float(cfg.get("cflow_kill_on_end_grace", _END_MAX) or 0)
         if grace > 0:
+            # The done run's own final turn may still be running — the agent
+            # advanced to end and is crossing the finish line, and killing
+            # mid-turn would cut whatever it is flushing. Wait for idle,
+            # capped by grace. An already-idle driver has no turn to wait out
+            # (nothing was delivered into its PTY; there is nothing to pick
+            # up), so there the wait is zero.
             started = time.monotonic()
-            seen_busy = False
-            try:
-                while not session.exited and time.monotonic() - started < grace:
-                    status = session.status()
-                    if status == STATUS_BUSY:
-                        seen_busy = True
-                    elif status == STATUS_IDLE:
-                        if seen_busy:
-                            break
-                        if time.monotonic() - started > _END_REACT:
-                            break
-                    await asyncio.sleep(0.5)
-            except Exception:
-                pass
+            while (
+                not session.exited
+                and session.status() == STATUS_BUSY
+                and time.monotonic() - started < grace
+            ):
+                await asyncio.sleep(0.5)
         if session.exited:
             return
         if session.sdef.keep_alive:
