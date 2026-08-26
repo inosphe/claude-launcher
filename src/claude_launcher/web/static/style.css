@@ -1232,17 +1232,47 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .sess-beads > .wf-note, .sess-beads > .wf-warning { margin: 0 0 8px; line-height: 1.5; }
 .sess-beads .wf-btn.option { margin-top: 8px; }
-.sess-reports { margin: 0 0 12px; }
-.sess-reports h3 {
-  font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 8px;
+/* A round report, in the rail and in an issue's pane — the same block, and
+   it must stay the same block: the two screens share one function, so one of
+   them getting better on its own is the bug this replaced.
+
+   A card rather than a line of links. This sits above a stack of comment
+   blocks tens of lines long, and as 13px blue text it went missing in them;
+   the weight lives here, in the border and the ground, so the heading can sit
+   at the same level as the section beside it instead of shouting over it.
+   Drawn on the block itself — a wrapper would change what the pane's first
+   child is called, and an order check reads exactly that. */
+.sess-reports {
+  margin: 14px 0 16px; padding: 10px 12px 6px;
+  background: #171c22; border: 1px solid #2a2e36;
+  border-left: 3px solid #58a6ff; border-radius: 6px;
+}
+.sess-reports-mark { color: #58a6ff; }
+.sess-reports-count {
+  padding: 0 7px; border-radius: 9px; background: #172947; color: #79c0ff;
+  font-size: 11px; text-transform: none;
+}
+.sess-reports-what {
+  color: #8b949e; font-size: 11.5px; line-height: 1.5; margin: 0 0 8px;
 }
 .sess-report {
   display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
-  padding: 4px 0; border-bottom: 1px solid #23262d;
+  padding: 6px 8px; margin: 0 -4px; border-radius: 5px; text-decoration: none;
 }
-.sess-report:last-child { border-bottom: none; }
-.sess-report-link { color: #6cb6ff; text-decoration: none; font-size: 13px; }
-.sess-report-link:hover { text-decoration: underline; }
+.sess-report:hover { background: #1b2430; }
+.sess-report-name {
+  color: #6cb6ff; font-size: 13px; font-family: ui-monospace, monospace;
+}
+.sess-report:hover .sess-report-name { text-decoration: underline; }
+.sess-report-bits {
+  color: #7d8590; font-size: 11px; margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
+/* The rail can be dragged down to 220px, and at that width the card's gutter
+   costs 18% of the line. Same card, tighter gutter — a density, not a second
+   design. */
+.sess-beads .sess-reports { padding: 8px 9px 4px; }
+.sess-beads .sess-report { padding: 5px; margin: 0 -3px; }
 .sess-beads-create { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 .sess-beads-create input {
   flex: 1 1 200px; min-width: 0; padding: 6px 8px; background: #0d1117;
@@ -1293,7 +1323,14 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .beads-detail-head h3 { font-family: ui-monospace, monospace; font-size: 12px; color: #58a6ff; flex: 1; }
 .beads-detail-title { font-size: 16px; margin: 6px 0 8px; }
 .beads-detail-meta { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; flex-wrap: wrap; }
-.beads-detail h4 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin: 14px 0 6px; }
+/* One rule for a section heading in this pane. Reports used to bring its own
+   (an h3, from when this block was only ever in the rail), so two sections at
+   the same level were drawn at two different levels. */
+.beads-detail h4, .sess-reports-head {
+  font-size: 12px; text-transform: uppercase; color: #7d8590;
+  margin: 14px 0 6px; display: flex; align-items: baseline; gap: 8px;
+}
+.sess-reports .sess-reports-head { margin: 0 0 6px; }
 .beads-desc {
   white-space: pre-wrap; overflow-wrap: anywhere; font-family: inherit;
   font-size: 13px; line-height: 1.5; color: #c6cdd5; margin: 0;

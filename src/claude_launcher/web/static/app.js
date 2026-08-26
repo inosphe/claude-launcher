@@ -7411,11 +7411,22 @@ function sessBeads(data) {
   return box;
 }
 
-/* The HTML pages a session left behind, newest first. The daemon indexes them
+/* The HTML pages a round left behind, newest first. The daemon indexes them
    by reading its reports directory (the filenames carry the time and the
    issue), and serves each one sandboxed, so these are ordinary links — the
    dashboard's cookie authenticates them and a new tab is the right place for
-   a page that was written to be read on its own. */
+   a page that was written to be read on its own.
+
+   A card, and that is the whole of what was wrong here. This block sits in a
+   pane that goes on to stack tens of pre-formatted comment blocks under it,
+   and as one line of 13px blue text it disappeared into them: the most
+   valuable thing in the pane was the weakest thing drawn in it. The weight is
+   carried by the card, which is what lets the heading drop to an h4 and agree
+   with the section beside it instead of competing with it.
+
+   The card is drawn on this element itself, never on a wrapper around it —
+   the pane's order is checked elsewhere by reading its children's first class
+   (beads_check), so an extra div here would silently break that. */
 function sessReports(reports, opts = {}) {
   // Same rows in both places; only the label differs. On a session's page the
   // reports all share a session, so the issue is what tells them apart — on an
@@ -7423,20 +7434,44 @@ function sessReports(reports, opts = {}) {
   // whichever half is not already the heading of the page you are on.
   const bySession = opts.by === "session";
   const box = el("div", "sess-reports");
-  box.appendChild(el("h3", null, `Reports (${reports.length})`));
-  for (const r of reports) {
-    const row = el("div", "sess-report");
-    const a = el("a", "sess-report-link",
-      (bySession ? r.session : r.issue) || "round report");
-    a.href = r.url;
-    a.target = "_blank";
-    a.rel = "noopener";
-    row.appendChild(a);
-    row.appendChild(el("span", "beads-bits",
-      `${String(r.at || "").replace("T", " ").replace("Z", "")} · ${r.size} B`));
-    box.appendChild(row);
-  }
+  // An h4, deliberately: this was an h3 while Comments beside it was an h4,
+  // so two sections at the same level of the same pane were drawn at two
+  // different levels. They share one rule now (.beads-detail h4).
+  const head = el("h4", "sess-reports-head");
+  head.appendChild(el("span", "sess-reports-mark", "▤"));
+  head.appendChild(el("span", "sess-reports-name", "Round reports"));
+  head.appendChild(el("span", "sess-reports-count", String(reports.length)));
+  box.appendChild(head);
+  // What a row IS, said once for the block instead of not at all. Neither
+  // half of a row ("s121", "19 KB") says it, and a reader who has not met one
+  // of these pages cannot tell this link from any other link on the page.
+  box.appendChild(el("p", "sess-reports-what", bySession
+    ? "The write-up each session left when its round on this issue ended — " +
+      "one HTML page, opening in its own tab."
+    : "The write-up this session left at the end of each round — one HTML " +
+      "page, opening in its own tab."));
+  for (const r of reports) box.appendChild(sessReportRow(r, bySession));
   return box;
+}
+
+/* One round. The whole row is the link, because the report is the only thing
+   in this block worth clicking — the target used to be the four characters of
+   a session name, which is a hard thing to hit and an easy thing to miss. */
+function sessReportRow(r, bySession) {
+  const row = el("a", "sess-report sess-report-link");
+  row.href = r.url;
+  row.target = "_blank";
+  row.rel = "noopener";
+  row.title = bySession
+    ? `the round ${r.session || "a session"} wrote up for this issue`
+    : `this session's write-up of the round it spent on ${r.issue || "no issue"}`;
+  row.appendChild(el("span", "sess-report-name",
+    (bySession ? r.session : r.issue) || "round report"));
+  // Never the raw byte count: 19591 is what the filesystem knows, and 19 KB
+  // is what tells a reader whether this is a write-up or a stub.
+  row.appendChild(el("span", "sess-report-bits",
+    `${reportWhen(r.at)} · ${fmtReportSize(r.size)}`));
+  return row;
 }
 
 /* An issue for a session that has none — the one write this panel makes.

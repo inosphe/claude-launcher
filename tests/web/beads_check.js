@@ -97,8 +97,10 @@ new Function(
   + slice("beadsFilterIssues") + slice("beadsSortIssues")
   + slice("beadsStatusBadge") + slice("beadsIssueRow")
   + slice("sessBeads") + slice("sessBeadsCreate")
-  + slice("sessReports") + slice("beadsHierarchy")
-  + slice("beadsRelationBlock") + slice("beadsDetailPane")
+  + slice("sessReports") + slice("sessReportRow")
+  + slice("fmtReportSize") + slice("reportWhen")
+  + slice("beadsHierarchy") + slice("beadsRelationBlock")
+  + slice("beadsDetailPane")
   + `
 Object.assign(exports, {
   filter: beadsFilterIssues, sort: beadsSortIssues, row: beadsIssueRow,
@@ -264,16 +266,56 @@ let pane = ctx.pane();
 let links = pane.find("sess-report-link");
 check("the pane lists every round written for the issue", links.length, 2);
 check("labelled by the session, not by the issue the page already names",
-      links.map((a) => a.text), ["s121", "s99"]);
+      links.map((a) => a.find("sess-report-name")[0].text), ["s121", "s99"]);
 check("each link opens the served page in its own tab",
       [links[0].href, links[0].target, links[0].rel],
       [ROWS[0].url, "_blank", "noopener"]);
-check("the heading counts", pane.find("sess-reports")[0].kids[0].text, "Reports (2)");
+
+/* The row IS the link. It used to be a div holding a four-character anchor,
+   which is a small thing to hit and an easy one to miss in a pane that goes
+   on to stack comment blocks under it. */
+check("the whole row is the anchor, not a word inside it",
+      [links[0].tag, links[0].classes.has("sess-report")], ["a", true]);
+check("and it says what it is, for a reader who has not met one of these",
+      links[0].title, "the round s121 wrote up for this issue");
+
+/* The heading. An h4 now, matching Comments beside it -- the two are sections
+   of one pane and used to be drawn at two different levels (h3 vs h4). The
+   weight this block needs is carried by the card, not by the heading. */
+const head = pane.find("sess-reports-head")[0];
+check("the heading sits at the level of the section beside it", head.tag, "h4");
+check("and still counts what is in the block",
+      [head.find("sess-reports-name")[0].text, head.find("sess-reports-count")[0].text],
+      ["Round reports", "2"]);
+check("Comments is drawn at that same level",
+      pane.all().filter((n) => n.tag === "h4" && n.text.startsWith("Comments")).length, 1);
+
+/* Neither half of a row says what a row is, so the block says it once. */
+const what = pane.find("sess-reports-what")[0].text;
+check("the block says what these pages are, and that they open elsewhere",
+      [what.includes("write-up"), what.includes("own tab")], [true, true]);
+
+/* The size a person reads, not the one the filesystem knows. */
+check("the size is said in KB, never as raw bytes",
+      [links[0].find("sess-report-bits")[0].text.includes("19 KB"),
+       links[0].find("sess-report-bits")[0].text.includes("19591")],
+      [true, false]);
+check("and the stamp says which zone it is in",
+      links[0].find("sess-report-bits")[0].text.startsWith("2026-08-26 05:13:22 UTC"),
+      true);
+
+/* This block is the pane's own child and its first class is its name: an
+   order check above reads exactly that to place it against the description
+   and the family block. Wrapping it in a card div would break that silently,
+   so it is pinned here, where the wrapping would be done. */
+const mine = pane.kids.filter((k) => [...k.classes][0] === "sess-reports");
+check("the block stays a direct child of the pane, named by its first class",
+      mine.length, 1);
 
 /* A second session's report for the same issue is the case the by-session
    index could not answer at all -- both must be reachable from here. */
 check("rounds from different sessions both survive to the pane",
-      links.map((a) => a.text).sort(), ["s121", "s99"]);
+      links.map((a) => a.find("sess-report-name")[0].text).sort(), ["s121", "s99"]);
 
 ctx.setDetail({ issue: { id: "claunch-j31", title: "the round", comments: [] },
                 reports: [] });
@@ -285,11 +327,22 @@ check("an older payload with no reports field does not break the pane",
       ctx.pane().find("sess-reports").length, 0);
 
 /* The rail keeps its own label: there the session is the heading, so the
-   issue is what tells two rounds apart. */
+   issue is what tells two rounds apart. Everything else about the block is
+   the same object -- one function draws both, and a change that improved only
+   one screen is the thing this check exists to catch. */
 const railBox = ctx.reports(ROWS);
 check("the rail labels the same rows by issue",
-      railBox.find("sess-report-link").map((a) => a.text),
+      railBox.find("sess-report-name").map((a) => a.text),
       ["claunch-j31", "claunch-j31"]);
+check("the rail gets the same card, heading and all",
+      [railBox.classes.has("sess-reports"),
+       railBox.find("sess-reports-head")[0].tag,
+       railBox.find("sess-reports-count")[0].text],
+      [true, "h4", "2"]);
+check("the rail gets the same readable size",
+      railBox.find("sess-report-bits")[0].text.includes("19 KB"), true);
+check("and its sentence is the one for a page that already names the session",
+      railBox.find("sess-reports-what")[0].text.includes("this session left"), true);
 
 if (failures) process.exit(1);
 console.log("beads_check ok");
