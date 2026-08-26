@@ -300,3 +300,68 @@ def test_the_api_edits_defaults_and_per_run_overrides(proj):
             await client.close()
 
     asyncio.run(scenario())
+
+
+def test_the_api_takes_enabled_alone_and_keeps_the_runs_interval(proj):
+    """`enabled` with no interval: the shape the terminal header's chip sends.
+
+    It is its own case because the chip has nothing to put in `interval` and
+    must not invent one. Sending the effective value back would look harmless
+    and would quietly convert a run that was FOLLOWING the machine default
+    into one that has pinned today's value — the next change to the default
+    would then skip that run, for a reason nobody could see. So the chip
+    sends the one field it is actually changing, and this pins the two
+    properties it relies on: the door accepts that shape, and the merge keeps
+    the interval the run already had.
+    """
+    mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+
+    async def scenario():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        mm = MeshManager(mgr)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            # A run that has tuned its own interval, as the run page allows.
+            resp = await client.post(
+                "/api/cflow/reminder", headers=BEARER,
+                json={"cwd": cwd, "scope": "w1", "interval": 90},
+            )
+            assert (await resp.json())["reminder"] == {"interval": 90.0}
+
+            # Pause, the chip's way: one field, no interval.
+            resp = await client.post(
+                "/api/cflow/reminder", headers=BEARER,
+                json={"cwd": cwd, "scope": "w1", "enabled": False},
+            )
+            body = await resp.json()
+            assert resp.status == 200, body
+            assert body["reminder"] == {"interval": 90.0, "enabled": False}
+
+            # And the stored override reads as "off, still every 90s" through
+            # the very function the clock and the dashboard both consult —
+            # reminder_policy takes the run's `reminder` and nothing else, so
+            # feeding it what was just persisted is what the clock will do on
+            # its next pass. A pause that silently reset the interval would
+            # pass every assertion above and fail here.
+            enabled, interval = cflow_clock.reminder_policy(
+                {"reminder": body["reminder"]}, store.daemon_config()
+            )
+            assert (enabled, interval) == (False, 90.0)
+
+            # Resume puts it back without having had to remember the 90.
+            resp = await client.post(
+                "/api/cflow/reminder", headers=BEARER,
+                json={"cwd": cwd, "scope": "w1", "enabled": True},
+            )
+            assert (await resp.json())["reminder"] == {
+                "interval": 90.0, "enabled": True,
+            }
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())

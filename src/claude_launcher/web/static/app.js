@@ -900,15 +900,58 @@ function termTimerRun() {
 /* The last reading, stamped with the session it was taken FOR. A terminal
    switch repaints long before the 2s poll comes round, and the previous
    session's countdown left on the new session's header would be the one
-   mistake this chip exists to avoid. */
+   mistake this chip exists to avoid.
+
+   `remind` rides along beside the pick because the chip is a SWITCH as well
+   as a readout, and the two do not always speak for the same clock: the line
+   reports whichever clock is loudest (the strip's ranking, unchanged), while
+   the switch is always this run's step reminder — the only one of the two a
+   person can turn off here at all (the stall ping is machine-wide, see
+   cflow_clock.ping_policy). So the reminder's own standing has to be kept,
+   not re-derived from a pick that may be about the ping. */
 let termTimerRead = null;
 let termTimerTicker = null;
+let termTimerBusy = false;   // one flip at a time; a double-click is one flip
 
 function renderTermTimer() {
+  const run = termTimerRun();
   termTimerRead = {
-    name: currentName, pick: railTimerPick(termTimerRun()), at: Date.now(),
+    name: currentName, pick: railTimerPick(run), at: Date.now(),
+    remind: (run && run.timers && run.timers.reminder) || null,
   };
   paintTermTimer();
+}
+
+/* What the chip's leading glyph means, and it is not what the strip's means.
+
+   The strip's glyph states the clock's condition, and it has to: a strip with
+   no subject can offer nothing to press. This chip has a subject — one
+   session, one run — so the same few pixels are worth more as the control
+   than as a second copy of a state the line spells out in words beside it and
+   the colour carries anyway.
+
+   Which is also the bug it fixes. The strip's vocabulary hangs "⏸" on held,
+   waiting and blocked — every state EXCEPT the one a person actually caused —
+   and "○" on `off`, the switched-off one. On a strip that is only slightly
+   odd; on a button it is a lie, and the lie a reader acts on: a pause icon on
+   something pressable promises a pause, and pressing it used to navigate away
+   to the run page instead.
+
+   So: filled pause = the reminder is on, press to stop it; play = it is off,
+   press to start it again. The condition of the clock stays in the words. */
+const TERM_TIMER_HOLD_GLYPH = { on: "⏸", off: "▶" };
+
+/* Whether the header's chip can offer the switch at all: a run to address
+   (the pick carries its cwd and scope) and a daemon that published the
+   reminder's standing. An older daemon that publishes timers without it
+   still gets the strip's readout and the strip's click — a chip that
+   silently did nothing would be worse than one that navigates. */
+function termTimerHold() {
+  const read = termTimerRead;
+  if (!read || !read.pick || !read.remind) return null;
+  if (!read.pick.cwd) return null;
+  return { on: !!read.remind.enabled, cwd: read.pick.cwd,
+           scope: read.pick.scope || "default" };
 }
 
 function paintTermTimer() {
@@ -921,24 +964,81 @@ function paintTermTimer() {
     box.className = "term-btn timer-chip hidden";
     box.textContent = "";
     box.removeAttribute("title");
+    box.disabled = false;
     return;
   }
+  const hold = termTimerHold();
   box.className = `term-btn timer-chip ${line.state}`;
-  box.title = line.title;
+  if (hold) box.classList.toggle("timer-paused", !hold.on);
+  box.title = termTimerTitle(read.pick, line, hold);
   box.textContent = "";
-  box.append(el("span", "tt-glyph", line.glyph), el("span", "tt-text", line.text));
-  // The run page, where the interval is actually editable — the strip's
-  // click, on the strip's own reading. Wired once: textContent above wipes
-  // the children, not the box.
+  box.append(
+    el("span", "tt-glyph",
+       hold ? TERM_TIMER_HOLD_GLYPH[hold.on ? "on" : "off"] : line.glyph),
+    el("span", "tt-text", line.text)
+  );
+  box.disabled = termTimerBusy;
+  // Wired once: textContent above wipes the children, not the box, so a
+  // listener added per repaint would stack.
   if (!box.dataset.wired) {
     box.dataset.wired = "1";
-    box.addEventListener("click", () => {
-      const p = termTimerRead && termTimerRead.pick;
-      if (!p) return;
-      location.hash =
-        "#/wf/" + encodeURIComponent(`${p.scope || "default"}|${p.cwd}`);
-    });
+    box.addEventListener("click", termTimerClick);
   }
+}
+
+/* The strip's hover text plus the two things a control owes a reader that a
+   readout does not: what pressing it does, and — since pressing it no longer
+   goes there — where the run page still is. */
+function termTimerTitle(pick, line, hold) {
+  const lines = [line.title];
+  if (hold) {
+    lines.push(
+      "Click to " + (hold.on
+        ? "PAUSE this run's step reminder: the daemon stops re-typing the "
+        + "step into this session until you say."
+        : "RESUME this run's step reminder: the daemon may re-type the step "
+        + "into this session again."),
+      // Named by the route that survives: the badge is on the session's own
+      // row and goes to that session's run, where the strip above the nav is
+      // one element on a page other people are rearranging.
+      "Set for this run only; the machine defaults stay untouched. The "
+      + "interval lives on the run page — the run's badge in the rail "
+      + "opens it."
+    );
+  } else {
+    lines.push("Click to open the run page, where the interval is editable.");
+  }
+  return lines.join("\n");
+}
+
+async function termTimerClick() {
+  const hold = termTimerHold();
+  if (!hold) {
+    // No switch to offer (an older daemon): the strip's destination, on this
+    // chip's own reading — what this chip did before it had a switch.
+    const p = termTimerRead && termTimerRead.pick;
+    if (!p) return;
+    location.hash =
+      "#/wf/" + encodeURIComponent(`${p.scope || "default"}|${p.cwd}`);
+    return;
+  }
+  if (termTimerBusy) return;
+  termTimerBusy = true;
+  paintTermTimer();
+  // `enabled` alone: the override merges, so a run that had an interval set
+  // keeps it, and nothing here has to know the floor (cflow_engine.set_reminder).
+  await cflowAction("/api/cflow/reminder", {
+    cwd: hold.cwd, scope: hold.scope, enabled: !hold.on,
+  });
+  termTimerBusy = false;
+  // cflowAction re-polls, but the poll is up to 2s away and a switch that
+  // takes two seconds to look flipped reads as a switch that did nothing.
+  if (termTimerRead && termTimerRead.remind) {
+    termTimerRead.remind = Object.assign(
+      {}, termTimerRead.remind, { enabled: !hold.on }
+    );
+  }
+  paintTermTimer();
 }
 
 /* ------------------------------------------------------------------ */
