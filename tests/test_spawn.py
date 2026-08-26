@@ -615,6 +615,21 @@ def test_the_child_cap_still_refuses_a_request_that_asks_to_be_held_to_it():
     assert "over_limit: false" in str(exc.value)
 
 
+def test_a_null_answer_reads_as_not_having_said():
+    """What a client sends for a field nobody filled in.
+
+    Refusing on it would turn an empty form into a no — and the no is the
+    one answer here that changes what the daemon does.
+    """
+    warnings: list = []
+    child = spawn.check(
+        _policy(max_children=2), {"over_limit": None},
+        parent=PARENT, depth=0, children=2, warnings=warnings,
+    )
+    assert child["harness"] == "py"
+    assert len(warnings) == 1
+
+
 def test_saying_yes_to_the_cap_is_the_same_as_saying_nothing():
     policy = _policy(max_children=2)
     warnings: list = []

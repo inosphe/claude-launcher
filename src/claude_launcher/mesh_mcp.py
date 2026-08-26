@@ -121,7 +121,10 @@ TOOLS = [
             "'connect' to let it reach other members. Check your budget with "
             "'children' first (it also lists the workspaces you may send a "
             "child to, if any); limits come from the 'spawn' block in "
-            "~/.claunch.yaml."
+            "~/.claunch.yaml. The child cap is SOFT: at the limit the spawn "
+            "still goes through and the answer carries a 'warnings' entry "
+            "saying so, so a full parent is a thing to notice, not a wall to "
+            "work around. The depth limit is hard and does refuse."
         ),
         "inputSchema": {
             "type": "object",
@@ -288,7 +291,11 @@ TOOLS = [
             "registered workspaces you may send a child to, and "
             "'child_cflow' — the workflow your next child starts on if you "
             "spawn without naming one ('' = none). Call this before spawning "
-            "rather than provoking a refusal."
+            "rather than provoking a refusal. 'blocked_by' is what actually "
+            "refuses; 'soft_blocked_by' is the child cap, which warns and "
+            "lets the spawn through. Its count is the RUNNING children — an "
+            "ended one does not hold a slot, so it reads lower than the "
+            "child list, which keeps the exited."
         ),
         "inputSchema": {"type": "object", "properties": {}, "required": []},
     },

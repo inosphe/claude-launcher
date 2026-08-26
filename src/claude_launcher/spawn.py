@@ -305,12 +305,11 @@ def check(
     :class:`SessionDef` the child should be built from — inherited values,
     with any *permitted* override applied.
 
-    ``children`` is the RUNNING count and nothing else — an ended child does
-    not hold a slot (see ``Manager.live_children``). Worth saying twice
-    because the number leaves here and is read next to rosters that DO list
-    exited sessions, and a reader who folds the two together concludes the
-    cap is counting the dead and goes looking for a bug in the filter. The
-    warning this raises says "running" out loud for that reason.
+    That running count leaves here inside a warning, where it is read next to
+    rosters that DO list exited sessions — and a reader who folds the two
+    together concludes the cap is counting the dead and goes hunting a bug in
+    a filter that is correct. Which is why :func:`over_limit_warning` says
+    "running" out loud rather than printing a bare ``N/M``.
 
     ``warnings`` is a list this appends to: a request that is *allowed* but
     worth saying something about leaves its sentence there. An out-parameter
@@ -337,11 +336,15 @@ def check(
         # A SOFT cap: it interrupts a fan-out loop, it does not forbid a child
         # somebody wanted on purpose. So the default is to cross it and SAY
         # so; only a request that asked for the strict reading outright is
-        # refused. ``.get(key, True)`` and not ``.get(key)``: absent means
-        # "did not say", which takes the default, while a present ``false``
-        # is an answer and has to be honoured — the two are the same falsy
-        # value to a plain ``get`` and mean opposite things here.
-        if request.get("over_limit", True):
+        # refused.
+        #
+        # Three-valued on purpose, and a plain truthiness test would collapse
+        # it: "did not say" and "said no" are the same falsy value and mean
+        # opposite things here. A JSON ``null`` counts as not saying — it is
+        # what a client sends for a field nobody filled in, and reading it as
+        # a no would refuse a spawn on the strength of an empty form.
+        answer = request.get("over_limit")
+        if answer is None or answer:
             if warnings is not None:
                 warnings.append(
                     over_limit_warning(policy.max_children, children)
