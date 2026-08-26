@@ -68,7 +68,17 @@ def _graft_fields() -> tuple:
 #: ``reflect`` asks whether the live daemon was actually restarted onto that
 #: merge. Both exist because their step used to be prose alone -- a round
 #: could be filed as swept, or as deployed, with nothing having happened.
-ARMED = {"improv-worker": ("review",), "improv-leader": ("sweep", "reflect")}
+#:
+#: The worker arms two. ``review`` runs the tests its own change can affect;
+#: ``wrapup`` asks whether the round left its HTML report behind. The second
+#: is armed for the same reason the leader's two are -- the step was prose
+#: alone, and it sits in the last thing a session does before killing itself,
+#: which is the line a busy round drops first: skipping it costs nothing,
+#: because the turn ends either way.
+ARMED = {
+    "improv-worker": ("review", "wrapup"),
+    "improv-leader": ("sweep", "reflect"),
+}
 
 # Every gate runs against a venv that is already there. A worker's worktree
 # builds its venv once during the work ('uv sync --extra test'); after that,
@@ -83,6 +93,15 @@ NO_SYNC = "uv run --no-sync python"
 #: (a sweep receipt, a daemon's boot time).
 GATES = {
     ("improv-worker", "review"): "tools/changed_tests.py",
+    # Not a script under tools/, and the odd one out for a reason worth
+    # keeping: the check ships inside claunch itself, so the gate calls the
+    # module rather than the `claunch` on PATH. That PATH entry is whichever
+    # copy happens to be installed -- measured, it answered
+    # "invalid choice: 'report'" and exited 2, which would have failed the
+    # gate in every session until the branch landed and was reinstalled.
+    # Calling it through `uv run` runs the tree being checked, which is the
+    # same reason the other three name a path into this checkout.
+    ("improv-worker", "wrapup"): "claude_launcher.cli report check",
     ("improv-leader", "sweep"): "tools/sweep.py",
     ("improv-leader", "reflect"): "tools/deploy_check.py",
 }

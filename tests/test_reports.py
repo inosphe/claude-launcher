@@ -427,30 +427,51 @@ def test_the_report_routes_need_authentication(home):
 # --------------------------------------------------------------------------- #
 # the workflow that has to demand one
 # --------------------------------------------------------------------------- #
-WORKFLOWS = [
-    Path("src/claude_launcher/workflows/improv-worker.yaml"),
-    Path(".claunch/workflows/improv-worker.yaml"),
-]
+BUNDLED = Path("src/claude_launcher/workflows/improv-worker.yaml")
+OVERRIDE = Path(".claunch/workflows/improv-worker.yaml")
 
 
-@pytest.mark.parametrize("path", WORKFLOWS, ids=lambda p: p.parts[0])
-def test_improv_worker_wrapup_gates_on_the_report(path):
-    wrapup = yaml.safe_load(path.read_text(encoding="utf-8"))["steps"]["wrapup"]
-    # A verify, not prose: the report is the last thing before the session
-    # kills itself, so "we said to write one" is exactly the line a busy round
-    # drops. The command is a stat and a 4KB read, not a suite.
-    assert wrapup["verify"] == "claunch report check"
-    text = wrapup["instructions"]
+def wrapup_of(path: Path) -> dict:
+    return yaml.safe_load(path.read_text(encoding="utf-8"))["steps"]["wrapup"]
+
+
+@pytest.mark.parametrize("path", [BUNDLED, OVERRIDE], ids=["bundled", "override"])
+def test_improv_worker_wrapup_asks_for_the_report_in_both_layers(path):
+    text = wrapup_of(path)["instructions"]
+    assert "회차 보고서" in text
     assert "claunch report path" in text
     assert "claunch report save" in text
-    assert "회차 보고서" in text
-    assert "claunch report ls" in wrapup["done_when"]
+    assert "claunch report ls" in wrapup_of(path)["done_when"]
 
 
-def test_both_layers_of_improv_worker_agree_about_the_report():
-    """The project copy shadows the bundled one, so a change made to only one
+def test_the_prose_is_identical_in_both_layers():
+    """The project copy shadows the bundled one, so prose changed in only one
     of them either does not take effect here or does not ship."""
-    steps = [yaml.safe_load(p.read_text(encoding="utf-8"))["steps"]["wrapup"] for p in WORKFLOWS]
-    assert steps[0]["verify"] == steps[1]["verify"]
-    assert steps[0]["instructions"] == steps[1]["instructions"]
-    assert steps[0]["done_when"] == steps[1]["done_when"]
+    a, b = wrapup_of(BUNDLED), wrapup_of(OVERRIDE)
+    assert a["instructions"] == b["instructions"]
+    assert a["done_when"] == b["done_when"]
+
+
+def test_only_the_project_layer_arms_the_gate():
+    """Where the machine check may live, and why it is not both.
+
+    The canonical file ships to every repository, so it carries no ``verify``
+    at all (``test_cflow_layers`` pins that for the whole improv trio) — a
+    repository that wants the check grafts one into its project layer. The
+    cost is real and is the point of writing it down: elsewhere the report is
+    prose, and prose is what this change exists to stop relying on.
+    """
+    assert wrapup_of(BUNDLED).get("verify") is None
+    assert wrapup_of(OVERRIDE)["verify"] == (
+        "uv run --no-sync python -m claude_launcher.cli report check"
+    )
+
+
+def test_the_gate_runs_the_checkout_rather_than_whatever_claunch_is_installed():
+    """`claunch report check` would have been the obvious command and is the
+    wrong one: the `claunch` on PATH is an installed copy, not this tree. It
+    was measured answering "invalid choice: 'report'" with exit 2 — a gate
+    that fails in every session until the branch lands and is reinstalled."""
+    verify = wrapup_of(OVERRIDE)["verify"]
+    assert verify.startswith("uv run --no-sync python")
+    assert "-m claude_launcher.cli" in verify
