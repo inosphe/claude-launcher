@@ -8926,6 +8926,44 @@ function fmtPace(sec) {
   return `${+(n / 3600).toFixed(2)}h`;
 }
 
+/* How wide a string draws at a given font size. SVG has no layout to ask, so
+   this estimates: a Hangul or CJK glyph takes a full em, the rest of what
+   step titles are written in takes about 0.55. The estimate only has to be
+   safe in one direction — it must not claim a string fits when it does not —
+   and 0.55em is the wide end of this face's Latin advances. */
+function wfdTextW(s, px) {
+  let w = 0;
+  for (const ch of String(s)) {
+    const c = ch.codePointAt(0);
+    const wide = (c >= 0x1100 && c <= 0x115f)
+      || (c >= 0x2e80 && c <= 0x303e) || (c >= 0x3041 && c <= 0x33ff)
+      || (c >= 0x3400 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0x9fff)
+      || (c >= 0xa000 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3)
+      || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xfe30 && c <= 0xfe6f)
+      || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6);
+    w += wide ? px : px * 0.55;
+  }
+  return w;
+}
+
+/* Cut a string to a pixel budget, ellipsis included in the budget. A title
+   that overruns its box does not merely look wrong — it runs out over the
+   right rail and lands on the edge labels drawn there (improv-worker's
+   `landing` title crossed its own `request` label). The full text stays
+   reachable: the caller hangs it on the node as a <title>. */
+function wfdFit(s, px, max) {
+  const str = String(s);
+  if (wfdTextW(str, px) <= max) return str;
+  const budget = max - wfdTextW("…", px);
+  let out = "", w = 0;
+  for (const ch of str) {
+    const cw = wfdTextW(ch, px);
+    if (w + cw > budget) break;
+    out += ch; w += cw;
+  }
+  return `${out.replace(/\s+$/, "")}…`;
+}
+
 function wfDiagramSvg(wf, run, selected) {
   const steps = wf.steps || [];
   const byId = {};
@@ -8974,6 +9012,69 @@ function wfDiagramSvg(wf, run, selected) {
   const rowOf = (id) => (id === "end" ? endRow : rows[id]);
   const yTop = (id) => 8 + rowOf(id) * ROWH;
 
+  /* Two options that leave the same step for the same step are ONE route on
+     the page. Drawing one arc per option drew that route twice, and both
+     copies put their label on the same coordinate — improv-worker's `rebase`
+     and `remeasure` (both await-landing -> rebase) came out at x=127,y=649
+     on top of each other, and the loop cost two upward arcs where the reader
+     only ever had one way back. A route carries its options instead, so the
+     count of upward arcs is the count of loops: two for improv-worker, which
+     is the floor (each directed cycle must send one arc up, and the rest of
+     this graph flows down). */
+  const routes = [];
+  const byPair = new Map();
+  for (const e of edges) {
+    const key = `${e.from}>${e.to}`;
+    let r = byPair.get(key);
+    if (!r) {
+      r = { from: e.from, to: e.to, i: e.i, opts: [] };
+      byPair.set(key, r);
+      routes.push(r);
+    }
+    r.opts.push(e);
+  }
+
+  /* Gutter columns by row span, not by option index. The index is a number
+     about one step's menu; whether two arcs collide is a fact about the rows
+     they cross. improv-worker had both of its left-rail arcs on index 1 —
+     `changes` (rows 1..7) and the loop back to rebase (rows 6..9) — so they
+     ran down the same column and crossed. Shortest span first, so a long arc
+     nests outside a short one instead of cutting through it; arcs that share
+     no row reuse a column and the drawing stays as narrow as it was. */
+  const laneOf = new Map();
+  const lanes = (rs) => {
+    const taken = [];
+    for (const r of rs.slice().sort((a, b) => {
+      const sa = Math.abs(rowOf(a.to) - rowOf(a.from));
+      const sb = Math.abs(rowOf(b.to) - rowOf(b.from));
+      return (sa - sb) || (rowOf(a.from) - rowOf(b.from));
+    })) {
+      const lo = Math.min(rowOf(r.from), rowOf(r.to));
+      const hi = Math.max(rowOf(r.from), rowOf(r.to));
+      let lane = 0;
+      while (taken[lane] && taken[lane].some(([a, b]) => lo <= b && a <= hi)) lane++;
+      (taken[lane] = taken[lane] || []).push([lo, hi]);
+      laneOf.set(r, lane);
+    }
+  };
+  lanes(routes.filter((r) => rowOf(r.to) > rowOf(r.from) + 1));   // right rail
+  lanes(routes.filter((r) => rowOf(r.to) <= rowOf(r.from)));      // left rail
+
+  /* The centre column fans the same way, and for the same reason: a step's
+     one straight way out belongs on the centre line. Counting the option's
+     place in the MENU pushed it off — improv-worker's `landing` sends its
+     first option down the right rail and its second straight down, so the
+     only straight arrow it draws was offset as though it had a twin. Count
+     the straight ways out instead. */
+  const fanOf = new Map();
+  const straight = new Map();
+  for (const r of routes) {
+    if (rowOf(r.to) !== rowOf(r.from) + 1) continue;
+    const n = straight.get(r.from) || 0;
+    fanOf.set(r, n);
+    straight.set(r.from, n + 1);
+  }
+
   const parts = [];
   // width/height attrs pin the drawing at its natural size (one SVG unit =
   // one CSS pixel): the column growing must not blow the graph up with it.
@@ -8989,47 +9090,73 @@ function wfDiagramSvg(wf, run, selected) {
     '<path d="M 0 0 L 10 5 L 0 10 z" fill="#4d5566"/></marker></defs>'
   );
 
-  for (const e of edges) {
+  /* Two labels on one coordinate are one unreadable label. Every line the
+     loop below places goes through here, which pushes a line down until it
+     clears whatever already stands in that column. */
+  const placed = [];
+  const freeY = (x, y, anchor) => {
+    let out = y;
+    for (let n = 0; n < placed.length + 1; n++) {
+      const hit = placed.some((p) =>
+        p.anchor === anchor && Math.abs(p.x - x) < 40 && Math.abs(p.y - out) < 10);
+      if (!hit) break;
+      out += 11;
+    }
+    placed.push({ x, y: out, anchor });
+    return out;
+  };
+
+  for (const e of routes) {
     const r1 = rowOf(e.from), r2 = rowOf(e.to);
+    const lane = laneOf.get(e) || 0;
     let d, lx, ly, anchor = "start";
     if (r2 === r1 + 1) {
-      const x = W / 2 + (e.i ? (e.i % 2 ? -1 : 1) * 18 * Math.ceil(e.i / 2) : 0);
+      const f = fanOf.get(e) || 0;
+      const x = W / 2 + (f ? (f % 2 ? -1 : 1) * 18 * Math.ceil(f / 2) : 0);
       const y1 = yTop(e.from) + NH, y2 = yTop(e.to) - 2;
       d = `M ${x} ${y1} L ${x} ${y2}`;
       lx = x + 7; ly = (y1 + y2) / 2 + 4;
     } else if (r2 > r1) {
       const y1 = yTop(e.from) + NH / 2, y2 = yTop(e.to) + 8;
-      const b = NX + NW + 30 + 16 * (e.i || 0);
+      const b = NX + NW + 30 + 16 * lane;
       d = `M ${NX + NW} ${y1} C ${b} ${y1}, ${b} ${y2}, ${NX + NW + 2} ${y2}`;
       lx = NX + NW + 8; ly = y1 - 8;
     } else {
       const y1 = yTop(e.from) + NH / 2, y2 = yTop(e.to) + NH / 2;
-      const b = NX - 30 - 16 * (e.i || 0);
+      const b = NX - 30 - 16 * lane;
       d = `M ${NX} ${y1} C ${b} ${y1}, ${b} ${y2}, ${NX - 2} ${y2}`;
-      lx = NX - 8; ly = (y1 + y2) / 2 + 4; anchor = "end";
+      // At the end the arc LEAVES from, not at its middle: the middle of a
+      // long arc is beside rows that have nothing to do with the branch, and
+      // two arcs of different length can share a middle. The step a branch
+      // departs from is unique to it.
+      lx = NX - 8; ly = y1 - 8; anchor = "end";
     }
-    const hold = isHeld(e);
+    const hold = e.opts.some(isHeld);
+    const pace = e.opts.some((o) => o.pace);
     // Dashed for as long as the pacing exists, not only while it bites: that
     // this branch runs at most once per interval is a fact about the
     // workflow, and a reader planning a run needs it before anything is held.
-    const ecls = `wfd-edge${e.pace ? " paced" : ""}${hold ? " held" : ""}`;
+    const ecls = `wfd-edge${pace ? " paced" : ""}${hold ? " held" : ""}`;
     parts.push(`<path class="${ecls}" d="${d}" marker-end="url(#arrow)"/>`);
-    if (e.label) {
-      parts.push(
-        `<text class="wfd-elabel" x="${lx}" y="${ly}" text-anchor="${anchor}">` +
-        `${escXml(e.label)}</text>`
-      );
-    }
-    // Under the option's own name, in its column: what the pacing costs this
-    // branch — and, while it is actually held, when the window opens.
-    if (e.pace) {
-      const word = hold
-        ? `held → ${fmtOpensAt(run.opens_at)}`
-        : `every ${fmtPace(e.pace)}`;
-      parts.push(
-        `<text class="wfd-epace${hold ? " held" : ""}" x="${lx}" ` +
-        `y="${ly + 11}" text-anchor="${anchor}">${escXml(word)}</text>`
-      );
+    for (const o of e.opts) {
+      if (o.label) {
+        parts.push(
+          `<text class="wfd-elabel" x="${lx}" y="${freeY(lx, ly, anchor)}" ` +
+          `text-anchor="${anchor}">${escXml(o.label)}</text>`
+        );
+      }
+      // Under the option's own name, in its column: what the pacing costs this
+      // branch — and, while it is actually held, when the window opens.
+      if (o.pace) {
+        const word = isHeld(o)
+          ? `held → ${fmtOpensAt(run.opens_at)}`
+          : `every ${fmtPace(o.pace)}`;
+        parts.push(
+          `<text class="wfd-epace${isHeld(o) ? " held" : ""}" x="${lx}" ` +
+          `y="${freeY(lx, ly + 11, anchor)}" text-anchor="${anchor}">` +
+          `${escXml(word)}</text>`
+        );
+      }
     }
   }
 
@@ -9058,11 +9185,18 @@ function wfDiagramSvg(wf, run, selected) {
       flags.push("paced");
     }
     const title = s.title && s.title !== s.id ? `${s.id} — ${s.title}` : s.id;
+    // 12px of padding each side, and the visit counter takes the right end of
+    // the line when a step has been stood on twice.
+    const room = NW - 24 - (visits[id] > 1 ? 26 : 0);
+    const shown = wfdFit(title, 13, room);
     parts.push(`<g class="${cls.join(" ")}" data-step="${escXml(s.id)}">`);
+    // First child, where SVG says a <title> belongs: it is the group's
+    // tooltip, and what the cut title dropped is only reachable here.
+    if (shown !== title) parts.push(`<title>${escXml(title)}</title>`);
     parts.push(`<rect x="${NX}" y="${y}" width="${NW}" height="${NH}" rx="8"/>`);
     parts.push(
       `<text class="wfd-title" x="${NX + 12}" y="${y + (flags.length ? 19 : 27)}">` +
-      `${escXml(title)}</text>`
+      `${escXml(shown)}</text>`
     );
     if (flags.length) {
       parts.push(

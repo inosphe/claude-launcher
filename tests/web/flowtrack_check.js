@@ -37,11 +37,11 @@ const code = [
 const ctx = {};
 new Function(
   "exports",
-  code + "\nObject.assign(exports, {wfDiagramSvg, wfStepOrder, flowMetrics," +
+  code + "\nObject.assign(exports, {wfDiagramSvg, wfStepOrder, wfdTextW, wfdFit, flowMetrics," +
   " flowOrder, flowTrack, flowNeedsHuman, flowState});"
 )(ctx);
-const { wfDiagramSvg, wfStepOrder, flowMetrics, flowOrder, flowTrack,
-        flowNeedsHuman, flowState } = ctx;
+const { wfDiagramSvg, wfStepOrder, wfdTextW, wfdFit, flowMetrics,
+        flowOrder, flowTrack, flowNeedsHuman, flowState } = ctx;
 
 let failures = 0;
 function check(what, cond, extra) {
@@ -291,12 +291,151 @@ const WORKER = {
   const yOf = (id) => {
     const m = svg.match(
       new RegExp(`class="[^"]*wfd-node[^"]*" data-step="${id}"[^>]*>` +
-                 `<rect x="[^"]+" y="(\\d+)"`));
+                 `(?:<title>[^<]*</title>)?<rect x="[^"]+" y="(\\d+)"`));
     return m ? +m[1] : NaN;
   };
   check("end is the bottom row of the picture",
         order.every((id) => Number.isFinite(yOf(id)) && yOf("end") > yOf(id)),
         { endY: yOf("end"), steps: order.map((id) => yOf(id)) });
+}
+
+/* --- one route, one arc, one label to a coordinate --------------------- */
+/* The real improv-worker has two things the fixture above leaves out, and
+   both of them broke the drawing rather than the order.
+
+   `await-landing` leaves for `rebase` under TWO names (a rebase re-request
+   and a re-measure request). Those are one way back, not two: drawn as two
+   arcs they put their labels on the identical coordinate — measured at
+   x=127,y=649, one word on top of the other — and they spent two upward arcs
+   on one route. Two is also the floor here rather than a target to beat: a
+   directed cycle drawn with every arc pointing down does not exist, so each
+   of this graph's two loops owes exactly one upward arc. Rowing `rebase`
+   under `await-landing` does not buy the loop back — it only moves which arc
+   points up, and every other cut of that cycle floats a downstream step to
+   row 0, because `rebase` is the only step in it with an edge coming in from
+   above.
+
+   And the titles are sentences. A 45-character title in a 210px box did not
+   stop at the box: it ran out over the right rail and printed across the
+   edge labels drawn there. */
+const WORKER_FULL = {
+  name: "improv-worker", start: "intake",
+  steps: [
+    { id: "intake", title: "목표 수립", next: "work" },
+    { id: "work", title: "작업 실행", next: "review" },
+    { id: "review", title: "테스트 (표적)", next: "commit" },
+    { id: "commit", title: "커밋·보고", next: "landing" },
+    { id: "landing", title: "착지 결정 (깨끗하면 스스로 요청한다)",
+      select: { prompt: "p", chooser: "agent", options: [
+        { name: "request", next: "rebase" },
+        { name: "escalate", next: "landing-review" } ] } },
+    { id: "landing-review", title: "착지 결정 (상위 세션에 묻는다)",
+      select: { prompt: "p", chooser: "delegate", options: [
+        { name: "request", next: "rebase" },
+        { name: "hold", next: "wrapup" } ] } },
+    { id: "rebase", title: "정렬 (요청 전 — rebase, 또는 프리뷰 머지 위 재측정)",
+      next: "peer-review" },
+    { id: "peer-review", title: "동료 리뷰 (리베이스 후, 요청 직전)",
+      select: { prompt: "p", chooser: "delegate", options: [
+        { name: "pass", next: "integration-request" },
+        { name: "changes", next: "work" } ] } },
+    { id: "integration-request", title: "상위 통합 요청 (머지는 상위 세션 전권)",
+      next: "await-landing" },
+    { id: "await-landing", title: "착지 대기 (요청은 착지가 아니다)",
+      select: { prompt: "p", chooser: "agent", options: [
+        { name: "landed", next: "landed" },
+        { name: "rebase", next: "rebase" },
+        { name: "remeasure", next: "rebase" } ] } },
+    { id: "landed", title: "착지 확인 (기계가 본다)", next: "wrapup" },
+    { id: "wrapup", title: "회차 마감·정리" },
+  ],
+};
+{
+  const svg = wfDiagramSvg(WORKER_FULL, {}, null);
+
+  /* Every arc as (first y, last y): a straight `M x y1 L x y2` and a bend
+     `M x y1 C bx y1, bx y2, x2 y2` both finish on the last number pair. */
+  const arcs = [...svg.matchAll(/<path class="wfd-edge[^"]*" d="([^"]+)"/g)]
+    .map((m) => {
+      const n = m[1].match(/-?[\d.]+/g).map(Number);
+      return {
+        d: m[1], y1: n[1], y2: n[n.length - 1],
+        bend: m[1].includes("C") ? n[2] : null,
+      };
+    });
+  const up = arcs.filter((a) => a.y2 < a.y1);
+  check("one upward arc per loop, and this graph has two loops",
+        up.length === 2, arcs.map((a) => `${a.y1}->${a.y2}`));
+  check("...and the shared way back is drawn once, not once per option",
+        arcs.length === 16, arcs.length);
+
+  /* Merging the arc must not eat a branch name: both options that take the
+     shared way back are still written on it. */
+  const labels = [...svg.matchAll(
+    /<text class="wfd-e(?:label|pace)[^"]*" x="([-\d.]+)" y="([-\d.]+)"[^>]*>([^<]*)</g)]
+    .map((m) => ({ x: +m[1], y: +m[2], text: m[3] }));
+  const named = labels.map((l) => l.text);
+  for (const name of ["request", "escalate", "hold", "pass", "changes",
+                      "landed", "rebase", "remeasure"]) {
+    check(`the branch '${name}' is still named on its arc`,
+          named.includes(name), named);
+  }
+  const at = labels.map((l) => `${l.x},${l.y}`);
+  check("no two edge labels share a coordinate", new Set(at).size === at.length, at);
+
+  /* Two arcs that cross the same rows may not share a gutter column. The
+     option index used to choose it, so `changes` (rows 1..7) came out in the
+     same column as the loop back to rebase (rows 6..9) and crossed it. */
+  const NXPX = 135;
+  const left = arcs.filter((a) => a.bend !== null && a.bend < NXPX);
+  const span = (a) => [Math.min(a.y1, a.y2), Math.max(a.y1, a.y2)];
+  for (const a of left) {
+    for (const b of left) {
+      if (a === b) continue;
+      const [al, ah] = span(a), [bl, bh] = span(b);
+      if (al <= bh && bl <= ah) {
+        check("arcs crossing the same rows get their own column",
+              a.bend !== b.bend, { a: a.d, b: b.d });
+      }
+    }
+  }
+
+  /* A step with one straight way out draws it on the centre line. `landing`
+     sends its first option down the right rail and its second straight down,
+     so counting the option's place in the menu offset the only straight
+     arrow it has as though it had a twin. */
+  const CENTRE = 480 / 2;
+  // Every step in this graph has at most one straight way out, so all of them
+  // belong on the line. A step with two would legitimately fan off it.
+  const centres = [...svg.matchAll(/<path class="wfd-edge[^"]*" d="M ([-\d.]+) [-\d.]+ L/g)]
+    .map((m) => +m[1]);
+  check("a step with one straight way out draws it on the centre line",
+        centres.filter((x) => x !== CENTRE).length === 0, centres);
+
+  /* The title stops at the box, and the whole of it stays reachable. */
+  const BOX = 210 - 24;
+  const titles = [...svg.matchAll(/<text class="wfd-title"[^>]*>([^<]*)</g)]
+    .map((m) => m[1]);
+  check("no title draws wider than its box",
+        titles.every((t) => wfdTextW(t, 13) <= BOX),
+        titles.map((t) => [t, Math.round(wfdTextW(t, 13))]));
+  check("a title that had to be cut says so",
+        titles.some((t) => t.endsWith("…")), titles);
+  check("...and hangs its whole text on the node for a hover",
+        svg.includes(
+          "<title>integration-request — 상위 통합 요청 (머지는 상위 세션 전권)</title>"),
+        svg.slice(svg.indexOf("<title>"), svg.indexOf("<title>") + 90));
+  check("a title that fits is left alone", titles.includes("intake — 목표 수립"),
+        titles);
+
+  /* A Hangul glyph is a full em and Latin is not. Measuring both the same way
+     is what let a 45-character title claim it fitted. */
+  check("the width estimate is per-glyph, not per-character",
+        wfdTextW("가나다", 13) === 39 && wfdTextW("abc", 13) < 39,
+        [wfdTextW("가나다", 13), wfdTextW("abc", 13)]);
+  check("a cut string never draws wider than the budget it was given",
+        wfdTextW(wfdFit("상위 통합 요청 (머지는 상위 세션 전권)", 13, 80), 13) <= 80,
+        wfdFit("상위 통합 요청 (머지는 상위 세션 전권)", 13, 80));
 }
 
 if (failures) {
