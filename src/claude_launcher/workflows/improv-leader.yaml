@@ -96,6 +96,7 @@ steps:
       테스트 수치와 그 축·트리·환경, 양방향 diff, 포함 관계, 스택 위치,
       merge-tree 결과), 심사 한계와 테스트가 세우지 못하는 것, 그리고 판정
       마커 — `LANDING REQUEST @ <hash>` / `REBASE REQUESTED @ <hash>` /
+      `REVIEWED: pass @ <hash>` / `CHANGES REQUESTED: <무엇을>` /
       `HOLD: <이유>` / `BLOCKED: <게이트>` / `merged <hash>`. 코멘트는 산문
       문단이 아니라 (축, 트리, 값)의 줄로 적는다 — 보드는 저장소에 커밋되므로
       산문은 무게만 늘리고 되짚을 때 읽히지 않는다. 긴 묶음은 파일로 붙인다:
