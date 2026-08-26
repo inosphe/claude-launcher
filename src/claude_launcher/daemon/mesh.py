@@ -1261,14 +1261,18 @@ class MeshManager:
         live), and the operator can see it is not going to matter — but the
         daemon still waits out ``busy_hold`` because it cannot know that.
 
-        What this drops is the idle-gate in :meth:`_deliver_to` and nothing
-        else. The paste still goes through :meth:`Session.deliver`, which
-        waits for a starting TUI to actually accept input and for the
-        keyboard to fall quiet — skipping those does not deliver a message
-        sooner, it delivers a broken one (typed but never submitted, or
-        folded into someone's half-written line). Both are bounded and
-        release seconds after typing stops, so a person who clicked the
-        button gets their delivery without anyone's line being eaten.
+        What this drops is every hold a person is in a position to overrule:
+        the idle-gate in :meth:`_deliver_to`, the pinned hold ahead of it,
+        and — through ``force`` — the keyboard holds inside
+        :meth:`Session.deliver`, where the wait shortens and an unsent line
+        is submitted ahead of the delivery instead of refusing it. Nobody's
+        line is eaten: it goes to the agent first, as its own message.
+
+        The one hold that stays is :meth:`Session._await_readable`. A TUI
+        that has not mounted its input yet is not somebody holding the
+        message back, and typing into it does not deliver the message
+        sooner, it delivers a broken one — typed into nothing, or typed and
+        never submitted. That wait is bounded and ends by itself.
 
         Returns ``{"flushed": n, "handles": [...]}`` — how many messages went
         in and to which handles, so the caller can say what happened rather
@@ -5333,11 +5337,16 @@ class MeshManager:
             member.handle, {"anchor": time.monotonic()}
         ).pop("stranded_told", None)
         # ``force`` is a human at the dashboard saying "type it in now" (see
-        # :meth:`flush_session`). It drops THIS gate and nothing below it: the
-        # gate exists to keep an automated paste out of a running turn, and
-        # waiting that out is exactly what the operator is declining to do.
-        # The holds inside Session.deliver stay — they are about the paste
-        # arriving intact, which no impatience makes safe to skip.
+        # :meth:`flush_session`). It drops THIS gate — the gate exists to keep
+        # an automated paste out of a running turn, and waiting that out is
+        # exactly what the operator is declining to do — and it is carried
+        # into :meth:`Session.deliver` as well, because a button that answers
+        # "still waiting" is a button that did nothing. What it buys there is
+        # narrow and stated in that docstring: a short keyboard wait instead
+        # of a long one, and an unsent line submitted ahead of the delivery
+        # rather than the delivery refusing to land behind it. The paste is
+        # still assembled the same way; nothing about arriving intact is
+        # skipped, because no impatience makes that safe.
         #
         # A live keyboard is held exactly like a running turn: the human is
         # mid-composition, and their thinking pauses outlast the idle
@@ -5376,7 +5385,7 @@ class MeshManager:
             if gap > 0:
                 return  # paced: the last delivery into this terminal is recent
         block = format_delivery(mesh.name, member.handle, pending)
-        if not await session.deliver(block):
+        if not await session.deliver(block, force=force):
             return  # undelivered: hold the cursor, the next tick retries
         mesh.cursors[member.handle] = len(mesh.messages)
         # Fast-path arrivals are not in the log yet, so the cursor cannot

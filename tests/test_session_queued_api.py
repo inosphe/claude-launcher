@@ -575,6 +575,62 @@ def test_hold_outranks_the_timing_holds_but_not_a_dead_session(
     asyncio.run(run())
 
 
+def test_flush_goes_through_an_unsent_line_rather_than_reporting_nothing(
+    home, tmp_path, monkeypatch
+):
+    """The hold that used to make this button a no-op.
+
+    A composer with something in it refuses an ordinary delivery — a paste
+    into a half-written line breaks the human's prompt along with itself —
+    and the banner calls that state "held" like every other. Pressing
+    "deliver now" against it returned ``flushed: 0``, which is a button that
+    visibly does nothing while the thing it is for sits in the backlog.
+
+    Forced, it goes in: the unsent line is submitted first (see
+    :meth:`Session.deliver`), so both texts reach the agent whole and in the
+    order they were written, and the caller is told a number that means
+    something.
+    """
+    _register_py_harness()
+    monkeypatch.setattr(session_mod, "TYPING_GUARD", 3600.0)   # still "typing"
+    monkeypatch.setattr(session_mod, "FORCE_TYPING_GRACE", 0.05)
+    monkeypatch.setattr(session_mod, "FORCE_DRAFT_SETTLE", 0.05)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mm.create("team")
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            await mm.join("team", "s1", handle="worker")
+            session = mgr.get("s1")
+            await _wait_idle(session)
+            _pin_status(session, session_mod.STATUS_IDLE)
+            await mm.send("team", "operator", "worker", "let me in",
+                          external=True, type="fyi")
+            # A person is mid-sentence in this terminal.
+            session.note_human_input(at_terminal=True, data=b"half a prompt")
+            assert session.draft_open() is True
+
+            body = await (await client.get(
+                "/api/sessions/s1/queued", headers=BEARER)).json()
+            assert body["state"] == "keyboard"
+            assert body["draft_open"] is True
+
+            body = await (await client.post(
+                "/api/sessions/s1/queued/flush", headers=BEARER)).json()
+            assert body["flushed"] == 1
+            assert body["handles"] == ["worker@team"]
+            assert body["queued"]["messages"] == []
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_flush_overrules_a_hold_without_lifting_it(home, tmp_path):
     """"Deliver now" goes through a held session, and the hold survives it.
 

@@ -25,7 +25,7 @@ import os
 import sys
 import time
 import webbrowser
-from typing import List
+from typing import List, Optional
 
 from . import (
     cli_mesh,
@@ -561,6 +561,111 @@ def _cmd_rebrief(args: argparse.Namespace) -> int:
         )
         return 0
     print(block)
+    return 0
+
+
+#: One line for why a backlog is still a backlog, keyed by the daemon's own
+#: state word (``/queued``'s ``state``, walked in the delivery gate's order —
+#: see :func:`daemon.api._session_queued`). The web banner says the same thing
+#: in :func:`queuedReason`; this is that sentence for a terminal.
+_QUEUE_HOLD_REASON = {
+    "exited": "the session has exited — its backlog is delivered if it is respawned",
+    "hold": "delivery is pinned shut here — release it with 'claunch delivery-hold --off'",
+    "busy": "the agent is mid-turn",
+    "keyboard": "a keyboard is active on this session",
+    "paced": "the mesh just typed a block in here — it is spacing the next one",
+    "settling": "nothing is holding it — the next delivery tick types it in",
+}
+
+
+def _resolve_session(args: argparse.Namespace) -> Optional[str]:
+    """The session a delivery command is about: the argument, or the one we
+    are running inside. Prints its own error, so callers return 2 on None."""
+    name = getattr(args, "session", None) or os.environ.get("CLAUNCH_SESSION")
+    if not name:
+        print(
+            "error: no session: pass NAME, or run this inside a managed "
+            "session (which sets $CLAUNCH_SESSION)",
+            file=sys.stderr,
+        )
+    return name
+
+
+def _cmd_deliver_now(args: argparse.Namespace) -> int:
+    """Type a session's held backlog into it now, because a person said so.
+
+    The terminal's half of the dashboard's "deliver now" button — the same
+    endpoint, so the same thing happens. It exists because the button did
+    not: :meth:`MeshManager.flush_session` had exactly one caller, the HTTP
+    route the web UI posts to, which left every operator who works from a
+    shell with no way to overrule a hold at all.
+
+    Every hold a person is in a position to overrule is dropped: the pinned
+    hold, the mid-turn idle-gate, and the keyboard holds inside
+    :meth:`Session.deliver` (an unsent line in the composer is submitted
+    ahead of the delivery rather than refusing it). A session that has exited
+    keeps its backlog, and that is reported rather than dressed up — exit 1,
+    so a script can tell "I delivered it" from "I asked".
+    """
+    name = _resolve_session(args)
+    if not name:
+        return 2
+    client = daemon_client.ensure_running()
+    info = client.post(f"/api/sessions/{name}/queued/flush")
+    flushed = int(info.get("flushed") or 0)
+    handles = info.get("handles") or []
+    queued = info.get("queued") or {}
+    left = len(queued.get("messages") or [])
+    if flushed:
+        where = f" ({', '.join(handles)})" if handles else ""
+        print(f"delivered {flushed} message(s) into {name!r}{where}")
+    elif not left:
+        print(f"nothing was queued for {name!r} — nothing to deliver")
+        return 0
+    else:
+        print(f"nothing was delivered into {name!r}")
+    if left:
+        reason = _QUEUE_HOLD_REASON.get(
+            str(queued.get("state") or ""), "still held"
+        )
+        print(f"  {left} message(s) still queued — {reason}")
+    return 0 if flushed else 1
+
+
+def _cmd_delivery_hold(args: argparse.Namespace) -> int:
+    """Pin a session shut, or let it go again — the opposite of
+    :func:`_cmd_deliver_now` and the other half of the same pair.
+
+    With neither flag it toggles, which is what the header chip's click does;
+    the flags are for a script that must not depend on what the state was.
+    Nothing is dropped either way: messages accepted while held stay in their
+    mesh log and go in when it is released, or when somebody says 'deliver
+    now' — a hold with no way past it would be a trap rather than a setting.
+    """
+    name = _resolve_session(args)
+    if not name:
+        return 2
+    want = True if args.on else (False if args.off else None)
+    client = daemon_client.ensure_running()
+    info = client.post(
+        f"/api/sessions/{name}/queued/hold",
+        {} if want is None else {"hold": want},
+    )
+    held = bool(info.get("hold"))
+    waiting = len((info.get("queued") or {}).get("messages") or [])
+    if held:
+        print(
+            f"session {name!r} delivery held — nothing is typed in here "
+            f"until it is released ('claunch delivery-hold {name} --off') "
+            f"or somebody says 'claunch deliver-now {name}'"
+        )
+    else:
+        print(
+            f"session {name!r} delivery released — the ordinary gate is "
+            "back, so a message still waits out a running turn"
+        )
+    if waiting:
+        print(f"  {waiting} message(s) waiting")
     return 0
 
 
@@ -1751,6 +1856,34 @@ def register(sub) -> None:
         "--session", help="session to brief (default: $CLAUNCH_SESSION)"
     )
     p_rebrief.set_defaults(func=_cmd_rebrief)
+
+    p_flush = sub.add_parser(
+        "deliver-now",
+        help="type a session's held mesh backlog into it now -- the terminal's "
+             "half of the dashboard's 'deliver now' button; overrules a pinned "
+             "hold, a running turn and a live keyboard (an unsent line in the "
+             "composer is submitted first, never typed over)",
+    )
+    p_flush.add_argument(
+        "session", nargs="?",
+        help="session to deliver into (default: $CLAUNCH_SESSION)",
+    )
+    p_flush.set_defaults(func=_cmd_deliver_now)
+
+    p_hold = sub.add_parser(
+        "delivery-hold",
+        help="pin a session shut so nothing is typed into it, or release it "
+             "(no flag toggles) -- the opposite of deliver-now; nothing is "
+             "dropped, a held backlog goes in when it is released",
+    )
+    p_hold.add_argument(
+        "session", nargs="?",
+        help="session to hold (default: $CLAUNCH_SESSION)",
+    )
+    hold_which = p_hold.add_mutually_exclusive_group()
+    hold_which.add_argument("--on", action="store_true", help="hold it shut")
+    hold_which.add_argument("--off", action="store_true", help="release it")
+    p_hold.set_defaults(func=_cmd_delivery_hold)
 
     p_migrate = sub.add_parser(
         "migrate-session",
