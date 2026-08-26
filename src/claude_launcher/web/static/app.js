@@ -4863,10 +4863,18 @@ function renderTranscriptPage(data, older) {
 }
 
 function renderTranscriptRecord(r) {
-  const box = el("div", `log-rec log-${r.role === "assistant" ? "asst" : "user"}`);
+  // The role comes off the jsonl, and claude writes every tool_result as a
+  // user-role record — the API's shape, not the reader's. The output belongs
+  // to the assistant's tool exchange, so a user record whose blocks are all
+  // tool results reads with the assistant; only a real user turn (always
+  // text) stays in the user column. Otherwise a tool-heavy session reads as
+  // the user talking through every tool — see claunch-jm2.
+  const asst = r.role === "assistant"
+    || (r.role === "user" && (r.blocks || []).every((b) => b.type === "tool_result"));
+  const box = el("div", `log-rec log-${asst ? "asst" : "user"}`);
   box.dataset.seq = String(r.seq);
   const head = el("div", "log-head");
-  head.appendChild(el("span", "log-role", r.role));
+  head.appendChild(el("span", "log-role", asst ? "assistant" : r.role));
   if (r.ts) {
     const when = el("span", "log-ts", fmtLogTime(r.ts));
     when.title = r.ts;
