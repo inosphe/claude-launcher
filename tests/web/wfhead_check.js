@@ -83,6 +83,9 @@ let meshName = "", flowMesh = "", transcriptName = "", traceSession = "";
 let sessName = "", currentName = "", currentPage = "home";
 function wfDiagramSvg() { return ""; }
 function wfPacedNote() { return null; }
+// The timing diagram under the graph (s157) — another of the pictures this
+// file is not testing, stubbed to the same shape as its neighbour above.
+function wfTimelinePanel() { return null; }
 function wfReports() { return el("div", "wf-reports"); }
 function wfActions() { return el("div", "wf-actions"); }
 function reminderControl() { return el("div", "wf-reminder"); }

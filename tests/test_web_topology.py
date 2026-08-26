@@ -178,6 +178,29 @@ make it move at all — the 2s poll, every attach path, and one interval
 ageing both faces of the clock so they cannot drift apart — are held there
 too.
 
+``wftime_check`` on the run page's second picture: the same journal the
+state graph's neighbours print as prose, laid on a time axis. One lane per
+step, one bar per visit, and inside each bar the stretches spent at a door
+(a choice presented and not confirmed, a gate, a question with a peer, a
+paced option held for its window) drawn apart from the stretches spent
+working — because a step that took twenty minutes of work and a step that
+took twenty minutes because nobody answered its gate are the same two lines
+in the fold and must never be the same bar here. It pins the interval model
+(delivery closes the standing bar, since `state_forced` and a resumed run
+both leave a step without completing it), the right edge (a live run owns
+the axis out to now, a finished one stops where its record does), that a
+door is counted INTO its step's total and drawn apart from it, that a door
+the record never closes ends with its step rather than at the end of the
+axis, and that the lanes are the graph's own rows — both pictures call
+``wfStepOrder`` so that a step sits on the same line in each. Its two
+sharpest fixtures are transcribed out of this repository's own runs, because
+the shape a hand-made journal has is not the shape the engine writes: a door
+is journalled BETWEEN two steps and names the step being entered, and a step
+that is nothing but a choice is never delivered at all — so the door is the
+only thing that ever puts the run there, and a model that waits for a
+delivery draws twenty real minutes of a leader's `standby` as "never
+entered".
+
 ``leak_check`` is the odd one out and deliberately so: instead of slicing a
 function it boots the WHOLE of ``app.js`` against a stub browser built by
 parsing the shipped ``index.html``, then runs the page the way an unattended
@@ -263,6 +286,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "pollselect_check.js",
         "beads_check.js",
         "wfdpace_check.js",
+        "wftime_check.js",
         "askdoor_check.js",
         "railtimer_check.js",
         "termtimer_check.js",

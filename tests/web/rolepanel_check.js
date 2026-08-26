@@ -412,7 +412,11 @@ async function main() {
 
   /* ---- the diagram holds its size --------------------------------------- */
   const diaCtx = {};
-  new Function("exports", slice("escXml") + slice("wfDiagramSvg")
+  new Function("exports",
+    // wfStepOrder is the graph's row order, lifted out to be shared with the
+    // timing diagram under it (s157) — named here because this harness
+    // slices by function name rather than by span.
+    slice("escXml") + slice("wfStepOrder") + slice("wfDiagramSvg")
     + "Object.assign(exports, { wfDiagramSvg });")(diaCtx);
   const svg = diaCtx.wfDiagramSvg(
     { start: "a", steps: [{ id: "a", title: "A" }] }, { visits: {} }, null

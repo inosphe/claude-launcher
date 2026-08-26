@@ -1593,6 +1593,65 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .wfd-epace { fill: #6e7681; font-size: 9px; }
 .wfd-epace.held { fill: #c6cdd5; }
 
+/* The same steps on a clock — the run's journal in the time domain, under the
+   graph it belongs to. One lane per step, one bar per visit; the bar's fill
+   is time the run was WORKING, and the bands laid over it are the doors it
+   stood at instead. The palette is the one the rest of these pages already
+   agreed: amber = your move (a choice open, a gate), purple = a peer holds
+   it, grey = the daemon's clock and nobody's press. */
+.wf-time { margin-top: 18px; border-top: 1px solid #23272e; padding-top: 12px; }
+.wf-time-head {
+  font-size: 12px; text-transform: uppercase; color: #7d8590;
+  margin: 0 0 8px; font-weight: 600; letter-spacing: 0.04em;
+}
+.wf-time-svg { overflow-x: auto; }
+.wf-time-key { font-size: 11px; color: #6e7681; margin: 8px 0 0; line-height: 1.5; }
+/* Natural size, shrunk-to-fit only — the same rule as .wfd above it, so the
+   two pictures stay the same width as each other in every column. */
+.wft { max-width: 100%; height: auto; display: block; }
+.wft-grid { stroke: #21252c; stroke-width: 1; }
+.wft-axis { fill: #4d5566; font-size: 9px; }
+.wft-tick { fill: #6e7681; font-size: 9px; }
+.wft-tick.end { fill: #8fa1b3; }
+.wft-lane { cursor: pointer; }
+/* The click target: invisible, but it must still take the press, so it is
+   filled transparent rather than left with no fill at all. */
+.wft-hit { fill: transparent; }
+.wft-lane:hover .wft-hit { fill: #ffffff08; }
+.wft-base { stroke: #262b33; stroke-width: 1; }
+.wft-name { fill: #9da5b0; font-size: 11px; }
+.wft-total { fill: #6e7681; font-size: 9px; }
+/* A step this run never entered: the lane is drawn (a timing diagram that
+   hides its idle signals is not one) but it must not compete with the ones
+   that carry the clock. */
+.wft-lane.idle .wft-name { fill: #4d5566; }
+.wft-lane.current .wft-name { fill: #cfe2ff; font-weight: 600; }
+.wft-lane.selected .wft-name { fill: #d29922; font-weight: 600; }
+.wft-lane.selected .wft-base { stroke: #4a3c1c; }
+/* A step the workflow no longer declares, still on the clock because it
+   happened: struck through rather than dropped. */
+.wft-lane.gone .wft-name { fill: #7d5c5c; font-style: italic; }
+.wft-run { fill: #234c33; stroke: #2f6f43; stroke-width: 1; }
+.wft-bar.live .wft-run { fill: #14233a; stroke: #58a6ff; stroke-width: 1.5; }
+.wft-bar:hover .wft-run { stroke: #8fa1b3; }
+/* The doors, over the working fill. Amber for the two a person clears... */
+.wft-wait.select { fill: #d2992238; stroke: #d29922; stroke-width: 0.8; }
+.wft-wait.gate { fill: #d2992238; stroke: #d29922; stroke-width: 0.8; }
+/* ...purple for the one a peer holds (the delegated ask), matching the flow
+   card's reading of the same state... */
+.wft-wait.ask { fill: #8957e538; stroke: #8957e5; stroke-width: 0.8; }
+/* ...and grey, dashed, for the one nobody can press: a paced option held
+   until the daemon's clock opens its window. */
+.wft-wait.window {
+  fill: #8fa1b330; stroke: #8fa1b3; stroke-width: 0.8; stroke-dasharray: 3 2;
+}
+.wft-mark { font-size: 9px; pointer-events: none; }
+.wft-mark.report { fill: #d8dbe0; }
+.wft-mark.pass { fill: #56d364; }
+.wft-mark.fail { fill: #f85149; }
+.wft-mark.chose { fill: #e3b341; }
+.wft-mark.forced { fill: #d29922; }
+
 .wf-reports { margin-top: 14px; }
 .wf-reports h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;

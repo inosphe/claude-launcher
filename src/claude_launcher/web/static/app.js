@@ -7570,6 +7570,11 @@ function renderWfInto(view, data, ui) {
   const pacedNote = wfPacedNote(wf, run);
   if (pacedNote) dia.appendChild(pacedNote);
 
+  // The same steps, on a clock. Under the graph rather than beside it because
+  // the two are one reading: what the run may do, then what it did and when.
+  const timeline = wfTimelinePanel(data, ui);
+  if (timeline) dia.appendChild(timeline);
+
   const forceBtn = el(
     "button", "wf-btn force",
     !sel
@@ -8304,6 +8309,28 @@ function escXml(s) {
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
+/* The steps top to bottom: BFS from `start`, then anything unreachable. The
+   two pictures in this column share it deliberately — a lane that is not on
+   the same row as its box is a lane the reader has to hunt for. */
+function wfStepOrder(wf) {
+  const steps = (wf && wf.steps) || [];
+  const byId = {};
+  for (const s of steps) byId[s.id] = s;
+  const outs = (s) => (s.select ? s.select.options.map((o) => o.next) : [s.next]);
+  const order = [];
+  const seen = new Set();
+  const queue = [wf && wf.start];
+  while (queue.length) {
+    const id = queue.shift();
+    if (!id || seen.has(id) || !byId[id]) continue;
+    seen.add(id);
+    order.push(id);
+    for (const t of outs(byId[id])) if (t && !seen.has(t)) queue.push(t);
+  }
+  for (const s of steps) if (!seen.has(s.id)) order.push(s.id);
+  return order;
+}
+
 /* A cadence in the largest unit that still reads whole: 300 -> "5m",
    90 -> "90s", 5400 -> "1.5h". The diagram has about ten pixels of type to
    say it in, so "300 seconds" is not an option and neither is "00:05:00". */
@@ -8328,17 +8355,10 @@ function wfDiagramSvg(wf, run, selected) {
       ? s.select.options.map((o) => [o.next, o.name, o])
       : [[s.next, null, null]];
 
-  const order = [];
-  const seen = new Set();
-  const queue = [wf.start];
-  while (queue.length) {
-    const id = queue.shift();
-    if (!id || seen.has(id) || !byId[id]) continue;
-    seen.add(id);
-    order.push(id);
-    for (const [t] of outsOf(byId[id])) if (t && !seen.has(t)) queue.push(t);
-  }
-  for (const s of steps) if (!seen.has(s.id)) order.push(s.id);
+  // Shared with the timing diagram under this graph: the two pictures have
+  // to put a step on the same row, or the lane is one the reader must hunt
+  // for rather than glance down to.
+  const order = wfStepOrder(wf);
 
   const rows = {};
   order.forEach((id, i) => { rows[id] = i; });
@@ -8504,6 +8524,439 @@ function wfPacedNote(wf, run) {
     "interval on it, and a choice made inside that interval is held until " +
     "the window opens — the daemon releases it, not you" + held
   );
+}
+
+/* ------------------------------------------------------------------ */
+/* the run in the time domain                                          */
+/* ------------------------------------------------------------------ */
+/* The graph above says what this workflow CAN do. The journal says what this
+   run DID — and it said it as two hundred lines of prose in a fold nobody
+   opens twice. The same record laid on a time axis answers the one question
+   the prose cannot: where the wall clock actually went. One lane per step, a
+   bar per visit, and inside the bar the stretches where nothing was being
+   worked — a choice presented and not yet confirmed, a gate open, a question
+   sitting with a peer — drawn apart from the stretches where it was. A step
+   that took twenty minutes because a leader took nineteen of them to answer
+   looks nothing like one that took twenty minutes of work, and on this
+   picture they no longer read alike. */
+
+/* Which journal events open a stretch of WAITING inside a step, and what
+   closes each. The engine writes no single "waiting" event: every door has
+   its own pair, and a step can be behind two at once (a paced option chosen
+   inside its interval is held while the selection it belongs to is still
+   open), so they are tracked independently rather than collapsed to a flag.
+   `state_forced` closes every door because it is the one press that takes
+   the run somewhere else without answering any of them. */
+const WFT_WAIT = {
+  select_presented: {
+    kind: "select", label: "choice open",
+    ends: ["select_confirmed", "select_hold_cancelled", "state_forced"],
+  },
+  select_held: {
+    kind: "window", label: "held for its window",
+    ends: ["select_confirmed", "select_hold_cancelled", "window_discarded",
+           "state_forced"],
+  },
+  gate_wait: {
+    kind: "gate", label: "gate",
+    ends: ["approved", "state_forced"],
+  },
+  ask_opened: {
+    kind: "ask", label: "asked a peer",
+    ends: ["ask_answered", "ask_declined", "ask_abstained", "ask_escalated",
+           "ask_unresolved", "ask_discarded", "ask_unanswered_proceeded",
+           "ask_withdraw_failed", "state_forced"],
+  },
+};
+
+/* The events that happened AT a moment rather than over one — a glyph on the
+   bar, not a stretch of it. Anything unlisted is bookkeeping and is left out
+   rather than drawn as a mystery (the rule traceFlowLabel already follows). */
+function wftMark(e) {
+  const clip = (s, n) => wftClip(String(s == null ? "" : s)
+    .replace(/\s+/g, " ").trim(), n);
+  switch (e.event) {
+    case "step_report":
+      return { kind: "report", glyph: "◆", label: `report — ${clip(e.summary, 90)}` };
+    case "verify_passed":
+      return { kind: "pass", glyph: "✓", label: "verify passed" };
+    case "verify_failed":
+      return { kind: "fail", glyph: "✗", label: `verify FAILED — ${clip(e.output, 90)}` };
+    case "verify_discarded":
+      return { kind: "fail", glyph: "✗", label: "verify discarded" };
+    case "select_confirmed":
+      return { kind: "chose", glyph: "●", label: `chose ${e.option || "?"}` };
+    case "approved":
+      return { kind: "chose", glyph: "●", label: `approved by ${e.by || "?"}` };
+    // The three ways a delegated question ends without an answer. They are
+    // the reason a step's bar can be long with no door left open on it, so
+    // leaving them off would make the picture look like time spent working.
+    case "ask_unanswered_proceeded":
+      return { kind: "forced", glyph: "⋯", label: "nobody answered — proceeded" };
+    case "ask_unresolved":
+      return { kind: "forced", glyph: "⋯", label: "nobody to ask" };
+    case "ask_escalated":
+      return { kind: "forced", glyph: "↑", label: `escalated to ${e.to || "?"}` };
+    case "state_forced":
+      return { kind: "forced", glyph: "⤳", label: `forced to ${e.step || "?"}` };
+    case "loop_limit":
+      return { kind: "fail", glyph: "!", label: "loop limit reached" };
+    case "loop_extended":
+      return { kind: "chose", glyph: "↻", label: "loop limit raised" };
+    default:
+      return null;
+  }
+}
+
+/* journal -> the picture's model. Kept apart from the drawing because the
+   interesting half is here: which bar an event belongs to, which door it
+   opened or shut, and where a run that is still going has its right edge.
+   `nowMs` is passed in rather than read so the model is a pure function of
+   the record — a drawing that moves on its own cannot be pinned by a test. */
+function wfTimeline(wf, run, journal, nowMs) {
+  const entries = [];
+  for (const e of journal || []) {
+    const ms = Date.parse(e.at || "");
+    if (Number.isFinite(ms)) entries.push({ e, ms });
+  }
+  // Stable (ES2019 on), which matters here: a step completing and the next
+  // being delivered share a timestamp to the second, and the file's order is
+  // the only thing that says which of them came first.
+  entries.sort((a, b) => a.ms - b.ms);
+  const runStart = Date.parse((run || {}).started_at || "");
+  if (!entries.length && !Number.isFinite(runStart)) return null;
+  const t0 = entries.length ? entries[0].ms : runStart;
+  const last = entries.length ? entries[entries.length - 1].ms : t0;
+  const status = (run || {}).status;
+  const live = status !== "done" && status !== "aborted";
+  const now = Number.isFinite(nowMs) ? nowMs : Date.now();
+  // A run still going owns the axis out to now, so its open bar grows with
+  // every poll instead of stopping at whatever it last wrote. The floor keeps
+  // a run that has only just started from dividing by zero.
+  const t1 = Math.max(last, live ? now : last, t0 + 1000);
+
+  const bars = [];
+  const runMarks = [];
+  // Events that named a step the run had not been SEEN to reach yet. The
+  // engine writes a door's outcome an instant before the step it belongs to
+  // is delivered (`ask_unanswered_proceeded integrate` lands on the same
+  // second as `step_delivered integrate`, just ahead of it), so an event with
+  // nowhere to go is held rather than dropped, and laid on that step's bar
+  // the moment it opens.
+  const pending = {};
+  let bar = null;
+  const closeBar = (ms) => {
+    if (!bar) return;
+    bar.to = Math.max(bar.from, ms);
+    for (const w of bar.waits) if (w.to === null) w.to = bar.to;
+    bar = null;
+  };
+  // The doors and the point events, onto whatever bar is standing.
+  const attach = (e, ms) => {
+    if (!bar) return;
+    const opens = WFT_WAIT[e.event];
+    if (opens) {
+      bar.waits.push({ kind: opens.kind, label: opens.label, from: ms,
+                       to: null, ends: opens.ends });
+    } else {
+      for (const w of bar.waits) {
+        if (w.to === null && w.ends.indexOf(e.event) >= 0) w.to = ms;
+      }
+    }
+    const m = wftMark(e);
+    if (m) bar.marks.push(Object.assign({ at: ms }, m));
+  };
+  const openBar = (step, visit, ms) => {
+    // Closing on the way in, not only on completion: `state_forced` and a
+    // resumed run both put the run somewhere else without the standing step
+    // ever completing, and a bar left open runs across every lane below it.
+    closeBar(ms);
+    bar = {
+      step, visit: visit || 0, from: ms, to: null, live: false,
+      waits: [], marks: [],
+    };
+    if (!bar.visit) bar.visit = bars.filter((b) => b.step === step).length + 1;
+    bars.push(bar);
+    for (const q of pending[step] || []) attach(q.e, Math.max(ms, q.ms));
+    pending[step] = [];
+  };
+
+  for (const rec of entries) {
+    const e = rec.e, ms = rec.ms;
+    if (e.event === "started") {
+      runMarks.push({ at: ms, kind: "started",
+                      label: `run started · ${e.workflow || ""}`.trim() });
+      continue;
+    }
+    if (e.event === "done" || e.event === "aborted" || e.event === "archived") {
+      closeBar(ms);
+      runMarks.push({
+        at: ms, kind: e.event,
+        label: e.event === "done" ? "run finished" : `run ${e.event}`,
+      });
+      continue;
+    }
+    if (e.event === "step_delivered") { openBar(e.step || "?", e.visit, ms); continue; }
+    if (e.event === "step_completed") { closeBar(ms); continue; }
+    const step = e.step;
+    if (step && (!bar || bar.step !== step)) {
+      // A door is opened AT the step being entered, BEFORE its instructions
+      // are handed over — and a step that is nothing but a choice (a leader's
+      // `standby`) is never delivered at all, so a run can sit in one for
+      // twenty minutes with no `step_delivered` anywhere in the record. The
+      // door itself is therefore what puts the run in the step; without this
+      // the picture calls that step never entered.
+      if (WFT_WAIT[e.event]) openBar(step, e.visit, ms);
+      else { (pending[step] = pending[step] || []).push({ e, ms }); continue; }
+    }
+    attach(e, ms);
+  }
+  if (bar) {
+    bar.live = live;
+    bar.to = t1;
+    for (const w of bar.waits) if (w.to === null) w.to = t1;
+  }
+
+  const lanes = [];
+  const byLane = new Map();
+  const byId = {};
+  for (const s of (wf && wf.steps) || []) byId[s.id] = s;
+  const lane = (id, declared) => {
+    let l = byLane.get(id);
+    if (!l) {
+      const s = byId[id];
+      l = {
+        id, declared,
+        title: s && s.title && s.title !== id ? s.title : "",
+        bars: [], busy: 0, waited: 0,
+      };
+      byLane.set(id, l);
+      lanes.push(l);
+    }
+    return l;
+  };
+  for (const id of wfStepOrder(wf)) lane(id, true);
+  for (const b of bars) {
+    // A run outlives the file it was cut from: a step the workflow no longer
+    // declares still happened, and dropping it would leave a hole in the
+    // clock with nothing on the page saying why.
+    const l = lane(b.step, false);
+    l.bars.push(b);
+    l.busy += b.to - b.from;
+    for (const w of b.waits) l.waited += Math.max(0, w.to - w.from);
+  }
+  return { t0, t1, span: t1 - t0, live, lanes, bars, runMarks };
+}
+
+/* ---- drawing ------------------------------------------------------ */
+/* Same width as the state graph above it, and pinned at its natural size for
+   the same reason: one SVG unit is one CSS pixel, so a wide column must not
+   blow the type up with it. */
+const WFT = {
+  w: 480,      // total, matching wfDiagramSvg's W
+  name: 112,   // the step names down the left
+  right: 54,   // the per-step total down the right
+  head: 26,    // the elapsed axis across the top
+  row: 20,     // lane pitch
+  bar: 11,     // the occupancy bar inside a lane
+};
+
+/* Tick cadences that read whole. The axis is elapsed time, so these are the
+   units a person says out loud: seconds, minutes, hours, then days. */
+const WFT_TICKS = [1, 5, 15, 30, 60, 300, 900, 1800, 3600, 7200, 21600,
+                   43200, 86400, 172800, 604800];
+
+function wftTickStep(spanMs, want) {
+  const target = spanMs / (want || 5) / 1000;
+  for (const s of WFT_TICKS) if (s >= target) return s * 1000;
+  return WFT_TICKS[WFT_TICKS.length - 1] * 1000;
+}
+
+function wftClip(s, n) {
+  const t = String(s == null ? "" : s);
+  return t.length > n ? t.slice(0, n - 1) + "…" : t;
+}
+
+/* A duration as this picture says it: at most two units and never a decimal
+   — "8m40s", not "8.67m". The axis ticks land on whole units by construction,
+   the per-step totals down the right do not, and a column of totals nobody
+   can read at a glance is a column of noise. Truncating rather than rounding
+   the smaller unit keeps "1h59m" from ever printing as "1h60m". */
+function wftDur(ms) {
+  const s = Math.max(0, Math.round(ms / 1000));
+  if (s < 60) return `${s}s`;
+  if (s < 3600) {
+    const m = Math.floor(s / 60), r = s % 60;
+    return r ? `${m}m${r}s` : `${m}m`;
+  }
+  if (s < 86400) {
+    const h = Math.floor(s / 3600), r = Math.floor((s % 3600) / 60);
+    return r ? `${h}h${r}m` : `${h}h`;
+  }
+  const d = Math.floor(s / 86400), r = Math.floor((s % 86400) / 3600);
+  return r ? `${d}d${r}h` : `${d}d`;
+}
+
+function wftStamp(ms) {
+  return new Date(ms).toISOString().replace("T", " ").slice(0, 19) + "Z";
+}
+
+function wfTimelineSvg(model, selected, run) {
+  const lanes = model.lanes;
+  const H = WFT.head + lanes.length * WFT.row + 8;
+  const plotX = WFT.name;
+  const plotW = WFT.w - WFT.name - WFT.right;
+  // Two decimals is a twentieth of a pixel — past that the coordinates are
+  // noise, and a run with two hundred journal entries pays for every digit
+  // of it on every two-second poll.
+  const n = (v) => Math.round(v * 100) / 100;
+  const x = (ms) => n(plotX + ((ms - model.t0) / model.span) * plotW);
+  const current = run && run.step_id &&
+    run.status !== "done" && run.status !== "aborted" ? run.step_id : null;
+
+  const parts = [];
+  parts.push(
+    `<svg viewBox="0 0 ${WFT.w} ${H}" width="${WFT.w}" height="${H}" ` +
+    `xmlns="http://www.w3.org/2000/svg" class="wft">`
+  );
+
+  // the elapsed axis: gridlines the full height, labelled once across the top
+  const step = wftTickStep(model.span, 5);
+  parts.push(
+    `<text class="wft-axis" x="${plotX - 8}" y="${WFT.head - 8}" ` +
+    `text-anchor="end">elapsed →</text>`
+  );
+  for (let t = model.t0; t <= model.t1 + 1; t += step) {
+    const gx = x(t);
+    parts.push(
+      `<line class="wft-grid" x1="${gx}" y1="${WFT.head - 4}" ` +
+      `x2="${gx}" y2="${H - 6}"/>`
+    );
+    parts.push(
+      `<text class="wft-tick" x="${gx + 3}" y="${WFT.head - 8}">` +
+      `${escXml(t === model.t0 ? "0" : wftDur(t - model.t0))}</text>`
+    );
+  }
+  // The right edge is a moment too, and on a live run it is *now* — said once
+  // at the end of the axis rather than drawn as a line that creeps.
+  parts.push(
+    `<text class="wft-tick end" x="${WFT.w - 6}" y="${WFT.head - 8}" ` +
+    `text-anchor="end">` +
+    `${escXml((model.live ? "now · " : "") + wftDur(model.span))}</text>`
+  );
+
+  lanes.forEach((lane, i) => {
+    const top = WFT.head + i * WFT.row;
+    const mid = top + WFT.row / 2;
+    const cls = ["wft-lane"];
+    if (!lane.bars.length) cls.push("idle");
+    if (lane.id === current) cls.push("current");
+    if (lane.id === selected) cls.push("selected");
+    if (!lane.declared) cls.push("gone");
+    parts.push(`<g class="${cls.join(" ")}" data-step="${escXml(lane.id)}">`);
+    const visits = lane.bars.length;
+    parts.push(
+      `<title>${escXml(
+        lane.id + (lane.title ? ` — ${lane.title}` : "") + "\n" +
+        (visits
+          ? `${visits} visit${visits > 1 ? "s" : ""}, ${wftDur(lane.busy)} in all` +
+            (lane.waited ? `, ${wftDur(lane.waited)} of it waiting` : "")
+          : "never entered") +
+        (lane.declared ? "" : "\nno longer declared by this workflow")
+      )}</title>`
+    );
+    // The whole row is the click target, so a lane with no bar on it is still
+    // the same press as its box in the graph above.
+    parts.push(
+      `<rect class="wft-hit" x="0" y="${top}" width="${WFT.w}" ` +
+      `height="${WFT.row}"/>`
+    );
+    parts.push(
+      `<line class="wft-base" x1="${plotX}" y1="${mid}" ` +
+      `x2="${plotX + plotW}" y2="${mid}"/>`
+    );
+    parts.push(
+      `<text class="wft-name" x="${WFT.name - 8}" y="${mid + 4}" ` +
+      `text-anchor="end">${escXml(wftClip(lane.id, 17))}</text>`
+    );
+    if (visits) {
+      parts.push(
+        `<text class="wft-total" x="${WFT.w - 6}" y="${mid + 4}" ` +
+        `text-anchor="end">${escXml(
+          wftDur(lane.busy) + (visits > 1 ? ` ×${visits}` : "")
+        )}</text>`
+      );
+    }
+
+    for (const b of lane.bars) {
+      const bx = x(b.from);
+      const bw = n(Math.max(2, x(b.to) - bx));
+      const by = mid - WFT.bar / 2;
+      parts.push(`<g class="wft-bar${b.live ? " live" : ""}">`);
+      parts.push(
+        `<title>${escXml(
+          `${lane.id} ×${b.visit}\n${wftStamp(b.from)} → ` +
+          `${b.live ? "still standing here" : wftStamp(b.to)}\n` +
+          `${wftDur(b.to - b.from)}` +
+          b.waits.map((w) => `\n· ${w.label}: ${wftDur(w.to - w.from)}`).join("") +
+          b.marks.map((m) => `\n· ${m.label}`).join("")
+        )}</title>`
+      );
+      parts.push(
+        `<rect class="wft-run" x="${bx}" y="${by}" width="${bw}" ` +
+        `height="${WFT.bar}" rx="2"/>`
+      );
+      for (const w of b.waits) {
+        const wx = x(w.from);
+        const ww = n(Math.max(1, x(w.to) - wx));
+        parts.push(
+          `<rect class="wft-wait ${w.kind}" x="${wx}" y="${by}" ` +
+          `width="${ww}" height="${WFT.bar}"/>`
+        );
+      }
+      for (const m of b.marks) {
+        parts.push(
+          `<text class="wft-mark ${m.kind}" x="${x(m.at)}" ` +
+          `y="${by + WFT.bar - 2}" text-anchor="middle">` +
+          `${escXml(m.glyph)}</text>`
+        );
+      }
+      parts.push("</g>");
+    }
+    parts.push("</g>");
+  });
+
+  parts.push("</svg>");
+  return parts.join("");
+}
+
+/* The timing diagram as the run page's element: the model, the drawing, and
+   the lane clicks bound to the same selection the graph's boxes drive. Null
+   when there is nothing to lay on an axis — a run whose first step has not
+   been delivered has a journal but no duration anywhere in it. */
+function wfTimelinePanel(data, ui) {
+  const model = wfTimeline(
+    data.workflow || {}, data.run || {}, data.journal, Date.now()
+  );
+  if (!model || !model.bars.length) return null;
+  const box = el("div", "wf-time");
+  box.appendChild(el("h4", "wf-time-head", "time domain"));
+  const svg = el("div", "wf-time-svg");
+  svg.innerHTML = wfTimelineSvg(model, ui.getStep(), data.run || {});
+  svg.querySelectorAll("g.wft-lane[data-step]").forEach((g) => {
+    g.addEventListener("click", () => {
+      const step = g.dataset.step;
+      ui.select(ui.getStep() === step ? null : step);   // click again = clear
+    });
+  });
+  box.appendChild(svg);
+  box.appendChild(el(
+    "p", "wf-time-key",
+    "one lane per step, one bar per visit. The pale stretch inside a bar is " +
+    "time the run spent at a door — a choice open, a gate, a question with a " +
+    "peer — rather than working; ◆ a report, ✓/✗ a verify, ● the option taken."
+  ));
+  return box;
 }
 
 /* ------------------------------------------------------------------ */
