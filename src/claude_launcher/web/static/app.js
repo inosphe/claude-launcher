@@ -1063,8 +1063,11 @@ function termTimerTitle(pick, line, hold) {
         + "step into this session until you say."
         : "RESUME this run's step reminder: the daemon may re-type the step "
         + "into this session again."),
+      // Named by the route that survives: the badge is on the session's own
+      // row and goes to that session's run, where the strip above the nav is
+      // one element on a page other people are rearranging.
       "Set for this run only; the machine defaults stay untouched. The "
-      + "interval lives on the run page — the countdown above the rail's nav "
+      + "interval lives on the run page — the run's badge in the rail "
       + "opens it."
     );
   } else {
