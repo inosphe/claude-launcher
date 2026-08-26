@@ -18,6 +18,8 @@ import yaml
 from claude_launcher import daemon_client
 from claude_launcher.cflow import checkout, engine, state as state_mod
 
+from test_daemon_wedge import _stub_connect
+
 pytest_plugins = []
 
 
@@ -63,7 +65,7 @@ def _sessions(monkeypatch, *rows, fail=None):
         def post(self, path, body, **kw):
             return {}
 
-    monkeypatch.setattr(daemon_client, "connect", lambda: FakeClient())
+    _stub_connect(monkeypatch, daemon_client, FakeClient)
 
 
 def _row(name, cwd, **extra):
@@ -116,7 +118,7 @@ def test_a_run_keyed_away_from_its_session_is_a_mismatch(flow_dir, monkeypatch):
 def test_the_check_is_quiet_when_it_cannot_be_made(flow_dir, monkeypatch):
     """No daemon, an unknown name, an unmanaged run: no answer is not an
     error, and 'could not check' on every daemonless run is noise."""
-    monkeypatch.setattr(daemon_client, "connect", lambda: None)
+    _stub_connect(monkeypatch, daemon_client, lambda: None)
     down = checkout.inspect(session="s1", cwd=str(flow_dir))
     assert down.problem and checkout.warning(down) is None
 
@@ -229,7 +231,7 @@ def test_the_command_says_it_could_not_ask_rather_than_reporting_all_clear(
 ):
     """"Could not ask" and "nobody is there" are different answers, and a
     reader who cannot tell them apart reads silence as an all-clear."""
-    monkeypatch.setattr(daemon_client, "connect", lambda: None)
+    _stub_connect(monkeypatch, daemon_client, lambda: None)
     code, out = _run_cli(monkeypatch, capsys)
     assert code == 0
     assert "unknown" in out

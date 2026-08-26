@@ -14,6 +14,8 @@ from claude_launcher.cflow import engine, mcp, model, responders, state as state
 from claude_launcher.cflow.engine import CflowError
 from claude_launcher.cflow.model import WorkflowError
 
+from test_daemon_wedge import _stub_connect
+
 LINEAR = """
 name: linear
 steps:
@@ -1307,7 +1309,7 @@ def _roster(monkeypatch, *meshes, fail=None):
         def post(self, path, body, **kw):
             return {}
 
-    monkeypatch.setattr(daemon_client, "connect", lambda: FakeClient())
+    _stub_connect(monkeypatch, daemon_client, FakeClient)
 
 
 def _links(*pairs):
@@ -1449,7 +1451,7 @@ def test_the_pool_reports_rather_than_raises(monkeypatch, kwargs, expected):
 
 
 def test_a_dead_daemon_is_a_reason_not_a_crash(monkeypatch):
-    monkeypatch.setattr(daemon_client, "connect", lambda: None)
+    _stub_connect(monkeypatch, daemon_client, lambda: None)
     assert "daemon is not running" in responders.pool(session="dev1").problem
     _roster(monkeypatch, TEAM, fail="connection refused")
     assert "could not be read" in responders.pool(session="dev1").problem

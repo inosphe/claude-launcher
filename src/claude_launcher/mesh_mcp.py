@@ -390,11 +390,23 @@ class MeshMcpError(Exception):
 
 
 def _client():
-    client = daemon_client.connect()
+    client, why = daemon_client.connect_with_diagnosis()
     if client is None:
+        reason = daemon_client.unreachable_reason(why)
+        if not daemon_client.is_absent(why):
+            # The agent reading this is the caller that matters most: told
+            # "not running", it starts a daemon, and told nothing it retries
+            # blind. A send that silently needed a retry once let a window
+            # declaration land 22s late. So say which of the two it is, and
+            # what the right next move actually is.
+            raise MeshMcpError(
+                f"the claunch {reason} -- this is NOT a report that the "
+                f"daemon is gone, so do not start one; call again and act "
+                f"only on what the retry returns"
+            )
         raise MeshMcpError(
-            "the claunch daemon is not running (start it with any claunch "
-            "session command, or 'claunch daemon start')"
+            f"the claunch {reason} (start it with any claunch "
+            f"session command, or 'claunch daemon start')"
         )
     return client
 

@@ -569,9 +569,21 @@ def _by_lineage(sessions):
 
 
 def _cmd_sessions(_args: argparse.Namespace) -> int:
-    client = daemon_client.connect()
+    client, why = daemon_client.connect_with_diagnosis()
     if client is None:
-        print("daemon is not running; no sessions")
+        if not daemon_client.is_absent(why):
+            # Not "no sessions": we did not get to look. Said on stderr and
+            # with a non-zero status because the two failures have to be
+            # distinguishable to something that only counts lines -- a caller
+            # piping this into `grep -c` reads an unconfirmed look as an empty
+            # roster, which is how a live session once got reported as retired.
+            print(
+                f"{daemon_client.unreachable_reason(why)}; the session list "
+                f"was not read",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"{daemon_client.unreachable_reason(why)}; no sessions")
         return 0
     sessions = client.get("/api/sessions").get("sessions", [])
     if not sessions:

@@ -194,11 +194,13 @@ def pool(*, session: str, mesh: str = "", cwd: Optional[str] = None) -> Pool:
             problem="this run is not driven by a managed session, so it has "
             "no mesh identity to ask from"
         )
-    client = daemon_client.connect()
+    client, why = daemon_client.connect_with_diagnosis()
     if client is None:
+        # Which of the two it was decides what the reader does next, and a
+        # slow daemon reported as an absent one sends them to start a second.
         return Pool(
-            problem="the claunch daemon is not running, so the mesh roster "
-            "cannot be read"
+            problem=f"the claunch {daemon_client.unreachable_reason(why)}, "
+            f"so the mesh roster cannot be read"
         )
     try:
         doc = client.get("/api/mesh", timeout=CALL_TIMEOUT)
@@ -351,9 +353,12 @@ def deliver(
     not send would be stuck on the least important half of the operation. The
     failure is returned so it can be journaled and shown, not swallowed.
     """
-    client = daemon_client.connect()
+    client, why = daemon_client.connect_with_diagnosis()
     if client is None:
-        return "the claunch daemon is not running, so nobody was notified"
+        return (
+            f"the claunch {daemon_client.unreachable_reason(why)}, so nobody "
+            f"was notified"
+        )
     try:
         client.post(
             f"/api/mesh/{mesh}/messages",
@@ -402,9 +407,12 @@ def withdraw(
     already recorded and the run has already moved, so a message that does
     not send costs a wasted turn, not correctness.
     """
-    client = daemon_client.connect()
+    client, why = daemon_client.connect_with_diagnosis()
     if client is None:
-        return "the claunch daemon is not running, so nobody was told"
+        return (
+            f"the claunch {daemon_client.unreachable_reason(why)}, so nobody "
+            f"was told"
+        )
     body = (
         f"cflow: the question I sent you ({ask.get('id')}, "
         f"{workflow}/{ask.get('step')}) is closed — the user answered it "

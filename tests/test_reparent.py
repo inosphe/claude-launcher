@@ -25,6 +25,8 @@ from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
 from claude_launcher.daemon.mesh import MeshManager
 
+from test_daemon_wedge import _stub_connect
+
 
 # --------------------------------------------------------------------------- #
 # the manager: guards around one field
@@ -265,7 +267,7 @@ def test_the_tool_sends_the_caller_as_the_actor(home, monkeypatch):
             posted.append((path, body))
             return {"session": "w1", "parent": "mid", "previous": "lead", "depth": 2}
 
-    monkeypatch.setattr(mesh_mcp.daemon_client, "connect", lambda: Client())
+    _stub_connect(monkeypatch, mesh_mcp.daemon_client, Client)
     monkeypatch.setenv("CLAUNCH_SESSION", "lead")
     out = mesh_mcp.call_tool("reparent", {"session": "w1", "parent": "mid"})
     assert out["parent"] == "mid"

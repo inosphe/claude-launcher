@@ -63,9 +63,17 @@ def _cmd_create(args: argparse.Namespace) -> int:
 
 
 def _cmd_ls(_args: argparse.Namespace) -> int:
-    client = daemon_client.connect()
+    client, why = daemon_client.connect_with_diagnosis()
     if client is None:
-        print("daemon is not running; no meshes")
+        if not daemon_client.is_absent(why):
+            # An unconfirmed look is not an empty roster; see _cmd_sessions.
+            print(
+                f"{daemon_client.unreachable_reason(why)}; the mesh list was "
+                f"not read",
+                file=sys.stderr,
+            )
+            return 1
+        print(f"{daemon_client.unreachable_reason(why)}; no meshes")
         return 0
     payload = client.get("/api/mesh")
     meshes = payload.get("meshes", [])
