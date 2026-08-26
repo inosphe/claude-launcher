@@ -1912,12 +1912,17 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         if wd:
             info["winddown"] = wd
         attached.append(info)
-    return web.json_response(
-        {
-            "sessions": attached,
-            "llm_configured": briefing.llm_configured(briefing.llm_config()),
-        }
-    )
+    # A config file that cannot be read must not cost the caller the session
+    # list: this poll is the rail's lifeline (it carries every row, and the
+    # client rebuilds the whole list off it), while the llm flag is one
+    # toggle's enabled-ness. So the read is guarded here rather than allowed
+    # to leave the handler -- StoreError is not in error_middleware's list and
+    # would surface as a 500 on the one request the UI cannot do without.
+    try:
+        llm_ok = briefing.llm_configured(briefing.llm_config())
+    except store.StoreError:
+        llm_ok = False
+    return web.json_response({"sessions": attached, "llm_configured": llm_ok})
 
 
 async def h_sessions_create(request: web.Request) -> web.Response:

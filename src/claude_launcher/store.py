@@ -33,6 +33,7 @@ nothing else stores these settings, so there is no separate "export" step.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -79,14 +80,40 @@ def load() -> dict:
 
 
 def save(doc: dict) -> None:
-    """Persist ``doc`` as the config file (stable key order, like the old export)."""
+    """Persist ``doc`` as the config file (stable key order, like the old export).
+
+    Written to a temporary file beside it and renamed into place, because this
+    file has concurrent readers. :func:`load` reads it fresh on every call and
+    the daemon calls it on **every** ``/api/sessions`` poll (two seconds, per
+    open browser tab, to answer whether the briefing summariser is configured
+    -- see ``daemon.api.h_sessions_list``). The plain ``write_text`` this
+    replaced truncated the file before writing it, so a reader landing inside
+    that window saw an empty or half-written document. Empty is the dangerous
+    one: it parses cleanly and simply has no ``llm`` block, so a configuration
+    that was never wrong reported itself absent for that poll and the web UI's
+    briefing controls went inert until the next one.
+
+    ``os.replace`` is atomic on POSIX and on Windows, so a reader sees either
+    the whole old document or the whole new one -- never a state between them.
+    The temporary carries this process's pid so two writers cannot land on the
+    same scratch name, and it is cleaned up if the rename never happens.
+    """
     doc.setdefault("version", VERSION)
     p = path()
     p.parent.mkdir(parents=True, exist_ok=True)
     text = yaml.safe_dump(
         doc, sort_keys=True, allow_unicode=True, default_flow_style=False
     )
-    p.write_text(text, encoding="utf-8")
+    tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, p)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def update(mutator: Callable[[dict], None]) -> dict:
