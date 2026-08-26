@@ -109,6 +109,7 @@ steps:
       테스트 수치와 그 축·트리·환경, 양방향 diff, 포함 관계, 스택 위치,
       merge-tree 결과), 심사 한계와 테스트가 세우지 못하는 것, 그리고 판정
       마커 — `LANDING REQUEST @ <hash>` / `REBASE REQUESTED @ <hash>` /
+      `REVIEWED: pass @ <hash>` / `CHANGES REQUESTED: <무엇을>` /
       `HOLD: <이유>` / `BLOCKED: <게이트>` / `merged <hash>`. 코멘트는 산문
       문단이 아니라 (축, 트리, 값)의 줄로 적는다 — 보드는 저장소에 커밋되므로
       산문은 무게만 늘리고 되짚을 때 읽히지 않는다. 긴 묶음은 파일로 붙인다:
@@ -550,7 +551,89 @@ steps:
       커밋 해시·테스트 수치가 담긴 완료 보고가 기록되고 같은 묶음이 이슈
       코멘트로도 남았다(메시 가입 시 상위에게 nudge 한 줄). master는
       움직이지 않았다.
-    next: landing
+    next: peer-review
+
+  peer-review:
+    title: 동료 리뷰 (착지 요청 전)
+    instructions: |
+      이 단계는 네가 답하는 자리가 아니다 — 질문은 리뷰어에게(없으면 상위
+      리더에게) 나가 있다. 네가 할 일은 답할 사람이 읽을 것을 갖춰 두고
+      턴을 끝내는 것이다.
+
+      갖출 것은 commit 단계에서 이미 만들었다: 목표·범위, 브랜치, 커밋
+      해시, 표적 테스트 수치가 담긴 이슈 코멘트. 그 묶음이 없으면 지금
+      만든다 — `claunch beads comments add <id> -f <파일>`. 답하는 세션은
+      네 런 상태를 읽지 않는다; 보드와 브랜치가 그가 보는 전부다.
+
+      메시에 속해 있으면 nudge 한 줄만 보낸다: `<id> 리뷰 요청 —
+      <브랜치> @ <tip>, 근거는 코멘트에.` 같은 내용을 본문에 다시 싣지
+      않는다. 그리고 기다리지 않는다 — 질문이 누구에게 나가 있는지 한
+      줄만 보고에 남기고 턴을 끝낸다.
+    select:
+      # 누가 답하는가 — 리뷰는 competence 결정이라 형제가 정상 답변자다.
+      # 그래서 첫 그룹에 scope를 두지 않는다(기본 any). 착지 결정은
+      # authority 결정이라 scope: ancestor로 묶여 있다 — 두 문의 종류가
+      # 다르고, 그래서 한 문에 합치지 않았다: 합치면 리뷰어가 통합
+      # 순서까지 정하게 된다.
+      #
+      # 리뷰어가 없는 편성이 정상이다. 그때 첫 그룹은 아무도 못 맞춰
+      # skip되고(사유는 저널에 남는다) 상위 리더가 받는다. 데몬이
+      # 역할·배선·생존을 그 순서로 보고 각각 다른 사유를 적는다
+      # (cflow/responders.py Pool.match) — 역할이 없는 것과, 있는데 안
+      # 닿는 것과, 닿는데 죽은 것은 고치는 방법이 서로 다르기 때문이다.
+      # 선언 하나가 편성에 따라 리뷰어 게이트도 되고 리더 부담도 된다.
+      #
+      # otherwise: human을 쓰지 않는다 — 리뷰어가 없는 편성에서 워커 수만큼
+      # 사용자를 세운다. otherwise: self는 리더까지 기권했을 때의 밸브다.
+      # 그 통과는 승인이 아니라 무응답으로 저널에 남고(엔진이 그렇게
+      # 적는다), master를 지키는 것은 이 문이 아니라 리더의 머지 전권과
+      # 통합 후 전체 스윕이다 — 착지 결정이 사람 문을 폐지할 때 쓴 것과
+      # 같은 판정이다. 이 문은 게이트가 아니라 문이다.
+      #
+      # timeout이 이 단계의 안전장치다. 없으면 deadline이 안 걸리고
+      # (engine._deadline은 timeout이 없으면 None을 준다) 데몬 시계가 돌
+      # 것이 없어져, 리뷰어가 질문을 받아 놓고 침묵하면 런이 영구히
+      # 굳는다 — 역할이 없을 때가 아니라 있는데 안 답할 때가 위험하다.
+      prompt: |
+        이 메시의 워커 하나가 한 회차의 목표를 자기 브랜치에 커밋했고
+        표적 테스트가 green이다. 착지 요청을 올리기 전에 동료 판정을
+        구하는 자리다 — 통과인가, 고칠 것이 있는가?
+
+        질문을 보낸 세션이 그 워커다. 이슈 id는 그 세션이 assignee인
+        in_progress 항목이다 — `claunch beads list --status in_progress
+        --json`. 근거는 보드와 브랜치에 있다: `claunch beads comments <id>`
+        (목표·범위·브랜치·해시·수치)와 `git log --oneline <base>..<tip>`,
+        `git diff <base>..<tip>`.
+
+        보는 것은 셋이다: 커밋이 그 목표를 실제로 달성했는가, 범위 밖을
+        건드리지 않았는가, 표적 테스트가 그 목표를 실제로 덮는가. 스타일과
+        취향은 여기서 다루지 않는다 — 이 문이 막는 것은 잘못된 변경이지
+        다른 변경이 아니다.
+
+        판정은 이 답과 별개로 네가 보드에 남긴다:
+        `claunch beads comments add <id> "REVIEWED: pass @ <tip>"` 또는
+        `claunch beads comments add <id> "CHANGES REQUESTED: <무엇을>"`.
+        고칠 것을 고르면 무엇을 고쳐야 하는지가 그 코멘트에 있어야 한다 —
+        선택지만으로는 워커가 무엇을 할지 모른다. 상태는 건드리지 않는다:
+        이슈는 그대로 in_progress이고, 표를 움직이는 것은 워커의 착지
+        요청이다.
+
+        근거를 못 읽었으면 추측하지 말고 abstain으로 넘긴다. 기권은 다음
+        그룹으로 넘어가고, 아무도 답하지 않으면 리뷰 없이 통과한다 — 그
+        경우 방어선은 리더의 통합 후 전체 스윕이다.
+      chooser:
+        from:
+          - {role: reviewer}
+          - {role: leader, scope: ancestor}
+        otherwise: self
+        timeout: 900
+      options:
+        pass:
+          description: 리뷰 통과 — 착지 결정으로 간다
+          next: landing
+        changes:
+          description: 고칠 것이 있다 — 작업 실행으로 돌아간다(무엇을 고칠지는 보드의 CHANGES REQUESTED 코멘트다)
+          next: work
 
   landing:
     title: 착지 결정
