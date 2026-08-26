@@ -432,6 +432,21 @@ check("the session terminal is built with a real scrollback, so the main"
       /scrollback:\s*5000/.test(slice("function freshAttach(name)",
                                       "term.onData(sendInput)")));
 
+/* --- and this page asks the daemon to fill that scrollback --------------- */
+{
+  const w = build();
+  (async () => {
+    await w.live();
+    const u = w.sockets[w.sockets.length - 1].url;
+    check("the socket asks for the seed explicitly — the daemon sends none"
+          + " without it, so `claunch attach` is not handed five thousand"
+          + " lines it never opted into",
+          /[?&]scrollback=1\b/.test(u), u);
+    check("and it is still the session's own terminal socket",
+          /\/api\/sessions\/s8\/ws/.test(u), u);
+  })();
+}
+
 /* The checks run in async blocks, so the tally is only complete once the
    microtask queue has drained — and a throw inside one of them must not be
    reported as a pass on the way out. */

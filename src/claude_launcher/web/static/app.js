@@ -2836,8 +2836,15 @@ function openSocket(name) {
   setLink("opening");
 
   const proto = location.protocol === "https:" ? "wss" : "ws";
+  // `scrollback=1` asks the daemon to seed this socket with its scrollback
+  // before the grid repaint. This page is the client that wants it: its xterm
+  // is built with a real scrollback (buildSessionTerm), so the seeded lines
+  // land somewhere and the wheel over them is the browser's own. The daemon
+  // sends nothing without the flag — `claunch attach` never asked for five
+  // thousand lines, and a client that says nothing must keep what it had.
   const sock = new WebSocket(
-    `${proto}://${location.host}${url(`/api/sessions/${encodeURIComponent(name)}/ws`)}`
+    `${proto}://${location.host}`
+    + url(`/api/sessions/${encodeURIComponent(name)}/ws?scrollback=1`)
   );
   sock.binaryType = "arraybuffer";
   ws = sock;

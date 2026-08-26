@@ -939,6 +939,22 @@ def test_ws_scroll_control_serves_history_and_freezes_data(home, tmp_path):
                     if pred(data):
                         return data
 
+            # A client that asks for the scrollback gets it before the grid,
+            # so its own terminal can serve the wheel natively.
+            asked = await client.ws_connect(
+                "/api/sessions/wsc/ws?scrollback=1", headers=bearer
+            )
+            try:
+                assert json.loads((await asked.receive(timeout=10)).data)["type"] == "init"
+                hist = await asked.receive(timeout=10)
+                assert hist.type == aiohttp.WSMsgType.BINARY
+                assert hist.data.startswith(b"\x1b[?1049l")
+                assert b"echo:l0" in hist.data, "the seed carries real history"
+                grid = await asked.receive(timeout=10)
+                assert grid.type == aiohttp.WSMsgType.BINARY
+            finally:
+                await asked.close()
+
             ws = await client.ws_connect("/api/sessions/wsc/ws", headers=bearer)
             try:
                 msg = await ws.receive(timeout=10)
@@ -948,15 +964,12 @@ def test_ws_scroll_control_serves_history_and_freezes_data(home, tmp_path):
                 assert init["alt"] is False  # the echo harness lives in the main buffer
                 assert init["mouse"] is False  # and it never asks for the mouse
 
-                # On the main buffer the attach hands over the scrollback
-                # first, so the viewer's own terminal can serve the wheel
-                # natively, and only then the grid.
-                hist = await ws.receive(timeout=10)
-                assert hist.type == aiohttp.WSMsgType.BINARY
-                assert hist.data.startswith(b"\x1b[?1049l")
-                assert b"echo:l0" in hist.data, "the seed carries real history"
+                # A client that asked for nothing gets nothing: the very next
+                # binary frame is the grid, not five thousand lines of history
+                # it never opted into. `claunch attach` is that client.
                 seed = await ws.receive(timeout=10)
                 assert seed.type == aiohttp.WSMsgType.BINARY
+                assert b"echo:l0" not in seed.data, "no unrequested scrollback"
 
                 await ws.send_str(json.dumps({"type": "scroll", "lines": 5}))
                 scrolled = await next_json(lambda d: d.get("type") == "scrolled")

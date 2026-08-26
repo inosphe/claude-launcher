@@ -212,7 +212,7 @@ return {
   const sa = w.sockets[w.sockets.length - 1];
   check("a fresh session opens one socket", w.sockets.length === 1, w.sockets.length);
   check("...pointed at that session",
-        sa.url.endsWith("/api/sessions/a/ws"), sa.url);
+        /\/api\/sessions\/a\/ws(\?|$)/.test(sa.url), sa.url);
   check("attach has taken the header", w.api.current === "a", w.api.current);
   check("and built a terminal", !!w.api.term && !w.api.term.disposed, !!w.api.term);
   check("nothing is parked yet", w.api.keep().length === 0, w.api.keep());
@@ -330,7 +330,7 @@ return {
         w.sockets.length === before + 1, w.sockets.length);
   const fresh = w.sockets[w.sockets.length - 1];
   check("...opened for that session again",
-        fresh.url.endsWith("/api/sessions/a/ws"), fresh.url);
+        /\/api\/sessions\/a\/ws(\?|$)/.test(fresh.url), fresh.url);
   check("and the session is back on screen", w.api.current === "a", w.api.current);
 }
 

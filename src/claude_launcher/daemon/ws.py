@@ -2,6 +2,13 @@
 
 Protocol (matches the SPA's app.js and any non-browser client):
 
+Query parameters: ``?scrollback=1`` asks to be seeded with the daemon's
+scrollback (one binary frame, before the repaint, main buffer only) so the
+client's own terminal can serve the wheel natively. Off by default — the seed
+is up to five thousand lines, which a browser has somewhere to put and a
+terminal on the end of ``claunch attach`` does not. A client that asks for
+nothing gets what it always got.
+
 - server -> client, binary: raw PTY output bytes (feed straight to xterm.js).
   On connect the server first sends a JSON ``init`` text frame
   (``{"type":"init","cols":..,"rows":..,"status":..,"pid":..,"boot_id":..}``),
@@ -80,6 +87,21 @@ class ViewerState:
     offset: int = 0
 
 
+def _wants_scrollback(request: web.Request) -> bool:
+    """Whether this client asked to be seeded with the daemon's scrollback.
+
+    Opt-in, and deliberately so. The seed is worth up to
+    :data:`~claude_launcher.daemon.screen.HISTORY_SEED_LINES` lines, which is
+    what a browser's xterm wants (it has a scrollback to put them in, and the
+    wheel over it is then the browser's own) and what a terminal on the other
+    end of ``claunch attach`` did not ask for. Absent the flag nothing is
+    sent — so a client that says nothing keeps the behaviour it has always
+    had, and one written later inherits the quiet side by default rather than
+    having to know to turn it off.
+    """
+    return request.query.get("scrollback") in ("1", "true")
+
+
 async def _synced(session) -> None:
     """Let the rendered grid catch up before it is replayed to a viewer.
 
@@ -139,10 +161,21 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
         await _synced(session)
         # On the main buffer, hand the viewer the scrollback before the grid,
         # so its own terminal holds what the daemon holds and the wheel below
-        # it is the browser's own. Skipped on the alternate screen: those rows
-        # would land in a buffer that keeps no scrollback, and a program there
-        # has usually taken the mouse anyway.
-        if not session.screen.alt_screen:
+        # it is the browser's own.
+        #
+        # Only when the client asked (``?scrollback=1``). The default is to
+        # send nothing, and that direction is the point: a viewer that says
+        # nothing gets what it has always got. Seeding by default would push
+        # up to five thousand lines into `claunch attach`'s terminal — a
+        # change nobody opted into, on a client that never asked for a
+        # scrollback and cannot use one the way a browser does. "Say nothing,
+        # get nothing" also means the next client to arrive inherits the safe
+        # side rather than this defect.
+        #
+        # Skipped on the alternate screen whatever the client asked: those
+        # rows would land in a buffer that keeps no scrollback, and a program
+        # there has usually taken the mouse anyway.
+        if _wants_scrollback(request) and not session.screen.alt_screen:
             seed = session.screen.history_sequence()
             if seed:
                 await ws.send_bytes(seed)

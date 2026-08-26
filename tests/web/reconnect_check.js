@@ -205,7 +205,7 @@ function build(opts) {
           w.apiCalls.length === 1 && w.apiCalls[0] === "/api/daemon", w.apiCalls);
     check("and then opened a second socket", w.sockets.length === 2);
     check("pointed at the same session",
-          w.sockets[1].url.endsWith("/api/sessions/s7/ws"), w.sockets[1].url);
+          /\/api\/sessions\/s7\/ws(\?|$)/.test(w.sockets[1].url), w.sockets[1].url);
     w.sockets[1].opened();
     check("which is live again", w.api.state === "live", w.api.state);
     check("with a full retry budget for the next outage", w.api.tries === 0,
