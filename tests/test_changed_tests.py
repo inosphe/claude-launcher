@@ -403,6 +403,110 @@ def test_the_command_never_names_the_whole_test_directory():
     assert "--no-sync" in cmd  # a gate does not re-resolve a live daemon's venv
 
 
+# --------------------------------------------------------------------------- #
+# The basetemp: one string doing three jobs.
+# --------------------------------------------------------------------------- #
+#
+# The path passed to ``--basetemp`` is pytest's scratch root, it is the only
+# thing in a process listing that says whose pytest that is, and -- because a
+# cflow gate keeps no stdout -- its CreationTime and ``popen-gw*`` count are
+# the only surviving record of when a dead run started and how wide it ran.
+#
+# pytest empties an explicit basetemp when the run starts, so those three only
+# coexist if the name is unique per run. It used to be ``C:/t/<session>c``,
+# fixed for the session's whole life, which meant a round's second gate erased
+# the first's record at startup -- measured, and the reason these exist.
+
+
+def test_basetemp_is_unique_per_run(monkeypatch):
+    """The regression this section guards: a reused name is a lost timeline.
+
+    pytest ``rm_rf``s an explicit basetemp at startup, so two runs on one name
+    do not merely collide -- the later one destroys the earlier one's record
+    of itself, and a gate has no stdout to fall back on.
+    """
+    monkeypatch.setenv("CLAUNCH_SESSION", "s99")
+    first = changed_tests.session_basetemp("s99", now=1_000_000)
+    later = changed_tests.session_basetemp("s99", now=1_000_061)
+    assert first != later
+
+
+def test_basetemp_still_says_whose_run_it_is(monkeypatch):
+    """Generation must not cost identity: a process scan matches the prefix.
+
+    Uniqueness and recognisability are different properties of the same
+    string, and conflating them is what pinned the old name -- the session
+    only ever needed to be *findable*, not the whole path to be stable.
+    """
+    path = changed_tests.session_basetemp("s99", now=1_000_000)
+    assert "/s99c" in path
+    assert path.startswith(changed_tests.basetemp_root().as_posix())
+
+
+def test_basetemp_stays_under_the_measured_path_ceiling():
+    """48 characters, measured, not guessed: xdist nests ``popen-gwN/`` under
+    it and the transcript tests fold an absolute cwd back into a filename, so
+    the path is ``2*basetemp+162`` against MAX_PATH -- 48 passes at 258, 49
+    fails at 260. The generation suffix has to be spent out of that budget."""
+    path = changed_tests.session_basetemp("s1234567890", now=1_000_000)
+    assert len(path) <= 48, path
+
+
+def test_a_pinned_basetemp_reaches_the_command():
+    """A hand run needs to be able to name its own tree -- that is how the
+    two runs of one round stay separable when one of them is not the gate."""
+    cmd = changed_tests.build_command(
+        ["tests/test_mesh.py"], basetemp="C:/t/pinned"
+    )
+    assert "--basetemp=C:/t/pinned" in cmd
+
+
+def test_pruning_keeps_the_newest_and_leaves_other_sessions_alone(
+    tmp_path, monkeypatch
+):
+    """Unique names mean nothing ever reclaims a directory -- with an explicit
+    basetemp pytest skips its own end-of-session cleanup as well -- so this
+    round added the reclaiming. Two properties matter more than the count:
+
+    * the newest survive, because a *live* sibling run of the same session is
+      always among them (a hand run overlapping a gate run is normal), and
+    * another session's directories are that session's evidence. Deleting
+      them would trade this bug for a worse one.
+    """
+    root = tmp_path / "t"  # conftest seeds tmp_path itself, so take a subdir
+    root.mkdir()
+    monkeypatch.setattr(changed_tests, "basetemp_root", lambda: root)
+    for stamp in ("0101000001", "0101000002", "0101000003"):
+        (root / f"s99c{stamp}").mkdir()
+    (root / "s99c").mkdir()  # the pre-generation name, aged out by sorting
+    theirs = root / "s98c0101000001"
+    theirs.mkdir()
+
+    dropped = changed_tests.prune_basetemps("s99", keep=2)
+
+    survivors = sorted(p.name for p in root.iterdir())
+    assert survivors == ["s98c0101000001", "s99c0101000002", "s99c0101000003"]
+    assert theirs.exists(), "another session's timeline is not ours to delete"
+    assert sorted(p.name for p in dropped) == ["s99c", "s99c0101000001"]
+
+
+def test_pruning_survives_a_locked_directory(tmp_path, monkeypatch):
+    """Housekeeping never decides a gate. A directory that cannot be removed
+    is a live run or an open handle; going red over it would turn a lost temp
+    tree into a lost round."""
+    root = tmp_path / "t"
+    root.mkdir()
+    monkeypatch.setattr(changed_tests, "basetemp_root", lambda: root)
+    for stamp in ("0101000001", "0101000002"):
+        (root / f"s99c{stamp}").mkdir()
+
+    def boom(path):
+        raise OSError(32, "The process cannot access the file")
+
+    monkeypatch.setattr(changed_tests.shutil, "rmtree", boom)
+    assert changed_tests.prune_basetemps("s99", keep=1) == []
+
+
 def test_the_script_runs_as_a_script_and_its_exit_status_reaches_the_shell():
     """The verify line runs it this way, and only this path proves the file
     is executable and its exit code survives the shell."""
