@@ -841,6 +841,36 @@ class Mesh:
                 delivered.append(handle)
         return {"recipients": recipients, "delivered": delivered, "remote": remote}
 
+    def ack_timeout(self) -> dict:
+        """This mesh's ack-timeout settings: ``{enabled, owed_secs,
+        door_secs}``.
+
+        Read defensively, like :meth:`MeshManager.backpressure` beside it: a
+        ``mesh.json`` written before the section existed has no
+        ``ack_timeout`` key, and neither a ledger nor a delivery may fall
+        over because of that — an absent section means the pre-timeout
+        behaviour (nothing ever expires), which is what those files were
+        running under anyway.
+
+        The two clocks are separate because the two debts are different. A
+        DELIVERED question the member never answered is an obligation, and
+        ``owed_secs`` writes it off. An UNDELIVERED message is not the
+        member's debt at all — it is the daemon's — and ``door_secs`` only
+        stops it counting toward ``backpressure.inbox_max``; the message is
+        still queued and still lands on respawn.
+        """
+        pol = self.policy.get("ack_timeout") or {}
+        if not isinstance(pol, dict) or not pol.get("enabled", False):
+            return {"enabled": False, "owed_secs": 0.0, "door_secs": 0.0}
+        try:
+            return {
+                "enabled": True,
+                "owed_secs": max(0.0, float(pol.get("owed_secs", 0.0) or 0.0)),
+                "door_secs": max(0.0, float(pol.get("door_secs", 0.0) or 0.0)),
+            }
+        except (TypeError, ValueError):
+            return {"enabled": False, "owed_secs": 0.0, "door_secs": 0.0}
+
     def owed(self, handle: str) -> List[dict]:
         """Reply-expecting messages already DELIVERED to ``handle`` that it
         has not answered — the per-message form of the policy engine's
@@ -868,7 +898,20 @@ class Mesh:
         list is only worth reading if what stays on it is what still matters.
         """
         dropped = self.dismissed.get(handle) or frozenset()
-        return [m for m in self.owed_all(handle) if m.get("id") not in dropped]
+        secs = self.ack_timeout()["owed_secs"]
+        now = datetime.now(timezone.utc) if secs else None
+        out: List[dict] = []
+        for m in self.owed_all(handle):
+            if m.get("id") in dropped:
+                continue
+            if now is not None:
+                age = _age_secs(m.get("ts"), now)
+                # An unparsable/absent ts is NOT expired: the timeout may
+                # only ever forgive a debt it can actually date.
+                if age is not None and age >= secs:
+                    continue
+            out.append(m)
+        return out
 
     def owed_all(self, handle: str) -> List[dict]:
         """:meth:`owed` before the operator's dismissals are subtracted.
@@ -883,6 +926,23 @@ class Mesh:
         done = self.delivered_ids.get(handle) or frozenset()
         n = len(self.messages)
         out: List[dict] = []
+        # A joining member's cursor jumps to the end of the log (see
+        # ``MeshManager.join``), which makes every earlier message read as
+        # "already delivered" to it. Without a floor the walk below then
+        # charges a member that has never spoken with the whole history it
+        # arrived after — mail sent before it existed, addressed to a '*'
+        # that did not include it. Its join is that floor.
+        member = self.members.get(handle)
+        # ONE clock for both sides of the comparison below. Read twice, the
+        # join is dated against an earlier "now" than the messages are, so a
+        # message sent in the same instant measures fractionally OLDER than
+        # the join and trips a floor meant only for real history.
+        now_wall = datetime.now(timezone.utc)
+        joined_ago = (
+            _age_secs(member.joined_at, now_wall)
+            if member is not None and member.joined_at
+            else None
+        )
         # Backwards from the newest, stopping at this member's own last send —
         # the log is walked by index rather than sliced because mesh_info calls
         # this for every member on every web poll.
@@ -895,6 +955,10 @@ class Mesh:
                 delivered = m.get("id") in done
             if m.get("from") == handle:
                 break
+            if joined_ago is not None:
+                age = _age_secs(m.get("ts"), now_wall)
+                if age is not None and age > joined_ago:
+                    break  # predates this member's join — never its debt
             if not delivered or not self.addressed_to(m, handle):
                 continue
             if expects_reply(msg_type_for(m, handle)):
@@ -1056,6 +1120,52 @@ class MeshManager:
             return None
         return max(0, int(depth))
 
+    def countable_inbox(self, mesh: Mesh, handle: str) -> Optional[int]:
+        """:meth:`inbox_depth` minus mail that has aged past
+        ``ack_timeout.door_secs`` — what the DOOR actually weighs.
+
+        The cap exists to stop a fan-in arriving faster than a terminal can
+        read. That is a statement about RECENT pressure, but the depth it
+        was measured against is a total, and the two only agree while the
+        queue is draining. When it is not draining — the member's session
+        exited, so delivery holds its cursor and returns (see the delivery
+        worker) — the total never falls again, and the door that was meant
+        to pace a burst becomes a wall nothing can take down. A leader then
+        cannot address that handle for the rest of the mesh's life, and the
+        bounce it reads ("wait about 90s and re-send") is advice that will
+        never once come true.
+
+        So mail past ``door_secs`` stops being weighed. It is NOT dropped —
+        it stays queued and still lands if the session is respawned, which
+        is a contract of its own — it just stops holding the door shut
+        against everybody who came later. The effect is a leaky bucket: a
+        dead terminal accepts ``inbox_max`` messages per ``door_secs``
+        instead of ``inbox_max`` ever.
+
+        Remote members are returned unaged: their queue lives on their own
+        daemon and all we hold is a depth it piggybacked on a sync ack, with
+        no per-message timestamps to age. That daemon applies its own door
+        to its own members, which is where the per-message evidence is.
+        """
+        depth = self.inbox_depth(mesh, handle)
+        if depth is None:
+            return None
+        secs = mesh.ack_timeout()["door_secs"]
+        if not secs:
+            return depth
+        member = mesh.members.get(handle)
+        if member is not None and not self._is_local(mesh, member):
+            return depth
+        now = datetime.now(timezone.utc)
+        fresh = 0
+        for msg in mesh.pending(handle):
+            age = _age_secs(msg.get("ts"), now)
+            # Undatable mail is counted, for the same reason the ledger
+            # refuses to expire it: the clock may only forgive what it can date.
+            if age is None or age < secs:
+                fresh += 1
+        return fresh
+
     def congested_recipients(
         self, mesh: Mesh, recipients: Iterable[str]
     ) -> List[dict]:
@@ -1070,14 +1180,19 @@ class MeshManager:
             return []
         out: List[dict] = []
         for handle in recipients:
-            depth = self.inbox_depth(mesh, handle)
-            if depth is None or depth < bp["inbox_max"]:
+            # Weighed on the countable depth, REPORTED on the true one: the
+            # sender is refused because of recent pressure, but what is
+            # actually waiting for that terminal is the number it needs to
+            # see. They differ only once mail has aged past the door.
+            countable = self.countable_inbox(mesh, handle)
+            if countable is None or countable < bp["inbox_max"]:
                 continue
+            depth = self.inbox_depth(mesh, handle)
             member = mesh.members.get(handle)
             out.append(
                 {
                     "handle": handle,
-                    "queued": depth,
+                    "queued": depth if depth is not None else countable,
                     "inbox_max": bp["inbox_max"],
                     "retry_after": bp["retry_after"],
                     "remote": bool(
@@ -4400,7 +4515,11 @@ class MeshManager:
             st = mesh.activity.get(handle) or {}
             last_sent = st.get("last_sent", 0.0)
             last_asked = st.get("last_asked", 0.0)
-            unanswered = last_asked > 0 and last_sent < last_asked
+            unanswered = (
+                last_asked > 0
+                and last_sent < last_asked
+                and bool(mesh.owed(handle))
+            )
             pending = len(mesh.pending(handle))
             anchor = st.get("anchor", now)
             active_at = max(last_sent, st.get("last_delivered", 0.0), anchor)
