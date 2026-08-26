@@ -287,6 +287,26 @@ def parse(document) -> Dict[str, Optional[dict]]:
     return out
 
 
+#: The packaged half of :func:`registry`, parsed once. Its input is a string
+#: constant baked into the package, so there is nothing to invalidate -- and
+#: it was being re-parsed on every ``registry()`` call, which is every
+#: ``get()``, which the profile listing does once per profile in its loop.
+#: :class:`Harness` is frozen, so the entries are shareable; the caller gets a
+#: fresh dict to lay the config's own harnesses over.
+_BUILTIN: Optional[Dict[str, Harness]] = None
+
+
+def _builtin() -> Dict[str, Harness]:
+    global _BUILTIN
+    if _BUILTIN is None:
+        _BUILTIN = {
+            name: _parse_entry(name, body)
+            for name, body in parse(DEFAULT_YAML).items()
+            if body is not None
+        }
+    return _BUILTIN
+
+
 def registry(doc: Optional[dict] = None) -> Dict[str, Harness]:
     """The harnesses in force: the packaged set with the config's on top.
 
@@ -294,10 +314,7 @@ def registry(doc: Optional[dict] = None) -> Dict[str, Harness]:
     ``harnesses:`` block that no longer parses must not stop every session
     command from running, so a bad entry is skipped and the rest stand.
     """
-    merged: Dict[str, Harness] = {}
-    for name, body in parse(DEFAULT_YAML).items():
-        if body is not None:
-            merged[name] = _parse_entry(name, body)
+    merged: Dict[str, Harness] = dict(_builtin())
     doc = store.load() if doc is None else doc
     section = doc.get("harnesses")
     if isinstance(section, dict):

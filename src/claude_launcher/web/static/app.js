@@ -6184,6 +6184,26 @@ function stopBeadsPoll() {
 
 async function refreshBeads() {
   if (!beadsOpen) return;
+  // The focused issue's own fetch goes out *with* the listing, not after it.
+  // The two answer different questions and the detail is the small one, but
+  // it was queued behind three quarters of a megabyte of board it does not
+  // read — so the page a reader opened to see one issue waited for every
+  // issue first. The root comes from the previous listing, which is where it
+  // came from anyway; on the very first draw there is none yet and the
+  // request goes without it, exactly as the sequential version's would have
+  // on its first pass.
+  const detailWanted = beadsFocus;
+  let detailPromise = null;
+  if (detailWanted) {
+    const root = beadsRootOf(detailWanted);
+    const q = root ? `?cwd=${encodeURIComponent(root)}` : "";
+    detailPromise = api(`/api/beads/${encodeURIComponent(detailWanted)}${q}`)
+      .then(async (resp) => {
+        const data = await resp.json().catch(() => ({}));
+        return resp.ok ? data : { error: data.error || `HTTP ${resp.status}` };
+      })
+      .catch(() => null);   // keep the last detail
+  }
   try {
     const resp = await api("/api/beads");
     if (resp.status === 404) {
@@ -6195,14 +6215,11 @@ async function refreshBeads() {
       else { beadsCache = data; beadsError = data.error || ""; }
     }
   } catch { return; }   // auth overlay is up, or the daemon is away
-  if (beadsFocus) {
-    const root = beadsRootOf(beadsFocus);
-    const q = root ? `?cwd=${encodeURIComponent(root)}` : "";
-    try {
-      const resp = await api(`/api/beads/${encodeURIComponent(beadsFocus)}${q}`);
-      const data = await resp.json().catch(() => ({}));
-      beadsDetail = resp.ok ? data : { error: data.error || `HTTP ${resp.status}` };
-    } catch { /* keep the last detail */ }
+  if (detailPromise) {
+    const data = await detailPromise;
+    // Only if the reader has not walked to another issue meanwhile: this
+    // request was fired against the focus of the poll that started it.
+    if (data && beadsFocus === detailWanted) beadsDetail = data;
   }
   if (beadsOpen) renderBeads();
 }

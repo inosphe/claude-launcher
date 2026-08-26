@@ -429,6 +429,19 @@ class Board:
             self._roots[cwd] = await asyncio.to_thread(self._root_for, cwd)
         return self._roots[cwd]
 
+    async def _resolve_roots(self, cwds: Sequence[str]) -> None:
+        """Warm :meth:`root_for` for every directory in ``cwds`` concurrently.
+
+        Deduplicated first: two sessions in one tree must not each spawn their
+        own ``git rev-parse`` for the answer they share.
+        """
+        wanted = [c for c in dict.fromkeys(cwds) if c and c not in self._roots]
+        if not wanted:
+            return
+        await asyncio.gather(
+            *(self.root_for(c) for c in wanted), return_exceptions=True
+        )
+
     @staticmethod
     def has_board(root: Optional[Path]) -> bool:
         if root is None:
@@ -590,6 +603,17 @@ class Board:
         if not result["available"]:
             result["error"] = f"'{cli_beads.BINARY}' is not installed on the daemon machine"
             return result
+        # Resolve every directory's board first, all at once. root_for shells
+        # out to `git rev-parse` for a cwd it has not seen, and the fleet is
+        # spread over one worktree per session -- awaited one at a time that
+        # was seventeen sequential process spawns before the page could draw
+        # anything, which is most of the ~9s this endpoint cost on a daemon
+        # that had not been asked yet. They are independent questions, so they
+        # are asked together; the answers are memoised, so this is a one-time
+        # cost per directory either way and every later poll skips it.
+        await self._resolve_roots(
+            [s.sdef.cwd for s in sessions] + list(extra_roots)
+        )
         by_root: Dict[str, List] = {}
         order: List[Path] = []
         for s in sessions:

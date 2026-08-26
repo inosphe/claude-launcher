@@ -458,21 +458,37 @@ async def h_daemon_restart(request: web.Request) -> web.Response:
 
 
 async def h_profiles(request: web.Request) -> web.Response:
+    # One config read for the whole listing, one availability probe per
+    # harness. Both used to happen inside the double loop below: fourteen
+    # profiles times six harnesses is 98 rows, and each row re-read and
+    # re-parsed ~/.claunch.yaml (once per link of the profile's inheritance
+    # chain, plus once per registry lookup) and re-ran shutil.which -- which
+    # on Windows walks every PATH directory against every PATHEXT extension.
+    # That was ten thousand filesystem probes and a stack of YAML parses to
+    # answer six distinct questions, on a handler the dashboard calls while
+    # it is booting -- so it was also half a second of event loop that every
+    # other request on the page had to wait behind.
+    doc = store.load()
     profiles = profile_mod.list_all()
-    registry = harness_registry.registry()
-    harness_names = harness_registry.names()
+    registry = harness_registry.registry(doc)
+    harness_names = harness_registry.names(doc)
+    # available() asks the machine, not the profile, so it has exactly as many
+    # answers as there are harnesses.
+    available = {
+        name: bool(entry and entry.available())
+        for name, entry in registry.items()
+    }
     items = []
     selectors = []
     for p in profiles:
         try:
-            name = lineage.effective_harness(p)
-            entry = registry.get(name)
+            name = lineage.effective_harness(p, doc)
             items.append(
                 {
                     "name": p.name,
                     "profile": p.name,
                     "harness": name,
-                    "harness_available": bool(entry and entry.available()),
+                    "harness_available": available.get(name, False),
                     "explicit": False,
                 }
             )
@@ -488,7 +504,6 @@ async def h_profiles(request: web.Request) -> web.Response:
                 }
             )
         for harness_name in harness_names:
-            entry = registry.get(harness_name)
             selector = f"{p.name}:{harness_name}"
             selectors.append(selector)
             items.append(
@@ -496,7 +511,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "name": selector,
                     "profile": p.name,
                     "harness": harness_name,
-                    "harness_available": bool(entry and entry.available()),
+                    "harness_available": available.get(harness_name, False),
                     "explicit": True,
                 }
             )

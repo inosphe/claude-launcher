@@ -128,22 +128,27 @@ def effective_env(profile: Profile) -> Dict[str, str]:
     return env
 
 
-def effective_harness(profile: Profile) -> str:
+def effective_harness(profile: Profile, doc: Optional[dict] = None) -> str:
     """Harness selected by the nearest profile in the inheritance chain.
 
     Profiles created before harness selection existed have no field and keep
     the historical ``claude`` default. The returned name is validated against
     the live registry so a deleted/tombstoned harness fails at the profile
     boundary rather than much later at process spawn.
+
+    ``doc`` is an already-read config document, for the callers that ask this
+    about every profile in one breath (the web dashboard's profile listing).
+    Without it each link of each chain re-reads and re-parses
+    ``~/.claunch.yaml``, and so does each registry lookup below.
     """
     name = profile.harness_override or harnesses.CLAUDE_HARNESS
     if not profile.harness_override:
         for item in chain(profile):
-            own = str(store.profile_entry(item.name).get("harness") or "").strip()
+            own = str(store.profile_entry(item.name, doc).get("harness") or "").strip()
             if own:
                 name = own
-    if harnesses.get(name) is None:
-        known = ", ".join(harnesses.names())
+    if harnesses.get(name, doc) is None:
+        known = ", ".join(harnesses.names(doc))
         raise LineageError(
             f"profile {profile.selector!r} selects unknown harness {name!r} "
             f"(known: {known})"
