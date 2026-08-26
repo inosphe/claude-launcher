@@ -833,6 +833,10 @@ def test_a_same_second_same_size_rewrite_still_changes_the_tree(repo):
     index = repo / ".git" / "index"
     later = time.time() + 5          # and the index reads as newer than
     os.utime(index, (later, later))  # the entry, so nothing is racy
+    time.sleep(1.1)                  # the scratch copy is made past the
+                                     # second boundary: without the fix
+                                     # this is stale EVERY run, not just
+                                     # when the clock happens to flip
 
     tree = changed_tests.worktree_tree(repo)
     assert tree != _git(repo, "rev-parse", "HEAD^{tree}").strip()
