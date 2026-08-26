@@ -1005,8 +1005,9 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
     assert set(standby.select.options) == {"land", "complete"}
     assert standby.select.options["land"].next == "land"
     assert standby.select.options["complete"].next == "landing"
-    assert "merge-tree" in _prose(standby.instructions)
-    assert "master 대비가 아니다" in _prose(standby.instructions)
+    standby_rules = _prose(standby.instructions)
+    assert "merge-tree" in standby_rules
+    assert "master 대비가 아니다" in standby_rules
 
     land = wf.steps["land"]
     assert land.next == "standby"  # one child per pass, then back on watch
