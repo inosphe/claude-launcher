@@ -573,6 +573,7 @@ _QUEUE_HOLD_REASON = {
     "hold": "delivery is pinned shut here — release it with 'claunch delivery-hold --off'",
     "busy": "the agent is mid-turn",
     "keyboard": "a keyboard is active on this session",
+    "paced": "the mesh just typed a block in here — it is spacing the next one",
     "settling": "nothing is holding it — the next delivery tick types it in",
 }
 

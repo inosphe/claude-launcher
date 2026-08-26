@@ -143,6 +143,24 @@ def test_delivery_hold_states_it_outright_when_asked_to(daemon, flag, want):
     assert client.posts == [("/api/sessions/s1/queued/hold", {"hold": want})]
 
 
+def test_every_hold_the_daemon_can_name_has_a_sentence_here():
+    """The reason table mirrors a ladder that lives in the daemon, and a hold
+    added there without a line here degrades to "still held" — the one thing
+    the command exists to avoid saying. Read the ladder out of the source so
+    a new rung fails this instead of shipping mute (``paced`` arrived exactly
+    that way, with the mesh backpressure work)."""
+    import re
+    from pathlib import Path
+
+    from claude_launcher import cli_sessions
+
+    api = Path(cli_sessions.__file__).with_name("daemon") / "api.py"
+    ladder = set(re.findall(r'state = "(\w+)"', api.read_text(encoding="utf-8")))
+    assert ladder, "could not read the state ladder out of daemon/api.py"
+    missing = ladder - set(cli_sessions._QUEUE_HOLD_REASON)
+    assert not missing, f"no sentence for {sorted(missing)}"
+
+
 def test_the_routes_the_cli_posts_to_are_the_routes_the_daemon_serves():
     """The two halves are only one control if they meet at the same door.
     A rename on either side that this does not catch turns 'deliver now' in a
