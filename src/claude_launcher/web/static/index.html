@@ -396,6 +396,18 @@
             <input type="radio" name="beads" value="none">
             <span>No issue</span>
           </label>
+          <!-- Under the first answer, and a textarea rather than an input:
+               what an issue says is a specification, not a name. It is here
+               at all because the opening task and the issue body stopped
+               being the same words — the task is what the session is TOLD
+               when it boots, this is the record of the work — and there was
+               nowhere to write the second without writing it into the first.
+               Left empty it changes nothing: the issue is minted from the
+               task, exactly as every release before this did. -->
+          <label id="new-issue-text-row">Issue text
+            <textarea name="issue_text" rows="3"
+              placeholder="what the issue says — first line is its title; empty uses the opening task"></textarea>
+          </label>
           <label id="new-issue-row" class="hidden">
             Issue <select name="issue"></select>
           </label>

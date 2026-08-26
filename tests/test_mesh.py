@@ -1636,6 +1636,13 @@ def test_the_board_answer_reaches_the_api_in_its_own_spelling(monkeypatch):
     mesh_mcp._spawn({"task": "go"})
     assert "beads" not in sent["body"] and "issue" not in sent["body"]
 
+    # the third answer travels under its own name — a lead that wrote the
+    # specification hands it over instead of letting the child mint from a
+    # task that is only the first instruction
+    mesh_mcp._spawn({"task": "go", "issue_text": "Rail must answer"})
+    assert sent["body"]["issue_text"] == "Rail must answer"
+    assert "issue" not in sent["body"] and "beads" not in sent["body"]
+
 
 def test_cursors_phase1_format_migrates(home, tmp_path):
     _register_py_harness()

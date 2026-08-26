@@ -1596,7 +1596,10 @@ class Wizard(Form):
             # After the task, because the default answer is read from it and
             # the other two are only worth asking once the reader has seen
             # what this session is for.
-            *issue_fields(get("issue") or "", none=bool(get("no_issue"))),
+            *issue_fields(
+                get("issue") or "", none=bool(get("no_issue")),
+                text=get("issue_text") or "",
+            ),
             restore, attach,
             ActionField(key="create", label="Create session"),
         ]
@@ -1789,12 +1792,14 @@ class Wizard(Form):
 def _issue_summary(form: "Form") -> str:
     """The board answer on the closing line — including the fact that a pick
     may be a JOIN, which is the half a user would otherwise learn from the
-    session's own opening block."""
-    issue, none = issue_answers(form)
+    session's own opening block, and whether a new issue was written here or
+    read off the task, which is the half that decides where to go looking for
+    what this session was actually asked to do."""
+    issue, none, text = issue_answers(form)
     if none:
         return "no issue"
     if not issue:
-        return "new issue"
+        return "new issue, written here" if text else "new issue from the task"
     row = next(
         (o for o in form.field("issue").options if o.value == issue), None
     )
@@ -2124,7 +2129,10 @@ class SpawnWizard(Form):
             # The board rows follow the task here too, and read the CHILD's
             # directory rather than this session's -- a spawn into a workspace
             # is a spawn onto another repository's board.
-            *issue_fields(get("issue") or "", none=bool(get("no_issue"))), attach,
+            *issue_fields(
+                get("issue") or "", none=bool(get("no_issue")),
+                text=get("issue_text") or "",
+            ), attach,
             ActionField(key="create", label="Spawn child"),
         ]
 

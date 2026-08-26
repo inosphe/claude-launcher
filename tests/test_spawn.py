@@ -961,3 +961,47 @@ def test_the_auto_name_carries_both_session_names():
 def test_the_auto_name_survives_a_session_name_git_would_refuse():
     """Session names and worktree names are not the same alphabet."""
     assert worktree.validate_name(worktree.child_name("lead/x", "w 1"))
+
+
+def test_the_written_issue_travels_from_both_creation_commands(monkeypatch, tmp_path):
+    """--issue-text is the third board answer and rides on its own key, on
+    new-session and on spawn alike: the daemon mints from it instead of from
+    --task, so a flag that reached only one of the two doors would leave the
+    other one filing the wrong words."""
+    from claude_launcher import cli, daemon_client
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s7")
+    reached = {}
+
+    class _Client:
+        base_url = "http://x"
+
+        def get(self, path):
+            return {}
+
+        def post(self, path, body=None):
+            reached["path"], reached["body"] = path, body
+            return {"name": "solo", "harness": "claude", "profile": "nc",
+                    "session": {"name": "kid", "cwd": str(tmp_path)}}
+
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: _Client())
+
+    assert cli.main([
+        "new-session", "-s", "solo", "--profile", "nc", "-c", str(tmp_path),
+        "--task", "start when ready", "--issue-text", "Rail must answer",
+        "--detached",
+    ]) == 0
+    assert reached["body"]["issue_text"] == "Rail must answer"
+    assert reached["body"]["task"] == "start when ready"
+    # the other two answers are absent, which is how the daemon reads "mint"
+    assert "issue" not in reached["body"] and "beads" not in reached["body"]
+
+    assert cli.main([
+        "spawn", "--as", "kid", "--task", "go", "--issue-text", "Wire it",
+    ]) == 0
+    assert reached["path"] == "/api/sessions/s7/children"
+    assert reached["body"]["issue_text"] == "Wire it"
+
+    # left off, it is not sent at all
+    assert cli.main(["spawn", "--as", "kid2", "--task", "go"]) == 0
+    assert "issue_text" not in reached["body"]

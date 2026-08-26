@@ -2851,6 +2851,12 @@ $("new-session").addEventListener("submit", async (e) => {
   const beads = f.beads.value;
   if (beads === "none") body.beads = false;
   else if (beads === "existing" && f.issue.value) body.issue = f.issue.value;
+  // Only under the answer it belongs to: the box keeps its text while the
+  // radios are being tried out, and sending it alongside "existing" or
+  // "none" is a contradiction the daemon refuses (beads.check_request).
+  else if (beads === "new" && f.issue_text.value.trim()) {
+    body.issue_text = f.issue_text.value.trim();
+  }
   if (!parent && f.resume.value) {
     // "" (no resume) is left off entirely: the API reads a missing key as
     // "a new conversation" and an empty string as "open the picker".
@@ -6000,6 +6006,9 @@ function beadsMode() {
 function syncBeadsRow() {
   const f = $("new-session");
   const picking = beadsMode() === "existing";
+  // Hidden, not cleared: somebody who types a specification, tries the other
+  // two answers and comes back should find their words where they left them.
+  $("new-issue-text-row").classList.toggle("hidden", beadsMode() !== "new");
   $("new-issue-row").classList.toggle("hidden", !picking);
   const hint = $("new-issue-hint");
   const row = picking
