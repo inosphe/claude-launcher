@@ -78,6 +78,35 @@ with ``--no-ff`` then produces a different commit with **byte-identical
 content**, and without this the batch would pay for the whole suite twice
 over one tree.
 
+**And a tree is not quite the verdict either -- the board is not code.** The
+same step that arms this gate also commits ``.beads/issues.jsonl``, and the
+order it prescribes puts that commit *after* the sweep: sweep the tip, close
+the issues with the numbers the sweep produced, commit the board, leave the
+step. So master moves to a commit no receipt names, and the step's own
+``verify`` goes red **because the step was followed**. That is not a race
+somebody lost; it is what obeying the instruction does, every round.
+
+Re-ordering the step does not fix it, and this is the part that took five
+rounds to see. Board commits do not all come from here -- a crew on another
+mesh integrates into the same master, and one of its board commits (``e6e3ef9``,
+12:47:37) landed *inside* a re-sweep that ran 12:46:24-12:49:30. Nothing this
+workflow can reorder controls when somebody else commits, so with the gate
+keyed on the whole tree there is no serial sweep that reliably satisfies it.
+The failure stopped being waste and became non-termination; the roughly
+eighteen minutes of re-swept-for-nothing was the cheaper half.
+
+So ``check`` has a third and last rung, ``code_tree``: the tip's tree with
+``NON_CODE_ENTRIES`` removed. A green receipt recorded for the same code tree
+answers, and it says so, naming both trees. What makes that sound is measured
+on both sides -- pytest never collects the board file (it is outside
+``testpaths``, and three consecutive board-only commits gave 1759/1/0 to the
+digit), and no test reads the repository's own copy. What makes it *safe* is
+that it subtracts rather than selects: anything outside those names still
+changes the digest, so an unrecognised path costs one sweep, never a verdict.
+Keying on the inputs instead (``src/``, ``tests/``, ``pyproject.toml``) folds
+harder and fails the other way round, which is the trade this file already
+refuses everywhere else.
+
 Safe while nothing in this suite reads the repository's own HEAD or refs --
 and that is now watched rather than asserted. ``tests/_repo_history_guard.py``
 refuses such a read at the ``subprocess`` call that makes it, and
@@ -146,6 +175,34 @@ DEFAULT_COMMAND = 'uv run --no-sync pytest tests -q -n 8 --basetemp="C:/t/{sessi
 #: ``123 passed``, ``2 failed``, ``1 skipped`` ... from pytest's summary line.
 _COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|skipped|error|errors|xfailed|xpassed)")
 
+#: Top-level entries the gate subtracts from a tree before asking whether two
+#: commits are the same thing. Exactly one, and adding a second needs the same
+#: two-sided measurement this one has:
+#:
+#: * *not an input*  -- ``.beads/issues.jsonl`` is outside ``testpaths =
+#:   ["tests"]``, so pytest does not collect it, and three rounds of the same
+#:   board-only commit produced counts that did not differ by one digit
+#:   (1759/1/0 three times over trees ``dc534d0``/``cc3dc69``/``9a76122``);
+#: * *not consumed* -- no test reads the repository's own copy. Every
+#:   ``.beads`` path under ``tests/`` is built under a ``tmp_path`` fixture
+#:   and written by the test itself, which is checkable rather than taken on
+#:   faith: ``grep -rn '[.]beads' tests/`` and look for one that is not
+#:   rooted in a fixture. (Do not count *this* file's own cases while
+#:   checking -- ``tests/test_sweep.py`` commits a board into a throwaway
+#:   repository to test exactly this rung.)
+#:
+#: **This is a deny list, and that is the whole safety argument.** The digest
+#: below is the *whole* tree minus these names, so a path that appears
+#: anywhere else -- a new root ``conftest.py``, a data directory, ``uv.lock``
+#: -- still changes it and the gate still goes red. The tempting shape is the
+#: opposite one, keying on the inputs (``src/``, ``tests/``, ``pyproject.toml``):
+#: it folds harder, and it fails in the direction that costs a verdict rather
+#: than a sweep -- one input path left off the list and the gate is green over
+#: a tree nobody judged. This repository has already paid for a green over an
+#: unswept tree once (six issues closed citing a contaminated 1562), so the
+#: rule is that being wrong here must cost time, never correctness.
+NON_CODE_ENTRIES = frozenset({".beads"})
+
 
 def _git(repo: Path, *args: str) -> str:
     """``git -C repo args...``, stripped. Raises LookupError on failure."""
@@ -170,6 +227,36 @@ def repo_key(repo: Path) -> str:
     common = _git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
     resolved = str(Path(common).resolve()).lower().replace("\\", "/")
     return hashlib.sha1(resolved.encode("utf-8")).hexdigest()[:12]
+
+
+def code_tree(repo: Path, tree: str) -> str:
+    """`tree` with :data:`NON_CODE_ENTRIES` removed, as a stable digest.
+
+    The gate's question is "was the whole suite run over this content", and
+    ``find_receipt_by_tree`` answers it exactly when two commits share a tree.
+    The board breaks that and nothing else does: ``improv-leader``'s sweep step
+    says to sweep, close the issues, then commit ``.beads/issues.jsonl`` --
+    so following the step moves master to a commit the receipt cannot name,
+    and the step's own ``verify`` is red *because* the step was obeyed. Five
+    rounds ran that way before it was written down, and the wasted re-sweeps
+    came to about eighteen minutes; a second integrator committing the same
+    file from another mesh made it worse than waste, because master moved
+    again while a re-sweep was still running (``e6e3ef9`` landed at 12:47:37
+    inside a run spanning 12:46:24-12:49:30). Re-ordering the step cannot fix
+    that -- nothing in this workflow controls when somebody else commits --
+    which is why the axis moves instead.
+
+    Not a git object: this hashes ``git ls-tree``'s own lines (mode, type,
+    sha, name) for the entries that are kept. Building a real tree would mean
+    writing objects into the repository a gate is only supposed to read.
+    """
+    listing = _git(repo, "ls-tree", tree)
+    kept = [
+        line
+        for line in listing.splitlines()
+        if line.split("\t", 1)[-1] not in NON_CODE_ENTRIES
+    ]
+    return hashlib.sha1("\n".join(kept).encode("utf-8")).hexdigest()
 
 
 def receipts_dir(repo: Path, override: Optional[Path] = None) -> Path:
@@ -201,19 +288,11 @@ def is_green(receipt: dict) -> bool:
     )
 
 
-def find_receipt_by_tree(
-    repo: Path, tree: str, override: Optional[Path] = None
-) -> Optional[tuple]:
-    """The newest green receipt recorded for `tree`, whatever commit it named.
+def _newest_green(repo: Path, override: Optional[Path], matches) -> Optional[tuple]:
+    """The newest green receipt `matches` accepts, as ``(path, receipt)``.
 
-    The sweep runs against a working tree, so the sha in the receipt's name is
-    only an address -- the thing judged is the content. This is what lets one
-    sweep of an integration preview answer for the merge commit that lands the
-    same candidates: same tree, different sha.
-
-    Returns ``(path, receipt)`` or ``None``. Unreadable files are skipped
-    rather than fatal: this is a fallback, and the caller is already on its
-    way to a red gate without it.
+    Unreadable files are skipped rather than fatal: every caller is a fallback,
+    and is already on its way to a red gate without one.
     """
     directory = receipts_dir(repo, override)
     if not directory.is_dir():
@@ -224,13 +303,45 @@ def find_receipt_by_tree(
             receipt = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
-        if receipt.get("tree") != tree or not is_green(receipt):
+        if not is_green(receipt) or not matches(receipt):
             continue
         if best is None or (receipt.get("finished_at") or "") > (
             best[1].get("finished_at") or ""
         ):
             best = (path, receipt)
     return best
+
+
+def find_receipt_by_tree(
+    repo: Path, tree: str, override: Optional[Path] = None
+) -> Optional[tuple]:
+    """The newest green receipt recorded for `tree`, whatever commit it named.
+
+    The sweep runs against a working tree, so the sha in the receipt's name is
+    only an address -- the thing judged is the content. This is what lets one
+    sweep of an integration preview answer for the merge commit that lands the
+    same candidates: same tree, different sha.
+    """
+    return _newest_green(repo, override, lambda r: r.get("tree") == tree)
+
+
+def find_receipt_by_code_tree(
+    repo: Path, code: str, override: Optional[Path] = None
+) -> Optional[tuple]:
+    """The newest green receipt whose tree matched `code` outside the board.
+
+    One rung weaker than :func:`find_receipt_by_tree` and deliberately last:
+    the trees really do differ, and what is being claimed is that they differ
+    only in :data:`NON_CODE_ENTRIES`. See :func:`code_tree` for why that claim
+    is safe to make and where it came from.
+
+    A receipt written before this field existed has no ``code_tree`` and is
+    skipped, which leaves the gate red -- the direction this whole axis is
+    built to fail in.
+    """
+    return _newest_green(
+        repo, override, lambda r: bool(code) and r.get("code_tree") == code
+    )
 
 
 def parse_counts(output: str) -> dict:
@@ -258,6 +369,7 @@ def cmd_run(args) -> int:
     try:
         commit = _git(repo, "rev-parse", args.branch)
         tree = _git(repo, "rev-parse", args.branch + "^{tree}")
+        code = code_tree(repo, tree)
         head = _git(repo, "rev-parse", "HEAD")
         dirty = _git(repo, "status", "--porcelain")
     except LookupError as exc:
@@ -312,6 +424,7 @@ def cmd_run(args) -> int:
     receipt = {
         "commit": commit,
         "tree": tree,
+        "code_tree": code,
         "branch": args.branch,
         "repo": str(repo),
         "command": command,
@@ -341,6 +454,7 @@ def cmd_check(args) -> int:
     try:
         commit = _git(repo, "rev-parse", args.branch)
         tree = _git(repo, "rev-parse", args.branch + "^{tree}")
+        code = code_tree(repo, tree)
         path = receipt_path(repo, commit, args.receipts)
     except LookupError as exc:
         print(f"cannot tell: {exc}", file=sys.stderr)
@@ -361,10 +475,21 @@ def cmd_check(args) -> int:
         # batch to one sweep. Nothing is inferred: the sha it was recorded
         # under is printed alongside.
         found = find_receipt_by_tree(repo, tree, args.receipts)
+        matched = "tree"
+        if found is None:
+            # Last rung, and the weakest: the trees really do differ, and the
+            # claim is that they differ only in NON_CODE_ENTRIES. This is the
+            # rung that stops the sweep step from breaking its own verify by
+            # obeying itself -- the board commit it is told to make lands
+            # after the sweep it is told to run, every round, by construction.
+            found = find_receipt_by_code_tree(repo, code, args.receipts)
+            matched = "code"
         if found is None:
             print(
                 f"no sweep receipt for {args.branch} tip {commit[:12]} at {path}, "
-                f"and none green for its tree {tree[:12]} -- spawn a subagent to "
+                f"none green for its tree {tree[:12]}, and none green for its "
+                f"code tree {code[:12]} (that tree without "
+                f"{', '.join(sorted(NON_CODE_ENTRIES))}) -- spawn a subagent to "
                 f"run 'python tools/sweep.py run --branch {args.branch}' in a "
                 f"clean tree at that commit, then leave this step again. Do not "
                 f"run the suite in this turn.",
@@ -372,7 +497,7 @@ def cmd_check(args) -> int:
             )
             return 1
         path, receipt = found
-        stood_in_for = receipt.get("commit") or "?"
+        stood_in_for = (receipt.get("commit") or "?", matched)
 
     if receipt.get("dirty"):
         print(
@@ -385,14 +510,19 @@ def cmd_check(args) -> int:
 
     counts = receipt.get("counts") or {}
     summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "no counts"
-    via = (
-        ""
-        if stood_in_for is None
-        else (
-            f"\nvia the receipt for {stood_in_for[:12]}: a different "
-            f"commit, the same tree {tree[:12]}"
+    via = ""
+    if stood_in_for is not None:
+        sha, matched = stood_in_for
+        via = (
+            f"\nvia the receipt for {sha[:12]}: a different commit, the "
+            f"same tree {tree[:12]}"
+            if matched == "tree"
+            else (
+                f"\nvia the receipt for {sha[:12]}: a different tree "
+                f"({(receipt.get('tree') or '?')[:12]}), identical outside "
+                f"{', '.join(sorted(NON_CODE_ENTRIES))} -- code tree {code[:12]}"
+            )
         )
-    )
     if receipt.get("exit_code") != 0 or counts.get("failed") or counts.get("error"):
         failures = "\n  ".join(receipt.get("failures") or []) or "(none recorded)"
         print(

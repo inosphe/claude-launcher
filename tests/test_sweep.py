@@ -21,7 +21,12 @@ smaller:
   else's uncommitted files is a verdict about a different tree than the commit
   it claims (this repository closed six issues citing exactly such a number);
 * a missing receipt is a *failure*, not a "cannot tell" -- the whole point is
-  that a sweep which died leaves the gate red.
+  that a sweep which died leaves the gate red;
+* and the board is subtracted from the tree before two commits are compared,
+  because the step that arms this gate is told to commit ``.beads/`` *after*
+  it sweeps -- so without that, following the instruction is what turns the
+  step's own verify red. The cases below pin both directions of it: a
+  board-only commit reuses the sweep, and anything else does not.
 
 The suite is never actually run here: every case passes ``--command`` a cheap
 stand-in. What is under test is the bookkeeping around the suite, which is
@@ -292,6 +297,178 @@ def test_reuse_needs_the_same_content_not_merely_the_same_files(repo, receipts):
     _git(repo, "commit", "-q", "-m", "late candidate")
 
     assert _check(repo, receipts) == 1
+
+
+def _board(repo: Path, text: str) -> None:
+    """A commit that touches nothing but the board -- the shape of the bug.
+
+    ``improv-leader``'s sweep step prescribes exactly this after the sweep:
+    close the issues with the numbers the sweep produced, then commit
+    ``.beads/issues.jsonl``. It is not a stray commit somebody could stop
+    making; it is the step.
+    """
+    board = repo / ".beads"
+    board.mkdir(exist_ok=True)
+    (board / "issues.jsonl").write_text(text + chr(10), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "chore(beads): close the round")
+
+
+def test_the_board_commit_the_step_prescribes_does_not_undo_its_own_sweep(
+    repo, receipts, capsys
+):
+    """The bug this axis exists for: obeying the step is what broke it.
+
+    Sweep the tip, close the issues with the numbers, commit the board, leave
+    the step -- and the tip the verify reads is now one the receipt cannot
+    name. Five rounds ran that way. The tree really did change, so
+    ``find_receipt_by_tree`` cannot help; what did not change is anything the
+    suite reads.
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    swept = _git(repo, "rev-parse", "master").strip()
+    _board(repo, '{"id": "x", "status": "closed"}')
+
+    tip = _git(repo, "rev-parse", "master").strip()
+    assert tip != swept
+    assert (
+        _git(repo, "rev-parse", "master^{tree}").strip()
+        != _git(repo, "rev-parse", swept + "^{tree}").strip()
+    ), "the board commit did not move the tree -- the test is not testing this"
+
+    assert _check(repo, receipts) == 0
+    out = capsys.readouterr().out
+    assert swept[:12] in out and "code tree" in out, (
+        f"the gate did not say what it stood on, or why: {out}"
+    )
+
+
+def test_a_commit_outside_the_board_still_demands_its_own_sweep(
+    repo, receipts, capsys
+):
+    """The negative control, and the only reason the exemption is safe.
+
+    Being wrong here has to cost a sweep, never a verdict. A change to real
+    content after the receipt was written is the case the whole gate exists
+    for, and the board exemption must not reach it.
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    (repo / "a.txt").write_text("two" + chr(10), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "a real change")
+
+    assert _check(repo, receipts) == 1
+    assert "none green for its code tree" in capsys.readouterr().err
+
+
+def test_the_board_and_a_code_change_in_one_commit_is_not_exempt(repo, receipts):
+    """Exempt is a property of the *difference*, not of the board being in it.
+
+    A round that closes issues and fixes a line in the same commit has
+    changed something the suite reads. Subtracting ``.beads`` leaves that
+    line behind, so the digest moves and the gate stays red.
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    (repo / ".beads").mkdir()
+    (repo / ".beads" / "issues.jsonl").write_text("{}" + chr(10), encoding="utf-8")
+    (repo / "a.txt").write_text("two" + chr(10), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "board and code together")
+
+    assert _check(repo, receipts) == 1
+
+
+def test_the_exemption_is_the_exact_name_not_a_prefix(repo, receipts):
+    """``.beads`` is a name, and the entries are matched whole.
+
+    The shape this rule was first written in was a path prefix
+    (``grep -v '^[.]beads/'``), which also swallows a top-level ``.beadsx``
+    -- a file nobody has measured and the suite might well read. Matching the
+    entry exactly costs nothing and keeps the exemption to what was measured.
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    (repo / ".beadsx").write_text("not the board" + chr(10), encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "a name that merely starts the same way")
+
+    assert _check(repo, receipts) == 1
+
+
+def test_the_board_exemption_does_not_launder_a_red_sweep(repo, receipts, capsys):
+    """Green is still the only verdict that carries.
+
+    Otherwise the exemption becomes the cheapest way past a red gate: commit
+    the board, and the tip that was measured red is answered for by nothing.
+    """
+    assert _run(repo, receipts, "--command", RED) == 1
+    _board(repo, '{"id": "x"}')
+
+    assert _check(repo, receipts) == 1
+    assert "none green for its code tree" in capsys.readouterr().err
+
+
+def test_a_dirty_receipt_does_not_stand_in_for_a_board_commit(repo, receipts):
+    """The contaminated-sweep rule survives this rung too.
+
+    ``--allow-dirty`` is a verdict about a commit plus whatever was lying
+    around. It is refused for the commit it names, and reuse by code tree
+    must not be the way back in.
+    """
+    (repo / "scratch.txt").write_text("somebody else's work", encoding="utf-8")
+    assert _run(repo, receipts, "--command", GREEN, "--allow-dirty") == 0
+    _board(repo, '{"id": "x"}')
+
+    assert _check(repo, receipts) == 1
+
+
+def test_a_receipt_written_before_this_axis_existed_is_not_reused(repo, receipts):
+    """Old receipts have no ``code_tree``, and absence is not a match.
+
+    Receipts outlive the tool that wrote them -- they are kept outside the
+    repository precisely so a restart does not lose them. One from before
+    this field existed says nothing about the board, so the gate goes red,
+    which is the direction this whole axis is built to fail in.
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    swept = _git(repo, "rev-parse", "master").strip()
+    path = sweep.receipt_path(repo, swept, receipts)
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    del receipt["code_tree"]
+    path.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+
+    _board(repo, '{"id": "x"}')
+    assert _check(repo, receipts) == 1
+
+
+def test_the_board_may_be_added_for_the_first_time(repo, receipts):
+    """A repository without a board yet is the same case.
+
+    The digest is over the entries that are kept, so an entry that appears is
+    as invisible as one that changes. This is not hypothetical: a fresh
+    worktree of this repository has no ``.beads`` until the first board write
+    lands in it.
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    assert not (repo / ".beads").exists()
+    _board(repo, '{"id": "x"}')
+
+    assert _check(repo, receipts) == 0
+
+
+def test_the_exemption_names_one_thing_and_widening_it_is_an_edit(repo):
+    """Pinned, because the tempting change here is to generalise it.
+
+    Every argument for this rung -- pytest does not collect the file, no test
+    reads the repository's own copy -- was measured about ``.beads`` and
+    nothing else. A second name needs its own two-sided measurement, and this
+    assertion is where that is noticed.
+    """
+    assert sweep.NON_CODE_ENTRIES == frozenset({".beads"})
+
+    tree = _git(repo, "rev-parse", "master^{tree}").strip()
+    assert sweep.code_tree(repo, tree) != tree, (
+        "the code tree must not be the tree hash -- one of them is a lie"
+    )
 
 
 def test_a_tree_standing_on_another_commit_refuses_to_produce_a_receipt(
