@@ -65,18 +65,74 @@ stands behind an empty selection is the step's ``done_when``, which asks the
 worker for numbers and scenarios in its report; this file's job is to make
 sure that whatever *was* touched is green, not to be the whole review.
 
+**The same tree is judged once.** Before running anything the gate hashes the
+content pytest is about to read (:func:`worktree_tree` -- the working tree,
+not ``HEAD``, because uncommitted work is the point of this tool) and looks
+for a green receipt filed under that hash *and* this selection. If one is
+there it prints what it stood on and runs nothing; when it does run, it
+leaves the receipt behind.
+
+That is the largest measured waste in a worker's round, and it is not an
+estimate. s150 ran sixteen modules by hand in 578s and the same round's gate
+ran the same selection over the same tree again for 656s. s147 ran one
+fourteen-module selection five times in a single round. s144 saw the same
+doubling. The mechanism to stop it was already in ``tools/sweep.py``
+(``find_receipt_by_tree``, keyed by tree so a different sha with identical
+content is the same verdict) and this file simply did not call it -- ``grep
+receipt tools/changed_tests.py`` returned nothing.
+
+Three things make the reuse safe, and each is load-bearing:
+
+* **The key is the tree, and the tree includes uncommitted files.** A sweep
+  can key by commit because it refuses to run on a dirty checkout; this gate
+  exists to judge dirty checkouts, so the dirt has to be *inside* the key
+  instead of excluded from it. Any edit changes the hash and the receipt no
+  longer answers.
+* **The key includes the selection.** Same tree, fewer modules, is a
+  different verdict and must not stand in for a larger one (``claunch-p5n``).
+* **Only green carries over**, by ``sweep.is_green``, so the two gates cannot
+  drift on what green means. A red receipt is not a verdict to launder and
+  not a reason to refuse to re-run either: the fix loop needs the re-run, and
+  the moment the fix is typed the tree is different anyway.
+
+And the premise underneath both gates -- that no test can tell two same-tree
+commits apart -- stopped being a hand-grepped sentence:
+``tests/_repo_history_guard.py`` refuses a read of this repository's HEAD or
+refs at the ``subprocess`` call that makes it.
+
+``--check`` reads the receipt and never runs. That is the door for a
+**peer reviewer**, who is a different session, past its own intake scan, and
+whose confirming run would therefore be concurrent load that no scan counted
+-- which is where two sessions have already met xdist node-down and OSError
+22 and come away with no verdict at all. A reviewer reads the receipt, or
+abstains; either is cheaper than a run nobody budgeted.
+
+What the reviewer has to stand on for that to work is the *same content*, and
+the key says so rather than trusting it: a clean checkout of the author's
+commit hashes to what the author's gate hashed, and anything uncommitted on
+either side hashes to something else and abstains. That is the right answer,
+not a limitation -- a reviewer looking at a different tree than the one that
+was judged has no verdict, and should say so.
+
 Exit codes match ``tools/deploy_check.py``: 0 = the selected tests passed (or
-there were none), 1 = they failed, 2 = could not tell.
+there were none), 1 = they failed, 2 = could not tell -- which is what
+``--check`` returns when no receipt answers, because "nobody has run this"
+and "this is fine" are the two things a gate must never spell the same way.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
+import importlib.util
+import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
@@ -86,6 +142,26 @@ from typing import List, Optional
 # populate it) and whatever else on the path answers to the same name.
 # Pinned by tests/test_gates_run_this_checkout.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+
+def _load_sweep():
+    """``tools/sweep.py``, by path -- ``tools`` is not on ``pythonpath``.
+
+    Imported rather than copied because a receipt is a *format*, and
+    ``sweep.py`` says in as many words why its two halves live in one file:
+    "a format split across two files drifts". This is a third half, so it
+    borrows the same ``repo_key``/``receipts_dir``/``is_green``/``parse_counts``
+    instead of growing its own opinion about any of them.
+    """
+    spec = importlib.util.spec_from_file_location(
+        "sweep", Path(__file__).resolve().parent / "sweep.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+sweep = _load_sweep()
 
 CANNOT_TELL = 2
 
@@ -131,9 +207,9 @@ EXPLICIT_GUARDS = (
 MIN_STEM = 4
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git(repo: Path, *args: str, env: Optional[dict] = None) -> str:
     proc = subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True
+        ["git", "-C", str(repo), *args], capture_output=True, text=True, env=env
     )
     if proc.returncode != 0:
         raise LookupError(
@@ -350,6 +426,119 @@ def prune_basetemps(session: str, *, keep: int = KEEP_BASETEMPS) -> List[Path]:
     return dropped
 
 
+# --------------------------------------------------------------------------- #
+# receipts: so the same tree is not judged twice
+# --------------------------------------------------------------------------- #
+def worktree_tree(repo: Path) -> str:
+    """The tree hash of the content pytest is about to read.
+
+    Not ``HEAD^{tree}``. This gate's whole job is to judge work that is
+    *uncommitted* -- ``changed_paths`` unions three sources for exactly that
+    reason -- so a key that ignored the working tree would hand one edit's
+    verdict to the next one, which is worse than running twice.
+
+    Built in a scratch index so the real one is untouched: the repository's
+    index is copied (keeping its stat cache, or every file would be re-hashed
+    on a machine where a git spawn already costs 1.2-2.9s -- claunch-fej8),
+    ``add -A`` stages tracked and untracked-but-not-ignored content into it,
+    and ``write-tree`` names the result. That is the same content pytest
+    collects, minus what ``.gitignore`` already excludes from both.
+
+    Side effect worth knowing: ``add -A`` writes blobs for uncommitted files
+    into the object database, the way ``git stash create`` does. They are
+    loose objects nothing references, and gc collects them.
+    """
+    git_dir = Path(_git(repo, "rev-parse", "--absolute-git-dir"))
+    with tempfile.TemporaryDirectory() as tmp:
+        index = Path(tmp) / "index"
+        if (git_dir / "index").is_file():
+            shutil.copyfile(git_dir / "index", index)
+        env = dict(os.environ, GIT_INDEX_FILE=str(index))
+        _git(repo, "add", "-A", env=env)
+        return _git(repo, "write-tree", env=env)
+
+
+def selection_key(files: List[str]) -> str:
+    """Which modules a receipt speaks for -- part of the key, not a detail.
+
+    Two runs over the same tree that selected different modules are two
+    different verdicts, and the smaller one must never answer for the larger
+    (``claunch-p5n`` names this explicitly). Folding the selection into the
+    key makes that impossible rather than merely discouraged.
+    """
+    return hashlib.sha1("\n".join(sorted(files)).encode("utf-8")).hexdigest()[:12]
+
+
+def receipts_dir(repo: Path, override: Optional[Path] = None) -> Path:
+    """Where a *targeted* receipt lives -- deliberately not where sweeps live.
+
+    ``sweep.find_receipt_by_tree`` globs ``receipts_dir/*.json`` and accepts
+    any green receipt whose ``tree`` matches. Filing sixteen modules' verdict
+    in that directory would therefore let ``sweep.py check`` read it as a
+    verdict about the whole suite: a false green of exactly the shape this
+    repository keeps having to relearn. A subdirectory is invisible to a
+    non-recursive glob, so the two kinds cannot be confused by accident.
+    """
+    return sweep.receipts_dir(repo, override) / "changed"
+
+
+def receipt_path(
+    repo: Path, tree: str, files: List[str], override: Optional[Path] = None
+) -> Path:
+    return receipts_dir(repo, override) / f"{tree}-{selection_key(files)}.json"
+
+
+def find_receipt(
+    repo: Path, tree: str, files: List[str], override: Optional[Path] = None
+) -> Optional[dict]:
+    """The green receipt that already answers for this tree and selection.
+
+    An exact key, so there is no "is this close enough" judgement and no
+    newest-wins scan: a receipt either was recorded for this content and this
+    selection or it was not. A receipt whose selection is a strict *superset*
+    would also answer, and is deliberately not looked for -- the win this
+    exists to collect is the same round running the same thing twice, where
+    the selections are equal by construction.
+
+    Red receipts are not reused. ``sweep.is_green`` is the judge, so the two
+    gates cannot drift on what "green" means -- except on one axis, on
+    purpose: ``is_green`` also refuses a receipt marked ``dirty``, and a
+    targeted receipt is *always* dirty in the sweep's sense. That refusal
+    exists because a sweep is keyed by commit, so uncommitted files are
+    outside its key; here they are inside it, hashed into ``tree``. So the
+    field is recorded for the reader and left out of the verdict.
+    """
+    path = receipt_path(repo, tree, files, override)
+    if not path.is_file():
+        return None
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None                       # a fallback, not a source of truth
+    if receipt.get("tree") != tree or sorted(receipt.get("selection") or []) != sorted(
+        files
+    ):
+        return None                       # a hash collision, or a hand-edited file
+    return receipt if sweep.is_green({**receipt, "dirty": False}) else None
+
+
+def describe(receipt: dict) -> str:
+    """What was stood on, named -- never inferred.
+
+    ``sweep.py``'s ``check`` prints the sha of the receipt it accepted when
+    that sha is not the one being gated, and this does the same for the same
+    reason: a gate that passes without running has to say what it passed on,
+    or it is indistinguishable from a gate that did nothing.
+    """
+    counts = receipt.get("counts") or {}
+    summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "no counts"
+    return (
+        f"{summary} in {receipt.get('seconds')}s, run by "
+        f"{receipt.get('session')} at {receipt.get('finished_at')} "
+        f"on commit {(receipt.get('commit') or '?')[:12]}"
+    )
+
+
 def build_command(files: List[str], *, basetemp: Optional[str] = None) -> List[str]:
     """pytest over exactly ``files``, parallel only when it pays."""
     session = os.environ.get("CLAUNCH_SESSION", "worker")
@@ -358,6 +547,81 @@ def build_command(files: List[str], *, basetemp: Optional[str] = None) -> List[s
         cmd += ["-n", str(min(MAX_WORKERS, len(files)))]
     cmd += [f"--basetemp={basetemp or session_basetemp(session)}"]
     return cmd
+
+
+def run_and_record(
+    repo: Path,
+    files: List[str],
+    cmd: List[str],
+    tree: Optional[str],
+    base: str,
+    override: Optional[Path] = None,
+) -> int:
+    """Run the selection, and leave a receipt whatever the outcome.
+
+    The receipt is written for red runs too. ``claunch-p5n`` is the case: a
+    session restarted, the background shell's record went with it, the pytest
+    process had run to completion and the verdict was unrecoverable -- so the
+    round re-measured, and the re-measurement collided with the generation
+    before it. A verdict that only exists in a terminal is a verdict one
+    process death away from costing another full run.
+
+    Output is teed rather than captured. ``sweep.py`` can capture because
+    nobody watches a sweep; a worker watches this one, and taking its
+    progress away to gain a count would trade the thing it is for the thing
+    it records.
+    """
+    started = datetime.now(timezone.utc)
+    lines: List[str] = []
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(repo),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        errors="replace",
+        bufsize=1,
+    )
+    assert proc.stdout is not None
+    for line in proc.stdout:
+        sys.stdout.write(line)
+        sys.stdout.flush()
+        lines.append(line)
+    code = proc.wait()
+    finished = datetime.now(timezone.utc)
+
+    if tree is None:
+        return 0 if code == 0 else 1      # no key, so nothing to file it under
+
+    output = "".join(lines)
+    receipt = {
+        "kind": "changed_tests",
+        "tree": tree,
+        "selection": sorted(files),
+        "base": base,
+        "repo": str(repo),
+        "command": cmd,
+        "exit_code": code,
+        "counts": sweep.parse_counts(output),
+        "failures": sweep._failure_lines(output),
+        "session": os.environ.get("CLAUNCH_SESSION", "worker"),
+        "started_at": started.isoformat(),
+        "finished_at": finished.isoformat(),
+        "seconds": round((finished - started).total_seconds(), 1),
+    }
+    try:
+        receipt["commit"] = _git(repo, "rev-parse", "HEAD")
+    except LookupError:
+        receipt["commit"] = None          # an address for the reader, not the key
+    dest = receipt_path(repo, tree, files, override)
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
+        print(f"receipt: {dest}")
+    except OSError as exc:
+        # Never turn a finished run into a failure over its bookkeeping.
+        print(f"WARNING: could not write the receipt: {exc}", file=sys.stderr)
+    return 0 if code == 0 else 1
 
 
 def main(argv: Optional[list] = None) -> int:
@@ -383,6 +647,22 @@ def main(argv: Optional[list] = None) -> int:
             "to a name you chose; it must not be a path another run is using, "
             "because pytest empties it at startup"
         ),
+    )
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="read the receipt only, never run: 0 green, 2 no receipt (abstain)",
+    )
+    ap.add_argument(
+        "--no-reuse",
+        action="store_true",
+        help="run even if a green receipt already answers for this tree",
+    )
+    ap.add_argument(
+        "--receipts",
+        type=Path,
+        default=None,
+        help="override the receipt root (tests)",
     )
     args = ap.parse_args(argv)
 
@@ -419,7 +699,7 @@ def main(argv: Optional[list] = None) -> int:
             f"vs {args.base}) -- nothing for this gate to run. The step's "
             f"done_when still asks your report for numbers and scenarios."
         )
-        return 0
+        return 0                          # a pass, for --check too: see below
 
     cmd = build_command(files, basetemp=args.basetemp)
     print(
@@ -428,18 +708,73 @@ def main(argv: Optional[list] = None) -> int:
     )
     for f in files:
         print(f"  {f}")
-    print(f"$ {' '.join(cmd)}", flush=True)
+
+    # The key, before anything is run. A failure here costs the reuse, never
+    # the gate: standing on no receipt is the behaviour this tool has always
+    # had, and turning a runnable selection into "cannot tell" over a git
+    # call would be a worse gate than the one being improved.
+    tree: Optional[str] = None
+    try:
+        tree = worktree_tree(repo)
+    except (LookupError, OSError) as exc:
+        print(
+            f"WARNING: no tree hash for this working tree ({exc}); running "
+            f"without receipt reuse.",
+            file=sys.stderr,
+        )
+
+    found = (
+        find_receipt(repo, tree, files, args.receipts) if tree is not None else None
+    )
+
+    if args.check:
+        # The reviewer's door. A peer-review responder is a different session
+        # past its own intake scan, so a confirming run of theirs is load no
+        # scan counted -- which is where s155 and s148 met xdist node-down and
+        # OSError 22, i.e. no verdict at all. Reading the receipt costs them
+        # nothing and costs the machine nothing.
+        if found is None:
+            print(
+                f"no green receipt for tree {(tree or '?')[:12]} and this "
+                f"{len(files)}-module selection -- abstain, or ask the author "
+                f"to run 'python tools/changed_tests.py --base {args.base}'. "
+                f"Do not run the selection yourself: it is load nobody's scan "
+                f"counted.",
+                file=sys.stderr,
+            )
+            return CANNOT_TELL
+        print(f"green receipt for tree {tree[:12]}: {describe(found)}")
+        return 0
+
     if args.list_only:
+        print(f"$ {' '.join(cmd)}", flush=True)
+        return 0
+
+    if found is not None and not args.no_reuse:
+        # The measured waste this exists to remove: s150 ran these same
+        # modules by hand for 578s and the gate immediately ran them again
+        # for 656s over an identical tree; s147 ran one selection five times
+        # in a round. Nothing is inferred here -- what was stood on is named.
+        print(
+            f"not running: tree {tree[:12]} with this selection is already "
+            f"green.\n  {describe(found)}\n"
+            f"  receipt: {receipt_path(repo, tree, files, args.receipts)}\n"
+            f"  (--no-reuse runs it anyway; any edit changes the tree and so "
+            f"the key)"
+        )
         return 0
 
     # Reclaim before the run, not after: the directory this run is about to
     # create is the newest and so is never a candidate, and a run that dies
-    # still leaves its own tree behind to be read.
+    # still leaves its own tree behind to be read. Below the reuse check, not
+    # above it: a round that stands on a receipt starts no run, so it has no
+    # claim on anybody's timeline -- least of all its own live sibling's.
     session = os.environ.get("CLAUNCH_SESSION", "worker")
     for gone in prune_basetemps(session):
         print(f"pruned old basetemp: {gone}", file=sys.stderr)
 
-    return 0 if subprocess.run(cmd, cwd=str(repo)).returncode == 0 else 1
+    print(f"$ {' '.join(cmd)}", flush=True)
+    return run_and_record(repo, files, cmd, tree, args.base, args.receipts)
 
 
 if __name__ == "__main__":

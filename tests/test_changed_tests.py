@@ -31,6 +31,7 @@ what these tests are about is which files get chosen.
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 from pathlib import Path
@@ -516,3 +517,197 @@ def test_the_script_runs_as_a_script_and_its_exit_status_reaches_the_shell():
         text=True,
     )
     assert proc.returncode in (0, 1, 2)
+
+
+# --------------------------------------------------------------------------- #
+# receipts: the same tree is not judged twice
+# --------------------------------------------------------------------------- #
+@pytest.fixture
+def gate(repo, tmp_path, monkeypatch):
+    """Drive ``main`` with a stand-in for pytest, and count what it ran.
+
+    The gate's *selection* is tested above; what is under test here is
+    whether it runs at all, so the run itself is replaced by a one-line
+    process. That keeps these cases at one spawn each instead of a real
+    pytest, and it makes "did it run?" a fact on disk rather than an
+    inference from a duration.
+    """
+    tally = tmp_path / "runs.txt"
+    state = {"exit": 0}
+    body = f"open(r{str(tally)!r}, 'a').write('x'); print('1 passed')"
+
+    def stub(files, *, basetemp=None):
+        return [sys.executable, "-c", f"{body}; raise SystemExit({state['exit']})"]
+
+    monkeypatch.setattr(changed_tests, "build_command", stub)
+
+    class Gate:
+        receipts = tmp_path / "receipts"
+
+        def __call__(self, *extra):
+            return changed_tests.main(
+                ["--repo", str(repo), "--base", "master",
+                 "--receipts", str(self.receipts), *extra]
+            )
+
+        def runs(self):
+            return len(tally.read_text()) if tally.exists() else 0
+
+        def red(self):
+            state["exit"] = 1
+
+    return Gate()
+
+
+def test_a_green_receipt_stops_the_second_run(repo, gate, capsys):
+    """The measured waste, gone: same tree, same selection, no second run.
+
+    s150 ran sixteen modules by hand in 578s and watched the round's gate run
+    the same selection over the same tree again for 656s. This is that pair,
+    in miniature.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    assert gate() == 0
+    assert gate.runs() == 1
+
+    assert gate() == 0
+    assert gate.runs() == 1, "the second call ran the selection again"
+
+    out = capsys.readouterr().out
+    assert "not running" in out
+    assert "1 passed" in out, "it must say what it stood on, not just that it did"
+
+
+def test_an_edit_is_a_different_tree_and_gets_its_own_run(repo, gate):
+    """Uncommitted work is inside the key, which is the whole point.
+
+    A key that was ``HEAD^{tree}`` would answer for the commit and hand its
+    verdict to every edit made on top of it -- silently, and green.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    _write(repo, "src/pkg/mesh.py", "x = 3\n")
+    assert gate() == 0
+    assert gate.runs() == 2
+
+
+def test_a_red_receipt_is_not_reused(repo, gate):
+    """A red verdict is recorded, and re-running is how it gets fixed.
+
+    Recorded because a verdict that lives only in a terminal is one process
+    death away from a re-measurement (``claunch-p5n``). Not reused because a
+    fix loop needs the run -- and the moment the fix is typed the tree, and
+    so the key, is different anyway.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    gate.red()
+    assert gate() == 1
+    assert gate() == 1
+    assert gate.runs() == 2
+
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    path = changed_tests.receipt_path(repo, tree, files, gate.receipts)
+    assert json.loads(path.read_text(encoding="utf-8"))["exit_code"] == 1
+
+
+def test_a_narrower_selection_does_not_answer_for_a_wider_one(repo, gate):
+    """Same tree, fewer modules, is a different verdict (``claunch-p5n``).
+
+    Forged by hand rather than produced, because producing it would mean
+    finding two changes with the same tree and different selections -- which
+    cannot happen, and that impossibility is exactly what makes a key without
+    the selection in it look safe.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+
+    assert changed_tests.find_receipt(repo, tree, files, gate.receipts) is not None
+    wider = sorted(files + ["tests/test_unrelated.py"])
+    assert changed_tests.find_receipt(repo, tree, wider, gate.receipts) is None
+
+
+def test_a_targeted_receipt_is_invisible_to_the_sweep_gate(repo, gate):
+    """The false green this filing scheme exists to make impossible.
+
+    ``sweep.find_receipt_by_tree`` globs the receipt directory and accepts any
+    green receipt matching the tree. A three-module run filed there would be
+    read by ``sweep.py check`` as a verdict about the *whole suite* -- green,
+    for a suite nobody ran. A non-recursive glob cannot see a subdirectory,
+    so the two kinds are separated by the filing rather than by care.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    tree = changed_tests.worktree_tree(repo)
+
+    assert changed_tests.receipts_dir(repo, gate.receipts).is_dir()
+    assert changed_tests.sweep.find_receipt_by_tree(repo, tree, gate.receipts) is None
+
+
+def test_check_abstains_when_no_receipt_answers(repo, gate, capsys):
+    """The reviewer's door, closed: no verdict is not a pass, and not a run.
+
+    A peer-review responder is a different session, past its own intake scan,
+    so its confirming run is load nobody counted -- which is where two
+    sessions have already come away with no verdict at all. Abstaining is the
+    cheap answer; running is the expensive one.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate("--check") == changed_tests.CANNOT_TELL
+    assert gate.runs() == 0
+    assert "abstain" in capsys.readouterr().err
+
+
+def test_check_reads_a_green_receipt_without_running(repo, gate, capsys):
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate("--check") == 0
+    assert gate.runs() == 1
+    assert "green receipt" in capsys.readouterr().out
+
+
+def test_no_reuse_runs_anyway(repo, gate):
+    """An escape hatch, because a receipt is evidence and not a promise."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate("--no-reuse") == 0
+    assert gate.runs() == 2
+
+
+def test_an_untracked_file_is_in_the_tree_key(repo):
+    """``changed_paths`` counts untracked files, so the key must too.
+
+    A new test module is untracked by definition, and it is the file most
+    likely to be the reason this round is being gated at all.
+    """
+    before = changed_tests.worktree_tree(repo)
+    _write(repo, "tests/test_brand_new.py")
+    assert changed_tests.worktree_tree(repo) != before
+
+
+def test_the_scratch_index_leaves_the_real_one_alone(repo):
+    """Keying the tree must not stage the worker's files under them."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    changed_tests.worktree_tree(repo)
+    assert _git(repo, "diff", "--cached", "--name-only").strip() == ""
+
+
+def test_a_repository_that_cannot_be_hashed_still_runs(repo, gate, monkeypatch):
+    """Receipts are an optimisation; losing them must not lose the gate.
+
+    The failure mode being refused is a gate that answers "cannot tell"
+    because its bookkeeping broke -- which would be a worse gate than the one
+    that had no bookkeeping at all.
+    """
+    def boom(_repo):
+        raise LookupError("no git here")
+
+    monkeypatch.setattr(changed_tests, "worktree_tree", boom)
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate.runs() == 1
+    assert gate() == 0
+    assert gate.runs() == 2
