@@ -74,9 +74,13 @@ def inspect(*, session: str, cwd: Optional[str] = None) -> Occupancy:
         # Not a managed session: there is no recorded home to compare against,
         # and a lone run owns whatever directory it was started in.
         return Occupancy(run_cwd, problem="not a managed session")
-    client = daemon_client.connect()
+    client, why = daemon_client.connect_with_diagnosis()
     if client is None:
-        return Occupancy(run_cwd, problem="the claunch daemon is not running")
+        # "did not answer" and "is not running" lead a reader to different
+        # places; this line is the only thing they get to tell them apart.
+        return Occupancy(
+            run_cwd, problem=f"the claunch {daemon_client.unreachable_reason(why)}"
+        )
     try:
         doc = client.get("/api/sessions", timeout=CALL_TIMEOUT) or {}
     except daemon_client.DaemonClientError as exc:

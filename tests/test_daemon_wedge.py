@@ -342,6 +342,24 @@ def test_zero_answers_across_the_whole_verdict_budget_is_wedged(home, monkeypatc
     assert "0 answers" in report["why"]
 
 
+def _stub_connect(monkeypatch, module, factory):
+    """Stub the daemon-connection seam in both of its shapes.
+
+    ``connect_with_diagnosis`` is the primitive -- a client plus the evidence
+    behind the answer -- and ``connect`` is its bool-shaped view. A stub that
+    only replaced one of them would leave the other reaching for a real
+    daemon, so tests replace the pair together.
+    """
+    client = factory()
+    state = daemon_client.NOT_RUNNING if client is None else daemon_client.SERVING
+    report = {"state": state, "pid": None, "started_at": None, "probes": 0,
+              "successes": 0, "budget": 0.0, "base_url": None, "lock_free": True}
+    monkeypatch.setattr(module, "connect", lambda: factory())
+    monkeypatch.setattr(
+        module, "connect_with_diagnosis", lambda **kw: (factory(), dict(report))
+    )
+
+
 def _dead_pid() -> int:
     """A pid that certainly belonged to a process and certainly does not now."""
     proc = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -349,10 +367,19 @@ def _dead_pid() -> int:
     return proc.pid
 
 
-def _announce(monkeypatch, *, pid: int, port: int = 59999) -> None:
+def _announce(
+    monkeypatch, *, pid: int, port: int = 59999, started_at: str = ""
+) -> None:
     """Write a daemon.json naming ``pid`` at ``port`` (default: one nothing
-    listens on)."""
+    listens on).
+
+    ``started_at`` is what the real daemon records and what an unconfirmed
+    diagnosis quotes back ("pid P up since T"); it defaults to absent so the
+    tests that do not care about the phrasing stay unchanged.
+    """
     doc = {"pid": pid, "host": "127.0.0.1", "port": port, "version": "test"}
+    if started_at:
+        doc["started_at"] = started_at
     monkeypatch.setattr(runtime_state, "read_daemon_json", lambda: dict(doc))
     monkeypatch.setattr(
         daemon_client.runtime_state, "read_daemon_json", lambda: dict(doc)

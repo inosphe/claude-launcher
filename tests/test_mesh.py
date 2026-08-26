@@ -33,6 +33,8 @@ from claude_launcher.daemon.mesh import (
 )
 from claude_launcher.daemon.screen import ScreenState
 
+from test_daemon_wedge import _stub_connect
+
 CHILD = (
     "import sys\n"
     "print('READY')\n"
@@ -1500,7 +1502,7 @@ def test_mesh_mcp_tools(home, monkeypatch):
             }
             return {"id": "msg-1", "recipients": ["a", "b"], "relay": None}
 
-    monkeypatch.setattr(mesh_mcp.daemon_client, "connect", lambda: FakeClient())
+    _stub_connect(monkeypatch, mesh_mcp.daemon_client, FakeClient)
 
     init = mesh_mcp._handle(
         {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}}
@@ -1562,7 +1564,7 @@ def test_mesh_mcp_tools(home, monkeypatch):
             killed.append(path)
             return {"name": "w1", "exited": True}
 
-    monkeypatch.setattr(mesh_mcp.daemon_client, "connect", lambda: KillClient())
+    _stub_connect(monkeypatch, mesh_mcp.daemon_client, KillClient)
     resp = mesh_mcp._handle(
         {
             "jsonrpc": "2.0", "id": 6, "method": "tools/call",
