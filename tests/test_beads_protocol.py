@@ -145,6 +145,31 @@ def test_the_worker_closes_only_its_own_landed_issue(layer):
     assert "hold" in tidy  # ...and the frozen branch is still not closed
 
 
+def test_every_role_can_reach_the_close_gate_the_block_names():
+    """The rule may not name a gate a workflow does not have.
+
+    The shared block hands closing to the assignee and names the gate that
+    qualifies it: ``landed``, which proves the merge from git. That is only
+    a rule a session can obey if its own workflow has that step — and
+    ``improv-mid`` does not: a stack worker goes ``handoff ->
+    await-landing -> wrapup`` with no mechanical proof of its own landing.
+
+    A live mid worker is therefore neither qualified (no gate) nor an
+    orphan (not exited), so the block has to name it as the leader's or its
+    stack issue belongs to nobody. It said "orphans only" for one commit;
+    this is the pin that keeps the two halves in step.
+    """
+    block = _block(_bundled("improv-worker"))
+    for name in ("improv-worker", "improv-leader", "improv-mid"):
+        wf = model.load(_bundled(name))
+        if "landed" in wf.steps:
+            continue
+        assert "중간 워커" in block and "스택 이슈" in block, (
+            f"{name} has no 'landed' step, so the block must name who closes "
+            f"its own issue — it currently does not"
+        )
+
+
 # --------------------------------------------------------------------------- #
 # the leader: reconciles, registers, closes, commits the board
 # --------------------------------------------------------------------------- #
