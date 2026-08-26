@@ -1055,6 +1055,44 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
     assert wf.steps["wrapup"].next is None
 
 
+def test_a_rule_survives_the_column_its_line_was_broken_at():
+    """Re-wrapping a workflow paragraph must not read as losing its rule.
+
+    This is the guard on the test above, not on the workflow: ``3794310``
+    re-flowed ``improv-mid``'s ``land`` step, ``rebase <네 기준>`` became
+    ``rebase\\n<네 기준>``, and the suite went red for two hours over a rule
+    that had not changed by one character -- with two reviewed branches
+    frozen behind the gate the whole time (claunch-n5eq).
+
+    So the property is pinned directly: take the shipped rule, break its
+    line somewhere else, and the anchor must still find it. A future edit
+    that drops ``_prose`` from the checks above turns this red *here*, where
+    the failure says what it is, instead of in a workflow test whose message
+    is "land lost its rule" -- which is the sentence that sent the last
+    reader looking in the wrong file.
+    """
+    land = _prose(_bundled("improv-mid").steps["land"].instructions)
+    anchor = "rebase <네 기준>"
+    assert anchor in land
+    # Every space the phrase could be broken at, one at a time -- and only the
+    # spaces, because that is where a re-wrap breaks. (A break inside a word
+    # would not be a re-wrap; it would be a different word, and no amount of
+    # collapsing should paper over that.) The continuation is indented, as
+    # YAML's own re-indent leaves it.
+    breaks = [i for i, ch in enumerate(anchor) if ch == " "]
+    assert breaks, "the anchor has no space to break at -- this guard is vacuous"
+    for cut in breaks:
+        rewrapped = land.replace(
+            anchor, anchor[:cut] + "\n          " + anchor[cut + 1:], 1
+        )
+        assert anchor in _prose(rewrapped), (
+            f"a break after {anchor[:cut]!r} hid the rule"
+        )
+    # And the converse, so this is a pin and not a tautology: a rule that is
+    # genuinely gone stays gone, however the prose is folded.
+    assert anchor not in _prose(land.replace(anchor, "rebase whenever you like", 1))
+
+
 def test_both_worker_layers_know_their_place_on_a_stack():
     """A worker under a nested worker measures against its declared base
     branch, requests from that parent, and rebases on a restack notice —
