@@ -371,6 +371,17 @@ class Sources:
     def members(self, mesh: str) -> List[str]:
         return []
 
+    def issues(self, cwd: str, parent: str = "") -> List[dict]:
+        """The board issues a session created in ``cwd`` could be put on.
+
+        Each row is the daemon's own verdict as well as the issue: ``mode``
+        (``assigned`` — nobody holds it, it would be assigned; ``joined`` — a
+        running session holds it and the assignment would stay put) and
+        ``held_by``. The form only shows what the daemon already decided, so
+        the row a user reads and the thing that then happens cannot disagree.
+        """
+        return []
+
     def workflows(self, cwd: str) -> List[dict]:
         """The cflow workflows declared in ``cwd``.
 
@@ -487,6 +498,27 @@ class DaemonSources(Sources):
                 ]
         return []
 
+    def issues(self, cwd: str, parent: str = "") -> List[dict]:
+        key = f"beads:{cwd}:{parent}"
+        if key in self._cache:
+            return self._cache[key]
+        from urllib.parse import quote
+
+        try:
+            doc = self.client.get(
+                "/api/beads/candidates?cwd=" + quote(cwd)
+                + ("&parent=" + quote(parent) if parent else "")
+            )
+            rows = [i for i in (doc.get("issues") or []) if i.get("id")]
+        except Exception:
+            # No board, no br, or a daemon too old to answer: the picker is
+            # empty and the other two answers still work. A wizard that
+            # refused because the board could not be read would be refusing
+            # over the one field that is optional.
+            rows = []
+        self._cache[key] = rows
+        return rows
+
     def workflows(self, cwd: str) -> List[dict]:
         key = "wf:" + cwd
         if key in self._cache:
@@ -529,6 +561,100 @@ class DaemonSources(Sources):
 # --------------------------------------------------------------------------- #
 # the worktree rows, which both forms ask exactly the same way
 # --------------------------------------------------------------------------- #
+#: The three answers the board question has, in the order they are offered:
+#: mint one from the task (the default, and what every release before this
+#: did), pick one that already exists, or none at all.
+BEADS_NEW = "new"
+BEADS_PICK = "existing"
+BEADS_NONE = "none"
+
+
+def issue_fields(
+    preset: str = "", *, none: bool = False, section: str = ""
+) -> List[Field]:
+    """The board rows, asked identically by ``new-session`` and ``spawn``.
+
+    Two rows rather than one picker with three kinds of entry in it: the
+    *mode* is a closed question with three answers and belongs on its own
+    line, and the issue list is only a question at all under one of them.
+    :func:`sync_issues` fills the second row and hides it under the other two.
+    """
+    mode = ChoiceField(
+        key="beads", label="Board", section=section,
+        hint="the issue this session works: minted from the opening task, "
+             "one that already exists, or none",
+        options=[
+            Option("new issue from the opening task", BEADS_NEW),
+            Option("an existing issue", BEADS_PICK),
+            Option("no issue", BEADS_NONE),
+        ],
+    )
+    # A flag given alongside --wizard pre-fills its field, the same way every
+    # other row on these forms is pre-filled.
+    mode.select(BEADS_NONE if none else BEADS_PICK if preset else BEADS_NEW)
+    issue = ChoiceField(
+        key="issue", label="Issue",
+        hint="picked from this directory's board; a row saying 'held by' "
+             "would be JOINED, not assigned -- the holder keeps it",
+        options=[],
+        empty="(no open issue on this directory's board)",
+    )
+    if preset:
+        # Carried even when the daemon cannot list the board, so a preset id
+        # from the command line is never silently dropped.
+        issue.options = [Option(preset, preset)]
+    return [mode, issue]
+
+
+def _issue_option(row: dict) -> Option:
+    """One board row as the picker draws it: what it is, and what picking it
+    would DO — the second half being the part a user cannot infer."""
+    iid = str(row.get("id") or "")
+    title = str(row.get("title") or "").strip()
+    label = f"{iid}  {title}".rstrip()
+    bits = [str(row.get("status") or "")]
+    if row.get("held_by"):
+        bits.append(f"held by {row['held_by']} -- JOIN, not assign")
+    return Option(label, iid, ", ".join(b for b in bits if b))
+
+
+def sync_issues(form: "Form", cwd: str, *, parent: str = "") -> None:
+    """Refill the issue picker for ``cwd`` and hide it unless it is the answer.
+
+    Refetched only when the directory (or the parent whose directory it is)
+    actually changed, like every other conditional list on these forms — a
+    picker that reloads under the cursor is a picker that moves while it is
+    being read.
+    """
+    mode = form.value("beads")
+    issue = form.field("issue")
+    issue.hidden = mode != BEADS_PICK
+    if issue.hidden:
+        return
+    key = (cwd, parent)
+    if form._issues_for != key:
+        form._issues_for = key
+        chosen = issue.value
+        rows = form.sources.issues(cwd, parent) or []
+        issue.options = [_issue_option(r) for r in rows]
+        if chosen and not issue.select(chosen):
+            # A preset (or a previous directory's pick) that this board does
+            # not have: kept as its own row rather than dropped, so the user
+            # sees the id they asked for instead of a silently different one.
+            issue.options.insert(0, Option(str(chosen), chosen, "not on this board"))
+            issue.index = 0
+
+
+def issue_answers(form: "Form") -> "tuple":
+    """``(issue, no_issue)`` — the two flags the commands actually take."""
+    mode = form.value("beads")
+    if mode == BEADS_NONE:
+        return None, True
+    if mode == BEADS_PICK:
+        return (form.value("issue") or None), False
+    return None, False
+
+
 def worktree_fields(auto_detail: str, section: str = "") -> List[Field]:
     """The four rows that put a launch in a checkout of its own.
 
@@ -1267,6 +1393,7 @@ class Wizard(Form):
         self._workflow_auto: str = ""
         self._members_for: Optional[str] = None
         self._worktrees_for: Optional[str] = None
+        self._issues_for: Optional[tuple] = None
 
         harness = ChoiceField(
             key="harness", label="Harness",
@@ -1437,6 +1564,10 @@ class Wizard(Form):
             *worktree_fields(""), role,
             resume, fork,
             args_field, mesh, handle, connect, workflow, context, task,
+            # After the task, because the default answer is read from it and
+            # the other two are only worth asking once the reader has seen
+            # what this session is for.
+            *issue_fields(get("issue") or "", none=bool(get("no_issue"))),
             restore, attach,
             ActionField(key="create", label="Create session"),
         ]
@@ -1527,6 +1658,7 @@ class Wizard(Form):
         role = "" if self.field("role").disabled else (self.value("role") or "")
         sync_workflows(self, cwd, role)
         self.field("context").hidden = not self.value("workflow")
+        sync_issues(self, cwd)
 
     # -- validation ------------------------------------------------------ #
     def _check(self) -> List[tuple]:
@@ -1588,6 +1720,7 @@ class Wizard(Form):
         args.workflow = self.value("workflow") or None
         args.context = (self.value("context") or None) if args.workflow else None
         args.task = self.value("task") or None
+        args.issue, args.no_issue = issue_answers(self)
         args.restore = self.value("restore")
         args.attach = bool(self.value("attach"))
         return args
@@ -1619,8 +1752,25 @@ class Wizard(Form):
                 parts.append(label + " " + str(self.value(key)))
         if self.value("resume") is not None:
             parts.append("resuming " + (self.value("resume") or "(picker)"))
+        parts.append(_issue_summary(self))
         return "creating: " + ", ".join(parts)
 
+
+
+def _issue_summary(form: "Form") -> str:
+    """The board answer on the closing line — including the fact that a pick
+    may be a JOIN, which is the half a user would otherwise learn from the
+    session's own opening block."""
+    issue, none = issue_answers(form)
+    if none:
+        return "no issue"
+    if not issue:
+        return "new issue"
+    row = next(
+        (o for o in form.field("issue").options if o.value == issue), None
+    )
+    held = row.detail if row and "held by" in (row.detail or "") else ""
+    return f"issue {issue}" + (f" ({held})" if held else "")
 
 
 def _natural(name: str) -> tuple:
@@ -1744,6 +1894,7 @@ class SpawnWizard(Form):
         self._workflows_for: Optional[tuple] = None
         self._workflow_auto: str = ""
         self._worktrees_for: Optional[tuple] = None
+        self._issues_for: Optional[tuple] = None
         # Fixed once, not per render: a name that ticked over between the
         # picker showing it and Create sending it would cut a worktree under
         # a name nobody read.
@@ -1940,7 +2091,11 @@ class SpawnWizard(Form):
             parent, over_limit, name, harness, profile, borrow, null, fork,
             workspace,
             *worktree_fields(""), args_field,
-            mesh, handle, role, connect, workflow, context, task, attach,
+            mesh, handle, role, connect, workflow, context, task,
+            # The board rows follow the task here too, and read the CHILD's
+            # directory rather than this session's -- a spawn into a workspace
+            # is a spawn onto another repository's board.
+            *issue_fields(get("issue") or "", none=bool(get("no_issue"))), attach,
             ActionField(key="create", label="Spawn child"),
         ]
 
@@ -2053,6 +2208,13 @@ class SpawnWizard(Form):
         connect.hidden = no_mesh or not connect.options
 
         cwd = self._child_cwd()
+        # The child's board is the board of the directory the child lands in,
+        # which is the parent's unless a workspace moved it -- so the picker
+        # is asked by parent when there is no workspace, and the daemon
+        # resolves the directory the same way the spawn will.
+        sync_issues(
+            self, cwd, parent="" if self.value("workspace") else parent
+        )
         # Cut from where the child will actually run: a worktree of the
         # workspace it was sent to, or of the parent's own checkout.
         sync_worktree(
@@ -2346,6 +2508,7 @@ class SpawnWizard(Form):
         args.workflow = picked or (self.NO_WORKFLOW if paired else None)
         args.context = (self.value("context") or None) if picked else None
         args.task = self.value("task") or None
+        args.issue, args.no_issue = issue_answers(self)
         args.attach = bool(self.value("attach"))
         return args
 
@@ -2377,6 +2540,7 @@ class SpawnWizard(Form):
             "no mesh" if mesh == self.NO_MESH
             else "mesh " + (mesh or self._mesh_now() or "(a new one for the pair)")
         )
+        parts.append(_issue_summary(self))
         return "spawning: " + ", ".join(parts)
 
 # --------------------------------------------------------------------------- #

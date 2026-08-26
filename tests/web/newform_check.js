@@ -5,7 +5,9 @@
    RUNS ON (harness, profile, login, directory, args). The second set is
    right by default nearly every time, so it now folds shut under the first —
    and the opening task, whose right answer depends on every row above it,
-   sits alone at the bottom.
+   sits near the bottom, with only the board question below it: two of that
+   question's three answers are read off the task, so it cannot be asked
+   first.
 
    Three things about that arrangement can break silently, so they are pinned
    here:
@@ -40,6 +42,16 @@ const html = fs.readFileSync(path.join(STATIC, "index.html"), "utf8");
 const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
 
 let failures = 0;
+function cls() {
+  const set = new Set();
+  return {
+    has: (c) => set.has(c),
+    add: (c) => set.add(c),
+    remove: (c) => set.delete(c),
+    contains: (c) => set.has(c),
+    toggle: (c, on) => (on ? set.add(c) : set.delete(c)),
+  };
+}
 function check(what, got, want) {
   const g = JSON.stringify(got), w = JSON.stringify(want);
   if (g !== w) {
@@ -78,19 +90,40 @@ check("the form's controls read in the new order", named(form.text), [
   "harness", "profile", "borrow", "null_token", "cwd", "resume", "fork", "args",
   // what it is told first
   "task",
+  // where that job is written down — three radios sharing one name, then
+  // the picker that only one of them opens
+  "beads", "beads", "beads", "issue",
 ]);
 
 check("the arrangement is asked before the machinery",
       named(form.text).indexOf("mesh") < named(form.text).indexOf("harness"),
       true);
-check("the opening task is the last thing on the form",
-      named(form.text).slice(-1), ["task"]);
+check("the opening task is the last thing asked before the board",
+      named(form.text).filter((n) => n !== "beads" && n !== "issue").slice(-1),
+      ["task"]);
 check("...and it is not inside the fold",
       named(fold.text).includes("task"), false);
 check("the fold sits between the two",
       [form.text.indexOf("new-onboard") < form.text.indexOf("new-runtime"),
        form.text.indexOf("new-runtime") < form.text.indexOf("new-task")],
       [true, true]);
+check("the board question comes after the task it is read off",
+      form.text.indexOf("new-task") < form.text.indexOf("new-beads"), true);
+check("...and is not inside the fold either",
+      named(fold.text).includes("beads"), false);
+
+/* The three answers, and the one that opens the picker. A radio group that
+   lost its default would submit nothing at all — and the absent answer is
+   the one that mints an issue, so the form would silently stop doing what it
+   did before this row existed. */
+const beadsBox = block('<fieldset id="new-beads">', "</fieldset>", form.start);
+check("the board question offers exactly three answers",
+      [...beadsBox.text.matchAll(/name="beads" value="(\w+)"/g)].map((m) => m[1]),
+      ["new", "existing", "none"]);
+check("minting from the task is the one that is checked",
+      /value="new" checked/.test(beadsBox.text), true);
+check("the issue picker is hidden until it is the answer",
+      /id="new-issue-row" class="hidden"/.test(beadsBox.text), true);
 
 /* The hints travel with the field they explain — a directory warning left
    above the fold would be pointing at a row that is not on screen. */
@@ -133,6 +166,103 @@ const present = named(form.text).slice().sort();
 check("Create reads nothing the form does not offer",
       read.filter((k) => !present.includes(k)), []);
 check("...and it does read a fair few of them", read.length > 8, true);
+
+/* The board's own rule, read out of the submit handler: "new" is the absence
+   of both keys. A request that says nothing gets an issue minted from its
+   task, which is what every client written before this row still sends — so
+   the default answer must produce exactly that request. */
+check("only 'none' and 'existing' put a board key on the request",
+      [/body\.beads = false/.test(submit),
+       /body\.issue = f\.issue\.value/.test(submit),
+       /body\.beads = true/.test(submit)],
+      [true, true, false]);
+
+/* ---- the board row, against stubs ----
+   The whole reason this row exists is that picking an issue somebody is
+   already working means something different from picking a free one, and the
+   difference is invisible until a session has been created on it. So the two
+   things pinned here are: the picker says "would JOIN" on the rows the daemon
+   marked held, and the hint under it spells out what that costs. */
+{
+  const issueSel = {
+    value: "", innerHTML: "", options: [],
+    appendChild(o) { this.options.push(o); },
+  };
+  const hintBox = { textContent: "", classList: cls() };
+  const rowBox = { classList: cls() };
+  const bf = { beads: { value: "new" }, issue: issueSel };
+  const bctx = {};
+  new Function("exports", "$", "Option", "issuesCache", "issuesError",
+    "issuesRead",
+    sliceFrom("function beadsMode()") + "\n" +
+    sliceFrom("function syncBeadsRow()") + "\n" +
+    sliceFrom("function renderIssueOptions()") + "\n" +
+    "exports.mode = beadsMode;\n" +
+    "exports.sync = syncBeadsRow;\n" +
+    "exports.render = renderIssueOptions;\n")(
+    bctx,
+    (id) => ({ "new-session": bf, "new-issue-row": rowBox,
+               "new-issue-hint": hintBox }[id] || null),
+    function Opt(text, value) { return { text, value }; },
+    [
+      { id: "cl-1", title: "wire the rail", status: "open", held_by: null },
+      { id: "cl-2", title: "the leader's own", status: "in_progress",
+        held_by: "lead" },
+    ],
+    "",
+    true);
+
+  bctx.render();
+  check("the picker leads with an unchosen row, then the board's",
+        issueSel.options.map((o) => o.value), ["", "cl-1", "cl-2"]);
+  check("a free issue reads as itself",
+        issueSel.options[1].text, "cl-1  wire the rail [open]");
+  check("an issue somebody holds says who, and what picking it would do",
+        issueSel.options[2].text,
+        "cl-2  the leader's own [in_progress] — held by lead, would JOIN");
+
+  check("the picker is hidden while the answer is 'new'",
+        [rowBox.classList.has("hidden"), hintBox.classList.has("hidden")],
+        [true, true]);
+
+  bf.beads.value = "existing";
+  bf.issue.value = "cl-1";
+  bctx.sync();
+  check("choosing a free issue opens the row and warns about nothing",
+        [rowBox.classList.has("hidden"), hintBox.classList.has("hidden")],
+        [false, true]);
+
+  bf.issue.value = "cl-2";
+  bctx.sync();
+  check("choosing a held one spells out that it is a JOIN, not a takeover",
+        [hintBox.classList.has("hidden"),
+         /lead is assigned to cl-2/.test(hintBox.textContent),
+         /JOINS it/.test(hintBox.textContent),
+         /assignment stays put/.test(hintBox.textContent)],
+        [false, true, true, true]);
+
+  /* An empty list means two different things and only one of them is worth
+     saying: the board answered and has nothing, or the fetch is still in
+     flight. Saying "no open issue" during the second is telling somebody
+     something false about their board. */
+  for (const [read, hidden] of [[false, true], [true, false]]) {
+    const box = { textContent: "", classList: cls() };
+    const ctx2 = {};
+    new Function("exports", "$", "issuesCache", "issuesError", "issuesRead",
+      [sliceFrom("function beadsMode()"),
+       sliceFrom("function syncBeadsRow()"),
+       "exports.sync = syncBeadsRow;"].join("\n"))(
+      ctx2,
+      (id) => ({ "new-session": { beads: { value: "existing" },
+                                  issue: { value: "" } },
+                 "new-issue-row": { classList: cls() },
+                 "new-issue-hint": box }[id] || null),
+      [], "", read);
+    ctx2.sync();
+    check(`an empty board ${read ? "that answered says so" : "mid-fetch says nothing"}`,
+          box.classList.has("hidden"), hidden);
+  }
+}
 
 /* ---- renderRuntimeSummary ---- */
 const sumBox = { textContent: "" };

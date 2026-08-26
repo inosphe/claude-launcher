@@ -231,6 +231,26 @@ def test_sweep_plan_returns_in_progress_to_open_and_closes_untouched_placeholder
     ]
 
 
+def test_a_joiners_exit_does_not_return_the_holders_issue_to_open():
+    """The sweep acts on what a session was ASSIGNED, and a joiner never was.
+
+    Worth pinning rather than reading off the code: a joiner's issue is
+    linked to it (its rail shows it, its opening block names it), so every
+    view says the issue is "its" — and an exit that swept on that view would
+    quietly take a running session's work back to open.
+    """
+    mine = [
+        # the joiner is on this issue, but somebody else holds it
+        {"id": "shared", "status": "in_progress", "assignee": "holder",
+         "via": ["link"]},
+        # ...and this one really is the joiner's own
+        {"id": "own", "status": "in_progress", "assignee": "w2"},
+    ]
+    plan = beads_mod.sweep_plan(mine, "w2", exit_code=0)
+    assert [p[1] for p in plan if p[0] == "update"] == ["own"]
+    assert not any("shared" in step for step in plan)
+
+
 def test_the_winddown_block_names_the_issues_and_the_grace():
     text = beads_mod.compose_winddown(
         "s7", [{"id": "x-1", "status": "in_progress", "title": "Do it"}], 90
@@ -251,7 +271,10 @@ def test_every_br_call_names_the_board_and_stamps_the_actor(repo):
     async def run():
         sess = _Sess(_sdef("s3", repo, task="Build the widget"))
         made = await board.ensure_issue(sess, body={"task": "Build the widget"}, parent=None)
-        assert made == {"issue": "t-1", "created": True}
+        assert made == {
+            "issue": "t-1", "created": True, "mode": beads_mod.MINTED,
+            "held_by": None, "why": "minted from the opening task",
+        }
         create = br.calls[-1]
         assert create[:5] == ["br", "--db", str(repo / ".beads" / "beads.db"), "--actor", "s3"]
         assert create[5:7] == ["create", "Build the widget"]
@@ -285,9 +308,9 @@ def test_a_task_mints_an_issue_assigned_and_labelled_by_origin(repo):
     asyncio.run(run())
 
 
-def test_a_request_naming_an_issue_adopts_it_instead_of_minting(repo):
+def test_a_request_naming_a_free_issue_takes_it_instead_of_minting(repo):
     br = FakeBr()
-    br.add(id="claunch-9", title="assigned by the leader", assignee="lead")
+    br.add(id="claunch-9", title="written by the leader, unassigned")
     board = _board(br, repo)
 
     async def run():
@@ -295,7 +318,8 @@ def test_a_request_naming_an_issue_adopts_it_instead_of_minting(repo):
         made = await board.ensure_issue(
             me, body={"task": "go", "context": "issue: claunch-9"}, parent="lead"
         )
-        assert made == {"issue": "claunch-9", "created": False}
+        assert made["issue"] == "claunch-9" and made["created"] is False
+        assert made["mode"] == beads_mod.TAKE and made["held_by"] is None
         assert br.issues["claunch-9"]["assignee"] == "w1"
         assert len(br.issues) == 1  # nothing minted
 
@@ -304,6 +328,143 @@ def test_a_request_naming_an_issue_adopts_it_instead_of_minting(repo):
             _Sess(_sdef("w2", repo)), body={"task": "go", "issue": "nope-1"}, parent=None
         )
         assert made is None
+
+    asyncio.run(run())
+
+
+class _Manager:
+    """Only what ``adoption`` asks a manager: get(name) -> session, or raise."""
+
+    def __init__(self, **sessions):
+        self._by_name = sessions
+
+    def get(self, name):
+        if name not in self._by_name:
+            raise KeyError(name)
+        return self._by_name[name]
+
+
+def test_adoption_takes_a_free_or_dead_issue_and_only_joins_a_live_holder():
+    live = lambda name: {"s1": True, "gone": False}.get(name)  # noqa: E731
+
+    assert beads_mod.adoption({}, session="w1", running=live)["mode"] == beads_mod.TAKE
+    assert beads_mod.adoption(
+        {"assignee": ""}, session="w1", running=live
+    )["mode"] == beads_mod.TAKE
+    # already mine: taken, and with no holder to report
+    mine = beads_mod.adoption({"assignee": "w1"}, session="w1", running=live)
+    assert mine["mode"] == beads_mod.TAKE and mine["held_by"] is None
+    # a session of ours that has exited: its sweep already let go
+    dead = beads_mod.adoption({"assignee": "gone"}, session="w1", running=live)
+    assert dead["mode"] == beads_mod.TAKE and dead["held_by"] == "gone"
+    # a running session: joined, never taken
+    held = beads_mod.adoption({"assignee": "s1"}, session="w1", running=live)
+    assert held["mode"] == beads_mod.JOIN and held["held_by"] == "s1"
+    # a name the daemon knows nothing about (a human, another machine)
+    other = beads_mod.adoption({"assignee": "alice"}, session="w1", running=live)
+    assert other["mode"] == beads_mod.JOIN and other["held_by"] == "alice"
+
+
+def test_an_issue_a_running_session_holds_is_joined_and_the_assignment_stands(repo):
+    br = FakeBr()
+    br.add(id="claunch-9", title="the leader's own", assignee="lead")
+    board = _board(br, repo)
+    mgr = _Manager(lead=_Sess(_sdef("lead", repo), status="busy"))
+
+    async def run():
+        made = await board.ensure_issue(
+            _Sess(_sdef("w1", repo)),
+            body={"task": "go", "issue": "claunch-9"}, parent="lead", manager=mgr,
+        )
+        assert made["mode"] == beads_mod.JOIN and made["held_by"] == "lead"
+        # the board was NOT written with a new assignee...
+        assert br.issues["claunch-9"]["assignee"] == "lead"
+        assert not any(
+            c[:2] == ["update", "claunch-9"] or "--assignee" in c for c in br.calls
+        )
+        # ...but the join is on the record, so a later reader sees both
+        text = br.comments["claunch-9"][0]["text"]
+        assert text.startswith("JOINED: session w1")
+        assert "lead" in text and "assignee left unchanged" in text
+
+    asyncio.run(run())
+
+
+def test_an_issue_held_by_an_exited_session_is_taken_over(repo):
+    br = FakeBr()
+    br.add(id="claunch-9", title="orphaned", assignee="old")
+    board = _board(br, repo)
+    mgr = _Manager(old=_Sess(_sdef("old", repo), status="exited", exit_code=0))
+
+    async def run():
+        made = await board.ensure_issue(
+            _Sess(_sdef("w1", repo)),
+            body={"task": "go", "issue": "claunch-9"}, parent=None, manager=mgr,
+        )
+        assert made["mode"] == beads_mod.TAKE and made["held_by"] == "old"
+        assert br.issues["claunch-9"]["assignee"] == "w1"
+        assert "claunch-9" not in br.comments
+
+    asyncio.run(run())
+
+
+def test_beads_false_is_the_no_issue_answer(repo):
+    br = FakeBr()
+    br.add(id="claunch-9", title="named but declined")
+    board = _board(br, repo)
+
+    async def run():
+        assert await board.ensure_issue(
+            _Sess(_sdef("w1", repo)),
+            body={"task": "go", "issue": "claunch-9", "beads": False}, parent=None,
+        ) is None
+        assert br.calls == []
+
+    asyncio.run(run())
+
+
+def test_the_link_note_tells_a_joiner_it_is_not_the_assignee():
+    minted = beads_mod.compose_link_note("x-1", mode=beads_mod.MINTED)
+    assert "registered from this task" in minted and "claunch beads show x-1" in minted
+    took = beads_mod.compose_link_note("x-1", mode=beads_mod.TAKE)
+    assert "assigned to you" in took
+    joined = beads_mod.compose_link_note(
+        "x-1", mode=beads_mod.JOIN, held_by="s9", mesh="m1"
+    )
+    assert "JOINED" in joined and "NOT its assignee" in joined
+    assert "claunch mesh send m1 s9" in joined
+    # with no shared mesh the instruction cannot name one, and must not pretend
+    alone = beads_mod.compose_link_note("x-1", mode=beads_mod.JOIN, held_by="s9")
+    assert "mesh send" not in alone and "s9" in alone
+
+
+def test_candidates_offer_open_issues_with_the_verdict_the_creation_path_will_take(repo):
+    br = FakeBr()
+    br.add(id="free", title="nobody's", status="open", priority=2)
+    br.add(id="held", title="the leader's", status="in_progress", assignee="lead")
+    br.add(id="dead", title="orphaned", status="open", assignee="old")
+    br.add(id="done", title="finished", status="closed")
+    board = _board(br, repo)
+    mgr = _Manager(
+        lead=_Sess(_sdef("lead", repo), status="busy"),
+        old=_Sess(_sdef("old", repo), status="exited", exit_code=0),
+    )
+
+    async def run():
+        view = await board.candidates(str(repo), mgr)
+        assert view["root"] == str(repo) and view["error"] is None
+        by_id = {i["id"]: i for i in view["issues"]}
+        assert "done" not in by_id  # closed issues are not on offer
+        assert by_id["free"]["mode"] == beads_mod.TAKE
+        assert by_id["held"]["mode"] == beads_mod.JOIN
+        assert by_id["held"]["held_by"] == "lead"
+        assert by_id["dead"]["mode"] == beads_mod.TAKE
+        # in_progress ranks above open, so the held one leads the list
+        assert view["issues"][0]["id"] == "held"
+
+        bare = beads_mod.Board(br, root_for=lambda cwd: None)
+        blind = await bare.candidates("nowhere")
+        assert blind["issues"] == [] and "no board" in blind["error"]
 
     asyncio.run(run())
 
@@ -452,13 +613,15 @@ def test_create_and_spawn_link_an_issue_and_tell_the_agent(home, tmp_path, repo)
             )
             doc = await resp.json()
             assert resp.status == 201, doc
-            assert doc["beads"] == {"issue": "t-1", "created": True}
+            assert doc["beads"]["issue"] == "t-1"
+            assert doc["beads"]["created"] is True
+            assert doc["beads"]["mode"] == beads_mod.MINTED
             assert doc["issue"] == "t-1"
             assert mgr.get("lead").sdef.issue == "t-1"
             assert br.issues["t-1"]["assignee"] == "lead"
 
-            # the child adopts the issue its parent hands it, and is told so
-            br.add(id="claunch-5", title="worker's job", assignee="lead")
+            # the child takes the free issue its parent hands it, and is told so
+            br.add(id="claunch-5", title="worker's job")
             resp = await client.post(
                 "/api/sessions/lead/children",
                 json={"name": "w1", "task": "do the job\nissue: claunch-5"},
@@ -466,9 +629,25 @@ def test_create_and_spawn_link_an_issue_and_tell_the_agent(home, tmp_path, repo)
             )
             doc = await resp.json()
             assert resp.status == 201, doc
-            assert doc["beads"] == {"issue": "claunch-5", "created": False}
+            assert doc["beads"]["issue"] == "claunch-5"
+            assert doc["beads"]["created"] is False
+            assert doc["beads"]["mode"] == beads_mod.TAKE
             assert mgr.get("w1").sdef.issue == "claunch-5"
             assert br.issues["claunch-5"]["assignee"] == "w1"
+
+            # a second child pointed at the SAME issue joins it: w1 is running,
+            # so the assignment stays where it is and nothing is duplicated
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w2", "issue": "claunch-5", "task": "help out"},
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["beads"]["mode"] == beads_mod.JOIN
+            assert doc["beads"]["held_by"] == "w1"
+            assert br.issues["claunch-5"]["assignee"] == "w1"
+            assert mgr.get("w2").sdef.issue == "claunch-5"
 
             # the rail's view and the page's view
             resp = await client.get("/api/sessions/w1/meta", headers=BEARER)
@@ -477,7 +656,16 @@ def test_create_and_spawn_link_an_issue_and_tell_the_agent(home, tmp_path, repo)
             assert [i["id"] for i in meta["beads"]["issues"]] == ["claunch-5"]
             resp = await client.get("/api/beads", headers=BEARER)
             fleet = await resp.json()
-            assert [s["name"] for s in fleet["boards"][0]["sessions"]] == ["lead", "w1"]
+            assert [s["name"] for s in fleet["boards"][0]["sessions"]] == [
+                "lead", "w1", "w2",
+            ]
+            # both sessions show on the joined issue, and the board still
+            # names only one of them as its assignee
+            joined = next(
+                i for i in fleet["boards"][0]["issues"] if i["id"] == "claunch-5"
+            )
+            assert sorted(s["name"] for s in joined["sessions"]) == ["w1", "w2"]
+            assert joined["assignee"] == "w1"
             resp = await client.get(f"/api/beads/t-1?cwd={repo}", headers=BEARER)
             assert (await resp.json())["issue"]["title"] == "Lead the work"
 
@@ -493,6 +681,146 @@ def test_create_and_spawn_link_an_issue_and_tell_the_agent(home, tmp_path, repo)
     asyncio.run(run())
 
 
+def test_a_join_tells_the_holder_over_the_mesh_they_share(home, tmp_path, repo):
+    """The daemon's other half of the ownership rule.
+
+    It refuses to move the assignment, so the two sessions have to settle it —
+    and the holder cannot see from its own terminal that there is anything to
+    settle. The notice goes out as ``fyi`` from the board, not from the joiner:
+    nobody owes the daemon a reply and the holder keeps the issue either way.
+    """
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="claunch-7", title="the one they both want")
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("team")
+        client = await _serve(mgr, mm, board)
+        try:
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "holder", "profile": "py", "cwd": str(repo),
+                      "mesh": "team", "handle": "h1", "issue": "claunch-7",
+                      "task": "own it"},
+                headers=BEARER,
+            )
+            assert (await resp.json())["beads"]["mode"] == beads_mod.TAKE
+
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "joiner", "profile": "py", "cwd": str(repo),
+                      "mesh": "team", "handle": "h2", "issue": "claunch-7",
+                      "task": "help out"},
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert doc["beads"]["mode"] == beads_mod.JOIN
+            assert doc["beads"]["held_by"] == "holder"
+            assert doc["beads"]["notified"] == "team"
+
+            resp = await client.get("/api/mesh/team/messages", headers=BEARER)
+            msgs = (await resp.json())["messages"]
+            notice = [m for m in msgs if m.get("from") == beads_mod.BOARD_SENDER]
+            assert len(notice) == 1
+            assert notice[0]["to"] == ["h1"] or notice[0]["to"] == "h1"
+            assert notice[0]["type"] == "fyi"
+            assert "session joiner was just created on claunch-7" in notice[0]["body"]
+            assert "did NOT move the assignment" in notice[0]["body"]
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_no_shared_mesh_means_no_notice_and_the_session_still_starts(home, tmp_path, repo):
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="claunch-7", title="held, but out of earshot", assignee="holder")
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            await client.post(
+                "/api/sessions",
+                json={"name": "holder", "profile": "py", "cwd": str(repo),
+                      "task": "own it"},
+                headers=BEARER,
+            )
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "joiner", "profile": "py", "cwd": str(repo),
+                      "issue": "claunch-7", "task": "help out"},
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["beads"]["mode"] == beads_mod.JOIN
+            assert doc["beads"]["notified"] == ""
+            assert br.issues["claunch-7"]["assignee"] == "holder"
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_candidates_route_offers_a_boards_open_issues_with_their_verdict(
+    home, tmp_path, repo
+):
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="free", title="nobody's", status="open")
+    br.add(id="shut", title="finished", status="closed")
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            await client.post(
+                "/api/sessions",
+                json={"name": "holder", "profile": "py", "cwd": str(repo),
+                      "task": "own something"},
+                headers=BEARER,
+            )
+            resp = await client.get(
+                f"/api/beads/candidates?cwd={repo}", headers=BEARER
+            )
+            view = await resp.json()
+            assert resp.status == 200, view
+            rows = {i["id"]: i for i in view["issues"]}
+            assert "shut" not in rows
+            assert rows["free"]["mode"] == beads_mod.TAKE
+            # the issue the running session just had minted is on offer too,
+            # marked as its holder's
+            held = [i for i in view["issues"] if i["held_by"] == "holder"]
+            assert held and held[0]["mode"] == beads_mod.JOIN
+
+            # a spawn form asks about the board of the directory the CHILD
+            # will run in, which it names by its parent rather than by path
+            resp = await client.get(
+                "/api/beads/candidates?parent=holder", headers=BEARER
+            )
+            assert (await resp.json())["root"] == str(repo)
+            resp = await client.get(
+                "/api/beads/candidates?parent=nobody", headers=BEARER
+            )
+            assert resp.status == 404
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_the_opening_names_the_issue_only_when_the_task_did_not(home, tmp_path, repo):
     """What the agent reads first: a minted issue is announced as a line in
     the task; an adopted one already in the task is not repeated."""
@@ -500,7 +828,7 @@ def test_the_opening_names_the_issue_only_when_the_task_did_not(home, tmp_path, 
 
     _register_py_harness()
     br = FakeBr()
-    br.add(id="claunch-5", assignee="lead")
+    br.add(id="claunch-5")
     board = _board(br, repo)
     seen = {}
     real = onboard.arrange
@@ -529,6 +857,17 @@ def test_the_opening_names_the_issue_only_when_the_task_did_not(home, tmp_path, 
             assert seen["a"].startswith("minted\n\nissue: t-1 -- your board record")
             assert "claunch beads show t-1 --json" in seen["a"]
             assert seen["b"] == "adopted\nissue: claunch-5"
+
+            # a JOIN is the exception: `issue: <id>` on its own reads as "this
+            # is yours", so the note goes in even though the task names the id
+            await client.post(
+                "/api/sessions",
+                json={"name": "c", "profile": "py", "cwd": str(repo),
+                      "task": "second pair of hands\nissue: claunch-5"},
+                headers=BEARER,
+            )
+            assert "NOT its assignee" in seen["c"]
+            assert "b" in seen["c"]  # names the session that holds it
             await mgr.shutdown_all()
         finally:
             onboard.arrange = real

@@ -1604,7 +1604,37 @@ def test_every_offered_spawn_field_is_forwarded():
 
     spawn_tool = next(t for t in mesh_mcp.TOOLS if t["name"] == "spawn")
     offered = set(spawn_tool["inputSchema"]["properties"])
-    assert offered <= set(mesh_mcp._SPAWN_KEYS)
+    # A field may reach the API under another name, but only through the
+    # declared map — an undeclared rename is the same silent no-op.
+    assert offered <= set(mesh_mcp._SPAWN_KEYS) | set(mesh_mcp._SPAWN_RENAMED)
+
+
+def test_the_board_answer_reaches_the_api_in_its_own_spelling(monkeypatch):
+    """`no_issue: true` is a falsey `beads: false` on the wire — the exact
+    shape a truthiness filter drops, so it is pinned."""
+    from claude_launcher import mesh_mcp
+
+    sent = {}
+
+    class FakeClient:
+        def post(self, path, body):
+            sent.clear()
+            sent.update({"path": path, "body": body})
+            return {"session": {"name": "kid"}}
+
+    monkeypatch.setattr(mesh_mcp, "_client", lambda: FakeClient())
+    monkeypatch.setattr(mesh_mcp, "_session", lambda: "lead")
+
+    mesh_mcp._spawn({"task": "go", "issue": "cl-9"})
+    assert sent["path"] == "/api/sessions/lead/children"
+    assert sent["body"]["issue"] == "cl-9" and "beads" not in sent["body"]
+
+    mesh_mcp._spawn({"task": "go", "no_issue": True})
+    assert sent["body"]["beads"] is False and "issue" not in sent["body"]
+
+    # saying nothing must send nothing: the daemon reads that as "mint one"
+    mesh_mcp._spawn({"task": "go"})
+    assert "beads" not in sent["body"] and "issue" not in sent["body"]
 
 
 def test_cursors_phase1_format_migrates(home, tmp_path):

@@ -33,8 +33,15 @@
   두 자리에 적으면 갈린다.
 - 데몬도 보드를 쓴다(`src/claude_launcher/daemon/beads.py`) — 에이전트가 자리에
   없는 세 순간만. (1) 생성: task를 가진 세션(new-session, 웹 폼, spawn)에 이슈를
-  만들어 assignee로 배정하고 오프닝에 `issue: <id>`를 실어 준다; 요청이 이미
-  `issue: <id>`를 말하면 새로 만들지 않고 그 이슈의 assignee만 옮긴다. (2) kill:
+  만들어 assignee로 배정하고 오프닝에 `issue: <id>`를 실어 준다. 요청이 기존
+  이슈를 말하면(`--issue`/`issue` 필드/task의 `issue: <id>`, 위저드·웹 폼의
+  Board 라디오) 새로 만들지 않고 `beads.adoption`이 소유권을 판정한다 — 비었거나
+  이미 그 세션 것이거나 붙잡던 세션이 종료됐으면 assignee로 지정(take), 살아 있는
+  세션이 붙잡고 있으면 assignee를 손대지 않고 참가만 시킨다(join: JOINED 코멘트
+  + 오프닝에 "너는 assignee가 아니다" + 공유 메시가 있으면 보유 세션에 fyi).
+  `--no-issue`(웹 폼의 No issue, 바디 `beads: false`)면 아무것도 만들지 않는다.
+  생성 폼이 채우는 후보 목록은 `GET /api/beads/candidates`이고, 각 줄이 그
+  판정(take인가 join인가, 누가 붙잡고 있는가)을 미리 싣는다. (2) kill:
   활성 이슈를 쥔 세션은 바로 죽이지 않고 정리 요청 블록을 타이핑한 뒤 그 턴이
   끝나기(또는 유예 `beads_winddown_grace`초)를 기다렸다가 종료한다 — 두 번째
   kill이나 `--force`는 즉시. (3) exit: 어떤 이유로든 프로세스가 사라지면 그
