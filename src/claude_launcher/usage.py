@@ -12,7 +12,7 @@ Claude has two ways to read the rolling 5-hour / 7-day limits:
 first and, on a scope error, fall back to reading the rate-limit headers from a
 minimal ``/v1/messages`` call (1 output token).
 
-Codex exposes its account limits through the stable app-server JSONL RPC.
+Codex exposes its account limits through the documented app-server JSONL RPC.
 Harnesses without a documented equivalent are rejected explicitly.
 """
 
@@ -29,7 +29,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Optional
 
-from . import config, credentials, harnesses, lineage, runner
+from . import config, credentials, harnesses, lineage, providers, runner
 from .profile import Profile
 
 _OAUTH_BETA = "oauth-2025-04-20"
@@ -165,6 +165,12 @@ def _windows_from_headers(headers: dict) -> List[UsageWindow]:
 
 def _fetch_claude(profile: Profile) -> UsageReport:
     """Claude usage (token may be inherited from a parent)."""
+    provider = providers.resolve_name(profile)
+    if provider != providers.DEFAULT_PROVIDER:
+        raise UsageError(
+            f"Claude usage reporting only supports the default Anthropic "
+            f"provider; profile {profile.selector!r} selects provider {provider!r}"
+        )
     token, profile_scoped = lineage.resolve_token(profile)
     if not token:
         raise credentials.CredentialsError(
@@ -195,28 +201,43 @@ def _codex_window_name(minutes) -> str:
 
 
 def _codex_windows(payload: dict) -> List[UsageWindow]:
-    limits = payload.get("rateLimits")
-    if not isinstance(limits, dict):
-        return []
+    by_id = payload.get("rateLimitsByLimitId")
+    if isinstance(by_id, dict) and by_id:
+        buckets = [
+            (str(key), value)
+            for key, value in by_id.items()
+            if isinstance(value, dict)
+        ]
+    else:
+        limits = payload.get("rateLimits")
+        buckets = [("", limits)] if isinstance(limits, dict) else []
     windows: List[UsageWindow] = []
-    for slot in ("primary", "secondary"):
-        value = limits.get(slot)
-        if not isinstance(value, dict):
-            continue
-        reset = _epoch_to_iso(str(value.get("resetsAt") or ""))
-        windows.append(
-            UsageWindow(
-                name=_codex_window_name(value.get("windowDurationMins")),
-                utilization=float(value.get("usedPercent") or 0.0),
-                resets_at=reset,
-                status=limits.get("rateLimitReachedType"),
-            )
+    qualify = len(buckets) > 1
+    for bucket_id, limits in buckets:
+        label = str(
+            limits.get("limitName") or limits.get("limitId") or bucket_id
         )
+        for slot in ("primary", "secondary"):
+            value = limits.get(slot)
+            if not isinstance(value, dict):
+                continue
+            name = _codex_window_name(value.get("windowDurationMins"))
+            if qualify and label:
+                name = f"{label}.{name}"
+            reset = _epoch_to_iso(str(value.get("resetsAt") or ""))
+            windows.append(
+                UsageWindow(
+                    name=name,
+                    utilization=float(value.get("usedPercent") or 0.0),
+                    resets_at=reset,
+                    status=limits.get("rateLimitReachedType"),
+                )
+            )
     return windows
 
 
 def _fetch_codex(profile: Profile, entry: harnesses.Harness) -> UsageReport:
-    """Read ChatGPT Codex limits through the CLI's stable app-server RPC."""
+    """Read ChatGPT Codex limits through the CLI's app-server RPC."""
     requests = [
         {
             "method": "initialize",
@@ -232,7 +253,9 @@ def _fetch_codex(profile: Profile, entry: harnesses.Harness) -> UsageReport:
         {"method": "initialized", "params": {}},
         {"method": "account/rateLimits/read", "id": 2, "params": {}},
     ]
-    cmd = [*entry.launch_command(), "app-server", "--stdio"]
+    # stdio JSONL is the documented default transport. There is no ``--stdio``
+    # flag; the explicit spelling would be ``--listen stdio://``.
+    cmd = [*entry.launch_command(), "app-server"]
     process = None
     try:
         process = subprocess.Popen(

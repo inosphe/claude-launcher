@@ -136,15 +136,16 @@ def effective_harness(profile: Profile) -> str:
     the live registry so a deleted/tombstoned harness fails at the profile
     boundary rather than much later at process spawn.
     """
-    name = harnesses.CLAUDE_HARNESS
-    for item in chain(profile):
-        own = str(store.profile_entry(item.name).get("harness") or "").strip()
-        if own:
-            name = own
+    name = profile.harness_override or harnesses.CLAUDE_HARNESS
+    if not profile.harness_override:
+        for item in chain(profile):
+            own = str(store.profile_entry(item.name).get("harness") or "").strip()
+            if own:
+                name = own
     if harnesses.get(name) is None:
         known = ", ".join(harnesses.names())
         raise LineageError(
-            f"profile {profile.name!r} selects unknown harness {name!r} "
+            f"profile {profile.selector!r} selects unknown harness {name!r} "
             f"(known: {known})"
         )
     return name
@@ -205,29 +206,16 @@ def lookup_token(profile: Profile) -> Optional[str]:
 
 
 def stored_auth_token(profile: Profile) -> Optional[str]:
-    """Claude provider key, with the historical ``set-token`` fallback.
+    """Nearest launcher token for a declared harness authentication route.
 
-    New provider profiles use the separate API-key secret routed to
-    ``ANTHROPIC_AUTH_TOKEN``. Existing profiles used ``set-token`` before that
-    distinction existed, so the nearest launcher token remains a fallback.
-    Native ``.credentials.json`` OAuth is never treated as a provider key.
+    This intentionally excludes native ``.credentials.json`` OAuth. The one
+    ``set-token`` secret is projected by the selected harness declaration;
+    OAuth-native harnesses keep using their own credential homes instead.
     """
-    key = stored_api_key(profile)
-    if key:
-        return key
     for p in [profile, *_ancestors_nearest_first(profile)]:
         token = credentials.stored_token(p)
         if token:
             return token
-    return None
-
-
-def stored_api_key(profile: Profile) -> Optional[str]:
-    """Nearest launcher-managed API key (own first, then ancestors)."""
-    for item in [profile, *_ancestors_nearest_first(profile)]:
-        key = credentials.stored_api_key(item)
-        if key:
-            return key
     return None
 
 
@@ -241,13 +229,11 @@ def login_state(profile: Profile) -> str:
     if harness != harnesses.CLAUDE_HARNESS:
         entry = harnesses.get(harness)
         if entry and entry.auth == "api-key":
-            return "ok" if stored_api_key(profile) else "none"
+            return "ok" if stored_auth_token(profile) else "none"
         # OAuth files are intentionally owned and refreshed by each harness.
         # We do not parse undocumented credential formats merely to paint a
         # status cell; ``claunch login``/the harness is authoritative.
         return "managed"
-    if stored_api_key(profile):
-        return "ok"
     own = credentials.token_state(profile)
     if own != "none":
         return own

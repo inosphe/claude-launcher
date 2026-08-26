@@ -20,9 +20,9 @@ def test_packaged_set_declares_supported_harnesses(home):
     assert reg["kimi"].auth == "oauth"
     assert reg["agent"].home_env == "CURSOR_CONFIG_DIR"
     assert reg["pi"].auth == "api-key"
-    assert reg["pi"].api_key_env == "ANTHROPIC_API_KEY"
-    assert reg["claude"].api_key_env == "ANTHROPIC_AUTH_TOKEN"
-    assert reg["claude"].api_key_clear_env == ["ANTHROPIC_API_KEY"]
+    assert reg["pi"].token_env == "ANTHROPIC_API_KEY"
+    assert reg["claude"].token_env == "ANTHROPIC_AUTH_TOKEN"
+    assert reg["claude"].empty_env == ["ANTHROPIC_API_KEY"]
     assert "OPENAI_API_KEY" in reg["codex"].clear_env
     # Claude leads displays; it is the default and the only builtin one.
     assert harnesses.names()[0] == "claude"
@@ -105,16 +105,29 @@ def test_parse_rejects_a_malformed_document():
         harnesses.parse({"harnesses": {"x": "just a string"}})
     with pytest.raises(HarnessConfigError, match="must be a string or a list"):
         harnesses.parse({"harnesses": {"x": {"command": 7}}})
-    with pytest.raises(HarnessConfigError, match="has no api_key_env"):
+    with pytest.raises(HarnessConfigError, match="has no token_env"):
         harnesses.parse({"harnesses": {"x": {"auth": "api-key"}}})
     with pytest.raises(HarnessConfigError, match="invalid env name"):
         harnesses.parse(
             {"harnesses": {"x": {"clear_env": ["NOT-AN-ENV"]}}}
         )
-    with pytest.raises(HarnessConfigError, match="cannot declare api_key_env"):
+    with pytest.raises(HarnessConfigError, match="cannot declare token_env"):
         harnesses.parse(
-            {"harnesses": {"x": {"auth": "oauth", "api_key_env": "TOKEN"}}}
+            {"harnesses": {"x": {"auth": "oauth", "token_env": "TOKEN"}}}
         )
+    with pytest.raises(HarnessConfigError, match="invalid harness name"):
+        harnesses.parse({"harnesses": {"not:selectable": {}}})
+
+
+def test_brief_api_key_field_is_an_input_only_compatibility_alias(home):
+    store.update(
+        lambda doc: doc.update(
+            {"harnesses": {"legacy": {"auth": "api-key", "api_key_env": "TOKEN"}}}
+        )
+    )
+    entry = harnesses.get("legacy")
+    assert entry.token_env == "TOKEN"
+    assert "api_key_env" not in entry.to_dict()
 
 
 def test_packaged_document_is_proven_by_the_same_parser():

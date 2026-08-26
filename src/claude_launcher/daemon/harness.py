@@ -75,7 +75,9 @@ class SessionDef:
 
     name: str
     harness: str = CLAUDE_HARNESS
-    profile: Optional[str] = None  # claude harness only
+    # Persist the selector, including an explicit ``:harness`` suffix.  This
+    # makes restores deterministic even if the profile's YAML default changes.
+    profile: Optional[str] = None
     cwd: str = ""
     args: Tuple[str, ...] = ()
     env: Dict[str, str] = field(default_factory=dict)
@@ -241,12 +243,12 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
     # definitions remain supported for the Python embedding API and old saved
     # records; the HTTP and CLI creation doors require a profile.
     if sdef.profile:
-        prof = profile_mod.require(sdef.profile)
+        prof = profile_mod.require_selector(sdef.profile)
         try:
             selected = lineage.effective_harness(prof)
         except lineage.LineageError as exc:
             raise HarnessError(str(exc)) from exc
-        sdef = replace(sdef, harness=selected)
+        sdef = replace(sdef, profile=prof.selector, harness=selected)
     if sdef.harness == CLAUDE_HARNESS:
         if not sdef.profile:
             raise HarnessError(
@@ -396,7 +398,7 @@ def build_command(
     session's own (forked or not) and a restore reopens it by its pinned id,
     exactly like any other session.
     """
-    prof = profile_mod.require(sdef.profile) if sdef.profile else None
+    prof = profile_mod.require_selector(sdef.profile) if sdef.profile else None
     base = {
         k: v for k, v in os.environ.items() if k not in _NESTED_SESSION_MARKERS
     }

@@ -813,7 +813,7 @@ class SessionManager:
                     "identified and migrating would lose the conversation"
                 )
             try:
-                config_dir = profile_mod.require(old.profile).config_dir
+                config_dir = profile_mod.require_selector(old.profile).config_dir
             except profile_mod.ProfileError as exc:
                 raise ManagerError(str(exc)) from exc
         if not session.exited:

@@ -24,7 +24,16 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from . import config, harnesses, lineage, profile, seed, store, template
+from . import (
+    config,
+    credentials,
+    harnesses,
+    lineage,
+    profile,
+    seed,
+    store,
+    template,
+)
 
 LEGACY_META_FILENAME = ".launcher.json"
 LEGACY_SETTINGS_FILENAME = "settings.json"
@@ -63,6 +72,7 @@ def reconcile() -> None:
         if not p.exists():
             p = profile.create(name)
             created.append(p)
+        credentials.migrate_legacy_api_key(p)
     # Resolve inheritance only after all roots exist. A child whose parent was
     # also pulled in this reconciliation must see that parent's harness before
     # deciding whether Claude config belongs in its storage root.

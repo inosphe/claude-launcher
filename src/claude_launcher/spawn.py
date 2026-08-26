@@ -65,7 +65,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-from . import lineage, profile as profile_mod, store, workspaces, worktree as worktree_mod
+from . import (
+    harnesses,
+    lineage,
+    profile as profile_mod,
+    store,
+    workspaces,
+    worktree as worktree_mod,
+)
 
 #: Policy defaults. Permissive enough that spawning works out of the box,
 #: restrictive enough that a child is always recognisably a copy of its
@@ -363,7 +370,7 @@ def check(
     # command/auth fields that belonged to the parent's different program.
     if child.get("profile"):
         selected = lineage.effective_harness(
-            profile_mod.require(str(child["profile"]))
+            profile_mod.require_selector(str(child["profile"]))
         )
         if selected != child.get("harness"):
             child["harness"] = selected
@@ -569,7 +576,13 @@ def capabilities(
         # below: profile names live in a registry the agent cannot see, and
         # unlocking profile/borrow without naming the options would leave it
         # guessing.
-        report["profiles"] = [p.name for p in profile_mod.list_all()]
+        profiles = profile_mod.list_all()
+        report["profiles"] = [p.name for p in profiles]
+        report["profile_selectors"] = [
+            f"{p.name}:{name}"
+            for p in profiles
+            for name in harnesses.names()
+        ]
     if policy.allow_workspace:
         # The values, not just the field name. Everything else in
         # ``may_choose`` is something the agent already knows how to spell;

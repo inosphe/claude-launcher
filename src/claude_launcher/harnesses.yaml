@@ -5,8 +5,8 @@ harnesses:
   claude:
     builtin: true
     auth: claude
-    api_key_env: ANTHROPIC_AUTH_TOKEN
-    api_key_clear_env: [ANTHROPIC_API_KEY]
+    token_env: ANTHROPIC_AUTH_TOKEN
+    empty_env: [ANTHROPIC_API_KEY]
     description: >-
       Claude Code, run under a claunch profile (isolated config dir, provider
       and token). Needs --profile; the executable is CLAUDE_LAUNCHER_BIN.
@@ -25,7 +25,7 @@ harnesses:
     command: pi
     home_env: PI_CODING_AGENT_DIR
     auth: api-key
-    api_key_env: ANTHROPIC_API_KEY
+    token_env: ANTHROPIC_API_KEY
     heartbeat_args: [-p]
     description: The pi CLI agent using the packaged Anthropic API-key route.
 

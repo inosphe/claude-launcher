@@ -21,6 +21,12 @@ def run(*argv):
     return cli.main(list(argv))
 
 
+def test_public_cli_has_one_secret_writer():
+    help_text = cli.build_parser().format_help()
+    assert "set-token" in help_text
+    assert "set-key" not in help_text
+
+
 def test_install_scopes_are_mutually_exclusive(home, capsys, tmp_path, monkeypatch):
     import pytest
 
@@ -138,21 +144,19 @@ def test_profile_harness_is_created_inherited_pinned_and_cleared(home, capsys):
     assert "harness" not in store.profile_entry("child")
 
 
-def test_set_key_uses_the_harness_declared_route(home, capsys):
+def test_set_token_is_shared_and_pi_declares_its_projection(home, capsys):
     run("create", "pi-work", "--no-seed", "--harness", "pi")
-    store.set_profile_field("pi-work", "api_key_env", "OPENAI_API_KEY")
     capsys.readouterr()
 
-    assert run("set-key", "pi-work", "pi-secret") == 0
+    assert run("set-token", "pi-work", "pi-secret") == 0
     p = profile.require("pi-work")
-    assert credentials.stored_api_key(p) == "pi-secret"
-    assert credentials.stored_token(p) is None
-    assert "api_key_env" not in store.profile_entry("pi-work")
-    assert harnesses.get("pi").api_key_env == "ANTHROPIC_API_KEY"
+    assert credentials.stored_token(p) == "pi-secret"
+    assert harnesses.get("pi").token_env == "ANTHROPIC_API_KEY"
+    assert runner.harness_child_env(p, harnesses.get("pi"))["ANTHROPIC_API_KEY"] == "pi-secret"
     assert "pi-secret" not in store.path().read_text(encoding="utf-8")
 
 
-def test_set_key_uses_packaged_claude_bearer_route_without_profile_metadata(
+def test_set_token_uses_packaged_claude_bearer_route_without_profile_metadata(
     home, capsys
 ):
     run("create", "gateway", "--no-seed")
@@ -162,13 +166,12 @@ def test_set_key_uses_packaged_claude_bearer_route_without_profile_metadata(
     store.set_profile_field("gateway", "provider", "kimi")
     capsys.readouterr()
 
-    assert run("set-key", "gateway", "kimi-secret") == 0
+    assert run("set-token", "gateway", "kimi-secret") == 0
     p = profile.require("gateway")
     env = runner.child_env(p, with_token=True)
 
     assert env["ANTHROPIC_AUTH_TOKEN"] == "kimi-secret"
     assert env["ANTHROPIC_API_KEY"] == ""
-    assert "api_key_env" not in store.profile_entry("gateway")
 
 
 def test_set_harness_refuses_value_with_clear(home, capsys):
@@ -178,11 +181,14 @@ def test_set_harness_refuses_value_with_clear(home, capsys):
     assert "not both" in capsys.readouterr().err
 
 
-def test_set_key_is_refused_for_oauth_harnesses(home, capsys):
+def test_set_token_for_oauth_harness_is_stored_but_not_injected(home, capsys):
     run("create", "kimi-work", "--no-seed", "--harness", "kimi")
     capsys.readouterr()
-    assert run("set-key", "kimi-work", "secret") == 1
-    assert "declares no API-key route" in capsys.readouterr().err
+    assert run("set-token", "kimi-work", "secret") == 0
+    p = profile.require("kimi-work")
+    env = runner.harness_child_env(p, harnesses.get("kimi"), base_env={})
+    assert credentials.stored_token(p) == "secret"
+    assert "KIMI_API_KEY" not in env
 
 
 def test_set_and_get_token(home, capsys):
@@ -192,6 +198,16 @@ def test_set_and_get_token(home, capsys):
     capsys.readouterr()
     assert run("get-token", "work") == 0
     assert capsys.readouterr().out.strip() == "sk-ant-oat01-X"
+
+
+def test_token_commands_name_the_base_profile_because_variants_share_it(
+    home, capsys
+):
+    run("create", "work", "--no-seed")
+    capsys.readouterr()
+    assert run("set-token", "work:pi", "secret") == 1
+    assert "all harness variants share one token" in capsys.readouterr().err
+    assert credentials.stored_token(profile.require("work")) is None
 
 
 def test_get_token_own_requires_own(home, capsys):
@@ -218,6 +234,12 @@ def test_prune_removes_orphan(home, capsys):
 
 def test_unknown_profile_errors(home, capsys):
     assert run("env", "ghost") == 1
+
+
+def test_path_qualified_selector_prints_namespaced_harness_home(home, capsys):
+    p = profile.create("ds4")
+    assert run("path", "ds4:pi") == 0
+    assert Path(capsys.readouterr().out.strip()) == p.config_dir / "pi"
 
 
 _REAL_RUN = subprocess.run
@@ -264,8 +286,8 @@ def test_run_without_null_still_injects_token(home, monkeypatch, capsys):
 def test_non_claude_run_does_not_steal_the_harness_provider_flag(
     home, monkeypatch, capsys
 ):
-    run("create", "pi-work", "--no-seed", "--harness", "pi")
-    run("set-key", "pi-work", "pi-secret")
+    run("create", "pi-work", "--no-seed")
+    run("set-token", "pi-work", "pi-secret")
     reached = {}
 
     def fake_run(cmd, **kwargs):
@@ -279,9 +301,10 @@ def test_non_claude_run_does_not_steal_the_harness_provider_flag(
 
     monkeypatch.setattr(runner.subprocess, "run", fake_run)
     capsys.readouterr()
-    assert run("run", "pi-work", "--no-worktree", "--provider", "openai") == 0
+    assert run("run", "pi-work:pi", "--no-worktree", "--provider", "openai") == 0
     assert reached["cmd"][-2:] == ["--provider", "openai"]
     assert reached["env"]["ANTHROPIC_API_KEY"] == "pi-secret"
+    assert lineage.effective_harness(profile.require("pi-work")) == "claude"
 
 
 def test_run_null_conflicts_with_borrow(home, capsys):

@@ -22,6 +22,7 @@ OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 #: Bearer token Claude Code sends to a custom (provider-overridden) backend.
 AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 
+
 class RunnerError(Exception):
     """Raised when the selected harness cannot be launched."""
 
@@ -40,9 +41,8 @@ def _finalize_declared_auth(harness: harnesses.Harness, env: dict) -> None:
     """Apply the selected harness's declared authentication boundary."""
     for name in harness.clear_env:
         env.pop(name, None)
-    if harness.api_key_env and env.get(harness.api_key_env):
-        for name in harness.api_key_clear_env:
-            env[name] = ""
+    for name in harness.empty_env:
+        env[name] = ""
 
 
 def child_env(
@@ -103,17 +103,17 @@ def child_env(
     if with_token:
         if provider != providers.DEFAULT_PROVIDER:
             # A provider is overriding the backend: auth comes from the
-            # profile's separate provider key (or legacy set-token; own,
-            # inherited, or borrowed), which OVERRIDES any plaintext
+            # profile's single set-token value (own, inherited, or borrowed),
+            # which OVERRIDES any plaintext
             # ANTHROPIC_AUTH_TOKEN in the config file — so backend keys can
             # live in the per-machine 0600 token file instead of the yaml.
             stored = lineage.stored_auth_token(auth_source)
             if stored:
-                if not harness.api_key_env:
+                if not harness.token_env:
                     raise RunnerError(
-                        "the claude harness has no declared api_key_env"
+                        "the claude harness has no declared token_env"
                     )
-                env[harness.api_key_env] = stored
+                env[harness.token_env] = stored
             # A custom backend never uses the Anthropic OAuth var; drop any
             # shell leftover unless the config file set it explicitly (the
             # provider pattern pins it to "").
@@ -184,9 +184,10 @@ def finalize_harness_env(
     """Enforce profile auth/storage boundaries after all environment layers.
 
     Existing profiles often carry many ``ANTHROPIC_*`` and
-    ``CLAUDE_CODE_*`` values. They remain untouched for Claude Code (including
-    Kimi-compatible Claude backends), but are not sprayed into unrelated CLI
-    agents. Pi receives its one launcher-managed provider key again below.
+    ``CLAUDE_CODE_*`` values. Except for the packaged Claude auth boundary,
+    they remain available to Claude Code (including Kimi-compatible backends),
+    but are not sprayed into unrelated CLI agents. Pi receives the profile's
+    one launcher-managed token again below.
 
     The daemon calls this a second time after applying per-session ``--env``;
     otherwise that dead customization path could escape the same boundary.
@@ -194,30 +195,30 @@ def finalize_harness_env(
     if harness.builtin:
         _finalize_declared_auth(harness, env)
         return
-    key_env = harness.api_key_env
-    managed_key = (
-        lineage.stored_api_key(profile) if harness.auth == "api-key" else None
+    token_env = harness.token_env
+    managed_token = (
+        lineage.stored_auth_token(profile) if harness.auth == "api-key" else None
     )
     for key in list(env):
         if key.startswith(("CLAUDE_CODE_", "ANTHROPIC_")) and not (
-            harness.auth == "api-key" and managed_key and key == key_env
+            harness.auth == "api-key" and managed_token and key == token_env
         ):
             env.pop(key, None)
         elif (
             harness.auth == "api-key"
             and key.upper().endswith("API_KEY")
-            and (not managed_key or key != key_env)
+            and (not managed_token or key != token_env)
         ):
-            # A Pi profile has one explicit key route. Do not let whatever
-            # provider keys happened to start claunch choose Pi's backend.
+            # A Pi profile has one explicit token route. Do not let whatever
+            # API keys happened to start claunch choose Pi's backend.
             env.pop(key, None)
-    if managed_key:
-        if not key_env:
+    if managed_token:
+        if not token_env:
             raise RunnerError(
                 f"harness {harness.name!r} uses API-key auth but declares "
-                "no api_key_env"
+                "no token_env"
             )
-        env[key_env] = managed_key
+        env[token_env] = managed_token
     _finalize_declared_auth(harness, env)
     if harness.home_env:
         home = harness.profile_home(profile.config_dir)
@@ -305,8 +306,8 @@ def login(profile: Profile) -> int:
         if not harness.login_args:
             if harness.auth == "api-key":
                 raise RunnerError(
-                    f"harness {harness.name!r} uses an API key; store one with "
-                    f"'claunch set-key {profile.name}'"
+                    f"harness {harness.name!r} uses the profile token as an "
+                    f"API key; store it with 'claunch set-token {profile.name}'"
                 )
             raise RunnerError(
                 f"harness {harness.name!r} has no login command declared"
@@ -360,7 +361,7 @@ def run(
         if incompatible:
             raise RunnerError(
                 f"{', '.join(incompatible)} only applies to the claude harness; "
-                f"profile {profile.name!r} selects {harness.name!r}"
+                f"profile {profile.selector!r} selects {harness.name!r}"
             )
         return _plain_spawn(profile, harness, list(args), cwd=cwd)
 
@@ -371,13 +372,13 @@ def run(
         name, source = providers.resolve_with_source(auth_source)
     if name != providers.DEFAULT_PROVIDER:
         # Tell the user why auth behaves differently on this run: with a
-        # provider overriding the backend, the stored provider key (if any) is
+        # provider overriding the backend, the stored profile token (if any) is
         # exported as ANTHROPIC_AUTH_TOKEN instead of the OAuth injection.
         stored = lineage.stored_auth_token(auth_source)
         via = (
-            "auth: stored provider key exported as ANTHROPIC_AUTH_TOKEN"
+            "auth: stored profile token exported as ANTHROPIC_AUTH_TOKEN"
             if stored
-            else "auth: no stored provider key; using the provider's env as configured"
+            else "auth: no stored profile token; using the provider's env as configured"
         )
         print(
             f"provider {name!r} active ({source}); {via}",

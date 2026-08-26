@@ -56,13 +56,13 @@ def test_default_provider_still_injects_oauth(home):
     assert "ANTHROPIC_AUTH_TOKEN" not in env
 
 
-def test_direct_anthropic_api_key_is_not_blank_without_auth_token(home):
+def test_claude_always_blanks_anthropic_api_key(home):
     p = profile.create("console-api")
     settings.set_env(p, {"ANTHROPIC_API_KEY": "console-key"})
 
     env = runner.child_env(p, with_token=True)
 
-    assert env["ANTHROPIC_API_KEY"] == "console-key"
+    assert env["ANTHROPIC_API_KEY"] == ""
     assert "ANTHROPIC_AUTH_TOKEN" not in env
 
 
@@ -78,18 +78,17 @@ def test_provider_selection_prefers_stored_token(home):
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == ""  # yaml's explicit pin kept
 
 
-def test_provider_prefers_separate_api_key_without_losing_oauth(home):
+def test_provider_projects_the_single_profile_token(home):
     p = profile.create("kimi-claude")
     store.update(_provider_glm)
     store.set_profile_field(p.name, "provider", "glm")
-    credentials.save_token(p, "oauth-or-legacy-fallback")
-    credentials.save_api_key(p, "kimi-api-key")
+    credentials.save_token(p, "kimi-api-key")
 
     env = runner.child_env(p, with_token=True)
 
     assert env["ANTHROPIC_AUTH_TOKEN"] == "kimi-api-key"
     assert env["ANTHROPIC_API_KEY"] == ""
-    assert credentials.stored_token(p) == "oauth-or-legacy-fallback"
+    assert credentials.stored_token(p) == "kimi-api-key"
 
 
 def test_provider_without_stored_token_keeps_yaml_value(home):
@@ -332,7 +331,7 @@ def test_borrow_lends_profile_env_above_provider_below_runner(home):
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "provider-sonnet"  # provider falls through
 
 
-def test_pi_gets_only_its_separate_managed_api_key(home, monkeypatch):
+def test_pi_gets_only_its_projected_profile_token(home, monkeypatch):
     p = profile.create("pi-work")
     lineage.set_harness(p, "pi")
     settings.set_env(
@@ -343,7 +342,7 @@ def test_pi_gets_only_its_separate_managed_api_key(home, monkeypatch):
             "KEEP_ME": "yes",
         },
     )
-    credentials.save_api_key(p, "pi-secret")
+    credentials.save_token(p, "pi-secret")
     monkeypatch.setenv("OPENAI_API_KEY", "ambient-openai")
 
     env = runner.harness_child_env(p, harnesses.get("pi"), base_env=dict())
@@ -369,7 +368,7 @@ def test_oauth_harnesses_ignore_api_keys_and_use_namespaced_storage(
 ):
     p = profile.create(name)
     lineage.set_harness(p, name)
-    credentials.save_api_key(p, "stale-managed-key")
+    credentials.save_token(p, "shared-but-ignored-by-oauth")
     settings.set_env(
         p,
         {

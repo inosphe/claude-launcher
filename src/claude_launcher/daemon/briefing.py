@@ -107,7 +107,7 @@ def _config_dir(sdef) -> Optional[Path]:
     """
     if getattr(sdef, "profile", None):
         try:
-            return profile_mod.require(sdef.profile).config_dir
+            return profile_mod.require_selector(sdef.profile).config_dir
         except ProfileError:
             return None
     env = os.environ.get("CLAUDE_CONFIG_DIR")
