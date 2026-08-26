@@ -404,8 +404,8 @@ def test_ending_a_child_at_the_cap_makes_room_for_the_next(home, tmp_path):
             )
             assert resp.status == 201
 
-            resp = await client.delete(
-                "/api/sessions/lead/children/w1", headers=BEARER
+            resp = await client.post(
+                "/api/sessions/lead/children/w1/kill", headers=BEARER
             )
             assert resp.status == 200
             await _wait_for(lambda: mgr.get("w1").exited, "w1 to exit")
@@ -1093,8 +1093,8 @@ def test_an_agent_ends_the_child_it_spawned(home, tmp_path):
                 "/api/sessions/lead/children", headers=BEARER)).json()
             assert caps["children_used"] == 1
 
-            resp = await client.delete(
-                "/api/sessions/lead/children/w1", headers=BEARER
+            resp = await client.post(
+                "/api/sessions/lead/children/w1/kill", headers=BEARER
             )
             assert resp.status == 200
             assert (await resp.json())["name"] == "w1"
@@ -1125,8 +1125,8 @@ def test_an_agent_ends_the_child_it_spawned(home, tmp_path):
             # the budget bug asserted just above. The retry deleted a record
             # that was supposed to stay respawnable, and stranded the mesh
             # row naming it. A retry an agent can be induced into must be safe.
-            resp = await client.delete(
-                "/api/sessions/lead/children/w1", headers=BEARER
+            resp = await client.post(
+                "/api/sessions/lead/children/w1/kill", headers=BEARER
             )
             assert resp.status == 200
             assert (await resp.json())["already_exited"] is True
@@ -1166,21 +1166,21 @@ def test_a_session_may_not_end_a_peer_or_itself(home, tmp_path):
                 assert resp.status == 201
 
             # sibling: refused
-            resp = await client.delete(
-                "/api/sessions/w1/children/w2", headers=BEARER
+            resp = await client.post(
+                "/api/sessions/w1/children/w2/kill", headers=BEARER
             )
             assert resp.status == 403
             assert "not a peer" in (await resp.json())["error"]
 
             # upwards: refused (a child does not retire its parent)
-            resp = await client.delete(
-                "/api/sessions/w1/children/lead", headers=BEARER
+            resp = await client.post(
+                "/api/sessions/w1/children/lead/kill", headers=BEARER
             )
             assert resp.status == 403
 
             # itself: refused
-            resp = await client.delete(
-                "/api/sessions/w1/children/w1", headers=BEARER
+            resp = await client.post(
+                "/api/sessions/w1/children/w1/kill", headers=BEARER
             )
             assert resp.status == 400
             assert "cannot end itself" in (await resp.json())["error"]
@@ -1218,15 +1218,15 @@ def test_a_grandchild_is_reachable_but_a_stranger_is_not(home, tmp_path):
             assert resp.status == 201
 
             # a root session it never spawned
-            resp = await client.delete(
-                "/api/sessions/lead/children/rogue", headers=BEARER
+            resp = await client.post(
+                "/api/sessions/lead/children/rogue/kill", headers=BEARER
             )
             assert resp.status == 403
             assert not mgr.get("rogue").exited
 
             # its worker's worker
-            resp = await client.delete(
-                "/api/sessions/lead/children/gc", headers=BEARER
+            resp = await client.post(
+                "/api/sessions/lead/children/gc/kill", headers=BEARER
             )
             assert resp.status == 200
             await _wait_for(lambda: mgr.get("gc").exited, "gc to exit")
@@ -1265,7 +1265,7 @@ def test_a_record_a_mesh_still_names_is_not_dropped(home, tmp_path):
             assert "w1" in mm.get(name).members
 
             # end it: allowed, and the row is *meant* to outlive the terminal
-            resp = await client.delete("/api/sessions/w1", headers=BEARER)
+            resp = await client.post("/api/sessions/w1/kill", headers=BEARER)
             assert resp.status == 200
             await _wait_for(lambda: mgr.get("w1").exited, "w1 to exit")
             assert "w1" in mm.get(name).members
@@ -1283,7 +1283,7 @@ def test_a_record_a_mesh_still_names_is_not_dropped(home, tmp_path):
             # which — an omission that looked like a no-op would read as the
             # clear not having taken
             mgr.create(SessionDef(name="loose", harness="py", cwd=str(tmp_path)))
-            await client.delete("/api/sessions/loose", headers=BEARER)
+            await client.post("/api/sessions/loose/kill", headers=BEARER)
             await _wait_for(lambda: mgr.get("loose").exited, "loose to exit")
             resp = await client.delete("/api/sessions", headers=BEARER)
             body = await resp.json()
@@ -1329,8 +1329,8 @@ def test_force_delete_releases_the_roster_and_the_record_together(home, tmp_path
                     headers=BEARER,
                 )
                 assert resp.status == 201
-                resp = await client.delete(
-                    f"/api/sessions/{child}", headers=BEARER
+                resp = await client.post(
+                    f"/api/sessions/{child}/kill", headers=BEARER
                 )
                 assert resp.status == 200
                 await _wait_for(

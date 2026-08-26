@@ -425,8 +425,8 @@ def call_tool(name: str, args: dict) -> dict:
         if not child:
             raise MeshMcpError("'session' is required")
         q = "?force=1" if args.get("force") else ""
-        return _client().delete(
-            f"/api/sessions/{_session()}/children/{child}{q}"
+        return _client().post(
+            f"/api/sessions/{_session()}/children/{child}/kill{q}"
         )
     if name == "reparent":
         child = str(args.get("session") or "")

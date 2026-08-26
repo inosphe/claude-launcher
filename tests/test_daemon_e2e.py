@@ -97,9 +97,12 @@ def test_session_lifecycle(home, tmp_path):
         assert log.is_file()
         assert b"READY" in log.read_bytes()
 
-        # exited sessions stay listed until killed/removed
+        # exited sessions stay listed: kill is idempotent now and never
+        # drops a record — forgetting is remove()'s job alone
         assert mgr.get("t1").exited
         mgr.kill("t1")
+        assert mgr.get("t1").exited
+        mgr.remove("t1")
         with pytest.raises(Exception):
             mgr.get("t1")
 

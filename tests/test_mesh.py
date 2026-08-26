@@ -1558,7 +1558,7 @@ def test_mesh_mcp_tools(home, monkeypatch):
     killed = []
 
     class KillClient(FakeClient):
-        def delete(self, path, **kw):
+        def post(self, path, body=None, **kw):
             killed.append(path)
             return {"name": "w1", "exited": True}
 
@@ -1579,8 +1579,8 @@ def test_mesh_mcp_tools(home, monkeypatch):
     )
     assert resp["result"]["isError"] is False
     assert killed == [
-        "/api/sessions/s0/children/w1",
-        "/api/sessions/s0/children/w1?force=1",
+        "/api/sessions/s0/children/w1/kill",
+        "/api/sessions/s0/children/w1/kill?force=1",
     ]
 
     # and it names what to end rather than defaulting to something

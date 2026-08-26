@@ -555,21 +555,42 @@ class SessionManager:
         }
 
     def kill(self, name: str, *, force: bool = False) -> AnySession:
-        """Kill a running session; deregister an already-exited one.
+        """Kill a running session; leave an already-exited one alone.
 
-        The deregistering half is the operator's alone, and its callers guard
-        it: a record a mesh row still names must not be dropped, or the row is
-        left naming a session that cannot be respawned or reached. The check
-        lives at the route (``_mesh_holds``) because it needs the mesh service
-        and this class deliberately does not know about it. The agent-facing
-        route does not reach this half at all — its second call is a no-op, so
-        a retry cannot destroy anything.
+        Idempotent for every caller, operator included: a second kill of a
+        session that has already ended changes nothing and returns the same
+        record the first one left. Ending and forgetting are separate verbs —
+        this one only ends. :meth:`remove` and :meth:`clear` are the only
+        things that drop a record.
+
+        It used to deregister on the second call, which made *repeating* the
+        command the destructive act, and a caller repeats a command precisely
+        when the first one looked like it had not worked. That cost a record
+        that was supposed to stay respawnable once already (via the agent
+        route, which has been guarded ever since); the guard is now here,
+        where every caller gets it, instead of at each route.
         """
         session = self.get(name)
-        if session.exited:
-            del self._sessions[name]
-        else:
+        if not session.exited:
             session.kill(force=force)
+            self.persist()
+        return session
+
+    def remove(self, name: str) -> AnySession:
+        """Drop one exited session's record — the per-session half of
+        :meth:`clear`.
+
+        A running session is refused outright: forgetting is not how anything
+        ends, and a route that reached for this on a live session has the
+        verbs confused. The mesh guard is the caller's, for the reason
+        :meth:`clear` spells out — this class knows nothing of meshes.
+        """
+        session = self.get(name)
+        if not session.exited:
+            raise ManagerError(
+                f"session {name!r} is still running — kill it first"
+            )
+        del self._sessions[name]
         self.persist()
         return session
 

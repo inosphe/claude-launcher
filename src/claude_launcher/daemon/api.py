@@ -296,8 +296,9 @@ def build_app(
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
     r.add_get("/api/sessions/{name}/children", h_session_children)
     r.add_post("/api/sessions/{name}/children", h_session_spawn)
-    r.add_delete("/api/sessions/{name}/children/{child}", h_session_child_kill)
+    r.add_post("/api/sessions/{name}/children/{child}/kill", h_session_child_kill)
     r.add_post("/api/sessions/{name}/parent", h_session_reparent)
+    r.add_post("/api/sessions/{name}/kill", h_session_kill)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
@@ -2384,7 +2385,7 @@ async def h_sessions_clear(request: web.Request) -> web.Response:
         stopped = [s.sdef.name for s in live]
     kept: List[dict] = []
     for name, held in (
-        (s.sdef.name, mesh.meshes_for_session(s.sdef.name))
+        (s.sdef.name, _mesh_holds(request, s.sdef.name))
         for s in manager.list()
         if s.exited
     ):
@@ -2723,31 +2724,64 @@ async def _leave_meshes(mesh_mgr, held: List[dict]) -> List[dict]:
     return still
 
 
-async def h_session_delete(request: web.Request) -> web.Response:
-    """Kill a running session; drop the record of an exited one (operator).
+async def h_session_kill(request: web.Request) -> web.Response:
+    """Kill a running session; do nothing to one that has already exited.
 
-    The second half is guarded: see :func:`_mesh_holds`. Killing is not — a
-    member row is *meant* to outlive the terminal, reading ``exited``.
+    This route only ends — it never drops a record, so it is safe to repeat:
+    a second kill is what a caller reaches for when the first one *looked*
+    like it had not worked, and that call must not be the destructive one.
+    Forgetting is the DELETE beside it, and it refuses a running session, so
+    the two verbs cannot be reached through each other.
 
-    ``?force=1`` carries its meaning to whichever half runs: on a running
-    session it is SIGKILL (as it always was), on a held exited one it takes
-    the record off its rosters first (:func:`_leave_meshes`) and then drops
-    it. One word because it is one stance — do it anyway — and because
-    ``claunch kill-session --force`` already says it.
+    On an exited session the reply says ``already_exited`` rather than being
+    silent: a caller that asks twice deserves to know the second ask changed
+    nothing, or it will keep asking.
+
+    ``?force=1`` is SIGKILL, as it always was, and means nothing on an exited
+    session — there is nothing left for it to carry. The mesh is untouched
+    either way: a member row is *meant* to outlive the terminal, reading
+    ``exited``.
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
     force = request.query.get("force") in ("1", "true")
     session = manager.get(name)  # ManagerError -> 400, as it always did
     if session.exited:
-        held = _mesh_holds(request, name)
-        if held and force:
-            held = await _leave_meshes(request.app["mesh"], held)
-        if held:
-            return json_error(409, _mesh_holds_error(name, held))
-    elif await _winding_down(request, session, force=force):
+        return web.json_response({**session.info(), "already_exited": True})
+    if await _winding_down(request, session, force=force):
         return web.json_response({**session.info(), "winding_down": True})
     session = manager.kill(name, force=force)
+    return web.json_response(session.info())
+
+
+async def h_session_delete(request: web.Request) -> web.Response:
+    """Drop the record of an exited session (operator). Never ends anything.
+
+    The mirror of the kill route above: DELETE is forget, POST kill is end,
+    and each refuses the other's job — a running session gets a 400 naming
+    the kill route, because an operator who meant "end it" must not get
+    "forgotten" from a command that said no such thing.
+
+    The exited half is guarded: see :func:`_mesh_holds`. ``?force=1`` takes
+    a held record off its rosters first (:func:`_leave_meshes`) and then
+    drops it. One word because it is one stance — do it anyway.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    force = request.query.get("force") in ("1", "true")
+    session = manager.get(name)  # ManagerError -> 400, as it always did
+    if not session.exited:
+        return json_error(
+            400,
+            f"{name!r} is still running — DELETE only drops a record. "
+            f"Kill it first (POST /api/sessions/{name}/kill).",
+        )
+    held = _mesh_holds(request, name)
+    if held and force:
+        held = await _leave_meshes(request.app["mesh"], held)
+    if held:
+        return json_error(409, _mesh_holds_error(name, held))
+    session = manager.remove(name)
     return web.json_response(session.info())
 
 
@@ -2771,9 +2805,10 @@ async def _winding_down(request: web.Request, session, *, force: bool) -> bool:
 async def h_session_child_kill(request: web.Request) -> web.Response:
     """Retire a session an agent spawned — the counterpart of the POST above.
 
-    Scoped by the route rather than by a flag: ``DELETE /api/sessions/{name}``
-    is the operator's, who may end anything, and this one only reaches down
-    ``name``'s own subtree. The rule is :meth:`SessionManager.commands`, the
+    Scoped by the route rather than by a flag: ``POST
+    /api/sessions/{name}/kill`` is the operator's, who may end anything, and
+    this one only reaches down ``name``'s own subtree. The rule is
+    :meth:`SessionManager.commands`, the
     same one that decides which mesh edges an agent may rewire, so an agent
     ends what it created and nothing else — not a sibling, and not itself,
     which would leave the caller answering from a terminal it just closed.

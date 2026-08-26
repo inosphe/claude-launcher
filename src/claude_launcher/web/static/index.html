@@ -68,6 +68,7 @@
     </span>
     <button id="m-resume" class="m-act hidden" type="button">resume</button>
     <button id="m-kill" class="m-act hidden" type="button">kill</button>
+    <button id="m-remove" class="m-act hidden" type="button">remove</button>
   </div>
 
   <!-- The rail. Only things that move on their own live here: the session
@@ -169,7 +170,10 @@
                 title="this session's conversation — scrollable, the whole of it">transcript</button>
         <button id="term-rebrief" class="term-btn"
                 title="re-type this session's briefing (mesh, run, parent, task) into its terminal — for an agent whose context was cleared or compacted">rebrief</button>
-        <button id="term-kill" class="term-btn">kill</button>
+        <button id="term-kill" class="term-btn"
+                title="terminate the program running in this session">kill</button>
+        <button id="term-remove" class="term-btn hidden"
+                title="forget this exited session (it can no longer be resumed here)">remove</button>
       </span>
       <!-- Text size, and with it the session's grid: bigger glyphs mean fewer
            columns and rows, and that new size is sent to the program. Three

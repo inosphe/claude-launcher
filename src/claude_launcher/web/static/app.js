@@ -2703,30 +2703,46 @@ $("new-session").addEventListener("submit", async (e) => {
 
 $("term-details").addEventListener("click", () => openDetail(currentName));
 
+/* Kill ends, remove forgets, and the two buttons never share a meaning:
+   kill posts to the kill route (which leaves an exited session alone), and
+   remove is the only thing on the page that makes a session unresumable.
+   The header shows exactly one of them at a time (see setStatusBadge). */
 $("term-kill").addEventListener("click", async () => {
   if (!currentName) return;
   const name = currentName;
-  // On an exited session DELETE deregisters the record rather than killing
-  // anything — that is the one path that makes the session unresumable, so
-  // it asks first (killing a live program keeps its existing behaviour).
-  const exited = $("term-status").textContent === "exited";
-  if (exited && !(await modalConfirm(
-    `Remove exited session '${name}'?`,
-    "The daemon forgets it, so it can no longer be resumed from here.",
-    "Remove"
-  ))) return;
   // A live session holding board issues is wound down first (the daemon
   // types a settle-the-board block in and waits for that turn); the same
   // button pressed again while that runs means "stop now" — the daemon
   // reads the second kill that way, this only says so in the URL.
   const winding = !!(sessionsCache.find((s) => s.name === name) || {}).winddown;
-  let resp = await api(
-    `/api/sessions/${encodeURIComponent(name)}${winding ? "?winddown=0" : ""}`,
-    { method: "DELETE" }
+  const resp = await api(
+    `/api/sessions/${encodeURIComponent(name)}/kill${winding ? "?winddown=0" : ""}`,
+    { method: "POST" }
   );
+  if (!resp.ok) {
+    const doc = await resp.json().catch(() => ({}));
+    await modalInfo(`Could not kill '${name}'`,
+                    doc.error || `HTTP ${resp.status}`);
+  }
+  refreshSessions();
+});
+
+$("term-remove").addEventListener("click", async () => {
+  if (!currentName) return;
+  const name = currentName;
+  // This is the one path that makes the session unresumable, so it asks
+  // first. Only ever shown on an exited session; the DELETE route refuses
+  // a running one outright.
+  if (!(await modalConfirm(
+    `Remove exited session '${name}'?`,
+    "The daemon forgets it, so it can no longer be resumed from here.",
+    "Remove"
+  ))) return;
+  let resp = await api(`/api/sessions/${encodeURIComponent(name)}`,
+                       { method: "DELETE" });
   // The one refusal this route has: a mesh row still names the record. The
   // same choice the bulk buttons get (offerForce), asked for one session.
-  if (exited && resp.status === 409) {
+  if (resp.status === 409) {
     const doc = await resp.json().catch(() => ({}));
     const go = await showModal({
       title: `'${name}' is still a mesh member`,
@@ -2750,11 +2766,9 @@ $("term-kill").addEventListener("click", async () => {
     refreshSessions();
     return;
   }
-  if (exited) {
-    detach();
-    currentName = null;
-    location.hash = "#/";
-  }
+  detach();
+  currentName = null;
+  location.hash = "#/";
   refreshSessions();
 });
 
@@ -2965,18 +2979,15 @@ function setStatusBadge(status) {
   const badge = $("term-status");
   badge.textContent = status;
   badge.className = `badge ${status}`;
-  // An exited session is revivable, not attachable — offer resume, and make
-  // kill what it actually is there: dropping the daemon's record of it.
+  // An exited session is revivable, not attachable — offer resume, and swap
+  // kill for remove: one verb per button, one button per state.
   const exited = status === "exited";
   $("term-resume").classList.toggle("hidden", !exited);
   // Rebrief types into a live terminal; on an exited one there is nobody to
   // read it, so the button yields its spot to resume.
   $("term-rebrief").classList.toggle("hidden", exited);
-  const kill = $("term-kill");
-  kill.textContent = exited ? "remove" : "kill";
-  kill.title = exited
-    ? "forget this exited session (it can no longer be resumed here)"
-    : "terminate the program running in this session";
+  $("term-kill").classList.toggle("hidden", exited);
+  $("term-remove").classList.toggle("hidden", !exited);
   syncMobileBars();  // the mobile bars mirror this header
 }
 
@@ -5008,9 +5019,8 @@ function syncMobileBars() {
   $("m-resume").classList.toggle("hidden", status !== "exited");
   // Nothing to size without a terminal under the bar.
   $("m-zoom").classList.toggle("hidden", !has);
-  const kill = $("m-kill");
-  kill.classList.toggle("hidden", !has);
-  kill.textContent = status === "exited" ? "remove" : "kill";
+  $("m-kill").classList.toggle("hidden", !has || status === "exited");
+  $("m-remove").classList.toggle("hidden", !has || status !== "exited");
 
   const bDot = $("mb-dot");
   bDot.className = `dot ${status}`;
@@ -5029,6 +5039,7 @@ $("m-menu").addEventListener("click", () => { location.hash = "#/"; });
 // The header's controls are the real ones; these just reach them, so kill's
 // confirm-before-forgetting and resume's reattach stay in one place.
 $("m-kill").addEventListener("click", () => $("term-kill").click());
+$("m-remove").addEventListener("click", () => $("term-remove").click());
 $("m-resume").addEventListener("click", () => $("term-resume").click());
 
 $("mobile-bottom").addEventListener("click", () => {

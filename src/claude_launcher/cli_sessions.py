@@ -835,11 +835,28 @@ def _cmd_wait_for(args: argparse.Namespace) -> int:
 
 
 def _cmd_kill_session(args: argparse.Namespace) -> int:
+    """End a running session. On one that has already exited this does
+    nothing and says so — the record stays, and stays respawnable, because
+    dropping it is a different verb ('clear-sessions', or the web UI's
+    remove button), never this one."""
     client = daemon_client.ensure_running()
     suffix = "?force=1" if args.force else ""
-    info = client.delete(f"/api/sessions/{args.session}{suffix}")
-    if info.get("status") == "exited" and info.get("exit_code") is not None:
-        print(f"session {args.session!r} removed (exit code {info['exit_code']})")
+    info = client.post(f"/api/sessions/{args.session}/kill{suffix}")
+    if info.get("already_exited"):
+        code = info.get("exit_code")
+        print(
+            f"session {args.session!r} had already exited"
+            + (f" (exit code {code})" if code is not None else "")
+            + " — nothing to kill. It is still respawnable "
+            f"('claunch respawn {args.session}'); "
+            "'claunch clear-sessions' drops the record."
+        )
+    elif info.get("winding_down"):
+        print(
+            f"session {args.session!r} is winding down — it was asked to "
+            "settle its board issues first, then it will be terminated. "
+            "Run this again to stop it now."
+        )
     else:
         print(f"session {args.session!r} killed")
     return 0
@@ -1691,7 +1708,8 @@ def register(sub) -> None:
     p_skip.set_defaults(func=_cmd_skip_permissions_dispatch)
 
     p_kill = sub.add_parser(
-        "kill-session", help="kill a running session (or remove an exited one)"
+        "kill-session",
+        help="kill a running session (an exited one is left alone)",
     )
     p_kill.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
     p_kill.add_argument("session", nargs="?")

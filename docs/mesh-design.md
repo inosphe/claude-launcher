@@ -1265,16 +1265,17 @@ enrolled is a terminal nobody is listening to, and one enrolled but not
 briefed is an agent that does not know why it exists. Each optional step
 reports separately, so a partial success is legible. `GET` on the same path
 answers "what may I spawn" before a refusal has to be provoked, and
-`DELETE /api/sessions/{name}/children/{child}` ends one.
+`POST /api/sessions/{name}/children/{child}/kill` ends one.
 
-That `DELETE` is scoped by its route rather than by a flag: plain
-`DELETE /api/sessions/{child}` is the operator's, who may end anything, while
-this one reaches only into `{name}`'s own subtree — `SessionManager.commands`,
-the rule that also decides which edges an agent may rewire. So an agent gives
-back a slot it took and nothing else: a sibling is refused, and so is itself,
-which would have it answering from a terminal it just closed. The member row
-survives, reading `exited`, because the child is respawnable and a roster that
-forgot it would forget the work. Clearing and respawning stay the human's.
+That kill is scoped by its route rather than by a flag: the operator's
+`POST /api/sessions/{child}/kill` may end anything, while this one reaches
+only into `{name}`'s own subtree — `SessionManager.commands`, the rule that
+also decides which edges an agent may rewire. So an agent gives back a slot
+it took and nothing else: a sibling is refused, and so is itself, which
+would have it answering from a terminal it just closed. The member row
+survives, reading `exited`, because the child is respawnable and a roster
+that forgot it would forget the work. Clearing and respawning stay the
+human's.
 
 A second call on an already-exited child is a **no-op**, and the first cut of
 this was wrong about that: it deregistered instead, which put the destructive
@@ -1284,7 +1285,10 @@ budget bug above — the slot did not come back — so the agent called `kill`
 again, the way anyone would, and the retry deleted a record that was supposed
 to remain respawnable. The lesson is not "fix the budget bug" (that is fixed);
 it is that a retry an agent can be *induced* into must be safe. Ending and
-forgetting are separate verbs with separate callers.
+forgetting are separate verbs with separate routes: the kill verbs never drop
+a record (the operator's `kill-session`/`POST .../kill` included — the same
+second-call trap used to live there too), and the DELETE routes never end
+anything.
 
 Forgetting is guarded too, on both of its routes (`DELETE
 /api/sessions/{name}` on an exited record, and `DELETE /api/sessions` in

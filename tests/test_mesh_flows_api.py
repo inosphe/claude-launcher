@@ -208,9 +208,9 @@ def test_a_stopped_session_still_carries_the_run_it_stopped_in(home, tmp_path):
             assert flow["cwd"] == cwd               # ...and the way to its run page
             assert body["workflows"][flow["key"]]["start"] == "plan"  # track drawn
 
-            # Deregistered (killing an exited record drops it) is the other
+            # Deregistered (removing the exited record) is the other
             # absence: no session, no directory, nothing to show.
-            mgr.kill("lead")
+            mgr.remove("lead")
             resp = await client.get("/api/mesh/team/flows", headers=BEARER)
             body = await resp.json()
             assert body["flows"]["lead"] == {"session": "lead", "status": "no_session"}

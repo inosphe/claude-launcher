@@ -558,7 +558,7 @@ def test_a_kill_winds_down_first_then_terminates_and_sweeps(home, tmp_path, repo
         client = await _serve(mgr, mm, board)
         try:
             mgr.create(SessionDef(name="w1", harness="py", cwd=str(repo)))
-            resp = await client.delete("/api/sessions/w1", headers=BEARER)
+            resp = await client.post("/api/sessions/w1/kill", headers=BEARER)
             doc = await resp.json()
             assert resp.status == 200 and doc["winding_down"] is True
             assert not mgr.get("w1").exited
@@ -602,14 +602,14 @@ def test_a_second_kill_or_force_stops_at_once(home, tmp_path, repo, monkeypatch)
         try:
             mgr.create(SessionDef(name="w1", harness="py", cwd=str(repo)))
             mgr.create(SessionDef(name="w2", harness="py", cwd=str(repo)))
-            resp = await client.delete("/api/sessions/w1", headers=BEARER)
+            resp = await client.post("/api/sessions/w1/kill", headers=BEARER)
             assert (await resp.json())["winding_down"] is True
             # the same button again: stop now
-            resp = await client.delete("/api/sessions/w1", headers=BEARER)
+            resp = await client.post("/api/sessions/w1/kill", headers=BEARER)
             assert "winding_down" not in await resp.json()
             await _wait_for(lambda: mgr.get("w1").exited, "w1 killed")
             # force never winds down
-            resp = await client.delete("/api/sessions/w2?force=1", headers=BEARER)
+            resp = await client.post("/api/sessions/w2/kill?force=1", headers=BEARER)
             assert "winding_down" not in await resp.json()
             await _wait_for(lambda: mgr.get("w2").exited, "w2 killed")
             await board.cancel_all()
@@ -634,13 +634,13 @@ def test_no_active_issue_means_the_kill_is_immediate_and_the_setting_turns_it_of
         client = await _serve(mgr, mm, board)
         try:
             mgr.create(SessionDef(name="w1", harness="py", cwd=str(repo)))
-            resp = await client.delete("/api/sessions/w1", headers=BEARER)
+            resp = await client.post("/api/sessions/w1/kill", headers=BEARER)
             assert "winding_down" not in await resp.json()
             await _wait_for(lambda: mgr.get("w1").exited, "w1 killed")
 
             store.update(lambda doc: doc.update({"daemon": {"beads_winddown": False}}))
             mgr.create(SessionDef(name="w2", harness="py", cwd=str(repo)))
-            resp = await client.delete("/api/sessions/w2", headers=BEARER)
+            resp = await client.post("/api/sessions/w2/kill", headers=BEARER)
             assert "winding_down" not in await resp.json()
             await _wait_for(lambda: mgr.get("w2").exited, "w2 killed")
             # the sweep is not a setting

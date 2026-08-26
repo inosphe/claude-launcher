@@ -1173,7 +1173,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |
 | `wait-for S`          | Block until `--idle` (default) or `--exited`; `--timeout SECS`, `--idle-threshold SECS`. Exits 1 on timeout. |
 | `rebrief [--session S]` | Print the session's briefing re-derived from current daemon state: mesh memberships and roster, replies it owes, the cflow run it drives, parent/children, and its recorded opening `--task`. Managed claude sessions run it **automatically** — a `SessionStart` hook injected at spawn fires it after `/compact` and `/clear`, and claude reads the output back into context — so an agent's lost context is restored without the agent having to remember to ask. Defaults to `$CLAUNCH_SESSION`; also a **rebrief** button in the web UI, which types the same block into the session's terminal. |
-| `kill-session S`      | Terminate a running session, or drop the record of an exited one (`--force` skips graceful terminate). |
+| `kill-session S`      | Terminate a running session (`--force` skips graceful terminate). Idempotent: an already-exited session is left alone — dropping a record is a different verb, below. |
 | `reparent S PARENT`   | Move a session — with everything spawned under it — under another parent. The operator's form of the agents' `reparent` MCP tool, which is scoped to the caller's own subtree; this one is not. Refused for a cycle, an exited parent, or a move that would push any session past `spawn.max_depth`. Opens the session's edge to its new parent in every mesh the two share. |
 | `clear-sessions` (`clear`) | Drop the records of **all** exited sessions at once — running ones are untouched. They are kept indefinitely otherwise (a restart never discards them), so this is the explicit cleanup; `--logs` also deletes their output logs, freeing their auto-generated names. |
 | `resize S COLS ROWS`  | Resize the session's terminal. |
@@ -1339,7 +1339,7 @@ is nothing to misjudge:
 claunch new-session -s job1 --profile work -- -p "summarize this repo"
 claunch wait-for job1 --exited --timeout 600
 claunch capture-pane job1 --history > result.txt   # include scrolled-off lines
-claunch kill-session job1                          # deregister the exited session
+claunch clear-sessions                             # drop the exited record afterwards
 ```
 
 Several one-shot jobs can fan out in parallel and then be joined one by one —
@@ -1352,8 +1352,8 @@ done
 for i in 1 2 3; do
   claunch wait-for "job$i" --exited --timeout 900
   claunch capture-pane "job$i" --history > "result$i.txt"
-  claunch kill-session "job$i"
 done
+claunch clear-sessions
 ```
 
 #### Robustness notes
@@ -1565,7 +1565,6 @@ screen it left behind, replayed from its log.
 Records therefore accumulate, and only you drop them:
 
 ```bash
-claunch kill-session s0     # drop one record (or kill it, if still running)
 claunch clear-sessions      # drop every exited record; running sessions stay
 claunch clear-sessions --logs   # ...and delete their output logs too
 ```
