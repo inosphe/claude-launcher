@@ -8579,6 +8579,21 @@ function wfDiagramSvg(wf, run, selected) {
   lanes(routes.filter((r) => rowOf(r.to) > rowOf(r.from) + 1));   // right rail
   lanes(routes.filter((r) => rowOf(r.to) <= rowOf(r.from)));      // left rail
 
+  /* The centre column fans the same way, and for the same reason: a step's
+     one straight way out belongs on the centre line. Counting the option's
+     place in the MENU pushed it off — improv-worker's `landing` sends its
+     first option down the right rail and its second straight down, so the
+     only straight arrow it draws was offset as though it had a twin. Count
+     the straight ways out instead. */
+  const fanOf = new Map();
+  const straight = new Map();
+  for (const r of routes) {
+    if (rowOf(r.to) !== rowOf(r.from) + 1) continue;
+    const n = straight.get(r.from) || 0;
+    fanOf.set(r, n);
+    straight.set(r.from, n + 1);
+  }
+
   const parts = [];
   // width/height attrs pin the drawing at its natural size (one SVG unit =
   // one CSS pixel): the column growing must not blow the graph up with it.
@@ -8615,7 +8630,8 @@ function wfDiagramSvg(wf, run, selected) {
     const lane = laneOf.get(e) || 0;
     let d, lx, ly, anchor = "start";
     if (r2 === r1 + 1) {
-      const x = W / 2 + (e.i ? (e.i % 2 ? -1 : 1) * 18 * Math.ceil(e.i / 2) : 0);
+      const f = fanOf.get(e) || 0;
+      const x = W / 2 + (f ? (f % 2 ? -1 : 1) * 18 * Math.ceil(f / 2) : 0);
       const y1 = yTop(e.from) + NH, y2 = yTop(e.to) - 2;
       d = `M ${x} ${y1} L ${x} ${y2}`;
       lx = x + 7; ly = (y1 + y2) / 2 + 4;

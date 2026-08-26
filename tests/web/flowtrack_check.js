@@ -400,6 +400,18 @@ const WORKER_FULL = {
     }
   }
 
+  /* A step with one straight way out draws it on the centre line. `landing`
+     sends its first option down the right rail and its second straight down,
+     so counting the option's place in the menu offset the only straight
+     arrow it has as though it had a twin. */
+  const CENTRE = 480 / 2;
+  // Every step in this graph has at most one straight way out, so all of them
+  // belong on the line. A step with two would legitimately fan off it.
+  const centres = [...svg.matchAll(/<path class="wfd-edge[^"]*" d="M ([-\d.]+) [-\d.]+ L/g)]
+    .map((m) => +m[1]);
+  check("a step with one straight way out draws it on the centre line",
+        centres.filter((x) => x !== CENTRE).length === 0, centres);
+
   /* The title stops at the box, and the whole of it stays reachable. */
   const BOX = 210 - 24;
   const titles = [...svg.matchAll(/<text class="wfd-title"[^>]*>([^<]*)</g)]
