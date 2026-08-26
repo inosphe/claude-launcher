@@ -561,6 +561,112 @@ def test_borrow_across_providers_leaves_a_pinless_profile_alone(home):
     assert env["ANTHROPIC_BASE_URL"] == "https://lender.example/"
 
 
+def test_null_token_alone_keeps_model_pins(home):
+    # `run ds4 --null`: no token at all, but the backend in play is still the
+    # profile's own, so its pins keep their final say and endpoint and model
+    # id stay from the same provider.
+    #
+    # The reason they survive is *not* a `with_token` gate -- `run()` reaches
+    # child_env as `with_token=True, null_token=True`, so the exception is
+    # live on this path. They survive because `--null` and `--borrow` are
+    # refused together (cli.py, daemon/harness.py), which leaves the auth
+    # source as the profile itself and makes the predicate true.
+    store.update(
+        lambda doc: doc.update(
+            {
+                "providers": {
+                    "backend": {
+                        "env": {
+                            "ANTHROPIC_BASE_URL": "https://backend.example/",
+                            "ANTHROPIC_AUTH_TOKEN": "backend-key",
+                            "ANTHROPIC_MODEL": "backend-model",
+                        }
+                    }
+                }
+            }
+        )
+    )
+    p = profile.create("ds4")
+    settings.set_env(p, {"ANTHROPIC_MODEL": "pinned-model"})
+    store.set_profile_field("ds4", "provider", "backend")
+    credentials.save_token(p, "sk-ant-oat01-unused")
+
+    env = runner.child_env(p, with_token=True, null_token=True)
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert env["ANTHROPIC_BASE_URL"] == "https://backend.example/"
+    assert env["ANTHROPIC_MODEL"] == "pinned-model"
+
+
+def test_null_token_with_provider_override_drops_model_pins(home):
+    # `--null` bars `--borrow`, but not `--provider` -- so the backend can
+    # still swing out from under the profile's pins with no token in play.
+    # The exception has to hold on this path too, or `--null --provider`
+    # rebuilds the very mismatch the borrow path was fixed for.
+    store.update(
+        lambda doc: doc.update(
+            {
+                "providers": {
+                    "mine": {
+                        "env": {
+                            "ANTHROPIC_BASE_URL": "https://mine.example/",
+                            "ANTHROPIC_MODEL": "mine-model",
+                        }
+                    },
+                    "other": {
+                        "env": {
+                            "ANTHROPIC_BASE_URL": "https://other.example/",
+                            "ANTHROPIC_MODEL": "other-model",
+                        }
+                    },
+                }
+            }
+        )
+    )
+    p = profile.create("ds4")
+    settings.set_env(p, {"ANTHROPIC_MODEL": "mine-model-pinned"})
+    store.set_profile_field("ds4", "provider", "mine")
+
+    env = runner.child_env(
+        p, with_token=True, null_token=True, provider_override="other"
+    )
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert env["ANTHROPIC_BASE_URL"] == "https://other.example/"
+    assert env["ANTHROPIC_MODEL"] == "other-model"
+
+
+def test_login_env_is_unfiltered_today(home):
+    # `with_token=False` is the `login` / `setup-token` path: no provider env
+    # is laid down and no token is injected, so the profile's own env reaches
+    # the child as-is -- model pins included. This records what child_env does
+    # today, not a defect: those commands talk to Anthropic's login endpoints
+    # and take no model, so a stale model id has nothing to break here.
+    # If that changes, this goes red and the change gets looked at.
+    store.update(
+        lambda doc: doc.update(
+            {
+                "providers": {
+                    "backend": {
+                        "env": {"ANTHROPIC_BASE_URL": "https://backend.example/"}
+                    }
+                }
+            }
+        )
+    )
+    p = profile.create("ds4")
+    settings.set_env(p, {"ANTHROPIC_MODEL": "pinned-model"})
+    store.set_profile_field("ds4", "provider", "backend")
+    credentials.save_token(p, "sk-ant-oat01-stored")
+
+    env = runner.child_env(p, with_token=False)
+
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in env
+    assert "ANTHROPIC_BASE_URL" not in env
+    assert env["ANTHROPIC_MODEL"] == "pinned-model"
+    assert env["CLAUDE_CONFIG_DIR"] == str(p.config_dir)
+
+
 def test_pi_gets_only_its_projected_profile_token(home, monkeypatch):
     p = profile.create("pi-work")
     lineage.set_harness(p, "pi")
