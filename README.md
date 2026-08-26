@@ -2497,6 +2497,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/cflow/reminder`          | the reminder clock's machine defaults (`{defaults: {enabled, interval}}`) |
 | PUT    | `/api/cflow/reminder`          | `{enabled?, interval?}` — set those defaults; the clock re-reads them every tick, so this applies without a restart |
 | POST   | `/api/cflow/reminder`          | `{cwd, scope, enabled?, interval?}` or `{cwd, scope, clear: true}` — one run's override, stored (and archived) with the run |
+| POST   | `/api/cflow/reminder/skip`     | `{cwd, scope}` — let ONE of that run's reminders go by: re-arms the clock's timer (and drops one held for a stopped session) without writing an override. Answers `{skipped}`; `false` = the clock was keeping no timer there |
 
 **Step reminders.** An agent mid-work forgets the /cflow protocol the way it
 forgets everything else — a long side quest buries the step instructions —
@@ -2514,6 +2515,12 @@ Defaults:
 `claunch daemon config cflow_reminder true|false` /
 `cflow_reminder_interval 600` — these two keys are read live, no restart —
 with a per-run override on the run's web page (or the POST above).
+A session's own header carries the narrow verb beside them: **⏭ skips one
+reminder** — the timer is re-armed where it stands (and a reminder held for a
+stopped session is dropped), the clock stays on, and nothing is written. It is
+there because pausing is the wrong size for the usual want, *not this one, I am
+watching this session do one long thing* — and a pause is a state somebody has
+to remember to undo, set at the moment they are least likely to.
 
 **Resuming what a restart stopped.** A daemon restart brings restorable
 sessions back (`--resume` of the pinned conversation), but a restored session

@@ -912,6 +912,7 @@ function termTimerRun() {
 let termTimerRead = null;
 let termTimerTicker = null;
 let termTimerBusy = false;   // one flip at a time; a double-click is one flip
+let termTimerSkipBusy = false;  // same, for the skip beside it
 
 function renderTermTimer() {
   const run = termTimerRun();
@@ -954,12 +955,53 @@ function termTimerHold() {
            scope: read.pick.scope || "default" };
 }
 
+/* The reminder states in which a skip has something to skip.
+
+   All three are the same fact seen at three moments: this clock is holding a
+   live timer for this run and the next thing it does is type. `counting` is
+   before, `due` is at, and `held` is after — due, and waiting only for the
+   session to be working again, which makes it the state where a skip is
+   worth the most: a held reminder is retried EVERY poll, so it lands the
+   instant the agent starts its next turn.
+
+   The rest are not "not yet", they are nothing to skip, and offering the
+   button on them would be a promise the daemon cannot keep. `arming` has no
+   timer in the clock's table at all (the run just moved); `watching` has an
+   interval of zero and speaks only when its probe changes; `off`, `blocked`
+   and `stopped` are the three ways the clock is already silent — and on
+   those the honest control is the switch beside it, or nothing. */
+const TERM_TIMER_SKIPPABLE = { counting: 1, due: 1, held: 1 };
+
+/* The run whose next reminder this press would skip, or null when there is
+   none to skip.
+
+   Read off the REMINDER's own standing, never off the line's — the chip
+   reports whichever of the two clocks is loudest, so a run counting down to
+   a reminder can be showing a stall ping that is due, and a skip decided
+   from the line would then be offered for a clock this button cannot touch
+   (the ping is machine-wide) or hidden for one it can. Same split, and the
+   same reason, as the switch's `remind` above. */
+function termTimerSkip() {
+  const read = termTimerRead;
+  if (!read || !read.pick || !read.remind) return null;
+  if (!read.pick.cwd) return null;
+  const state = read.remind.state;
+  if (!TERM_TIMER_SKIPPABLE[state]) return null;
+  return { state, cwd: read.pick.cwd, scope: read.pick.scope || "default",
+           interval: read.remind.interval };
+}
+
 function paintTermTimer() {
   const box = $("term-timer");
   if (!box) return;
   const read = termTimerRead;
   const line = read && read.name === currentName
     ? railTimerLine(read.pick, (Date.now() - read.at) / 1000) : null;
+  // Gated on `line`, not on the reading alone: a reading taken for the
+  // session we just walked away from must not leave a live skip button
+  // sitting on the new session's name any more than it may leave the
+  // countdown there.
+  paintTermTimerSkip(line ? termTimerSkip() : null);
   if (!line) {
     box.className = "term-btn timer-chip hidden";
     box.textContent = "";
@@ -1037,6 +1079,90 @@ async function termTimerClick() {
     termTimerRead.remind = Object.assign(
       {}, termTimerRead.remind, { enabled: !hold.on }
     );
+  }
+  paintTermTimer();
+}
+
+/* The skip beside the switch: one press, one reminder let go by.
+
+   Icon only, and that is not a space saving. The chip next to it already
+   spells the clock out in words, and the one thing this button adds to that
+   sentence is a verb — a second copy of "step reminder" on the same row
+   would push the countdown into its ellipsis to say nothing new. */
+function paintTermTimerSkip(skip) {
+  const box = $("term-timer-skip");
+  if (!box) return;
+  if (!skip) {
+    box.className = "term-btn timer-skip hidden";
+    box.textContent = "";
+    box.removeAttribute("title");
+    box.disabled = false;
+    return;
+  }
+  // Wearing the clock's state, like the chip: on `due` and `held` this is
+  // the button somebody is reaching for, and it should be visible from the
+  // same glance that made them reach.
+  box.className = `term-btn timer-skip ${skip.state}`;
+  box.textContent = "⏭";
+  box.title = termTimerSkipTitle(skip);
+  box.disabled = termTimerSkipBusy;
+  if (!box.dataset.wired) {
+    box.dataset.wired = "1";
+    box.addEventListener("click", termTimerSkipClick);
+  }
+}
+
+/* What the press does, and — the part a reader has to be told, because the
+   button beside it does the other thing — what it does NOT do. */
+function termTimerSkipTitle(skip) {
+  const lines = [
+    skip.state === "held"
+      ? "SKIP the reminder now waiting: it is due and is retried every "
+        + "poll, so it lands the moment this session is working again. "
+        + "Press to let it go instead."
+      : "SKIP this one step reminder: the daemon does not re-type the step "
+        + "into this session now.",
+    "The clock stays on" + (skip.interval
+      ? `, and the next one is due in ${fmtCountdown(skip.interval)}.`
+      : ".")
+      + " Nothing is stored: neither this run's setting nor the machine "
+      + "defaults change — that is the ⏸ beside it, and it is a pause you "
+      + "have to remember to undo.",
+  ];
+  return lines.join("\n");
+}
+
+async function termTimerSkipClick() {
+  const skip = termTimerSkip();
+  if (!skip || termTimerSkipBusy) return;
+  termTimerSkipBusy = true;
+  paintTermTimer();
+  // No body but the run: this door sets nothing, so there is nothing to
+  // send it. `skipped: false` comes back when the daemon was keeping no
+  // timer for the run — not an error, and the next poll says so in the
+  // clock's own words, so it is left to the poll rather than alerted.
+  await cflowAction("/api/cflow/reminder/skip", {
+    cwd: skip.cwd, scope: skip.scope,
+  });
+  termTimerSkipBusy = false;
+  // Same reason the switch does this: the poll is up to 2s away, and a
+  // countdown that goes on counting down for two seconds after a skip reads
+  // as a skip that did nothing. Re-armed locally exactly as the daemon just
+  // re-armed it — a full interval from now.
+  const read = termTimerRead;
+  if (read && read.remind && skip.interval) {
+    read.remind = Object.assign({}, read.remind, {
+      state: "counting", due_in: skip.interval,
+    });
+    // Only when the line is speaking for the reminder. When the ping is the
+    // loudest clock the chip is telling the ping's story, and restamping the
+    // reading would rewind the ping's countdown along with it.
+    if (read.pick && read.pick.clock === "reminder") {
+      read.pick = Object.assign({}, read.pick, {
+        state: "counting", due_in: skip.interval,
+      });
+      read.at = Date.now();
+    }
   }
   paintTermTimer();
 }

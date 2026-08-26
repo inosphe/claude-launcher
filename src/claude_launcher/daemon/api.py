@@ -243,6 +243,7 @@ def build_app(
     r.add_get("/api/quickjob", h_quickjob_get)
     r.add_put("/api/quickjob", h_quickjob_set)
     r.add_post("/api/cflow/reminder", h_cflow_reminder_run_set)
+    r.add_post("/api/cflow/reminder/skip", h_cflow_reminder_skip)
     r.add_get("/api/mesh", h_mesh_list)
     r.add_post("/api/mesh", h_mesh_create)
     r.add_delete("/api/mesh/outgoing/{rid}", h_mesh_outgoing_cancel)
@@ -1655,6 +1656,35 @@ async def h_cflow_reminder_run_set(request: web.Request) -> web.Response:
     except store.StoreError:
         pass  # the override was set; broken config only hides the defaults
     return web.json_response(payload)
+
+
+async def h_cflow_reminder_skip(request: web.Request) -> web.Response:
+    """Let ONE of a run's step reminders go by, without switching it off.
+
+    The narrow verb beside the switch above: it re-arms the clock's timer for
+    this run and drops any reminder already held for a stopped session, and
+    it writes nothing — no override, no state, nothing archived with the run.
+    A person watching a session do one long thing wants *this* reminder not
+    to land in the middle of it, and paying for that with a pause they have
+    to remember to undo is how a run goes quiet for the rest of the day.
+
+    Answers ``skipped: false`` — not an error — when this daemon's clock was
+    keeping no timer for the run. Nothing was coming, so nothing was stopped,
+    and the next poll's ``timers`` says why in the run's own words.
+    """
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, _body = resolved
+    clock = (request.app.get("cflow_clocks") or {}).get("reminder")
+    if clock is None:
+        # No clock on this daemon means no reminder is ever coming from it.
+        # Reported rather than answered `skipped: false`, because the two are
+        # different facts and only this one is worth acting on.
+        return json_error(503, "this daemon runs no cflow reminder clock")
+    return web.json_response(
+        {"cwd": cwd, "scope": scope, "skipped": bool(clock.skip(cwd, scope))}
+    )
 
 
 # --------------------------------------------------------------------------- #

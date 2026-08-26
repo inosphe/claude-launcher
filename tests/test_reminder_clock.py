@@ -234,6 +234,87 @@ def test_only_a_working_session_is_reminded(proj):
     assert len(sess.delivered) == 1              # the held reminder lands
 
 
+def test_skip_lets_one_reminder_go_by_and_keeps_the_clock(proj):
+    """The narrow verb beside the switch: re-arm once, change nothing.
+
+    Its whole claim is that it is NOT a pause — so the two halves worth
+    pinning are that the reminder about to be typed is not typed, and that a
+    full interval later the next one is, with no override written anywhere.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)                                # arrival arms the timer
+    assert clock.scan(t + 601)                   # ...and an interval later it is due
+
+    assert clock.skip(cwd, "w1") is True         # let that one go by
+    assert clock.scan(time.monotonic() + 100) == []   # nothing is due now
+
+    # The clock is not off, only re-armed: a full interval from the skip the
+    # next reminder is due exactly as it would have been.
+    assert clock.scan(time.monotonic() + 601)
+
+    # And nothing was written. A pause stores an override on the run (and is
+    # archived with it); this stores nothing, which is the difference the
+    # button in the header is offering.
+    assert "reminder" not in cflow_engine.status(cwd, scope="w1")
+    assert store.daemon_config().get("cflow_reminder") is not False
+
+
+def test_skip_drops_a_reminder_held_for_a_stopped_session(proj):
+    """The state a skip is worth the most in, and the one it is easiest to
+    get wrong: a held reminder is due and retried EVERY poll, so re-arming
+    without clearing the hold would land the very reminder just skipped, the
+    moment the agent starts its next turn."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    sess.status_value = "idle"                   # nobody working: it will hold
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+    due = clock.scan(t + 601)
+    assert due
+    asyncio.run(clock._deliver(*due[0]))
+    assert sess.delivered == []
+    key = (cwd, "w1")
+    assert clock.timers()[key]["held_ago"] is not None   # the debt is stamped
+
+    assert clock.skip(cwd, "w1") is True
+    assert clock.timers()[key]["held_ago"] is None       # ...and dropped
+
+    sess.status_value = "busy"                   # the agent starts working
+    assert clock.scan(time.monotonic() + 100) == []
+    assert sess.delivered == []                  # the held reminder never lands
+
+
+def test_skip_reports_when_there_was_nothing_to_skip(proj):
+    """`False` is the answer whenever this clock keeps no timer for the run —
+    and the two ways that happens are worth separating from a failure, because
+    in both of them no reminder was coming for a skip to have stopped."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    clock = cflow_clock.ReminderClock(_FakeManager({}))
+    # Never scanned: the table is empty, so there is nothing armed.
+    assert clock.skip(cwd, "w1") is False
+
+    # A position the clock stays out of (a human gate) drops the entry on the
+    # pass that sees it — same answer, and for the better reason.
+    (proj / ".claunch" / "workflows" / "gated.yaml").write_text(
+        "name: gated\nsteps:\n  one:\n    gate: human review\n"
+        "    instructions: ship it\n",
+        encoding="utf-8",
+    )
+    cflow_engine.start("gated", cwd=cwd, scope="w2")
+    clock.scan(time.monotonic())
+    # One pass, two runs in the same directory: the working one keeps a timer
+    # a skip can re-arm, the gated one is dropped from the table entirely.
+    assert clock.skip(cwd, "w1") is True
+    assert clock.skip(cwd, "w2") is False
+
+
 # --------------------------------------------------------------------------- #
 # the API doors
 # --------------------------------------------------------------------------- #
@@ -361,6 +442,85 @@ def test_the_api_takes_enabled_alone_and_keeps_the_runs_interval(proj):
             assert (await resp.json())["reminder"] == {
                 "interval": 90.0, "enabled": True,
             }
+        finally:
+            await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_the_skip_door_re_arms_the_clock_and_writes_nothing(proj):
+    """`POST /api/cflow/reminder/skip` — the header chip's other press.
+
+    Three properties, and the third is the one that makes it worth a door of
+    its own: it re-arms the live clock, it answers honestly when there was
+    nothing armed to re-arm, and it leaves the run's override alone. A skip
+    that quietly wrote `enabled: false` would pass any test that only looked
+    at whether the next reminder fired.
+    """
+    mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+
+    async def scenario():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        mm = MeshManager(mgr)
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            # No clock on this daemon at all: reported, not answered
+            # `skipped: false` — "nothing is coming from here, ever" and
+            # "nothing was due just now" are different facts.
+            resp = await client.post(
+                "/api/cflow/reminder/skip", headers=BEARER,
+                json={"cwd": cwd, "scope": "w1"},
+            )
+            assert resp.status == 503, await resp.json()
+
+            app["cflow_clocks"] = {"reminder": clock, "ping": None}
+
+            # Armed but never scanned into the table yet: nothing to skip.
+            resp = await client.post(
+                "/api/cflow/reminder/skip", headers=BEARER,
+                json={"cwd": cwd, "scope": "w1"},
+            )
+            body = await resp.json()
+            assert resp.status == 200, body
+            assert body["skipped"] is False
+
+            t = time.monotonic()
+            clock.scan(t)
+            assert clock.scan(t + 601)           # the reminder is due
+
+            resp = await client.post(
+                "/api/cflow/reminder/skip", headers=BEARER,
+                json={"cwd": cwd, "scope": "w1"},
+            )
+            body = await resp.json()
+            assert resp.status == 200, body
+            assert body["skipped"] is True
+            assert clock.scan(time.monotonic() + 100) == []
+
+            # The switch is untouched: the run still carries no override, and
+            # the policy the clock consults still says on, at the default.
+            detail = await (await client.get(
+                f"/api/cflow/run?cwd={cwd}&scope=w1", headers=BEARER,
+            )).json()
+            assert "reminder" not in detail["run"]
+            assert cflow_clock.reminder_policy(
+                detail["run"], store.daemon_config()
+            ) == (True, 600.0)
+
+            # A directory with no run is still a bad request, as it is for
+            # every other action door.
+            resp = await client.post(
+                "/api/cflow/reminder/skip", headers=BEARER,
+                json={"cwd": str(proj / "nope"), "scope": "w1"},
+            )
+            assert resp.status == 400
         finally:
             await client.close()
 
