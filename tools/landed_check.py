@@ -56,6 +56,14 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+# Every gate script under tools/ puts this checkout first, and this one
+# keeps the rule even though it imports nothing from the package: it asks
+# git and nothing else. The rule is worth more without an exemption list --
+# the moment this file grows an import, the line that would have made it
+# resolve against the tree being checked is already here rather than
+# remembered. tests/test_gates_run_this_checkout.py holds all five to it.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 CANNOT_TELL = 2
 
 
