@@ -849,6 +849,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .timer-chip.held { color: #a371f7; border-color: #3c2e5c; }
 .timer-chip.off { color: #6e7681; }
 .timer-chip.stopped { color: #ff7b72; border-color: #8b2e2e; }
+/* Switched off BY A PERSON, at this chip. Distinct from `.off` — which the
+   line's own state sets, and which the machine defaults can cause without
+   anybody here touching anything — because this one is the state the reader
+   themselves put the run into, and it can outlive their memory of doing it.
+   It dims rather than glows: a reminder somebody deliberately paused is not
+   a fault to raise, it is a quiet the chip has to keep admitting to. The
+   glyph beside it (▶) is what says the quiet is undoable, and where. */
+.timer-chip.timer-paused { color: #6e7681; border-color: #30363d; }
+.timer-chip:disabled { opacity: 0.6; cursor: wait; }
 /* The briefing card's strip, between the header and the terminal: padding
    and a rule like the queued strip's, in the panel's own grey so a summary
    reads as something to read, not as a wait the reader caused. The card

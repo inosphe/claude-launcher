@@ -135,8 +135,13 @@
            why it cannot serve here: on a session's own header a countdown
            belonging to some other session is a confident lie. So this chip
            speaks for the attached session's run or shows nothing at all.
-           Rendered by renderTermTimer(); aged every second by
-           paintTermTimer(). -->
+
+           Also the switch that pauses that run's step reminder and lets it go
+           again — the one clock of the two a person can turn off from here
+           (the stall ping is a machine-wide setting). Its leading glyph is
+           the control, not a second copy of the state: ⏸ while the reminder
+           is on, ▶ once it is paused. Rendered by renderTermTimer(); aged
+           every second by paintTermTimer(). -->
       <button id="term-timer" class="term-btn timer-chip hidden" type="button"></button>
       <!-- What would happen to a message arriving RIGHT NOW: typed straight
            in, queued — and by what — or REFUSED outright, once this
