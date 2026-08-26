@@ -28,6 +28,7 @@ from . import (
     cli_workspace,
     config,
     credentials,
+    harness_policy,
     harnesses,
     herdr,
     lineage,
@@ -73,11 +74,33 @@ def _cmd_create(args: argparse.Namespace) -> int:
         raise LineageError(
             f"unknown harness {args.harness!r} (known: {', '.join(harnesses.names())})"
         )
-    p = profile.create(args.name)
+    # Validate the would-be config before creating a directory. A denied
+    # --harness must not leave a half-created profile behind.
+    prospective = profile.resolve(args.name)
+    prospective_doc = store.load()
+    section = prospective_doc.get("profiles")
+    if not isinstance(section, dict):
+        section = {}
+        prospective_doc["profiles"] = section
+    entry = section.setdefault(prospective.name, {})
+    if not isinstance(entry, dict):
+        entry = {}
+        section[prospective.name] = entry
+    if args.parent:
+        entry["parent"] = args.parent
     if args.harness:
-        lineage.set_harness(p, args.harness)
+        harness_policy.require(
+            prospective, args.harness, doc=prospective_doc
+        )
+    else:
+        lineage.effective_harness(prospective, prospective_doc)
+    p = profile.create(args.name)
     if args.parent:
         lineage.set_parent(p, args.parent)
+    if args.harness:
+        # Parent first: inherited allowed_harnesses is part of deciding whether
+        # this explicit pin is legal.
+        lineage.set_harness(p, args.harness)
     print(f"created profile {p.name!r} at {p.config_dir}")
     selected = lineage.effective_harness(p)
     is_claude = selected == harnesses.CLAUDE_HARNESS
@@ -559,12 +582,13 @@ def _cmd_set_provider(args: argparse.Namespace) -> int:
 
 
 def _cmd_providers(_args: argparse.Namespace) -> int:
-    registry = providers.registry()
-    global_choice = providers.active() or providers.DEFAULT_PROVIDER
+    doc = store.load()
+    registry = providers.registry(doc)
+    global_choice = providers.active(doc) or providers.DEFAULT_PROVIDER
     print(f"config file: {config.sync_file()}")
     print(f"global provider: {global_choice}")
     print("available providers:")
-    pinned = routing.configured()
+    pinned = routing.configured(doc)
     for name in sorted(registry):
         url = registry[name].get("ANTHROPIC_BASE_URL", "")
         suffix = f"  -> {url}" if url else ""
@@ -572,10 +596,13 @@ def _cmd_providers(_args: argparse.Namespace) -> int:
         # it belongs next to the backend URL rather than one command away.
         if name in pinned:
             suffix += f"  [routing: {_routing_line(pinned[name])}]"
+        allowed = harness_policy.provider_constraint(name, doc)
+        if allowed is not None:
+            suffix += f"  [harnesses: {', '.join(allowed) or '(none)'}]"
         print(f"  {name}{suffix}")
     rows = []
     for p in profile.list_all():
-        eff = providers.resolve_name(p)
+        eff = providers.resolve_name(p, doc)
         if eff != providers.DEFAULT_PROVIDER:
             rows.append((p.name, eff))
     if rows:
@@ -1299,6 +1326,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         return args.func(args)
     except (
         profile.ProfileError,
+        harness_policy.HarnessPolicyError,
         borrowing.BorrowError,
         runner.RunnerError,
         usage.UsageError,

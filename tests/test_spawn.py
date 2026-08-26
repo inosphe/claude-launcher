@@ -331,6 +331,26 @@ def test_capabilities_lists_the_profiles_only_when_the_field_is_unlocked():
     assert all(":" in item for item in report["profile_selectors"])
 
 
+def test_capabilities_only_lists_policy_allowed_profile_selectors():
+    profile.create("other")
+    store.set_profile_field("other", "allowed_harnesses", ["pi"])
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {"claude-only": {"env": {}, "allowed_harnesses": ["claude"]}}
+        )
+    )
+    store.set_profile_field("talk", "provider", "claude-only")
+
+    report = spawn.capabilities(
+        _policy(allow_profile=True), depth=0, children=0
+    )
+
+    assert "other:pi" in report["profile_selectors"]
+    assert "other:claude" not in report["profile_selectors"]
+    assert "talk:claude" in report["profile_selectors"]
+    assert "talk:pi" not in report["profile_selectors"]
+
+
 def test_capabilities_always_offers_null_token():
     report = spawn.capabilities(_policy(), depth=0, children=0)
     assert "null_token" in report["may_choose"]

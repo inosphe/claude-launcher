@@ -625,14 +625,6 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #new-runs-on legend {
   padding: 0 6px; font-size: 11px; text-transform: uppercase; color: #7d8590;
 }
-/* The pick and its consequence side by side: the profile is the decision, so
-   it takes the width, and the harness beside it is the read-only projection
-   of that decision (syncProfileHarness) rather than a second question. They
-   stack on a narrow screen — see the mobile block near the end of this
-   file. */
-#new-runs-on-pair {
-  display: grid; grid-template-columns: 3fr 2fr; gap: 0 10px; align-items: end;
-}
 /* Amber, like #cwd-hint: the same register — not an error, but the thing
    that would have gone wrong unnoticed. Silent (hidden) unless
    renderProfileHint has something to say. */
@@ -2483,10 +2475,6 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   /* thumb-sized here too, and two to a row instead of four to a line */
   .bulk { padding: 12px 16px; font-size: 13px; flex: 1 1 40%; }
   /* iOS zooms the page on any input below 16px, and a zoomed page scrolls */
-  /* Two columns is a squeeze at phone width, and the harness half is the
-     part nobody edits — so the pick gets the whole row and its projection
-     sits under it. */
-  #new-runs-on-pair { grid-template-columns: 1fr; }
   #new-session input, #new-session select,
   #new-mesh input, #new-mesh select, .auth-box input,
   #term-input-field { font-size: 16px; }

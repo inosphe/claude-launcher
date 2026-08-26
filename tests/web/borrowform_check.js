@@ -1,5 +1,5 @@
-/* New-session's Borrow row follows the selected harness contract while the
-   Harness row stays read-only. This is intentionally separate from the spawn
+/* New-session's Borrow row follows the harness encoded in PROFILE:HARNESS;
+   there is no second Harness row. This is intentionally separate from spawn
    checks: no parent/policy exists here to explain an accidentally grey row. */
 const fs = require("fs");
 const path = require("path");
@@ -38,7 +38,8 @@ function renderRoleStance() {}
 function syncSpawnMode() {}
 function renderRuntimeSummary() {}
 function renderProfileHint() {}
-` + slice("profileBorrowCapability") + slice("syncForkAvailability") + `
+` + slice("profileBorrowCapability") + slice("profileHarnessName") +
+slice("syncForkAvailability") + `
 exports.sync = syncForkAvailability;`
 )(ctx, (id) => id === "new-session" ? form : null, details);
 

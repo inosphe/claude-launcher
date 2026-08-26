@@ -144,3 +144,47 @@ def test_oauth_harness_cannot_borrow_even_when_lender_has_a_token(home):
     assert not report.allowed
     assert report.status == "unsupported-harness"
     assert "oauth" in report.message
+
+
+def test_borrow_cannot_bypass_runtime_profile_harness_policy(home):
+    runtime = profile.create("work")
+    lender = profile.create("ds4")
+    credentials.save_token(lender, "secret")
+    store.set_profile_field(runtime.name, "allowed_harnesses", ["pi"])
+
+    report = borrowing.validate(
+        profile.resolve_selector("work:claude"),
+        "ds4",
+        entry=harnesses.get("claude"),
+    )
+
+    assert report.allowed is False
+    assert report.status == "harness-policy-denied"
+    assert "profile 'work'" in report.message
+
+
+def test_borrow_respects_the_lender_profile_and_provider_policy(home):
+    runtime = profile.create("work")
+    lender = profile.create("ds4")
+    credentials.save_token(lender, "secret")
+    store.set_profile_field(lender.name, "allowed_harnesses", ["pi"])
+
+    profile_denied = borrowing.validate(runtime, "ds4")
+    assert not profile_denied.allowed
+    assert "profile 'ds4'" in profile_denied.message
+
+    store.set_profile_field(lender.name, "allowed_harnesses", None)
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {
+                "pi-only": {
+                    "env": {},
+                    "allowed_harnesses": ["pi"],
+                }
+            }
+        )
+    )
+    store.set_profile_field(lender.name, "provider", "pi-only")
+    provider_denied = borrowing.validate(runtime, "ds4")
+    assert not provider_denied.allowed
+    assert "provider 'pi-only'" in provider_denied.message

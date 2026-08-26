@@ -16,12 +16,15 @@ Schema::
       env: {KEY: VALUE, ...}
     provider: <name>            # global default provider (optional)
     providers:
-      <name>: {env: {KEY: VALUE, ...}}
+      <name>:
+        env: {KEY: VALUE, ...}
+        allowed_harnesses: [claude, ...]  # optional; missing = unrestricted
     profiles:
       <name>:
         parent: <other>         # optional
         harness: <name>         # optional; inherited, default claude
         provider: <name>        # optional; Claude Code only
+        allowed_harnesses: [claude, pi]  # optional; inherited by intersection
         env: {KEY: VALUE, ...}
     workspaces:                 # machine-local; see :mod:`workspaces`
       <name>: <absolute path>

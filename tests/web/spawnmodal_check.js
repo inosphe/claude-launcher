@@ -219,9 +219,9 @@ function uiStub(over = {}) {
     git: { repo: true, worktrees: [] }, stamp: "20260824-210000",
     name: ctl(), role: ctl(), workflow: ctl(), context: ctl(), contextRow: ctl(),
     mesh: ctl(), handle: ctl(), task: ctl(), args: ctl(),
-    harness: ctl(), profile: ctl(), borrow: ctl(),
+    profile: ctl(), borrow: ctl(),
     nullTok: ctl(), fork: ctl(), over: ctl(), overRow: ctl(),
-    harnessNote: ctl(), profileNote: ctl(), borrowNote: ctl(),
+    profileNote: ctl(), borrowNote: ctl(),
     nullNote: ctl(), forkNote: ctl(), argsNote: ctl(),
     workspace: ctl(), workspaceNote: ctl(),
     wtMode: wtGroup(), worktreeNote: ctl(), wtName: ctl(),
@@ -380,7 +380,6 @@ async function main() {
     mesh: ctl({ value: "-" }), role: ctl({ value: "" }),
   });
   const greyBody = ctx.spawnPayload(greyed);
-  check("a greyed harness is not sent", greyBody.harness === undefined, greyBody);
   check("a greyed profile is not sent", greyBody.profile === undefined);
   check("a greyed --null is not sent", greyBody.null_token === undefined);
   check("a greyed fork is not sent", greyBody.fork === undefined);
@@ -397,9 +396,6 @@ async function main() {
     git: { repo: true }, over: ctl(), update: ctl(),
   });
   ctx.syncSpawnGates(g);
-  check("harness is read-only because the profile owns it",
-    g.harness.disabled === true && /profile owns/.test(g.harnessNote.textContent),
-    g.harnessNote.textContent);
   check("locked profile names its key",
     g.profile.disabled === true && /spawn\.allow_profile/.test(g.profileNote.textContent));
   check("no workspaces list locks the directory row",
@@ -656,10 +652,12 @@ async function main() {
   const built = ctx.buildSpawnForm("lead1", { quick: true, task: "fix the tab", name: "w7" });
   const bui = built.ui;
   for (const k of ["name", "role", "workflow", "context", "mesh", "handle", "task",
-                   "harness", "profile", "borrow", "args", "workspace", "wtMode",
+                   "profile", "borrow", "args", "workspace", "wtMode",
                    "wtPick", "wtName", "update", "rebase", "fork", "over"]) {
     check(`form builds ${k}`, bui[k] && typeof bui[k] === "object", k);
   }
+  check("the qualified Profile : Harness picker has no duplicate harness control",
+    bui.harness === undefined, bui.harness);
   check("parent is pinned to the opener", bui.parent.value === "lead1", bui.parent);
   check("the seed task lands in the field", bui.task.value === "fix the tab", bui.task.value);
   check("the seed name lands in the field", bui.name.value === "w7");

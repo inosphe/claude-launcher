@@ -2,7 +2,7 @@
 
    The form asks for two unrelated things and used to interleave them: what a
    session IS (whose child, which mesh, what role, which run) and what it
-   RUNS ON (harness, profile, login, directory, args). The second set is
+   RUNS ON (qualified profile selector, login, directory, args). The second set is
    right by default nearly every time, so it now folds shut under the first —
    and the opening task, whose right answer depends on every row above it,
    sits near the bottom, with only the board question below it: two of that
@@ -17,7 +17,7 @@
      a list, not a set.
    - What the fold contains. The rows a child inherits (SPAWN_INHERITS,
      sliced from app.js) are split in two: the ones on the face of the form
-     (RUNTIME_PROMOTED — the profile and the harness it selects) and the ones
+     (RUNTIME_PROMOTED — the qualified profile selector) and the ones
      still folded away. The fold must hold EXACTLY the remainder. Too much
      and its summary speaks for a row that does not in fact travel; too
      little and a row went missing in the move. A row that appears in both
@@ -97,7 +97,7 @@ check("the form's controls read in the new order", named(form.text), [
   // who it is
   "parent", "fork_parent", "over_limit", "name",
   // whose credentials it holds — promoted out of the fold
-  "profile", "harness",
+  "profile",
   // what it joins, and what it drives
   "mesh", "handle", "role", "workflow", "context",
   // how it runs — folded
@@ -119,10 +119,10 @@ check("the profile is asked above the fold, not inside it",
       [form.text.indexOf("new-runs-on") < form.text.indexOf("new-runtime"),
        named(fold.text).includes("profile")],
       [true, false]);
-check("...with the pick first and its read-only projection beside it",
-      named(runsOn.text), ["profile", "harness"]);
-check("the harness stays read-only wherever it is shown",
-      /name="harness"[^>]*\sdisabled[\s>]/s.test(runsOn.text), true);
+check("the qualified profile selector is the only runtime choice",
+      named(runsOn.text), ["profile"]);
+check("there is no duplicate Harness control beside PROFILE:HARNESS",
+      /name="harness"/.test(runsOn.text), false);
 check("the credential hint travels with the profile it qualifies",
       ids(runsOn.text).includes("profile-hint"), true);
 const BOARD_ROWS = ["beads", "issue_text", "issue"];
@@ -343,7 +343,7 @@ check("the issue text is sent only under the answer that mints",
 const sumBox = { textContent: "" };
 function ctl(v) { return { value: v, checked: false, disabled: false }; }
 const f = {
-  harness: ctl("claude"), profile: ctl(""), borrow: ctl(""),
+  profile: ctl(""), borrow: ctl(""),
   null_token: ctl(""), args: ctl(""), resume: ctl(""), parent: ctl(""),
   cwd: { value: "", disabled: false, selectedIndex: 0,
          options: [{ text: "(daemon cwd)" }] },
@@ -379,12 +379,11 @@ check("the default says what it would create",
    here would put the same value on screen twice, written by two different
    code paths — which is how the two come to disagree. */
 f.profile.value = "nc";
-f.harness.value = "claude";
 f.cwd.options = [{ text: "(daemon cwd)" },
                  { text: "launcher — F:/works/claude-launcher" }];
 f.cwd.selectedIndex = 1;
 ctx.render();
-check("the promoted profile and harness are not repeated on the fold's face",
+check("the promoted qualified profile is not repeated on the fold's face",
       sumBox.textContent, "— launcher");
 
 f.borrow.value = "work";
@@ -417,13 +416,6 @@ f.profile.disabled = false;
 f.cwd.disabled = false;
 ctx.render();
 check("only the open FOLDED rows speak for a child",
-      sumBox.textContent, "— lead's setup · launcher");
-
-/* Unlocking a promoted row changes nothing here — it is read off the face of
-   the form, where the operator can see it is theirs. */
-f.harness.disabled = false;
-ctx.render();
-check("unlocking a promoted row does not put it back on this line",
       sumBox.textContent, "— lead's setup · launcher");
 
 /* Back to a session of its own: every row speaks again, disables and all —

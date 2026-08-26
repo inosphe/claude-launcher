@@ -420,7 +420,9 @@ claunch env <name> --apply-template
 
 A profile can inherit from a **parent**, so you can build a base profile once and
 spin off variants. Children inherit the parent's `harness`, `env` (child keys
-win), API-key route and applicable login secret. A local `set-harness` pin wins;
+win), API-key route and applicable login secret. Every `allowed_harnesses`
+constraint in the parent chain also applies; a child list intersects it and
+therefore cannot widen it. A local `set-harness` pin wins;
 `set-harness --clear` returns to the inherited/default (`claude`) choice.
 
 ```bash
@@ -469,6 +471,7 @@ which the launcher reads live at launch. You can edit that file directly, or use
 ```yaml
 providers:
   fireworks-glm5p2:
+    allowed_harnesses: [claude]  # optional compatibility/security boundary
     env:
       ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference"
       ANTHROPIC_MODEL: "accounts/fireworks/models/glm-5p2"
@@ -508,6 +511,10 @@ The resulting precedence for a run is: shell env < provider `env` < profile `env
 (template + inherited + own) < the projected `set-token` value < the final
 harness auth boundary. For Claude that last boundary always forces
 `ANTHROPIC_API_KEY=""`.
+
+A provider may declare `allowed_harnesses`. When present, selecting that
+provider is only valid for the listed harnesses; `set-provider` refuses an
+atomic config change that would make a profile's current harness illegal.
 
 **Keeping backend tokens out of the config file.** Whenever a **non-default
 provider is active** for the run (selected on the profile, inherited, the
@@ -1705,9 +1712,44 @@ claunch login ds4:codex              # OAuth in ds4/codex/
 claunch new-session -s pi --profile ds4:pi -c ~/proj
 ```
 
-The web create form, `new --wizard` and `spawn --wizard` offer qualified
-profile selectors and show Harness read-only. Sending a separate `harness`
-field/flag is rejected. A session saves the qualified selector, so
+### Restricting harnesses by profile or provider
+
+Both profiles and providers accept an optional `allowed_harnesses` list:
+
+```yaml
+providers:
+  kimi-api:
+    allowed_harnesses: [claude]
+    env:
+      ANTHROPIC_BASE_URL: "https://api.kimi.example/"
+
+profiles:
+  account:
+    allowed_harnesses: [claude, pi]
+  ds4:
+    parent: account
+    provider: kimi-api
+    # Intersects account + kimi-api, so ds4 effectively allows only claude.
+    allowed_harnesses: [claude, kimi]
+```
+
+The field being absent means unrestricted. An explicit `[]` allows no
+harnesses. Profile constraints are intersected from the root ancestor through
+the selected profile, then intersected with the effective provider's list
+(own → ancestor → global → default). Unknown future harness names may remain in
+the list, but only currently declared harnesses are offered.
+
+The rule is enforced for bare defaults, explicit `PROFILE:HARNESS`, provider
+overrides, `set-harness`, direct runs, managed creation/spawn, restore and
+borrowed auth (the lender must also allow the consuming harness). API and UI
+selector lists omit denied combinations; `profile_details[].harness_policy`
+retains the denial reason for diagnostics.
+
+The Web create form and Spawn modal show one `Profile : Harness` picker — the
+qualified selector already contains both values, so there is no duplicate
+Harness row. The terminal `new --wizard` and `spawn --wizard` retain their
+read-only Harness projection for terminal readability. Sending a separate
+`harness` field/flag is rejected. A session saves the qualified selector, so
 `ds4:pi` restores as Pi even if `profiles.ds4.harness` later changes.
 The colon is logical only and never becomes part of a Windows path.
 

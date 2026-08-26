@@ -93,9 +93,6 @@ box_["new-over-row"].classes.add("hidden");
 
 const form = {
   parent: picker(), name: control(""),
-  harness: picker([["claude", "claude", true], ["codex", "codex", true],
-                   ["gemini", "gemini", true],
-                   ["pi (not installed)", "pi", false]]),
   profile: picker([["work", "work"], ["home", "home"]]),
   borrow: picker([["(this profile's own token)", ""], ["work", "work"]]),
   null_token: control(""),
@@ -105,7 +102,6 @@ const form = {
   role: picker([["(no role)", ""], ["worker", "worker"]]),
   over_limit: control(""),
 };
-form.harness.value = "claude";
 form.profile.value = "work";
 
 let forkSyncs = 0;
@@ -134,10 +130,10 @@ new Function(
    // it holds off is pollselect_check's; here it only has to exist, so that
    // slicing the function does not slice it away from its own state.
    sliceLet("parentsRendered"),
-   slice("profileBorrowCapability"),
+   slice("profileBorrowCapability"), slice("profileHarnessName"),
    slice("spawnUnlocked"), slice("refreshSpawnPolicy"),
    slice("spawnWorkspaceName"), slice("refreshParentChoices"),
-   slice("spawnParent"), slice("syncSpawnMode"), slice("syncSpawnHarnessRow"),
+   slice("spawnParent"), slice("syncSpawnMode"),
    slice("syncSpawnProfileRow"), slice("syncSpawnCwdRow"),
    slice("syncSpawnOverRow"), slice("spawnChildFields")].join("\n") + `
 exports.refresh = refreshParentChoices;
@@ -173,7 +169,7 @@ function check(what, got, want) {
     failures++;
   }
 }
-const INHERITED = ["harness", "profile", "borrow", "null_token", "cwd", "args",
+const INHERITED = ["profile", "borrow", "null_token", "cwd", "args",
                    "resume", "fork"];
 const greyed = () => INHERITED.map((k) => form[k].disabled);
 /* Re-reading a parent's report the way a changed policy would: the fetch is
@@ -209,8 +205,8 @@ async function main() {
   /* With no parent the form is the create form: nothing greyed by this, and
      the row that offers the parent's conversation is not there at all. */
   check("no parent, nothing inherited",
-        ["harness", "cwd", "args"].map((k) => form[k].disabled),
-        [true, false, false]);
+        ["cwd", "args"].map((k) => form[k].disabled),
+        [false, false]);
   check("the fork row is hidden until there is a parent",
         box_["new-fork-row"].classes.has("hidden"), true);
   check("the create form's own rows are re-derived by their owner",
@@ -225,7 +221,7 @@ async function main() {
   form.parent.value = "lead";
   ctx.sync();
   check("with no report every inherited row stays the parent's",
-        greyed(), [true, true, true, true, true, true, true, true]);
+        greyed(), [true, true, true, true, true, true, true]);
   check("the rows that make it a different worker still travel",
         form.role.disabled, false);
   check("the hint names the parent",
@@ -234,7 +230,7 @@ async function main() {
         [false, true]);
   check("...and says which rows an unlock would open",
         box_["parent-hint"].textContent.includes(
-          "harness, profile, borrow, null_token, cwd, args stay its parent's"),
+          "profile, borrow, null_token, cwd, args stay its parent's"),
         true);
   check("the blank directory entry now means the parent's",
         form.cwd.options[0].textContent, "(inherit the parent's directory)");
@@ -251,15 +247,14 @@ async function main() {
   await ctx.policy();
   check("the report was fetched for the parent named", fetched, ["lead"]);
   check("what the policy opened is handed back, what it shuts stays grey",
-        greyed(), [true, false, false, false, false, false, true, true]);
+        greyed(), [false, false, false, false, false, true, true]);
   check("a child's workflows are re-read for where the child will stand",
         wfRefreshes > 0, true);
   check("the profile row gains an inherit entry, and starts on it",
         [form.profile.options[0].label, form.profile.value],
         ["(inherit the parent's profile)", ""]);
-  check("the hint now names only the rows still shut",
-        box_["parent-hint"].textContent.includes("harness stay its parent's"),
-        true);
+  check("the dead compatibility harness unlock creates no second control",
+        form.harness, undefined);
 
   /* Asking twice for the same parent does not ask the daemon twice. */
   await ctx.policy();
@@ -270,7 +265,6 @@ async function main() {
   form.borrow.value = "work";
   form.args.value = "--verbose  --model x";
   form.cwd.value = "F:/repo";
-  form.harness.value = "codex";     // standing on a greyed row: not an answer
   check("a child sends what was opened, spelt in the API's keys",
         ctx.fields(form, { name: "kid" }),
         { name: "kid", profile: "home", borrow: "work",
@@ -301,13 +295,8 @@ async function main() {
   /* Even an old daemon advertising the dead harness unlock cannot open it. */
   reports.lead.spawnable_harnesses = ["codex"];
   await reread("lead");
-  check("the harness row stays read-only when the policy names any",
-        form.harness.disabled, true);
-  check("only the selected profile's harness is displayed",
-        form.harness.options.map((o) => [o.value, o.disabled]),
-        [["claude", false]]);
-  check("entering child mode seeds the row with the parent's own harness",
-        form.harness.value, "claude");
+  check("an old spawnable_harnesses field still creates no Harness row",
+        form.harness, undefined);
 
   /* An OAuth child has no shared token route and no Claude-only rows. */
   PROFILE_DETAILS.home.harness = "codex";
@@ -378,7 +367,7 @@ async function main() {
         box_["new-fork-row"].title,
         "the parent has no claude conversation to copy");
   check("another parent is another policy — nothing is carried over",
-        greyed(), [true, true, true, true, true, true, true, true]);
+        greyed(), [true, true, true, true, true, true, true]);
 
   /* A report that arrives after the pick moved on is dropped: it describes a
      parent this form is no longer building a child of. */
@@ -401,14 +390,14 @@ async function main() {
   form.parent.value = "";
   ctx.sync();
   check("clearing the parent hands the rows back",
-        ["harness", "profile", "cwd", "args"].map((k) => form[k].disabled),
-        [true, false, false, false]);
+        ["profile", "cwd", "args"].map((k) => form[k].disabled),
+        [false, false, false]);
   check("the inherit entry goes with it, and a real profile is selected",
         [form.profile.options[0].value, form.profile.value], ["work", "work"]);
   check("the blank directory entry is the daemon's own again",
         form.cwd.options[0].textContent, "(daemon cwd)");
-  check("the root harness remains a one-option projection",
-        form.harness.options.map((o) => o.disabled), [false]);
+  check("the root form has only the qualified profile selector",
+        form.harness, undefined);
   check("the fork row goes with it",
         box_["new-fork-row"].classes.has("hidden"), true);
   check("and the create form re-derives its own greying",

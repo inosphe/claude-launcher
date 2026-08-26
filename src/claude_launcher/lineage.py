@@ -22,20 +22,20 @@ class LineageError(Exception):
     """Raised for missing parents or parent cycles."""
 
 
-def get_parent(profile: Profile) -> Optional[str]:
-    parent = store.profile_entry(profile.name).get("parent")
+def get_parent(profile: Profile, doc: Optional[dict] = None) -> Optional[str]:
+    parent = store.profile_entry(profile.name, doc).get("parent")
     return str(parent) if parent else None
 
 
-def _parent_profile(profile: Profile) -> Optional[Profile]:
-    name = get_parent(profile)
+def _parent_profile(profile: Profile, doc: Optional[dict] = None) -> Optional[Profile]:
+    name = get_parent(profile, doc)
     if not name:
         return None
     parent = profile_mod.resolve(name)
     return parent if parent.exists() else None
 
 
-def chain(profile: Profile) -> List[Profile]:
+def chain(profile: Profile, doc: Optional[dict] = None) -> List[Profile]:
     """Profiles from the root ancestor down to ``profile`` (self last)."""
     items: List[Profile] = []
     seen = set()
@@ -45,7 +45,7 @@ def chain(profile: Profile) -> List[Profile]:
             raise LineageError(f"parent cycle detected at {current.name!r}")
         seen.add(current.name)
         items.append(current)
-        current = _parent_profile(current)
+        current = _parent_profile(current, doc)
     items.reverse()
     return items
 
@@ -113,10 +113,29 @@ def set_parent(profile: Profile, parent_name: str) -> None:
         raise LineageError(
             f"setting parent {parent_name!r} would create a cycle"
         )
+    doc = store.load()
+    section = doc.get("profiles")
+    if not isinstance(section, dict):
+        section = {}
+        doc["profiles"] = section
+    entry = section.get(profile.name)
+    if not isinstance(entry, dict):
+        entry = {}
+        section[profile.name] = entry
+    entry["parent"] = parent.name
+    # The new parent contributes harness/provider selection and every
+    # allowed_harnesses constraint. Prove the result before persisting it.
+    effective_harness(profile, doc)
     store.set_profile_field(profile.name, "parent", parent.name)
 
 
 def clear_parent(profile: Profile) -> None:
+    doc = store.load()
+    section = doc.get("profiles")
+    entry = section.get(profile.name) if isinstance(section, dict) else None
+    if isinstance(entry, dict):
+        entry.pop("parent", None)
+    effective_harness(profile, doc)
     store.set_profile_field(profile.name, "parent", None)
 
 
@@ -143,7 +162,7 @@ def effective_harness(profile: Profile, doc: Optional[dict] = None) -> str:
     """
     name = profile.harness_override or harnesses.CLAUDE_HARNESS
     if not profile.harness_override:
-        for item in chain(profile):
+        for item in chain(profile, doc):
             own = str(store.profile_entry(item.name, doc).get("harness") or "").strip()
             if own:
                 name = own
@@ -153,6 +172,14 @@ def effective_harness(profile: Profile, doc: Optional[dict] = None) -> str:
             f"profile {profile.selector!r} selects unknown harness {name!r} "
             f"(known: {known})"
         )
+    # Late import: harness_policy reads this module's chain(), while this
+    # function is the final boundary that applies the policy to every caller.
+    from . import harness_policy, providers as providers_mod
+
+    try:
+        harness_policy.require(profile, name, doc=doc)
+    except (harness_policy.HarnessPolicyError, providers_mod.ProviderError) as exc:
+        raise LineageError(str(exc)) from exc
     return name
 
 
@@ -162,11 +189,26 @@ def set_harness(profile: Profile, name: str) -> None:
     if harnesses.get(name) is None:
         known = ", ".join(harnesses.names())
         raise LineageError(f"unknown harness {name!r} (known: {known})")
+    from . import harness_policy, providers as providers_mod
+
+    try:
+        harness_policy.require(profile, name)
+    except (harness_policy.HarnessPolicyError, providers_mod.ProviderError) as exc:
+        raise LineageError(str(exc)) from exc
     store.set_profile_field(profile.name, "harness", name)
 
 
 def clear_harness(profile: Profile) -> None:
     """Drop the local pin, inheriting an ancestor or the claude default."""
+    doc = store.load()
+    section = doc.get("profiles")
+    entry = section.get(profile.name) if isinstance(section, dict) else None
+    if isinstance(entry, dict):
+        entry.pop("harness", None)
+    # Validate the value this edit would reveal before persisting it. Without
+    # this, ``set-harness P pi`` followed by ``--clear`` could write a profile
+    # whose inherited/default Claude harness its own allow-list forbids.
+    effective_harness(profile, doc)
     store.set_profile_field(profile.name, "harness", None)
 
 

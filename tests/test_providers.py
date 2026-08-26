@@ -74,3 +74,36 @@ def test_clear_active_resets_global(home):
     providers.clear_active()
     p = profile.create("work")
     assert providers.resolve_name(p) == "default"
+
+
+def test_provider_change_refuses_a_disallowed_current_harness_atomically(home):
+    doc = store.load()
+    doc.setdefault("providers", {})["claude-only"] = {
+        "env": {},
+        "allowed_harnesses": ["claude"],
+    }
+    store.save(doc)
+    p = profile.create("work")
+    lineage.set_harness(p, "pi")
+
+    with pytest.raises(providers.ProviderError, match="allows only"):
+        providers.set_profile_selection(p, "claude-only")
+
+    assert "provider" not in store.profile_entry(p.name)
+    assert providers.resolve_name(p) == "default"
+
+
+def test_global_provider_change_refuses_if_any_profile_would_be_denied(home):
+    doc = store.load()
+    doc.setdefault("providers", {})["claude-only"] = {
+        "env": {},
+        "allowed_harnesses": ["claude"],
+    }
+    store.save(doc)
+    p = profile.create("work")
+    lineage.set_harness(p, "pi")
+
+    with pytest.raises(providers.ProviderError, match="work"):
+        providers.set_active("claude-only")
+
+    assert providers.active() is None
