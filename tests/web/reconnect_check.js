@@ -181,6 +181,20 @@ function build(opts) {
                       pid: pid === undefined ? 4242 : pid, boot_id: "b1" });
              await settle();
              return s;
+           },
+           // The other way a socket can start: onto a session that had ALREADY
+           // finished. No `exit` frame is coming for this one — the child that
+           // publishes it ended before the socket existed — so the daemon says
+           // so on the init frame instead (daemon/ws.py).
+           dead: async (code) => {
+             api.openSocket("s7");
+             const s = sockets[sockets.length - 1];
+             s.opened();
+             s.text({ type: "init", cols: 80, rows: 24, status: "exited",
+                      pid: 32868, boot_id: "b1", exited: true,
+                      exit_code: code === undefined ? 2 : code });
+             await settle();
+             return s;
            } };
 }
 
@@ -286,6 +300,68 @@ function build(opts) {
           w.sockets.length === 1, w.sockets.length);
   })();
 }
+
+/* --- landing on one that had already finished --------------------------
+
+   The reported bug, and the reason it looked like a network problem. The
+   terminal is bound to a record whose child is long gone, so the `exit` frame
+   this machine used to wait for is never coming — and the repaint a fresh
+   socket is seeded with hands xterm the program's own mouse modes back
+   (?1003h: any-event tracking). Under those, a mouse MOVEMENT over the
+   terminal is a report, the report is a write, the write finds no child, and
+   the daemon ends the socket. Read as an outage that is a reconnect, a
+   repaint, and the same thing again a moment later — which is what a reader
+   sees as a terminal that will not sit still. */
+{
+  const w = build();
+  (async () => {
+    const s = await w.dead();
+    check("an init that says `exited` ends the machine there and then",
+          w.api.state === "idle", w.api.state);
+    check("the header offers resume, not a retry",
+          w.statuses[w.statuses.length - 1] === "exited", w.statuses);
+
+    s.sent.length = 0;
+    w.api.sendInput(String.fromCharCode(27) + "[<35;10;5M");   // a motion report
+    check("nothing is written to a session that has ended — not even what " +
+          "xterm sends on its own account",
+          s.sent.length === 0 && w.api.queued.length === 0, s.sent);
+
+    s.dropped();
+    check("so a close behind it schedules nothing",
+          w.pending() === 0 && w.api.state === "idle", w.api.state);
+    check("and opens nothing", w.sockets.length === 1, w.sockets.length);
+    check("the buffer was never told it was reconnecting",
+          !w.written.some((t) => t.includes("reconnecting")), w.written);
+    w.api.reconnectNow(true);
+    check("pressing the chip by hand does not resurrect it either",
+          w.sockets.length === 1, w.sockets.length);
+  })();
+}
+
+/* --- and the flag is only ever read as itself -------------------------- */
+{
+  const w = build();
+  (async () => {
+    // An init WITHOUT it is a live session, whatever else it carries: a false
+    // positive here is a terminal that silently refuses to type.
+    const s = await w.live();
+    check("a session that did not say it ended is still a live link",
+          w.api.state === "live", w.api.state);
+    w.api.sendInput("hello");
+    check("and still takes what is typed at it",
+          s.sent.length === 1, s.sent);
+    s.dropped();
+    check("and its close is still an outage worth retrying",
+          w.api.state === "reconnecting" && w.pending() === 1, w.api.state);
+  })();
+}
+
+/* A parked terminal's socket runs the passive shim instead of the machine
+   above, and restoreTerminal opens a FRESH socket for any parked session that
+   has not ended — which is this loop again, one navigation later. */
+check("the parked copy reads the same flag",
+      src.includes("if (msg.exited) b.exited = true;"));
 
 /* --- walking away takes the link with you ------------------------------ */
 {

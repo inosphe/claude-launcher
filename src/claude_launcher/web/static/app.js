@@ -3480,6 +3480,19 @@ function handleFrame(msg) {
     mouseTracking = !!msg.mouse;
     scrollOffset = 0;
     updateScrollChip();
+    // ...unless there is no program there at all. A viewer landing on a
+    // session that had ALREADY finished (#/s/<name> for a killed one) never
+    // receives an `exit` frame — that one is published by a child ending, and
+    // this child ended before anybody subscribed — so the init flag is the
+    // only telling there is. Reading it is what keeps this terminal out of a
+    // loop: the repaint above hands xterm the program's own mouse modes back
+    // (?1003h — any-event tracking is in a claude session's final screen), so
+    // without it a mouse MOVEMENT over the terminal writes to a child that is
+    // gone, the daemon ends the socket on it, and the link answers a close it
+    // takes for an outage by reconnecting, repainting, and being closed again
+    // a moment later. That loop is what a reader sees as a terminal that will
+    // not sit still.
+    if (msg.exited) endSession();
   } else if (msg.type === "buffer") {
     altScreen = !!msg.alt;
     if (!altScreen) {
@@ -3527,23 +3540,41 @@ function handleFrame(msg) {
       }
     }
   } else if (msg.type === "exit") {
-    // Not a broken link: the program finished. There is nothing to reconnect
-    // to, so the machine goes idle and stays there until `resume` builds a
-    // new session under the name.
-    sessionEnded = true;
-    linkQueue = [];
-    setLink("idle");
-    setStatusBadge("exited");
-    altScreen = false;
-    mouseTracking = false;
-    scrollOffset = 0;
-    updateScrollChip();
+    // Not a broken link: the program finished under this socket. The notice
+    // belongs here rather than in endSession(), because this is the case
+    // where it lands after the program's own last output.
+    endSession();
     term.write(
       `\r\n\x1b[90m[session exited (code ${msg.code})] ` +
       `- press "resume" above to relaunch it\x1b[0m\r\n`
     );
-    refreshTermInput();
   }
+}
+
+/* The program this terminal is bound to is over — whether it ended under the
+   socket (an `exit` frame) or had already ended before the socket existed (an
+   `init` that says so). Everything here follows from there being no child:
+   nothing to reconnect TO, so a close is not an outage (openSocket's onclose,
+   reconnectNow); nothing to type at, so the send-keys strip closes and held
+   keystrokes are dropped rather than replayed into whatever `resume` builds
+   next; and nobody owning the mouse or the alternate screen, so the wheel
+   comes back to the reader.
+
+   Idempotent on purpose: the daemon can say it twice — the init flag, and the
+   exit frame the daemon's write path answers with if this terminal got a
+   report out before that flag was read — and the second telling must not
+   re-run the notice above or move a scroll position. */
+function endSession() {
+  if (sessionEnded) return;
+  sessionEnded = true;
+  linkQueue = [];
+  setLink("idle");
+  setStatusBadge("exited");
+  altScreen = false;
+  mouseTracking = false;
+  scrollOffset = 0;
+  updateScrollChip();
+  refreshTermInput();
 }
 
 /* ---- the one-line send-keys input --------------------------------------
@@ -3717,6 +3748,13 @@ function sendInput(data) {
   // waits in linkQueue: the queued-deliveries banner uses this to tell "YOUR
   // typing is holding delivery" apart from some other viewer's keyboard.
   lastLocalKey = Date.now();
+  // Nothing is aimed at a session that has ended. Not merely pointless: this
+  // path carries what xterm generates on its OWN account as well as what a
+  // person types — mouse reports under the tracking modes the repaint
+  // re-asserted, focus reports, an answer to a device query — and the daemon
+  // ends a socket whose write finds no child, which the link would then have
+  // to read as an outage.
+  if (sessionEnded) return;
   // Typing while scrolled back into history goes to a session the viewer is
   // not watching — and the response would be frozen with it. Snap to live
   // first, as every terminal does when the wheel returns to the bottom.
@@ -4603,6 +4641,11 @@ function shimFrame(b, ev) {
       b.boot = msg.boot_id || null;
       b.alt = !!msg.alt;
       b.mouse = !!msg.mouse;
+      // The same flag the live machine reads, for the same reason:
+      // restoreTerminal opens a fresh socket for a parked terminal whose
+      // session has not ended, and doing that to one that has is where the
+      // loop above starts.
+      if (msg.exited) b.exited = true;
     } else if (msg.type === "buffer") {
       b.alt = !!msg.alt;
     } else if (msg.type === "mouse") {
