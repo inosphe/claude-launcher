@@ -152,7 +152,8 @@ def is_report(path: Path) -> bool:
     try:
         if path.stat().st_size < MIN_BYTES:
             return False
-        head = path.read_bytes()[:4096].decode("utf-8", "replace").lower()
+        with path.open("rb") as fh:
+            head = fh.read(4096).decode("utf-8", "replace").lower()
     except OSError:
         return False
     return "<html" in head
@@ -198,6 +199,25 @@ def latest(session: str) -> Optional[dict]:
     return rows[0] if rows else None
 
 
+def names_in(session: str) -> List[str]:
+    """Every correctly-named file in the directory, newest first.
+
+    Wider than :func:`listing` on purpose — it does not ask whether the file
+    is a *readable* report, only whether it holds one of the reserved names.
+    :func:`target` needs exactly this: a stub half-written a minute ago is not
+    a report, but its name is already taken by this round and handing out a
+    second one would strand it.
+    """
+    try:
+        base = dir_for(session)
+    except ReportError:
+        return []
+    if not base.is_dir():
+        return []
+    names = [p.name for p in base.iterdir() if p.is_file() and FILENAME_RE.match(p.name)]
+    return sorted(names, reverse=True)
+
+
 def target(
     session: str,
     issue: Optional[str] = None,
@@ -212,13 +232,20 @@ def target(
     guess which is current. "The same" means same session and same issue; a
     round with a different issue is a different report. ``new`` forces a fresh
     stamp for the case where keeping the earlier one is deliberate.
+
+    The match is on the *name*, not on :func:`listing`, and the difference is
+    the common case rather than a corner: the first draft an agent writes may
+    well not pass :func:`is_report` yet (too short, still being filled in),
+    and if asking again then minted a second name, revising a draft would
+    quietly leave the stub behind for a reader to find.
     """
     base = dir_for(session, create=True)
     if not new:
         slug = issue_slug(issue)
-        for row in listing(session):
-            if issue_slug(row["issue"]) == slug:
-                return base / row["file"]
+        for name in names_in(session):
+            meta = parse(name)
+            if meta and issue_slug(meta["issue"]) == slug:
+                return base / name
     return base / filename(issue, at)
 
 
