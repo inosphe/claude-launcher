@@ -73,8 +73,10 @@ from __future__ import annotations
 
 import argparse
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 from typing import List, Optional
 
@@ -256,17 +258,105 @@ def mentioning(repo: Path, name: str) -> List[str]:
     return hits
 
 
-def build_command(files: List[str]) -> List[str]:
+#: How many of this session's own past basetemps :func:`prune_basetemps`
+#: leaves standing. The timeline only has to outlive the round that reads it,
+#: and eight is well above the two or three a round ever quotes -- but it is
+#: also the guard against pruning a *live* sibling: a hand run and a gate run
+#: of the same session overlap routinely (measured by s150), and the live one
+#: is always among the newest, so anything at or above two is safe.
+KEEP_BASETEMPS = 8
+
+
+def basetemp_root() -> Path:
+    """Where the per-run scratch trees live. Short on purpose -- see below."""
+    return Path("C:/t")
+
+
+def session_basetemp(session: str, *, now: Optional[float] = None) -> str:
+    """``C:/t/<session>c<MMDDHHMMSS>`` -- identity in the prefix, generation
+    in the suffix.
+
+    The string does three jobs at once and the split is what makes them fit:
+
+    * **scratch** -- pytest's ``tmp_path`` root. pytest *empties* an explicit
+      basetemp when the run starts (``_pytest/tmpdir.py`` ``getbasetemp`` ->
+      ``rm_rf``), so any two runs that share the path delete each other's
+      fixtures. Measured: a run holding a fixture lost it 7.6s in, exactly
+      when a second run began; under ``-n`` the wipe lands earlier still,
+      at node startup, because xdist's controller calls ``getbasetemp``
+      before any test does (``xdist/workermanage.py``).
+    * **identity** -- a process scan sees the command line and nothing else,
+      so this is how you tell whose pytest that is. That needs the session
+      to be *recognisable*, which a stable prefix gives; it never needed the
+      whole string to be stable, and treating those as the same thing is
+      what cost the third job.
+    * **timeline** -- a gate leaves no stdout, so the directory's
+      CreationTime, recursive LastWriteTime and ``popen-gw*`` count are the
+      only surviving record of when a dead run started, how long it took and
+      how wide it ran. A repeated name means the *next* round erases the
+      previous round's, at its startup, before anyone reads it.
+
+    A per-session-fixed name solved the first job against concurrent runs and
+    silently broke the third against consecutive ones. A generation suffix
+    settles both, and costs the second nothing.
+
+    Length: measured ceiling is 48 characters (xdist nests ``popen-gwN/`` and
+    the transcript tests fold an absolute cwd back into a filename, so the
+    path is ``2*basetemp+162`` against MAX_PATH). ``C:/t/`` + session + ``c``
+    + ten digits is 21 for a five-character session, against the old fixed
+    name's 11 -- the generation spends ten of the 37 characters that were
+    spare, and pinned tests hold both numbers.
+    """
+    stamp = time.strftime("%m%d%H%M%S", time.localtime(now))
+    return f"{basetemp_root().as_posix()}/{session}c{stamp}"
+
+
+def prune_basetemps(session: str, *, keep: int = KEEP_BASETEMPS) -> List[Path]:
+    """Drop this session's oldest scratch trees, keeping the newest ``keep``.
+
+    Giving every run its own name means nothing ever reuses -- and therefore
+    nothing ever reclaims -- a directory: with an explicit basetemp pytest
+    skips its own end-of-session cleanup too (``_pytest/tmpdir.py``
+    ``pytest_sessionfinish`` requires ``_given_basetemp is None``). Measured
+    on this machine: 431 top-level directories under ``C:/t``, the oldest six
+    days old, none of which anything was ever going to remove.
+
+    Only ``<session>c*`` is considered. Another session's timeline is that
+    session's evidence and is never this function's to delete. Failures are
+    swallowed: a locked directory is a live run or an open handle, and a gate
+    that goes red because housekeeping lost a race is worse than one that
+    leaves a directory behind.
+
+    Ordering is by name, which is chronological because the suffix leads with
+    the month -- except across a new year, where January sorts below the
+    December it follows. The cost of that is bounded and self-clearing: at
+    worst the first few runs of a year keep stale trees and drop fresh ones,
+    and the window walks itself straight again within ``keep`` runs. Sorting
+    by mtime would be correct there and wrong here, where several of these
+    are created inside one second.
+    """
+    root = basetemp_root()
+    try:
+        mine = sorted(p for p in root.glob(f"{session}c*") if p.is_dir())
+    except OSError:
+        return []
+    dropped = []
+    for path in mine[: max(0, len(mine) - keep)]:
+        try:
+            shutil.rmtree(path)
+        except OSError:
+            continue
+        dropped.append(path)
+    return dropped
+
+
+def build_command(files: List[str], *, basetemp: Optional[str] = None) -> List[str]:
     """pytest over exactly ``files``, parallel only when it pays."""
     session = os.environ.get("CLAUNCH_SESSION", "worker")
     cmd = ["uv", "run", "--no-sync", "pytest", *files, "-q"]
     if len(files) > 1:
         cmd += ["-n", str(min(MAX_WORKERS, len(files)))]
-    # Short and per-session for the same two reasons the sweep's is: xdist
-    # nests popen-gwN/ under it against a 260-char ceiling, and pytest empties
-    # its basetemp at startup, so a shared path has concurrent runs deleting
-    # each other's temp trees.
-    cmd += [f"--basetemp=C:/t/{session}c"]
+    cmd += [f"--basetemp={basetemp or session_basetemp(session)}"]
     return cmd
 
 
@@ -283,6 +373,16 @@ def main(argv: Optional[list] = None) -> int:
         action="store_true",
         dest="list_only",
         help="print the selection and the command, run nothing",
+    )
+    ap.add_argument(
+        "--basetemp",
+        default=None,
+        help=(
+            "pytest scratch root for this run (default: a fresh "
+            "C:/t/<session>c<MMDDHHMMSS>). Pass one to pin a run's timeline "
+            "to a name you chose; it must not be a path another run is using, "
+            "because pytest empties it at startup"
+        ),
     )
     args = ap.parse_args(argv)
 
@@ -321,7 +421,7 @@ def main(argv: Optional[list] = None) -> int:
         )
         return 0
 
-    cmd = build_command(files)
+    cmd = build_command(files, basetemp=args.basetemp)
     print(
         f"{len(files)} test module(s) selected from {len(paths)} changed path(s) "
         f"vs {args.base}:"
@@ -331,6 +431,13 @@ def main(argv: Optional[list] = None) -> int:
     print(f"$ {' '.join(cmd)}", flush=True)
     if args.list_only:
         return 0
+
+    # Reclaim before the run, not after: the directory this run is about to
+    # create is the newest and so is never a candidate, and a run that dies
+    # still leaves its own tree behind to be read.
+    session = os.environ.get("CLAUNCH_SESSION", "worker")
+    for gone in prune_basetemps(session):
+        print(f"pruned old basetemp: {gone}", file=sys.stderr)
 
     return 0 if subprocess.run(cmd, cwd=str(repo)).returncode == 0 else 1
 
