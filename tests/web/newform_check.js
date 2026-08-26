@@ -148,7 +148,7 @@ const beadsBox = block('<fieldset id="new-beads">', "</fieldset>", form.start);
 check("the board question offers exactly three answers",
       [...beadsBox.text.matchAll(/name="beads" value="(\w+)"/g)].map((m) => m[1]),
       ["new", "existing", "none"]);
-check("minting from the task is the one that is checked",
+check("the answer that mints is the one that is checked",
       /value="new" checked/.test(beadsBox.text), true);
 check("the issue picker is hidden until it is the answer",
       /id="new-issue-row" class="hidden"/.test(beadsBox.text), true);

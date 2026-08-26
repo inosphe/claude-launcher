@@ -566,8 +566,8 @@ def _my_handle(members: list) -> str:
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "connect", "workflow", "context",
     "task", "issue", "issue_text", "harness", "workspace", "worktree",
-    "rebase_onto",
-    "profile", "borrow", "null_token", "cwd", "args", "env", "fork",
+    "rebase_onto", "profile", "borrow", "null_token", "cwd", "args", "env",
+    "fork",
 )
 
 

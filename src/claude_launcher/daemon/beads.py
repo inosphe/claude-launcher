@@ -12,6 +12,13 @@ the board and a session's life meet and no agent is in a position to act:
    issue (``issue: <id>`` in the task or context, or an ``issue`` field) adopts
    that one instead of minting a duplicate.
 
+   What a minted issue SAYS need not be the opening task any more: a request
+   may carry ``issue_text``, the creation forms' own box, and then the board
+   holds the specification while the terminal holds only the first
+   instruction. The three answers are exclusive — text, an existing issue, or
+   none — and a request that gives two is refused (:func:`check_request`)
+   rather than having one of them quietly dropped.
+
    Adopting is not the same as *taking*. Two sessions assigned to one issue is
    an ownership conflict nobody notices until both have committed, so the
    daemon decides it here, mechanically, from the board and its own session
@@ -787,8 +794,9 @@ class Board:
 
         Never raises: a board that cannot be written must not cost a session
         its launch. Returns ``{"issue": id, "created": bool, "mode": ...,
-        "held_by": name|None, "why": str}`` on success, where ``mode`` is one
-        of :data:`MINTED`, :data:`TAKE`, :data:`JOIN`.
+        "held_by": name|None, "from_issue_text": bool, "why": str}`` on
+        success, where ``mode`` is one of :data:`MINTED`, :data:`TAKE`,
+        :data:`JOIN` (``from_issue_text`` only on a mint).
         """
         cfg = store.daemon_config()
         if not cfg.get("beads_auto_issue", True) or body.get("beads") is False:

@@ -2290,9 +2290,9 @@ async def _onboard_and_launch(
         # reason: the note is the only place the session is told that the
         # record holds instructions this task does not repeat.
         joined = linked.get("mode") == beads_mod.JOIN
-        if joined or linked.get("from_issue_text") or linked["issue"] not in (
-            beads_mod.issue_refs(plan.task, plan.context)
-        ):
+        written = bool(linked.get("from_issue_text"))
+        named = linked["issue"] in beads_mod.issue_refs(plan.task, plan.context)
+        if joined or written or not named:
             plan = replace(
                 plan,
                 task=(plan.task + "\n\n" if plan.task else "")
@@ -2301,7 +2301,7 @@ async def _onboard_and_launch(
                     mode=linked.get("mode") or beads_mod.MINTED,
                     held_by=linked.get("held_by"),
                     mesh=plan.mesh or "",
-                    text=bool(linked.get("from_issue_text")),
+                    text=written,
                 ),
             )
 

@@ -599,9 +599,7 @@ def issue_fields(
     )
     # A flag given alongside --wizard pre-fills its field, the same way every
     # other row on these forms is pre-filled.
-    mode.select(
-        BEADS_NONE if none else BEADS_PICK if preset else BEADS_NEW
-    )
+    mode.select(BEADS_NONE if none else BEADS_PICK if preset else BEADS_NEW)
     issue_text = TextField(
         key="issue_text", label="Issue text",
         placeholder="(empty: the opening task is used)",

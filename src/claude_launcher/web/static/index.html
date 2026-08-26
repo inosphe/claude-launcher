@@ -369,9 +369,10 @@
             placeholder="typed in once it has booted — what it is for"></textarea>
         </fieldset>
 
-        <!-- The board answer, after the task because two of its three shapes
-             are read off it: "new" mints an issue from that text, and there
-             is nothing to mint from when the box is empty. The third — an
+        <!-- The board answer, after the task because it is still the fallback
+             two of its three shapes are read off: "new" mints from the box
+             below when that is filled and from the task when it is not, so
+             an empty pair has nothing to mint from. The third — an
              issue that already exists — is a picker rather than a text box
              for the same reason every other row here is: the daemon
              publishes the list, and an id it does not have would be a
@@ -386,7 +387,7 @@
           <legend>Board issue</legend>
           <label class="check">
             <input type="radio" name="beads" value="new" checked>
-            <span>New issue, from the opening task</span>
+            <span>New issue</span>
           </label>
           <label class="check">
             <input type="radio" name="beads" value="existing">
