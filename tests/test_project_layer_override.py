@@ -103,15 +103,17 @@ NO_SYNC = "uv run --no-sync python"
 #: (a sweep receipt, a daemon's boot time).
 GATES = {
     ("improv-worker", "review"): "tools/changed_tests.py",
-    # Not a script under tools/, and the odd one out for a reason worth
-    # keeping: the check ships inside claunch itself, so the gate calls the
-    # module rather than the `claunch` on PATH. That PATH entry is whichever
-    # copy happens to be installed -- measured, it answered
-    # "invalid choice: 'report'" and exited 2, which would have failed the
-    # gate in every session until the branch landed and was reinstalled.
-    # Calling it through `uv run` runs the tree being checked, which is the
-    # same reason the other three name a path into this checkout.
-    ("improv-worker", "wrapup"): "claude_launcher.cli report check",
+    # This one was twice wrong before it was a path like the other three.
+    # First `claunch report check`: the PATH entry is whichever copy happens
+    # to be installed, and it answered "invalid choice: 'report'" -- exit 2 in
+    # every session until the branch landed and was reinstalled. Then
+    # `-m claude_launcher.cli report check`, which looks like it runs this
+    # tree and does not: a src layout cannot resolve `-m` from the working
+    # directory, so it comes from site-packages, and --no-sync is a promise
+    # that the worktree's .venv stays empty (measured: ModuleNotFoundError).
+    # A path into this checkout is the only form that does not depend on what
+    # is installed. tests/test_gates_run_this_checkout.py holds all five to it.
+    ("improv-worker", "wrapup"): "tools/report_check.py",
     # Two git calls, no suite: "is there a merge commit on another branch with
     # my frozen tip as a parent?". Asked that way on purpose -- "does any
     # branch contain my tip" answers yes for a child stacked on it, which in a
@@ -206,6 +208,12 @@ def test_no_gate_calls_a_binary_off_PATH():
     ``ARMED``/``GATES`` almost cover this already, but only for steps somebody
     remembered to list there. This walks the files instead, so a gate added to
     the layer without touching either table is still held to the rule.
+
+    A prefix is all this checks, and a prefix turned out not to be enough:
+    ``uv run --no-sync python -m claude_launcher.cli ...`` starts with the
+    right words and still resolves out of site-packages, and so does an
+    absolute path into a different checkout. What the command has to *reach*
+    is pinned next door, in tests/test_gates_run_this_checkout.py.
     """
     offenders = []
     for path in sorted(OVERRIDES.glob("*.yaml")):

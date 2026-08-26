@@ -1053,9 +1053,12 @@ steps:
     # 그 저장소의 것이기 때문이다(test_cflow_layers의
     # test_the_improv_workflows_carry_no_repo_specific_verify가 정본 셋 전부에
     # 대해 그것을 못박는다). 기계 검사를 원하는 저장소는 프로젝트 레이어
-    # (.claunch/workflows/)에서 이 스텝에 `verify: 'claunch report check'`를
-    # 얹는다 — stat 한 번과 앞 4KB 읽기가 전부라 review가 경고하는
-    # 「안 보이는 스윕」이 아니다. 얹지 않은 저장소에서는 위 산문만 남고,
+    # (.claunch/workflows/)에서 이 스텝에 verify를 얹는다 — stat 한 번과 앞 4KB
+    # 읽기가 전부라 review가 경고하는 「안 보이는 스윕」이 아니다.
+    # **`verify: 'claunch report check'`로 적지 마라.** 여기 그렇게 적혀 있었고,
+    # 그대로 옮겨 적은 저장소에서 게이트가 exit 2를 냈다: PATH의 claunch는 검사받는
+    # 체크아웃이 아니라 마지막에 설치된 것이다. 게이트 명령은 검사받는 트리의
+    # 파일을 이름으로 불러야 한다(이 저장소의 오버라이드가 그 형태의 실례다). 얹지 않은 저장소에서는 위 산문만 남고,
     # 그것이 이 층 나눔이 받아들이는 대가다: 산문은 어디서나 읽히고
     # 게이트는 그 명령이 실제로 도는 곳에서만 선다.
     done_when: |
