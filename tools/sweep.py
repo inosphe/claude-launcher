@@ -63,6 +63,29 @@ fail to be, and both were seen for real:
 So ``run`` refuses both, and checks HEAD first, because standing on the
 wrong commit is the worse of the two.
 
+**A commit is the key; a tree is the verdict.** The sweep judges the working
+tree, not the history above it, so a green receipt for tree *T* is a verdict
+about every commit whose tree is *T*. ``check`` uses that: if the tip has no
+receipt of its own it will accept a green one recorded for a different commit
+with the same tree, and says so, naming both shas.
+
+That is not a convenience -- it is what makes ``improv-leader``'s five-minute
+integration window cost one sweep instead of two. The leader sweeps the
+integration *preview* (the batch's candidates merged onto master in a scratch
+branch) before committing to the merge, so a broken combination is caught
+while master is still clean. Merging those same candidates in the same order
+with ``--no-ff`` then produces a different commit with **byte-identical
+content**, and without this the batch would pay for the whole suite twice
+over one tree.
+
+Safe here because nothing in this suite reads the repository's own history:
+every test that touches git (``tests/test_mergecheck.py``,
+``tests/test_worktree.py``, ``tests/test_sweep.py``, ``tests/test_spawn_api.py``,
+``tests/test_cflow_layers.py``) builds a throwaway repository under
+``tmp_path``. A suite that asserted on ``git log`` would need this turned off.
+Only *green* receipts carry over; a red one is a verdict the gate refuses to
+launder, and the tip is simply left without a receipt, which is red anyway.
+
 Exit codes match ``tools/deploy_check.py``: 0 = confirmed, 1 = no, 2 = could
 not tell.
 """
@@ -157,6 +180,49 @@ def receipts_dir(repo: Path, override: Optional[Path] = None) -> Path:
 
 def receipt_path(repo: Path, commit: str, override: Optional[Path] = None) -> Path:
     return receipts_dir(repo, override) / f"{commit}.json"
+
+
+def is_green(receipt: dict) -> bool:
+    """A receipt that judged a clean tree and found nothing wrong."""
+    counts = receipt.get("counts") or {}
+    return (
+        not receipt.get("dirty")
+        and receipt.get("exit_code") == 0
+        and not counts.get("failed")
+        and not counts.get("error")
+    )
+
+
+def find_receipt_by_tree(
+    repo: Path, tree: str, override: Optional[Path] = None
+) -> Optional[tuple]:
+    """The newest green receipt recorded for `tree`, whatever commit it named.
+
+    The sweep runs against a working tree, so the sha in the receipt's name is
+    only an address -- the thing judged is the content. This is what lets one
+    sweep of an integration preview answer for the merge commit that lands the
+    same candidates: same tree, different sha.
+
+    Returns ``(path, receipt)`` or ``None``. Unreadable files are skipped
+    rather than fatal: this is a fallback, and the caller is already on its
+    way to a red gate without it.
+    """
+    directory = receipts_dir(repo, override)
+    if not directory.is_dir():
+        return None
+    best = None
+    for path in sorted(directory.glob("*.json")):
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if receipt.get("tree") != tree or not is_green(receipt):
+            continue
+        if best is None or (receipt.get("finished_at") or "") > (
+            best[1].get("finished_at") or ""
+        ):
+            best = (path, receipt)
+    return best
 
 
 def parse_counts(output: str) -> dict:
@@ -266,26 +332,39 @@ def cmd_check(args) -> int:
     repo = args.repo.resolve()
     try:
         commit = _git(repo, "rev-parse", args.branch)
+        tree = _git(repo, "rev-parse", args.branch + "^{tree}")
         path = receipt_path(repo, commit, args.receipts)
     except LookupError as exc:
         print(f"cannot tell: {exc}", file=sys.stderr)
         return CANNOT_TELL
 
-    if not path.is_file():
-        print(
-            f"no sweep receipt for {args.branch} tip {commit[:12]} at {path} -- "
-            f"spawn a subagent to run 'python tools/sweep.py run --branch "
-            f"{args.branch}' in a clean tree at that commit, then leave this step "
-            f"again. Do not run the suite in this turn.",
-            file=sys.stderr,
-        )
-        return 1
-
-    try:
-        receipt = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as exc:
-        print(f"cannot tell: {path} is unreadable: {exc}", file=sys.stderr)
-        return CANNOT_TELL
+    stood_in_for = None
+    if path.is_file():
+        try:
+            receipt = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            print(f"cannot tell: {path} is unreadable: {exc}", file=sys.stderr)
+            return CANNOT_TELL
+    else:
+        # No receipt under this sha. The sweep judges content, not history, so
+        # a green receipt for the same tree is a verdict about this commit --
+        # the integration preview's sweep answering for the merge that lands
+        # the same candidates is exactly that case, and it is what keeps a
+        # batch to one sweep. Nothing is inferred: the sha it was recorded
+        # under is printed alongside.
+        found = find_receipt_by_tree(repo, tree, args.receipts)
+        if found is None:
+            print(
+                f"no sweep receipt for {args.branch} tip {commit[:12]} at {path}, "
+                f"and none green for its tree {tree[:12]} -- spawn a subagent to "
+                f"run 'python tools/sweep.py run --branch {args.branch}' in a "
+                f"clean tree at that commit, then leave this step again. Do not "
+                f"run the suite in this turn.",
+                file=sys.stderr,
+            )
+            return 1
+        path, receipt = found
+        stood_in_for = receipt.get("commit") or "?"
 
     if receipt.get("dirty"):
         print(
@@ -298,6 +377,14 @@ def cmd_check(args) -> int:
 
     counts = receipt.get("counts") or {}
     summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "no counts"
+    via = (
+        ""
+        if stood_in_for is None
+        else (
+            f"\nvia the receipt for {stood_in_for[:12]}: a different "
+            f"commit, the same tree {tree[:12]}"
+        )
+    )
     if receipt.get("exit_code") != 0 or counts.get("failed") or counts.get("error"):
         failures = "\n  ".join(receipt.get("failures") or []) or "(none recorded)"
         print(
@@ -312,6 +399,7 @@ def cmd_check(args) -> int:
         f"sweep of {args.branch} tip {commit[:12]} green: {summary} "
         f"in {receipt.get('seconds')}s\ncommand: {receipt.get('command')}\n"
         f"swept by {receipt.get('session')} at {receipt.get('finished_at')}"
+        f"{via}"
     )
     return 0
 

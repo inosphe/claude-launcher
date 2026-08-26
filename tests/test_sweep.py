@@ -180,6 +180,120 @@ def test_a_receipt_from_one_worktree_answers_for_another(repo, receipts):
     )
 
 
+# --------------------------------------------------------------------------- #
+# One sweep per integration window. The leader batches every landing request
+# that arrives inside five minutes into one merge, and the whole point of the
+# batch is that the suite runs once for it. It ran twice: once on the
+# integration preview (the candidates merged onto master in a scratch branch,
+# swept before master moves) and again on the merge commit that lands exactly
+# those candidates. Same content, different sha -- and the receipt was keyed
+# only by sha, so the second run was structurally forced.
+# --------------------------------------------------------------------------- #
+
+
+def _feature(repo: Path, name: str, filename: str) -> None:
+    """A feature branch off master with one commit on it."""
+    _git(repo, "checkout", "-q", "-b", name, "master")
+    (repo / filename).write_text(f"{name}{chr(10)}", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", name)
+    _git(repo, "checkout", "-q", "master")
+
+
+def test_the_preview_sweep_answers_for_the_merge_that_lands_the_same_batch(
+    repo, receipts, capsys
+):
+    """The batch pays for the suite once, not twice.
+
+    The preview is built the way the merge will be -- the same candidates,
+    onto master, in the same order, ``--no-ff`` -- so the merge commit's tree
+    is byte-identical to the preview's. The sha differs, and nothing about
+    the suite depends on a sha, so the preview's green is a verdict about the
+    merge commit too.
+    """
+    _feature(repo, "feat-a", "a-change.txt")
+    _feature(repo, "feat-b", "b-change.txt")
+
+    preview = repo.parent / "preview"
+    _git(repo, "worktree", "add", "-q", "-b", "preview", str(preview), "master")
+    _git(preview, "merge", "--no-ff", "-q", "-m", "preview a", "feat-a")
+    _git(preview, "merge", "--no-ff", "-q", "-m", "preview b", "feat-b")
+    assert _run(preview, receipts, "--command", GREEN, "--branch", "preview") == 0
+
+    _git(repo, "merge", "--no-ff", "-q", "-m", "land a", "feat-a")
+    _git(repo, "merge", "--no-ff", "-q", "-m", "land b", "feat-b")
+
+    preview_tip = _git(repo, "rev-parse", "preview").strip()
+    master_tip = _git(repo, "rev-parse", "master").strip()
+    assert preview_tip != master_tip
+    assert (
+        _git(repo, "rev-parse", "preview^{tree}").strip()
+        == _git(repo, "rev-parse", "master^{tree}").strip()
+    ), "the preview was not built the way the merge was -- the test is wrong"
+
+    assert not sweep.receipt_path(repo, master_tip, receipts).exists()
+    assert _check(repo, receipts) == 0, (
+        "the batch was made to sweep its own content twice"
+    )
+    out = capsys.readouterr().out
+    assert preview_tip[:12] in out and "the same tree" in out, (
+        f"the gate did not say whose receipt it stood on: {out}"
+    )
+
+
+def test_a_red_receipt_for_the_same_tree_is_not_laundered_into_a_pass(
+    repo, receipts, capsys
+):
+    """Reuse carries verdicts, not just receipts.
+
+    If a red preview could be skipped over -- "no receipt for this tip, so
+    sweep again" -- the cheapest way past a red gate would be to merge and
+    re-run. Only green stands in; a red preview leaves the merge commit with
+    nothing, which is red as well, and the message says which of the two it
+    is.
+    """
+    _feature(repo, "feat-a", "a-change.txt")
+
+    preview = repo.parent / "preview"
+    _git(repo, "worktree", "add", "-q", "-b", "preview", str(preview), "master")
+    _git(preview, "merge", "--no-ff", "-q", "-m", "preview a", "feat-a")
+    assert _run(preview, receipts, "--command", RED, "--branch", "preview") == 1
+
+    _git(repo, "merge", "--no-ff", "-q", "-m", "land a", "feat-a")
+    assert _check(repo, receipts) == 1
+    assert "none green for its tree" in capsys.readouterr().err
+
+
+def test_a_dirty_receipt_does_not_stand_in_for_another_commit(repo, receipts):
+    """The contaminated-sweep rule survives the tree lookup.
+
+    ``--allow-dirty`` records a verdict about "that commit plus whatever was
+    lying around". It is already refused for the commit it names; reusing it
+    by tree would let the same sweep answer for a commit it is even further
+    from.
+    """
+    (repo / "scratch.txt").write_text("somebody else's work", encoding="utf-8")
+    assert _run(repo, receipts, "--command", GREEN, "--allow-dirty") == 0
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "same tree, new sha")
+
+    assert _check(repo, receipts) == 1
+
+
+def test_reuse_needs_the_same_content_not_merely_the_same_files(repo, receipts):
+    """A tree hash is the content, so an edit ends the reuse.
+
+    The window batches by time; the receipt does not. A candidate that lands
+    after the preview was swept changes the tree, and the gate goes back to
+    demanding a sweep of what will actually be served.
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    (repo / "a.txt").write_text(f"two{chr(10)}", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "late candidate")
+
+    assert _check(repo, receipts) == 1
+
+
 def test_a_tree_standing_on_another_commit_refuses_to_produce_a_receipt(
     repo, receipts, capsys
 ):
