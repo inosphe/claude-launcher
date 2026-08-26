@@ -303,8 +303,9 @@ def session_basetemp(session: str, *, now: Optional[float] = None) -> str:
     Length: measured ceiling is 48 characters (xdist nests ``popen-gwN/`` and
     the transcript tests fold an absolute cwd back into a filename, so the
     path is ``2*basetemp+162`` against MAX_PATH). ``C:/t/`` + session + ``c``
-    + ten digits is 28 for a five-character session -- the suffix spends ten
-    of the twenty-odd characters that were spare.
+    + ten digits is 21 for a five-character session, against the old fixed
+    name's 11 -- the generation spends ten of the 37 characters that were
+    spare, and pinned tests hold both numbers.
     """
     stamp = time.strftime("%m%d%H%M%S", time.localtime(now))
     return f"{basetemp_root().as_posix()}/{session}c{stamp}"
@@ -325,6 +326,14 @@ def prune_basetemps(session: str, *, keep: int = KEEP_BASETEMPS) -> List[Path]:
     swallowed: a locked directory is a live run or an open handle, and a gate
     that goes red because housekeeping lost a race is worse than one that
     leaves a directory behind.
+
+    Ordering is by name, which is chronological because the suffix leads with
+    the month -- except across a new year, where January sorts below the
+    December it follows. The cost of that is bounded and self-clearing: at
+    worst the first few runs of a year keep stale trees and drop fresh ones,
+    and the window walks itself straight again within ``keep`` runs. Sorting
+    by mtime would be correct there and wrong here, where several of these
+    are created inside one second.
     """
     root = basetemp_root()
     try:
