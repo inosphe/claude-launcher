@@ -37,11 +37,11 @@ const code = [
 const ctx = {};
 new Function(
   "exports",
-  code + "\nObject.assign(exports, {wfDiagramSvg, flowMetrics, flowOrder," +
-  " flowTrack, flowNeedsHuman, flowState});"
+  code + "\nObject.assign(exports, {wfDiagramSvg, wfStepOrder, flowMetrics," +
+  " flowOrder, flowTrack, flowNeedsHuman, flowState});"
 )(ctx);
-const { wfDiagramSvg, flowMetrics, flowOrder, flowTrack, flowNeedsHuman,
-        flowState } = ctx;
+const { wfDiagramSvg, wfStepOrder, flowMetrics, flowOrder, flowTrack,
+        flowNeedsHuman, flowState } = ctx;
 
 let failures = 0;
 function check(what, cond, extra) {
@@ -234,6 +234,70 @@ check("no ask at all reads the same way (a forced goto leaves this)",
 check("a stopped session still outranks it",
       ctx.flowState({ ...NOBODY, stopped: true }) === "stopped",
       ctx.flowState({ ...NOBODY, stopped: true }));
+
+/* --- the rows are layers, not a breadth-first walk --------------------- */
+/* The shape is improv-worker's: one main chain with two loops back into it
+   and a shortcut to the finish. A BFS order rows a join by its SHORTEST
+   path, so wrapup (reachable straight from landing) sat above landed (only
+   reachable via the long chain) and the closing chain — landed -> wrapup ->
+   end — ran BACKWARD up the rail. The order must instead be the deepest
+   path, so every real edge runs downward and the only edges pointing up
+   are the two loop arcs. */
+const WORKER = {
+  name: "improv-worker", start: "intake",
+  steps: [
+    { id: "intake", next: "work" }, { id: "work", next: "review" },
+    { id: "review", next: "commit" }, { id: "commit", next: "landing" },
+    { id: "landing", select: { prompt: "p", chooser: "agent", options: [
+      { name: "request", next: "rebase" }, { name: "hold", next: "wrapup" } ] } },
+    { id: "rebase", next: "peer-review" },
+    { id: "peer-review", select: { prompt: "p", chooser: "agent", options: [
+      { name: "pass", next: "integration-request" },
+      { name: "changes", next: "work" } ] } },
+    { id: "integration-request", next: "await-landing" },
+    { id: "await-landing", select: { prompt: "p", chooser: "agent", options: [
+      { name: "landed", next: "landed" }, { name: "rebase", next: "rebase" } ] } },
+    { id: "landed", next: "wrapup" },
+    { id: "wrapup" },   // no `next`: the run terminates here, drawing the end node
+  ],
+};
+{
+  const order = wfStepOrder(WORKER);
+  const at = (id) => order.indexOf(id);
+  const FORWARD = [
+    ["intake", "work"], ["work", "review"], ["review", "commit"],
+    ["commit", "landing"], ["landing", "rebase"], ["landing", "wrapup"],
+    ["rebase", "peer-review"], ["peer-review", "integration-request"],
+    ["integration-request", "await-landing"], ["await-landing", "landed"],
+    ["landed", "wrapup"],
+  ];
+  const LOOPS = [["peer-review", "work"], ["await-landing", "rebase"]];
+  check("the main chain and the shortcut all run downward",
+        FORWARD.every(([u, v]) => at(v) > at(u)), order);
+  check("the two loop arcs are the only edges pointing up",
+        LOOPS.every(([u, v]) => at(v) < at(u)), order);
+  check("the join the shortcut shares sits below its long way round",
+        at("wrapup") > at("landed"), order);
+  check("...and right below it, so the closing chain is straight",
+        at("wrapup") === at("landed") + 1 && at("landed") > at("await-landing"),
+        order);
+  const drawn = [...wfDiagramSvg(WORKER, {}, null).matchAll(/data-step="([^"]+)"/g)]
+    .map((m) => m[1]).filter((id) => id !== "end");
+  check("the strip numbers the branching graph exactly as the run page stacks it",
+        flowOrder(WORKER).join() === drawn.join(),
+        { strip: flowOrder(WORKER), rows: drawn });
+  // end hangs off the bottom, below every step it terminates
+  const svg = wfDiagramSvg(WORKER, {}, null);
+  const yOf = (id) => {
+    const m = svg.match(
+      new RegExp(`class="[^"]*wfd-node[^"]*" data-step="${id}"[^>]*>` +
+                 `<rect x="[^"]+" y="(\\d+)"`));
+    return m ? +m[1] : NaN;
+  };
+  check("end is the bottom row of the picture",
+        order.every((id) => Number.isFinite(yOf(id)) && yOf("end") > yOf(id)),
+        { endY: yOf("end"), steps: order.map((id) => yOf(id)) });
+}
 
 if (failures) {
   console.log(`${failures} check(s) failed`);
