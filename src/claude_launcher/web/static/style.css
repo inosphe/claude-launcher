@@ -998,6 +998,7 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   background: #14161a; border-bottom: 1px solid #262b33;
 }
 #term-wf .wf-head h2 { font-size: 15px; }
+#term-wf .wf-head .cflow-scope { font-size: 11px; padding: 1px 7px; }
 /* The bar between the two. The whole strip drags; the grip only says so. */
 #term-split {
   flex: none; height: 8px; cursor: row-resize; touch-action: none;
@@ -1324,6 +1325,7 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   background: #1b1e24; border-bottom: 1px solid #262b33;
 }
 .docked .wf-head h2 { font-size: 15px; overflow-wrap: anywhere; }
+.docked .wf-head .cflow-scope { font-size: 11px; padding: 1px 7px; }
 .docked .wf-btn { margin-right: 0; padding: 3px 9px; font-size: 11px; }
 /* label over value: two columns in this width leaves neither readable */
 .docked .sess-meta {
@@ -1350,6 +1352,10 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .mono { font-family: Cascadia Mono, Consolas, Menlo, monospace; font-size: 12px; }
 .wf-head { display: flex; align-items: center; gap: 12px; }
 .wf-head h2 { font-size: 20px; }
+/* The owning session, beside the workflow's name. Sized up from the list
+   chip it shares a class with: in the head it is half the run's name, not
+   a footnote — and it keeps the pill so it still reads as a link away. */
+.wf-head .cflow-scope { font-size: 12px; padding: 2px 9px; }
 /* the way out to the full page sits at the head's far edge, off the badges */
 .wf-head .wf-btn.wf-full { margin-left: auto; margin-right: 0; }
 .badge.wf-running { background: #172947; color: #58a6ff; }

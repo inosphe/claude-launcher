@@ -5305,7 +5305,12 @@ function mobileTitle() {
     case "ws": return "workspaces";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
-    case "wf": return `workflow · ${shortenPath(wfCwd || "")}`;
+    // The session first, for the reason the head carries it (wfOwnerChip):
+    // one directory holds one run per session, so the path alone names a
+    // group of pages rather than the one on screen.
+    case "wf": return `workflow · ${
+      wfScope && wfScope !== "default" ? wfScope + " · " : ""
+    }${shortenPath(wfCwd || "")}`;
     case "log": return `transcript · ${transcriptName || ""}`;
     case "msg": return `messages · ${traceSession}`;
     case "session": return `session · ${sessName}`;
@@ -6956,6 +6961,23 @@ function restoreWfScrolls(view, keep) {
   }
 }
 
+/* Which session owns this run, drawn as the head's chip. It is identity and
+   not a detail: several sessions run the same workflow in the same tree, and
+   the pages are then identical but for this — so it belongs beside the
+   workflow's name, in the strip that holds still, rather than down in the
+   meta line that scrolls away under it. A link either way — an exited
+   session is still openable (it resumes), and that is the first thing
+   wanted here. */
+function wfOwnerChip(data) {
+  if (!data.scope || data.scope === "default") return null;
+  const owner = el("a", "cflow-scope", `session ${data.scope}`);
+  owner.href = "#/s/" + encodeURIComponent(data.scope);
+  owner.title = (data.sessions || []).includes(data.scope)
+    ? "attach this run's session"
+    : "this run's session is not running — open it to resume";
+  return owner;
+}
+
 /* One renderer, two homes: the #/wf page, and the split pane halved into the
    terminal's column. `ui` says which home this is — where its step selection
    lives, how it redraws, how it re-fetches after an action — so the pane is
@@ -6981,6 +7003,8 @@ function renderWfInto(view, data, ui) {
 
   const head = el("div", "wf-head");
   head.appendChild(el("h2", null, wf.name || run.workflow || "workflow"));
+  const owner = wfOwnerChip(data);
+  if (owner) head.appendChild(owner);
   head.appendChild(el(
     "span",
     `badge ${wfDotClass(run.status, run)}`,
@@ -7017,18 +7041,8 @@ function renderWfInto(view, data, ui) {
   if (wf.description) side.appendChild(el("p", "wf-desc", wf.description));
 
   const meta = el("div", "wf-meta");
-  // Which session owns this run is its identity, not a detail: several
-  // sessions run the same workflow in the same tree, and the pages are then
-  // identical but for this. A link either way — an exited session is still
-  // openable (it resumes), and that is the first thing wanted here.
-  if (data.scope && data.scope !== "default") {
-    const owner = el("a", "cflow-scope", `session ${data.scope}`);
-    owner.href = "#/s/" + encodeURIComponent(data.scope);
-    owner.title = (data.sessions || []).includes(data.scope)
-      ? "attach this run's session"
-      : "this run's session is not running — open it to resume";
-    meta.appendChild(owner);
-  }
+  // The owning session is not in this line any more: it moved up to the head
+  // (wfOwnerChip), which holds still while everything here scrolls away.
   meta.appendChild(el("span", null, `run ${run.run || "?"}`));
   meta.appendChild(el("span", null, `started ${(run.started_at || "?").replace("T", " ")}`));
   meta.appendChild(el("span", null, `${run.steps_completed ?? 0} steps done`));
