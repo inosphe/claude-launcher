@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 import yaml
 
@@ -81,3 +83,60 @@ def test_save_is_stable_yaml(config_file):
     # sort_keys=True keeps a deterministic order.
     assert text.index("a:") < text.index("b:")
     assert yaml.safe_load(text)["version"] == store.VERSION
+
+
+# --------------------------------------------------------------------------- #
+# writing while somebody is reading
+# --------------------------------------------------------------------------- #
+def test_save_never_shows_a_reader_a_half_written_document(config_file, monkeypatch):
+    """The file has concurrent readers, so it is renamed into place.
+
+    :func:`load` reads fresh on every call and the daemon calls it on *every*
+    ``/api/sessions`` poll. The plain write this replaced truncated the file
+    before writing it, and an empty read is the dangerous one: it parses
+    cleanly and simply has no ``llm`` block, so a configuration that was
+    never wrong reported itself absent for that poll and the web UI's
+    briefing controls went inert.
+
+    The rename is the only moment the new bytes and the old file both exist,
+    so that is where a reader is put — and what it must get is the whole
+    previous document.
+    """
+    store.save({"llm": {"endpoint": "e1", "model": "m", "api_key": "k"}})
+    seen = []
+    real_replace = os.replace
+
+    def spy(src, dst):
+        seen.append(store.load())
+        real_replace(src, dst)
+
+    monkeypatch.setattr(store.os, "replace", spy)
+    store.save({"llm": {"endpoint": "e2", "model": "m", "api_key": "k"}})
+
+    assert len(seen) == 1
+    assert seen[0]["llm"] == {"endpoint": "e1", "model": "m", "api_key": "k"}
+    assert store.load()["llm"]["endpoint"] == "e2"
+
+
+def test_save_leaves_no_scratch_file_behind(config_file):
+    store.save({"profiles": {"a": {}}})
+    assert not list(config_file.parent.glob(f"{config_file.name}.*.tmp"))
+
+
+def test_a_save_that_cannot_land_keeps_the_old_document_and_cleans_up(
+    config_file, monkeypatch
+):
+    """A failed rename must not leave the config gone, nor litter beside it —
+    the whole point of writing beside the file is that a failure costs
+    nothing."""
+    store.save({"llm": {"endpoint": "e1"}})
+
+    def boom(src, dst):
+        raise OSError("rename refused")
+
+    monkeypatch.setattr(store.os, "replace", boom)
+    with pytest.raises(OSError):
+        store.save({"llm": {"endpoint": "e2"}})
+
+    assert store.load()["llm"]["endpoint"] == "e1"
+    assert not list(config_file.parent.glob(f"{config_file.name}.*.tmp"))

@@ -510,6 +510,44 @@ def test_sessions_list_says_whether_llm_is_configured(home, tmp_path):
     asyncio.run(run())
 
 
+def test_sessions_list_survives_a_config_it_cannot_read(home, tmp_path):
+    """An unreadable config costs the caller one toggle, never the rail.
+
+    ``llm_configured`` is recomputed from disk on every poll (that is what
+    makes writing the config flip the very next one, above), so a file that
+    cannot be parsed reaches this handler as a ``StoreError`` — which
+    ``error_middleware`` does not list, and which would therefore turn the
+    one request the web UI cannot do without into a 500. The rail rebuilds
+    its entire list off this response, so a poll that fails takes every row
+    with it; the toggle it could not answer for is the cheaper thing to
+    lose.
+    """
+
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            # Broken *after* the session exists — the harness registry lives
+            # in this same file, and the point is a config that goes bad
+            # under a daemon that is already running.
+            store.path().write_text("{ this: is: not: valid", encoding="utf-8")
+
+            resp = await client.get("/api/sessions", headers=BEARER)
+            assert resp.status == 200
+            body = await resp.json()
+            assert [s["name"] for s in body["sessions"]] == ["s1"]
+            assert body["llm_configured"] is False
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_sessions_list_attaches_the_cached_briefing_digest(home, tmp_path):
     """The list poll pours each session's cached one-liner: a rail row can
     show it folded or open, and a browser refresh repaints it from the
