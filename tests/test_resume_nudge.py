@@ -89,6 +89,11 @@ class _Recorded:
         self.pid = 4321
         self.created_at = None
         self.last_output_at = None
+        # persist() also records when a person last looked in and last typed
+        # here; a double that leaves them off makes it raise instead of
+        # writing the file this test then reads.
+        self.last_visited_at = None
+        self.last_input_at = None
         self.exited_at = None
 
     def status(self, threshold=None) -> str:
@@ -110,12 +115,19 @@ class _NoSpawnManager(SessionManager):
         restoring: bool = False,
         opening: str = "",
         created_at: str = "",
+        last_visited_at: str = "",
+        last_input_at: str = "",
     ):
         session = _Recorded(sdef.name, "starting", cwd=sdef.cwd)
         # Carried like the real one does: a restore relaunches into a new
         # object, and the session's creation time has to survive it (the
-        # listings are ordered by it -- see manager.list).
+        # listings are ordered by it -- see manager.list). The same holds for
+        # when a person last looked in and last typed here -- and this
+        # override has to keep accepting them, or restore_all's call raises
+        # TypeError and every restore is counted as a failed relaunch.
         session.created_at = created_at or None
+        session.last_visited_at = last_visited_at or None
+        session.last_input_at = last_input_at or None
         self._sessions[sdef.name] = session
         return session
 
