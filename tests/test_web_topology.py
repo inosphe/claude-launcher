@@ -44,7 +44,15 @@ brain's gating (a policy-locked row greys with the key that opens it) and the
 payload it emits reading through the disables, plus what the modal remembers
 between spawns — ``queued_check`` on
 the queued-deliveries banner — the backlog the daemon is holding for the
-attached session, and whose keyboard it blames for the hold — ``seq_check`` on the
+attached session, and whose keyboard it blames for the hold —
+``backpressure_check`` on the one state none of those three can show:
+past the mesh's cap the daemon stops ACCEPTING mail for a session, so
+the backlog stops growing and every field the page had before reads as
+calm. Its checks are about precedence (a shut door outranks the timing
+holds in the header chip, but never ``exited``, nor a person's own pin,
+which the chip is also the button for) and about drawing with nothing to
+list — the panel box has to appear on refusals alone, with an empty
+queue — ``seq_check`` on the
 message trace's event list — the order a mesh's traffic is read in, and what
 the picture is allowed to claim about where each message got to —
 ``seqrender_check`` on the sequence that list is drawn into, ``zoom_check`` on
@@ -208,6 +216,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "queued_check.js",
         "sendinput_check.js",
         "holdchip_check.js",
+        "backpressure_check.js",
         "seq_check.js",
         "seqrender_check.js",
         "zoom_check.js",

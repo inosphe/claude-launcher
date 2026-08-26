@@ -987,7 +987,7 @@ def register(sub) -> None:
 
     p = msub.add_parser(
         "policy",
-        help="show or edit the mesh's nudge policy (heartbeat/task-poll/stall-warn)",
+        help="show or edit the mesh's delivery policy (heartbeat/task-poll/stall-warn/backpressure)",
     )
     p.add_argument("mesh")
     p.add_argument(

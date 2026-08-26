@@ -3772,6 +3772,19 @@ function localTyping() {
    the session panel. `mine` says whether this tab's typing can be the
    keyboard in question (false when the panel describes another session). */
 function queuedReason(q, mine) {
+  // The DOOR before any of the holds: a hold is "this is still coming", and
+  // a shut door is "the next one is not". Someone reading a banner to find
+  // out why the terminal is quiet needs the second answer more, because it
+  // is the one that also explains a backlog which has stopped growing —
+  // every other field here looks identical to calm. `exited` still wins:
+  // nothing is being refused there, the terminal is simply gone.
+  const bp = q.backpressure || {};
+  if (bp.congested && q.state !== "exited") {
+    return "at capacity: " + bp.queued + " waiting (cap " + bp.inbox_max +
+      ") — the mesh is REFUSING new messages for this session" +
+      (bp.refused ? ", " + bp.refused + " turned away in the last 10 min" : "") +
+      ". Senders are told to wait and re-send; nothing of theirs is queued";
+  }
   // `state`, not `reason`: the daemon fills it unconditionally (it is the
   // gate's one-word answer even before anything has queued), so a payload
   // carrying it says the same thing here, in the banner, and in the header
@@ -3799,6 +3812,13 @@ function queuedReason(q, mine) {
     case "hold":
       return "held: delivery is pinned shut here (the hold chip) — press it " +
         "again to resume";
+    case "paced":
+      // Not a fault and not the session's doing: the daemon typed a block
+      // in less than min_gap ago and is letting the next arrivals gather
+      // into one block instead of three interruptions. Say the wait is
+      // short, or this reads as another stuck delivery.
+      return "held: delivery into this terminal is being paced — a block " +
+        "went in moments ago and these go in with the next one";
     default:
       return "delivering…";
   }
@@ -3979,11 +3999,27 @@ let holdBusy = false;   // one toggle at a time; a double-click is one flip
    way the banner does — the fix for an unsent line (send it or clear it)
    is different from the fix for a recent keystroke (just wait). */
 function holdChipText(q, msgs) {
+  // The chip asks "would a message arriving right now get in", and a shut
+  // door answers it more finally than any hold does: a held message is
+  // still coming, a refused one was never taken. So congestion is read
+  // first — except under the two states that are blunter still. `exited`
+  // because nothing is being refused when there is no terminal, and `hold`
+  // because this chip is also the button that un-pins, and a person who
+  // pinned it must not be shown a sentence that hides their own doing.
+  const bp = q.backpressure || {};
+  const shut = !!bp.congested && q.state !== "exited";
+  if (shut && q.state !== "hold") {
+    return `delivery: REFUSING — inbox full (${msgs}/${bp.inbox_max})`;
+  }
   switch (q.state) {
     case "exited":
       return "delivery: exited";
     case "hold":
-      return msgs > 0 ? `delivery: held — pinned (${msgs} queued)` : "delivery: held — pinned";
+      return shut
+        ? `delivery: held — pinned, inbox full (${msgs}/${bp.inbox_max})`
+        : msgs > 0 ? `delivery: held — pinned (${msgs} queued)` : "delivery: held — pinned";
+    case "paced":
+      return msgs > 0 ? `delivery: paced (${msgs})` : "delivery: paced";
     case "busy":
       return msgs > 0 ? `delivery: queued — busy (${msgs})` : "delivery: would queue — busy";
     case "keyboard":
@@ -4017,6 +4053,12 @@ function renderHoldChip(q) {
   chip.className = "term-btn hold-chip";
   chip.classList.toggle("hold-pinned", q.state === "hold");
   chip.classList.toggle("hold-blocked", q.state !== "settling" && q.state !== "hold");
+  // Its own colour, not the amber every other hold shares: those all end by
+  // themselves, and this one is turning other sessions' messages away until
+  // this terminal reads what it has.
+  chip.classList.toggle(
+    "hold-shut", !!(q.backpressure || {}).congested && q.state !== "exited"
+  );
   chip.disabled = holdBusy;
   chip.title = chipTitle(q);
 }
@@ -4031,6 +4073,24 @@ function chipTitle(q) {
   ];
   if (pinned && (q.messages || []).length) {
     lines.push("The queued strip below is what is waiting; \"deliver now\" there still goes through.");
+  }
+  // Said here rather than in the chip's one line: the count of senders
+  // turned away is the fact that explains a backlog which has stopped
+  // growing, and it is worth more room than the chip has.
+  const bp = q.backpressure || {};
+  if (bp.congested) {
+    lines.push(
+      `At capacity: ${bp.queued} waiting, cap ${bp.inbox_max}. New messages ` +
+      "for this session are REFUSED — their senders are told to wait and " +
+      "re-send, and nothing of theirs is queued here."
+    );
+  }
+  if (bp.refused) {
+    const who = (bp.refused_from || [])
+      .map((r) => `${r.from}×${r.count}`).join(", ");
+    lines.push(
+      `${bp.refused} turned away in the last 10 min` + (who ? `: ${who}.` : ".")
+    );
   }
   return lines.join("\n");
 }
@@ -8378,6 +8438,13 @@ function renderSession(data) {
   const queued = sessQueued(data);
   if (queued) view.appendChild(queued);
 
+  // And under THAT, what never became a backlog at all: the senders the
+  // mesh turned away because this one had stopped reading. Drawn even with
+  // an empty queue above it — a refusal leaves no message to list, so an
+  // empty panel is exactly the wrong answer to "why has nobody written".
+  const bpBox = sessBackpressure(data);
+  if (bpBox) view.appendChild(bpBox);
+
   const meshes = data.meshes || [];
   const meshBox = el("div", "sess-meshes");
   meshBox.appendChild(el("h3", null, `Meshes (${meshes.length})`));
@@ -9015,6 +9082,76 @@ function sessQueued(data) {
     box.appendChild(status);
   }
   for (const m of q.messages) box.appendChild(queuedMsgRow(m));
+  return box;
+}
+
+/* ---- backpressure, in the panel ----
+   The queued box above says what IS waiting. This says what is not, and
+   never will be: the messages the mesh turned away at the door because this
+   session's backlog had reached its cap.
+
+   It is a separate box for one reason — it has to be able to draw when the
+   backlog is EMPTY. A refusal leaves no message anywhere: not in the log
+   (it was never appended), not in the queue (that is the whole point). The
+   only trace is the recipient's record, and if nothing rendered it, the
+   answer to "why has nobody messaged this session in ten minutes" would be
+   an empty panel. Nothing is drawn while the door is open and nobody has
+   been refused, though: an always-present "Refused (0)" would train the eye
+   to skip the one time it matters. */
+function sessBackpressure(data) {
+  const bp = (data.queued || {}).backpressure;
+  if (!bp || !bp.enabled) return null;
+  const paced = bp.paced_for || 0;
+  if (!bp.congested && !bp.refused && !paced) return null;
+  const box = el("div", "sess-bp");
+  if (bp.congested) box.className += " shut";
+  box.appendChild(el("h3", null, "Mesh backpressure"));
+  if (bp.congested) {
+    box.appendChild(el(
+      "p", "wf-warning",
+      `at capacity — ${bp.queued} waiting, cap ${bp.inbox_max}. New messages ` +
+      "for this session are refused at the door: their senders are told to " +
+      "wait and re-send, and nothing of theirs is queued here."
+    ));
+  } else if (paced) {
+    box.appendChild(el(
+      "p", "wf-note",
+      `delivery paced — the next block waits about ${Math.ceil(paced)}s, so ` +
+      "arrivals in the meantime go in together rather than one at a time."
+    ));
+  }
+  if (bp.refused) {
+    box.appendChild(el(
+      "p", "wf-note",
+      `${bp.refused} message(s) turned away in the last 10 minutes.`
+    ));
+    const list = el("div", "bp-list");
+    for (const r of bp.refused_from || []) {
+      const row = el("div", "bp-row");
+      row.appendChild(el("span", "bp-who", r.from));
+      row.appendChild(el(
+        "span", "bp-meta",
+        `${r.count} refused` +
+        (r.ago === null || r.ago === undefined ? "" : ` · last ${fmtAge(r.ago)} ago`)
+      ));
+      list.appendChild(row);
+    }
+    box.appendChild(list);
+  }
+  // Which room, and on which cap — a session in two meshes can be shut in
+  // one and open in the other, and the two may be configured differently.
+  for (const h of bp.handles || []) {
+    if (!h.congested && !h.refused && !h.paced_for) continue;
+    const row = el("div", "bp-row");
+    row.appendChild(el("span", "bp-who", `${h.handle}@${h.mesh}`));
+    row.appendChild(el(
+      "span", "bp-meta",
+      `${h.queued}/${h.inbox_max} queued` +
+      (h.congested ? " · REFUSING" : "") +
+      (h.paced_for ? ` · paced ${Math.ceil(h.paced_for)}s` : "")
+    ));
+    box.appendChild(row);
+  }
   return box;
 }
 
@@ -12787,7 +12924,7 @@ function renderMeshOwed(info, report) {
       "p", "mesh-owed-warn",
       "the heartbeat nudge is OFF for this mesh — nothing is chasing these " +
       "on its own; nudge a member by hand above, switch the heartbeat on " +
-      "under Nudge policy, or message the member yourself below"
+      "under Delivery policy, or message the member yourself below"
     ));
   } else if (report.engine && info.primary) {
     box.appendChild(el(
@@ -12798,17 +12935,24 @@ function renderMeshOwed(info, report) {
   return box;
 }
 
-/* Nudge-policy editor: heartbeat / task-poll / stall warnings, per mesh.
-   All nudges are terminal injections (they consume the agent's turn), so
-   every section ships disabled until deliberately switched on here. */
+/* Delivery-policy editor: heartbeat / task-poll / stall warnings, and the
+   backpressure gate, per mesh.
+
+   The first three are nudges — terminal injections that consume the agent's
+   turn — so each ships disabled until deliberately switched on here. The
+   fourth is the opposite and ships ON: it is what stops a fan-in of a dozen
+   children from spending a leader's turns for it. Editable in the same
+   place all the same, because a gate a person can see refusing messages
+   (the header chip says so) and cannot adjust is worse than no gate. */
 function renderMeshPolicy(info) {
   const pol = info.policy || {};
   const box = el("div", "mesh-policy");
-  box.appendChild(el("h3", null, "Nudge policy"));
+  box.appendChild(el("h3", null, "Delivery policy"));
   box.appendChild(el(
     "p", "wf-note",
     "nudges are typed into the member's terminal, so each one costs the " +
-    "agent a turn — enable deliberately"
+    "agent a turn — enable deliberately. Backpressure, at the bottom, is " +
+    "the one that ships on: it bounds what a terminal can be handed."
   ));
   const fields = {};
   const num = (val) => {
@@ -12864,6 +13008,29 @@ function renderMeshPolicy(info) {
     ["warn_secs", "warn after (s)", num(sw.warn_secs ?? 600)],
   ]);
 
+  // Not a nudge: the door and the pacing gate. `num`'s min is 1, and both
+  // of these take 0 as a real setting ("no cap" / "no pacing"), so they get
+  // their own inputs rather than borrowing that one.
+  const bp = pol.backpressure || {};
+  const zeroable = (val) => {
+    const inp = document.createElement("input");
+    inp.type = "number"; inp.min = "0"; inp.value = val;
+    inp.className = "pol-num";
+    return inp;
+  };
+  section(
+    "backpressure",
+    "backpressure — stop accepting mail a member has not read (ON by default)",
+    [
+      ["inbox_max", "refuse past this many queued (0 = no cap)",
+       zeroable(bp.inbox_max ?? 4)],
+      ["min_gap", "least gap between deliveries (s, 0 = none)",
+       zeroable(bp.min_gap ?? 15)],
+      ["retry_after", "tell refused senders to wait (s)",
+       zeroable(bp.retry_after ?? 90)],
+    ]
+  );
+
   const save = el("button", "wf-btn approve", "Save policy");
   save.addEventListener("click", async () => {
     const roles = tpRoles.value.split(",").map((r) => r.trim()).filter(Boolean);
@@ -12884,6 +13051,12 @@ function renderMeshPolicy(info) {
       stall_warn: {
         enabled: fields.stall_warn.enabled.checked,
         warn_secs: +fields.stall_warn.warn_secs.value,
+      },
+      backpressure: {
+        enabled: fields.backpressure.enabled.checked,
+        inbox_max: +fields.backpressure.inbox_max.value,
+        min_gap: +fields.backpressure.min_gap.value,
+        retry_after: +fields.backpressure.retry_after.value,
       },
     };
     const resp = await api(`/api/mesh/${encodeURIComponent(info.name)}/policy`, {

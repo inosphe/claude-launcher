@@ -548,8 +548,10 @@ class Mesh:
         #: peer_status decides whether a sync must carry the roster urgently.
         self.roster_version: int = 0
         self.seen_ids: set = set()  # message-id dedupe (idempotent redelivery)
-        #: Nudge policy config (heartbeat / task-poll / stall warnings),
-        #: persisted in mesh.json and edited via the API/web.
+        #: Delivery policy config — the three nudges (heartbeat /
+        #: task-poll / stall warnings) plus the backpressure gate that
+        #: bounds what any of them can hand a terminal. Persisted in
+        #: mesh.json and edited via the API/web.
         self.policy: dict = mesh_policy.default_policy()
         #: This mesh's role-set OVERRIDE (None = the packaged vocabulary), as
         #: uploaded to the authority. Persisted in mesh.json and federated,
@@ -1190,6 +1192,16 @@ class MeshManager:
             "enabled": enabled,
             "queued": queued,
             "congested": congested,
+            # The cap that is actually biting, so a chip can say "4/4"
+            # without walking ``handles`` itself: the congested handle's own
+            # cap when one is congested (that is the number being hit), the
+            # loosest configured cap otherwise (nothing is being hit, and
+            # the roomiest room is the honest headline).
+            "inbox_max": max(
+                [h["inbox_max"] for h in handles if h["congested"]]
+                or [h["inbox_max"] for h in handles]
+                or [0]
+            ),
             "paced_for": paced or None,
             "refused": refused,
             # Who is being turned away, worst offender first — the answer to

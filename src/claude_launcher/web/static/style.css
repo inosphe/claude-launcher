@@ -792,6 +792,18 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   background: #442022; color: #ff7b72; border-color: #8b2e2e;
 }
 .hold-chip.hold-pinned:hover { background: #552528; color: #ff9c9c; }
+/* A shut door is neither of the two above and must not borrow either
+   colour. Amber (hold-blocked) says "waiting, it will pass on its own", and
+   this does not pass until the agent reads its backlog; red (hold-pinned)
+   says "a person did this", and nobody did — the mesh did, mechanically.
+   Purple, and louder than both, because unlike either of them it is
+   affecting sessions the reader is not looking at. */
+.hold-chip.hold-shut,
+.hold-chip.hold-blocked.hold-shut,
+.hold-chip.hold-pinned.hold-shut {
+  background: #331a44; color: #d2a8ff; border-color: #6b3fa0;
+}
+.hold-chip.hold-shut:hover { background: #402154; border-color: #8957e5; }
 .hold-chip:disabled { opacity: 0.6; cursor: wait; }
 /* The nudge countdown for the session on screen. Same clock as the rail's
    strip, same words, same colours — so the two cannot be read as two facts —
@@ -1064,12 +1076,12 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .sess-meta dt { color: #7d8590; }
 .sess-meta dd { color: #c6cdd5; overflow-wrap: anywhere; }
-.sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-migrate,
+.sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-bp, .sess-migrate,
 .sess-reborrow, .sess-perms, .sess-brief-section {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
 }
-.sess-meshes h3, .sess-wf h3, .sess-send h3, .sess-queued h3,
+.sess-meshes h3, .sess-wf h3, .sess-send h3, .sess-queued h3, .sess-bp h3,
 .sess-migrate h3, .sess-reborrow h3, .sess-perms h3, .sess-brief-section h3 {
   font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px;
 }
@@ -1083,6 +1095,19 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-queued > .wf-note, .sess-queued > .wf-warning {
   margin: 0 0 8px; line-height: 1.5;
 }
+/* backpressure: what the queued box above cannot show, because a refused
+   message is not anywhere to be listed. Wears the chip's purple while the
+   door is shut, so the header and the panel are recognisably about the same
+   thing from across the room. */
+.sess-bp.shut { border-color: #6b3fa0; }
+.sess-bp.shut h3 { color: #d2a8ff; }
+.sess-bp > .wf-note, .sess-bp > .wf-warning { margin: 0 0 8px; line-height: 1.5; }
+.sess-bp .bp-row {
+  display: flex; justify-content: space-between; gap: 10px;
+  padding: 4px 0; border-top: 1px solid #22252c; font-size: 12px;
+}
+.sess-bp .bp-who { color: #c6cdd5; overflow-wrap: anywhere; }
+.sess-bp .bp-meta { color: #7d8590; white-space: nowrap; }
 /* write to this session: the mesh page's send box, with the recipient already
    answered by the panel it sits in */
 .sess-send-row { display: flex; gap: 8px; margin-bottom: 8px; }
@@ -1334,6 +1359,7 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .docked .sess-meta dt { margin-top: 7px; font-size: 11px; }
 .docked .sess-meshes, .docked .sess-wf, .docked .sess-send, .docked .sess-queued,
+.docked .sess-bp,
 .docked .sess-migrate, .docked .sess-reborrow, .docked .sess-perms,
 .docked .sess-quickjob, .docked .sess-kids {
   margin: 10px 0; padding: 10px 12px; max-width: none; background: #16181d;
@@ -2343,8 +2369,8 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   .flow-waiting, .flow-detail,
   .mesh-members, .mesh-send, .mesh-fed, .mesh-policy, .mesh-links,
   .mesh-roles, .mesh-owed, .wf-start, .mesh-log, .mesh-topo,
-  .sess-meta, .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-migrate,
-  .sess-reborrow, .sess-perms, .sess-quickjob, .sess-kids,
+  .sess-meta, .sess-meshes, .sess-wf, .sess-send, .sess-queued, .sess-bp,
+  .sess-migrate, .sess-reborrow, .sess-perms, .sess-quickjob, .sess-kids,
   .wf-pending, .ws-add, .ws-list, #ws-view > .wf-note { max-width: none; }
   /* The add row is three controls on one line at desk width; on a phone the
      path alone needs the whole line. */
