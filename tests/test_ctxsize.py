@@ -405,3 +405,66 @@ def test_a_session_with_no_transcript_carries_no_key(home, tmp_path, monkeypatch
             await mgr.shutdown_all()
 
     asyncio.run(run())
+
+
+def test_both_endpoints_carry_the_git_branch(home, tmp_path, monkeypatch):
+    """The rail row and the detail panel read the branch from the session's
+    own checkout — the same reading, so whichever one someone believes holds.
+    A directory with no git carries '' rather than a guess."""
+    import subprocess
+
+    from claude_launcher import store
+    from claude_launcher.daemon.manager import SessionManager
+
+    def git(*args, cwd):
+        return subprocess.run(
+            ["git", *args], cwd=cwd, capture_output=True, text=True, check=True
+        )
+
+    store.update(
+        lambda doc: doc.update(
+            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
+        )
+    )
+    # A directory outside any repository is arranged, not assumed: pytest's
+    # basetemp can sit inside a checkout, and git's discovery walks upward.
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+
+    # A real repository on a branch that already differs from master, and a
+    # plain directory that is no checkout at all.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git("init", "-q", cwd=repo)
+    git("config", "user.email", "t@example.com", cwd=repo)
+    git("config", "user.name", "t", cwd=repo)
+    (repo / "a.txt").write_text("hi\n", encoding="utf-8")
+    git("add", "-A", cwd=repo)
+    git("commit", "-qm", "init", cwd=repo)
+    git("checkout", "-qb", "s149-review", cwd=repo)
+    plain = tmp_path / "plain"
+    plain.mkdir()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            mgr.create(SessionDef(name="on-branch", harness="py", cwd=str(repo),
+                                  conversation_id=CID))
+            mgr.create(SessionDef(name="no-repo", harness="py", cwd=str(plain),
+                                  conversation_id="cafe0000-0000-0000-0000-0000000000fe"))
+
+            resp = await client.get("/api/sessions", headers=BEARER)
+            assert resp.status == 200
+            rows = {s["name"]: s for s in (await resp.json())["sessions"]}
+            assert rows["on-branch"]["branch"] == "s149-review"
+            assert rows["no-repo"]["branch"] == ""
+
+            resp = await client.get("/api/sessions/on-branch/meta", headers=BEARER)
+            assert resp.status == 200
+            meta = (await resp.json())["session"]
+            assert meta["branch"] == "s149-review"
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())

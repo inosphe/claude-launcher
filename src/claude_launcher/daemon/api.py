@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from aiohttp import web
 
@@ -651,6 +651,33 @@ def _session_cwd(session) -> str:
     """
     raw = session.sdef.cwd
     return cflow_state.resolve_cwd(raw) if raw else ""
+
+
+#: How long a session's git-branch reading stays plausible. A branch moves
+#: rarely (a worktree is cut once; an agent switches branches at most a few
+#: times a turn), while this reading rides the rail's every-poll list — so
+#: the per-cwd result is remembered for a spell rather than spawning a git
+#: process per session per poll, which would be the exact cost the poll was
+#: built to avoid.
+_BRANCH_TTL = 30.0
+_branch_cache: Dict[str, Tuple[str, float]] = {}
+
+
+def _branch_of(cwd: str) -> str:
+    """The git branch checked out at ``cwd``, or ``''``.
+
+    Empty for a directory that is not a git checkout, for a detached HEAD,
+    and for no directory — the three cases the UI must not dress as a branch.
+    """
+    if not cwd or not os.path.isdir(cwd):
+        return ""
+    now = time.monotonic()
+    hit = _branch_cache.get(cwd)
+    if hit is not None and now - hit[1] < _BRANCH_TTL:
+        return hit[0]
+    branch = worktree_mod.current_branch(Path(cwd))
+    _branch_cache[cwd] = (branch, now)
+    return branch
 
 
 def _scope_sessions(manager: SessionManager, cwd: str, scope: str) -> list:
@@ -2107,6 +2134,9 @@ async def h_sessions_list(request: web.Request) -> web.Response:
     attached = []
     for s in manager.list():
         info = ctxsize.attach(s)
+        # Which git branch the session's checkout is on — one fact that tells
+        # two sessions in the same worktree apart without opening either.
+        info["branch"] = _branch_of(_session_cwd(s))
         # The cached briefing's one-liner, when it exists — rides the list the
         # UI already polls so a row can show it without an open card or an LLM
         # call, and so a browser refresh repaints it from the daemon's session
@@ -2596,6 +2626,9 @@ async def h_session_meta(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
     session = manager.get(request.match_info["name"])
     info = ctxsize.attach(session)
+    # Same branch the rail row carries, so the detail panel's head and the
+    # Details list need no second guess.
+    info["branch"] = _branch_of(_session_cwd(session))
     name = info["name"]
     cwd = _session_cwd(session)
 
