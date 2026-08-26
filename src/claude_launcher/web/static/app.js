@@ -5499,6 +5499,7 @@ function mobileTitle() {
     case "meshes": return "mesh";
     case "flows": return "workflows";
     case "ws": return "workspaces";
+    case "reports": return "reports";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     // The session first, for the reason the head carries it (wfOwnerChip):
@@ -5617,6 +5618,7 @@ const VIEWS = {
   flows: "flows-view",
   cli: "cli-view",
   beads: "beads-view",
+  reports: "reports-view",
   wf: "wf-view",
   // The session's conversation — the fourth reading of it, beside the
   // terminal (what it is doing), the run page (where it has got to) and the
@@ -6040,6 +6042,7 @@ function parseHash(h) {
   if (parts[0] === "cli") return { page: "cli" };
   // #/beads is the board; #/beads/<id> the board with one issue opened.
   if (parts[0] === "beads") return { page: "beads", id: parts[1] || "" };
+  if (parts[0] === "reports") return { page: "reports" };
   if (parts[0] === "workspaces") return { page: "ws" };
   return { page: "home" };   // an unknown link is a wrong turn, not an error
 }
@@ -6054,6 +6057,7 @@ function route() {
   if (r.page !== "flow") stopFlowPoll();
   if (r.page !== "ws") closeWorkspaces();
   if (r.page !== "beads") stopBeadsPoll();
+  if (r.page !== "reports") stopReportsPoll();
   if (r.page !== "log") closeTranscript();
 
   switch (r.page) {
@@ -6088,6 +6092,7 @@ function route() {
     case "cli": openCli(); break;
     case "ws": openWorkspaces(); break;
     case "beads": openBeads(r.id); break;
+    case "reports": openReports(); break;
     default: openHome();
   }
 }
@@ -7471,6 +7476,250 @@ function sessBeadsCreate(name) {
   });
   sessBeadsBox = form;
   return form;
+}
+
+/* ------------------------------------------------------------------ */
+/* the Reports page: every round report on this machine               */
+/* ------------------------------------------------------------------ */
+/* The third reading of these pages, beside the two that already exist: a
+   session's rail block ("what did this one leave?") and an issue's detail
+   pane ("what was written up for this?"). Both of those need something in
+   hand. This page is for the reader who has neither — and it is the reading
+   the files were kept outside sessions/<name>/ for, because most of what it
+   lists was written by sessions the daemon has long since forgotten.
+
+   One fetch (/api/reports), whose rows come off the daemon's disk rather
+   than its registry, so a cleared session's round is still here. What the
+   registry does know rides along per row (session_status) and is DRAWN
+   rather than filtered on: the sessions that are gone are not an edge case
+   of this page, they are most of it. */
+let reportsCache = null;      // the rows, newest first; null until the first answer
+let reportsError = "";
+let reportsTimer = null;
+let reportsOpen = false;
+/* The narrowing, held across renders the way the Beads page holds its own —
+   a poll that redrew the table must not throw away what the reader picked. */
+let reportsState = "all";     // all | live | ended | gone
+let reportsSession = "";
+let reportsIssue = "";
+let reportsOldest = false;
+
+function openReports() {
+  reportsOpen = true;
+  showView("reports");
+  renderReports();
+  refreshReports();
+  // 30 s, not the rail's 2. A report is written once per round — tens of
+  // minutes apart at the very best — and each tick costs the daemon a
+  // listdir per session plus a read per file to tell a page from a stub.
+  if (!reportsTimer) reportsTimer = setInterval(refreshReports, 30000);
+}
+
+function stopReportsPoll() {
+  if (reportsTimer) { clearInterval(reportsTimer); reportsTimer = null; }
+  reportsOpen = false;
+}
+
+async function refreshReports() {
+  if (!reportsOpen) return;
+  try {
+    const resp = await api("/api/reports");
+    if (resp.status === 404) {
+      // The daemon on the other end is older than this page. Say so rather
+      // than drawing an empty table, which would read as "nothing written".
+      reportsError = "this daemon predates the Reports page — 'claunch " +
+        "daemon restart' to pick up this version";
+      reportsCache = reportsCache || [];
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) reportsError = data.error || `HTTP ${resp.status}`;
+      else { reportsCache = data.reports || []; reportsError = ""; }
+    }
+  } catch { return; }   // auth overlay is up, or the daemon is away
+  if (reportsOpen) renderReports();
+}
+
+/* What the daemon still knows about the session that wrote a row. Three
+   states, and the page draws all three: a report outlives its session by
+   design, so "no record" is this page's ordinary case rather than its broken
+   one — it is what a cleared session looks like from the one side that still
+   holds the evidence. */
+function reportSessionState(r) {
+  const st = (r && r.session_status) || "";
+  if (!st) return "gone";
+  return st === "exited" ? "ended" : "live";
+}
+
+/* The rows on screen: the narrowing, then the order. Never a re-sort — the
+   daemon already answered newest-first, and oldest-first is that same list
+   read the other way, so the two orders cannot disagree about a tie. */
+function reportsShown(rows) {
+  const out = (rows || []).filter((r) =>
+    (reportsState === "all" || reportSessionState(r) === reportsState) &&
+    (!reportsSession || r.session === reportsSession) &&
+    (!reportsIssue || (r.issue || "") === reportsIssue));
+  return reportsOldest ? out.slice().reverse() : out;
+}
+
+/* A report's size, said the way a person reads it. The bytes are what the
+   filesystem knows; "19 KB" is what tells a reader at a glance whether this
+   is a write-up or a stub. */
+function fmtReportSize(n) {
+  const b = Number(n);
+  if (!Number.isFinite(b) || b < 0) return "";
+  if (b < 1024) return `${Math.round(b)} B`;
+  const k = b / 1024;
+  if (k < 1024) return `${k < 10 ? k.toFixed(1) : Math.round(k)} KB`;
+  const m = k / 1024;
+  return `${m < 10 ? m.toFixed(1) : Math.round(m)} MB`;
+}
+
+/* The stamp, which came off the filename. It is UTC because the daemon names
+   the file that way (the name has to sort), and it is shown as written
+   rather than moved into the reader's zone — the same string is in the URL
+   of the page it opens, and the two must be readable as one thing. */
+function reportWhen(iso) {
+  return String(iso || "").replace("T", " ").replace("Z", " UTC");
+}
+
+const REPORT_STATES = [
+  ["all", "all", "every round on this machine"],
+  ["live", "live session", "rounds whose session is still running"],
+  ["ended", "ended", "rounds whose session finished, record still here"],
+  ["gone", "no record", "rounds whose session the daemon no longer knows — " +
+                        "cleared, or from an install that is gone"],
+];
+
+function reportsFilterBar() {
+  const bar = el("div", "seq-tabs reports-filters");
+  for (const [key, label, why] of REPORT_STATES) {
+    const b = el("button", "seq-tab" + (reportsState === key ? " on" : ""), label);
+    b.type = "button";
+    b.title = why;
+    b.addEventListener("click", () => { reportsState = key; renderReports(); });
+    bar.appendChild(b);
+  }
+  const rows = reportsCache || [];
+  bar.appendChild(reportsPick(
+    "session", [...new Set(rows.map((r) => r.session))].sort(), reportsSession,
+    (v) => { reportsSession = v; renderReports(); }));
+  bar.appendChild(reportsPick(
+    "issue", [...new Set(rows.map((r) => r.issue).filter(Boolean))].sort(),
+    reportsIssue, (v) => { reportsIssue = v; renderReports(); }));
+  const order = el("button", "wf-btn clear reports-order",
+    reportsOldest ? "oldest first" : "newest first");
+  order.type = "button";
+  order.title = "flip the order";
+  order.addEventListener("click", () => { reportsOldest = !reportsOldest; renderReports(); });
+  bar.appendChild(order);
+  return bar;
+}
+
+/* One of the two narrowing pickers. Its options are whatever the rows
+   actually carry, not the fleet: a filter offering a session with no report
+   would be offering an empty page. */
+function reportsPick(kind, values, current, onPick) {
+  const sel = document.createElement("select");
+  sel.className = "reports-pick";
+  sel.title = kind === "session"
+    ? "only the rounds this session wrote up"
+    : "only the rounds written up for this issue";
+  const any = document.createElement("option");
+  any.value = "";
+  any.textContent = kind === "session" ? "every session" : "every issue";
+  sel.appendChild(any);
+  for (const v of values) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = v;
+    if (v === current) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.addEventListener("change", () => onPick(sel.value));
+  return sel;
+}
+
+/* One row. The link that matters is the report itself, so it leads and it is
+   the largest thing in the line; the rest says which round this was. The
+   session is a second link where there is still something to walk to, and
+   plain text where there is not — a link to a session the daemon has never
+   heard of is a promise the page cannot keep. */
+function reportsRow(r) {
+  const row = el("div", "reports-row");
+  const open = el("a", "reports-open");
+  open.href = r.url;
+  open.target = "_blank";
+  open.rel = "noopener";
+  open.title = `open the round ${r.session} wrote up` +
+    (r.issue ? ` for ${r.issue}` : ", which named no issue");
+  open.appendChild(el("span", "reports-mark", "▤"));
+  open.appendChild(el("span", "reports-issue", r.issue || "no issue"));
+  row.appendChild(open);
+
+  const state = reportSessionState(r);
+  const sess = el(state === "gone" ? "span" : "a", "reports-sess " + state);
+  if (state !== "gone") sess.href = `#/s/${encodeURIComponent(r.session)}`;
+  sess.title = state === "gone"
+    ? `${r.session} — no record of this session any more; its round is here ` +
+      "because reports are kept outside the session directory"
+    : `${r.session} — ${r.session_status}`;
+  sess.appendChild(el("span", "reports-sess-name", r.session));
+  sess.appendChild(el("span", "reports-sess-state",
+    { live: "running", ended: "ended", gone: "no record" }[state]));
+  row.appendChild(sess);
+
+  row.appendChild(el("span", "reports-when", reportWhen(r.at)));
+  row.appendChild(el("span", "reports-size", fmtReportSize(r.size)));
+  if (r.issue) {
+    const board = el("a", "reports-board", "issue ↗");
+    board.href = `#/beads/${encodeURIComponent(r.issue)}`;
+    board.title = `${r.issue} on the board`;
+    row.appendChild(board);
+  }
+  return row;
+}
+
+function renderReports() {
+  const view = $("reports-view");
+  view.innerHTML = "";
+  const head = el("div", "wf-head");
+  head.appendChild(el("h2", null, "Reports"));
+  const back = el("button", "wf-btn clear", "Back");
+  back.addEventListener("click", () => { location.hash = "#"; });
+  head.appendChild(back);
+  view.appendChild(head);
+  view.appendChild(el("p", "wf-note",
+    "Every round report on this machine, newest first. One HTML page per " +
+    "round, written by the session that ran it and kept outside that " +
+    "session's own directory — so the write-up stays readable long after " +
+    "the session itself was cleared. Most of the rows below are exactly " +
+    "that, which is why a session that is gone is marked here rather than " +
+    "dropped."));
+  if (reportsError) view.appendChild(el("p", "wf-warning", reportsError));
+  if (!reportsCache) {
+    if (!reportsError) view.appendChild(el("p", "wf-note", "loading…"));
+    return;
+  }
+  if (!reportsCache.length) {
+    view.appendChild(el("p", "wf-note",
+      "No round has been written up yet. A session files one with " +
+      "'claunch report save <file>'; the workflows' wrapup step is what " +
+      "asks for it."));
+    return;
+  }
+  view.appendChild(reportsFilterBar());
+  const rows = reportsShown(reportsCache);
+  const list = el("div", "reports-list");
+  list.appendChild(el("p", "reports-count",
+    rows.length === reportsCache.length
+      ? `${rows.length} report${rows.length === 1 ? "" : "s"}`
+      : `${rows.length} of ${reportsCache.length} reports`));
+  if (!rows.length) {
+    list.appendChild(el("p", "wf-note",
+      "nothing matches — the filters above are narrower than the machine"));
+  }
+  for (const r of rows) list.appendChild(reportsRow(r));
+  view.appendChild(list);
 }
 
 /* Sessions currently running in a directory. normcase-style comparison,

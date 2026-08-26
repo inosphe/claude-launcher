@@ -295,6 +295,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "termtimer_check.js",
         "mdrender_check.js",
         "railseen_check.js",
+        "reports_check.js",
     ],
 )
 def test_topology_diagram_logic(script):
