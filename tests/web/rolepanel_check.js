@@ -259,12 +259,43 @@ async function main() {
     ctx.opens().length);
 
   /* ---- the child cap is a warning here, not a wall ----------------------
-     spawn.py reports the SOFT cap the same way it reports a hard refusal --
-     can_spawn false, the cap named in blocked_by -- and only soft_blocked_by
-     separates them. Reading the verdict alone cost a leader at 4/4 the whole
-     button, which is the one press that reaches the wizard, and the wizard
-     is where the Over-limit tick crosses the cap. So: keep the button, name
-     the cap, point at the crossing, and open. */
+     spawn.py reports the SOFT cap in soft_blocked_by alone now: can_spawn
+     stays true and blocked_by is empty, because the cap warns and lets the
+     spawn through. The panel has to keep the button AND say the cap was
+     reached -- a leader at 4/4 that loses the button loses the one press
+     that reaches the wizard, and a leader that loses the sentence spawns a
+     fifth worker without being told it did. */
+  ctx.drop();
+  routes = QJ_ROUTES();
+  routes["GET /api/sessions/lead1/children"] = {
+    doc: {
+      can_spawn: true,
+      blocked_by: [],
+      soft_blocked_by: [
+        "child limit reached (4 running/4) — spawning anyway is allowed " +
+        "and the daemon counts it against you",
+      ],
+      children_remaining: 0,
+    },
+  };
+  ctx.resetOpens();
+  const capped = ctx.sessQuickJob(data);
+  await settle();
+  check("the child cap keeps the button alive",
+    qjParts(capped).spawn.disabled === false);
+  check("...and says which cap was reached",
+    texts(capped).includes("child limit reached (4 running/4)"),
+    texts(capped).slice(-260));
+  check("...and says the spawn goes through anyway",
+    texts(capped).includes("spawning anyway is allowed"),
+    texts(capped).slice(-260));
+  await qjParts(capped).spawn.fire("click");
+  await settle();
+  check("a capped leader still reaches the wizard", ctx.opens().length === 1,
+    ctx.opens().length);
+
+  /* A daemon old enough to fold the cap into blocked_by as well: the panel
+     subtracts it (spawnHardBlocks) rather than reading a wall into it. */
   ctx.drop();
   routes = QJ_ROUTES();
   routes["GET /api/sessions/lead1/children"] = {
@@ -276,29 +307,23 @@ async function main() {
     },
   };
   ctx.resetOpens();
-  const capped = ctx.sessQuickJob(data);
+  const folded = ctx.sessQuickJob(data);
   await settle();
-  check("the child cap keeps the button alive",
-    qjParts(capped).spawn.disabled === false);
-  check("...and says which cap was reached",
-    texts(capped).includes("child limit reached (4/4)"),
-    texts(capped).slice(-260));
-  check("...and points at the box that crosses it",
-    texts(capped).includes("spawn over the child limit"),
-    texts(capped).slice(-260));
-  await qjParts(capped).spawn.fire("click");
+  check("an old daemon's folded cap is still not a wall",
+    qjParts(folded).spawn.disabled === false);
+  await qjParts(folded).spawn.fire("click");
   await settle();
-  check("a capped leader still reaches the wizard", ctx.opens().length === 1,
+  check("...and still reaches the wizard", ctx.opens().length === 1,
     ctx.opens().length);
 
-  /* A hard block sitting UNDER the soft one still closes the panel: an
-     over_limit tick crosses the cap, it does not undo the depth ceiling. */
+  /* A hard block sitting UNDER the soft one still closes the panel: nothing
+     about the child cap undoes the depth ceiling. */
   ctx.drop();
   routes = QJ_ROUTES();
   routes["GET /api/sessions/lead1/children"] = {
     doc: {
       can_spawn: false,
-      blocked_by: ["depth limit reached (3/3)", "child limit reached (4/4)"],
+      blocked_by: ["depth limit reached (3/3)"],
       soft_blocked_by: ["child limit reached (4/4)"],
       children_remaining: 0,
     },

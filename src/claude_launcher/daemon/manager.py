@@ -244,9 +244,20 @@ class SessionManager:
             raise
 
     def stage_child(
-        self, parent: str, request: dict, *, identity: str = ""
+        self,
+        parent: str,
+        request: dict,
+        *,
+        identity: str = "",
+        warnings: Optional[List[str]] = None,
     ) -> Session:
         """Register a child of ``parent`` under the spawn policy, unstarted.
+
+        ``warnings`` is passed straight down to
+        :func:`claude_launcher.spawn.check`, which appends to it what the
+        policy *allowed but wants said* — a crossed child cap, today. The
+        caller owns the list because it is the caller that has somewhere to
+        put it: the API turns it into a field of the 201 body.
 
         The agent-facing counterpart of :meth:`create`: the child is built
         from the parent's own definition, with only the fields
@@ -278,6 +289,7 @@ class SessionManager:
             parent=session.sdef.to_dict(),
             depth=self.depth(parent),
             children=len(self.live_children(parent)),
+            warnings=warnings,
         )
         # Settled here rather than left to :meth:`stage`, because the child's
         # worktree is named after the child (``<parent>-<child>-<stamp>``) and

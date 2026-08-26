@@ -1162,11 +1162,27 @@ that inherited or allowed replacement profile and has no separate unlock.
 `max_children` counts the children that are **running**. It is a cap on how
 many agents are alive at once, so a child that has been ended does not hold
 its slot — otherwise `kill` would free the terminal and keep the budget, and
-the refusal that says to end one first would be wrong. The exited record
+the warning that says to end one first would be wrong. The exited record
 stays in the tree (that is what `respawn` reads, and what `descendants` and
 `commands` walk), so `children_used` can read lower than the child list is
 long. The trade: a human's `respawn` can put a parent one over the cap, the
 same way the plain create path has always been able to.
+
+`max_children` **warns rather than refusing**. A spawn at the cap goes
+through and comes back with a `warnings` entry in the 201 body saying so; the
+strict reading is asked for with `over_limit: false` (`--within-limit`, or a
+*no* on the wizard's Over limit row). The reasoning is who pays for each
+mistake: a refusal that is wrong costs a whole turn — the agent reads it,
+decides, asks again — while a crossing that is wrong costs one extra session,
+which is cheap and visible in `children`. `max_depth` is the other way round
+and stays hard, because runaway recursion is what these limits are for and
+depth is the axis it runs away on.
+
+Because the count is the *running* children and the mesh roster keeps listing
+members that have exited, the two are easy to read on one axis — the warning
+names its own (`N direct child(ren) were already RUNNING`) so a reader does
+not conclude the cap is counting the dead and go hunting a bug in a filter
+that is correct.
 
 The working directory has **two** unlocks, because it has two spellings.
 `allow_cwd` takes a raw path; `allow_workspace` takes a name from the

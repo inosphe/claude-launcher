@@ -1970,19 +1970,24 @@ class SpawnWizard(Form):
         parent.select(get("parent") or here or "")
 
         # Only exists while the parent's child cap is actually reached (shown
-        # by _rebuild_for_parent): the cap is soft, but crossing it takes a
-        # deliberate yes, and a row that is always there stops being read.
+        # by _rebuild_for_parent), and pre-answered yes when it does: the cap
+        # warns rather than refusing, so this row reports a crossing that is
+        # about to happen and offers the strict reading to whoever wants it.
+        # A row that is always there stops being read.
         over_limit = ChoiceField(
             key="over_limit", label="Over limit", hidden=True,
-            hint="the child cap is a soft cap - saying yes here crosses it "
-                 "on purpose (the parent may end up at, say, 5/4)",
+            hint="the child cap is soft: it warns and lets the spawn "
+                 "through (the parent may end up at, say, 5/4). Answer no "
+                 "to be refused at the cap instead",
             options=[
-                Option("no - respect the cap", False),
-                Option("yes - spawn past it anyway", True),
+                Option("yes - spawn past it, with a warning", True),
+                Option("no - hold me to the cap, refuse", False),
             ],
         )
-        if get("over_limit"):
-            over_limit.select(True)
+        # Only a recalled NO needs moving: yes is where the row already
+        # stands, and an unanswered row means "did not say", which is yes.
+        if get("over_limit") is False:
+            over_limit.select(False)
 
         name = TextField(
             key="name", label="Name", placeholder="(auto)",
@@ -2465,15 +2470,22 @@ class SpawnWizard(Form):
             ))
             return out
         blocked = list(self._report.get("blocked_by") or [])
-        soft = set(self._report.get("soft_blocked_by") or [])
-        if soft and self._over_limit():
-            # The child cap is the one block a deliberate yes waives; depth
-            # and enabled stay exactly as refused.
+        soft = list(self._report.get("soft_blocked_by") or [])
+        # The soft cap is not in ``blocked_by`` any more -- it does not
+        # refuse. It becomes a refusal only where the operator ASKED for one,
+        # which is the no on this row, and then it is theirs to take back.
+        if soft and self._cap_answer() is False:
+            blocked = blocked + [b for b in soft if b not in blocked]
+        elif soft:
+            # ...and subtracted where a daemon old enough to fold it into
+            # both lists put it there. That daemon still honours the
+            # `over_limit: true` this form is about to send, so stopping on
+            # its fold would refuse a spawn it would have allowed.
             blocked = [b for b in blocked if b not in soft]
         if blocked:
             fix = (
-                "it is a soft cap: answer yes on the Over limit row to "
-                "spawn past it, or free a slot ('claunch kill-session "
+                "the Over limit row says no: answer yes to spawn past the "
+                "cap with a warning, or free a slot ('claunch kill-session "
                 "<child>')"
                 if soft and all(b in soft for b in blocked) else
                 "pick another parent, or free a slot "
@@ -2483,15 +2495,22 @@ class SpawnWizard(Form):
         out.extend(check_worktree(self))
         return out
 
-    def _over_limit(self) -> bool:
-        """Whether the cap was deliberately waived: a yes on a VISIBLE row.
+    def _cap_answer(self) -> Optional[bool]:
+        """What the Over limit row says, or ``None`` when it was not asked.
+
+        Three-valued because the daemon's default is three-valued: absent
+        means "did not say", which crosses the cap with a warning, and only an
+        explicit ``False`` asks to be refused at it. Collapsing that to a bool
+        would send a no nobody gave.
 
         Read through the hidden flag, like borrow reads through its disable:
-        a yes given while the row was shown, on a parent that then changed to
-        one with slots free, must not travel as an override nobody was asked
-        about.
+        an answer given while the row was shown, on a parent that then changed
+        to one with slots free, must not travel as an override nobody was
+        asked about.
         """
-        return bool(self.value("over_limit")) and not self.field("over_limit").hidden
+        if self.field("over_limit").hidden:
+            return None
+        return bool(self.value("over_limit"))
 
     # -- the answers ----------------------------------------------------- #
     def apply(self, args: Any) -> Any:
@@ -2502,7 +2521,7 @@ class SpawnWizard(Form):
         are the daemon's, unchanged.
         """
         args.parent = self.value("parent")
-        args.over_limit = self._over_limit()
+        args.over_limit = self._cap_answer()
         args.name = self.value("name")
         args.harness = None
         # Read through the disable, like borrow and args below: a value
@@ -2575,8 +2594,11 @@ class SpawnWizard(Form):
 
     def summary(self) -> str:
         parts = ["child of " + str(self.value("parent"))]
-        if self._over_limit():
+        answer = self._cap_answer()
+        if answer is True:
             parts.append("over the child cap")
+        elif answer is False:
+            parts.append("held to the child cap")
         if self.value("profile"):
             parts.append("profile " + str(self.value("profile")))
         if not self.field("borrow").disabled and self.value("borrow"):

@@ -1157,16 +1157,19 @@ async function main() {
     spawnable_harnesses: ["claude"], workspaces: null,
   } };
 
-  /* ---- the child cap is a crossing, not a dead end ----------------------
-     spawn.py folds the SOFT cap into `blocked_by` as well, so `can_spawn` is
-     false at the limit — and reading that alone used to stop the load dead:
-     no Workflow picker, no Over-limit row, a modal that said "child limit
-     reached" over an empty dropdown. The cap is exactly what a busy fleet
-     runs into, which is how "no workflows in the spawn modal" kept coming
-     back. */
-  const CAP = "child limit reached (4/4)";
+  /* ---- the child cap is a warning, not a dead end -----------------------
+     The cap does not refuse any more: spawn.py names it in `soft_blocked_by`
+     alone, `can_spawn` stays true and `blocked_by` is empty. What is checked
+     here is that the modal still SAYS it — a fifth child that appears with
+     no sentence about the cap is the other way to get this wrong — and that
+     the load is not stopped by it. Reading the verdict alone used to stop
+     the load dead: no Workflow picker, no Over-limit row, a modal that said
+     "child limit reached" over an empty dropdown. The cap is exactly what a
+     busy fleet runs into, which is how "no workflows in the spawn modal"
+     kept coming back. */
+  const CAP = "child limit reached (4 running/4)";
   routes["GET /api/sessions/lead1/children"] = { doc: {
-    can_spawn: false, blocked_by: [CAP], soft_blocked_by: [CAP],
+    can_spawn: true, blocked_by: [], soft_blocked_by: [CAP],
     children_used: 4, children_remaining: 0,
     may_choose: ["worktree"], spawnable_harnesses: [],
     child_cflow: "improv-worker",
@@ -1210,21 +1213,41 @@ async function main() {
     texts(modalEls["modal-body"]).slice(-200));
   const capActs = buttons(modalEls["modal-actions"]);
   const capBtn = capActs.find((b) => b.text.startsWith("Spawn"));
-  check("the button stays dead until the cap is crossed",
-    capBtn && capBtn.disabled === true);
-  check("...and says so to a pointer already resting on it",
-    capBtn && capBtn.title.includes("tick 'spawn over the child limit'"),
-    capBtn && capBtn.title);
-  const capBox = capOverRow && capOverRow._find((k) => k.tag === "input");
-  if (capBox) { capBox.checked = true; await capBox.fire("change"); }
-  check("...and the crossing arms it", capBtn && capBtn.disabled === false);
-  check("...and takes the explanation off the armed button",
+  check("the cap leaves the button alive", capBtn && capBtn.disabled === false,
+    capBtn && capBtn.disabled);
+  check("...with nothing to explain away on it",
     capBtn && capBtn.title === "", capBtn && capBtn.title);
+  const capBox = capOverRow && capOverRow._find((k) => k.tag === "input");
+  check("the crossing is pre-answered yes", capBox && capBox.checked === true,
+    capBox && capBox.checked);
   await capBtn.fire("click");
   await settle();
   const capPost = sent.find((x) => x.method === "POST");
   check("the crossing travels as over_limit",
     capPost && capPost.body.over_limit === true, capPost && capPost.body);
+
+  /* Unticking it is how the strict reading is asked for, and that answer has
+     to travel as a `false` — swallowed as falsy it would read as "did not
+     say", which is the crossing, and the operator would get the child they
+     just said no to. */
+  sent = [];
+  await ctx.openSpawnModal("lead1", { seed: { role: "worker" } });
+  await settle();
+  await settle();
+  const strictGate = walk(modalEls["modal-actions"]).find((n) =>
+    n.classes && n.classes.has("sess-spawn-cap"));
+  const strictBox = strictGate && walk(strictGate).find((n) => n.tag === "input");
+  if (strictBox) { strictBox.checked = false; await strictBox.fire("change"); }
+  const strictBtn = buttons(modalEls["modal-actions"])
+    .find((b) => b.text.startsWith("Spawn"));
+  check("unticking leaves the button alive (the daemon answers, not the form)",
+    strictBtn && strictBtn.disabled === false, strictBtn && strictBtn.disabled);
+  await strictBtn.fire("click");
+  await settle();
+  const strictPost = sent.find((x) => x.method === "POST");
+  check("...and the untick travels as a false",
+    strictPost && strictPost.body.over_limit === false,
+    strictPost && strictPost.body);
 
   /* A soft refusal that names nothing to cross. The gate still has to open —
      it is the only place the modal says why the button is dead now that the

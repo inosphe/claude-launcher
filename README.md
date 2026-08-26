@@ -2065,8 +2065,8 @@ workflow).
 
   ```yaml
   spawn:
-    max_children: 4          # direct children per session
-    max_depth: 3             # root session = depth 0
+    max_children: 4          # direct children per session -- SOFT: warns
+    max_depth: 3             # root session = depth 0 -- hard
     allow_workspace: true    # ...the one that starts open (see below)
     allow_cwd: false         # ...allow_profile / allow_args / allow_env too
   ```

@@ -443,3 +443,50 @@ def test_the_board_answers_are_mutually_exclusive_on_both_creation_commands():
     args = parser.parse_args(["new-session", "--issue-text", "the spec"])
     assert args.issue_text == "the spec"
     assert args.issue is None and args.no_issue is False
+
+
+def test_the_child_cap_flags_are_three_valued(home):
+    """"Did not say" has to reach the daemon as an ABSENT key.
+
+    The cap crosses by default, so a `False` default would send "hold me to
+    the cap" on every plain `claunch spawn` — the exact refusal this stopped
+    giving. Three states, three answers: None / True / False.
+    """
+    parser = cli.build_parser()
+    assert parser.parse_args(["spawn"]).over_limit is None
+    assert parser.parse_args(["spawn", "--over-limit"]).over_limit is True
+    assert parser.parse_args(["spawn", "--within-limit"]).over_limit is False
+
+
+def test_the_child_cap_answer_reaches_the_payload(home, monkeypatch, capsys):
+    """...and survives the truthy filter that builds the request body.
+
+    `over_limit: False` is a real answer and a falsy value at once, which is
+    what the payload comprehension drops. It has to be put back, or the one
+    flag that still asks for a refusal would silently do nothing.
+    """
+    from claude_launcher import cli_sessions, daemon_client
+
+    posts = []
+
+    class FakeClient:
+        def post(self, path, payload):
+            posts.append((path, payload))
+            return {"session": {"name": "w9"}, "warnings": ["at the cap"]}
+
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: FakeClient())
+    monkeypatch.setenv("CLAUNCH_SESSION", "lead")
+
+    def body(*flags):
+        posts.clear()
+        run("spawn", *flags)
+        return posts[-1][1]
+
+    assert "over_limit" not in body()               # did not say
+    assert body("--over-limit")["over_limit"] is True
+    assert body("--within-limit")["over_limit"] is False
+
+    # And the daemon's warning is printed, above the line it is about.
+    out = capsys.readouterr().out
+    assert "warning: at the cap" in out
+    assert out.index("warning: at the cap") < out.index("spawned w9")

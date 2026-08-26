@@ -356,7 +356,12 @@ def test_connect_lets_a_child_reach_a_named_peer_from_the_start(home, tmp_path):
 
 def test_the_policy_refuses_with_403_not_400(home, tmp_path):
     """A refused spawn is well-formed, so it is not a bad request — the
-    distinction is what tells an agent to stop retrying and ask a human."""
+    distinction is what tells an agent to stop retrying and ask a human.
+
+    Provoked with ``over_limit: false``, because the child cap on its own no
+    longer refuses: it warns and lets the spawn through. Asking to be held to
+    it is what still produces the 403 this is about.
+    """
     _register_py_harness()
     store.update(lambda doc: doc.update({"spawn": {"max_children": 1}}))
 
@@ -371,10 +376,57 @@ def test_the_policy_refuses_with_403_not_400(home, tmp_path):
             )
             assert resp.status == 201
             resp = await client.post(
-                "/api/sessions/lead/children", json={"name": "w2"}, headers=BEARER
+                "/api/sessions/lead/children",
+                json={"name": "w2", "over_limit": False}, headers=BEARER,
             )
             assert resp.status == 403
             assert "max_children" in (await resp.json())["error"]
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_the_child_cap_spawns_anyway_and_says_so(home, tmp_path):
+    """The default at the cap: a 201 with the child in it, and a warning.
+
+    This is the whole point of the soft cap. A leader standing at 4/4 with a
+    P0 to hand out gets the fifth worker on the same call it asked for it,
+    instead of a 403 that costs it a turn to read and answer.
+    """
+    _register_py_harness()
+    store.update(lambda doc: doc.update({"spawn": {"max_children": 1}}))
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm)
+        try:
+            mgr.create(SessionDef(name="lead", harness="py", cwd=str(tmp_path)))
+            resp = await client.post(
+                "/api/sessions/lead/children", json={"name": "w1"}, headers=BEARER
+            )
+            assert resp.status == 201
+            assert "warnings" not in await resp.json()   # a slot was free
+
+            resp = await client.post(
+                "/api/sessions/lead/children", json={"name": "w2"}, headers=BEARER
+            )
+            assert resp.status == 201
+            body = await resp.json()
+            assert body["session"]["name"] == "w2"
+            warnings = body["warnings"]
+            assert len(warnings) == 1
+            assert "spawn.max_children" in warnings[0]
+            # The axis the number is on, said where it is read: a roster that
+            # lists exited sessions shows more than this count, and folding
+            # the two together reads as a miscount in a correct filter.
+            assert "RUNNING" in warnings[0]
+
+            # And the child is really there, holding a slot of its own.
+            assert sorted(mgr.live_children("lead")) == ["w1", "w2"]
 
             await mgr.shutdown_all()
         finally:
