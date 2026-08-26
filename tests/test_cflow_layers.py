@@ -245,6 +245,97 @@ def test_the_project_override_worker_requests_through_a_rebase():
     assert "재요청" in wf.steps["integration-request"].instructions
 
 
+def test_a_worker_round_is_not_done_until_the_merge_is_confirmed():
+    """"Requested" is not "landed", and the round must not end on the former.
+
+    ``integration-request`` used to route straight to ``wrapup``, which tells
+    the session to run ``kill-session`` in the same turn it files its report.
+    So the run reached ``done``, and the session ceased to exist, while the
+    branch was still queued in the parent -- and a request that got rejected,
+    got a rebase asked of it, or was quietly dropped from a batch had nobody
+    left to notice. Measured more than once, the last time as a worker
+    reporting "통합 대기 중 ... run done. 세션 종료한다".
+
+    Two steps close it in both layers. ``await-landing`` is where the run
+    waits (an agent choice, because the two things that arrive -- a merge
+    notice or a rebase re-request -- are both real and only the agent sees
+    them), and ``landed`` is the machine half. They are separate steps because
+    the engine forbids a ``verify`` on a select step, so the gate needs a step
+    of its own; ``rebase`` is reachable again from the wait, which is the edge
+    the re-request prose always claimed and never had.
+    """
+    for label, wf in (
+        ("bundled", _bundled("improv-worker")),
+        ("project", model.load(PROJECT_OVERRIDES / "improv-worker.yaml")),
+    ):
+        assert wf.steps["integration-request"].next == "await-landing", (
+            f"{label}: a filed request goes to the wait, not to wrapup -- "
+            "routing it to wrapup is what let a round end at 'requested'"
+        )
+
+        wait = wf.steps["await-landing"]
+        assert wait.select is not None, f"{label}: await-landing must be a select"
+        assert wait.select.chooser == "agent"
+        assert wait.select.options["landed"].next == "landed"
+        assert wait.select.options["rebase"].next == "rebase", (
+            f"{label}: a rebase re-request must be able to reach the rebase "
+            "step again, or the prose promising it is a dead end"
+        )
+
+        landed = wf.steps["landed"]
+        assert landed.select is None, (
+            f"{label}: landed carries the machine gate, so it cannot be a "
+            "select -- the engine refuses a verify on one"
+        )
+        assert landed.next == "wrapup"
+        for token in ("--merges", "머지 커밋", "contains"):
+            assert token in landed.instructions, (
+                f"{label}: landed lost its {token!r} rule -- the check has to "
+                "be a merge-parent question, not a containment question"
+            )
+        assert "master를 직접 머지하지 않는다" in landed.instructions, (
+            f"{label}: landed must forbid turning its own gate green by "
+            "merging master, which is the one way to 'pass' it dishonestly"
+        )
+        for token in ("머지", "요청했다"):
+            assert token in landed.done_when, (
+                f"{label}: landed's done_when must distinguish a merge from a "
+                f"request; lost {token!r}"
+            )
+
+    for wf in (
+        _bundled("improv-worker"),
+        model.load(PROJECT_OVERRIDES / "improv-worker.yaml"),
+    ):
+        assert wf.steps["landing"].select.options["hold"].next == "wrapup"
+
+
+def test_the_worker_wrapup_no_longer_says_landing_does_not_matter():
+    """The prose that contradicted the new gate, pinned so it stays gone.
+
+    ``wrapup`` lists the excuses a round uses to put off killing its session
+    and answers each. One of them was "I will confirm the merge landed first",
+    and the answer was "착지 확인은 이 회차의 완료 조건이 아니다" -- which is
+    exactly the rule that has now been reversed. Leaving it would have left
+    the file arguing with itself, and the losing half is the one a reader
+    obeys because it sits in the step they are actually in.
+    """
+    for label, wf in (
+        ("bundled", _bundled("improv-worker")),
+        ("project", model.load(PROJECT_OVERRIDES / "improv-worker.yaml")),
+    ):
+        wrapup = wf.steps["wrapup"].instructions
+        assert "착지 확인은 이 회차의 완료" not in wrapup, (
+            f"{label}: wrapup still says landing confirmation is not a "
+            "completion condition, which the landed step made false"
+        )
+        assert "landed 스텝" in wrapup, (
+            f"{label}: wrapup should point at the landed step it now sits "
+            "behind, so the reader knows the confirmation already happened"
+        )
+        assert "claunch kill-session $CLAUNCH_SESSION" in wrapup
+
+
 def test_the_leader_requests_a_rebase_when_a_branch_has_drifted():
     """A merge request whose branch has drifted far from master is not merged
     — the leader sends it back for a rebase, like a PR that needs an update.

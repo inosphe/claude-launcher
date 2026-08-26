@@ -69,14 +69,24 @@ def _graft_fields() -> tuple:
 #: merge. Both exist because their step used to be prose alone -- a round
 #: could be filed as swept, or as deployed, with nothing having happened.
 #:
-#: The worker arms two. ``review`` runs the tests its own change can affect;
+#: The worker arms three. ``review`` runs the tests its own change can affect;
 #: ``wrapup`` asks whether the round left its HTML report behind. The second
 #: is armed for the same reason the leader's two are -- the step was prose
 #: alone, and it sits in the last thing a session does before killing itself,
 #: which is the line a busy round drops first: skipping it costs nothing,
 #: because the turn ends either way.
+#:
+#: ``landed`` is the third and it is the same kind of check as the leader's:
+#: it reads a fact another actor established -- whether the parent actually
+#: merged this branch. It exists because the round used to end at "requested".
+#: ``integration-request`` froze the branch, filed the request and went
+#: straight to ``wrapup``, which tells the session to kill itself in that same
+#: turn; the run reached ``done`` with the branch still sitting in somebody
+#: else's queue. Measured, repeatedly: a worker filed "통합 대기 중 ... run
+#: done. 세션 종료한다" and exited, and a request that was rejected, or asked
+#: for a rebase, or quietly dropped from a batch, had nobody left to notice.
 ARMED = {
-    "improv-worker": ("review", "wrapup"),
+    "improv-worker": ("review", "landed", "wrapup"),
     "improv-leader": ("sweep", "reflect"),
 }
 
@@ -102,6 +112,12 @@ GATES = {
     # Calling it through `uv run` runs the tree being checked, which is the
     # same reason the other three name a path into this checkout.
     ("improv-worker", "wrapup"): "claude_launcher.cli report check",
+    # Two git calls, no suite: "is there a merge commit on another branch with
+    # my frozen tip as a parent?". Asked that way on purpose -- "does any
+    # branch contain my tip" answers yes for a child stacked on it, which in a
+    # nested formation is the normal shape, so containment reads as landed
+    # when nothing landed.
+    ("improv-worker", "landed"): "tools/landed_check.py",
     ("improv-leader", "sweep"): "tools/sweep.py",
     ("improv-leader", "reflect"): "tools/deploy_check.py",
 }
