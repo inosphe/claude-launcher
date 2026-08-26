@@ -72,16 +72,41 @@ steps:
       브랜치와 스택 순서, 완료 보고·통합 요청의 수신자는 리더가 아니라
       나, restack 공지가 오면 rebase 후 재요청. 옮겨온 자식의 브리핑은
       여전히 리더를 부모로 적고 있으므로 이 공지는 생략할 수 없다.
-      리더에게는 스택 표를 fyi로 남긴다.
+      스택 표가 사는 곳은 내 이슈의 코멘트다(`claunch beads comments add
+      <내 이슈> -f <파일>`, 첫 줄 `STACK @ <베이스 tip>`) — 리더에게는 그
+      id와 자식 수 한 줄이면 된다. 표는 착지마다 바뀌는 기록이라 메시지로
+      돌리면 같은 표가 회차마다 리더의 컨텍스트에 다시 쌓인다.
 
       ── beads(br) 규칙 — 공통 ──
       일감의 정본은 beads다: 세션이 한 회차를 쓸 일, 다른 세션·회차로 넘어갈
       일은 이슈로 존재해야 한다(존재·제목·범위·완료 기준·assignee·상태·
-      의존·부모). beads에 두지 않는 것: 실행 기록(cflow 저널), 대화·답장
-      (mesh), 승인·선택(cflow ask/select), 머지 가능 판정(통합 단계의 git
-      증거). 코멘트에는 포인터와 판정만 — run id, 커밋 해시, 테스트 수치,
-      `REBASE REQUESTED @ <hash>` / `HOLD: <이유>` / `BLOCKED: <게이트>` /
-      `merged <hash>`.
+      의존·부모). beads에 두지 않는 것: 실행 기록(cflow 저널), 승인·선택
+      (cflow ask/select), 그리고 사건 — 대화·답장·정정, restack 공지, 창
+      순번처럼 지금 이 순간에만 뜻이 있고 되짚어 읽히지 않는 것(mesh).
+      ── 기록은 코멘트에, 신호는 메시지에 ──
+      되짚어 읽힐 것은 전부 코멘트다: 증거 묶음(브랜치·tip·기능/머지 해시,
+      테스트 수치와 그 축·트리·환경, 양방향 diff, 포함 관계, 스택 위치,
+      merge-tree 결과), 심사 한계와 테스트가 세우지 못하는 것, 그리고 판정
+      마커 — `LANDING REQUEST @ <hash>` / `REBASE REQUESTED @ <hash>` /
+      `HOLD: <이유>` / `BLOCKED: <게이트>` / `merged <hash>`. 코멘트는 산문
+      문단이 아니라 (축, 트리, 값)의 줄로 적는다 — 보드는 저장소에 커밋되므로
+      산문은 무게만 늘리고 되짚을 때 읽히지 않는다. 긴 묶음은 파일로 붙인다:
+      `claunch beads comments add <id> -f <파일>`.
+      **같은 것을 메시지 본문에 다시 싣지 않는다.** 메시는 상대 터미널에
+      타이핑되므로 본문은 수신자 수만큼 곱해 남의 컨텍스트에서 나가고, 기록으로
+      보낸 것은 아무에게도 답을 요구하지 않으면서 그 값을 치른다. 메시지는
+      nudge다 — 네 줄 안에 이슈 id와 상태, 코멘트 마커, 판정을 바꾸는 값 한 줄
+      (델타·미해결 한계 유무), 상대가 할 일. 상대는 그 id로 당겨 읽는다
+      (`claunch beads show <id> --json`, `claunch beads comments <id>`; 표
+      전체는 `claunch beads list --status in_review --json` 한 번이다).
+      이 갈래가 서지 않는 자리가 하나 있다: 다른 머신의 멤버는 이 저장소의
+      보드에 닿지 않는다(`claunch mesh members`의 machine이 다르면 그렇다).
+      그 상대에게만은 묶음을 메시지로 보낸다.
+      정본 규칙(파서·직렬화·포맷 같은 공용 규약, 판정식, 기준선)은 이슈가
+      아니지만 되짚어 읽히므로 보드에 산다: `--type doc` 이슈 하나를 세우고
+      (assignee 없음 — ready에서 빠진다) 갱신은 그 코멘트로 쌓는다. 전원
+      브로드캐스트로 규칙을 배포하지 않는다 — 수신자 수만큼 곱해지는 데다
+      나중에 합류한 사람에게는 닿지 않는다. 배포는 doc 이슈 id 한 줄이다.
       호출은 항상 `claunch beads <br 인자>` — 워크트리에서도 저장소 루트의
       .beads/beads.db 하나를 쓰고(--db를 대신 붙인다), 쓰기에 --actor
       $CLAUNCH_SESSION을 붙이며, DB가 없으면 issues.jsonl에서 스스로
@@ -185,14 +210,17 @@ steps:
         `git rebase <네 기준>` — 베이스에 --no-ff로 이미 실린 커밋은
         upstream에 있으므로 rebase가 건너뛰고 네 커밋만 다시 얹힌다.
         표적 테스트를 재확인하고, 요청을 이미 올렸으면 갱신된 묶음으로
-        재요청, 아니면 새 기준 tip을 적어 두라"; 리더에게 스택 표 갱신을
-        fyi 한 줄로.
+        재요청, 아니면 새 기준 tip을 적어 두라". restack 공지는 기록이
+        아니라 사건이라 메시가 맞는 자리다 — 받는 자식이 지금 기준선을
+        바꿔야 한다. 갱신된 스택 표는 내 이슈에 코멘트로 쌓고
+        (`STACK @ <새 tip>`), 리더에게는 그 사실을 fyi 한 줄로.
       master는 어떤 경우에도 머지 대상이 아니다.
     done_when: |
       자식 브랜치 하나가 --no-ff 머지 커밋으로 스택 베이스에 실렸고(또는
       충돌로 착지하지 않고 restack 요청을 보낸 사실이 적혔고), 간소화
-      스위트 수치와 새 스택 tip, 갱신된 스택 표, batch 공지(착지 통보 +
-      restack 공지)와 리더 fyi가 보고에 있다. master는 움직이지 않았다.
+      스위트 수치와 새 스택 tip이 보고에 있고, 갱신된 스택 표는 내 이슈의
+      `STACK @ <새 tip>` 코멘트로 남았으며, batch 공지(착지 통보 + restack
+      공지)와 리더 fyi 한 줄이 나갔다. master는 움직이지 않았다.
     next: standby
 
   landing:
@@ -279,11 +307,15 @@ steps:
         **`git branch --merged <베이스>`**로 함께 실리는 자식 브랜치 목록
         (= 스택의 트리 구조), 정렬 후 tip 해시와 간소화 스위트 수치(스택
         베이스 기준).
-      - 이 묶음을 보고에 남기고 리더(부모)에게 --no-ff 머지 요청을
-        회신 기대(ask)로 보낸 뒤, 베이스를 동결한다(추가 착지 없음). 보드:
-        `claunch beads update <내 이슈> --status in_review`와 `comments add
-        <내 이슈> "<베이스> @ <tip>, stack of N, tests N/M (간소화)"` —
-        리더의 통합 대기 표는 그 in_review 목록이다.
+      - 이 묶음이 가는 곳은 보고(cflow 저널)와 내 이슈의 코멘트다:
+        `claunch beads update <내 이슈> --status in_review`와 `claunch beads
+        comments add <내 이슈> -f <파일>`(첫 줄 `LANDING REQUEST @ <tip>,
+        stack of N`) — 리더의 통합 대기 표는 그 in_review 목록이고, 심사는
+        그 코멘트에서 이뤄진다. 리더에게는 nudge만 회신 기대(ask)로 보낸다:
+        이슈 id와 in_review, 마커, 스택 크기와 미해결 한계 유무 한 줄,
+        「--no-ff 머지 요청, 베이스 동결했다」.
+        묶음을 메시지 본문에 다시 싣지 않는다. 보낸 뒤 베이스를 동결한다
+        (추가 착지 없음).
       ── 금지: master를 직접 머지하지 않는다 ──
       master로의 merge·push, master 체크아웃 후 커밋·리베이스·cherry-pick,
       fast-forward로 슬쩍 반영 — 전부 금지다. 사용자가 승인했다는 이유로도,
@@ -292,8 +324,10 @@ steps:
     done_when: |
       master와의 분기 판별(정렬했으면 --rebase-merges 사실과 전후 tip,
       재확인 수치)과 증거 묶음(스택 표, 양방향 diff, merge-tree, 함께
-      실리는 브랜치 목록)이 보고에 있고, 리더에게 통합 요청이 나갔으며
-      베이스는 동결 상태다. master는 움직이지 않았다.
+      실리는 브랜치 목록)이 보고와 `LANDING REQUEST @ <tip>` 코멘트에
+      있고, 리더에게는 그것을 가리키는 nudge가 나갔으며(묶음을 메시지
+      본문에 다시 싣지 않았다) 베이스는 동결 상태다. master는 움직이지
+      않았다.
     next: await-landing
 
   await-landing:

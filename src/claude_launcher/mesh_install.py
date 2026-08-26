@@ -102,6 +102,41 @@ from your session automatically):
 - **Thread answers**: `--reply-to <msgid>` (ids appear in delivery blocks
   and history).
 
+### What belongs in a message, and what does not
+
+Delivery is an injection: your body is TYPED INTO each recipient's terminal
+and spent out of their context, multiplied by how many you addressed. That
+makes a message the wrong home for anything that gets read back later.
+
+- **Records go to the board, not the wire.** Evidence bundles (branch, tip,
+  hashes, test counts with the axis and tree they were taken on, both-way
+  diffs, what a branch carries, review limits), decisions, adopted rules,
+  findings and hand-offs belong where they persist and can be pulled — this
+  repository's issue board, reached with `claunch beads` from any worktree.
+  `claunch beads comments add <id> -f <file>` takes a long bundle from a file.
+  A shared convention that is not itself a work item still belongs there: put
+  it in a `doc`-type issue and append its revisions as comments.
+- **Then send the nudge.** Four lines: the issue id and its state, the comment
+  marker you just wrote, the ONE value that changes what the reader does (a
+  delta, whether an unresolved limit exists), and what you want from them. The
+  reader pulls the rest — `claunch beads show <id> --json`,
+  `claunch beads comments <id>`, or a whole queue in one
+  `claunch beads list --status in_review --json`.
+- **Keep that value line.** A nudge carrying no value makes the reader either
+  pull everything (you saved nobody anything) or judge without pulling, which
+  is worse.
+- **Events stay on the wire.** A base that moved, a window that opened, a
+  correction, an answer to a question asked — these mean something only now
+  and are never read back. Send them, and keep them short.
+- **The split needs a shared board.** A member on another machine (`members`
+  shows `machine/session`) cannot reach yours. Send that peer the bundle
+  itself.
+
+Never write a record to the board and then send the same content as prose:
+you have paid for it twice and only one copy survives the round. In one
+measured hour of a six-worker mesh, 54% of everything typed into terminals
+was `fyi`/`ack` — records that by their own intent asked nobody for anything.
+
 ## Step 4 — creating sessions
 
 **`spawn` is how a session creates a session.** Not `claunch new-session` —
