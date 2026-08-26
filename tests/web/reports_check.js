@@ -109,6 +109,11 @@ function setFilters(f) {
   reportsOldest = !!f.oldest;
 }
 function setCache(rows) { reportsCache = rows; reportsError = ""; }
+/* The page's base path. Real in app.js (derived from location.pathname);
+   settable here because a row's one link has to survive being served under a
+   relay tunnel's "/t/<backend>/" prefix as well as from the daemon's root. */
+let BASE = "/";
+function setBase(b) { BASE = b; }
 function state() {
   return { open: reportsOpen, error: reportsError, cache: reportsCache };
 }
@@ -121,6 +126,7 @@ new Function(
   + sliceConst("REPORT_STATES")
   + slice("openReports") + slice("stopReportsPoll") + slice("refreshReports")
   + slice("reportSessionState") + slice("reportsShown")
+  + slice("url")
   + slice("fmtReportSize") + slice("reportWhen")
   + slice("reportsFilterBar") + slice("reportsPick") + slice("reportsRow")
   + slice("renderReports")
@@ -130,7 +136,7 @@ Object.assign(exports, {
   sessionState: reportSessionState, shownRows: reportsShown,
   size: fmtReportSize, when: reportWhen, row: reportsRow,
   bar: reportsFilterBar, render: renderReports,
-  states: REPORT_STATES, shown, setAnswer, setFilters, setCache, state,
+  states: REPORT_STATES, shown, setAnswer, setFilters, setCache, state, setBase,
 });`)(ctx, document, el, view, fetched, answer, timers);
 
 let failures = 0;
@@ -204,6 +210,23 @@ check("and it is not offered as a link to nowhere", chip.href, "");
 check("the title says why the round outlived it",
       chip.title.includes("kept outside the session directory"), true);
 check("the report is still openable -- that is the whole point", open.href, ROWS[0].url);
+
+/* Openable from wherever the page is being served, which is the half this
+   row skipped. The url the daemon hands back is its own absolute path, and
+   the daemon cannot know it was reached through a relay tunnel -- under
+   "/t/<backend>/" an unresolved href leaves the tunnel and hits the relay's
+   404 rather than the daemon (claunch-krw1: 404 bare, 302-to-login under the
+   prefix). Every fetch on this page already resolves against BASE -- all five
+   call sites wrap url(), and api() does too -- and this link now does the
+   same. Other clickable hrefs are not covered by that: mdLink() sets one
+   without url() (claunch-xntk). */
+ctx.setBase("/t/box/");
+check("through a relay tunnel the row's link keeps the tunnel prefix",
+      ctx.row(ROWS[0]).find("reports-open")[0].href,
+      "/t/box/api/sessions/s121/reports/20260826T051322Z-claunch-j31.html");
+ctx.setBase("/");
+check("and from the daemon's own root it is the path the daemon gave",
+      ctx.row(ROWS[0]).find("reports-open")[0].href, ROWS[0].url);
 check("and the issue is still reachable on the board",
       gone.find("reports-board")[0].href, "#/beads/claunch-j31");
 

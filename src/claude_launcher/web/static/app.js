@@ -7498,10 +7498,27 @@ function sessReports(reports, opts = {}) {
 
 /* One round. The whole row is the link, because the report is the only thing
    in this block worth clicking — the target used to be the four characters of
-   a session name, which is a hard thing to hit and an easy thing to miss. */
+   a session name, which is a hard thing to hit and an easy thing to miss.
+
+   Through url(), like every other request the page makes. The daemon hands
+   back its own absolute path ("/api/sessions/<s>/reports/<f>") because it
+   cannot know how it was reached; resolving that against BASE is the
+   browser's half, and this link skipped it. Reached through a relay tunnel
+   the dashboard sits under "/t/<backend>/", so the unresolved href walked out
+   of the tunnel and hit the relay's own 404 instead of the daemon — which is
+   exactly what a reader saw when they copied a report link out of a relayed
+   dashboard and got "Not Found".
+
+   The sweep behind that is "every `.href =` assignment in this file" — 23 of
+   them, and these two were the only ones handed a daemon path rather than a
+   hash route. Say the shape, because it is not the same claim as "the only
+   such link on the page": `setAttribute("href", ...)` is outside that
+   regex's shape, and mdLink() is exactly that — MD_SAFE_HREF admits a
+   root-relative path, so a report body can still carry an unresolved one.
+   That second site is claunch-xntk, not this change. */
 function sessReportRow(r, bySession) {
   const row = el("a", "sess-report sess-report-link");
-  row.href = r.url;
+  row.href = url(r.url);
   row.target = "_blank";
   row.rel = "noopener";
   row.title = bySession
@@ -7724,7 +7741,10 @@ function reportsPick(kind, values, current, onPick) {
 function reportsRow(r) {
   const row = el("div", "reports-row");
   const open = el("a", "reports-open");
-  open.href = r.url;
+  // Resolved against BASE, for the same reason sessReportRow is: served
+  // through a relay tunnel this page lives under "/t/<backend>/", and the
+  // daemon's own absolute path leaves the tunnel.
+  open.href = url(r.url);
   open.target = "_blank";
   open.rel = "noopener";
   open.title = `open the round ${r.session} wrote up` +
