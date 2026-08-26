@@ -731,6 +731,204 @@ function applyCflowBadges() {
 }
 
 /* ------------------------------------------------------------------ */
+/* the nudge clocks                                                   */
+/* ------------------------------------------------------------------ */
+/* The strip above the rail's nav: what the daemon is about to type into a
+   session by itself, and how long is left of it.
+
+   Two clocks can do that (daemon/cflow_clock.py). The REMINDER re-types the
+   current step into a session that is working and has stopped moving; the
+   STALL PING wakes one that stopped altogether at a step nothing is holding.
+   They are complements — at any moment at most one of them applies to a given
+   run — so this shows the one that would actually speak next, and names it.
+   Showing only the reminder would report "off" at exactly the moments the
+   ping is the live clock, which is the wrong answer told confidently.
+
+   Everything the daemon knows rides in `run.timers` on the 2s /api/cflow
+   poll. The countdown between polls is local arithmetic on the last reading,
+   which is why railTimerLine takes the elapsed seconds rather than reading a
+   clock itself: it is the one function here worth testing, and a function
+   that calls Date.now() cannot be. */
+
+/* Seconds as a countdown a person reads at a glance: 7 -> "0:07",
+   252 -> "4:12", 3852 -> "1:04:12". Deliberately not fmtAge's "4m" — the
+   whole point of this strip is watching the last minute run out. */
+function fmtCountdown(sec) {
+  const n = Math.max(0, Math.round(Number(sec) || 0));
+  const s = n % 60, m = Math.floor(n / 60) % 60, h = Math.floor(n / 3600);
+  const mm = h ? String(m).padStart(2, "0") : String(m);
+  return (h ? `${h}:` : "") + `${mm}:${String(s).padStart(2, "0")}`;
+}
+
+/* Which clock's story the strip tells, when both have one. Ordered by how
+   much a reader needs it: something about to happen beats something counting,
+   which beats a clock that is armed but deliberately quiet, which beats every
+   flavour of silence.
+
+   Among the silences the order is the one that keeps a reader from being sent
+   the wrong way. A tick that is not RUNNING is a defect and outranks the two
+   silences that are working as designed: BLOCKED (the run is on a gate this
+   clock is not allowed to touch) and OFF (somebody turned it off). Reporting
+   "off" over a dead tick is the trap — it sends a person to switch on a thing
+   that is already on. And blocked outranks off because it is the answer to
+   the question actually being asked: not "is this configured" but "why is
+   nothing happening". */
+const RAIL_TIMER_RANK = {
+  due: 0, counting: 1, held: 2, waiting: 3, watching: 4,
+  arming: 5, stopped: 6, blocked: 7, off: 8,
+};
+
+/* The clock a run's strip speaks for, or null when the daemon published no
+   timers for it (an older daemon, or a slot that is idle or errored). */
+function railTimerPick(run) {
+  const timers = (run && run.timers) || null;
+  if (!timers) return null;
+  const cands = [];
+  for (const clock of ["reminder", "ping"]) {
+    const c = timers[clock];
+    if (c && c.state) cands.push(Object.assign({}, c, { clock }));
+  }
+  if (!cands.length) return null;
+  const rank = (c) => {
+    const r = RAIL_TIMER_RANK[c.state];
+    return r === undefined ? 99 : r;
+  };
+  const soonest = (c) =>
+    c.due_in === null || c.due_in === undefined ? Infinity : c.due_in;
+  cands.sort((a, b) => (rank(a) - rank(b)) || (soonest(a) - soonest(b)));
+  return Object.assign({}, cands[0], {
+    scope: run.scope, cwd: run.cwd, workflow: run.workflow,
+    others: cands.slice(1),
+  });
+}
+
+const RAIL_TIMER_GLYPH = {
+  due: "!", counting: "⏱", held: "⏸", waiting: "⏸",
+  watching: "◎", arming: "⏱", blocked: "⏸", off: "○",
+  stopped: "⚠",
+};
+
+/* One clock's line, `elapsed` seconds after its numbers were read.
+
+   The state can change under that elapsed time and is recomputed here rather
+   than trusted: a reading that said "counting, 3s left" is, four seconds
+   later, a clock that is due. Letting the strip keep counting down past zero
+   into negative numbers would be the one thing worse than saying nothing. */
+function railTimerLine(pick, elapsed = 0) {
+  if (!pick) return null;
+  const name = pick.clock === "ping" ? "stall ping" : "step reminder";
+  let state = pick.state;
+  const due = pick.due_in === null || pick.due_in === undefined
+    ? null : pick.due_in - (Number(elapsed) || 0);
+  if (state === "counting" && due !== null && due <= 0) state = "due";
+  let text;
+  if (state === "counting") text = `${name} in ${fmtCountdown(due)}`;
+  else if (state === "due") text = `${name} due now`;
+  else if (state === "held") text = `${name} held — session stopped`;
+  else if (state === "waiting") text = `${name} armed — session working`;
+  else if (state === "watching") text = `watching: ${pick.awaits || "a signal"}`;
+  else if (state === "arming") text = `${name} arming`;
+  else if (state === "blocked") text = `${name} paused — not this run's move`;
+  else if (state === "off") text = `${name} off`;
+  else if (state === "stopped") text = "clock not running";
+  else text = `${name} — ${state}`;
+  return {
+    state,
+    glyph: RAIL_TIMER_GLYPH[state] || "⏱",
+    text,
+    title: railTimerTitle(pick, state),
+  };
+}
+
+/* The hover text: both clocks, so the one this line is NOT about is still
+   answerable without a trip to the run page — "why is it saying stall ping"
+   has its answer in the reminder's own line. */
+function railTimerTitle(pick, state) {
+  const say = (c, st) => {
+    const bits = [c.clock === "ping" ? "stall ping" : "step reminder", st];
+    if (!c.running) bits.push("clock not running");
+    else if (!c.enabled) bits.push("switched off");
+    else if (c.interval) bits.push(`every ${fmtCountdown(c.interval)}`);
+    if (c.fired_ago !== null && c.fired_ago !== undefined) {
+      bits.push(`last fired ${fmtCountdown(c.fired_ago)} ago`);
+    }
+    return bits.join(" · ");
+  };
+  const lines = [`${pick.workflow || "cflow"} · ${pick.scope || "default"}`];
+  lines.push(say(pick, state));
+  for (const other of pick.others || []) lines.push(say(other, other.state));
+  if (state === "counting" || state === "due") {
+    lines.push(
+      "the daemon types this into the session by itself; the clock is " +
+      "re-armed whenever the run moves"
+    );
+  }
+  return lines.join("\n");
+}
+
+/* Which run the strip is about: the attached session's, or — when nothing is
+   attached, or what is attached drives no run — whichever run on this machine
+   is closest to being spoken to. The scope is always drawn beside it, so the
+   fallback can never be mistaken for the session on screen. */
+function railTimerRun() {
+  const mine = typeof currentName === "string" && currentName
+    ? sessCflowRun(currentName) : null;
+  if (mine && mine.timers) return mine;
+  let best = null;
+  for (const r of cflowCache || []) {
+    const p = railTimerPick(r);
+    if (!p || (p.state !== "counting" && p.state !== "due")) continue;
+    const due = p.due_in === null || p.due_in === undefined ? Infinity : p.due_in;
+    if (!best || due < best.due) best = { run: r, due };
+  }
+  return best ? best.run : null;
+}
+
+/* When the numbers currently on screen were read, so the second-by-second
+   repaint can age them. Set by renderRailTimer (the 2s poll), consumed by
+   paintRailTimer (the 1s tick). */
+let railTimerRead = null;
+let railTimerTicker = null;
+
+function renderRailTimer() {
+  railTimerRead = { pick: railTimerPick(railTimerRun()), at: Date.now() };
+  paintRailTimer();
+}
+
+function paintRailTimer() {
+  const box = $("rail-timer");
+  if (!box) return;
+  const read = railTimerRead;
+  const line = read && railTimerLine(read.pick, (Date.now() - read.at) / 1000);
+  if (!line) {
+    box.className = "hidden";
+    box.textContent = "";
+    box.removeAttribute("title");
+    return;
+  }
+  box.className = `rail-timer ${line.state}`;
+  box.title = line.title;
+  box.textContent = "";
+  box.append(
+    el("span", "rt-glyph", line.glyph),
+    el("span", "rt-scope", read.pick.scope || "default"),
+    el("span", "rt-text", line.text)
+  );
+  // The run page for the run being timed — where the interval is actually
+  // editable. Wired once for the node's lifetime: textContent above wipes the
+  // children, not the box, so a listener added per repaint would stack.
+  if (!box.dataset.wired) {
+    box.dataset.wired = "1";
+    box.addEventListener("click", () => {
+      const p = railTimerRead && railTimerRead.pick;
+      if (!p) return;
+      location.hash =
+        "#/wf/" + encodeURIComponent(`${p.scope || "default"}|${p.cwd}`);
+    });
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* context size                                                       */
 /* ------------------------------------------------------------------ */
 /* How full each session's conversation is. The daemon reads it out of the
@@ -1620,6 +1818,7 @@ async function refreshCflow() {
   const runs = data.runs || [];
   cflowCache = runs;
   applyCflowBadges();  // the rail rows may have painted before this cache filled
+  renderRailTimer();   // ...and the nudge countdown above the nav reads it too
   if (currentPage === "home") renderHome();
   const list = $("cflow-list");
   list.innerHTML = "";
@@ -13918,5 +14117,12 @@ pollTimer = setInterval(pollTick, 2000);
 $("session-list").addEventListener("pointerdown", holdRail);
 document.addEventListener("pointerup", releaseRail, true);
 document.addEventListener("pointercancel", releaseRail, true);
+
+// The countdown, between polls. It fetches nothing — it ages the last
+// /api/cflow reading — so it is a second's worth of arithmetic, and it is
+// separate from the 2s poll because a clock that only moves every other
+// second reads as a clock that has stopped, which is the exact thing this
+// strip exists to tell apart.
+railTimerTicker = setInterval(paintRailTimer, 1000);
 
 boot();

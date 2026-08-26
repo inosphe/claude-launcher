@@ -96,6 +96,15 @@
       <button id="clear-exited" class="bulk hidden" type="button"></button>
       <button id="delete-all" class="bulk danger hidden" type="button"></button>
     </div>
+    <!-- What the daemon is about to type into a session on a timer, and how
+         long is left of it. Above the nav because it belongs to the rail's
+         subject (the sessions) rather than to any page, and because it is the
+         one thing here nobody can see coming: the reminder and stall-ping
+         clocks fire out of silence, and a clock that is configured, a clock
+         that is armed and a clock whose tick died all look identical from a
+         terminal. Rendered by renderRailTimer(); hidden when no run on this
+         machine has a countdown to show. -->
+    <div id="rail-timer" class="hidden"></div>
     <nav id="rail-nav">
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
       <a href="#/new" data-page="new"><span>+</span>New</a>
