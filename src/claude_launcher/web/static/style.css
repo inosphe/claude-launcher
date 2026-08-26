@@ -612,6 +612,23 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   font-family: inherit; line-height: 1.45; resize: vertical;
   background: #14161a; color: #d8dbe0; border: 1px solid #30363d; border-radius: 4px;
 }
+/* The board question, fenced like the opening task it follows — same frame,
+   because they are two halves of one answer: what this session is for, and
+   where that is written down. */
+#new-beads {
+  margin: 4px 0; padding: 10px 12px 4px;
+  border: 1px solid #2a2e36; border-radius: 6px;
+}
+#new-beads legend {
+  padding: 0 6px; font-size: 11px; text-transform: uppercase; color: #7d8590;
+}
+/* What picking the selected issue would DO. Amber like #cwd-hint, and for
+   the same reason: it is not an error, it is the consequence the reader
+   cannot see from the row itself. */
+#new-issue-hint {
+  margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #d29922;
+}
+
 /* the stance the selected role would inject — scrolls rather than pushing
    the Create button off the sidebar */
 #role-stance {

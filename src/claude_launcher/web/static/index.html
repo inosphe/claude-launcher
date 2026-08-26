@@ -309,6 +309,39 @@
             placeholder="typed in once it has booted — what it is for"></textarea>
         </fieldset>
 
+        <!-- The board answer, after the task because two of its three shapes
+             are read off it: "new" mints an issue from that text, and there
+             is nothing to mint from when the box is empty. The third — an
+             issue that already exists — is a picker rather than a text box
+             for the same reason every other row here is: the daemon
+             publishes the list, and an id it does not have would be a
+             refusal nobody needed to provoke.
+
+             The rows say what PICKING one would do, not just what it is.
+             An issue a running session holds is joined, not taken, and the
+             assignment stays where it is — which is the half a reader cannot
+             infer and would otherwise learn from the new session's own
+             opening block, well after deciding. -->
+        <fieldset id="new-beads">
+          <legend>Board issue</legend>
+          <label class="check">
+            <input type="radio" name="beads" value="new" checked>
+            <span>New issue, from the opening task</span>
+          </label>
+          <label class="check">
+            <input type="radio" name="beads" value="existing">
+            <span>An existing issue</span>
+          </label>
+          <label class="check">
+            <input type="radio" name="beads" value="none">
+            <span>No issue</span>
+          </label>
+          <label id="new-issue-row" class="hidden">
+            Issue <select name="issue"></select>
+          </label>
+          <p id="new-issue-hint" class="hidden"></p>
+        </fieldset>
+
         <button type="submit">Create</button>
         <p id="create-error" class="error hidden"></p>
       </form>

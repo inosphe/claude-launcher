@@ -2607,7 +2607,16 @@ function spawnChildFields(f, body) {
 
 document
   .querySelector("#new-session select[name=parent]")
-  .addEventListener("change", () => { syncSpawnMode(); refreshSpawnPolicy(); });
+  .addEventListener("change", () => {
+    syncSpawnMode();
+    refreshSpawnPolicy();
+    // A child is created on the board of ITS directory, which the parent
+    // decides — so the memo is dropped here as well as on the Directory row.
+    issuesFor = null;
+    if (typeof beadsMode === "function" && beadsMode() === "existing") {
+      refreshIssueChoices();
+    }
+  });
 
 document
   .querySelector("#new-session select[name=role]")
@@ -2658,6 +2667,12 @@ $("new-session").addEventListener("submit", async (e) => {
     if (f.context.value.trim()) body.context = f.context.value.trim();
   }
   if (f.task.value.trim()) body.task = f.task.value.trim();
+  // The board answer. "new" is the absence of both keys — a request that says
+  // nothing gets an issue minted from the task, which is what every client
+  // that has never heard of this field still wants.
+  const beads = f.beads.value;
+  if (beads === "none") body.beads = false;
+  else if (beads === "existing" && f.issue.value) body.issue = f.issue.value;
   if (!parent && f.resume.value) {
     // "" (no resume) is left off entirely: the API reads a missing key as
     // "a new conversation" and an empty string as "open the picker".
@@ -5664,6 +5679,108 @@ async function refreshWorkflowChoices() {
   syncOnboardPickers();
 }
 
+/* The board rows. The mode is a closed question with three answers, so it is
+   radios rather than a fourth entry in a picker; the issue list is only a
+   question at all under one of them, and is hidden under the other two.
+
+   Every row carries the daemon's own verdict on it (daemon/beads.adoption):
+   an issue nobody holds would be ASSIGNED to the new session, one a running
+   session holds would be JOINED and the assignment left where it is. Saying
+   so here rather than in the created session's opening block is the whole
+   point of the row — by then the choice has been made. */
+function beadsMode() {
+  const f = $("new-session");
+  return f.beads ? f.beads.value : "new";
+}
+
+function syncBeadsRow() {
+  const f = $("new-session");
+  const picking = beadsMode() === "existing";
+  $("new-issue-row").classList.toggle("hidden", !picking);
+  const hint = $("new-issue-hint");
+  const row = picking
+    ? issuesCache.find((i) => i.id === f.issue.value)
+    : null;
+  // Only the consequence a reader cannot see from the row is written out:
+  // an issue that would simply be assigned needs no warning.
+  if (row && row.held_by) {
+    hint.textContent =
+      `${row.held_by} is assigned to ${row.id} and still running — this ` +
+      "session JOINS it: the assignment stays put and the two settle " +
+      "ownership between them.";
+    hint.classList.remove("hidden");
+  } else if (picking && !issuesCache.length) {
+    hint.textContent = issuesError ||
+      "no open issue on this directory's board.";
+    hint.classList.remove("hidden");
+  } else {
+    hint.classList.add("hidden");
+  }
+}
+
+/* The board follows the Directory picker exactly as the workflow list does,
+   and for the same reason: a session created somewhere else is created on
+   another repository's board. Kept as the daemon serves them, verdict and
+   all — a list of bare ids could not say which ones are held. */
+let issuesCache = [];
+let issuesFor = null;
+let issuesError = "";
+
+async function refreshIssueChoices() {
+  const cwd = newSessionCwd();
+  const parent = spawnParent();
+  const key = `${cwd}\u0000${parent ? parent.name : ""}`;
+  if (key === issuesFor) return;
+  // Claimed before the await and given back on failure, like
+  // refreshWorkflowChoices: an empty list remembered as an answer would
+  // leave the picker blank for the life of the tab.
+  issuesFor = key;
+  let answered = false;
+  try {
+    const q = parent && !cwd
+      ? `parent=${encodeURIComponent(parent.name)}`
+      : `cwd=${encodeURIComponent(cwd)}`;
+    const resp = await api(`/api/beads/candidates?${q}`);
+    const doc = resp.ok ? await resp.json() : {};
+    issuesCache = doc.issues || [];
+    issuesError = doc.error || "";
+    answered = resp.ok;
+  } catch {
+    issuesCache = [];
+    issuesError = "";
+  }
+  if (!answered && issuesFor === key) issuesFor = null;
+  renderIssueOptions();
+}
+
+function renderIssueOptions() {
+  const sel = $("new-session").issue;
+  const kept = sel.value;
+  sel.innerHTML = "";
+  sel.appendChild(new Option("(pick an issue)", ""));
+  for (const i of issuesCache) {
+    const held = i.held_by ? ` — held by ${i.held_by}, would JOIN` : "";
+    sel.appendChild(
+      new Option(`${i.id}  ${i.title || ""}`.trim() + ` [${i.status}]${held}`,
+                 i.id)
+    );
+  }
+  sel.value = [...sel.options].some((o) => o.value === kept) ? kept : "";
+  syncBeadsRow();
+}
+
+for (const radio of document.querySelectorAll(
+  '#new-beads input[name="beads"]'
+)) {
+  radio.addEventListener("change", () => {
+    // The list is only fetched once somebody asks for it: a board read costs
+    // a `br` fork on the daemon, and two of the three answers never look.
+    if (beadsMode() === "existing") refreshIssueChoices();
+    syncBeadsRow();
+  });
+}
+$("new-session").issue.addEventListener("change", syncBeadsRow);
+
 $("new-session").mesh.addEventListener("change", syncOnboardPickers);
 $("new-session").workflow.addEventListener("change", () => {
   // From here on this row is the operator's, not the role's.
@@ -5672,7 +5789,13 @@ $("new-session").workflow.addEventListener("change", () => {
 });
 document
   .querySelector("#new-session select[name=cwd]")
-  .addEventListener("change", refreshWorkflowChoices);
+  .addEventListener("change", () => {
+    refreshWorkflowChoices();
+    // The board moves with the directory too — but only while it is being
+    // looked at; the memo below makes the next open re-read it regardless.
+    issuesFor = null;
+    if (beadsMode() === "existing") refreshIssueChoices();
+  });
 
 
 function el(tag, cls, text) {
