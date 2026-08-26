@@ -1978,8 +1978,8 @@ async function refreshCflow() {
     // (plus the current step's filed-but-not-advanced report, if any).
     const reports = (r.reports || []).slice(-3);
     for (const rep of reports) {
-      const line = cflowLine(`${rep.step}: ${rep.summary || ""}`, "report");
-      if (rep.details) line.title = rep.details;
+      const line = cflowLine(`${rep.step}: ${mdPlain(rep.summary)}`, "report");
+      if (rep.details) line.title = mdText(rep.details);
       li.appendChild(line);
     }
 
@@ -2024,7 +2024,8 @@ async function refreshCflow() {
     } else if (r.status === "waiting_approval") {
       if (r.reason === "declined" && r.declined) {
         li.appendChild(cflowLine(
-          `${r.declined.by} declined — ${r.declined.reason || "no reason given"}`
+          `${r.declined.by} declined — ` +
+          (mdPlain(r.declined.reason) || "no reason given")
         ));
       }
       li.appendChild(cflowHint("claunch cflow approve"));
@@ -6191,6 +6192,297 @@ function el(tag, cls, text) {
 }
 
 /* ------------------------------------------------------------------ */
+/* markdown — the little of it that cflow reports are written in        */
+/* ------------------------------------------------------------------ */
+/* A step report is the one thing on this dashboard a human reads end to
+   end, and the `report` tool now asks the agent for markdown. Rendering it
+   needs no library: the subset that gets written — headings, lists, fenced
+   code, tables, emphasis — is a hundred lines, and building NODES instead
+   of an HTML string means there is no sanitiser here to get wrong. Text the
+   grammar does not recognise stays as its own literal text, so a report
+   that was never markdown still reads exactly as it was typed.
+
+   Two deliberate departures from CommonMark, both for the same reason —
+   these are reports, not prose:
+   - a single newline inside a paragraph is a line break, not a space. An
+     agent that lays evidence out one fact per line meant those lines.
+   - a paragraph keeps its leading whitespace (CSS pre-wrap), so pasted
+     command output stays aligned even when nobody fenced it. */
+
+const MD_BULLET = /^(\s*)([-*+]|\d+[.)])\s+(.*)$/;
+const MD_RULE = /^\s{0,3}([-*_])[ \t]*(\1[ \t]*){2,}$/;
+const MD_FENCE = /^\s*(```|~~~)/;
+const MD_BLOCK_START = /^\s{0,3}(#{1,6}\s|>|```|~~~)/;
+// Only what a dashboard link may point at. Anything else (javascript:, data:)
+// renders as the link's own text — visible, inert, and not silently dropped.
+const MD_SAFE_HREF = /^(https?:\/\/|mailto:|#|\/)/i;
+
+/* Inline markers, in the order they must be tried: a code span swallows
+   what is inside it, so it matches before emphasis can see the backticks.
+   `_` comes after `*` on purpose and is guarded below — snake_case_names
+   are far commoner in these reports than underscore emphasis is. */
+const MD_INLINE = [
+  [/^(`+)([\s\S]*?)\1(?!`)/, (m) => el("code", "md-code", m[2].replace(/^ (.*) $/, "$1"))],
+  [/^\*\*([\s\S]+?)\*\*/, (m) => mdWrap("strong", "md-strong", m[1])],
+  [/^__([\s\S]+?)__(?!\w)/, (m) => mdWrap("strong", "md-strong", m[1])],
+  [/^~~([\s\S]+?)~~/, (m) => mdWrap("s", "md-strike", m[1])],
+  [/^\*([^*\n]+)\*/, (m) => mdWrap("em", "md-em", m[1])],
+  [/^_([^_\n]+)_(?!\w)/, (m) => mdWrap("em", "md-em", m[1])],
+  [/^\[([^\]\n]*)\]\(\s*([^)\s]+)(?:\s+"[^"]*")?\s*\)/, (m) => mdLink(m[1], m[2])],
+];
+
+function mdWrap(tag, cls, text) {
+  const node = el(tag, cls);
+  for (const n of mdInline(text)) node.appendChild(n);
+  return node;
+}
+
+function mdLink(text, href) {
+  const label = text || href;
+  if (!MD_SAFE_HREF.test(href)) return mdWrap("span", "md-link-inert", label);
+  const a = mdWrap("a", "md-link", label);
+  a.setAttribute("href", href);
+  if (/^https?:/i.test(href)) {
+    a.setAttribute("target", "_blank");
+    a.setAttribute("rel", "noreferrer noopener");
+  }
+  return a;
+}
+
+/* One line of inline markdown -> a list of nodes. */
+function mdInline(src) {
+  const text = String(src == null ? "" : src);
+  const out = [];
+  let plain = "";
+  const flush = () => {
+    if (plain) { out.push(document.createTextNode(plain)); plain = ""; }
+  };
+  let i = 0;
+  while (i < text.length) {
+    const c = text[i];
+    if (c === "\\" && i + 1 < text.length && "\\`*_~[]()#+-.!>|".includes(text[i + 1])) {
+      plain += text[i + 1];
+      i += 2;
+      continue;
+    }
+    // A mid-word underscore is part of the word: test_web_topology.py
+    if (c === "_" && i > 0 && /\w/.test(text[i - 1])) { plain += c; i++; continue; }
+    let hit = null;
+    if ("`*_~[".includes(c)) {
+      for (const [re, make] of MD_INLINE) {
+        const m = re.exec(text.slice(i));
+        if (m) { hit = [m, make]; break; }
+      }
+    }
+    if (!hit) { plain += c; i++; continue; }
+    flush();
+    out.push(hit[1](hit[0]));
+    i += hit[0][0].length;
+  }
+  flush();
+  return out;
+}
+
+/* A run of bullets at one indent -> [list node, index of the first line
+   after it]. Deeper bullets nest under the item above them; an indented
+   line that is not a bullet continues that item's own text. */
+function mdList(lines, start) {
+  const first = MD_BULLET.exec(lines[start]);
+  const indent = first[1].length;
+  const ordered = /\d/.test(first[2]);
+  const list = el(ordered ? "ol" : "ul", "md-list");
+  if (ordered) {
+    const n = parseInt(first[2], 10);
+    if (n > 1) list.setAttribute("start", String(n));
+  }
+  let i = start;
+  let item = null;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      // A blank line only ends the list if what follows is not more of it.
+      let j = i + 1;
+      while (j < lines.length && !lines[j].trim()) j++;
+      const nxt = j < lines.length ? MD_BULLET.exec(lines[j]) : null;
+      if (!nxt || nxt[1].length < indent) break;
+      i = j;
+      continue;
+    }
+    const m = MD_BULLET.exec(line);
+    if (m && m[1].length < indent) break;
+    if (m && m[1].length <= indent + 1) {
+      item = el("li", "md-item");
+      for (const n of mdInline(m[3])) item.appendChild(n);
+      list.appendChild(item);
+      i++;
+      continue;
+    }
+    if (m && item) {
+      const [sub, next] = mdList(lines, i);
+      item.appendChild(sub);
+      i = next;
+      continue;
+    }
+    if (!m && item && /^\s/.test(line)) {
+      item.appendChild(el("br", null));
+      for (const n of mdInline(line.trim())) item.appendChild(n);
+      i++;
+      continue;
+    }
+    break;
+  }
+  return [list, i];
+}
+
+const mdCells = (row) =>
+  row.trim().replace(/^\|/, "").replace(/\|$/, "").split("|").map((c) => c.trim());
+
+/* Reports carry evidence as (axis, tree, value) rows often enough that a
+   pipe table earns its twenty lines. A header row plus a `---|---` rule is
+   the whole signature; anything else falls through to a paragraph. */
+function mdTable(lines, start) {
+  const align = mdCells(lines[start + 1]).map((c) =>
+    /^:-+:$/.test(c) ? "center" : /-+:$/.test(c) ? "right" : /^:-+/.test(c) ? "left" : "");
+  const table = el("table", "md-table");
+  const thead = el("thead", null);
+  const hrow = el("tr", null);
+  mdCells(lines[start]).forEach((c, k) => {
+    const th = mdWrap("th", null, c);
+    if (align[k]) th.setAttribute("style", `text-align:${align[k]}`);
+    hrow.appendChild(th);
+  });
+  thead.appendChild(hrow);
+  table.appendChild(thead);
+  const body = el("tbody", null);
+  let i = start + 2;
+  for (; i < lines.length && lines[i].trim() && lines[i].includes("|"); i++) {
+    const row = el("tr", null);
+    mdCells(lines[i]).forEach((c, k) => {
+      const td = mdWrap("td", null, c);
+      if (align[k]) td.setAttribute("style", `text-align:${align[k]}`);
+      row.appendChild(td);
+    });
+    body.appendChild(row);
+  }
+  table.appendChild(body);
+  return [table, i];
+}
+
+/* Markdown text -> a list of block nodes. */
+function mdBlocks(src) {
+  const lines = String(src == null ? "" : src).replace(/\r\n?/g, "\n").split("\n");
+  const out = [];
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) { i++; continue; }
+
+    const fence = MD_FENCE.exec(line);
+    if (fence) {
+      const close = new RegExp("^\\s*" + (fence[1][0] === "`" ? "```" : "~~~") + "\\s*$");
+      const lang = line.trim().slice(3).trim();
+      const buf = [];
+      i++;
+      while (i < lines.length && !close.test(lines[i])) { buf.push(lines[i]); i++; }
+      i++;  // the closing fence, or past the end when there never was one
+      const pre = el("pre", "md-pre");
+      const code = el("code", null, buf.join("\n"));
+      if (lang) code.setAttribute("data-lang", lang);
+      pre.appendChild(code);
+      out.push(pre);
+      continue;
+    }
+
+    const head = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(line);
+    if (head) {
+      out.push(mdWrap("div", "md-h md-h" + head[1].length,
+                      head[2].replace(/\s+#+\s*$/, "")));
+      i++;
+      continue;
+    }
+
+    if (MD_RULE.test(line)) { out.push(el("hr", "md-hr")); i++; continue; }
+
+    if (/^\s{0,3}>/.test(line)) {
+      const buf = [];
+      while (i < lines.length && /^\s{0,3}>/.test(lines[i])) {
+        buf.push(lines[i].replace(/^\s{0,3}>\s?/, ""));
+        i++;
+      }
+      const quote = el("blockquote", "md-quote");
+      for (const n of mdBlocks(buf.join("\n"))) quote.appendChild(n);
+      out.push(quote);
+      continue;
+    }
+
+    if (line.includes("|") && i + 1 < lines.length &&
+        lines[i + 1].includes("-") && /^\s*\|?[\s:|-]+$/.test(lines[i + 1]) &&
+        lines[i + 1].includes("|")) {
+      const [table, next] = mdTable(lines, i);
+      out.push(table);
+      i = next;
+      continue;
+    }
+
+    if (MD_BULLET.test(line)) {
+      const [list, next] = mdList(lines, i);
+      out.push(list);
+      i = next;
+      continue;
+    }
+
+    const buf = [];
+    while (i < lines.length && lines[i].trim() &&
+           !MD_BLOCK_START.test(lines[i]) && !MD_BULLET.test(lines[i]) &&
+           !MD_RULE.test(lines[i])) {
+      buf.push(lines[i].replace(/\s+$/, ""));
+      i++;
+    }
+    const p = el("p", "md-p");
+    buf.forEach((ln, k) => {
+      if (k) p.appendChild(el("br", null));
+      for (const n of mdInline(ln)) p.appendChild(n);
+    });
+    out.push(p);
+  }
+  return out;
+}
+
+/* Render `text` into `node` as markdown and hand `node` back, so it drops
+   into the one expression where an `el(...)` used to stand. */
+function mdInto(node, text) {
+  for (const b of mdBlocks(text)) node.appendChild(b);
+  return node;
+}
+
+/* The same markdown with its markers taken off, line structure kept. For a
+   `title` tooltip, where the browser renders text and nothing else: a
+   reader hovering a rail line should not be shown the asterisks. */
+function mdText(src) {
+  return String(src == null ? "" : src)
+    .replace(/\r\n?/g, "\n")
+    .replace(/^[ \t]*(```|~~~).*$/gm, "")
+    .replace(/^[ \t]{0,3}#{1,6}[ \t]+/gm, "")
+    .replace(/^[ \t]{0,3}>[ \t]?/gm, "")
+    .replace(/^[ \t]{0,3}([-*_])[ \t]*(\1[ \t]*){2,}$/gm, "")
+    .replace(/^([ \t]*)([-*+]|\d+[.)])[ \t]+/gm, "$1• ")
+    .replace(/`+([^`]*)`+/g, "$1")
+    .replace(/\*\*([\s\S]+?)\*\*/g, "$1")
+    .replace(/__([\s\S]+?)__(?!\w)/g, "$1")
+    .replace(/~~([\s\S]+?)~~/g, "$1")
+    .replace(/\*([^*\n]+)\*/g, "$1")
+    .replace(/\[([^\]\n]*)\]\([^)\n]*\)/g, "$1")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/* And the same again folded onto one line, for the rail rows that are a
+   single ellipsised line by design. */
+function mdPlain(src) {
+  return mdText(src).replace(/\s*\n\s*/g, " ").replace(/[ \t]{2,}/g, " ").trim();
+}
+
+/* ------------------------------------------------------------------ */
 /* home (#/) — what this daemon is doing, and the way in to each part  */
 /* ------------------------------------------------------------------ */
 /* On a phone this page IS the rail (see syncLayout), so #main is not on
@@ -7340,8 +7632,10 @@ function wfActions(data, opts = {}) {
   } else if (run.status === "waiting_approval") {
     const isLoop = run.reason === "loop_limit";
     if (run.reason === "declined" && run.declined) {
-      msgs.appendChild(el("p", "wf-warning",
-        `${run.declined.by} declined: ${run.declined.reason || "no reason given"}`));
+      const dec = el("div", "wf-warning md");
+      dec.appendChild(el("div", null, `${run.declined.by} declined:`));
+      mdInto(dec, run.declined.reason || "no reason given");
+      msgs.appendChild(dec);
     }
     msgs.appendChild(el("p", "wf-gate", run.gate || "waiting for approval"));
     const btn = el("button", "wf-btn approve",
@@ -7359,10 +7653,11 @@ function wfActions(data, opts = {}) {
   } else if (run.status === "waiting_selection" || run.status === "select") {
     msgs.appendChild(el("p", "wf-gate", run.prompt || "decision point"));
     if (run.proposal) {
-      msgs.appendChild(el(
-        "p", "wf-proposal",
-        `agent proposes: ${run.proposal.option} — ${run.proposal.reason || ""}`
-      ));
+      const prop = el("div", "wf-proposal md");
+      prop.appendChild(el(
+        "div", "wf-proposal-head", `agent proposes: ${run.proposal.option}`));
+      mdInto(prop, run.proposal.reason || "");
+      msgs.appendChild(prop);
     }
     if (run.status === "waiting_selection" || run.chooser === "user") {
       for (const o of run.options || []) {
@@ -7885,8 +8180,10 @@ function wfReports(data, ui) {
     rhead.appendChild(el("span", "wf-report-at", (r.at || "").replace("T", " ")));
     card.appendChild(rhead);
     if (expanded) {
-      card.appendChild(el("p", "wf-report-summary", r.summary || ""));
-      if (r.details) card.appendChild(el("pre", "wf-report-details", r.details));
+      card.appendChild(mdInto(el("div", "wf-report-summary md"), r.summary || ""));
+      if (r.details) {
+        card.appendChild(mdInto(el("div", "wf-report-details md"), r.details));
+      }
     } else {
       card.title = `show reports for '${r.step}'`;
       card.addEventListener("click", () => ui.select(r.step));
@@ -9199,8 +9496,8 @@ function sessWorkflow(data) {
     }
     if (flow.context) box.appendChild(el("p", "wf-context", `context: ${flow.context}`));
     for (const rep of (flow.reports || []).slice(-3)) {
-      const line2 = cflowLine(`${rep.step}: ${rep.summary || ""}`, "report");
-      if (rep.details) line2.title = rep.details;
+      const line2 = cflowLine(`${rep.step}: ${mdPlain(rep.summary)}`, "report");
+      if (rep.details) line2.title = mdText(rep.details);
       box.appendChild(line2);
     }
     const link = el("button", "wf-btn approve", "Open the run page");
@@ -9344,12 +9641,12 @@ function renderSessRun(body, data) {
       r.visit > 1 ? `${r.step} ×${r.visit}` : r.step));
     head.appendChild(el("span", "wf-report-at", (r.at || "").replace("T", " ")));
     card.appendChild(head);
-    card.appendChild(el("p", "wf-report-summary", r.summary || ""));
+    card.appendChild(mdInto(el("div", "wf-report-summary md"), r.summary || ""));
     if (r.details) {
       const more = document.createElement("details");
       more.className = "sess-run-more";
       more.appendChild(el("summary", null, "details"));
-      more.appendChild(el("pre", "wf-report-details", r.details));
+      more.appendChild(mdInto(el("div", "wf-report-details md"), r.details));
       card.appendChild(more);
     }
     body.appendChild(card);
