@@ -129,7 +129,16 @@ def _continues(lines: List[str], i: int) -> bool:
 
 
 def graft(bundled_text: str, blocks: Dict[str, List[str]]) -> str:
-    """The packaged text with each block placed before its step's ``next:``.
+    """The packaged text with each block placed inside its step.
+
+    Before the step's ``next:`` where there is one. A **select** step has none
+    — the engine forbids it, because a select routes through its options — and
+    such a step can still carry an ``awaits``: ``verify`` is the field a select
+    may not have (``model.py``: "'verify' is not allowed on a select step"),
+    while ``awaits`` only has to name its probe explicitly there. That is not a
+    corner: the steps where a run *waits* are the ones written as selects, so
+    "what is this standing still for" belongs to them more than to anywhere
+    else. Placing at the end of the step body covers them.
 
     The packaged copy may already end a step with a one-line pointer comment
     ("the verify lives in the project layer"); a block that begins with the
@@ -138,9 +147,30 @@ def graft(bundled_text: str, blocks: Dict[str, List[str]]) -> str:
     pending = dict(blocks)
     out: List[str] = []
     step = None
+
+    def close(step_id) -> None:
+        """Place a block for a step that had no ``next:`` to hang it on."""
+        if step_id not in pending:
+            return
+        block = pending.pop(step_id)
+        # Behind any blank lines that separate this step from the next one:
+        # the block is a field of the step above them, not of the step below.
+        end = len(out)
+        while end > 0 and not out[end - 1].strip():
+            end -= 1
+        start = end
+        while start > 0 and COMMENT_RE.match(out[start - 1]):
+            start -= 1
+        trailing = out[start:end]
+        if trailing and block[: len(trailing)] == trailing:
+            del out[start:end]
+            end = start
+        out[end:end] = block
+
     for line in bundled_text.splitlines(keepends=True):
         m = STEP_RE.match(line)
         if m:
+            close(step)
             step = m.group(1)
         if NEXT_RE.match(line) and step in pending:
             block = pending.pop(step)
@@ -152,6 +182,7 @@ def graft(bundled_text: str, blocks: Dict[str, List[str]]) -> str:
                 del out[k:]
             out.extend(block)
         out.append(line)
+    close(step)
     if pending:
         raise ValueError(
             "grafted field blocks for steps the packaged copy does not have: "

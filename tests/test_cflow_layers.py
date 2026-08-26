@@ -203,10 +203,18 @@ def test_the_worker_rebases_onto_the_target_before_a_request():
     """A merge request follows a rebase onto the integration target.
 
     The request path routes through a dedicated ``rebase`` step (a normal
-    pull-request flow: rebase, then request). The step must say how to detect
-    divergence (``git merge-base`` / ``git rev-list``), that a rebased branch
-    re-runs the simplified suite before asking, and that rebasing is not an
-    exception to the master prohibition.
+    pull-request flow: align, then request). The step must say how the
+    divergence is judged, that a realigned branch re-runs the simplified suite
+    before asking, and that rebasing is not an exception to the master
+    prohibition.
+
+    How it is judged used to be two git commands written out here in prose,
+    and the same two were written out again in the leader's preflight. That
+    is the shape this now refuses: the prose named the commands, nothing ran
+    them, and the thing actually judging was the leader's rejection — a
+    measurement paid for with a turn and a round trip. Both sides now name one
+    script, and ``test_both_sides_judge_a_landing_with_the_same_command``
+    holds them to naming the same one.
 
     ``peer-review`` sits between the rebase and the request, and belongs
     there: the reviewer must read the tree that gets merged, not the one
@@ -227,12 +235,19 @@ def test_the_worker_rebases_onto_the_target_before_a_request():
     assert review["changes"].next == "work"
     for anchor in (
         "pull request",
-        "merge-base",
-        "git rev-list",
-        "다시 돌려",  # rebase 후 간소화 스위트 재확인
+        "merge_ready.py",  # 판정식은 한 자리에만 있다
+        "다시 돌려",  # 재정렬 후 간소화 스위트 재확인
         "master를 직접 머지하지 않는다",
     ):
         assert anchor in rebase.instructions, f"rebase lost its {anchor!r} rule"
+    # The split is the step's whole point: only a conflict forces a rebase,
+    # and a moved baseline is settled by re-measuring. Fold them back into one
+    # and the friction this step was rewritten to remove comes straight back.
+    assert "재측정" in rebase.instructions
+    assert "merge --no-ff" in rebase.instructions, (
+        "the cheaper remedy has to be spelled out where the verdict is read, "
+        "or the worker rebases by default and the concession buys nothing"
+    )
 
     for anchor in ("rebase", "재요청"):
         assert anchor in wf.steps["integration-request"].instructions, (
@@ -252,7 +267,7 @@ def test_the_project_override_worker_requests_through_a_rebase():
     assert (
         wf.steps["peer-review"].select.options["pass"].next == "integration-request"
     )
-    for anchor in ("rebase", "merge-base", "다시 돌려"):
+    for anchor in ("rebase", "merge_ready.py", "재측정", "다시 돌려"):
         assert anchor in wf.steps["rebase"].instructions, (
             f"project worker rebase lost its {anchor!r} rule"
         )
@@ -367,14 +382,22 @@ def test_the_worker_wrapup_no_longer_says_landing_does_not_matter():
 def test_the_leader_requests_a_rebase_when_a_branch_has_drifted():
     """A merge request whose branch has drifted far from master is not merged
     — the leader sends it back for a rebase, like a PR that needs an update.
-    The screening is on the divergence (``git rev-list --count`` /
-    ``git merge-tree``), and the refusal names the escape (rebase and then
-    re-request) instead of silently merging."""
+    The screening is the shared gate rather than two git commands written out
+    here (and written out again in the worker), and the refusal names the
+    escape instead of silently merging. There are two escapes now, not one:
+    a conflict has to be rebased, a moved baseline only has to be re-measured,
+    and giving both the same name is what made a worker rebase for a demand
+    nobody needed."""
     bundled = dict(state_mod.bundled_workflows())
     leader = model.load(bundled["improv-leader"])
 
     preflight = leader.steps["integrate-preflight"]
-    for anchor in ("rebase 재요청", "rev-list --count", "merge-tree", "재요청"):
+    for anchor in (
+        "merge_ready.py",
+        "REBASE REQUESTED",
+        "REMEASURE REQUESTED",
+        "재요청",
+    ):
         assert anchor in preflight.instructions, (
             f"integrate-preflight lost its {anchor!r} rule"
         )
@@ -398,7 +421,7 @@ def test_the_project_override_leader_requests_a_rebase_for_stale_branches():
     wf = model.load(PROJECT_OVERRIDES / "improv-leader.yaml")
 
     preflight = wf.steps["integrate-preflight"]
-    for anchor in ("rebase 재요청", "rev-list --count", "merge-tree"):
+    for anchor in ("merge_ready.py", "REBASE REQUESTED", "REMEASURE REQUESTED"):
         assert anchor in preflight.instructions, (
             f"project leader integrate-preflight lost its {anchor!r} rule"
         )
@@ -1144,3 +1167,27 @@ def test_the_leader_is_told_that_a_delegated_decision_is_its_own(layer):
         "standby does not distinguish a decision delegated TO the leader "
         "from a human gate it must not touch"
     )
+
+
+def test_both_sides_judge_a_landing_with_the_same_command():
+    """One predicate, two callers -- the invariant the round trip rested on.
+
+    The worker used to decide "am I aligned?" from prose in its own step, and
+    the leader used to decide the same thing from prose in its preflight. Two
+    copies of a rule drift, and this pair drifting is not a hypothetical
+    inconvenience: it is a branch the worker's gate passed and the leader's
+    screening sent back, which is the exact round trip the script was written
+    to delete. So the name of the script is pinned on both sides, in both
+    layers, rather than left to whoever edits one file next.
+    """
+    bundled = dict(state_mod.bundled_workflows())
+    pairs = [
+        (model.load(bundled["improv-worker"]), model.load(bundled["improv-leader"])),
+        (
+            model.load(PROJECT_OVERRIDES / "improv-worker.yaml"),
+            model.load(PROJECT_OVERRIDES / "improv-leader.yaml"),
+        ),
+    ]
+    for worker, leader in pairs:
+        assert "merge_ready.py" in worker.steps["rebase"].instructions
+        assert "merge_ready.py" in leader.steps["integrate-preflight"].instructions

@@ -89,6 +89,7 @@ steps:
       테스트 수치와 그 축·트리·환경, 양방향 diff, 포함 관계, 스택 위치,
       merge-tree 결과), 심사 한계와 테스트가 세우지 못하는 것, 그리고 판정
       마커 — `LANDING REQUEST @ <hash>` / `REBASE REQUESTED @ <hash>` /
+      `REMEASURE REQUESTED @ <hash>` /
       `REVIEWED: pass @ <hash>` / `CHANGES REQUESTED: <무엇을>` /
       `HOLD: <이유>` / `BLOCKED: <게이트>` / `merged <hash>`. 코멘트는 산문
       문단이 아니라 (축, 트리, 값)의 줄로 적는다 — 보드는 저장소에 커밋되므로
@@ -126,7 +127,7 @@ steps:
       않는다). staged 순서: description이 먼저, --assignee가 마지막.
       상태 전이의 주인: open→in_progress는 assignee 워커(intake 끝,
       --external-ref에 run id) / in_progress→in_review는 assignee 워커
-      (landing request) / in_review→in_progress는 리더(rebase 재요청) /
+      (landing request) / in_review→in_progress는 리더(rebase·재측정 재요청) /
       in_review→closed는 assignee 세션이다 — 누가 배정했든 그 이슈를 끝까지
       관리하는 것은 assignee다. 닫는 자리는 wrapup 하나, 닫을 자격은 landed가
       git으로 증명한 머지 커밋 해시다(`claunch beads close <id> --reason

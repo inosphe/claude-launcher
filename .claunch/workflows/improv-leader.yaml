@@ -106,6 +106,7 @@ steps:
       테스트 수치와 그 축·트리·환경, 양방향 diff, 포함 관계, 스택 위치,
       merge-tree 결과), 심사 한계와 테스트가 세우지 못하는 것, 그리고 판정
       마커 — `LANDING REQUEST @ <hash>` / `REBASE REQUESTED @ <hash>` /
+      `REMEASURE REQUESTED @ <hash>` /
       `REVIEWED: pass @ <hash>` / `CHANGES REQUESTED: <무엇을>` /
       `HOLD: <이유>` / `BLOCKED: <게이트>` / `merged <hash>`. 코멘트는 산문
       문단이 아니라 (축, 트리, 값)의 줄로 적는다 — 보드는 저장소에 커밋되므로
@@ -143,7 +144,7 @@ steps:
       않는다). staged 순서: description이 먼저, --assignee가 마지막.
       상태 전이의 주인: open→in_progress는 assignee 워커(intake 끝,
       --external-ref에 run id) / in_progress→in_review는 assignee 워커
-      (landing request) / in_review→in_progress는 리더(rebase 재요청) /
+      (landing request) / in_review→in_progress는 리더(rebase·재측정 재요청) /
       in_review→closed는 assignee 세션이다 — 누가 배정했든 그 이슈를 끝까지
       관리하는 것은 assignee다. 닫는 자리는 wrapup 하나, 닫을 자격은 landed가
       git으로 증명한 머지 커밋 해시다(`claunch beads close <id> --reason
@@ -406,22 +407,43 @@ steps:
       시작한다"를 한 줄 흘리는 것 — 스캔에는 약 8초의 사각지대가 있어
       그것만이 지금 있는 방어다.
 
-      ── 통합 후보의 분기 심사 (rebase 재요청) ──
+      ── 통합 후보의 분기 심사 (재요청은 두 갈래다) ──
       PR 워크플로우처럼 「너무 차난(뒤처진)」 후보는 머지 문에 오르지
-      않는다. 후보 브랜치마다 master와의 분기를 잰다:
-      - git rev-list --count <branch>..master   # master가 그 tip 뒤에서 앞선 커밋 수
-      - git merge-tree $(git merge-base master <branch>) master <branch>
-                                              # 미리 병합이 충돌하는가
-      뒤처짐이 0(또는 소수)이고 미리 병합이 깨끗하면 통합 후보다. 충돌이
-      있거나 뒤처짐이 뚜렷하면(예: master가 수 개 이상 커밋 앞섬) 그
-      브랜치는 이번 머지에서 제외하고, 워커에게 rebase 후 다시 요청하라고
-      메시로 재요청을 보낸다 — 보드에는 `claunch beads update <id> --status
-      in_progress`와 `comments add <id> "REBASE REQUESTED: master @ <hash>"`
-      (통합 대기 표에서 "rebase 요청됨"으로 빠지는 것이 이것이다; 워커가
-      재정렬 후 다시 in_review로 올린다). 워커 세션이 이미 끝났으면
-      사용자에게 respawn(claunch respawn)으로
+      않는다. 손으로 재지 않는다 — 워커의 정렬 단계 게이트가 부르는 것과
+      **같은 스크립트**를 후보마다 부른다. 같은 명령이어야 워커가 통과시킨
+      것을 여기서 되돌리는 일이 안 생긴다:
+        uv run --no-sync python tools/merge_ready.py --branch <branch> --target master
+      종료 코드가 판정이다:
+      - 0 ready — 통합 후보다(대상이 이미 그 브랜치에 들어 있거나, 프리뷰
+        머지 위 재측정이 끝나 있다)
+      - 3 rebase — 미리 병합이 텍스트로 충돌한다. 재정렬 말고는 길이 없다.
+      - 1 re-measure — 대상은 움직였지만 병합은 깨끗하다. 브랜치는 합쳐지고,
+        낡은 것은 증거다: 워커의 표적 수치는 움직이기 전 base에서 쟀다.
+      - 2 cannot tell — 판정 불가. 「아니다」로 읽지 말고 무엇이 안 읽혔는지
+        먼저 본다.
+      **거리만으로 되돌리지 않는다.** behind가 0이면 master ⊆ 그 브랜치라
+      --no-ff 머지는 텍스트로 충돌할 수 없고, 그때 거리를 이유로 재정렬을
+      요구하는 것은 빈 요구다 — 요구한 만큼 리뷰어가 승인한 tip이 바뀐다.
+      거리를 굳이 강제 근거로 쓰려면 숫자를 대라: `--max-behind N`이 그
+      자리이고, 기본은 꺼져 있다.
+      **「충돌 없음」도 통과 조건이 아니다.** merge-tree가 조용한 것은 텍스트가
+      안 겹쳤다는 말이지 합쳐서 돈다는 말이 아니다. 이 저장소의 실례가
+      90a07a9다 — 한 브랜치가 tools/ 게이트 전부에 sys.path 규칙을 세우는
+      동안 master가 그 규칙을 안 지키는 다섯째 게이트를 들여왔다. 서로 다른
+      파일이라 merge-tree는 깨끗했고, 합친 트리는 빨갰다. 그래서 behind > 0
+      이면 충돌이 없어도 재측정을 요구한다.
+      두 갈래는 요구가 다르므로 마커도 다르다. 어느 쪽이든 그 브랜치는 이번
+      머지에서 빼고 `claunch beads update <id> --status in_progress` 뒤에:
+      - 3이면 `comments add <id> "REBASE REQUESTED: master @ <hash>"`
+      - 1이면 `comments add <id> "REMEASURE REQUESTED: master @ <hash>"` —
+        재정렬을 요구하는 것이 아니다. 워커가 대상 tip 위에 프리뷰 머지를
+        만들어 그 위에서 표적을 다시 재고 ref를 남기면 그것으로 갈음된다
+        (게이트가 그 ref의 두 부모를 보고 0으로 답한다). 재정렬을 택하는
+        것도 워커의 자유지만, 요구는 수치이지 재정렬이 아니다.
+      메시로 보내는 것은 어느 마커가 붙었는지 가리키는 nudge 한 줄이다.
+      워커 세션이 이미 끝났으면 사용자에게 respawn(claunch respawn)으로
       되살려 재요청을 이어가게 할지 알린다. 뒤처진 기준선을 master에 조용히
-      얹지 않는다 — rebase된 브랜치가 다시 심사에 오른 뒤 머지다.
+      얹지 않는다 — 게이트가 0으로 답하는 브랜치가 다시 심사에 오른 뒤 머지다.
     done_when: |
       claunch cflow checkout의 결과(peers 유무와 이름, 또는 확인 불가
       사유)가 보고에 있고, 스윕 창 확보 절차의 잡힌 행이 함께 있다.
@@ -444,8 +466,9 @@ steps:
         보고 요약이 아니라
         그 표를 근거로 이번 통합을 self-decision으로 합격 판정한다. 증거가
         빈 브랜치가 하나라도 있으면 합격하지 않고(머지 없이) 관제 대기로
-        돌아간다. 너무 벌어진(큰 뒤처짐·충돌 위험) 브랜치는 preflight에서
-        rebase 재요청으로 빠졌다 — 대상은 그 후보들만이다. preflight가 이
+        돌아간다. 게이트가 0으로 답하지 않은 브랜치는 preflight에서
+        재요청으로 빠졌다 — 충돌이면 rebase, 기준선이 움직였을 뿐이면
+        재측정, 두 갈래다. 대상은 남은 후보들만이다. preflight가 이
         체크아웃에 서 있는 다른 세션을 보고했다면, 그들이 서 있는 채로
         스윕·머지를 진행할지 판정하고 그 사실을 이 저널 기록에 담는다.
         합격 판정과 함께 master --no-ff 머지를 진행한다 — 판정은 리더의
@@ -463,12 +486,15 @@ steps:
       - 브랜치 간 포함 관계(git branch --contains) — 한 브랜치가 나머지를
         모두 포함하면 그 하나만 머지하고, 아니면 차례로 머지한다
         (대기가 하나면 이 확인은 한 줄로 끝난다 — 생략하지는 않는다)
-      - git log master..<branch> / <branch>..master 로 양방향 차이를 확인,
-        master가 분기 이후 움직였으면 충돌 여부를 먼저 본다
-        (preflight가 rebase 재요청으로 빠뜨린 후보가 이 자리에서 또
-        뒤처져 있거나 미리 병합이 충돌하면 그 브랜치는 머지하지 않는다 —
-        충돌 트리를 master에 강제로 얹지 않고 preflight의 재요청 규칙으로
-        되돌린다)
+      - git log master..<branch> / <branch>..master 로 양방향 차이를 확인.
+        배치가 둘 이상이면 **머지할 때마다 master가 움직이므로 뒤에 선
+        후보는 배치 안에서 낡는다** — preflight의 판정은 배치 시작 시점의
+        것이다. 그래서 각 머지 직전에 그 후보에 대해 게이트를 한 번 더
+        부른다: `uv run --no-sync python tools/merge_ready.py --branch
+        <branch> --target master`. 3(충돌)이면 그 브랜치는 머지하지 않고
+        preflight의 재요청 규칙으로 되돌린다 — 충돌 트리를 master에 강제로
+        얹지 않는다. 1(재측정)이면 남은 후보를 먼저 머지하고 이 브랜치는
+        재측정 요청으로 되돌린다.
       - 중간 워커(improv-mid)의 브랜치는 스택 하나가 후보 하나다: 요청에
         실린 스택 표(순서·자식 브랜치·기준·머지 해시·수치)를 git branch
         --merged <브랜치>로 검산하고 --no-ff 한 번으로 머지한다 — 그 안의
