@@ -189,6 +189,28 @@ TOOLS = [
                         "has booted — what it is for, in its own words"
                     ),
                 },
+                "issue": {
+                    "type": "string",
+                    "description": (
+                        "an EXISTING board issue for the child, instead of "
+                        "the fresh one its task would otherwise mint. What "
+                        "that means is the daemon's call, not yours: an issue "
+                        "nobody holds is assigned to the child, and one a "
+                        "RUNNING session holds is only joined — the "
+                        "assignment stays where it is, both sessions are told "
+                        "about each other, and they settle ownership between "
+                        "them. Hand a worker the issue you wrote for it "
+                        "rather than letting it mint a duplicate"
+                    ),
+                },
+                "no_issue": {
+                    "type": "boolean",
+                    "description": (
+                        "give the child no board issue at all — neither "
+                        "minted nor adopted. Without this a child with a task "
+                        "gets one minted for it"
+                    ),
+                },
                 "fork": {
                     "type": "boolean",
                     "description": (
@@ -517,13 +539,23 @@ def _my_handle(members: list) -> str:
 #: fields are the policy's to unlock, not the schema's to advertise.
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "connect", "workflow", "context",
-    "task", "harness", "workspace", "worktree", "rebase_onto",
+    "task", "issue", "harness", "workspace", "worktree", "rebase_onto",
     "profile", "borrow", "null_token", "cwd", "args", "env", "fork",
 )
 
 
+#: Offered fields that reach the API under another name. The one case: the
+#: API's board switch is ``beads: false``, which as a *falsey* value cannot
+#: ride in the comprehension below — it would be dropped as if the caller had
+#: never said it — and reads better to an agent as ``no_issue: true``.
+_SPAWN_RENAMED = {"no_issue": ("beads", False)}
+
+
 def _spawn(args: dict) -> dict:
     payload = {k: args[k] for k in _SPAWN_KEYS if args.get(k) not in (None, "")}
+    for offered, (key, value) in _SPAWN_RENAMED.items():
+        if args.get(offered):
+            payload[key] = value
     return _client().post(f"/api/sessions/{_session()}/children", payload)
 
 

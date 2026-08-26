@@ -193,6 +193,7 @@ check("only 'none' and 'existing' put a board key on the request",
   const bf = { beads: { value: "new" }, issue: issueSel };
   const bctx = {};
   new Function("exports", "$", "Option", "issuesCache", "issuesError",
+    "issuesRead",
     sliceFrom("function beadsMode()") + "\n" +
     sliceFrom("function syncBeadsRow()") + "\n" +
     sliceFrom("function renderIssueOptions()") + "\n" +
@@ -208,7 +209,8 @@ check("only 'none' and 'existing' put a board key on the request",
       { id: "cl-2", title: "the leader's own", status: "in_progress",
         held_by: "lead" },
     ],
-    "");
+    "",
+    true);
 
   bctx.render();
   check("the picker leads with an unchosen row, then the board's",
@@ -238,6 +240,28 @@ check("only 'none' and 'existing' put a board key on the request",
          /JOINS it/.test(hintBox.textContent),
          /assignment stays put/.test(hintBox.textContent)],
         [false, true, true, true]);
+
+  /* An empty list means two different things and only one of them is worth
+     saying: the board answered and has nothing, or the fetch is still in
+     flight. Saying "no open issue" during the second is telling somebody
+     something false about their board. */
+  for (const [read, hidden] of [[false, true], [true, false]]) {
+    const box = { textContent: "", classList: cls() };
+    const ctx2 = {};
+    new Function("exports", "$", "issuesCache", "issuesError", "issuesRead",
+      [sliceFrom("function beadsMode()"),
+       sliceFrom("function syncBeadsRow()"),
+       "exports.sync = syncBeadsRow;"].join("\n"))(
+      ctx2,
+      (id) => ({ "new-session": { beads: { value: "existing" },
+                                  issue: { value: "" } },
+                 "new-issue-row": { classList: cls() },
+                 "new-issue-hint": box }[id] || null),
+      [], "", read);
+    ctx2.sync();
+    check(`an empty board ${read ? "that answered says so" : "mid-fetch says nothing"}`,
+          box.classList.has("hidden"), hidden);
+  }
 }
 
 /* ---- renderRuntimeSummary ---- */

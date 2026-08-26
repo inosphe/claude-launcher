@@ -231,6 +231,26 @@ def test_sweep_plan_returns_in_progress_to_open_and_closes_untouched_placeholder
     ]
 
 
+def test_a_joiners_exit_does_not_return_the_holders_issue_to_open():
+    """The sweep acts on what a session was ASSIGNED, and a joiner never was.
+
+    Worth pinning rather than reading off the code: a joiner's issue is
+    linked to it (its rail shows it, its opening block names it), so every
+    view says the issue is "its" — and an exit that swept on that view would
+    quietly take a running session's work back to open.
+    """
+    mine = [
+        # the joiner is on this issue, but somebody else holds it
+        {"id": "shared", "status": "in_progress", "assignee": "holder",
+         "via": ["link"]},
+        # ...and this one really is the joiner's own
+        {"id": "own", "status": "in_progress", "assignee": "w2"},
+    ]
+    plan = beads_mod.sweep_plan(mine, "w2", exit_code=0)
+    assert [p[1] for p in plan if p[0] == "update"] == ["own"]
+    assert not any("shared" in step for step in plan)
+
+
 def test_the_winddown_block_names_the_issues_and_the_grace():
     text = beads_mod.compose_winddown(
         "s7", [{"id": "x-1", "status": "in_progress", "title": "Do it"}], 90

@@ -2613,9 +2613,8 @@ document
     // A child is created on the board of ITS directory, which the parent
     // decides — so the memo is dropped here as well as on the Directory row.
     issuesFor = null;
-    if (typeof beadsMode === "function" && beadsMode() === "existing") {
-      refreshIssueChoices();
-    }
+    issuesRead = false;
+    if (beadsMode() === "existing") refreshIssueChoices();
   });
 
 document
@@ -5709,7 +5708,10 @@ function syncBeadsRow() {
       "session JOINS it: the assignment stays put and the two settle " +
       "ownership between them.";
     hint.classList.remove("hidden");
-  } else if (picking && !issuesCache.length) {
+  } else if (picking && issuesRead && !issuesCache.length) {
+    // Only once the board has actually answered: an empty list held while
+    // the fetch is still in flight would read as "this board has nothing",
+    // which is a different and wrong thing to tell somebody.
     hint.textContent = issuesError ||
       "no open issue on this directory's board.";
     hint.classList.remove("hidden");
@@ -5725,6 +5727,8 @@ function syncBeadsRow() {
 let issuesCache = [];
 let issuesFor = null;
 let issuesError = "";
+/* Whether the board has answered at all yet — see syncBeadsRow. */
+let issuesRead = false;
 
 async function refreshIssueChoices() {
   const cwd = newSessionCwd();
@@ -5750,6 +5754,7 @@ async function refreshIssueChoices() {
     issuesError = "";
   }
   if (!answered && issuesFor === key) issuesFor = null;
+  issuesRead = true;
   renderIssueOptions();
 }
 
@@ -5794,6 +5799,7 @@ document
     // The board moves with the directory too — but only while it is being
     // looked at; the memo below makes the next open re-read it regardless.
     issuesFor = null;
+    issuesRead = false;
     if (beadsMode() === "existing") refreshIssueChoices();
   });
 
