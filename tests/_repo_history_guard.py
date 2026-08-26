@@ -358,19 +358,90 @@ EXEMPT_CALLERS = (
 
 
 def exempt() -> Optional[tuple]:
-    """The :data:`EXEMPT_CALLERS` entry on the current stack, if any."""
+    """The :data:`EXEMPT_CALLERS` entry on the current stack, if any.
+
+    The exemption covers *product code reading its own checkout*, so it is
+    withdrawn the moment a test is the one asking. That is the difference
+    between the six the sweep found -- which drive ``cli``/``attach``/``api``
+    and never mention the branch -- and the case the guard exists for: a test
+    that calls ``current_branch`` against this repository and asserts on what
+    comes back. The first cannot depend on the branch name; the second is the
+    definition of depending on it.
+
+    Checked here rather than argued in a comment. The claim that "no test
+    asks for the branch" was established by grep, and this file exists
+    because a hand-grepped premise went stale. So the premise is machinery:
+    if a test module is the direct caller, ``None`` comes back and the read
+    is a hard stop like any other.
+    """
     import inspect
 
     # ``context=0``: only the refused path reaches here, but reading source
     # lines for every frame to answer a yes/no question is work nobody asked
     # for, and it touches the disk from inside a subprocess call.
-    for frame in inspect.stack(0):
+    frames = inspect.stack(0)
+    for i, frame in enumerate(frames):
         name = frame.function
-        path = frame.filename.replace("\\", "/")
+        path = _posix(frame.filename)
         for module, func, why in EXEMPT_CALLERS:
-            if func == name and path.endswith(module):
-                return (module, func, why)
+            if func != name or not path.endswith(module):
+                continue
+
+            # (a) The exempt frame must be the one that MADE this call, not
+            # merely somewhere above it. Without this, every deeper git call
+            # is exempt for as long as ``current_branch`` is on the stack --
+            # harmless today, when ``worktree._git`` is the only thing below
+            # it, and a silent widening the moment the table grows.
+            between = [f for f in frames[:i] if not _plumbing(f.filename)]
+            if any(not _posix(f.filename).endswith(module) for f in between):
+                continue
+
+            # (b) One hop, and exactly one. If the frame directly beneath is
+            # test code, a test asked for this and the exemption is off.
+            #
+            # Do NOT "fix" this into a scan of the whole stack: product code
+            # driven by a test ALWAYS has a test frame somewhere below it, so
+            # that version exempts nothing and the six come back red. One hop
+            # is the only line that separates "a test asked" from "a test
+            # drove product code that asked".
+            caller = frames[i + 1] if i + 1 < len(frames) else None
+            if caller is not None and _is_test_file(caller.filename):
+                return None
+
+            return (module, func, why)
     return None
+
+
+#: This module's own frames, which sit between the caller and ``Popen`` and
+#: are not part of anybody's call chain.
+_SELF = "tests/_repo_history_guard.py"
+
+
+def _posix(filename: str) -> str:
+    return filename.replace("\\", "/")
+
+
+def _plumbing(filename: str) -> bool:
+    """Frames nobody wrote: this guard, and ``subprocess.run`` itself.
+
+    ``subprocess.run`` opens ``Popen``, so the stdlib sits in the middle of
+    every chain the guard sees. Counting it as an outside caller would make
+    the same-module test above reject every real call, exemption or not --
+    which is exactly what it did on the first attempt.
+    """
+    path = _posix(filename)
+    return path.endswith(_SELF) or path == _posix(subprocess.__file__)
+
+
+def _is_test_file(filename: str) -> bool:
+    """Anything under ``tests/`` -- not just ``test_*.py``.
+
+    A test that asks through ``tests/conftest.py`` or a ``tests/_helper.py``
+    is still a test asking, and helpers are where people actually put this
+    kind of call.
+    """
+    path = _posix(filename)
+    return "/tests/" in path and not path.endswith(_SELF)
 
 
 class Guard:

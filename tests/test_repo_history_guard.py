@@ -201,24 +201,6 @@ def test_the_exemption_table_is_short_and_says_why():
     assert "claunch-l8lh" in why, "an exemption has to point at its own follow-up"
 
 
-def test_product_code_reading_the_branch_for_a_label_is_let_through(
-    repo_history_guard,
-):
-    """The six the sweep found: real reads, no dependency, so not a hard stop.
-
-    Driven through the real ``worktree.current_branch`` rather than a stub,
-    because what is exempt is that frame being on the stack -- a test that
-    faked the frame would pass while the thing it stands for had moved.
-    """
-    from claude_launcher import worktree
-
-    before = len(repo_history_guard.exempted)
-    assert worktree.current_branch(ROOT) != ""      # it really did run git
-    assert len(repo_history_guard.exempted) == before + 1
-    _, problem = repo_history_guard.exempted[-1]
-    assert "rev-parse --abbrev-ref HEAD" in problem
-
-
 def test_the_same_command_from_a_test_is_still_refused():
     """The exemption is on the caller, not on the command.
 
@@ -232,3 +214,68 @@ def test_the_same_command_from_a_test_is_still_refused():
             cwd=str(ROOT),
             capture_output=True,
         )
+def test_a_test_that_asks_for_the_branch_itself_is_not_exempt():
+    """The exemption's ground, held by machinery rather than by a paragraph.
+
+    ``EXEMPT_CALLERS`` rests on a claim about the six tests the sweep found:
+    none of them asks for the branch -- they drive ``cli``/``attach``/``api``
+    and the product code reads it to build a label. That claim was first
+    established by grep, and a grep result is precisely the kind of evidence
+    this file exists to stop trusting: it was a hand-grepped premise going
+    stale that put the guard here.
+
+    So the claim is enforced instead. Calling ``current_branch`` on THIS
+    repository from a test module is a test asking for the branch, and it is
+    refused even though ``current_branch`` is the exempted frame. A test that
+    wants a branch name digs a repository under ``tmp_path`` -- which never
+    reaches the guard at all, because the target is not this repository. That
+    is why ``tests/test_worktree.py`` and ``tests/test_attach.py`` can go on
+    naming these helpers freely.
+    """
+    from claude_launcher import worktree
+
+    with pytest.raises(RepoHistoryRead):
+        worktree.current_branch(ROOT)
+
+
+def test_product_code_reading_the_branch_for_a_label_is_let_through(
+    repo_history_guard,
+):
+    """The six the sweep found: a test DRIVING product code, not asking it.
+
+    ``pane_label`` is the frame those six actually go through
+    (``cli.py:497`` -> ``rename_pane(pane_label(...))``), so the chain here is
+    the real one: test -> ``pane_label`` -> ``current_branch`` -> ``_git``.
+    The frame directly beneath ``current_branch`` is product code, so the
+    exemption holds and the label gets built.
+
+    Contrast with the test below, where the test itself is that frame.
+    """
+    from claude_launcher import worktree
+
+    before = len(repo_history_guard.exempted)
+    label = worktree.pane_label("sX", str(ROOT))
+
+    assert len(repo_history_guard.exempted) == before + 1
+    _, problem = repo_history_guard.exempted[-1]
+    assert "rev-parse --abbrev-ref HEAD" in problem
+    assert "sX" in label
+
+
+def test_a_test_that_asks_for_the_branch_itself_is_not_exempt():
+    """One hop is the whole line, and this is the side that must stay red.
+
+    ``current_branch`` is the exempted frame, and it is still refused here --
+    because the frame beneath it is this test. That is the difference between
+    product code reading its own checkout for a label and a test whose result
+    could turn on which branch is out.
+
+    A test that genuinely wants a branch name digs a repository under
+    ``tmp_path``; that never reaches the guard at all, since the target is not
+    this repository. Which is why ``tests/test_worktree.py`` and
+    ``tests/test_attach.py`` go on naming these helpers freely.
+    """
+    from claude_launcher import worktree
+
+    with pytest.raises(RepoHistoryRead):
+        worktree.current_branch(ROOT)
