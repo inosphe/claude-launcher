@@ -1,4 +1,4 @@
-"""improv-worker/improv-mid landing: delegated upward, open to the user.
+"""improv-worker/improv-mid landing-review: delegated upward, open to the user.
 
 The landing decision moved from a human gate to the session above it because
 that session — not the person — knows the state of the integration queue, and
@@ -6,6 +6,12 @@ because every round standing a person up cost more than the decision was
 worth. What that move quietly took away was the user's own way in: the run
 went out to an agent and the terminal it was started from could neither see
 the question nor answer it.
+
+The delegation later moved off the fast path into ``landing-review`` (see
+``test_landing_fast_path.py``): a clean request no longer asks anybody, and
+this question is only put when the machine checks broke. That changed how
+*often* it is asked, not what it is -- so everything below still holds, and
+is now checked on the step that actually carries it.
 
 Both are true at once now, and this pins the pair. The delegation is intact
 (the chooser still names the sessions above, still falls to a human, still
@@ -52,12 +58,16 @@ def landing(request):
     where, roles = LAYERS[request.param]
     path = where()
     text = path.read_text(encoding="utf-8")
-    step = model.parse(text, default_name=path.stem).steps["landing"]
+    step = model.parse(text, default_name=path.stem).steps["landing-review"]
     return step, text, roles
 
 
 def test_the_landing_is_still_delegated_upward(landing):
-    """The door is added beside the delegation, not in place of it."""
+    """The door is added beside the delegation, not in place of it.
+
+    Moving this to ``landing-review`` must not have quietly loosened it: the
+    candidate list, the fall to a human and the 30-minute clock are the same
+    values the old ``landing`` carried."""
     step, _, roles = landing
     delegate = step.select.delegate
     assert delegate is not None, "landing stopped delegating"
