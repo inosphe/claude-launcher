@@ -21,7 +21,13 @@
      helper that is right and never called leaves no trace.
    - And it is under the name in the detail panel's head too, in every
      arrangement of that head — the Details list's `directory` row is the
-     seventh row down and not on the Workflow tab at all. */
+     seventh row down and not on the Workflow tab at all.
+   - The git BRANCH the checkout is on rides beside the path as a sibling
+     that never shrinks: a worktree's "repository › checkout" already fills
+     a 260px rail, and the one fact that tells two sessions in one worktree
+     apart must survive where the path's tail gets the ellipsis — and be
+     absent when there is nothing to say (no directory, no git, detached
+     HEAD). */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -184,29 +190,50 @@ check("...nor '.claude/worktrees' at the root with no repository above it",
       ctx.split("/.claude/worktrees/x"), null);
 check("nothing in is nothing out", [ctx.short(""), ctx.short(null)], ["", ""]);
 
+/* The line is a path child plus an optional branch sibling: the path is
+   what ellipsises, the branch is what must survive the fold. These helpers
+   dig each piece out of the real line. */
+const pathText = (lineEl) => {
+  const p = descendants(lineEl).find((k) => k.classes.has("cwd-path"));
+  return p ? p.text : "";
+};
+const branchEl = (lineEl) =>
+  descendants(lineEl).find((k) => k.classes.has("cwd-branch"));
+
 /* ---- the line itself --------------------------------------------------- */
-const wtLine = ctx.line({ name: "s84", cwd: WT });
-check("the worktree line says the short form", wtLine.text,
+const wtLine = ctx.line({ name: "s84", cwd: WT, branch: "s84-scroll-restore" });
+check("the worktree line says the short form", pathText(wtLine),
       "claude-launcher › s84-scroll-restore");
+check("...with the branch beside it", branchEl(wtLine).text, "⎇ s84-scroll-restore");
+check("...the branch naming itself on hover", branchEl(wtLine).title,
+      "git branch s84-scroll-restore");
 check("...is flagged as a worktree", wtLine.classes.has("worktree"), true);
 check("...and carries the whole path on hover",
       wtLine.title.split("\n").pop(), WT);
 check("...saying which worktree of which repository first",
       wtLine.title.split("\n")[0], "worktree s84-scroll-restore of claude-launcher");
-const plainLine = ctx.line({ name: "s45", cwd: "F:\\works\\claude-launcher" });
+const plainLine = ctx.line({ name: "s45", cwd: "F:\\works\\claude-launcher", branch: "master" });
 check("a plain directory is not flagged", plainLine.classes.has("worktree"), false);
 check("...but still has the whole path on hover",
       plainLine.title.split("\n").pop(), "F:\\works\\claude-launcher");
+check("...and still carries its branch",
+      [pathText(plainLine), branchEl(plainLine).text],
+      ["…/works/claude-launcher", "⎇ master"]);
 /* No directory was given: the session runs in the daemon's. Said in the
    words the create form uses for the same choice, and set apart by class so
    the stylesheet can grey it — never an empty line that reads as a blank. */
 const none = ctx.line({ name: "bare", cwd: "" });
 check("no directory of its own says so, in the form's own words",
-      none.text, "(daemon cwd)");
+      pathText(none), "(daemon cwd)");
 check("...and is set apart", none.classes.has("unknown"), true);
 check("...and not called a worktree", none.classes.has("worktree"), false);
 check("...with a title that explains rather than repeats",
       none.title.includes("daemon"), true);
+/* A git session with nothing to report (a non-repo directory, a detached
+   HEAD) must not draw a blank tag — the branch is simply absent. */
+const branchless = ctx.line({ name: "s46", cwd: "F:\\works\\claude-launcher" });
+check("a branch-less session draws no branch tag",
+      descendants(branchless).filter((k) => k.classes.has("cwd-branch")).length, 0);
 
 /* ---- and under the name in the detail panel's head --------------------- */
 /* The same line, drawn by the real sessHead: the panel's Details list has
@@ -215,37 +242,45 @@ check("...with a title that explains rather than repeats",
    Every arrangement of that head must carry it: the head drops its buttons
    when docked beside its own terminal, and the line must not go with them. */
 const cwdInHead = (h) => descendants(h).filter((k) => k.classes.has("sess-cwd"));
+const branchInHead = (h) => descendants(h).filter((k) => k.classes.has("cwd-branch"));
 ctx.arrange({ termUp: true, narrow: false, cur: "s84" });
-let head = ctx.head({ name: "s84", status: "busy", cwd: WT });
+let head = ctx.head({ name: "s84", status: "busy", cwd: WT, branch: "s84-scroll-restore" });
 check("docked beside its own terminal (no buttons) the head still says where",
-      cwdInHead(head).map((k) => k.text), ["claude-launcher › s84-scroll-restore"]);
+      cwdInHead(head).map((k) => pathText(k)), ["claude-launcher › s84-scroll-restore"]);
+check("...and which branch", branchInHead(head).map((k) => k.text), ["⎇ s84-scroll-restore"]);
 check("...flagged as a worktree, whole path on hover",
       [cwdInHead(head)[0].classes.has("worktree"), cwdInHead(head)[0].title.split("\n").pop()],
       [true, WT]);
 check("...and the name is still the head's first word", head.kids[0].text, "s84");
 ctx.arrange({ termUp: true, narrow: false, cur: "other" });
-head = ctx.head({ name: "s84", status: "busy", cwd: WT });
+head = ctx.head({ name: "s84", status: "busy", cwd: WT, branch: "s84-scroll-restore" });
 check("aimed at another session (buttons kept) it says where, once",
-      cwdInHead(head).map((k) => k.text), ["claude-launcher › s84-scroll-restore"]);
+      cwdInHead(head).map((k) => pathText(k)), ["claude-launcher › s84-scroll-restore"]);
 ctx.arrange({ termUp: false, narrow: true, cur: null });
 head = ctx.head({ name: "bare", status: "idle", cwd: "" });
 check("on a phone, a session with no directory of its own says whose",
-      cwdInHead(head).map((k) => [k.text, k.classes.has("unknown")]),
+      cwdInHead(head).map((k) => [pathText(k), k.classes.has("unknown")]),
       [["(daemon cwd)", true]]);
+check("...with no branch to invent", branchInHead(head).length, 0);
 /* The stylesheet's part: a line of its own under everything the head holds
-   (order past the buttons, which declare none), never wrapping. */
+   (order past the buttons, which declare none), never wrapping — and a flex
+   line inside it, so the branch keeps its width when the path gives way. */
 const headRule = (css.match(/\.sess-head \.sess-cwd \{([^}]*)\}/) || [])[1] || "";
 check("the head's line is full-width", /flex-basis:\s*100%/.test(headRule), true);
 check("...sorted last", Number((headRule.match(/order:\s*(\d+)/) || [])[1]) > 0, true);
-check("...one line, ellipsised",
-      /white-space:\s*nowrap/.test(headRule) && /text-overflow:\s*ellipsis/.test(headRule), true);
+check("...a flex line, so the branch keeps its width", /display:\s*flex/.test(headRule), true);
+const headPathRule =
+  (css.match(/\.sess-head \.sess-cwd \.cwd-path \{([^}]*)\}/) || [])[1] || "";
+check("...one line, ellipsised, where the path gives way",
+      /white-space:\s*nowrap/.test(headPathRule) && /text-overflow:\s*ellipsis/.test(headPathRule),
+      true);
 
 /* ---- on the row, built by the real code -------------------------------- */
 served = { sessions: [
   { name: "s45", status: "idle", role: "leader", profile: "nc", parent: null,
-    cwd: "F:\\works\\claude-launcher" },
+    cwd: "F:\\works\\claude-launcher", branch: "master" },
   { name: "s84", status: "busy", role: "worker", profile: "nc", parent: "s45",
-    cwd: WT },
+    cwd: WT, branch: "s84-scroll-restore" },
   { name: "bare", status: "idle", profile: "nc", parent: null, cwd: "" },
 ] };
 
@@ -257,16 +292,25 @@ served = { sessions: [
   const row = (name) => rows.find((r) => r.dataset.name === name);
   const cwdOf = (name) =>
     descendants(row(name)).filter((k) => k.classes.has("rail-cwd"));
+  const branchOf = (name) =>
+    descendants(row(name)).filter((k) => k.classes.has("cwd-branch"));
 
   check("each row carries exactly one directory line",
         rows.map((r) => descendants(r).filter((k) => k.classes.has("rail-cwd")).length),
         [1, 1, 1]);
   check("the worktree row says repository › checkout",
-        cwdOf("s84")[0].text, "claude-launcher › s84-scroll-restore");
+        pathText(cwdOf("s84")[0]), "claude-launcher › s84-scroll-restore");
   check("the main-checkout row says the tail of its path",
-        cwdOf("s45")[0].text, "…/works/claude-launcher");
+        pathText(cwdOf("s45")[0]), "…/works/claude-launcher");
   check("the row with no directory says whose it uses",
-        cwdOf("bare")[0].text, "(daemon cwd)");
+        pathText(cwdOf("bare")[0]), "(daemon cwd)");
+  check("the git rows carry their branches",
+        [branchOf("s45").map((k) => k.text), branchOf("s84").map((k) => k.text)],
+        [["⎇ master"], ["⎇ s84-scroll-restore"]]);
+  check("...the branch lives inside the directory line, not beside it",
+        cwdOf("s84")[0].kids.map((k) => k.className), ["cwd-path", "cwd-branch"]);
+  check("the row with no directory has no branch",
+        branchOf("bare").length, 0);
 
   /* A direct child of the row, because on this rail the row's own children
      are its lines (raillayout_check pins that), and before the context
@@ -280,13 +324,20 @@ served = { sessions: [
 
   /* ---- and the stylesheet lets it be a line ---------------------------- */
   /* Full-width so it breaks the row (a loose span would squeeze the name),
-     one line only (twenty rows, a wrapping path doubles each), ellipsised
-     rather than clipped, and sorted after the ▸ toggle like every other
-     breaker (raillayout_check pins the budget; this pins the entry). */
+     one line only (twenty rows, a wrapping path doubles each), the path
+     ellipsised rather than clipped while the branch keeps its width, and
+     sorted after the ▸ toggle like every other breaker (raillayout_check
+     pins the budget; this pins the entry). */
   const rule = (css.match(/#session-list \.rail-cwd \{([^}]*)\}/) || [])[1] || "";
   check("the line is full-width", /flex-basis:\s*100%/.test(rule), true);
-  check("...never wraps", /white-space:\s*nowrap/.test(rule), true);
-  check("...and ellipsises", /text-overflow:\s*ellipsis/.test(rule), true);
+  check("...a flex line, so the branch survives the fold", /display:\s*flex/.test(rule), true);
+  const pathRule = (css.match(/#session-list \.rail-cwd \.cwd-path \{([^}]*)\}/) || [])[1] || "";
+  check("the path never wraps", /white-space:\s*nowrap/.test(pathRule), true);
+  check("...and ellipsises", /text-overflow:\s*ellipsis/.test(pathRule), true);
+  check("...leaving room for the branch", /min-width:\s*0/.test(pathRule), true);
+  const branchRule =
+    (css.match(/#session-list \.rail-cwd \.cwd-branch \{([^}]*)\}/) || [])[1] || "";
+  check("the branch never shrinks to nothing", /flex:\s*none/.test(branchRule), true);
   const order = Number((rule.match(/order:\s*(\d+)/) || [])[1]);
   const toggle = Number(((css.match(/#session-list \.sess-brief-toggle \{([^}]*)\}/) || [])[1]
                          .match(/order:\s*(\d+)/) || [])[1]);

@@ -1191,15 +1191,27 @@ function cwdShort(p) {
    words rather than printing an empty string that reads as "no directory" —
    the form that created it offers the same choice under the same name,
    "(daemon cwd)". `cls` is the place-specific class; the `worktree` and
-   `unknown` markers ride along so each place can dress them. */
+   `unknown` markers ride along so each place can dress them.
+
+   The branch follows the path as a sibling (`cwd-branch`) that never
+   shrinks, with the ellipsis falling on the path element instead. A
+   worktree's "repository › checkout" already brushes the edge of a 260px
+   rail, and the one fact that tells two sessions in the same repository
+   apart is the one that must survive where a path's tail can give way. */
 function cwdLine(s, cls) {
   const cwd = (s && s.cwd) || "";
   const wt = cwdSplit(cwd);
   const line = el(
     "span",
-    cls + (wt ? " worktree" : "") + (cwd ? "" : " unknown"),
-    cwd ? cwdShort(cwd) : "(daemon cwd)"
+    cls + (wt ? " worktree" : "") + (cwd ? "" : " unknown")
   );
+  line.appendChild(el("span", "cwd-path", cwd ? cwdShort(cwd) : "(daemon cwd)"));
+  const branch = (s && s.branch) || "";
+  if (branch) {
+    const tag = el("span", "cwd-branch", `⎇ ${branch}`);
+    tag.title = `git branch ${branch}`;
+    line.appendChild(tag);
+  }
   line.title = cwd
     ? (wt ? `worktree ${wt.worktree} of ${wt.repo}\n` : "directory\n") + cwd
     : "directory: the daemon's own — none was given when the session was created";
@@ -8121,6 +8133,13 @@ function renderSession(data) {
         : `${s.cwd}  (workspace ${data.workspace.name})`
       : s.cwd,
     s.cwd
+  );
+  // The checkout's branch, beside the directory — the one thing the
+  // directory's tail cannot say: two sessions from one worktree share the
+  // same path, and only the branch tells them apart.
+  metaRow(
+    dl, "branch", s.branch,
+    "the git branch checked out in the session's directory"
   );
   metaRow(dl, "conversation", s.conversation_id, "claude --session-id");
   // Which model is answering in it — above the size for the same reason the
