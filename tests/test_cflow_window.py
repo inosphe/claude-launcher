@@ -360,3 +360,55 @@ def test_the_leader_batches_integration_and_sweeps_after_a_gate(layer):
             "the sweep gate must not run the suite in the leader's turn"
         )
         assert "sweep.py check" in verify.command
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_a_window_costs_one_full_sweep_however_many_requests_it_holds(layer):
+    """The interval batches merges; these lines are what batches the *sweep*.
+
+    Holding five landing requests into one merge saves nothing if the suite
+    still runs once per request, and three paths used to let it: standby
+    commissioning a sweep whenever "the queue piled up" (the same condition
+    that opens ``integrate``, so the batch was swept twice), standby honouring
+    a worker's "please run the whole suite" one request at a time (which is
+    per-branch sweeping with extra steps), and the integration preview being
+    swept *and then* the merge commit that lands the same candidates.
+
+    The preview is kept -- it catches a broken combination while master is
+    still clean -- and made cheap instead: built the way the merge will be, it
+    produces the same tree, and ``tools/sweep.py`` accepts a green receipt for
+    that tree. So the batch pays once whether or not the preview ran.
+    """
+    if layer == "bundled":
+        bundled = dict(state_mod.bundled_workflows())
+        leader = model.load(bundled["improv-leader"])
+        worker = model.load(bundled["improv-worker"])
+    else:
+        leader = model.load(OVERRIDES / "improv-leader.yaml")
+        worker = model.load(OVERRIDES / "improv-worker.yaml")
+
+    standby = leader.steps["standby"].instructions
+    assert "관제 대기에서 전체 스윕을 시키지 않는다" in standby, (
+        "standby may commission a full sweep again -- that is a second sweep "
+        "of the batch integrate is about to merge"
+    )
+    assert "브랜치당 스윕" in standby
+
+    integrate = leader.steps["integrate"].instructions
+    assert "프리뷰 스윕이 곧 이 배치의 스윕이다" in integrate
+    assert "find_receipt_by_tree" in integrate, (
+        "the preview is only free while the leader knows the receipt carries "
+        "over by tree; without that line it reads as an extra sweep"
+    )
+    assert "--branch" in integrate
+
+    sweep_step = leader.steps["sweep"].instructions
+    assert "이미 돌았으면 여기서 또 돌지 않는다" in sweep_step
+    assert "프리뷰" in leader.steps["sweep"].done_when
+
+    review = worker.steps["review"].instructions
+    assert "SWEEP REQUESTED" in review, (
+        "the worker's escalation must land on the board as a marker the batch "
+        "sweep answers, not as a request for a sweep of its own branch"
+    )
+    assert "리더에게 지금 스윕을 돌려 달라고 청하지 않는다" in review
