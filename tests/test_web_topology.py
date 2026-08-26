@@ -138,6 +138,14 @@ on the rail's own wordmark, which doubles as the link back to the root
 route ("#/") and so has to look like a title and not like a browser's
 default link.
 
+``railtimer_check`` on the strip that sits above that nav — the countdown
+for the daemon's automatic nudge, which is the one thing on this dashboard
+nobody could see coming: two clocks can produce it (a reminder into a
+session that is working, a stall ping into one that stopped), at most one of
+them applies at a time, and the check holds the pick to the clock a reader
+needs plus the several silences — off, not running, held, gated — that a
+lazier strip would collapse into one word.
+
 ``leak_check`` is the odd one out and deliberately so: instead of slicing a
 function it boots the WHOLE of ``app.js`` against a stub browser built by
 parsing the shipped ``index.html``, then runs the page the way an unattended
@@ -221,6 +229,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "beads_check.js",
         "wfdpace_check.js",
         "askdoor_check.js",
+        "railtimer_check.js",
     ],
 )
 def test_topology_diagram_logic(script):
