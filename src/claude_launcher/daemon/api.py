@@ -2242,6 +2242,13 @@ async def _onboard_and_launch(
     manager: SessionManager = request.app["manager"]
     name, cwd = session.sdef.name, session.sdef.cwd
     try:
+        # Inside the discarding try, and before anything is arranged: a board
+        # answer that contradicts itself is checkable without a session, and
+        # the alternative is a request that half-happens.
+        try:
+            beads_mod.check_request(body)
+        except beads_mod.BoardRequestError as exc:
+            raise onboard.OnboardError(str(exc)) from None
         if parent:
             await onboard.inherit_mesh(body, parent=parent, mesh_mgr=_mesh_mgr(request))
             onboard.inherit_workflow(
@@ -2279,9 +2286,12 @@ async def _onboard_and_launch(
         # id: `issue: <id>` on its own reads as "this is yours", which is the
         # one thing a joiner must not conclude. Only the ordinary cases are
         # skipped when the reference is already there.
+        # An issue written from its own box is spelled out for the same
+        # reason: the note is the only place the session is told that the
+        # record holds instructions this task does not repeat.
         joined = linked.get("mode") == beads_mod.JOIN
-        if joined or linked["issue"] not in beads_mod.issue_refs(
-            plan.task, plan.context
+        if joined or linked.get("from_issue_text") or linked["issue"] not in (
+            beads_mod.issue_refs(plan.task, plan.context)
         ):
             plan = replace(
                 plan,
@@ -2291,6 +2301,7 @@ async def _onboard_and_launch(
                     mode=linked.get("mode") or beads_mod.MINTED,
                     held_by=linked.get("held_by"),
                     mesh=plan.mesh or "",
+                    text=bool(linked.get("from_issue_text")),
                 ),
             )
 

@@ -570,28 +570,45 @@ BEADS_NONE = "none"
 
 
 def issue_fields(
-    preset: str = "", *, none: bool = False, section: str = ""
+    preset: str = "", *, none: bool = False, text: str = "", section: str = ""
 ) -> List[Field]:
     """The board rows, asked identically by ``new-session`` and ``spawn``.
 
-    Two rows rather than one picker with three kinds of entry in it: the
+    Three rows rather than one picker with three kinds of entry in it: the
     *mode* is a closed question with three answers and belongs on its own
-    line, and the issue list is only a question at all under one of them.
-    :func:`sync_issues` fills the second row and hides it under the other two.
+    line, and each of the two rows under it is a question only under one of
+    those answers. :func:`sync_issues` fills them and hides each under the
+    answers it does not belong to.
+
+    The text row is what the minted issue SAYS. It exists because the two
+    things that used to share the opening task are not the same thing: the
+    task is what the session is told when it boots, the issue is the record
+    of the work, and an operator with a specification to file wants it on the
+    board rather than in a terminal's scrollback. Left empty it changes
+    nothing -- the issue is minted from the task, as it always was.
     """
     mode = ChoiceField(
         key="beads", label="Board", section=section,
-        hint="the issue this session works: minted from the opening task, "
-             "one that already exists, or none",
+        hint="the issue this session works: a new one, one that already "
+             "exists, or none",
         options=[
-            Option("new issue from the opening task", BEADS_NEW),
+            Option("new issue", BEADS_NEW),
             Option("an existing issue", BEADS_PICK),
             Option("no issue", BEADS_NONE),
         ],
     )
     # A flag given alongside --wizard pre-fills its field, the same way every
     # other row on these forms is pre-filled.
-    mode.select(BEADS_NONE if none else BEADS_PICK if preset else BEADS_NEW)
+    mode.select(
+        BEADS_NONE if none else BEADS_PICK if preset else BEADS_NEW
+    )
+    issue_text = TextField(
+        key="issue_text", label="Issue text",
+        placeholder="(empty: the opening task is used)",
+        hint="what the new issue says -- first line is its title, the whole "
+             "of it the goal; the session is told to go read it",
+        text=text or "",
+    )
     issue = ChoiceField(
         key="issue", label="Issue",
         hint="picked from this directory's board; a row saying 'held by' "
@@ -603,7 +620,7 @@ def issue_fields(
         # Carried even when the daemon cannot list the board, so a preset id
         # from the command line is never silently dropped.
         issue.options = [Option(preset, preset)]
-    return [mode, issue]
+    return [mode, issue_text, issue]
 
 
 def _issue_option(row: dict) -> Option:
@@ -619,14 +636,20 @@ def _issue_option(row: dict) -> Option:
 
 
 def sync_issues(form: "Form", cwd: str, *, parent: str = "") -> None:
-    """Refill the issue picker for ``cwd`` and hide it unless it is the answer.
+    """Refill the issue picker for ``cwd`` and hide each conditional row
+    unless it is the answer it belongs to.
 
     Refetched only when the directory (or the parent whose directory it is)
     actually changed, like every other conditional list on these forms — a
     picker that reloads under the cursor is a picker that moves while it is
     being read.
+
+    The text row is hidden rather than cleared under the other two answers:
+    somebody who types a specification, changes their mind about the mode and
+    changes it back should find their words where they left them.
     """
     mode = form.value("beads")
+    form.field("issue_text").hidden = mode != BEADS_NEW
     issue = form.field("issue")
     issue.hidden = mode != BEADS_PICK
     if issue.hidden:
@@ -646,13 +669,19 @@ def sync_issues(form: "Form", cwd: str, *, parent: str = "") -> None:
 
 
 def issue_answers(form: "Form") -> "tuple":
-    """``(issue, no_issue)`` — the two flags the commands actually take."""
+    """``(issue, no_issue, issue_text)`` — the three flags the commands take.
+
+    Only ever one of them at a time: the mode row decides which, and the two
+    that do not belong to it come back empty. The form is the one place that
+    holds all three at once (a hidden row keeps its value), so it is also the
+    place that has to drop the ones the answer does not mean.
+    """
     mode = form.value("beads")
     if mode == BEADS_NONE:
-        return None, True
+        return None, True, None
     if mode == BEADS_PICK:
-        return (form.value("issue") or None), False
-    return None, False
+        return (form.value("issue") or None), False, None
+    return None, False, (form.value("issue_text") or None)
 
 
 def worktree_fields(auto_detail: str, section: str = "") -> List[Field]:
@@ -1720,7 +1749,7 @@ class Wizard(Form):
         args.workflow = self.value("workflow") or None
         args.context = (self.value("context") or None) if args.workflow else None
         args.task = self.value("task") or None
-        args.issue, args.no_issue = issue_answers(self)
+        args.issue, args.no_issue, args.issue_text = issue_answers(self)
         args.restore = self.value("restore")
         args.attach = bool(self.value("attach"))
         return args
@@ -2508,7 +2537,7 @@ class SpawnWizard(Form):
         args.workflow = picked or (self.NO_WORKFLOW if paired else None)
         args.context = (self.value("context") or None) if picked else None
         args.task = self.value("task") or None
-        args.issue, args.no_issue = issue_answers(self)
+        args.issue, args.no_issue, args.issue_text = issue_answers(self)
         args.attach = bool(self.value("attach"))
         return args
 
