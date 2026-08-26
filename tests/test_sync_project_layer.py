@@ -160,3 +160,68 @@ def test_a_field_block_does_not_swallow_the_blank_line_between_steps(sync):
         "\n",
         "      after a blank\n",
     ]
+
+
+# A select step routes through its options, so the engine forbids `next:` on
+# one (`model.py`: "a select step routes via its options; 'next' is not
+# allowed"). The graft used to hang every block on that line, so a project
+# layer that armed a select step raised -- with a message blaming the packaged
+# copy for a step it does have. That is not a corner: `verify` is the field a
+# select may not carry, `awaits` is one it may, and the steps where a run
+# *waits* are written as selects. "What is this standing still for" belongs to
+# them more than anywhere else.
+SELECT_BUNDLED = """name: t
+steps:
+  waiting:
+    title: waiting
+    select:
+      chooser: agent
+      prompt: |
+        has it arrived?
+      options:
+        yes:
+          description: it has
+          next: end
+
+  end:
+    title: done
+    instructions: |
+      finish
+"""
+
+SELECT_PROJECT = SELECT_BUNDLED.replace(
+    "          next: end\n",
+    "          next: end\n"
+    "    # why the daemon re-measures this one\n"
+    "    awaits:\n"
+    "      probe: 'ask git'\n"
+    "      poll: 60\n",
+)
+
+
+def test_a_select_step_can_carry_a_project_layer_awaits(sync):
+    blocks = sync.field_blocks(SELECT_PROJECT)
+    assert blocks["waiting"] == [
+        "    # why the daemon re-measures this one\n",
+        "    awaits:\n",
+        "      probe: 'ask git'\n",
+        "      poll: 60\n",
+    ]
+    out = sync.graft(SELECT_BUNDLED, blocks)
+    assert "      poll: 60\n" in out
+    # placed inside `waiting`, not leaked into the step after it
+    assert out.index("      poll: 60\n") < out.index("  end:\n")
+    # and the blank line that separates the two steps is still there
+    assert "      poll: 60\n\n  end:\n" in out
+    assert sync.graft(SELECT_BUNDLED, sync.field_blocks(out)) == out
+
+
+def test_a_block_on_the_last_step_lands_before_the_end_of_the_file(sync):
+    """The last step has no step header after it to close it -- EOF does."""
+    project = SELECT_BUNDLED.replace(
+        "      finish\n",
+        "      finish\n    # the receipt this repository reads\n    verify: 'check it'\n",
+    )
+    out = sync.graft(SELECT_BUNDLED, sync.field_blocks(project))
+    assert out.endswith("    # the receipt this repository reads\n    verify: 'check it'\n")
+    assert sync.graft(SELECT_BUNDLED, sync.field_blocks(out)) == out
