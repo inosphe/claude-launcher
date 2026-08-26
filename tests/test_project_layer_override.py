@@ -176,6 +176,37 @@ def test_the_leader_override_gates_the_deploy_on_a_real_restart():
     assert "--branch master" in verify.command
 
 
+def test_no_gate_calls_a_binary_off_PATH():
+    """Every gate must run the tree it is checking, not whatever is installed.
+
+    This is a rule the other three gates already followed without anyone
+    writing it down: they name a path into this checkout and reach it through
+    ``uv run``. The first gate that did not follow it proved why. It was
+    ``claunch report check`` -- the obvious spelling -- and the ``claunch`` on
+    PATH is an installed copy, not this tree, so it answered
+    ``invalid choice: 'report'`` and exited 2. That gate could not have passed
+    in any session until the branch landed and was reinstalled.
+
+    ``ARMED``/``GATES`` almost cover this already, but only for steps somebody
+    remembered to list there. This walks the files instead, so a gate added to
+    the layer without touching either table is still held to the rule.
+    """
+    offenders = []
+    for path in sorted(OVERRIDES.glob("*.yaml")):
+        wf = model.load(path)
+        for step_id, step in wf.steps.items():
+            if step.verify is None:
+                continue
+            if not step.verify.command.startswith(NO_SYNC):
+                offenders.append(f"{path.name}:{step_id} -> {step.verify.command}")
+    assert not offenders, (
+        "a gate must run this checkout, not a binary off PATH. Reach it "
+        f"with '{NO_SYNC} ...'. Measured: 'claunch report check' exited 2 "
+        "with \"invalid choice: 'report'\" because PATH held an older "
+        "install. Offending gates: " + "; ".join(offenders)
+    )
+
+
 @pytest.mark.parametrize("stem", sorted(ARMED))
 def test_the_override_adds_no_other_verify(stem):
     """The override's whole diff against canonical is its machine checks —
