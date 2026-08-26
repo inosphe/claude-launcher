@@ -27,12 +27,14 @@ The spec is passed to the upstream verbatim, so every field the backend
 understands (``order``, ``only``, ``ignore``, ``sort``, ``allow_fallbacks``,
 ``max_price``, ...) works without this module knowing the vocabulary.
 
-One shim serves every session that wants the same (upstream, spec) pair. The
-port is *derived from that pair*, which is what makes concurrent launches safe:
-two sessions starting at once both aim at the same port, one wins the bind, and
-the loser finds the winner's health endpoint and reuses it. A changed spec is a
-different fingerprint, hence a different port, so config edits are picked up by
-the next launch instead of being served stale by a running shim.
+One shim serves every session that wants the same (upstream, spec) pair, which
+a fingerprint over that pair identifies. Sessions launching at the same moment
+converge on one shim through an exclusive *start claim* file: whoever takes it
+spawns, the rest wait for what it started. (Watching the port instead is not
+enough — between binding and answering there is a window where a shim looks
+like a stranger, and the next caller starts a duplicate beside it.) A changed
+spec is a different fingerprint, so config edits are picked up by the next
+launch instead of being served stale by a running shim.
 """
 
 from __future__ import annotations
@@ -239,7 +241,13 @@ def _shim_env() -> dict:
     ``PYTHONPATH`` makes the shim always the sibling of the code that spawned
     it — which is also what lets the test suite exercise a real shim process.
     """
-    env = dict(os.environ)
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        # The shim proxies whatever credentials the caller sends and needs none
+        # of its own; a long-lived process should not hold the token as well.
+        if not k.startswith(("ANTHROPIC_", "CLAUDE_CODE_"))
+    }
     pkg_parent = str(Path(__file__).resolve().parent.parent)
     parts = [pkg_parent] + [p for p in env.get("PYTHONPATH", "").split(os.pathsep) if p]
     env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(parts))
@@ -306,43 +314,107 @@ def _log_tail(fp: str, lines: int = 12) -> str:
     return "\n".join(text.strip().splitlines()[-lines:])
 
 
+def _claim_file(fp: str) -> Path:
+    return state_dir() / f"{fp}.claim"
+
+
+def _try_claim(fp: str) -> bool:
+    """Win the right to *start* this fingerprint's shim, or report that another
+    process already holds it.
+
+    Testing the port is not enough on its own: between a shim binding its socket
+    and answering its health endpoint there is a window where the port reads as
+    busy but no shim answers, and a second caller would take that for a stranger
+    and start a duplicate on the next port. An exclusive file makes the start
+    itself the thing that is claimed, so exactly one process spawns and the rest
+    wait for it.
+    """
+    state_dir().mkdir(parents=True, exist_ok=True)
+    path = _claim_file(fp)
+    try:
+        fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        try:
+            age = time.time() - path.stat().st_mtime
+        except OSError:  # it went away underneath us — the holder finished
+            return _try_claim(fp)
+        if age < START_TIMEOUT + 5:
+            return False
+        # Older than any start could possibly be: the holder died mid-spawn.
+        path.unlink(missing_ok=True)
+        return _try_claim(fp)
+    try:
+        os.write(fd, str(os.getpid()).encode("ascii"))
+    finally:
+        os.close(fd)
+    return True
+
+
+def _find(fp: str) -> Optional[int]:
+    """The port a live shim for ``fp`` answers on, if one is up."""
+    for port in candidate_ports(fp):
+        info = health(port)
+        if info is not None and info.get("fingerprint") == fp:
+            return port
+    return None
+
+
+def _free_port(fp: str) -> Optional[int]:
+    for port in candidate_ports(fp):
+        if _port_free(port):
+            return port
+    return None
+
+
 def ensure_shim(upstream: str, block: Dict) -> str:
     """Base URL of a live shim fronting ``upstream`` with ``block`` merged in.
 
-    Reuses a running shim for the same pair; starts one otherwise. Losing the
-    start race is not an error — the winner answers on the same derived port
-    and both callers get its URL.
+    Reuses a running shim for the same pair and starts one otherwise. Callers
+    that arrive together converge on a single shim: one of them takes the start
+    claim and the others wait for what it starts.
     """
     fp = fingerprint(upstream, block)
-    start_port = None
-    for port in candidate_ports(fp):
-        info = health(port)
-        if info is not None:
-            if info.get("fingerprint") == fp:
-                _record(fp, port, upstream, block, info.get("pid"))
+    port = _find(fp)
+    if port is not None:
+        _record(fp, port, upstream, block, None)
+        return local_url(port)
+    if not _try_claim(fp):
+        # Another launch is starting this exact shim right now. Wait for it
+        # rather than adding a second one beside it.
+        deadline = time.monotonic() + START_TIMEOUT + 5
+        while time.monotonic() < deadline:
+            port = _find(fp)
+            if port is not None:
+                _record(fp, port, upstream, block, None)
                 return local_url(port)
-            continue  # a shim for a different routing target owns this port
-        if start_port is None and _port_free(port):
-            start_port = port
-    if start_port is None:
+            time.sleep(0.1)
         raise RoutingError(
-            f"no free loopback port for the routing shim in "
-            f"{candidate_ports(fp)[0]}..{candidate_ports(fp)[-1]}"
+            f"another process holds the start claim for the routing shim to "
+            f"{upstream} but none came up (stale {_claim_file(fp)}?)"
         )
-    _spawn(upstream, block, start_port, fp)
-    deadline = time.monotonic() + START_TIMEOUT
-    while time.monotonic() < deadline:
-        info = health(start_port, timeout=0.5)
-        if info is not None and info.get("fingerprint") == fp:
-            _record(fp, start_port, upstream, block, info.get("pid"))
-            return local_url(start_port)
-        time.sleep(0.1)
-    tail = _log_tail(fp)
-    raise RoutingError(
-        f"routing shim for {upstream} did not come up on port {start_port} "
-        f"within {int(START_TIMEOUT)}s (see {log_file(fp)})"
-        + (f"\n{tail}" if tail else "")
-    )
+    try:
+        start_port = _free_port(fp)
+        if start_port is None:
+            raise RoutingError(
+                f"no free loopback port for the routing shim in "
+                f"{candidate_ports(fp)[0]}..{candidate_ports(fp)[-1]}"
+            )
+        _spawn(upstream, block, start_port, fp)
+        deadline = time.monotonic() + START_TIMEOUT
+        while time.monotonic() < deadline:
+            info = health(start_port, timeout=0.5)
+            if info is not None and info.get("fingerprint") == fp:
+                _record(fp, start_port, upstream, block, info.get("pid"))
+                return local_url(start_port)
+            time.sleep(0.1)
+        tail = _log_tail(fp)
+        raise RoutingError(
+            f"routing shim for {upstream} did not come up on port {start_port} "
+            f"within {int(START_TIMEOUT)}s (see {log_file(fp)})"
+            + (("\n" + tail) if tail else "")
+        )
+    finally:
+        _claim_file(fp).unlink(missing_ok=True)
 
 
 def apply(env: dict, provider_name: str, doc: Optional[dict] = None) -> None:

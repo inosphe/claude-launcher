@@ -260,6 +260,35 @@ def test_one_shim_serves_every_caller_of_the_same_pair(upstream, shims):
 
 
 @pytest.mark.slow_shim
+def test_simultaneous_launches_converge_on_one_shim(upstream, shims):
+    """The start race is the reason the port is derived rather than allocated.
+
+    Two sessions launching at the same moment both aim at the same port; one
+    wins the bind and the loser must find the winner rather than fail.
+    """
+    results: list = []
+    barrier = threading.Barrier(4)
+
+    def _go():
+        barrier.wait()
+        try:
+            results.append(routing.ensure_shim(upstream.url, SPEC))
+        except Exception as exc:  # recorded, so a loser's failure is visible
+            results.append(exc)
+
+    threads = [threading.Thread(target=_go) for _ in range(4)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=60)
+
+    assert len(results) == 4
+    assert all(isinstance(r, str) for r in results), results
+    assert len(set(results)) == 1  # everyone got the same shim
+    assert len(routing.instances()) == 1
+
+
+@pytest.mark.slow_shim
 def test_a_changed_spec_gets_its_own_shim(upstream, shims):
     first = routing.ensure_shim(upstream.url, SPEC)
     second = routing.ensure_shim(upstream.url, {"order": ["together"]})
