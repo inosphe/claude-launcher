@@ -102,6 +102,16 @@ BOARD_SENDER = "beads"
 #: polls every 2 s; without this each open rail would fork ``br`` at that rate.
 CACHE_TTL = 2.0
 
+#: The most issues an edge read will ask ``br dep list`` about in one pass.
+#: The listing already says which issues have outgoing edges at all
+#: (``dependency_count``), so on an ordinary board this loop runs a handful of
+#: times or not once -- but ``br`` has no bulk edge dump and the per-board lock
+#: serialises these, so a board that wired everything to everything would spend
+#: the poll interval forking. Past the cap the hierarchy is drawn from the edges
+#: that were read and the rest of the board stays flat, which is the same shape
+#: a board with no edges draws; the page is never held up for it.
+DEPS_SCAN_LIMIT = 200
+
 #: A wind-down: how long the agent has to react to the block at all before it
 #: is treated as not listening, and the ceiling on the whole turn after that.
 REACT_WINDOW = 20.0
@@ -109,6 +119,25 @@ DEFAULT_GRACE = 120.0
 DEFAULT_TITLE_LIMIT = 100
 
 Runner = Callable[[List[str], str], Awaitable[Tuple[int, str, str]]]
+
+
+def _reads_only(args: Sequence[str]) -> bool:
+    """Whether this ``br`` argv only reads the board.
+
+    A write invalidates the cached listing; a read must not, or the dashboard's
+    own polling would throw away what it just paid for. ``dep`` is the verb that
+    is both -- ``dep list`` is how the hierarchy is read and ``dep add`` is how
+    it is written -- so it is settled on the subcommand rather than the verb.
+    """
+    verb = args[0]
+    if verb in ("list", "show", "search"):
+        return True
+    sub = args[1] if len(args) > 1 else ""
+    if verb == "comments":
+        return sub != "add"
+    if verb == "dep":
+        return sub in ("list", "tree", "cycles")
+    return False
 
 
 class BeadsUnavailable(cli_beads.BeadsError):
@@ -499,6 +528,11 @@ class Board:
         self._roots: Dict[str, Optional[Path]] = {}
         self._locks: Dict[str, asyncio.Lock] = {}
         self._cache: Dict[str, Tuple[float, List[dict]]] = {}
+        #: The dependency edges of a board, cached beside its listing and
+        #: dropped with it -- an edge read is derived from the listing it was
+        #: taken against, so keeping one past the other would draw a hierarchy
+        #: out of issues that are no longer there.
+        self._deps: Dict[str, Tuple[float, List[dict]]] = {}
         #: Sessions mid wind-down, by name: what was typed and when.
         self.winddowns: Dict[str, dict] = {}
         self._tasks: set = set()
@@ -584,10 +618,9 @@ class Board:
                     raise cli_beads.BeadsError(
                         f"br {' '.join(cmd[3:])[:80]} failed ({code}): {detail}"
                     )
-        if args and args[0] not in ("list", "show", "comments", "search"):
+        if args and not _reads_only(args):
             self._cache.pop(key, None)
-        elif args[0] == "comments" and len(args) > 1 and args[1] == "add":
-            self._cache.pop(key, None)
+            self._deps.pop(key, None)
         text = out.strip()
         if not text:
             return None
@@ -619,6 +652,71 @@ class Board:
         rows = [r for r in (rows or []) if isinstance(r, dict)]
         self._cache[key] = (now, rows)
         return rows
+
+    async def edges(self, root: Path, rows: Sequence[dict]) -> List[dict]:
+        """``root``'s dependency edges, as ``{from, to, type}`` — child first.
+
+        ``br`` has no bulk edge dump: ``list`` reports only how many an issue
+        has, and the graph command it does have covers open work alone, which
+        would drop a closed child out from under an open parent exactly where
+        the page wants to show it. So the edges are read one issue at a time --
+        but only for the issues the listing already says have any. Each edge is
+        stored on the depending side, so asking every issue with a non-zero
+        ``dependency_count`` sees every edge exactly once and asking the other
+        side would only see them twice.
+
+        Direction is ``br``'s own: ``br dep add <child> <parent> --type
+        parent-child`` makes the CHILD the depending issue, so ``from`` is the
+        child and ``to`` is the parent (measured against ``br epic status``,
+        which counts the depended-on issue as the one with children).
+
+        An issue whose edges cannot be read is skipped rather than failing the
+        board: a hierarchy is a nicety over a listing that is already useful,
+        and a page that showed nothing because one edge read broke would be
+        trading the whole board for the ornament.
+        """
+        key = str(root)
+        now = self._clock()
+        hit = self._deps.get(key)
+        if hit and now - hit[0] < CACHE_TTL:
+            return hit[1]
+        wanted = [
+            r.get("id") for r in rows
+            if r.get("id") and (r.get("dependency_count") or 0)
+        ]
+        if len(wanted) > DEPS_SCAN_LIMIT:
+            log.info(
+                "beads: %s has %d issues with dependencies, reading the first "
+                "%d", key, len(wanted), DEPS_SCAN_LIMIT,
+            )
+            wanted = wanted[:DEPS_SCAN_LIMIT]
+        out: List[dict] = []
+        for issue_id in wanted:
+            try:
+                data = await self.br(root, ["dep", "list", issue_id])
+            except cli_beads.BeadsError as exc:
+                log.debug("beads: no edges for %r: %s", issue_id, exc)
+                continue
+            if isinstance(data, dict):
+                data = data.get("dependencies") or data.get("edges") or []
+            for row in data or []:
+                if not isinstance(row, dict):
+                    continue
+                # `dep list` answers in two shapes across br versions: the
+                # stored edge (issue_id/depends_on_id) and the resolved target
+                # (the depended-on issue itself, under `id`). Both name the
+                # same edge; the asked-for issue is the depending side either
+                # way, which is what makes the second shape readable at all.
+                target = row.get("depends_on_id") or row.get("id")
+                if not target:
+                    continue
+                out.append({
+                    "from": row.get("issue_id") or issue_id,
+                    "to": target,
+                    "type": row.get("type") or row.get("dependency_type") or "",
+                })
+        self._deps[key] = (now, out)
+        return out
 
     async def show(self, root: Path, issue_id: str) -> dict:
         """One issue in full, with its comments."""
@@ -724,7 +822,10 @@ class Board:
                 by_root[str(root)] = []
                 order.append(root)
         for root in order:
-            entry: dict = {"root": str(root), "issues": [], "sessions": [], "error": None}
+            entry: dict = {
+                "root": str(root), "issues": [], "deps": [], "sessions": [],
+                "error": None,
+            }
             members = by_root[str(root)]
             entry["sessions"] = [
                 {"name": s.sdef.name, "status": s.status(), "issue": s.sdef.issue}
@@ -744,6 +845,14 @@ class Board:
                     )
             for raw in rows:
                 entry["issues"].append({**raw, "sessions": owners.get(raw.get("id"), [])})
+            # The edges the page nests the board by. Read after the issues and
+            # from them, so a board that could not be listed never reaches here
+            # -- there is nothing to hang a hierarchy on.
+            try:
+                entry["deps"] = await self.edges(root, rows)
+            except cli_beads.BeadsError as exc:
+                log.debug("beads: no edge read for %s: %s", root, exc)
+                entry["deps"] = []
             result["boards"].append(entry)
         return result
 

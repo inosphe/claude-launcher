@@ -10,6 +10,10 @@
    it, labelled by the session that wrote them -- the reader there is looking
    at a closed issue whose session is gone, so the session is the half of the
    row that is news.
+   And a sixth: the pane says where the issue sits in the family -- its parent
+   and its children, both taken from the board listing's edges, because `br
+   show` resolves what an issue depends on but nothing on that side names the
+   children, and the children are half of what a reader opens a parent to see.
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
 const fs = require("fs");
@@ -76,6 +80,8 @@ function setDetail(d) { beadsDetail = d; }
 function setFocus(f) { beadsFocus = f; }
 let sessBeadsBox = null;
 let sessionsCache = [];
+let beadsCache = null;
+function setBoards(b) { beadsCache = b; }
 const gone = [];
 function go(h) { gone.push(h); }
 async function api() { return { ok: true, json: async () => ({}) }; }
@@ -91,12 +97,13 @@ new Function(
   + slice("beadsFilterIssues") + slice("beadsSortIssues")
   + slice("beadsStatusBadge") + slice("beadsIssueRow")
   + slice("sessBeads") + slice("sessBeadsCreate")
-  + slice("sessReports") + slice("beadsDetailPane")
+  + slice("sessReports") + slice("beadsHierarchy")
+  + slice("beadsRelationBlock") + slice("beadsDetailPane")
   + `
 Object.assign(exports, {
   filter: beadsFilterIssues, sort: beadsSortIssues, row: beadsIssueRow,
   rail: sessBeads, reports: sessReports, pane: beadsDetailPane,
-  setDetail, setFocus, gone,
+  setDetail, setFocus, setBoards, gone,
 });`)(ctx, document, el);
 
 let failures = 0;
@@ -179,6 +186,65 @@ check("and how to cut it short", box.find("wf-warning")[0].text.includes("Kill a
 const open = box.find("wf-btn").find((b) => b.text === "Open board");
 open.handlers.click[0]();
 check("open board routes to the page", ctx.gone, ["#/beads"]);
+
+/* ---- the issue detail pane: where it sits in the family ---------------- */
+/* The edges are the board's, not the issue payload's -- `from` is the child,
+   which is the direction `br dep add <child> <parent>` stores. */
+const FAM = [
+  { id: "epic", title: "the epic", status: "open", priority: 1 },
+  { id: "kid", title: "the child", status: "in_progress", priority: 2 },
+  { id: "other", title: "unrelated", status: "open", priority: 3 },
+];
+const FAM_DEPS = [{ from: "kid", to: "epic", type: "parent-child" }];
+ctx.setBoards({ boards: [{ root: "/repo", issues: FAM, deps: FAM_DEPS }] });
+
+ctx.setFocus("epic");
+ctx.setDetail({ issue: { id: "epic", title: "the epic", comments: [] } });
+let fam = ctx.pane().find("beads-detail-rel")[0];
+check("a parent's pane lists the children the issue payload cannot name",
+      fam.find("beads-rel-link").map((a) => a.text), ["kid"]);
+check("the children are counted and linked",
+      [fam.find("beads-rel-label")[0].text, fam.find("beads-rel-link")[0].href],
+      ["children (1)", "#/beads/kid"]);
+
+ctx.setFocus("kid");
+ctx.setDetail({ issue: { id: "kid", title: "the child", comments: [] } });
+fam = ctx.pane().find("beads-detail-rel")[0];
+check("a child's pane names its parent, with the parent's own state",
+      [fam.find("beads-rel-label")[0].text, fam.find("beads-rel-link")[0].text,
+       fam.find("beads-status")[0].text], ["parent", "epic", "open"]);
+
+/* Most issues are related to nothing. The pane must not spend a box saying so,
+   and it must not break when the listing has not arrived yet -- the detail
+   fetch and the listing go out together, so on the very first draw of a
+   direct #/beads/<id> link there is no board to read. */
+ctx.setFocus("other");
+ctx.setDetail({ issue: { id: "other", title: "unrelated", comments: [] } });
+check("an issue with no family gets no family box",
+      ctx.pane().find("beads-detail-rel").length, 0);
+
+ctx.setBoards(null);
+ctx.setFocus("kid");
+ctx.setDetail({ issue: { id: "kid", title: "the child", comments: [] } });
+check("and neither does one whose board listing has not arrived yet",
+      ctx.pane().find("beads-detail-rel").length, 0);
+
+/* The family goes between the facts and the description, which keeps it clear
+   of the Reports block below -- that block is the only route to a report whose
+   session is gone, so nothing may be inserted on top of it. */
+ctx.setBoards({ boards: [{ root: "/repo", issues: FAM, deps: FAM_DEPS }] });
+// A report row of this block's own, so the ordering check does not reach
+// into the Reports block below for its fixture.
+ctx.setDetail({ issue: { id: "kid", title: "the child", description: "why",
+                         comments: [] },
+                reports: [{ file: "r.html", session: "s1", issue: "kid",
+                            at: "2026-08-26T05:13:22Z", size: 10,
+                            url: "/api/sessions/s1/reports/r.html" }] });
+const order = ctx.pane().kids.map((k) => [...k.classes][0] || k.tag);
+check("family, then description, then the rounds written up for it",
+      [order.indexOf("beads-detail-rel") < order.indexOf("beads-desc"),
+       order.indexOf("beads-desc") < order.indexOf("sess-reports")],
+      [true, true]);
 
 /* ---- the issue detail pane: the rounds written up for this issue -------- */
 ctx.setFocus("claunch-j31");

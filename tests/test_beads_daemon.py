@@ -45,14 +45,24 @@ BEARER = {"Authorization": "Bearer sekrit"}
 # a board in memory, answering br's argv
 # --------------------------------------------------------------------------- #
 class FakeBr:
-    """Enough of ``br`` for the daemon: list/show/comments/create/update/close,
-    keyed by the ``--db`` the daemon names, remembering every call."""
+    """Enough of ``br`` for the daemon: list/show/comments/dep/create/update/
+    close, keyed by the ``--db`` the daemon names, remembering every call."""
 
     def __init__(self):
         self.issues: dict = {}
         self.comments: dict = {}
+        #: edges by the DEPENDING issue, which is where ``br`` stores them
+        self.deps: dict = {}
         self.calls: list = []
         self._n = 0
+
+    def link(self, child: str, parent: str, kind: str = "parent-child") -> None:
+        """``br dep add <child> <parent> --type <kind>`` -- the child depends."""
+        self.deps.setdefault(child, []).append(
+            {"issue_id": child, "depends_on_id": parent, "type": kind})
+        self.issues[child]["dependency_count"] = len(self.deps[child])
+        self.issues[parent]["dependent_count"] = (
+            self.issues[parent].get("dependent_count", 0) + 1)
 
     def add(self, **kw) -> dict:
         iid = kw.pop("id", None)
@@ -70,6 +80,8 @@ class FakeBr:
             "labels": [],
             "updated_at": f"2026-08-25T00:00:{len(self.issues):02d}Z",
             "description": "",
+            "dependency_count": 0,
+            "dependent_count": 0,
         }
         issue.update(kw)
         self.issues[issue["id"]] = issue
@@ -95,6 +107,14 @@ class FakeBr:
         if cmd == "show":
             i = self.issues.get(rest[0])
             return (0, json.dumps([i]), "") if i else (1, "", f"no issue {rest[0]}")
+        if cmd == "dep":
+            if rest[0] == "list":
+                return 0, json.dumps(self.deps.get(rest[1], [])), ""
+            if rest[0] == "add":
+                kind = _opts(rest[3:]).get("--type", "blocks")
+                self.link(rest[1], rest[2], kind)
+                return 0, json.dumps({"ok": True}), ""
+            return 1, "", f"fake br has no dep {rest[0]}"
         if cmd == "comments":
             if rest[0] == "list":
                 return 0, json.dumps(self.comments.get(rest[1], [])), ""
@@ -644,6 +664,101 @@ def test_listings_are_cached_briefly_and_writes_invalidate(repo):
         await board.br(repo, ["create", "x"], actor="s1")
         await board.issues(repo)
         assert sum(1 for c in br.calls if "list" in c) == 3
+
+    asyncio.run(run())
+
+
+def test_edges_are_read_only_where_the_listing_says_there_are_any(repo):
+    """``br`` has no bulk edge dump, so the listing's counts are what keeps the
+    read bounded: an issue with no outgoing edge is never asked about."""
+    br = FakeBr()
+    br.add(id="epic")
+    br.add(id="kid")
+    br.add(id="lone")
+    br.link("kid", "epic")
+    board = _board(br, repo)
+
+    async def run():
+        rows = await board.issues(repo)
+        edges = await board.edges(repo, rows)
+        # child first: `br dep add <child> <parent>` stores the edge on the
+        # depending side, which is the child.
+        assert edges == [{"from": "kid", "to": "epic", "type": "parent-child"}]
+        asked = [c[c.index("list") + 1] for c in br.calls if "dep" in c]
+        assert asked == ["kid"], asked
+        # `epic` has a dependent, not a dependency -- asking it too would see
+        # the one edge twice.
+        assert "epic" not in asked and "lone" not in asked
+
+    asyncio.run(run())
+
+
+def test_reading_the_edges_does_not_throw_away_the_listing_it_came_from(repo):
+    """``dep list`` is a read. It shares the ``dep`` verb with ``dep add``,
+    which is a write -- so a rule written on the verb alone would have the
+    dashboard's own poll invalidating the listing it had just paid for."""
+    br = FakeBr()
+    br.add(id="epic")
+    br.add(id="kid")
+    br.link("kid", "epic")
+    board = _board(br, repo)
+
+    async def run():
+        rows = await board.issues(repo)
+        await board.edges(repo, rows)
+        await board.issues(repo)
+        assert sum(1 for c in br.calls if "list" in c and "dep" not in c) == 1
+        # ... and a real write still does invalidate both.
+        await board.br(repo, ["dep", "add", "kid", "epic"], actor="s1")
+        rows = await board.issues(repo)
+        assert sum(1 for c in br.calls if "list" in c and "dep" not in c) == 2
+
+    asyncio.run(run())
+
+
+def test_an_edge_read_that_fails_leaves_the_board_readable(repo):
+    """A hierarchy is an ornament over a listing that is already useful. One
+    unreadable issue must not cost the reader the whole board."""
+    br = FakeBr()
+    br.add(id="kid")
+    br.add(id="epic")
+    br.link("kid", "epic")
+
+    async def broken(argv, cwd):
+        if "dep" in argv:
+            return 1, "", "br dep list exploded"
+        return await br(argv, cwd)
+
+    board = beads_mod.Board(broken, root_for=lambda cwd: repo)
+
+    async def run():
+        rows = await board.issues(repo)
+        assert await board.edges(repo, rows) == []
+        view = await board.fleet_view([], extra_roots=[str(repo)])
+        board_entry = next(b for b in view["boards"] if b["root"] == str(repo))
+        assert board_entry["deps"] == []
+        assert {i["id"] for i in board_entry["issues"]} == {"kid", "epic"}
+
+    asyncio.run(run())
+
+
+def test_the_fleet_view_carries_the_edges_beside_the_issues(repo):
+    br = FakeBr()
+    br.add(id="epic")
+    br.add(id="kid")
+    br.link("kid", "epic")
+    br.link("kid", "epic", kind="blocks")   # a second edge on the same issue
+    board = _board(br, repo)
+
+    async def run():
+        view = await board.fleet_view([], extra_roots=[str(repo)])
+        entry = next(b for b in view["boards"] if b["root"] == str(repo))
+        assert entry["deps"] == [
+            {"from": "kid", "to": "epic", "type": "parent-child"},
+            {"from": "kid", "to": "epic", "type": "blocks"},
+        ]
+        # one `dep list` for the one issue that has any, however many it has
+        assert sum(1 for c in br.calls if "dep" in c) == 1
 
     asyncio.run(run())
 
