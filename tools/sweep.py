@@ -202,6 +202,20 @@ _COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|skipped|error|errors|xfailed|xpa
 #: unswept tree once (six issues closed citing a contaminated 1562), so the
 #: rule is that being wrong here must cost time, never correctness.
 #:
+#: **The bill for keeping it to one name is measured, not assumed.** Five
+#: other top-level entries are non-code in the same way the board is --
+#: ``docs/``, ``docs4users/``, ``README.md``, ``AGENTS.md``, ``.gitignore``
+#: -- and this history holds 15 commits that touched nothing but those,
+#: every one of which moves the digest and costs a sweep it did not need.
+#: (Against 21 that touched nothing but ``.beads/``, which is what this rung
+#: now reuses a receipt for. Count with ``git rev-list --no-merges``: a
+#: merge's combined diff can list only doc files, which inflates the first
+#: figure to 16.) Those 15 are the price of the paragraph above, paid on
+#: purpose, and the number is here so that whoever weighs an extension
+#: starts from it instead of from an impression. What argues against
+#: extending is not the size of that bill but the paragraph below: each
+#: added name widens a surface nothing guards.
+#:
 #: **What is prose here and what is enforced.** The pin in
 #: ``tests/test_sweep.py`` catches a name being *added*, and the cases around
 #: it catch the digest ceasing to discriminate. Neither catches the other
@@ -246,10 +260,19 @@ def code_tree(repo: Path, tree: str) -> str:
 
     The gate's question is "was the whole suite run over this content", and
     ``find_receipt_by_tree`` answers it exactly when two commits share a tree.
-    The board breaks that and nothing else does: ``improv-leader``'s sweep step
-    says to sweep, close the issues, then commit ``.beads/issues.jsonl`` --
-    so following the step moves master to a commit the receipt cannot name,
-    and the step's own ``verify`` is red *because* the step was obeyed. Five
+    Plenty of things break that: this tree has twelve top-level entries and
+    eleven of them move the digest, ``docs/`` and ``README.md`` included,
+    which the suite reads no more than it reads the board. The board is not
+    singled out for being harmless -- it is singled out because
+    ``improv-leader``'s sweep step *prescribes* committing it, and does so
+    after the sweep it also prescribes: sweep the tip, close the issues with
+    the numbers, ``git add .beads/issues.jsonl`` (that step commits no other
+    path -- ``improv-leader.yaml``, the ``sweep`` step), leave the step. So
+    master moves to a commit the receipt cannot name, and the step's own
+    ``verify`` is red *because* the step was obeyed. That, plus the
+    two-sided measurement in ``NON_CODE_ENTRIES``, is the whole case for
+    subtracting it; neither half reaches the other eleven, and a change
+    to any of them still costs a sweep, on purpose. Five
     rounds ran that way before it was written down, and the wasted re-sweeps
     came to about eighteen minutes; a second integrator committing the same
     file from another mesh made it worse than waste, because master moved

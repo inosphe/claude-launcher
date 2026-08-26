@@ -346,11 +346,13 @@ def test_the_board_commit_the_step_prescribes_does_not_undo_its_own_sweep(
 def test_a_commit_outside_the_board_still_demands_its_own_sweep(
     repo, receipts, capsys
 ):
-    """The negative control, and the only reason the exemption is safe.
+    """The negative control: being wrong here has to cost a sweep, not a verdict.
 
-    Being wrong here has to cost a sweep, never a verdict. A change to real
-    content after the receipt was written is the case the whole gate exists
-    for, and the board exemption must not reach it.
+    One of three things holding the exemption up, not the whole of it --
+    ``NON_CODE_ENTRIES`` lists the other two (the board is not a pytest
+    input; no test reads the repository's own copy). What this case pins is
+    the deny direction: a change to real content after the receipt was
+    written is what the gate exists for, and the exemption must not reach it.
     """
     assert _run(repo, receipts, "--command", GREEN) == 0
     (repo / "a.txt").write_text("two" + chr(10), encoding="utf-8")
