@@ -902,6 +902,28 @@ def _cmd_kill_session(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_keep_alive(args: argparse.Namespace) -> int:
+    """Set (or clear) a session's keep-alive flag.
+
+    The flag is the user-side half of the daemon's kill-on-end: a finished
+    one-shot run's driving session is recorded and ended automatically, and
+    this is how a session a user said "don't close me" to survives that —
+    the ending record is still written, the termination is skipped. Clear it
+    (``off``) when the context is no longer wanted: after that the session
+    may be ended like any other."""
+    client = daemon_client.ensure_running()
+    suffix = "?off=1" if getattr(args, "off", False) else ""
+    info = client.post(f"/api/sessions/{args.session}/keep-alive{suffix}")
+    flag = bool(info.get("keep_alive"))
+    print(
+        f"session {args.session!r} keep-alive "
+        + ("set" if flag else "cleared")
+        + " — a finished run records its ending but "
+        + ("leaves this session running" if flag else "terminates this session")
+    )
+    return 0
+
+
 def _cmd_resize(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     client.post(
@@ -1786,6 +1808,19 @@ def register(sub) -> None:
     p_kill.add_argument("--force", action="store_true", help="skip graceful terminate")
     p_kill.set_defaults(func=_cmd_kill_session_dispatch)
 
+    p_keep = sub.add_parser(
+        "keep-alive",
+        help="protect a session from the automatic end-of-run kill "
+             "(record is still written); 'off' lifts the protection",
+    )
+    p_keep.add_argument("-t", dest="session_t", help=argparse.SUPPRESS)
+    p_keep.add_argument("session", nargs="?")
+    p_keep.add_argument(
+        "off", nargs="?", choices=("off",),
+        help="clear the flag — the session may be ended at its run's close",
+    )
+    p_keep.set_defaults(func=_cmd_keep_alive_dispatch)
+
     p_clear = sub.add_parser(
         "clear-sessions",
         aliases=["clear"],
@@ -1928,3 +1963,9 @@ def _cmd_kill_session_dispatch(args: argparse.Namespace) -> int:
     if not _resolve_target(args):
         return 1
     return _cmd_kill_session(args)
+
+
+def _cmd_keep_alive_dispatch(args: argparse.Namespace) -> int:
+    if not _resolve_target(args):
+        return 1
+    return _cmd_keep_alive(args)

@@ -300,6 +300,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/parent", h_session_reparent)
     r.add_post("/api/sessions/{name}/kill", h_session_kill)
     r.add_delete("/api/sessions/{name}", h_session_delete)
+    r.add_post("/api/sessions/{name}/keep-alive", h_session_keep_alive)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
     r.add_post("/api/sessions/{name}/migrate", h_session_migrate)
     r.add_post("/api/sessions/{name}/reborrow", h_session_reborrow)
@@ -2888,6 +2889,23 @@ async def h_session_delete(request: web.Request) -> web.Response:
         return json_error(409, _mesh_holds_error(name, held))
     session = manager.remove(name)
     return web.json_response(session.info())
+
+
+async def h_session_keep_alive(request: web.Request) -> web.Response:
+    """Set (or, with ``?off=1``, clear) a session's keep-alive flag.
+
+    The flag is what the kill-on-end hook reads right beside its kill: a
+    session whose driving one-shot run finished is recorded and ended by the
+    daemon, and this is the one lever that says "record it, but do not end
+    it". The session itself sets it on a user's explicit "don't close me",
+    and the operator clears it when the context is no longer wanted. A plain
+    POST records the session's position; the reply echoes the full record.
+    """
+    manager: SessionManager = request.app["manager"]
+    name = request.match_info["name"]
+    on = request.query.get("off") not in ("1", "true")
+    session = manager.set_keep_alive(name, on)
+    return web.json_response({**session.info(), "keep_alive": bool(on)})
 
 
 async def _winding_down(request: web.Request, session, *, force: bool) -> bool:

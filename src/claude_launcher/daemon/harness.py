@@ -144,6 +144,13 @@ class SessionDef:
     #: request named or the issue the daemon minted from the task; carried on
     #: restores, restated by a re-briefing, and read by the exit sweep.
     issue: Optional[str] = None
+    #: Who may end this session when its driving cflow run finishes. When set,
+    #: the run-event clock still writes the durable ending record but skips
+    #: the termination — a user asked for this session's context to stay
+    #: (``claunch keep-alive <name>``), and an automatic kill would drop it
+    #: for the sake of a slot. Read live, right beside the kill, so a flag
+    #: set while the end-sequence waits still protects the session.
+    keep_alive: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -166,6 +173,7 @@ class SessionDef:
             "null_token": self.null_token,
             "task": self.task,
             "issue": self.issue,
+            "keep_alive": self.keep_alive,
         }
 
     @classmethod
@@ -190,6 +198,7 @@ class SessionDef:
             null_token=bool(data.get("null_token")),
             task=str(data.get("task") or "").strip() or None,
             issue=str(data.get("issue") or "").strip() or None,
+            keep_alive=bool(data.get("keep_alive")),
         )
 
 
