@@ -213,6 +213,22 @@
          (syncSplitPane), and the bar drags the ratio between the two. -->
     <div id="term-split" class="hidden"></div>
     <div id="term-wf" class="hidden"></div>
+    <!-- The one-line native input under the terminal. Everything the terminal's
+         own textarea is bad at — an IME composing a syllable, a phone's soft
+         keyboard, a pasted block — is what a web <input> IS for, so this is
+         the field the reader types a prompt into, and Enter hands the line to
+         the session through the same send-keys passthrough `claunch send-keys`
+         uses (POST /api/sessions/name/keys, keys=[text, "Enter"], in one
+         call). Hidden with the terminal; only live while one is attached. -->
+    <form id="term-input" class="hidden" autocomplete="off">
+      <input id="term-input-field" type="text"
+             placeholder="type for this session — Enter to send"
+             autocomplete="off" spellcheck="false"
+             aria-label="type text and send it to this session">
+      <span id="term-input-note" class="wf-note hidden"></span>
+      <button id="term-input-send" class="term-btn" type="submit"
+              title="send these keys to the session">⏎</button>
+    </form>
 
     <div id="home-view" class="hidden"></div>
 

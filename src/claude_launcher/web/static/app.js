@@ -3170,6 +3170,7 @@ function handleFrame(msg) {
     attachedPid = msg.pid || null;
     attachedBoot = msg.boot_id || null;
     setStatusBadge(msg.status);
+    refreshTermInput();
     flushInput(same);
     // Adopt the viewer's size once attached.
     refitSoon(50);
@@ -3200,6 +3201,7 @@ function handleFrame(msg) {
     updateScrollChip();
   } else if (msg.type === "state") {
     setStatusBadge(msg.status);
+    refreshTermInput();
   } else if (msg.type === "resize") {
     if (term.cols === msg.cols && term.rows === msg.rows) {
       // This viewer's own claim echoing back, or no news. Filtering on the
@@ -3240,8 +3242,106 @@ function handleFrame(msg) {
       `\r\n\x1b[90m[session exited (code ${msg.code})] ` +
       `- press "resume" above to relaunch it\x1b[0m\r\n`
     );
+    refreshTermInput();
   }
 }
+
+/* ---- the one-line send-keys input --------------------------------------
+   The native input under the terminal. The terminal's textarea is the xterm
+   composer — a thing the browser treats as a terminal, not as a place to
+   type — and an IME, a phone's soft keyboard or a pasted block all
+   misbehave there in exactly the ways they behave in a real <input>. So this
+   strip is where the reader types a prompt, and Enter hands the line to the
+   session through the same send-keys passthrough `claunch send-keys` uses:
+   POST /api/sessions/name/keys with keys=[text, "Enter"], in ONE call.
+
+   The text and its Enter are never two transmissions: splitting them on the
+   client is what re-spreads the submit/enter split across call sites, and
+   the split belongs to Session.send_keys — the one place that may fold and
+   un-fold it (split_submit, under the bracketed-paste marker). A test pins
+   this single-call shape (tests/web/sendinput_check.js). */
+
+function termInputBlock(ended) {
+  if (ended) return "this session has ended — nothing to send keys to";
+  return "";
+}
+
+function termInputNote(note, message, warn = false) {
+  note.classList.add(warn ? "wf-warning" : "wf-note");
+  note.classList.remove(warn ? "wf-note" : "wf-warning");
+  note.textContent = message;
+  note.title = message;
+  note.classList.remove("hidden");
+}
+
+async function sendKeyLine(field, btn, note) {
+  const text = field.value.trim();
+  if (!text || !currentName) return false;
+  const blocked = termInputBlock(sessionEnded);
+  if (blocked) {
+    termInputNote(note, blocked);
+    return false;
+  }
+  note.classList.add("hidden");
+  note.classList.remove("wf-warning");
+  const wasField = field.disabled, wasBtn = btn.disabled;
+  field.disabled = true;
+  btn.disabled = true;
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(currentName)}/keys`,
+      { method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ keys: [text, "Enter"] }) }
+    );
+    const doc = await resp.json().catch(() => ({}));
+    if (resp.ok) {
+      field.value = "";
+      return true;
+    }
+    termInputNote(note, doc.error || "the session refused these keys", true);
+    return false;
+  } catch {
+    termInputNote(note, "nothing was sent — the daemon is unreachable", true);
+    return false;
+  } finally {
+    field.disabled = wasField;
+    btn.disabled = wasBtn;
+  }
+}
+
+/* The field's live-ness follows the session it types to. An ended session has
+   no PTY any send-keys could reach, so the box is closed with the reason
+   shown; a live one is open, and whatever this tab's badge says the daemon
+   answers for. */
+function refreshTermInput() {
+  const field = $("term-input-field");
+  const note = $("term-input-note");
+  const btn = $("term-input-send");
+  if (!field || !btn) return;
+  const blocked = termInputBlock(sessionEnded);
+  field.disabled = !!blocked;
+  btn.disabled = !!blocked;
+  if (blocked) {
+    termInputNote(note, blocked);
+  } else {
+    note.classList.add("hidden");
+    note.textContent = "";
+    note.title = "";
+  }
+}
+
+function onTermInputSubmit(ev) {
+  ev.preventDefault();
+  sendKeyLine($("term-input-field"), $("term-input-send"), $("term-input-note"));
+}
+
+// Wired at load, like every other listener this page mounts — guarded like
+// every OTHER element access the whole-block harnesses (reconnect/wheel) boot
+// without: those eval this block against a stub DOM that only carries what the
+// block under test touches, and #term-input is not one of them.
+if ($("term-input"))
+  $("term-input").addEventListener("submit", onTermInputSubmit);
 
 /* ---- typing marks ----
    Keystrokes that reach the daemon as bytes mark its keyboard busy on
@@ -4487,6 +4587,12 @@ function freshAttach(name) {
 function attach(name) {
   stopWfPoll();
   stopMeshPoll();
+  // The send-keys input belongs to the session it is attached to: switching
+  // sessions must not hand one session's half-typed line to the next. Guarded
+  // (like #term-input below) for the whole-block harnesses that boot this
+  // function without the input's element in their stub DOM.
+  const termInputField = $("term-input-field");
+  if (termInputField) termInputField.value = "";
   // The common hop: this session has been up before, so bring its parked
   // terminal back instead of building a new one — no socket, no repaint.
   if (name !== currentName) {
@@ -5138,6 +5244,13 @@ function showView(name) {
   // detach() own that object's life.
   $("term-header").classList.toggle("hidden", !(showTerm && currentName));
   $("terminal").classList.toggle("hidden", !showTerm);
+  // The send-keys input belongs to an attached session: hidden with the
+  // terminal, and only up when one is attached. Guarded like the terminal
+  // itself is not — the element always exists in the shipped page, but a
+  // harness that boots this function against a partial DOM has no reason to
+  // know about it.
+  if ($("term-input"))
+    $("term-input").classList.toggle("hidden", !(showTerm && currentName));
   // The transcript is its own page now (VIEWS below hides and shows it like
   // any other), so nothing here has to reach for it. The terminal button that
   // walks to it lives in the header, which the line above already handles.

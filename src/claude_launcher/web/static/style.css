@@ -803,6 +803,33 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    still hangs over the edge must clip, not become a scrollbar. */
 #terminal { flex: 1; padding: 6px; min-height: 0; overflow: hidden; }
 #terminal .xterm { height: 100%; }
+/* The one-line native input under the terminal. Real browser input where the
+   xterm composer is a terminal — an IME, a phone's soft keyboard and a pasted
+   block behave here the way the browser makes them behave, and Enter hands
+   the line to the session via the send-keys passthrough. A strip like the
+   queued deliveries' (same background and rule), pinned to the column's
+   bottom as its last flex child. */
+#term-input {
+  flex: none; display: flex; align-items: center; gap: 8px; min-width: 0;
+  padding: 8px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
+}
+#term-input-field {
+  flex: 1; min-width: 0; padding: 5px 10px; font-size: 13px; line-height: 1.5;
+  color: #d8dbe0; background: #14161a; border: 1px solid #30363d;
+  border-radius: 5px;
+}
+#term-input-field:focus { outline: none; border-color: #1f6feb; }
+#term-input-field:disabled { opacity: 0.5; cursor: not-allowed; }
+#term-input-send:disabled { opacity: 0.5; cursor: not-allowed; }
+/* The send outcome, between the field and the button: a refusal or a dead
+   daemon in the warning's amber, an informational reason in the note's grey.
+   One line, truncated, so a long hold message can never shove the column
+   open. */
+#term-input-note {
+  flex: none; max-width: 40%; margin: 0; line-height: 1.4;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  font-size: 12px;
+}
 /* xterm's viewport is the session's scrollback. Keep a flick that runs off
    its end there rather than chaining out to the document. */
 #terminal .xterm-viewport {
@@ -2198,7 +2225,8 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   .bulk { padding: 12px 16px; font-size: 13px; flex: 1 1 40%; }
   /* iOS zooms the page on any input below 16px, and a zoomed page scrolls */
   #new-session input, #new-session select,
-  #new-mesh input, #new-mesh select, .auth-box input { font-size: 16px; }
+  #new-mesh input, #new-mesh select, .auth-box input,
+  #term-input-field { font-size: 16px; }
   #new-session label { font-size: 13px; margin-bottom: 10px; }
   #new-session button, #new-mesh button { padding: 10px 16px; font-size: 15px; }
 
