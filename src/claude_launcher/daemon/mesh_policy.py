@@ -17,6 +17,13 @@ member's terminal and when that member last *sent*:
   (idle+caught-up, or undeliverable-behind): a real mesh message to every
   member whose role is a ``stall_watch`` role in the mesh's vocabulary
   (the leader by default), so it also crosses machines over federation.
+* **backpressure** — the odd one out: not a nudge at all, but the gate that
+  keeps the three above (and every member's traffic) from arriving faster
+  than a terminal can read. A recipient whose undelivered backlog has hit
+  ``inbox_max`` stops ACCEPTING mail — the send is refused at the door and
+  the sender is told to retry — and ``min_gap`` paces how often a backlog
+  may be typed into one terminal at all. See :func:`default_policy` and
+  ``MeshManager._send_core`` / ``_deliver_to``, which are the two ends of it.
 
 interconnect's fourth tier — tmux send-keys escalation — has no port: every
 delivery here *is* an injection, so there is nothing to escalate to.
@@ -85,6 +92,26 @@ def default_policy() -> dict:
             "enabled": False,
             "warn_secs": 600.0,
         },
+        # ON by default, unlike the three nudges above, and for the opposite
+        # reason: those SPEND a recipient's turn, so switching one on is a
+        # deliberate choice; this one is the only thing that stops a fan-in
+        # of a dozen children from spending the leader's turns for it. A
+        # mesh that wants the old unbounded queue turns it off here.
+        "backpressure": {
+            "enabled": True,
+            # Undelivered messages a member may have waiting before it stops
+            # accepting new ones. Four is already more than one turn can act
+            # on; 0 disables the door and restores unbounded queueing.
+            "inbox_max": 4,
+            # Least time between two deliveries INTO one terminal. Delivery
+            # already coalesces a burst into one block (``settle``); this is
+            # what makes the burst after that one wait, so it coalesces too.
+            # 0 disables pacing.
+            "min_gap": 15.0,
+            # What a refused sender is told to wait. Advisory — nothing
+            # enforces it — so it is a number an agent can act on, not a lock.
+            "retry_after": 90.0,
+        },
     }
 
 
@@ -100,6 +127,27 @@ def _num(value, lo=_MIN_SECS, hi=_MAX_SECS) -> float:
     if not (lo <= f <= hi):
         raise PolicyError(f"{f} out of range [{lo}, {hi}]")
     return f
+
+
+def _count(value, hi=1000) -> int:
+    """A whole non-negative count (queue depths), 0 meaning "no limit".
+
+    Separate from :func:`_num` because a depth is not a duration: 2.5
+    messages is not a thing, and silently truncating it would let a typo
+    become a cap nobody chose.
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        raise PolicyError(f"not a whole number: {value!r}")
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        raise PolicyError(f"not a whole number: {value!r}") from None
+    if f != int(f):
+        raise PolicyError(f"not a whole number: {value!r}")
+    n = int(f)
+    if not (0 <= n <= hi):
+        raise PolicyError(f"{n} out of range [0, {hi}]")
+    return n
 
 
 def merge_policy(base: dict, patch: dict) -> dict:
@@ -124,6 +172,10 @@ def merge_policy(base: dict, patch: dict) -> dict:
             elif key in ("interval", "max_interval"):
                 out[section][key] = _num(value)
             elif key == "warn_secs":
+                out[section][key] = _num(value, lo=0.0)  # 0 disables
+            elif key == "inbox_max":
+                out[section][key] = _count(value)
+            elif key in ("min_gap", "retry_after"):
                 out[section][key] = _num(value, lo=0.0)  # 0 disables
             elif key == "roles":
                 if not isinstance(value, list) or not all(

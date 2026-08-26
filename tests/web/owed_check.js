@@ -15,7 +15,7 @@ const src = fs.readFileSync(
 );
 
 const a = src.indexOf("function fmtAge(secs) {");
-const b = src.indexOf("/* Nudge-policy editor");
+const b = src.indexOf("/* Delivery-policy editor");
 if (a < 0 || b <= a) throw new Error("cannot locate the unanswered section");
 const code = src.slice(a, b);
 

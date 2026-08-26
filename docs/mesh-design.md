@@ -815,10 +815,10 @@ can run them bare inside its own session. Mesh and session commands print a
 relay status trailer (`relay: connected as work-pc` / `relay: not configured`
 / `relay: disconnected`).
 
-## Nudge policies (phase 3)
+## Delivery policies (phase 3)
 
-interconnect's proxy-TUI policy set, daemon-resident and per-mesh, edited on
-the web (mesh view → "Nudge policy"), via
+Three nudges and one gate, daemon-resident and per-mesh, edited on
+the web (mesh view → "Delivery policy"), via
 `GET/PUT /api/mesh/{mesh}/policy`, or `claunch mesh policy <mesh>
 [--set section.key=value]`. The observable member state here is the session
 idle tracker plus mesh activity (last delivery into the member vs. the
@@ -847,6 +847,41 @@ delivery already is an injection, so there is nothing to escalate to. All
 three policies default **off**: unlike a socket append, a nudge consumes the
 recipient agent's turn, so enabling is a deliberate choice. Config persists
 in `mesh.json` (`policy`); timers are in-memory and restart with the daemon.
+
+**Backpressure** is the fourth section and the odd one out — not a nudge, but
+the gate that bounds what the three above (and every member's traffic) can
+hand a terminal. A fan-in of a dozen children at one leader had nothing
+holding it: every `send` was accepted, the backlog only grew, and `busy_hold`
+guaranteed that after a minute the daemon typed into the running turn anyway,
+so twelve reports cost twelve interruptions and each sender was told `sent`.
+
+- **the door** — a recipient whose undelivered backlog has reached
+  `inbox_max` (default 4) stops *accepting*. The send is **refused, not
+  queued**, and the sender is told so synchronously: refused for every
+  recipient is `429` with `Retry-After` (`MeshBusy`; the CLI and MCP surface
+  its sentence), refused for some is an ordinary send naming them in
+  `deferred`. A partial refusal also narrows the address it stores — the log
+  keeps the *address* and delivery re-derives recipients from it, so a `"*"`
+  left intact would reach the refused member on the next tick and make the
+  bounce a lie.
+- **pacing** — at most one block typed into one terminal per `min_gap`
+  (default 15s). Last of the automatic delivery gates, so it still binds
+  after `busy_hold` has given up; the wait costs nothing, because arrivals
+  in the meantime join the next block instead of interrupting separately.
+
+Two carve-outs: an **external** send is the human at the dashboard (not the
+fan-in this bounds, and they already have "deliver now"), and a send that
+arrived over the wire carrying an id has already been accepted somewhere —
+refusing it would lose it rather than un-send it.
+
+Unlike the nudges this ships **on**: those *spend* a recipient's turn, so
+switching one on is a choice; this is the only thing that stops a fan-in from
+spending them for it. `inbox_max: 0` or `enabled: false` restores the old
+unbounded queue. A refusal leaves no message anywhere — not in the log, not
+in a queue — so it is counted on the recipient instead, and that count is
+what the terminal header's delivery chip and the session panel's
+**Mesh backpressure** box read: past the cap the backlog *stops growing*,
+which looks exactly like calm on every other field.
 
 ## Unanswered mail
 

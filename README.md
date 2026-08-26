@@ -2124,7 +2124,7 @@ workflow).
   each worker's and the mid's own are the user's — while landing a child on
   the mid's own branch is the mid's call, as master is the lead's.
 
-### Nudge policies (heartbeat · task-poll · stall warnings)
+### Delivery policies (heartbeat · task-poll · stall warnings · backpressure)
 
 Per-mesh policies evaluated roughly **once a second** — on the mesh's
 **primary daemon only** (a mirror's engine is a guarded no-op; its policy
@@ -2157,14 +2157,49 @@ delivery at 10:00, member stays silent → nudges at 10:03, 10:09, 10:21, …
 converging to one per `max_interval`; the first `claunch mesh send` from the
 member ends the series.
 
-All three are **off by default**: unlike interconnect's socket appends, every
-nudge is a terminal injection that consumes the recipient agent's turn, so
-enabling is a deliberate choice. Timers are in-memory (they restart with the
+All three nudges are **off by default**: unlike interconnect's socket appends,
+every nudge is a terminal injection that consumes the recipient agent's turn,
+so enabling is a deliberate choice. Timers are in-memory (they restart with the
 daemon); only the config persists, in `mesh.json`. There is no escalation
 tier by design — delivery already *is* the escalation. Edit in the web mesh
-view ("Nudge policy"), via
+view ("Delivery policy"), via
 `claunch mesh policy <mesh> --set heartbeat.enabled=true ...`, or
 `PUT /api/mesh/{mesh}/policy`.
+
+**Backpressure** is the fourth section and the odd one out — not a nudge, but
+the gate that bounds what the three above (and every member's traffic) can
+hand a terminal. A fan-in of a dozen children at one leader had nothing
+holding it: every `send` was accepted, the backlog only grew, and `busy_hold`
+guaranteed that after a minute the daemon typed into the running turn anyway,
+so twelve reports cost twelve interruptions and each sender was told `sent`.
+
+- **the door** — a recipient whose undelivered backlog has reached
+  `inbox_max` (default 4) stops *accepting*. The send is **refused, not
+  queued**, and the sender is told so synchronously: refused for every
+  recipient is `429` with `Retry-After` (`MeshBusy`; the CLI and MCP surface
+  its sentence), refused for some is an ordinary send naming them in
+  `deferred`. A partial refusal also narrows the address it stores — the log
+  keeps the *address* and delivery re-derives recipients from it, so a `"*"`
+  left intact would reach the refused member on the next tick and make the
+  bounce a lie.
+- **pacing** — at most one block typed into one terminal per `min_gap`
+  (default 15s). Last of the automatic delivery gates, so it still binds
+  after `busy_hold` has given up; the wait costs nothing, because arrivals
+  in the meantime join the next block instead of interrupting separately.
+
+Two carve-outs: an **external** send is the human at the dashboard (not the
+fan-in this bounds, and they already have "deliver now"), and a send that
+arrived over the wire carrying an id has already been accepted somewhere —
+refusing it would lose it rather than un-send it.
+
+Unlike the nudges this ships **on**: those *spend* a recipient's turn, so
+switching one on is a choice; this is the only thing that stops a fan-in from
+spending them for it. `inbox_max: 0` or `enabled: false` restores the old
+unbounded queue. A refusal leaves no message anywhere — not in the log, not
+in a queue — so it is counted on the recipient instead, and that count is
+what the terminal header's delivery chip and the session panel's
+**Mesh backpressure** box read: past the cap the backlog *stops growing*,
+which looks exactly like calm on every other field.
 
 The web mesh view's **Unanswered** box lists the same debt per message, and
 lets an operator act on a row without waiting for a timer: **nudge** sends the
@@ -2389,7 +2424,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/mesh/{mesh}/owed`        | unanswered mail per member: who was asked what, and how long ago |
 | POST   | `/api/mesh/{mesh}/members/{handle}/nudge` | ask that member about it now (`{body?}` overrides the heartbeat's wording) |
 | DELETE | `/api/mesh/{mesh}/members/{handle}/owed[/{id}]` | dismiss its unanswered mail — one message, or all of it |
-| GET/PUT | `/api/mesh/{mesh}/policy`     | read / edit the mesh's nudge policy (heartbeat, task-poll, stall warnings) |
+| GET/PUT | `/api/mesh/{mesh}/policy`     | read / edit the mesh's delivery policy (heartbeat, task-poll, stall warnings, backpressure) |
 | GET/PUT | `/api/mesh/{mesh}/roles`      | read / upload the mesh's role set (`{yaml}` or `{roles}`; either null resets to the packaged vocabulary) |
 | POST   | `/api/mesh/{mesh}/invite`      | mint a single-use ticket pre-approving one join |
 | GET/DELETE | `/api/mesh/{mesh}/invites[/{prefix}]` | list / revoke outstanding tickets |
