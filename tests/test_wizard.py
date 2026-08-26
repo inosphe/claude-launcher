@@ -1850,6 +1850,9 @@ def test_the_three_answers_travel_as_the_flags_the_command_takes():
     args = argparse.Namespace()
     wiz.apply(args)
     assert args.issue == "cl-2" and args.no_issue is False
+    # and the closing line says it is a JOIN, on this form too — the form
+    # vanishes with the alternate screen, so this is the only trace left
+    assert "issue cl-2" in wiz.summary() and "held by lead" in wiz.summary()
     assert "issue cl-2" in wiz.summary()
     assert "held by lead" in wiz.summary()
 

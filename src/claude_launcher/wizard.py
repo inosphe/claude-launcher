@@ -632,7 +632,7 @@ def sync_issues(form: "Form", cwd: str, *, parent: str = "") -> None:
     if issue.hidden:
         return
     key = (cwd, parent)
-    if getattr(form, "_issues_for", None) != key:
+    if form._issues_for != key:
         form._issues_for = key
         chosen = issue.value
         rows = form.sources.issues(cwd, parent) or []
@@ -1393,6 +1393,7 @@ class Wizard(Form):
         self._workflow_auto: str = ""
         self._members_for: Optional[str] = None
         self._worktrees_for: Optional[str] = None
+        self._issues_for: Optional[tuple] = None
 
         harness = ChoiceField(
             key="harness", label="Harness",
@@ -1893,6 +1894,7 @@ class SpawnWizard(Form):
         self._workflows_for: Optional[tuple] = None
         self._workflow_auto: str = ""
         self._worktrees_for: Optional[tuple] = None
+        self._issues_for: Optional[tuple] = None
         # Fixed once, not per render: a name that ticked over between the
         # picker showing it and Create sending it would cut a worktree under
         # a name nobody read.
@@ -2538,6 +2540,7 @@ class SpawnWizard(Form):
             "no mesh" if mesh == self.NO_MESH
             else "mesh " + (mesh or self._mesh_now() or "(a new one for the pair)")
         )
+        parts.append(_issue_summary(self))
         return "spawning: " + ", ".join(parts)
 
 # --------------------------------------------------------------------------- #
