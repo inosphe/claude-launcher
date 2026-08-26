@@ -160,7 +160,12 @@ def is_report(path: Path) -> bool:
 
 
 def entry(session: str, path: Path) -> dict:
-    """One row of the index, as the API serves it."""
+    """One row of the index, as the API serves it.
+
+    The session rides in the row even though :func:`listing` was asked for one
+    session and knows it already: :func:`for_issue` returns rows from several
+    at once, and a row that cannot say who wrote it is not usable there.
+    """
     meta = parse(path.name) or {"at": None, "issue": None}
     try:
         size = path.stat().st_size
@@ -168,6 +173,7 @@ def entry(session: str, path: Path) -> dict:
         size = 0
     return {
         "file": path.name,
+        "session": session,
         "at": meta["at"],
         "issue": meta["issue"],
         "size": size,
@@ -197,6 +203,69 @@ def listing(session: str) -> List[dict]:
 def latest(session: str) -> Optional[dict]:
     rows = listing(session)
     return rows[0] if rows else None
+
+
+def sessions_with_reports() -> List[str]:
+    """Every session name that has a report directory, sorted.
+
+    Reads directory names only. The daemon's session registry is *not* the
+    source here on purpose: a report outlives the session that wrote it, and
+    ``clear-sessions`` drops the record while leaving the directory — asking
+    the registry would make exactly the reports that most need finding
+    invisible.
+    """
+    try:
+        root = paths.reports_root()
+        if not root.is_dir():
+            return []
+        return sorted(
+            d.name for d in root.iterdir()
+            if d.is_dir() and SESSION_RE.match(d.name)
+        )
+    except OSError:
+        return []
+
+
+def for_issue(issue: str) -> List[dict]:
+    """Every report written for one issue, across all sessions, newest first.
+
+    :func:`listing` answers the session rail's question — "what did this
+    session leave?". The board asks the other one: an issue is closed, and a
+    person wants the write-up. By then the session that wrote it may be gone
+    from every registry, so the issue is the only thing left to key on.
+
+    No index has to be maintained for that, for the same reason as the rest of
+    this module: the issue is *in the filename*. The scan reads directory and
+    file names, and only opens a file (:func:`is_report`, which reads its
+    head) for one whose name already matched — so the cost is one listdir per
+    session plus a read per actual hit, never a read per file.
+
+    An empty ``issue`` is an empty list rather than the ``no-issue`` reports:
+    a caller with no id in hand is asking a question it has not formed, and
+    handing back every unattributed round would read as an answer.
+    """
+    if not (issue or "").strip():
+        return []
+    slug = issue_slug(issue)
+    rows: List[dict] = []
+    for session in sessions_with_reports():
+        base = paths.session_reports(session)
+        try:
+            names = list(base.iterdir())
+        except OSError:
+            continue
+        for path in names:
+            m = FILENAME_RE.match(path.name)
+            if not m or m.group(2) != slug:
+                continue
+            if not is_report(path):
+                continue
+            rows.append(entry(session, path))
+    # The stamp leads the filename and sorts lexically, so name-descending is
+    # newest-first; the session breaks ties between two rounds stamped in the
+    # same second, which is only reachable when two sessions wrote at once.
+    rows.sort(key=lambda r: (r["file"], r["session"]), reverse=True)
+    return rows
 
 
 def names_in(session: str) -> List[str]:

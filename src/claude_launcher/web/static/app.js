@@ -7029,6 +7029,12 @@ function beadsDetailPane() {
   pane.appendChild(meta);
   if (i.description) pane.appendChild(el("pre", "beads-desc", i.description));
   if (i.close_reason) pane.appendChild(el("p", "wf-note", "closed: " + i.close_reason));
+  // The rounds that were written up for this issue. Keyed by issue across
+  // every session, so a closed issue whose session ended long ago still hands
+  // its write-up back — that reader is the whole point of keeping the pages
+  // outside sessions/<name>/ in the first place.
+  const reports = beadsDetail.reports || [];
+  if (reports.length) pane.appendChild(sessReports(reports, { by: "session" }));
   const comments = i.comments || [];
   pane.appendChild(el("h4", null, `Comments (${comments.length})`));
   for (const c of comments) {
@@ -7126,12 +7132,18 @@ function sessBeads(data) {
    issue), and serves each one sandboxed, so these are ordinary links — the
    dashboard's cookie authenticates them and a new tab is the right place for
    a page that was written to be read on its own. */
-function sessReports(reports) {
+function sessReports(reports, opts = {}) {
+  // Same rows in both places; only the label differs. On a session's page the
+  // reports all share a session, so the issue is what tells them apart — on an
+  // issue's page they all share the issue, so the session does. The label is
+  // whichever half is not already the heading of the page you are on.
+  const bySession = opts.by === "session";
   const box = el("div", "sess-reports");
   box.appendChild(el("h3", null, `Reports (${reports.length})`));
   for (const r of reports) {
     const row = el("div", "sess-report");
-    const a = el("a", "sess-report-link", r.issue || "round report");
+    const a = el("a", "sess-report-link",
+      (bySession ? r.session : r.issue) || "round report");
     a.href = r.url;
     a.target = "_blank";
     a.rel = "noopener";

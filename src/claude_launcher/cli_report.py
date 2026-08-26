@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from . import reports
+from .daemon import paths
 
 
 def _run_scope() -> str:
@@ -78,18 +79,49 @@ def _cmd_save(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_rows(rows: List[dict]) -> None:
+    for row in rows:
+        issue = row["issue"] or "-"
+        print(
+            f"{row['at']}  {row['session']:<10}  {issue:<16}  "
+            f"{row['size']:>7}B  {row['path']}"
+        )
+
+
 def _cmd_ls(args: argparse.Namespace) -> int:
+    """What is on disk: one session's reports, or one issue's across all of them.
+
+    ``--issue`` deliberately does *not* resolve a session first. It is the
+    lookup a person makes when the session is the part they no longer have —
+    a closed issue, its round finished days ago, the pane long gone — so
+    requiring ``$CLAUNCH_SESSION`` or ``--session`` would refuse exactly the
+    question it exists to answer.
+    """
+    if args.issue and not getattr(args, "session", None):
+        rows = reports.for_issue(args.issue)
+        if args.json:
+            print(json.dumps({"issue": args.issue, "reports": rows}, indent=2))
+            return 0
+        if not rows:
+            print(f"no report for issue {args.issue} in {paths.reports_root()}")
+            return 0
+        _print_rows(rows)
+        return 0
+
     session = _session(args)
     rows = reports.listing(session)
+    if args.issue:
+        want = reports.issue_slug(args.issue)
+        rows = [r for r in rows if reports.issue_slug(r["issue"]) == want]
     if args.json:
         print(json.dumps({"session": session, "reports": rows}, indent=2))
         return 0
     if not rows:
-        print(f"{session}: no report yet ({reports.dir_for(session)})")
+        where = reports.dir_for(session)
+        forr = f" for issue {args.issue}" if args.issue else ""
+        print(f"{session}: no report yet{forr} ({where})")
         return 0
-    for row in rows:
-        issue = row["issue"] or "-"
-        print(f"{row['at']}  {issue:<16}  {row['size']:>7}B  {row['path']}")
+    _print_rows(rows)
     return 0
 
 
@@ -202,7 +234,17 @@ def register(sub) -> None:
     p_save.add_argument("--new", action="store_true", help="do not reuse an existing file")
     p_save.set_defaults(report_func=_cmd_save)
 
-    p_ls = rsub.add_parser("ls", aliases=["list"], help="list a session's reports")
+    p_ls = rsub.add_parser(
+        "ls", aliases=["list"],
+        help="list a session's reports, or an issue's across every session",
+        description=(
+            "With no --issue, this session's reports. With --issue and no "
+            "--session, every session's report for that issue — the lookup for "
+            "a closed issue whose session is gone. With both, one session's "
+            "reports narrowed to that issue."
+        ),
+    )
+    p_ls.add_argument("--issue", help="board issue id to look up")
     p_ls.add_argument("--json", action="store_true", help="machine-readable output")
     p_ls.set_defaults(report_func=_cmd_ls)
 
