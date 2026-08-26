@@ -240,12 +240,14 @@
              which mesh it answers in, what role it holds, which run it drives
              — and those rows are the ones that leave an agent stranded if
              they are wrong: a session booted into no mesh cannot be told to
-             join one afterwards without a restart. What it runs on (harness,
-             profile, login, directory, args) is a machine detail that is
-             right by default nearly every time, so it folds away below —
-             reachable, editable, but not in the way. The opening task closes
-             the form on its own, under everything that shapes who receives
-             it. -->
+             join one afterwards without a restart. Whose credentials it runs
+             on — the profile, and the harness that follows from it — is the
+             other row with that property, so it sits with them rather than
+             in the fold. What is left below (login overrides, directory,
+             resume, args) is machine detail that is right by default nearly
+             every time, so it folds away — reachable, editable, but not in
+             the way. The opening task closes the form on its own, under
+             everything that shapes who receives it. -->
         <!-- Naming a parent turns this form into `claunch spawn`: the child
              inherits what decides how it runs, and which of those rows it may
              still be asked is the spawn policy's call, per parent — the form
@@ -268,6 +270,35 @@
           <span id="new-over-text"></span>
         </label>
         <label>Name <input name="name" placeholder="(auto)"></label>
+
+        <!-- WHO it runs as, on the face of the form rather than in the fold
+             below. The profile is not a machine detail: it decides whose
+             token, whose config and whose skills the agent boots with, and a
+             session created on the wrong one does not report the mistake any
+             more than one created in the wrong checkout does — it just runs,
+             quietly, on somebody else's credentials. It rode on the fold's
+             summary line before, but as a bare word among other bare words
+             ("claude · nc · launcher"), which is not something anyone can
+             check at a glance. The spawn modal has always asked it as a
+             top-level row; this is the create form catching up.
+             The harness beside it is read-only — a projection of the picked
+             profile (syncProfileHarness), shown because it is the part of
+             the pick with a consequence the name alone does not carry. -->
+        <fieldset id="new-runs-on">
+          <legend>Runs as</legend>
+          <div id="new-runs-on-pair">
+            <label>Profile <select name="profile"></select></label>
+            <label>Harness <select name="harness" disabled
+              title="Read-only: configured on the selected profile"></select></label>
+          </div>
+          <!-- What the profile row cannot say by itself. Three rows still in
+               the fold change what this pick MEANS — --borrow runs it on
+               another profile's token, --null on none at all, and a profile
+               whose harness is not installed here will not boot — and each
+               is exactly the mistake promoting the row was meant to stop.
+               Silent unless one of them applies (renderProfileHint). -->
+          <p id="profile-hint" class="hidden"></p>
+        </fieldset>
 
         <!-- What the session is FOR. Decided here because arranging them
              afterwards leaves an agent sitting at a prompt not knowing
@@ -292,12 +323,15 @@
              (renderRuntimeSummary), because the directory a session is
              created in is not a thing anyone should have to open a fold to
              find out: an agent started in the wrong checkout does not report
-             the mistake, it just works on the wrong tree. -->
+             the mistake, it just works on the wrong tree. The profile and
+             its harness once sat here for the same reason and were promoted
+             out (RUNTIME_PROMOTED) when the summary line proved too thin a
+             place to check a credential; the summary no longer repeats them,
+             since a line naming a row the reader can see is at best noise
+             and at worst a contradiction. -->
         <details id="new-runtime">
           <summary>How it runs <span id="new-runtime-sum"></span></summary>
           <div id="new-runtime-body">
-            <label>Harness <select name="harness" disabled title="Read-only: configured on the selected profile"></select></label>
-            <label>Profile <select name="profile"></select></label>
             <label>Borrow <select name="borrow"></select></label>
             <label class="check">
               <input type="checkbox" name="null_token">

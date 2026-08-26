@@ -15,10 +15,13 @@
    - The order itself. A reorder done by moving blocks of HTML is exactly the
      edit that drops a row on the floor, so the named controls are checked as
      a list, not a set.
-   - What the fold contains. It must be EXACTLY the rows a child inherits
-     (SPAWN_INHERITS, sliced from app.js): the fold's summary speaks for the
-     parent when a parent is named, and that is a lie the moment the fold
-     holds a row that does not in fact travel.
+   - What the fold contains. The rows a child inherits (SPAWN_INHERITS,
+     sliced from app.js) are split in two: the ones on the face of the form
+     (RUNTIME_PROMOTED — the profile and the harness it selects) and the ones
+     still folded away. The fold must hold EXACTLY the remainder. Too much
+     and its summary speaks for a row that does not in fact travel; too
+     little and a row went missing in the move. A row that appears in both
+     halves was copied rather than promoted, and the two copies drift.
    - That every field the submit handler reads is still on the form. `f.args`
      on a form with no args row is `undefined`, and the failure surfaces as a
      TypeError at Create time — after the user has filled the form in.
@@ -29,7 +32,14 @@
      created in the wrong checkout does not report the mistake — the summary
      line is the only part that stays visible. On a child it may only speak
      for the rows the spawn policy left OPEN: a greyed row still holds
-     whatever the form was last showing, which is not what gets created.
+     whatever the form was last showing, which is not what gets created. It
+     must also stay OFF the promoted rows: those carry their own labelled
+     controls now, and a second rendering of the same value is a
+     contradiction waiting to happen.
+   - renderProfileHint, because promoting the Profile row answers "which
+     profile" and leaves "on whose token" in the fold. --borrow, --null and a
+     harness this machine has not installed each make the promoted row's
+     answer incomplete in a way that boots and then fails.
    - syncRuntimeFold, because a row the policy hands back is a decision the
      operator cannot see is theirs while it is folded away. It opens the fold
      for that and never shuts it — and, since syncSpawnMode runs on the
@@ -79,15 +89,19 @@ function ids(text) {
   return [...text.matchAll(/\bid="([\w-]+)"/g)].map((m) => m[1]);
 }
 
-/* The reading order: who it is, what it joins, how it runs (folded), what
-   it is told first. */
+const runsOn = block('<fieldset id="new-runs-on">', "</fieldset>", form.start);
+
+/* The reading order: who it is, whose credentials it holds, what it joins,
+   how it runs (folded), what it is told first. */
 check("the form's controls read in the new order", named(form.text), [
   // who it is
   "parent", "fork_parent", "over_limit", "name",
+  // whose credentials it holds — promoted out of the fold
+  "profile", "harness",
   // what it joins, and what it drives
   "mesh", "handle", "role", "workflow", "context",
   // how it runs — folded
-  "harness", "profile", "borrow", "null_token", "cwd", "resume", "fork", "args",
+  "borrow", "null_token", "cwd", "resume", "fork", "args",
   // what it is told first
   "task",
   // where that job is written down — three radios sharing one name, then
@@ -96,8 +110,21 @@ check("the form's controls read in the new order", named(form.text), [
 ]);
 
 check("the arrangement is asked before the machinery",
-      named(form.text).indexOf("mesh") < named(form.text).indexOf("harness"),
+      named(form.text).indexOf("mesh") < named(form.text).indexOf("borrow"),
       true);
+/* The whole point of the promotion: it is readable without opening anything.
+   A profile row that drifted back below the fold's summary is the bug this
+   pins. */
+check("the profile is asked above the fold, not inside it",
+      [form.text.indexOf("new-runs-on") < form.text.indexOf("new-runtime"),
+       named(fold.text).includes("profile")],
+      [true, false]);
+check("...with the pick first and its read-only projection beside it",
+      named(runsOn.text), ["profile", "harness"]);
+check("the harness stays read-only wherever it is shown",
+      /name="harness"[^>]*\sdisabled[\s>]/s.test(runsOn.text), true);
+check("the credential hint travels with the profile it qualifies",
+      ids(runsOn.text).includes("profile-hint"), true);
 check("the opening task is the last thing asked before the board",
       named(form.text).filter((n) => n !== "beads" && n !== "issue").slice(-1),
       ["task"]);
@@ -144,8 +171,18 @@ function sliceConst(name) {
 }
 const INHERITS = new Function(
   `${sliceConst("SPAWN_INHERITS")}; return SPAWN_INHERITS;`)();
-check("the fold holds exactly the rows a child inherits",
-      named(fold.text).slice().sort(), INHERITS.slice().sort());
+const PROMOTED = new Function(
+  `${sliceConst("RUNTIME_PROMOTED")}; return RUNTIME_PROMOTED;`)();
+/* The partition, both ways round: nothing inherited went missing in the
+   move, and nothing was copied into both halves. */
+check("the fold plus the promoted rows are exactly what a child inherits",
+      [...named(fold.text), ...PROMOTED].sort(), INHERITS.slice().sort());
+check("nothing promoted is still in the fold",
+      PROMOTED.filter((k) => named(fold.text).includes(k)), []);
+check("...and everything promoted is genuinely inherited",
+      PROMOTED.filter((k) => !INHERITS.includes(k)), []);
+check("the promoted rows are the ones the markup hoisted",
+      PROMOTED.slice().sort(), named(runsOn.text).slice().sort());
 
 /* ---- every field Create reads is still on the form ---- */
 function sliceFrom(marker) {
@@ -285,26 +322,32 @@ new Function("exports", "$", "spawnParent", "PICKER",
 
 /* Before the workspace list arrives the directory row holds nothing, and a
    line that filled the gap with "(daemon cwd)" would be naming a directory
-   the form has not in fact settled on. */
+   the form has not in fact settled on. With the profile promoted out there
+   is then nothing folded to report at all, and a bare "—" is a label
+   pointing at nothing. */
 f.cwd.options = [];
 f.cwd.selectedIndex = -1;
 ctx.render();
 check("an unfilled directory row is left unsaid, not guessed at",
-      sumBox.textContent, "— claude");
+      sumBox.textContent, "");
 
 f.cwd.options = [{ text: "(daemon cwd)" }];
 f.cwd.selectedIndex = 0;
 ctx.render();
 check("the default says what it would create",
-      sumBox.textContent, "— claude · (daemon cwd)");
+      sumBox.textContent, "— (daemon cwd)");
 
+/* The promoted rows have labelled controls of their own now. Repeating them
+   here would put the same value on screen twice, written by two different
+   code paths — which is how the two come to disagree. */
 f.profile.value = "nc";
+f.harness.value = "claude";
 f.cwd.options = [{ text: "(daemon cwd)" },
                  { text: "launcher — F:/works/claude-launcher" }];
 f.cwd.selectedIndex = 1;
 ctx.render();
-check("a chosen profile and workspace ride on the fold's face",
-      sumBox.textContent, "— claude · nc · launcher");
+check("the promoted profile and harness are not repeated on the fold's face",
+      sumBox.textContent, "— launcher");
 
 f.borrow.value = "work";
 f.null_token.checked = true;
@@ -313,7 +356,7 @@ f.resume.value = "@picker";
 ctx.render();
 check("the rest is named only once it is set",
       sumBox.textContent,
-      "— claude · nc · launcher · borrow work · --null · resume (picker) · +args");
+      "— launcher · borrow work · --null · resume (picker) · +args");
 
 f.resume.value = "lead";
 ctx.render();
@@ -326,8 +369,8 @@ check("a named conversation is named",
 parentSession = { name: "lead" };
 for (const k of INHERITS) if (f[k]) f[k].disabled = true;
 ctx.render();
-check("a fully locked child shows the inherited profile harness",
-      sumBox.textContent, "— lead's setup · claude");
+check("a fully locked child names its parent and nothing else",
+      sumBox.textContent, "— inherited from lead");
 
 /* A child whose policy hands two rows back. Those two speak; the rest stay
    the parent's and stay unnamed — which rows are shut is the parent hint's
@@ -335,23 +378,23 @@ check("a fully locked child shows the inherited profile harness",
 f.profile.disabled = false;
 f.cwd.disabled = false;
 ctx.render();
-check("only open rows plus read-only harness speak for a child",
-      sumBox.textContent, "— lead's setup · claude · nc · launcher");
+check("only the open FOLDED rows speak for a child",
+      sumBox.textContent, "— lead's setup · launcher");
 
-/* Unlocking the harness adds it; the still-locked borrow/--null/args do not
-   come back with it. */
+/* Unlocking a promoted row changes nothing here — it is read off the face of
+   the form, where the operator can see it is theirs. */
 f.harness.disabled = false;
 ctx.render();
-check("an unlocked harness joins them, a locked borrow does not",
-      sumBox.textContent, "— lead's setup · claude · nc · launcher");
+check("unlocking a promoted row does not put it back on this line",
+      sumBox.textContent, "— lead's setup · launcher");
 
 /* Back to a session of its own: every row speaks again, disables and all —
    the create form's own greying (a non-claude harness) is not the policy's. */
 parentSession = null;
 ctx.render();
-check("with no parent every row speaks again",
+check("with no parent every folded row speaks again",
       sumBox.textContent,
-      "— claude · nc · launcher · borrow work · --null · resume lead · +args");
+      "— launcher · borrow work · --null · resume lead · +args");
 
 /* Served against a page that predates the fold (a daemon serving older
    assets), the summary has nowhere to go — and must not take the form
@@ -389,10 +432,11 @@ const foldBox = { open: false };
 const g = {};
 for (const k of INHERITS) g[k] = { disabled: true };
 const foldCtx = {};
-new Function("exports", "$", "SPAWN_INHERITS",
+new Function("exports", "$", "SPAWN_INHERITS", "RUNTIME_PROMOTED",
   "let runtimeFoldOpenedFor = null;\n" + sliceFrom("function syncRuntimeFold(") +
   "\nexports.sync = syncRuntimeFold;\n")(
-  foldCtx, (id) => (id === "new-runtime" ? foldBox : null), INHERITS);
+  foldCtx, (id) => (id === "new-runtime" ? foldBox : null), INHERITS,
+  PROMOTED);
 
 foldCtx.sync(g, null);
 check("a session of its own never opens the fold", foldBox.open, false);
@@ -401,9 +445,17 @@ foldCtx.sync(g, { name: "lead" });
 check("a child whose policy opens nothing leaves the fold shut",
       foldBox.open, false);
 
+/* A promoted row is not the fold's business: it is already on screen and
+   already labelled, so handing it back is not news the fold has to break
+   open for — and doing so would show the operator a set of rows that stayed
+   the parent's. */
 g.profile.disabled = false;
 foldCtx.sync(g, { name: "lead" });
-check("a row the policy handed back opens the fold", foldBox.open, true);
+check("unlocking a promoted row does not spring the fold", foldBox.open, false);
+
+g.borrow.disabled = false;
+foldCtx.sync(g, { name: "lead" });
+check("a FOLDED row the policy handed back opens the fold", foldBox.open, true);
 
 /* The operator shuts it. The poll comes round again with the same parent and
    the same unlocks — and must leave it shut. */
@@ -438,12 +490,107 @@ check("returning to a parent opens it again", foldBox.open, true);
 
 /* A page that predates the fold has no element to open. */
 const bareFold = {};
-new Function("exports", "$", "SPAWN_INHERITS",
+new Function("exports", "$", "SPAWN_INHERITS", "RUNTIME_PROMOTED",
   "let runtimeFoldOpenedFor = null;\n" + sliceFrom("function syncRuntimeFold(") +
-  "\nexports.sync = syncRuntimeFold;\n")(bareFold, () => null, INHERITS);
+  "\nexports.sync = syncRuntimeFold;\n")(
+  bareFold, () => null, INHERITS, PROMOTED);
 let foldThrew = false;
 try { bareFold.sync(g, { name: "lead" }); } catch { foldThrew = true; }
 check("no fold element is a no-op, not a crash", foldThrew, false);
+
+/* ---- renderProfileHint ---- */
+/* Promoting the Profile row answers "which profile" and leaves "on whose
+   token" in the fold. This line is what closes that gap, so each of the
+   three cases is pinned — and so is its silence, because a hint that is
+   always up is a hint nobody reads on the one launch where it matters. */
+const hintBox = { textContent: "", classes: new Set(["hidden"]),
+                  classList: null };
+hintBox.classList = {
+  toggle: (name, on) => { if (on) hintBox.classes.add(name);
+                          else hintBox.classes.delete(name); },
+};
+const h = {
+  profile: ctl("nc"), borrow: ctl(""), null_token: ctl(""),
+};
+const details = {};
+let hintParent = null;
+const hintCtx = {};
+new Function("exports", "$", "spawnParent", "profileDetails",
+  sliceFrom("function renderProfileHint()") +
+  "\nexports.hint = renderProfileHint;\n")(
+  hintCtx,
+  (id) => (id === "profile-hint" ? hintBox : id === "new-session" ? h : null),
+  () => hintParent, details);
+
+const shown = () => (hintBox.classes.has("hidden") ? "" : hintBox.textContent);
+
+hintCtx.hint();
+check("an ordinary profile says nothing at all", shown(), "");
+
+/* The harness a profile selects is not installed here: the read-only row
+   beside it prints the program's name, which reads like everything is fine
+   right up to the session failing to boot. */
+details.nc = { name: "nc", harness: "claude", harness_available: false };
+hintCtx.hint();
+check("a harness this machine lacks is said out loud",
+      /not installed on this machine/.test(shown()), true);
+
+details.nc.harness_available = true;
+hintCtx.hint();
+check("...and stops being said once it is there", shown(), "");
+
+/* --borrow and --null are the two rows that make the promoted answer
+   incomplete: the profile named is real, the credential is somebody else's
+   or nobody's. */
+h.borrow.value = "work";
+hintCtx.hint();
+check("borrowing names both halves — whose token, whose config",
+      [/work's token/.test(shown()), /stay nc's/.test(shown())],
+      [true, true]);
+
+h.null_token.checked = true;
+hintCtx.hint();
+check("--null outranks borrow, which the daemon refuses together",
+      /no token at all/.test(shown()), true);
+
+h.null_token.checked = false;
+h.borrow.value = "";
+hintCtx.hint();
+check("clearing them clears the line", shown(), "");
+
+/* On a child, a row the spawn policy locked is the parent's — the same rule
+   the summary line follows. Reporting a greyed borrow here would tell the
+   operator a credential arrangement nobody chose. */
+hintParent = { name: "lead" };
+h.borrow.value = "work";
+h.borrow.disabled = true;
+hintCtx.hint();
+check("a locked row on a child says nothing", shown(), "");
+
+h.borrow.disabled = false;
+hintCtx.hint();
+check("...and speaks again once the policy hands it back",
+      /work's token/.test(shown()), true);
+
+/* A profile error the daemon reported (lineage.LineageError, api.py) beats
+   the harness line: it is the reason the harness is unknown. */
+h.borrow.value = "";
+hintParent = null;
+details.nc = { name: "nc", harness: "?", harness_available: false,
+               error: "profile nc: broken lineage" };
+hintCtx.hint();
+check("a broken profile reports its own error, not a guess at the harness",
+      shown(), "nc: profile nc: broken lineage");
+
+/* Served against a page that predates the row, like every other rule here. */
+const bareHint = {};
+new Function("exports", "$", "spawnParent", "profileDetails",
+  sliceFrom("function renderProfileHint()") +
+  "\nexports.hint = renderProfileHint;\n")(
+  bareHint, () => null, () => null, {});
+let hintThrew = false;
+try { bareHint.hint(); } catch { hintThrew = true; }
+check("no hint element is a no-op, not a crash", hintThrew, false);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

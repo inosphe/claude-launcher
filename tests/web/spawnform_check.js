@@ -124,7 +124,7 @@ new Function(
   "exports", "$", "document", "Option", "sessionsCache", "syncForkAvailability",
   "renderRoleStance", "refreshWorkflowChoices", "spawnReport", "workspacesCache",
   "profileDetails",
-  "syncRuntimeFold", "renderRuntimeSummary",
+  "syncRuntimeFold", "renderRuntimeSummary", "renderProfileHint",
   [sliceConst("SPAWN_INHERITS"), sliceLet("newSpawnReport"),
    sliceLet("newSpawnReportFor"), sliceLet("newSpawnDefaultsFor"),
    // The picker's signature guard against the two-second poll, which lives
@@ -158,8 +158,9 @@ exports.setSessions = (s) => { sessionsCache = s; };
    // The "How it runs" fold opens itself when the policy hands a row back.
    // That rule reads the fold element, which this stub page does not have,
    // and it is newform_check's to hold — here it only has to exist. The
-   // summary line the fold carries is the same story.
-   () => {}, () => {});
+   // summary line the fold carries, and the credential hint under the
+   // promoted Profile row, are the same story.
+   () => {}, () => {}, () => {});
 
 let failures = 0;
 function check(what, got, want) {
