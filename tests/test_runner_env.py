@@ -457,6 +457,32 @@ def test_pi_can_borrow_a_base_profiles_token_without_borrowing_its_env(home):
     assert env["PI_CODING_AGENT_DIR"] == str(runtime.config_dir / "pi")
 
 
+def test_runner_enforces_profile_provider_harness_policy_on_direct_calls(home):
+    p = profile.create("work")
+    credentials.save_token(p, "secret")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {
+                "claude-only": {
+                    "env": {},
+                    "allowed_harnesses": ["claude"],
+                },
+                "pi-only": {
+                    "env": {},
+                    "allowed_harnesses": ["pi"],
+                },
+            }
+        )
+    )
+
+    with pytest.raises(runner.RunnerError, match="provider 'pi-only'"):
+        runner.child_env(p, with_token=True, provider_override="pi-only")
+
+    store.set_profile_field(p.name, "provider", "claude-only")
+    with pytest.raises(runner.RunnerError, match="provider 'claude-only'"):
+        runner.harness_child_env(p, harnesses.get("pi"), base_env={})
+
+
 @pytest.mark.parametrize(
     "name,key_name,home_name",
     [

@@ -1610,10 +1610,30 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             )
             pi_profile = profile.create("pi-profile")
             lineage.set_harness(pi_profile, "pi")
+            restricted = profile.create("restricted")
+            store.update(
+                lambda doc: (
+                    doc.setdefault("providers", {}).update(
+                        {
+                            "claude-only": {
+                                "env": {},
+                                "allowed_harnesses": ["claude"],
+                            }
+                        }
+                    ),
+                    doc["profiles"][restricted.name].update(
+                        {
+                            "provider": "claude-only",
+                            "allowed_harnesses": ["claude", "pi"],
+                        }
+                    ),
+                )
+            )
             resp = await client.get("/api/profiles", headers=bearer)
+            profile_doc = await resp.json()
             details = {
                 item["name"]: item
-                for item in (await resp.json())["profile_details"]
+                for item in profile_doc["profile_details"]
             }
             assert details["pi-profile"]["harness"] == "pi"
             assert details["pi-profile"]["harness_available"] is False
@@ -1622,11 +1642,14 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             assert details["pi-profile:claude"]["harness"] == "claude"
             assert details["pi-profile:claude"]["borrow_mode"] == "provider-token"
             assert details["pi-profile:pi"]["harness"] == "pi"
-            resp = await client.get("/api/profiles", headers=bearer)
-            profile_doc = await resp.json()
-            assert profile_doc["profiles"] == ["pi-profile"]
+            assert details["restricted:claude"]["harness_allowed"] is True
+            assert details["restricted:pi"]["harness_allowed"] is False
+            assert "provider 'claude-only'" in details["restricted:pi"]["harness_policy"]["reason"]
+            assert profile_doc["profiles"] == ["pi-profile", "restricted"]
             assert "pi-profile:claude" in profile_doc["profile_selectors"]
             assert "pi-profile:pi" in profile_doc["profile_selectors"]
+            assert "restricted:claude" in profile_doc["profile_selectors"]
+            assert "restricted:pi" not in profile_doc["profile_selectors"]
             resp = await client.get("/api/harnesses", headers=bearer)
             assert resp.status == 200
             by_name = {h["name"]: h for h in (await resp.json())["harnesses"]}

@@ -8,6 +8,7 @@ of truth, see :mod:`store`), which the launcher reads live at launch:
 
     providers:
       fireworks-glm5p2:
+        allowed_harnesses: [claude]
         env:
           ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference"
           ANTHROPIC_MODEL: "accounts/fireworks/models/glm-5p2"
@@ -32,7 +33,7 @@ from __future__ import annotations
 
 from typing import Dict, Optional, Tuple
 
-from . import lineage, store
+from . import lineage, profile as profile_mod, store
 from .profile import Profile
 
 #: The built-in "no override" provider — plain Anthropic, launcher injects token.
@@ -69,8 +70,8 @@ def provider_env(name: str, doc: Optional[dict] = None) -> Dict[str, str]:
     return dict(reg[name])
 
 
-def _require_known(name: str) -> str:
-    if name != DEFAULT_PROVIDER and name not in registry():
+def _require_known(name: str, doc: Optional[dict] = None) -> str:
+    if name != DEFAULT_PROVIDER and name not in registry(doc):
         raise ProviderError(f"unknown provider {name!r} (see 'claunch providers')")
     return name
 
@@ -97,7 +98,7 @@ def resolve_with_source(
 ) -> Tuple[str, str]:
     """Effective provider plus a human-readable note on where it came from."""
     doc = store.load() if doc is None else doc
-    for p in reversed(lineage.chain(profile)):  # self first, then up to the root
+    for p in reversed(lineage.chain(profile, doc)):  # self first, then root
         sel = _profile_selection(p.name, doc)
         if sel:
             if p.name == profile.name:
@@ -120,20 +121,22 @@ def effective_env(profile: Profile) -> Dict[str, str]:
 # --------------------------------------------------------------------------- #
 def set_active(name: str) -> None:
     """Set the global provider. ``default`` resets it (there is no higher level)."""
-    _require_known(name)
-
-    def _mutate(doc: dict) -> None:
-        if name == DEFAULT_PROVIDER:
-            doc.pop("provider", None)
-        else:
-            doc["provider"] = name
-
-    store.update(_mutate)
+    doc = store.load()
+    _require_known(name, doc)
+    if name == DEFAULT_PROVIDER:
+        doc.pop("provider", None)
+    else:
+        doc["provider"] = name
+    _validate_profiles(doc, "global provider change")
+    store.save(doc)
 
 
 def clear_active() -> None:
     """Remove the global provider selection (back to the built-in default)."""
-    store.update(lambda doc: doc.pop("provider", None))
+    doc = store.load()
+    doc.pop("provider", None)
+    _validate_profiles(doc, "clearing the global provider")
+    store.save(doc)
 
 
 def set_profile_selection(profile: Profile, name: str) -> None:
@@ -144,10 +147,51 @@ def set_profile_selection(profile: Profile, name: str) -> None:
     provider. To instead drop the override and inherit, use
     :func:`clear_profile_selection`.
     """
-    _require_known(name)
-    store.set_profile_field(profile.name, "provider", name)
+    doc = store.load()
+    _require_known(name, doc)
+    _profile_entry(doc, profile.name)["provider"] = name
+    _validate_profile(profile, doc, f"provider {name!r}")
+    store.save(doc)
 
 
 def clear_profile_selection(profile: Profile) -> None:
     """Remove ``profile``'s provider override so it inherits global/default."""
-    store.set_profile_field(profile.name, "provider", None)
+    doc = store.load()
+    _profile_entry(doc, profile.name).pop("provider", None)
+    _validate_profile(profile, doc, "clearing its provider")
+    store.save(doc)
+
+
+def _profile_entry(doc: dict, name: str) -> dict:
+    section = doc.get("profiles")
+    if not isinstance(section, dict):
+        section = {}
+        doc["profiles"] = section
+    entry = section.get(name)
+    if not isinstance(entry, dict):
+        entry = {}
+        section[name] = entry
+    return entry
+
+
+def _validate_profile(profile: Profile, doc: dict, action: str) -> None:
+    try:
+        lineage.effective_harness(profile, doc)
+    except lineage.LineageError as exc:
+        raise ProviderError(
+            f"cannot apply {action} to profile {profile.name!r}: {exc}"
+        ) from exc
+
+
+def _validate_profiles(doc: dict, action: str) -> None:
+    failures = []
+    for profile in profile_mod.list_all():
+        try:
+            lineage.effective_harness(profile, doc)
+        except lineage.LineageError as exc:
+            failures.append(f"{profile.name}: {exc}")
+    if failures:
+        raise ProviderError(
+            f"cannot apply {action}; it would deny active harnesses: "
+            + "; ".join(failures)
+        )

@@ -21,8 +21,8 @@ from typing import Dict, List, Optional, Tuple
 
 from aiohttp import web
 
-from .. import __version__, borrowing, harnesses as harness_registry
-from .. import lineage, profile as profile_mod, quickjob, reports as reports_mod
+from .. import __version__, borrowing, harness_policy, harnesses as harness_registry
+from .. import lineage, profile as profile_mod, providers, quickjob, reports as reports_mod
 from .. import spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import beads as beads_mod
@@ -503,6 +503,7 @@ async def h_profiles(request: web.Request) -> web.Response:
         try:
             name = lineage.effective_harness(p, doc)
             borrow_cap = borrowing.capability(registry.get(name))
+            policy_doc = harness_policy.evaluate(p, name, doc=doc).to_dict()
             items.append(
                 {
                     "name": p.name,
@@ -511,6 +512,8 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "harness_available": available.get(name, False),
                     "borrow_allowed": borrow_cap["allowed"],
                     "borrow_mode": borrow_cap["mode"],
+                    "harness_allowed": True,
+                    "harness_policy": policy_doc,
                     "explicit": False,
                 }
             )
@@ -521,6 +524,7 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "profile": p.name,
                     "harness": "?",
                     "harness_available": False,
+                    "harness_allowed": False,
                     "explicit": False,
                     "error": str(exc),
                 }
@@ -528,15 +532,36 @@ async def h_profiles(request: web.Request) -> web.Response:
         for harness_name in harness_names:
             selector = f"{p.name}:{harness_name}"
             borrow_cap = borrowing.capability(registry.get(harness_name))
-            selectors.append(selector)
+            try:
+                policy = harness_policy.evaluate(
+                    p, harness_name, doc=doc
+                )
+                policy_doc = policy.to_dict()
+            except (
+                harness_policy.HarnessPolicyError,
+                lineage.LineageError,
+                providers.ProviderError,
+            ) as exc:
+                policy = None
+                policy_doc = {
+                    "allowed": False,
+                    "profile": p.name,
+                    "harness": harness_name,
+                    "reason": str(exc),
+                }
+            allowed = bool(policy and policy.allowed)
+            if allowed:
+                selectors.append(selector)
             items.append(
                 {
                     "name": selector,
                     "profile": p.name,
                     "harness": harness_name,
                     "harness_available": available.get(harness_name, False),
-                    "borrow_allowed": borrow_cap["allowed"],
+                    "borrow_allowed": allowed and borrow_cap["allowed"],
                     "borrow_mode": borrow_cap["mode"],
+                    "harness_allowed": allowed,
+                    "harness_policy": policy_doc,
                     "explicit": True,
                 }
             )

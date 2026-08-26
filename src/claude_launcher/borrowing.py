@@ -18,7 +18,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
-from . import credentials, harnesses, lineage, profile as profile_mod, providers
+from . import (
+    credentials,
+    harness_policy,
+    harnesses,
+    lineage,
+    profile as profile_mod,
+    providers,
+)
 from .profile import Profile
 
 
@@ -167,6 +174,37 @@ def validate(
             lender=str(lender_value or "").strip() or None,
         )
 
+    try:
+        runtime_policy = harness_policy.evaluate(
+            runtime_profile,
+            harness_name,
+            provider_override=provider_override,
+        )
+    except (
+        harness_policy.HarnessPolicyError,
+        lineage.LineageError,
+        providers.ProviderError,
+    ) as exc:
+        return BorrowValidation(
+            False,
+            False,
+            "invalid-harness-policy",
+            str(exc),
+            harness_name,
+            cap["mode"],
+            lender=str(lender_value or "").strip() or None,
+        )
+    if not runtime_policy.allowed:
+        return BorrowValidation(
+            False,
+            False,
+            "harness-policy-denied",
+            runtime_policy.reason,
+            harness_name,
+            cap["mode"],
+            lender=str(lender_value or "").strip() or None,
+        )
+
     lender, status, message = _base_lender(lender_value)
     if lender is None:
         return BorrowValidation(
@@ -178,6 +216,37 @@ def validate(
             cap["mode"],
             lender=str(lender_value or "").strip() or None,
             token_env=entry.token_env if entry else None,
+        )
+
+    try:
+        lender_policy = harness_policy.evaluate(
+            lender,
+            harness_name,
+            provider_override=provider_override,
+        )
+    except (
+        harness_policy.HarnessPolicyError,
+        lineage.LineageError,
+        providers.ProviderError,
+    ) as exc:
+        return BorrowValidation(
+            False,
+            False,
+            "invalid-harness-policy",
+            str(exc),
+            harness_name,
+            cap["mode"],
+            lender=lender.name,
+        )
+    if not lender_policy.allowed:
+        return BorrowValidation(
+            False,
+            False,
+            "harness-policy-denied",
+            lender_policy.reason,
+            harness_name,
+            cap["mode"],
+            lender=lender.name,
         )
 
     try:

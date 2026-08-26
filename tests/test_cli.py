@@ -144,6 +144,19 @@ def test_profile_harness_is_created_inherited_pinned_and_cleared(home, capsys):
     assert "harness" not in store.profile_entry("child")
 
 
+def test_create_refuses_parent_denied_harness_before_making_profile(home, capsys):
+    parent = profile.create("account")
+    store.set_profile_field(parent.name, "allowed_harnesses", ["pi"])
+    capsys.readouterr()
+
+    assert run(
+        "create", "blocked", "--no-seed", "--parent", "account",
+        "--harness", "claude",
+    ) == 1
+    assert "allows only" in capsys.readouterr().err
+    assert not profile.resolve("blocked").config_dir.exists()
+
+
 def test_set_token_is_shared_and_pi_declares_its_projection(home, capsys):
     run("create", "pi-work", "--no-seed", "--harness", "pi")
     capsys.readouterr()
@@ -366,6 +379,23 @@ def test_set_provider_and_list(home, capsys):
     assert run("providers") == 0
     out = capsys.readouterr().out
     assert "default" in out
+
+
+def test_provider_list_shows_allowed_harnesses_including_explicit_none(home, capsys):
+    doc = store.load()
+    doc.setdefault("providers", {}).update(
+        {
+            "claude-only": {"env": {}, "allowed_harnesses": ["claude"]},
+            "disabled": {"env": {}, "allowed_harnesses": []},
+        }
+    )
+    store.save(doc)
+    capsys.readouterr()
+
+    assert run("providers") == 0
+    out = capsys.readouterr().out
+    assert "claude-only  [harnesses: claude]" in out
+    assert "disabled  [harnesses: (none)]" in out
 
 
 def test_set_provider_pin_and_clear(home, capsys):

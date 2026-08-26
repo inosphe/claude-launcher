@@ -295,16 +295,11 @@
              ("claude · nc · launcher"), which is not something anyone can
              check at a glance. The spawn modal has always asked it as a
              top-level row; this is the create form catching up.
-             The harness beside it is read-only — a projection of the picked
-             profile (syncProfileHarness), shown because it is the part of
-             the pick with a consequence the name alone does not carry. -->
+             Every option is already spelled PROFILE:HARNESS, so there is no
+             second read-only Harness row to repeat half of the answer. -->
         <fieldset id="new-runs-on">
           <legend>Runs as</legend>
-          <div id="new-runs-on-pair">
-            <label>Profile <select name="profile"></select></label>
-            <label>Harness <select name="harness" disabled
-              title="Read-only: configured on the selected profile"></select></label>
-          </div>
+          <label>Profile : Harness <select name="profile"></select></label>
           <!-- What the profile row cannot say by itself. Three rows still in
                the fold change what this pick MEANS — --borrow runs it on
                another profile's token, --null on none at all, and a profile

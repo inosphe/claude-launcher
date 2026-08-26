@@ -13,7 +13,16 @@ import sys
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from . import borrowing, config, credentials, harnesses, lineage, providers, routing
+from . import (
+    borrowing,
+    config,
+    credentials,
+    harness_policy,
+    harnesses,
+    lineage,
+    providers,
+    routing,
+)
 from .profile import Profile
 
 #: Environment variable Claude Code reads for a setup-token login.
@@ -107,6 +116,22 @@ def child_env(
     harness = harnesses.get(harnesses.CLAUDE_HARNESS)
     if harness is None:
         raise RunnerError("the claude harness is not declared")
+    try:
+        if borrow is not None:
+            borrow, _report = borrowing.require_allowed(
+                profile,
+                borrow.selector,
+                entry=harness,
+                provider_override=provider_override,
+            )
+        else:
+            harness_policy.require(
+                profile,
+                harness.name,
+                provider_override=provider_override,
+            )
+    except (borrowing.BorrowError, harness_policy.HarnessPolicyError) as exc:
+        raise RunnerError(str(exc)) from exc
     managed = _managed_env_keys()
     env = {
         k: v
@@ -225,6 +250,11 @@ def harness_child_env(
                 profile, borrow.selector, entry=harness
             )
         except borrowing.BorrowError as exc:
+            raise RunnerError(str(exc)) from exc
+    else:
+        try:
+            harness_policy.require(profile, harness.name)
+        except harness_policy.HarnessPolicyError as exc:
             raise RunnerError(str(exc)) from exc
     env = dict(os.environ if base_env is None else base_env)
     env.update(harness.env)

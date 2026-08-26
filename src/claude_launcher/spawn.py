@@ -66,9 +66,11 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from . import (
+    harness_policy,
     harnesses,
     lineage,
     profile as profile_mod,
+    providers,
     store,
     workspaces,
     worktree as worktree_mod,
@@ -578,11 +580,26 @@ def capabilities(
         # guessing.
         profiles = profile_mod.list_all()
         report["profiles"] = [p.name for p in profiles]
-        report["profile_selectors"] = [
-            f"{p.name}:{name}"
-            for p in profiles
-            for name in harnesses.names()
-        ]
+        selectors = []
+        errors = {}
+        for p in profiles:
+            try:
+                selectors.extend(
+                    f"{p.name}:{name}"
+                    for name in harness_policy.allowed_names(p)
+                )
+            except (
+                harness_policy.HarnessPolicyError,
+                lineage.LineageError,
+                providers.ProviderError,
+            ) as exc:
+                # The actual creation path still fails closed. The capability
+                # report names malformed profile policy instead of taking the
+                # whole child form down or offering unrestricted selectors.
+                errors[p.name] = str(exc)
+        report["profile_selectors"] = selectors
+        if errors:
+            report["profile_errors"] = errors
     if policy.allow_workspace:
         # The values, not just the field name. Everything else in
         # ``may_choose`` is something the agent already knows how to spell;
