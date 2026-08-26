@@ -400,6 +400,35 @@ def exempt() -> Optional[tuple]:
     return decide(inspect.stack(0))
 
 
+class _UnknownCaller:
+    """Returned when rule (b) cannot be answered, rather than guessed at.
+
+    Not a bool and not ``None`` on purpose: the three outcomes here are
+    "exempt", "refused", and "unanswerable", and collapsing the third into
+    either of the others is the bug this object exists to prevent.
+    """
+
+    def __repr__(self) -> str:                     # pragma: no cover - display
+        return "UNKNOWN_CALLER"
+
+
+#: Rule (b) asked a question whose answer is not on this stack. See
+#: :func:`decide`. Treated as a refusal, with its own message.
+UNKNOWN_CALLER = _UnknownCaller()
+
+#: Frames that mean "the caller is on a different stack".
+#:
+#: A worker thread's stack starts at the thread's entry point, so the frames
+#: that would answer rule (b) -- did a *test* drive this? -- are not merely
+#: further down, they are on another stack entirely and cannot be reached
+#: from here at all.
+_THREAD_ENTRY = ("/threading.py", "/concurrent/futures/thread.py")
+
+
+def _thread_boundary(filename: str) -> bool:
+    return any(_posix(filename).endswith(tail) for tail in _THREAD_ENTRY)
+
+
 def decide(frames: Sequence) -> Optional[tuple]:
     """:func:`exempt`'s rule, over a plain list of frames so it can be tested.
 
@@ -431,6 +460,19 @@ def decide(frames: Sequence) -> Optional[tuple]:
         version exempts nothing and the six come back red. The first frame
         outside the module is the only line that separates "a test asked"
         from "a test drove product code that asked".
+
+    (c) **Is that question answerable at all?** (b) reads the caller off this
+        stack, which assumes the call is on the *same thread* as whoever
+        wanted it. Move the branch read to a worker thread -- the obvious
+        next step after ``b08c621`` took it off the event loop -- and the
+        stack begins at the thread's entry point: the test frame is on
+        another stack and is not visible from here. (b) then reads "no test
+        asked" for every call and hands out the exemption unconditionally,
+        which is the guard quietly not enforcing itself while still
+        reporting green. So an unreachable caller returns
+        :data:`UNKNOWN_CALLER` and is refused. "Nobody asked" and "I cannot
+        see who asked" are not the same answer, and a guard that spells them
+        the same way is not a guard.
     """
     for i, frame in enumerate(frames):
         for module, func, command, why in EXEMPT_CALLERS:
@@ -454,7 +496,9 @@ def decide(frames: Sequence) -> Optional[tuple]:
                 ),
                 None,
             )
-            if outside is not None and _is_test_file(outside.filename):
+            if outside is None or _thread_boundary(outside.filename):
+                return UNKNOWN_CALLER                 # (c) cannot answer (b)
+            if _is_test_file(outside.filename):
                 return None                           # (b) a test asked
 
             return (module, func, command, why)
@@ -514,6 +558,26 @@ class Guard:
                 problem = offending(args, kw.get("cwd"), guard.root)
                 if problem is not None:
                     allowed = exempt()
+                    if allowed is UNKNOWN_CALLER:
+                        # Say which question failed. Whoever moved this read
+                        # onto a thread is the one person who can put the
+                        # answer back, and they will be reading this line.
+                        problem = (
+                            f"{problem}\n"
+                            "The exempt caller was found, but who drove it "
+                            "could not be: the frames above it end at a "
+                            "thread entry point, so this call is on a "
+                            "different stack from whoever wanted it. The "
+                            "exemption asks whether a *test* depends on the "
+                            "branch name, and that question cannot be "
+                            "answered from here -- so it is refused rather "
+                            "than assumed. If a git read was moved to a "
+                            "thread or an executor, hand the caller's "
+                            "identity down to it, or narrow the exemption to "
+                            "the new shape."
+                        )
+                        guard.seen.append(problem)
+                        raise RepoHistoryRead(problem)
                     # The caller AND the command: an exempt frame does not
                     # license whatever else happens to be running under it.
                     if allowed is None or tuple(_argv(args)[1:]) != allowed[2]:

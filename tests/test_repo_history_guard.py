@@ -27,7 +27,13 @@ from pathlib import Path
 
 import pytest
 
-from _repo_history_guard import Guard, RepoHistoryRead, decide, offending
+from _repo_history_guard import (
+    UNKNOWN_CALLER,
+    Guard,
+    RepoHistoryRead,
+    decide,
+    offending,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -337,6 +343,27 @@ def _stack(*pairs):
                 ("F:/x/tests/test_cli.py", "test_run"),
             ),
         ),
+        (
+            False,
+            # Rule (c). The read has been moved onto a worker thread, so the
+            # test that drove it is on another stack. Before (c) this granted
+            # the exemption -- silently, for every call.
+            "the read has been moved onto a worker thread",
+            _stack(
+                (_WT, "_git"),
+                (_WT, "current_branch"),
+                ("C:/Python313/Lib/concurrent/futures/thread.py", "run"),
+                ("C:/Python313/Lib/threading.py", "_bootstrap_inner"),
+                ("C:/Python313/Lib/threading.py", "_bootstrap"),
+            ),
+        ),
+        (
+            False,
+            # Rule (c), the other way to lose the caller: nothing above the
+            # exempt frame at all.
+            "nothing above the exempt frame to attribute the call to",
+            _stack((_WT, "_git"), (_WT, "current_branch")),
+        ),
     ],
 )
 def test_the_exemption_reads_the_stack_shape(exempted, name, frames):
@@ -349,7 +376,64 @@ def test_the_exemption_reads_the_stack_shape(exempted, name, frames):
     forbid. Each row here is a mistake this rule made before it stopped
     making it.
     """
-    assert (decide(frames) is not None) is exempted, name
+    verdict = decide(frames)
+    # Only a real entry is a grant. ``UNKNOWN_CALLER`` is not ``None``, and
+    # an ``is not None`` test would have read it as one -- the same collapse
+    # of "cannot tell" into "fine" that rule (c) exists to stop.
+    assert (isinstance(verdict, tuple)) is exempted, name
+
+
+def test_an_unreachable_caller_is_refused_and_says_why(tmp_path):
+    """Rule (c), and the message that makes its cause findable.
+
+    This is the shape the guard is one refactor away from meeting: ``b08c621``
+    moved the branch read off the event loop, and the next step in that
+    direction puts it on a thread. Before rule (c) that granted the exemption
+    for *every* call -- the exempt frame was found, no test frame was visible
+    above it (the test is on another stack), so (b) concluded "no test asked".
+    The guard would have gone on reporting green while enforcing nothing, and
+    the premise it protects is the one tree-hash receipt reuse stands on.
+
+    Two things are pinned. The verdict is a third value, not ``None``, so no
+    caller can collapse it back into "refused for the ordinary reason". And
+    the refusal says which question went unanswered, because the person who
+    moved the read is the only one who can hand the caller down to it, and a
+    bare "read the repository's history" would send them looking at the read
+    instead of at the move.
+    """
+    threaded = [
+        _Frame(_WT, "_git"),
+        _Frame(_WT, "current_branch"),
+        _Frame("C:/Python313/Lib/concurrent/futures/thread.py", "run"),
+        _Frame("C:/Python313/Lib/threading.py", "_bootstrap_inner"),
+    ]
+    assert decide(threaded) is UNKNOWN_CALLER
+    assert decide(threaded) is not None, (
+        "must not read as the ordinary refusal -- the cause is different"
+    )
+
+    # The raise site, with the verdict forced: staging the real thread path
+    # would mean moving product code onto a thread inside a test, and what
+    # is under test here is what the guard *says* when it gets this verdict.
+    import _repo_history_guard as guard_module
+
+    real_exempt = guard_module.exempt
+    guard_module.exempt = lambda: UNKNOWN_CALLER
+    guard = Guard(tmp_path).install()
+    try:
+        with pytest.raises(RepoHistoryRead) as caught:
+            subprocess.run(
+                ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+                cwd=str(tmp_path),
+                capture_output=True,
+            )
+    finally:
+        guard.uninstall()
+        guard_module.exempt = real_exempt
+
+    message = str(caught.value)
+    assert "thread" in message, "the cause has to name the thread boundary"
+    assert "could not be" in message, "it has to say the question went unanswered"
 
 
 def test_an_exempt_frame_does_not_license_a_different_command(tmp_path):
