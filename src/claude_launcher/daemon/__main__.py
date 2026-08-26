@@ -18,7 +18,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import daemon_client, store
-from . import cflow_clock, paths, resume, runtime_state
+from . import cflow_clock, paths, restart_notice, resume, runtime_state
 from .api import build_app, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -113,6 +113,26 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     if bound is not None:
         bound["port"] = actual_port
     log.info("listening on http://%s:%s", host, actual_port)
+    # Now that this daemon is announced, settle the account of the boot: read
+    # (and clear) whatever asked for it, append this boot to the ledger the
+    # next one will compare against, and turn both into debts. Done here
+    # rather than at delivery time because the requests file is the *previous*
+    # daemon's epitaph -- anything that appends to it after this point belongs
+    # to the next restart, not this one.
+    boot = runtime_state.read_daemon_json() or {}
+    debts = restart_notice.note_boot(
+        pid=boot.get("pid") or os.getpid(),
+        started_at=boot.get("started_at") or "",
+        version=boot.get("version") or "",
+        port=actual_port,
+        restored=list(manager.resumed_busy),
+    )
+    if debts:
+        log.info(
+            "restart notice: %d owed by this boot (%s)",
+            len(debts),
+            ", ".join(sorted({d["kind"] for d in debts})),
+        )
 
     uplink, uplink_task = _start_uplink(actual_port)
     relay_state["uplink"] = uplink
@@ -134,6 +154,13 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # can send an agent straight back to the API it was using.
     resume_nudge = resume.ResumeNudge(manager, manager.resumed_busy)
     resume_nudge.start()
+    # Started alongside it, and deliberately not merged into it: the nudge is
+    # allowed to give up on a session that is working again, and this is not
+    # (see restart_notice's module docstring). Where both are owed, whichever
+    # lands first makes the other redundant -- and if that is this one, the
+    # nudge reads the session as driven and stands down, which is right.
+    restart_notice_task = restart_notice.RestartNotice(manager)
+    restart_notice_task.start()
 
     try:
         await app["shutdown_event"].wait()
@@ -157,6 +184,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
             except (asyncio.CancelledError, Exception):
                 pass
         await resume_nudge.shutdown()
+        # Undelivered debts stay on disk; shutdown only stops offering them.
+        await restart_notice_task.shutdown()
         # Pending wind-downs are dropped, not finished: shutdown_all below
         # ends every session the daemon's way, and they come back on restart.
         await app["beads"].cancel_all()
