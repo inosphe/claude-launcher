@@ -726,6 +726,26 @@ def _bundled(name):
     return model.load(dict(state_mod.bundled_workflows())[name])
 
 
+def _prose(text):
+    """A step's prose with its line wrapping taken out.
+
+    The anchors below pin RULES, and a rule does not change when the line it
+    sits on is re-wrapped -- but a substring check does. ``3794310`` turned
+    the whole suite red for exactly that: it re-flowed ``improv-mid``'s
+    ``land`` step, and ``rebase <네 기준>`` became ``rebase\\n<네 기준>``.
+    The rule was still there, verbatim; only the column the editor broke at
+    had moved, and there is no reading of "the rule was lost" that a newline
+    supports. These are ``|`` block scalars, so YAML keeps every one of those
+    breaks and hands them to the anchor.
+
+    Collapsing here is what keeps the pin about the phrase instead of about
+    the wrap. It is deliberately not applied to the checks that read a
+    workflow *file* (``read_text``), where the layering tests are asserting
+    about the bytes on disk.
+    """
+    return " ".join((text or "").split())
+
+
 def test_the_worker_does_not_fold_into_a_retired_or_frozen_branch():
     """A worktree that runs several rounds outlives the rule written for one.
 
@@ -975,7 +995,7 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
         "await-landing", "wrapup",
     }
 
-    intake = wf.steps["intake"].instructions
+    intake = _prose(wf.steps["intake"].instructions)
     for anchor in ("스택 베이스", "rebase_onto", "스택 표", "기준", "batch send"):
         assert anchor in intake, f"intake lost its {anchor!r} rule"
     assert "머지 커밋만" in intake  # the base takes merges, not feature work
@@ -985,14 +1005,15 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
     assert set(standby.select.options) == {"land", "complete"}
     assert standby.select.options["land"].next == "land"
     assert standby.select.options["complete"].next == "landing"
-    assert "merge-tree" in standby.instructions
-    assert "master 대비가 아니다" in standby.instructions
+    assert "merge-tree" in _prose(standby.instructions)
+    assert "master 대비가 아니다" in _prose(standby.instructions)
 
     land = wf.steps["land"]
     assert land.next == "standby"  # one child per pass, then back on watch
+    land_rules = _prose(land.instructions)
     for anchor in ("--no-ff", "merge-tree", "restack", "rebase <네 기준>"):
-        assert anchor in land.instructions, f"land lost its {anchor!r} rule"
-    assert "master는 어떤 경우에도 머지 대상이 아니다" in land.instructions
+        assert anchor in land_rules, f"land lost its {anchor!r} rule"
+    assert "master는 어떤 경우에도 머지 대상이 아니다" in land_rules
 
     landing = wf.steps["landing"].select
     # The fast path: a clean stack is offered up without asking the leader.
@@ -1013,9 +1034,10 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
 
     handoff = wf.steps["handoff"]
     assert handoff.next == "await-landing"
+    handoff_rules = _prose(handoff.instructions)
     for anchor in ("--rebase-merges", "git branch --merged", "스택 표",
                    "master를 직접 머지하지 않는다"):
-        assert anchor in handoff.instructions, f"handoff lost its {anchor!r} rule"
+        assert anchor in handoff_rules, f"handoff lost its {anchor!r} rule"
 
     waiting = wf.steps["await-landing"].select
     assert waiting.chooser == "agent"
@@ -1026,8 +1048,9 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
     # one-shot run's session, so the wrap-up no longer carries the kill
     # instruction (the most common incompletion it replaces); only the
     # keep-alive exception stays in prose.
-    assert "claunch kill-session $CLAUNCH_SESSION" not in wf.steps["wrapup"].instructions
-    assert "keep-alive" in wf.steps["wrapup"].instructions
+    wrapup = _prose(wf.steps["wrapup"].instructions)
+    assert "claunch kill-session $CLAUNCH_SESSION" not in wrapup
+    assert "keep-alive" in wrapup
     assert wf.steps["wrapup"].next is None
 
 
