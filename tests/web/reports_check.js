@@ -174,6 +174,10 @@ const ROWS = [
     at: "2026-08-26T04:00:00Z", issue: "claunch-tak", size: 4200,
     session_status: "busy",
     url: "/api/sessions/s-live/reports/20260826T040000Z-claunch-tak.html" },
+  { file: "20260826T020000Z-claunch-j31.html", session: "s-live",
+    at: "2026-08-26T02:00:00Z", issue: "claunch-j31", size: 1536,
+    session_status: "busy",
+    url: "/api/sessions/s-live/reports/20260826T020000Z-claunch-j31.html" },
   { file: "20260825T090000Z-no-issue.html", session: "s99",
     at: "2026-08-25T09:00:00Z", issue: null, size: 900,
     session_status: "exited",
@@ -212,7 +216,7 @@ check("the chip says the state the daemon reported",
       [liveChip.find("reports-sess-name")[0].text, liveChip.find("reports-sess-state")[0].text],
       ["s-live", "running"]);
 
-const noIssue = ctx.row(ROWS[2]);
+const noIssue = ctx.row(ROWS[3]);
 check("a round that named no issue says so rather than showing a blank",
       noIssue.find("reports-issue")[0].text, "no issue");
 check("and offers no board link, because there is no issue to open",
@@ -224,25 +228,33 @@ check("an ended session is marked ended, not gone",
 /* ---- narrowing and order ----------------------------------------------- */
 const only = (f) => { ctx.setFilters(f); return ctx.shownRows(ROWS).map((r) => r.session); };
 check("by default every round is shown -- the page hides nothing on its own",
-      only({}), ["s121", "s-live", "s99"]);
-check("live narrows to the sessions still running", only({ state: "live" }), ["s-live"]);
+      only({}), ["s121", "s-live", "s-live", "s99"]);
+check("live narrows to the sessions still running",
+      only({ state: "live" }), ["s-live", "s-live"]);
 check("ended narrows to the records that finished", only({ state: "ended" }), ["s99"]);
 check("no record narrows to the rounds that outlived their session",
       only({ state: "gone" }), ["s121"]);
 check("by session", only({ session: "s99" }), ["s99"]);
 check("by issue", only({ issue: "claunch-tak" }), ["s-live"]);
 check("a round with no issue is not swept up by an issue filter",
-      only({ issue: "claunch-j31" }), ["s121"]);
+      only({ issue: "claunch-j31" }), ["s121", "s-live"]);
+/* Two facts the board actually holds, and the page must not flatten either:
+   a session writes more than one round, and two sessions write up one issue. */
+check("both rounds a session wrote survive the narrowing",
+      only({ session: "s-live" }), ["s-live", "s-live"]);
+check("and they are told apart by what the row carries",
+      (ctx.setFilters({ session: "s-live" }), ctx.shownRows(ROWS).map((r) => r.issue)),
+      ["claunch-tak", "claunch-j31"]);
 check("the filters compose", only({ state: "gone", issue: "claunch-tak" }), []);
 check("oldest first is the same list read backwards, not a second sort",
-      only({ oldest: true }), ["s99", "s-live", "s121"]);
+      only({ oldest: true }), ["s99", "s-live", "s-live", "s121"]);
 ctx.setFilters({});
 
 /* ---- the page ---------------------------------------------------------- */
 ctx.setCache(ROWS);
 ctx.render();
-check("every round is drawn", view.find("reports-row").length, 3);
-check("and the count says so plainly", view.find("reports-count")[0].text, "3 reports");
+check("every round is drawn", view.find("reports-row").length, 4);
+check("and the count says so plainly", view.find("reports-count")[0].text, "4 reports");
 check("the state tabs are offered, plus the two pickers and the order flip",
       [view.find("seq-tab").length, view.find("reports-pick").length,
        view.find("reports-order").length],
@@ -251,7 +263,7 @@ check("the state tabs are offered, plus the two pickers and the order flip",
 /* The pickers offer what the rows carry, not the fleet: a session with no
    report would be an option that leads to an empty page. */
 const picks = view.find("reports-pick");
-check("the session picker offers every session that wrote one",
+check("the session picker offers each session once, however many it wrote",
       picks[0].kids.map((o) => o.text), ["every session", "s-live", "s121", "s99"]);
 check("the issue picker skips the rounds that named none",
       picks[1].kids.map((o) => o.text), ["every issue", "claunch-j31", "claunch-tak"]);
@@ -263,8 +275,7 @@ goneTab.handlers.click[0]();
 check("narrowing redraws in place, keeping no stale rows",
       view.find("reports-row").length, 1);
 check("and the count says what is hidden", view.find("reports-count")[0].text,
-      "1 of 3 reports");
-const noneTab = view.find("seq-tab").find((b) => b.text === "live session");
+      "1 of 4 reports");
 ctx.setFilters({ state: "gone", issue: "claunch-tak" });
 ctx.render();
 check("a narrowing that matches nothing says so instead of drawing an empty table",
@@ -308,7 +319,7 @@ const done = ctx.refresh().then(() => {
   ctx.open();
   return new Promise((r) => setTimeout(r, 0));
 }).then(() => {
-  check("the answer lands in the table", ctx.state().cache.length, 3);
+  check("the answer lands in the table", ctx.state().cache.length, 4);
   check("and the reader is not told anything is wrong", ctx.state().error, "");
 
   ctx.setAnswer({ ok: false, status: 404, body: {} });
@@ -319,7 +330,7 @@ const done = ctx.refresh().then(() => {
   // cannot hand them over.
   check("an older daemon is named as the reason, not read as an empty machine",
         ctx.state().error.includes("daemon restart"), true);
-  check("and the rows it already had are kept", ctx.state().cache.length, 3);
+  check("and the rows it already had are kept", ctx.state().cache.length, 4);
 
   ctx.setAnswer({ ok: false, status: 500, body: { error: "boom" } });
   return ctx.refresh();
