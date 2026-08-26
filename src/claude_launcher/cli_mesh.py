@@ -506,6 +506,35 @@ def _cmd_wire_requests(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_rewire(args: argparse.Namespace) -> int:
+    """Apply the mesh's auto_link rules to the members already in it.
+
+    A join wires the member that is joining; a rule that arrives afterwards
+    has no join left to run in. This is that missing run — for the fleet
+    already assembled when the rule (or a new packaged default) showed up.
+
+    It only opens, and it skips every pair somebody already decided, so a
+    link cut on purpose stays cut and a second run is a no-op. Those two
+    properties are what make it safe to run, not the CLI being a human's
+    surface: it sends no ``actor``, so it asks for the whole graph, and
+    every edge it can open is one the mesh's own rules already name.
+    """
+    client = daemon_client.ensure_running()
+    opened = (client.post(f"/api/mesh/{args.mesh}/rewire", {}) or {}).get(
+        "opened"
+    ) or []
+    if not opened:
+        print(
+            "nothing to open -- every pair the rules name is already "
+            "connected, or was decided by hand"
+        )
+        return 0
+    print(f"opened {len(opened)} edge(s):")
+    for edge in opened:
+        print(f"  {edge['a']} <-> {edge['b']}")
+    return 0
+
+
 def _cmd_requests(args: argparse.Namespace) -> int:
     client = daemon_client.ensure_running()
     if args.cancel:
@@ -1017,6 +1046,14 @@ def register(sub) -> None:
                    help="why, carried to the requester and into the refusal "
                         "it gets if it asks again")
     p.set_defaults(func=_cmd_wire_requests)
+
+    p = msub.add_parser(
+        "rewire",
+        help="apply the mesh's auto_link rules to the members already in it "
+             "(opens only; a pair decided by hand is left alone)",
+    )
+    p.add_argument("mesh")
+    p.set_defaults(func=_cmd_rewire)
 
     p = msub.add_parser(
         "requests",

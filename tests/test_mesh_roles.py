@@ -637,14 +637,63 @@ def _facts(role, tier, root):
     return mesh_roles.LinkFacts(role=role, tier=tier, root=root)
 
 
-def test_the_packaged_rules_connect_roots_and_nothing_else():
+def test_the_packaged_rules_connect_roots_and_every_reviewer_to_every_worker():
+    """G1: the two standing rules, and the pairs they deliberately leave out.
+
+    The reviewer rule is what makes a shipped workflow's reviewer gate able
+    to fire at all: `improv-worker` delegates its review to `{role: reviewer}`
+    and `cflow/responders.py` resolves that against the member graph, so
+    without a rule the declaration could only ever match where somebody had
+    hand-wired that exact pair.
+    """
     auto = mesh_roles.resolve().auto_link
     lead, other = _facts("leader", 0, "lead"), _facts("reviewer", 0, "other")
     child = _facts("worker", 1, "lead")
-    # G1
     assert auto.decide(lead, other) is True
     assert auto.decide(lead, child) is False       # the JOIN adds this one
     assert auto.decide(child, _facts("worker", 1, "other")) is False
+
+    # a reviewer reaches a worker across spawn trees and down any depth --
+    # `within: any`, because a reviewer is normally a root or a sibling while
+    # the workers hang off their own parents
+    deep = _facts("worker", 5, "elsewhere")
+    assert auto.decide(deep, _facts("reviewer", 0, "here")) is True
+    assert auto.decide(_facts("reviewer", 2, "a"), _facts("worker", 3, "b")) is True
+    # ...and it is the pair that is named, not the role alone
+    assert auto.decide(
+        _facts("reviewer", 1, "a"), _facts("reviewer", 1, "b")
+    ) is False
+    assert auto.decide(_facts("worker", 1, "a"), _facts("leader", 2, "b")) is False
+
+
+def test_a_packaged_rule_this_vocabulary_cannot_express_is_dropped_not_refused():
+    """G7: the other half of G4. A rule the UPLOAD wrote naming a role it did
+    not define is its author's mistake and refuses the document. A packaged
+    rule that merely rode in, because the upload said nothing about wiring,
+    has no such author -- refusing there would reject a mesh for a default it
+    never wrote, and would quietly make `replace: true` about the wiring too.
+    """
+    kept = mesh_roles.resolve(mesh_roles.parse(
+        "replace: true\ndefault: crew\nroles: {boss: {}, crew: {}}\n"
+    )).auto_link
+    # the tier rule survives -- it names no role, so every vocabulary has it
+    assert kept.decide(_facts("boss", 0, "a"), _facts("crew", 0, "b")) is True
+    # ...and the reviewer/worker rule is simply not there to match anything
+    assert kept.decide(_facts("crew", 1, "a"), _facts("boss", 2, "b")) is False
+    assert len(kept.rules) == 1
+
+    # deleting one END of the packaged rule drops it the same way, and the
+    # roles left over keep the rest of the vocabulary
+    trimmed = mesh_roles.resolve(mesh_roles.parse("roles: {worker: null}\n"))
+    assert "reviewer" in trimmed.roles and "worker" not in trimmed.roles
+    assert len(trimmed.auto_link.rules) == 1
+    # ...while the SAME rule, stated by the upload that deleted the role, is
+    # still refused -- that is G4, and this leniency does not reach it
+    with pytest.raises(mesh_roles.RoleError, match="worker"):
+        mesh_roles.resolve(mesh_roles.parse(
+            "auto_link: {rules: [{between: [{role: worker}, {}]}]}\n"
+            "roles: {worker: null}\n"
+        ))
 
 
 def test_a_rule_matches_a_pair_in_either_orientation():

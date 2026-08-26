@@ -3391,6 +3391,88 @@ class MeshManager:
             opened.append({"mesh": mesh.name, "a": mine, "b": above})
         return opened
 
+    async def rewire_members(
+        self, name: str, *, actor: str = ""
+    ) -> List[dict]:
+        """Apply the mesh's current ``auto_link`` rules to the members already here.
+
+        :meth:`_wire_member` runs at a join and stores what it decided, so a
+        rule added afterwards reaches nobody who was already in the room. That
+        is the right *default* — a member's wiring must not change under it
+        because somebody edited a document — and the wrong *only option*: a
+        mesh that adopts a rule, or a daemon that ships a new packaged one,
+        would otherwise have to hand-wire the fleet it already has, which is
+        the manual act the rules exist to remove.
+
+        So this is the same evaluation in explicit form. Three properties
+        make it safe to hand an operator:
+
+        * **It only opens.** Nothing is ever cut. A run of this cannot take
+          reach away from a member that has it.
+        * **A recorded edge is never touched.** Any pair somebody decided —
+          a join's wiring, an agent connecting its workers, a human cutting a
+          link — is skipped, whichever way it was decided. So a deliberate
+          ``disconnect`` survives every future rule and every rerun of this;
+          the rules propose wiring, they never overrule a person.
+        * **It is idempotent.** A pair already reachable is skipped too
+          (an unwired legacy member defaults to open), so a second run
+          reports nothing and writes nothing.
+
+        ``actor``, when a caller names one, confines the sweep to that
+        session's subtree: every candidate edge is put through the same
+        :meth:`_require_member_authority` an explicit edit would face, and a
+        pair the actor does not command is skipped rather than refused — a
+        sweep names no pair, so there is nothing there to reject. An agent
+        therefore gets its own fleet wired ahead of schedule and nothing
+        else, which is the rule the D-axis tests state for every other edit.
+
+        With no ``actor`` the whole graph is in scope, and it is worth being
+        exact about what holds that. ``actor`` is *declared* by the caller
+        here exactly as it is on :meth:`set_member_link`, so omitting it is
+        not a thing this layer can detect. Nor is there anywhere it is
+        filled in today: the route's only caller is ``claunch mesh rewire``,
+        which sends none, there is no MCP tool for this sweep, and the
+        dashboard does not call it. So the parameter currently narrows
+        nobody. It is here because the check belongs at the door before a
+        caller that names one arrives, not after.
+
+        Which means the guarantee this operation carries is not who called
+        it, and never was: it is the three properties above. Even at full
+        scope it opens only edges the mesh's own rules already sanction, and
+        it overrules nobody. There is no reach here that the next join would
+        not have produced by itself.
+
+        Returns the edges opened, ``{a, b}`` each, in handle order.
+        """
+        mesh = self.get(name)
+        self._require_authority(mesh, "the member graph")
+        facts = self._link_facts(mesh, dict(self._lineage_map(mesh)))
+        auto = mesh.roleset.auto_link
+        handles = sorted(mesh.members)
+        opened: List[dict] = []
+        for i, a in enumerate(handles):
+            for b in handles[i + 1:]:
+                if Mesh.member_key(a, b) in mesh.member_edges:
+                    continue  # somebody decided this pair; that decision stands
+                if mesh.connected(a, b):
+                    continue  # already reachable — writing it down says nothing
+                if not auto.decide(facts[a], facts[b]):
+                    continue
+                if actor:
+                    try:
+                        self._require_member_authority(mesh, actor, a, b)
+                    except MeshError:
+                        continue  # not this caller's pair to hurry along
+                await self.set_member_link(name, a, b, enabled=True, actor=actor)
+                opened.append({"a": a, "b": b})
+        log.info(
+            "mesh %r: rewire opened %d edge(s): %s",
+            mesh.name,
+            len(opened),
+            ", ".join(f"{e['a']}<->{e['b']}" for e in opened) or "none",
+        )
+        return opened
+
     async def isolate_member(
         self, name: str, handle: str, *, keep: Iterable[str] = ()
     ) -> List[str]:
