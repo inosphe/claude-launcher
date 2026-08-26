@@ -37,6 +37,15 @@ add`` puts more there — so a project directory only needs a file of its own
 when it wants to *differ*. A name that exists in both layers is not
 ambiguous, but the loser is reported (:class:`Located`) rather than silently
 dropped, because two copies of one workflow otherwise drift unnoticed.
+
+A project file does not have to be a whole second copy. Declaring ``extends:
+<name>`` makes it a *layer* over the workflow that name resolves to below it:
+the base is read first and this file's properties are merged onto it one at a
+time (:func:`model.merge_docs`), so a repository that only needs its own
+``verify`` commands writes those and inherits everything else. Bases are
+resolved here rather than in the parser — which layers exist is a fact about
+the directory, not about the file (:func:`resolve_base`) — and a run
+snapshots the composed result, never the overlay alone.
 """
 
 from __future__ import annotations
@@ -574,6 +583,112 @@ def locate(ref: str, cwd: Optional[str] = None) -> Located:
 def find_workflow(ref: str, cwd: Optional[str] = None) -> Path:
     """Where a reference resolves to, for callers that need only the file."""
     return locate(ref, cwd).path
+
+
+# --------------------------------------------------------------------------- #
+# layering: a file that declares `extends:` is merged over its base
+# --------------------------------------------------------------------------- #
+def layer_of(path: Path, cwd: Optional[str] = None) -> str:
+    """Which layer a file sits in, or :data:`LAYER_FILE` for one that sits in
+    neither. Compared by directory rather than by name: two layers hold files
+    of the same name on purpose, which is the whole point of layering."""
+    parent = _same(path.parent)
+    for layer, base in search_layers(cwd):
+        if _same(base) == parent:
+            return layer
+    return LAYER_FILE
+
+
+def _same(path: Path) -> Path:
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
+
+
+def resolve_base(ref: str, from_path: Path, cwd: Optional[str] = None) -> Path:
+    """The file ``from_path`` means by ``extends: <ref>``.
+
+    A ref ending in .yaml/.yml is a path, read against the extending file's own
+    directory — the spelling for a base that is not a published workflow but a
+    piece of one repository's own arrangement.
+
+    Anything else is a workflow NAME, searched nearest-first from the
+    extending file's OWN layer downward, skipping the extending file itself.
+    Two consequences, and both are the point:
+
+    * a project's ``improv-worker.yaml`` may say ``extends: improv-worker``
+      and mean the global copy — the name it shadows is the name it layers
+      over, and having to spell that as a path would tie the project file to
+      wherever the global layer happens to live on this machine;
+    * a file never reaches *upward*. A global workflow cannot pick up a
+      project's file of the same name, so a base is the same file for every
+      project that runs it, and one project cannot quietly redefine what
+      another one's runs are built on.
+    """
+    if ref.endswith((".yaml", ".yml")):
+        path = Path(ref).expanduser()
+        if not path.is_absolute():
+            path = from_path.parent / path
+        if path.is_file():
+            # Normalised, because this path is written into the run's journal
+            # and its state: "../../elsewhere/base.yaml" answers "which file
+            # is this run built on" only for a reader standing where the
+            # overlay stands.
+            return _same(path)
+        raise model.WorkflowError(
+            f"{from_path} extends {ref!r}, which is not a file ({path})"
+        )
+    layers = search_layers(cwd)
+    start = 0
+    mine = layer_of(from_path, cwd)
+    for i, (layer, _base) in enumerate(layers):
+        if layer == mine:
+            start = i
+            break
+    me = _same(from_path)
+    searched = []
+    for _layer, base in layers[start:]:
+        searched.append(base)
+        if not base.is_dir():
+            continue
+        for candidate in sorted(base.glob(f"{ref}.y*ml")):
+            if _same(candidate) != me:
+                return candidate
+    raise model.WorkflowError(
+        f"{from_path} extends {ref!r}, but no workflow of that name was found "
+        f"below it (searched {', '.join(str(d) for d in searched) or '(nothing)'})"
+        + (
+            ""
+            if start == 0
+            else " — a base is searched from the extending file's own layer "
+            "downward, never upward"
+        )
+    )
+
+
+def base_resolver(cwd: Optional[str] = None):
+    """The ``extends`` resolver :func:`model.compose` needs, bound to a cwd."""
+
+    def _resolve(ref: str, from_path: Path) -> Path:
+        return resolve_base(ref, from_path, cwd)
+
+    return _resolve
+
+
+def compose_located(located: Located, cwd: Optional[str] = None) -> model.Composed:
+    """Load an already-resolved workflow, following any ``extends`` chain."""
+    return model.compose(located.path, resolve=base_resolver(cwd))
+
+
+def load_workflow(ref: str, cwd: Optional[str] = None) -> model.Composed:
+    """Resolve a workflow reference and load it, layers and all.
+
+    The one entry point every caller that *runs* or *reads* a workflow should
+    use: it is where a name becomes a file (:func:`locate`) and where a file
+    becomes the merge of itself and its bases (:func:`model.compose`).
+    """
+    return compose_located(locate(ref, cwd), cwd)
 
 
 # --------------------------------------------------------------------------- #

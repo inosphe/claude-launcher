@@ -437,6 +437,34 @@ can only read your prompt has nothing to check against.
 run for a human, which is safe but is a dead end at 3am. `on_decline: impl`
 turns a refusal into another pass, which is usually what it means.
 
+**Keep the repo-specific half in a layer, not in a copy.** A workflow that is
+worth writing is usually worth running in more than one repository — and the
+one part that cannot travel is what its steps *check*, because `verify` names
+tools that exist here. Do not fork the file for that. Write the workflow once
+(the global layer), and give the project a **layer over it**:
+
+```sh
+claunch cflow add ci-flow --project --overlay     # writes the stub
+```
+
+```yaml
+# .claunch/workflows/ci-flow.yaml — the whole file
+extends: ci-flow                # the global copy of the same name
+steps:
+  test:
+    verify: 'uv run pytest -q -m "not slow"'
+  deploy:
+    # this repository has no deploy gate; inherit nothing here
+    ask: null
+```
+
+Merging is per property: two mappings merge recursively, anything else
+replaces (lists wholesale), and an explicit `null` deletes what omitting
+would have inherited. The graph, the prose and the protocol stay in one
+file, in one place, and `claunch cflow ls` says which base each layer sits
+on. The alternative — a full copy with two lines changed — drifts from the
+original the first time the original is edited, and nothing tells you.
+
 **Read the warnings.** `cflow show <name>` prints three kinds:
 `cycle detected` (fine if the exit is real — recipe 3), `once entered, these
 steps can never reach a termination` (a trap: some path enters a loop with

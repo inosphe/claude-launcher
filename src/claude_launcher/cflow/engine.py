@@ -1469,8 +1469,13 @@ def start(
         _archive_current(old, "force" if active else "auto", cwd)
     located = state_mod.locate(workflow_ref, cwd)
     path = located.path
-    text = path.read_text(encoding="utf-8")
-    workflow = model.parse(text, default_name=path.stem)
+    # Layers first: a file that `extends` another IS its merge with that
+    # base, and the snapshot below must be of the merge — the composed text,
+    # not this file's half of it — or the run would re-read a base that has
+    # moved under it.
+    composed = state_mod.compose_located(located, cwd)
+    text = composed.text
+    workflow = composed.workflow
     role_filter_note = _enforce_role_filter(
         workflow, mesh=(mesh or "").strip(), cwd=cwd
     )
@@ -1499,6 +1504,10 @@ def start(
         # different layer the moment somebody adds or deletes a file, and this
         # run's answer must stay the one that was true when it started.
         "origin": located.origin,
+        # The bases this file was composed with, recorded for the same reason
+        # `origin` is: which files answered is a fact about this start, and a
+        # layer added later must not rewrite the answer after the fact.
+        **({"bases": [str(p) for p in composed.bases]} if composed.layered else {}),
         "context": context or "",
         "mesh": (mesh or "").strip(),
         "started_at": state_mod.utcnow(),
@@ -1528,6 +1537,7 @@ def start(
             "source": str(path),
             "origin": located.origin,
             "shadowed": [str(p) for p in located.shadows],
+            **({"extends": [str(p) for p in composed.bases]} if composed.layered else {}),
             "context": context or "",
             "total_steps": workflow.step_count(),
             "warnings": workflow.warnings,
@@ -1600,8 +1610,9 @@ def request_start(
             )
     # Resolve now, so a typo or an invalid workflow fails in front of the
     # human who asked, not silently inside the agent's turn later.
-    path = state_mod.find_workflow(workflow_ref, cwd)
-    workflow = model.parse(path.read_text(encoding="utf-8"), default_name=path.stem)
+    composed = state_mod.load_workflow(workflow_ref, cwd)
+    path = composed.path
+    workflow = composed.workflow
     # The filter too: a request this scope's agent could never start should
     # be refused in front of whoever filed it, not inside the agent's turn.
     role_filter_note = _enforce_role_filter(workflow, mesh="", cwd=cwd)
@@ -2634,6 +2645,11 @@ def status(cwd: Optional[str] = None) -> dict:
     if state.get("source"):
         payload["source"] = state["source"]
         payload["origin"] = state.get("origin") or ""
+        # And, when the source was a layer over something, what it was a layer
+        # OVER: "the project one" stops being an answer the moment the project
+        # file is four lines of verify on top of the packaged workflow.
+        if state.get("bases"):
+            payload["extends"] = list(state["bases"])
     if state.get("context"):
         payload["context"] = state["context"]
     if state.get("current") and _current_report(state, state["current"]):

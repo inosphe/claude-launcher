@@ -6,6 +6,11 @@ and loops need no duplicated content::
 
     name: feature-dev
     description: ...
+    extends: feature-dev    # optional: this file is a LAYER over that
+                            # workflow (searched from this file's own layer
+                            # downward), carrying only the properties it
+                            # changes. Mappings merge one property at a time,
+                            # everything else replaces, `null` deletes
     start: design           # optional (defaults to the first step)
     max_visits: 25          # optional loop guard (per step, per run)
     recur: true             # optional: a finished round requests the next one
@@ -232,7 +237,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Set, Tuple
 
 import yaml
 
@@ -259,6 +264,26 @@ MAX_AWAITS_TIMEOUT = 30.0
 
 #: Reserved next-target meaning "the workflow ends here".
 END = "end"
+
+#: Top-level key naming the workflow this file is a *layer over*: the base is
+#: read first and this file's properties are merged onto it, one property at a
+#: time. It exists because the two halves of a workflow have different
+#: owners — the prose, the graph and the protocol are written once and ship to
+#: every repository, while what a step *checks* (``verify``, ``awaits``) names
+#: this repository's own tools and cannot travel. Without it the only way to
+#: add one command was to copy the whole file into the project layer, and this
+#: repository measured what that costs: a 1073-line packaged workflow copied
+#: to 1130 lines to add four, kept in step by a 216-line regex grafter
+#: (``tools/sync_project_layer.py``) because the copy drifts otherwise.
+#:
+#: The value is a workflow NAME (searched in the layers *below* the file that
+#: names it, so a project ``improv-worker.yaml`` may extend the global one of
+#: the same name without extending itself) or a path ending in .yaml/.yml
+#: (resolved against the extending file's own directory). Resolution needs to
+#: know which layer the file came from, which this module cannot see — so a
+#: base is resolved by :mod:`claude_launcher.cflow.state`, and parsing a doc
+#: that still carries this key is refused rather than half-honoured.
+EXTENDS_KEY = "extends"
 
 #: ``otherwise``: what happens once every candidate group has been tried.
 #: Hold the run for a human, through the CLI or the dashboard...
@@ -532,13 +557,114 @@ class Workflow:
         return len(self.steps)
 
 
-def parse(text: str, *, default_name: str = "workflow") -> Workflow:
+def read_doc(text: str, *, where: str = "workflow") -> dict:
+    """The YAML mapping behind a workflow file, unvalidated.
+
+    Split out of :func:`parse` because a file that ``extends`` another is read
+    long before it can be parsed: the merge happens on docs, and only the
+    merged doc is a workflow. ``where`` names the file in the error, which is
+    the whole difference between "invalid workflow YAML" and knowing which of
+    two layers is broken.
+    """
     try:
         doc = yaml.safe_load(text)
     except yaml.YAMLError as exc:
-        raise WorkflowError(f"invalid workflow YAML: {exc}") from exc
+        raise WorkflowError(f"invalid workflow YAML in {where}: {exc}") from exc
+    if doc is None:
+        doc = {}
     if not isinstance(doc, dict):
-        raise WorkflowError("workflow file must be a YAML mapping")
+        raise WorkflowError(f"workflow file must be a YAML mapping: {where}")
+    return doc
+
+
+def extends_ref(doc: dict) -> Optional[str]:
+    """What this doc declares as its base, or ``None``.
+
+    Refuses an empty or non-scalar value here rather than at merge time: a
+    file that says ``extends:`` and nothing else is a layer over nothing, and
+    the author meant to name something.
+    """
+    raw = doc.get(EXTENDS_KEY)
+    if raw is None:
+        return None
+    if not isinstance(raw, (str, int, float)):
+        raise WorkflowError(
+            f"{EXTENDS_KEY!r} must be a workflow name or a .yaml path, "
+            f"not {type(raw).__name__}"
+        )
+    ref = str(raw).strip()
+    if not ref:
+        raise WorkflowError(
+            f"{EXTENDS_KEY!r} is empty — name the workflow this file layers "
+            f"over, or drop the key"
+        )
+    return ref
+
+
+def merge_docs(base: dict, overlay: dict) -> dict:
+    """``overlay`` laid over ``base``, one property at a time.
+
+    Three rules, and they are the whole contract:
+
+    * two mappings merge recursively — that is what makes ``steps: {review:
+      {verify: ...}}`` reach one field of one step and leave the other
+      thousand lines alone;
+    * anything else replaces. A list replaces wholesale on purpose: merging
+      two lists has no reading a writer can predict (append? by index? by
+      key?), and a half-merged ``filter_roles.roles`` is worse than either;
+    * an explicit ``null`` DELETES the key. It is how a layer says "this step
+      has no verify here", which omitting cannot say — omitting is how you
+      inherit.
+
+    The base is never mutated: layers are read once and merged into fresh
+    dicts, so a base shared by two overlays cannot be polluted by the first.
+    """
+    out = dict(base)
+    for key, value in overlay.items():
+        if value is None:
+            out.pop(key, None)
+            continue
+        if isinstance(value, dict) and isinstance(out.get(key), dict):
+            out[key] = merge_docs(out[key], value)
+            continue
+        out[key] = value
+    return out
+
+
+def compose_docs(docs: Sequence[dict]) -> dict:
+    """Merge a chain of docs given NEAREST FIRST (the overlay before its base).
+
+    The chain is spelled in the direction it was walked — this file, then what
+    it extends, then what that extends — so composing folds it from the far
+    end back. The ``extends`` key itself does not survive: it named an edge of
+    the chain, and the composed doc has no chain left.
+    """
+    merged: dict = {}
+    for doc in reversed(list(docs)):
+        merged = merge_docs(merged, doc)
+    merged.pop(EXTENDS_KEY, None)
+    return merged
+
+
+def parse(text: str, *, default_name: str = "workflow") -> Workflow:
+    return parse_doc(read_doc(text, where=default_name), default_name=default_name)
+
+
+def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
+    """Validate one already-composed mapping into a :class:`Workflow`.
+
+    A doc still carrying ``extends`` is refused instead of parsed: honouring
+    the key needs the layers, which this module cannot see, and ignoring it
+    would hand back a workflow missing everything the base was carrying —
+    silently, and only at the step where the missing half was needed.
+    """
+    if doc.get(EXTENDS_KEY) is not None:
+        raise WorkflowError(
+            f"this workflow {EXTENDS_KEY} {doc[EXTENDS_KEY]!r} and has not "
+            f"been composed with it — load it through the layer-aware loader "
+            f"(claude_launcher.cflow.state.load_workflow), which resolves the "
+            f"base and merges this file over it"
+        )
     raw_steps = doc.get("steps")
     if not isinstance(raw_steps, dict) or not raw_steps:
         raise WorkflowError(
@@ -646,11 +772,129 @@ def _advice(workflow: Workflow) -> List[str]:
 
 
 def load(path: Path) -> Workflow:
+    """One file, parsed on its own.
+
+    Kept for callers that hold a path and no layers — and it refuses a file
+    that ``extends`` another rather than half-loading it (see
+    :func:`parse_doc`). The layer-aware entry point is
+    :func:`claude_launcher.cflow.state.load_workflow`.
+    """
+    return compose(path, resolve=None).workflow
+
+
+def read_file(path: Path) -> str:
     try:
-        text = path.read_text(encoding="utf-8")
+        return path.read_text(encoding="utf-8")
     except OSError as exc:
         raise WorkflowError(f"cannot read workflow {path}: {exc}") from exc
-    return parse(text, default_name=path.stem)
+
+
+#: How deep an ``extends`` chain may go before it is called a mistake rather
+#: than a design. Cycles are caught by identity (a file already in the chain),
+#: so this only bounds a legal-but-absurd tower — it is a guard, not a budget.
+MAX_EXTENDS_DEPTH = 8
+
+
+@dataclass(frozen=True)
+class Composed:
+    """A workflow and the files it was composed from, nearest first.
+
+    ``chain[0]`` is the file that was asked for; everything after it is a base
+    it reached through ``extends``. A file that extends nothing composes to a
+    chain of one, and to exactly the bytes it already had — layering costs
+    nothing where it is not used.
+    """
+
+    workflow: Workflow
+    doc: dict
+    chain: Tuple[Path, ...]
+    #: The composed doc as YAML — what a run snapshots at ``start``, so its
+    #: position cannot shift when a base file is edited mid-run. Verbatim
+    #: source when nothing was merged; re-serialised (and therefore
+    #: comment-free) when it was, because the merge happened on data and the
+    #: comments belong to two different files by then.
+    text: str
+
+    @property
+    def path(self) -> Path:
+        return self.chain[0]
+
+    @property
+    def bases(self) -> Tuple[Path, ...]:
+        return self.chain[1:]
+
+    @property
+    def layered(self) -> bool:
+        return len(self.chain) > 1
+
+
+def compose(
+    path: Path,
+    *,
+    resolve: Optional[Callable[[str, Path], Path]] = None,
+) -> Composed:
+    """Read ``path``, follow its ``extends`` chain, and parse the merge.
+
+    ``resolve`` turns one file's ``extends`` value into the base's path; it is
+    supplied by the layer-aware caller because which layers exist depends on
+    the directory the run stands in. Without one, a file that extends anything
+    is refused — the caller asked for a file and would otherwise be handed a
+    workflow with a silent hole where the base's half was.
+    """
+    chain: List[Path] = []
+    docs: List[dict] = []
+    seen: Dict[Path, int] = {}
+    current = path
+    while True:
+        key = _identity(current)
+        if key in seen:
+            raise WorkflowError(
+                f"{EXTENDS_KEY} cycle: "
+                + " -> ".join(str(p) for p in chain + [current])
+            )
+        seen[key] = len(chain)
+        text = read_file(current)
+        doc = read_doc(text, where=str(current))
+        chain.append(current)
+        docs.append(doc)
+        ref = extends_ref(doc)
+        if ref is None:
+            break
+        if resolve is None:
+            raise WorkflowError(
+                f"{current} {EXTENDS_KEY} {ref!r}, and this loader resolves no "
+                f"layers — load it through claude_launcher.cflow.state."
+                f"load_workflow, which knows where the base lives"
+            )
+        if len(chain) > MAX_EXTENDS_DEPTH:
+            raise WorkflowError(
+                f"{EXTENDS_KEY} chain deeper than {MAX_EXTENDS_DEPTH}: "
+                + " -> ".join(str(p) for p in chain)
+            )
+        current = resolve(ref, current)
+    if len(chain) == 1:
+        return Composed(
+            workflow=parse_doc(docs[0], default_name=path.stem),
+            doc=docs[0],
+            chain=tuple(chain),
+            text=text,
+        )
+    merged = compose_docs(docs)
+    workflow = parse_doc(merged, default_name=path.stem)
+    return Composed(
+        workflow=workflow,
+        doc=merged,
+        chain=tuple(chain),
+        text=yaml.safe_dump(merged, sort_keys=False, allow_unicode=True),
+    )
+
+
+def _identity(path: Path) -> Path:
+    """A path in the one spelling two references to the same file share."""
+    try:
+        return path.resolve()
+    except OSError:
+        return path.absolute()
 
 
 #: The pair field's canonical spelling, and the dashed one accepted beside

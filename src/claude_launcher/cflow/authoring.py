@@ -360,6 +360,39 @@ keep shadowing it. Never write the same workflow into both layers "to be
 safe": that is two files to keep in step, and nothing warns you when they
 diverge except the shadow note in `claunch cflow ls`.
 
+### When only the CHECKS are project-specific — layer, do not copy
+
+The usual reason a general workflow ends up copied into a project is one
+field: `verify` (and `awaits`) name commands that exist in this repo and
+nowhere else. Copying the file for that is the mistake the paragraph above
+warns about, in its most tempting form — so the project file says what it
+changes and inherits the rest:
+
+    # .claunch/workflows/ci-flow.yaml -- the whole file
+    extends: ci-flow          # the workflow of that name in a lower layer
+    steps:
+      test:
+        verify: 'pytest -q -m "not slow"'
+      deploy:
+        ask: null             # no deploy gate in THIS repo
+
+`claunch cflow add <name> --project --overlay` writes that stub for you.
+Three merge rules, and they are the contract:
+
+* two mappings merge recursively — naming one field of one step leaves every
+  other step untouched;
+* anything else replaces, lists included (a half-merged list has no reading
+  an author could predict);
+* an explicit `null` DELETES an inherited property. Omitting is how you
+  inherit; `null` is how you say "not here".
+
+The base is a workflow NAME, searched from the layer of the file that names
+it downward — so a project file may extend the global copy of the same name,
+and a global workflow can never reach up into one project's file — or a
+`.yaml` path relative to the extending file. Chains are allowed; a cycle is
+reported, not followed. Keep a layer to what it changes: the moment it holds
+a copy of a step's prose it is the copy again, drifting with nobody watching.
+
 ## Who may drive it
 
 A workflow written for one function in a fleet can say so, instead of hoping

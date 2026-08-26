@@ -2672,6 +2672,38 @@ ecs-change       15 steps  LSP recon -> ... -> ship  [F:\works\ShelterZero\.clau
                  project copy overrides [C:\Users\me\.claude-launcher\workflows\ecs-change.yaml]
 ```
 
+**A project layer can be a *layer*, not a copy.** Shadowing is whole-file, and
+that is the wrong shape when the two files are not two workflows: the prose,
+the graph and the protocol are written once and ship everywhere, while what a
+step *checks* names tools that exist in one repository. Give the project file
+an `extends:` and it carries only what it changes:
+
+```yaml
+# .claunch/workflows/improv-worker.yaml — the whole file
+extends: improv-worker          # the global copy of the same name
+steps:
+  review:
+    verify: 'python tools/changed_tests.py --base master'
+  landed:
+    verify: 'python tools/landed_check.py'
+```
+
+Merging is per property, and there are three rules: two mappings merge
+recursively (so naming one field of one step leaves the other thousand lines
+alone), anything else replaces (a list replaces wholesale — a half-merged list
+has no reading), and an explicit `null` **deletes** an inherited property,
+which is how a layer says "no verify here" where omitting means "inherit".
+A base is a workflow name — searched from the extending file's own layer
+downward, so a project file may extend the global copy of *the same name*, and
+a global workflow can never reach up into some project's file — or a
+`.yaml`/`.yml` path, resolved against the extending file's own directory.
+Chains are allowed; a cycle is named rather than followed.
+
+`claunch cflow add <name> --project --overlay` writes the stub. `cflow ls`,
+`cflow show`, the dashboard's picker and a run's own `status` say what a file
+extends, and `start` snapshots the **merge**, so editing a base cannot move a
+position that is already running.
+
 Runs are keyed by **(directory,
 session)**: the daemon exports `CLAUNCH_SESSION=<name>` into every managed
 session (tmux's `$TMUX` equivalent), the claude → MCP chain inherits it, and
@@ -2815,7 +2847,7 @@ outside — a supervising script or another agent can watch
 | `cflow archive`          | Retire the run (finished or not) into `.cflow/.../archive/`, freeing the slot for a new start. Active runs are aborted first; a new `start` auto-archives finished runs. On the dashboard: the Archive button + start picker. |
 | `cflow abort` / `reset`  | Abort the run / clear run state (journal kept). |
 | `cflow example [name]`   | Scaffold the example workflow above into this project. |
-| `cflow add <wf>... [--name N] [--global \| --project [DIR]] [--force]` | Install a workflow (a `.yaml` path, or a name findable from here) into the global layer (the default), so every directory can run it — `--project` installs into a project instead (DIR defaults to the current one). Parses it first; refuses to replace a different file without `--force`. |
+| `cflow add <wf>... [--name N] [--global \| --project [DIR]] [--overlay] [--force]` | Install a workflow (a `.yaml` path, or a name findable from here) into the global layer (the default), so every directory can run it — `--project` installs into a project instead (DIR defaults to the current one). Parses it first; refuses to replace a different file without `--force`. `--overlay` writes a *layer* (`extends: <name>`) instead of a copy, for a project that only needs to change a property or two. |
 | `cflow install` / `cflow mcp` | Aliases kept for installs written before the servers merged — see `install` and `mcp` in [Toolkit commands](#toolkit-commands-what-an-agent-gets). |
 
 ## How it works
