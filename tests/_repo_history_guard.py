@@ -65,13 +65,23 @@ refused read, each with its reason written beside it. There is one entry, and
 a full sweep is what put it there: six tests reach ``git rev-parse
 --abbrev-ref HEAD`` through ``worktree.current_branch`` because the product
 code under them builds a display label. The read is real; the *dependency* is
-not, and the evidence is that those six are green under every branch name
-this fleet has run them from. The exemption is on the caller, not the
-command -- the same command written in a test module is still a hard stop.
+not. Shown rather than argued: with ``current_branch`` replaced by one that
+returns a fixed sentinel for this repository, those three modules are
+``83 passed in 35.25s``. A branch name they depended on could not survive
+being replaced.
+
+An entry names a caller **and** the one command that caller may make. Both
+halves are load-bearing. Without the caller, the command is blanket-allowed
+and a test asserting on this repository's branch sails through. Without the
+command, an exempt frame licenses whatever else runs beneath it -- rule (a)
+skips test frames deliberately, so a test that intercepted
+``subprocess.run`` and dispatched a different read would ride through on
+somebody else's exemption.
 
 Kept as a table rather than a special case for the reason this whole file
 exists: an exception you can count is not the same as one that is absent
-because nobody looked.
+because nobody looked. Its size is pinned by a test, so it cannot grow
+quietly.
 """
 
 from __future__ import annotations
@@ -332,6 +342,14 @@ EXEMPT_CALLERS = (
     (
         "claude_launcher/worktree.py",
         "current_branch",
+        # The one command this caller may make. Without it the exemption is
+        # about *who* asks and not *what* they asked, and it spreads: a test
+        # that intercepts ``subprocess.run`` and dispatches some other read
+        # of this repository would ride through on the exempt frame, since
+        # rule (a) skips test frames on purpose. Nothing does that today.
+        # Naming the command keeps each row's reach inside that row, which is
+        # what has to be true before the table is ever allowed to grow.
+        ("rev-parse", "--abbrev-ref", "HEAD"),
         # A full sweep of this branch found six tests (test_prompt_input x2,
         # test_cli x3, test_spawn_api x1) reaching `git rev-parse --abbrev-ref
         # HEAD` through here. None of them asks for it: they exercise
@@ -415,7 +433,7 @@ def decide(frames: Sequence) -> Optional[tuple]:
         from "a test drove product code that asked".
     """
     for i, frame in enumerate(frames):
-        for module, func, why in EXEMPT_CALLERS:
+        for module, func, command, why in EXEMPT_CALLERS:
             if frame.function != func or not _posix(frame.filename).endswith(module):
                 continue
 
@@ -439,7 +457,7 @@ def decide(frames: Sequence) -> Optional[tuple]:
             if outside is not None and _is_test_file(outside.filename):
                 return None                           # (b) a test asked
 
-            return (module, func, why)
+            return (module, func, command, why)
     return None
 
 
@@ -496,7 +514,9 @@ class Guard:
                 problem = offending(args, kw.get("cwd"), guard.root)
                 if problem is not None:
                     allowed = exempt()
-                    if allowed is None:
+                    # The caller AND the command: an exempt frame does not
+                    # license whatever else happens to be running under it.
+                    if allowed is None or tuple(_argv(args)[1:]) != allowed[2]:
                         guard.seen.append(problem)
                         raise RepoHistoryRead(problem)
                     guard.exempted.append((allowed, problem))
