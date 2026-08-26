@@ -325,6 +325,10 @@ def build_app(
     # full, and a session's own slice of it (GET), with the one write the
     # dashboard offers — an issue for a session that has none (POST).
     r.add_get("/api/beads", h_beads_fleet)
+    # Before the {id} route, which would otherwise swallow it: aiohttp matches
+    # in registration order and "candidates" is a perfectly good issue id as
+    # far as that pattern is concerned.
+    r.add_get("/api/beads/candidates", h_beads_candidates)
     r.add_get("/api/beads/{id}", h_beads_issue)
     r.add_get("/api/sessions/{name}/beads", h_session_beads)
     r.add_post("/api/sessions/{name}/beads", h_session_beads_create)
@@ -2177,19 +2181,30 @@ async def _onboard_and_launch(
     # workflows tell it to read (`claunch beads show <id> --json`). Never a
     # reason to refuse the session: a board that cannot be written is logged
     # and the session starts without one.
-    linked = await request.app["beads"].ensure_issue(session, body=body, parent=parent)
+    linked = await request.app["beads"].ensure_issue(
+        session, body=body, parent=parent, manager=manager
+    )
     report: dict = {}
     if linked:
         beads_mod.link_issue(session, linked["issue"])
-        report["beads"] = linked
-        if linked["issue"] not in beads_mod.issue_refs(plan.task, plan.context):
+        report["beads"] = {k: v for k, v in linked.items() if k != "issue_row"}
+        # A JOIN is always spelled out, even when the task already carries the
+        # id: `issue: <id>` on its own reads as "this is yours", which is the
+        # one thing a joiner must not conclude. Only the ordinary cases are
+        # skipped when the reference is already there.
+        joined = linked.get("mode") == beads_mod.JOIN
+        if joined or linked["issue"] not in beads_mod.issue_refs(
+            plan.task, plan.context
+        ):
             plan = replace(
                 plan,
                 task=(plan.task + "\n\n" if plan.task else "")
-                + f"issue: {linked['issue']} -- your board record, "
-                + ("registered from this task" if linked["created"] else "assigned to you")
-                + f"; read it with `claunch beads show {linked['issue']} --json` "
-                "and keep its status current (claunch beads update/comments).",
+                + beads_mod.compose_link_note(
+                    linked["issue"],
+                    mode=linked.get("mode") or beads_mod.MINTED,
+                    held_by=linked.get("held_by"),
+                    mesh=plan.mesh or "",
+                ),
             )
 
     opening = ""
@@ -2205,7 +2220,56 @@ async def _onboard_and_launch(
         await onboard.unwind(report, name=name, cwd=cwd, mesh_mgr=_mesh_mgr(request))
         raise
     onboard.open_with(session, opening)
+    if linked and linked.get("mode") == beads_mod.JOIN:
+        # Last, because it names a session that now exists: the holder is told
+        # only once there is something for it to settle with. After launch for
+        # the same reason the join comment is written before it — the board
+        # keeps the record either way, the message is the nudge.
+        report["beads"]["notified"] = await _tell_issue_holder(
+            request, joiner=name, linked=linked
+        )
     return report
+
+
+async def _tell_issue_holder(request: web.Request, *, joiner: str, linked: dict) -> str:
+    """Tell the session that holds an issue that a second session joined it.
+
+    The daemon's half of the ownership rule: it refuses to move the
+    assignment, so the two sessions have to settle it, and the holder cannot
+    see that there is anything to settle from inside its own terminal. Sent
+    on a mesh the two share, as ``fyi`` from the board rather than from the
+    joiner — nobody owes the daemon a reply, and the holder keeps the issue
+    whether it reads this or not.
+
+    Returns the mesh it went out on, or "" — a notice that could not be sent
+    is never a reason to fail a session that has already started.
+    """
+    holder = linked.get("held_by") or ""
+    if not holder:
+        return ""
+    mm = _mesh_mgr(request)
+    if mm is None:
+        return ""
+    try:
+        mine = {m["mesh"] for m in mm.meshes_for_session(joiner)}
+        shared = [m for m in mm.meshes_for_session(holder) if m["mesh"] in mine]
+    except Exception as exc:  # noqa: BLE001 - a roster read must not fail a launch
+        beads_mod.log.debug("beads: no holder notice for %r: %s", holder, exc)
+        return ""
+    if not shared:
+        return ""
+    row = linked.get("issue_row") or {"id": linked.get("issue")}
+    body = beads_mod.compose_join_notice(joiner, row, holder=holder)
+    for entry in shared:
+        try:
+            await mm.send(
+                entry["mesh"], beads_mod.BOARD_SENDER, entry["handle"], body,
+                external=True, type="fyi",
+            )
+            return entry["mesh"]
+        except Exception as exc:  # noqa: BLE001
+            beads_mod.log.debug("beads: holder notice on %r failed: %s", entry["mesh"], exc)
+    return ""
 
 
 async def h_session_children(request: web.Request) -> web.Response:
@@ -3210,6 +3274,33 @@ async def h_beads_fleet(request: web.Request) -> web.Response:
     if cwd:
         extra.insert(0, cwd)
     view = await request.app["beads"].fleet_view(list(manager.list()), extra)
+    return web.json_response(view)
+
+
+async def h_beads_candidates(request: web.Request) -> web.Response:
+    """The issues a creation form may offer for a directory's board.
+
+    What the new-session and spawn forms fill their "existing issue" picker
+    from, and the reason that picker can be honest: each row carries the
+    daemon's own verdict on it (:func:`daemon.beads.adoption`) — whether a new
+    session would take it or only join a running holder — computed from the
+    same session list the creation path will use, so the form promises exactly
+    what the daemon is about to do.
+
+    ``?cwd=`` says which board (any directory inside the repository) and
+    defaults to the daemon's own. ``?parent=`` names the session a spawn would
+    hang off, so a child form asks about the board of the directory its child
+    will actually run in rather than the daemon's.
+    """
+    manager: SessionManager = request.app["manager"]
+    cwd = request.query.get("cwd") or ""
+    parent = request.query.get("parent") or ""
+    if not cwd and parent:
+        try:
+            cwd = manager.get(parent).sdef.cwd
+        except ManagerError:
+            return json_error(404, f"no session named {parent!r}")
+    view = await request.app["beads"].candidates(cwd or os.getcwd(), manager)
     return web.json_response(view)
 
 

@@ -12,6 +12,18 @@ the board and a session's life meet and no agent is in a position to act:
    issue (``issue: <id>`` in the task or context, or an ``issue`` field) adopts
    that one instead of minting a duplicate.
 
+   Adopting is not the same as *taking*. Two sessions assigned to one issue is
+   an ownership conflict nobody notices until both have committed, so the
+   daemon decides it here, mechanically, from the board and its own session
+   list (:func:`adoption`): an issue with no assignee -- or one whose assignee
+   is a session that has already exited -- is taken outright, and one a
+   *running* session holds is only JOINED. A joiner is linked to the issue
+   (its rail shows it, its opening message names it) but the board's
+   ``assignee`` is left exactly where it was, and the two sessions are told
+   about each other so they can settle it -- the holder over the mesh they
+   share, the joiner in its opening block. Nothing is stolen and nothing is
+   silently duplicated.
+
 2. **Ending.** A kill does not go straight to SIGTERM any more. When the
    session is alive and holds active issues, the daemon first types a
    wind-down block into it — the list of its issues and what to do with each
@@ -67,6 +79,17 @@ SESSION_LABEL = "session"
 #: ``issue: <id>`` — how a task or a workflow context names the issue a
 #: session is for (the improv workflows' own convention).
 ISSUE_REF = re.compile(r"\bissue:\s*([A-Za-z][\w.-]*)")
+
+#: What :func:`adoption` decided about an issue a creation request named, and
+#: what :meth:`Board.ensure_issue` reports back as ``mode``. ``MINTED`` is the
+#: fourth: nothing was named and an issue was created from the task.
+TAKE = "assigned"
+JOIN = "joined"
+MINTED = "created"
+
+#: The sender a daemon-originated ownership notice speaks as on the mesh --
+#: not a member, so it is never mistaken for a peer asking for something.
+BOARD_SENDER = "beads"
 
 #: How long a board listing is trusted before it is read again. The web UI
 #: polls every 2 s; without this each open rail would fork ``br`` at that rate.
@@ -183,6 +206,106 @@ def compose_description(task: str, *, name: str, parent: Optional[str]) -> str:
         "(the assignee fills this in at intake: test counts, commit hash)\n\n"
         "## 출처\n"
         f"{origin}, {_utcnow()}, opening task of session {name}"
+    )
+
+
+def adoption(
+    issue: dict, *, session: str, running: Callable[[str], Optional[bool]]
+) -> dict:
+    """Whether ``session`` may take ``issue`` as its own, or only joins it.
+
+    Pure, and the whole ownership rule in one place: a creation request that
+    names an existing issue must never quietly move it off somebody who is
+    still working it, and must never leave a free issue unassigned either.
+
+    ``running(name)`` answers what the daemon knows about a name that appears
+    as an assignee: ``True`` a session of that name is running here, ``False``
+    it is a session of ours that has exited, ``None`` it is nobody the daemon
+    knows (a human, a session on another machine).
+
+    The answer is ``{"mode": TAKE|JOIN, "held_by": str|None, "why": str}``:
+
+    - no assignee at all -> TAKE. This is the "빈 beads" case: assign it.
+    - assignee is this session already -> TAKE, and the caller writes nothing.
+    - assignee is a session that has EXITED -> TAKE. Its exit sweep already
+      returned the issue to ``open``; leaving the dead name on it would make
+      every future request join a session that cannot answer.
+    - assignee is a RUNNING session -> JOIN. Two assignees is the conflict;
+      the daemon refuses to create one and hands the two sessions each
+      other's names instead.
+    - assignee is a name the daemon does not know -> JOIN, for the same
+      reason a human's name is not the daemon's to overwrite.
+    """
+    holder = str(issue.get("assignee") or "").strip()
+    if not holder:
+        return {"mode": TAKE, "held_by": None, "why": "unassigned"}
+    if holder == session:
+        return {"mode": TAKE, "held_by": None, "why": "already yours"}
+    state = running(holder)
+    if state is False:
+        return {"mode": TAKE, "held_by": holder, "why": f"{holder} has exited"}
+    if state is None:
+        return {
+            "mode": JOIN, "held_by": holder,
+            "why": f"{holder} is not a session on this daemon",
+        }
+    return {"mode": JOIN, "held_by": holder, "why": f"{holder} is running"}
+
+
+def compose_link_note(
+    issue: str, *, mode: str, held_by: Optional[str] = None, mesh: str = ""
+) -> str:
+    """The ``issue: <id>`` line appended to a new session's opening task.
+
+    One sentence per thing the agent has to know and cannot find out on its
+    own: which record is its own, whether it is the assignee, and — when it
+    is not — who to settle that with and how. The read command is spelled out
+    because the workflows teach that exact call.
+    """
+    read = f"read it with `claunch beads show {issue} --json`"
+    if mode == JOIN:
+        holder = held_by or "another session"
+        settle = (
+            f"talk to {holder} on mesh {mesh} "
+            f'(`claunch mesh send {mesh} {holder} "..."`)'
+            if mesh
+            else f"raise it with {holder} through whoever created you"
+        )
+        return (
+            f"issue: {issue} -- the board record you were pointed at. "
+            f"{holder} is assigned to it and still running, so you are JOINED "
+            f"to it, NOT its assignee: {read}, and do not run `claunch beads "
+            f"update {issue} --assignee ...` on it. Settle ownership first -- "
+            f"{settle} -- and leave a comment saying what you agreed "
+            f"(`claunch beads comments add {issue} \"...\"`)."
+        )
+    if mode == TAKE:
+        return (
+            f"issue: {issue} -- your board record, assigned to you; {read} "
+            "and keep its status current (claunch beads update/comments)."
+        )
+    return (
+        f"issue: {issue} -- your board record, registered from this task; "
+        f"{read} and keep its status current (claunch beads update/comments)."
+    )
+
+
+def compose_join_notice(joiner: str, issue: dict, *, holder: str) -> str:
+    """What the daemon tells the session that already holds an issue.
+
+    It reports rather than asks — the holder keeps the assignment either way,
+    so there is nothing here that stops if it is ignored — and it says the two
+    things the holder cannot see from its own terminal: that a second session
+    now exists on its issue, and which of them is going to do the work.
+    """
+    return (
+        f"beads: session {joiner} was just created on {issue.get('id')} "
+        f"({issue.get('title') or 'no title'}), which is assigned to you. "
+        f"The daemon did NOT move the assignment -- {holder} is still its "
+        "assignee. Settle which of you owns it: either hand it over "
+        f"(`claunch beads update {issue.get('id')} --assignee {joiner}`) or "
+        f"tell {joiner} what slice to take, and record the answer as a "
+        f"comment on the issue."
     )
 
 
@@ -514,15 +637,46 @@ class Board:
         return result
 
     # ---- creation ------------------------------------------------------- #
+    @staticmethod
+    def _running(manager) -> Callable[[str], Optional[bool]]:
+        """``adoption``'s view of a name: running here / exited here / unknown.
+
+        A manager is optional so the board stays usable without one (tests,
+        and any caller that has no session list); with none, every assignee
+        reads as unknown, which is the conservative answer -- JOIN rather than
+        take something that may still be somebody's.
+        """
+        def running(name: str) -> Optional[bool]:
+            if manager is None:
+                return None
+            try:
+                other = manager.get(name)
+            except Exception:
+                return None
+            return not other.exited
+
+        return running
+
     async def ensure_issue(
-        self, session, *, body: dict, parent: Optional[str]
+        self, session, *, body: dict, parent: Optional[str], manager=None
     ) -> Optional[dict]:
         """Give a new session its issue: adopt the one the request names, or
-        mint one from its task. ``None`` when there is nothing to do — no task
-        and no reference, no board, ``br`` missing, or the feature is off.
+        mint one from its task. ``None`` when there is nothing to do -- no task
+        and no reference, no board, ``br`` missing, or the feature is off
+        (``beads_auto_issue``, or ``beads: false`` on the request, which is the
+        "no issue at all" answer the creation forms offer).
+
+        Adopting goes through :func:`adoption`, so which of the two things it
+        means is decided from the board rather than assumed: an unheld issue
+        is *taken* (``--assignee`` written), one a running session holds is
+        only *joined* and the board's assignment is not touched. ``manager`` is
+        what makes that distinction possible -- the daemon's session list, used
+        to tell a live holder from a dead name.
 
         Never raises: a board that cannot be written must not cost a session
-        its launch. Returns ``{"issue": id, "created": bool}`` on success.
+        its launch. Returns ``{"issue": id, "created": bool, "mode": ...,
+        "held_by": name|None, "why": str}`` on success, where ``mode`` is one
+        of :data:`MINTED`, :data:`TAKE`, :data:`JOIN`.
         """
         cfg = store.daemon_config()
         if not cfg.get("beads_auto_issue", True) or body.get("beads") is False:
@@ -553,9 +707,33 @@ class Board:
                 if current is None:
                     log.info("session %r names issue %r that is not on the board", name, iid)
                     return None
-                if current.get("assignee") != name:
-                    await self.br(root, ["update", iid, "--assignee", name], actor=name)
-                return {"issue": iid, "created": False}
+                verdict = adoption(
+                    current, session=name, running=self._running(manager)
+                )
+                if verdict["mode"] == TAKE:
+                    if current.get("assignee") != name:
+                        await self.br(
+                            root, ["update", iid, "--assignee", name], actor=name
+                        )
+                else:
+                    # A joiner writes no assignment, but the issue must still
+                    # say a second session is on it -- the holder may never
+                    # read its terminal, and this comment is what a later
+                    # reader of the board sees instead of two silent owners.
+                    await self.br(
+                        root,
+                        ["comments", "add", iid,
+                         f"JOINED: session {name} was created on this issue "
+                         f"while {verdict['held_by']} holds it; assignee left "
+                         "unchanged by the claunch daemon -- settle ownership "
+                         "and record it here"],
+                        actor=name,
+                    )
+                return {
+                    "issue": iid, "created": False, "mode": verdict["mode"],
+                    "held_by": verdict["held_by"], "why": verdict["why"],
+                    "issue_row": current,
+                }
             title = issue_title(task) or f"session {name}"
             label = "leader" if parent else "user"
             data = await self.br(
@@ -578,10 +756,73 @@ class Board:
                 iid = data[0].get("id")
             if not iid:
                 return None
-            return {"issue": str(iid), "created": True}
+            return {
+                "issue": str(iid), "created": True, "mode": MINTED,
+                "held_by": None, "why": "minted from the opening task",
+            }
         except cli_beads.BeadsError as exc:
             log.warning("beads: could not register an issue for %r: %s", name, exc)
             return None
+
+    async def candidates(self, cwd: str, manager=None) -> dict:
+        """The issues a creation form may offer for ``cwd``'s board.
+
+        Every issue somebody still means to do, most-urgent first, each
+        carrying the answer :func:`adoption` would give if it were picked --
+        ``mode`` (would a new session take it, or only join it) and ``held_by``
+        -- so the form can *say* "s129 holds this" beside the row instead of
+        the user finding out after the session exists. The verdict is computed
+        for a session that does not exist yet, so it is asked under a name no
+        session has; the only branch that would differ for the real one is the
+        "already yours" shortcut, which a new session never hits.
+        """
+        view = {"available": self.available(), "root": None, "issues": [],
+                "error": None}
+        if not view["available"]:
+            view["error"] = (
+                f"'{cli_beads.BINARY}' is not installed on the daemon machine"
+            )
+            return view
+        try:
+            root = await self.root_for(cwd)
+        except Exception as exc:  # git missing, odd path
+            view["error"] = str(exc)
+            return view
+        if not self.has_board(root):
+            view["error"] = (
+                "no board: this directory is not in a repository with a "
+                ".beads/ (claunch beads init --prefix <name> at the root)"
+            )
+            return view
+        view["root"] = str(root)
+        try:
+            rows = await self.issues(root)
+        except cli_beads.BeadsError as exc:
+            view["error"] = str(exc)
+            return view
+        running = self._running(manager)
+        open_rows = [r for r in rows if r.get("status") in ACTIVE_STATUSES]
+        open_rows.sort(
+            key=lambda r: (
+                _status_rank(r.get("status")),
+                int(r.get("priority") or 9),
+                -_ts(r.get("updated_at")),
+            )
+        )
+        for raw in open_rows:
+            verdict = adoption(raw, session="", running=running)
+            view["issues"].append({
+                "id": raw.get("id"),
+                "title": raw.get("title") or "",
+                "status": raw.get("status"),
+                "priority": raw.get("priority"),
+                "issue_type": raw.get("issue_type"),
+                "assignee": raw.get("assignee") or "",
+                "mode": verdict["mode"],
+                "held_by": verdict["held_by"],
+                "why": verdict["why"],
+            })
+        return view
 
     async def create_for(self, session, *, title: str, description: str = "") -> dict:
         """The rail's manual create: an issue for a session that has none."""
