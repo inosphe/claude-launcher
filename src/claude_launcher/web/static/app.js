@@ -13880,13 +13880,15 @@ async function pollOnce() {
   refreshWorkspaces();
 }
 
-/* What the hold above listens to. pointerdown covers mouse, pen and touch;
-   the release is caught on the document in the capture phase because the
-   pointer may well come up somewhere else entirely (a drag off the row, a
-   press that ends over the terminal). */
+pollTimer = setInterval(pollTick, 2000);
+
+/* What the rail hold listens to (its state and functions live beside
+   refreshSessions, which consults them). pointerdown covers mouse, pen and
+   touch; the release is caught on the document in the capture phase because
+   the pointer may well come up somewhere else entirely — a drag off the row,
+   a press that ends over the terminal. */
 $("session-list").addEventListener("pointerdown", holdRail);
 document.addEventListener("pointerup", releaseRail, true);
 document.addEventListener("pointercancel", releaseRail, true);
 
-pollTimer = setInterval(pollTick, 2000);
 boot();
