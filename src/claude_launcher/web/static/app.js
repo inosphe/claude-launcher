@@ -6832,6 +6832,7 @@ let beadsFocus = "";       // the issue opened in the detail pane, by id
 let beadsDetail = null;    // its /api/beads/<id> payload
 let beadsFilter = "active";  // status filter: active | <status> | all
 let beadsSession = "";     // session filter: "" = everybody
+let beadsLayout = "board"; // "board" = status lanes, "tree" = the forest
 
 const BEADS_STATUSES = ["open", "in_progress", "in_review", "blocked", "closed"];
 const BEADS_ACTIVE = new Set(["open", "in_progress", "in_review", "blocked"]);
@@ -6994,7 +6995,202 @@ function beadsFilterBar() {
   }
   sel.addEventListener("change", () => { beadsSession = sel.value; renderBeads(); });
   bar.appendChild(sel);
+  /* Two readings of the same board, because a family does not fit in a
+     column: the lanes say what state everything is in, and the tree says
+     what hangs off what across every state at once. */
+  const lay = el("div", "seq-tabs beads-layout");
+  for (const [key, label] of [["board", "lanes"], ["tree", "tree"]]) {
+    const b = el("button", "seq-tab" + (beadsLayout === key ? " on" : ""), label);
+    b.type = "button";
+    b.title = key === "board"
+      ? "one lane per status"
+      : "the parent-child forest, every status together";
+    b.addEventListener("click", () => { beadsLayout = key; renderBeads(); });
+    lay.appendChild(b);
+  }
+  bar.appendChild(lay);
   return bar;
+}
+
+/* ---- the hierarchy ---------------------------------------------------- */
+/* The board's parent-child edges, resolved into a forest.
+
+   `br` stores an edge on the DEPENDING side, and `br dep add <child> <parent>
+   --type parent-child` makes the child the depending one — so `from` is the
+   child and `to` is the parent (the daemon's `edges` carries that direction
+   through untouched). Only `parent-child` builds the tree: `blocks` is a
+   different relation between peers, and nesting by it would say something the
+   board does not mean.
+
+   Three things this must survive, because a board is written by agents and
+   nothing stops them: an edge pointing at an issue that is not on this board
+   (dropped — there is nothing to nest under), an issue given two parents (the
+   lowest id wins, so the drawing does not shuffle between polls), and a cycle
+   (every edge that would close one is dropped, leaving those issues as roots
+   rather than hanging the walk). */
+function beadsHierarchy(issues, deps) {
+  const byId = new Map();
+  for (const i of issues || []) if (i && i.id) byId.set(i.id, i);
+  const cand = new Map();
+  for (const d of deps || []) {
+    if (!d || d.type !== "parent-child") continue;
+    const child = d.from, up = d.to;
+    if (child === up || !byId.has(child) || !byId.has(up)) continue;
+    const cur = cand.get(child);
+    if (cur === undefined || String(up) < String(cur)) cand.set(child, up);
+  }
+  const parent = new Map();
+  for (const [child, up] of cand) {
+    const seen = new Set([child]);
+    let at = up, ok = true;
+    while (at !== undefined) {
+      if (seen.has(at)) { ok = false; break; }
+      seen.add(at);
+      at = cand.get(at);
+    }
+    if (ok) parent.set(child, up);
+  }
+  const kids = new Map();
+  for (const [child, up] of parent) {
+    if (!kids.has(up)) kids.set(up, []);
+    kids.get(up).push(child);
+  }
+  const rank = (ids) =>
+    beadsSortIssues(ids.map((x) => byId.get(x))).map((i) => i.id);
+  const order = [];
+  const walk = (id) => {
+    order.push(id);
+    for (const k of rank(kids.get(id) || [])) walk(k);
+  };
+  for (const r of rank([...byId.keys()].filter((id) => !parent.has(id)))) walk(r);
+  return { parent, kids, order };
+}
+
+/* The rows of one lane, in forest order and indented by the ancestors that
+   are IN THIS LANE.
+
+   A kanban splits a family across columns — a child `in_progress` under a
+   parent still `open` — so indenting by true depth would push a card in on
+   account of a parent the reader cannot see beside it. Indenting by the
+   visible ancestors instead means the nesting a lane draws is nesting a
+   reader can follow, and the parent that is elsewhere is said on the card
+   instead: `parentHere` is false and the card links up to it. */
+function beadsLaneRows(issues, tree) {
+  const here = new Map();
+  for (const i of issues || []) here.set(i.id, i);
+  const rank = new Map(tree.order.map((id, n) => [id, n]));
+  const rows = [...(issues || [])].sort(
+    (a, b) => (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9));
+  return rows.map((issue) => {
+    let indent = 0, at = tree.parent.get(issue.id);
+    const seen = new Set([issue.id]);
+    while (at !== undefined && !seen.has(at)) {
+      if (here.has(at)) indent++;
+      seen.add(at);
+      at = tree.parent.get(at);
+    }
+    const up = tree.parent.get(issue.id);
+    return {
+      issue,
+      indent,
+      parent: up === undefined ? "" : up,
+      parentHere: up !== undefined && here.has(up),
+      kids: (tree.kids.get(issue.id) || []).length,
+    };
+  });
+}
+
+/* One card. `beadsIssueRow` is still the row shape and still the rail's — a
+   rail is one column wide, where a card would only be a row that wrapped. */
+function beadsCard(row) {
+  const issue = row.issue || {};
+  const href = "#/beads/" + encodeURIComponent(issue.id || "");
+  const card = el("div", "beads-card");
+  if (issue.id === beadsFocus) card.classList.add("on");
+  card.classList.add("pri" + (issue.priority ?? 9));
+  // Indent as a class, not an inline style: the step is a CSS decision and
+  // the depth is capped there too -- a chain deeper than four would otherwise
+  // walk a card off the right edge of a lane that is 210px wide.
+  if (row.indent) card.classList.add("nested", "ind" + Math.min(row.indent, 4));
+
+  const top = el("div", "beads-card-top");
+  const id = el("a", "beads-id", issue.id || "?");
+  id.href = href;
+  id.title = "open this issue";
+  top.appendChild(id);
+  if (issue.priority !== undefined && issue.priority !== null) {
+    top.appendChild(el("span", "beads-pri", `P${issue.priority}`));
+  }
+  card.appendChild(top);
+
+  const title = el("a", "beads-card-title", issue.title || "(untitled)");
+  title.href = href;
+  card.appendChild(title);
+
+  /* Where this card sits in the family, said only when the nesting cannot say
+     it: a parent that is not in this lane, and how many children hang off
+     this one (they may be in any lane, so the count is the only place a
+     reader learns the card is a parent at all). */
+  const rel = el("div", "beads-card-rel");
+  if (row.parent && !row.parentHere) {
+    const up = el("a", "beads-rel-up", "↰ " + row.parent);
+    up.href = "#/beads/" + encodeURIComponent(row.parent);
+    up.title = "its parent, which is not in this lane";
+    rel.appendChild(up);
+  }
+  if (row.kids) {
+    rel.appendChild(el("span", "beads-rel-kids",
+      row.kids === 1 ? "1 child" : `${row.kids} children`));
+  }
+  if (rel.kids.length) card.appendChild(rel);
+
+  /* The badge row. Anything a later round wants to flag on a card without
+     re-cutting the layout goes here (claunch-3dgs wants "has reports"), which
+     is why it is a row of its own rather than more text on the title. */
+  const badges = el("div", "beads-card-badges");
+  if (issue.issue_type && issue.issue_type !== "task") {
+    badges.appendChild(el("span", "beads-badge type", issue.issue_type));
+  }
+  for (const l of issue.labels || []) {
+    badges.appendChild(el("span", "beads-badge label", "#" + l));
+  }
+  if (issue.assignee) {
+    badges.appendChild(el("span", "beads-badge who", "→ " + issue.assignee));
+  }
+  if (badges.kids.length) card.appendChild(badges);
+
+  const who = el("div", "beads-sessions");
+  for (const s of issue.sessions || []) {
+    const tag = el("a", `beads-sess ${s.status || ""}`, s.name);
+    tag.href = "#/s/" + encodeURIComponent(s.name);
+    tag.title = `${s.name} (${s.status || "?"}) — ${(s.via || []).join(", ")}`;
+    who.appendChild(tag);
+  }
+  if (who.kids.length) card.appendChild(who);
+  return card;
+}
+
+/* Which lanes a board draws, from the status filter. `active` is the four
+   that are still work and `all` adds closed; picking one status is a board of
+   one lane, which is the honest drawing of that filter rather than four lanes
+   with three of them empty. */
+function beadsLanes(filter) {
+  if (filter === "all") return BEADS_STATUSES;
+  if (filter === "active") return BEADS_STATUSES.filter((s) => BEADS_ACTIVE.has(s));
+  return BEADS_STATUSES.includes(filter) ? [filter] : BEADS_STATUSES;
+}
+
+function beadsLane(status, rows) {
+  const lane = el("div", `beads-lane ${status}`);
+  const head = el("div", "beads-lane-head");
+  head.appendChild(el("span", "beads-lane-name", status));
+  head.appendChild(el("span", "beads-lane-count", String(rows.length)));
+  lane.appendChild(head);
+  const body = el("div", "beads-lane-body");
+  if (!rows.length) body.appendChild(el("p", "beads-lane-empty", "—"));
+  for (const r of rows) body.appendChild(beadsCard(r));
+  lane.appendChild(body);
+  return lane;
 }
 
 function beadsBoardSection(board) {
@@ -7009,15 +7205,72 @@ function beadsBoardSection(board) {
     sec.appendChild(el("p", "wf-warning", board.error));
     return sec;
   }
-  const rows = beadsSortIssues(
-    beadsFilterIssues(board.issues, beadsFilter, beadsSession));
-  if (!rows.length) {
+  // The forest is built from the WHOLE board, not from what the filter left:
+  // a parent is a fact about the board, and one filtered out of view must
+  // still be named on its child's card rather than quietly making that child
+  // a root.
+  const tree = beadsHierarchy(board.issues, board.deps);
+  const shown = beadsFilterIssues(board.issues, beadsFilter, beadsSession);
+  if (!shown.length) {
     sec.appendChild(el("p", "wf-note",
       `nothing ${beadsFilter === "all" ? "" : beadsFilter + " "}here` +
       (beadsSession ? ` for ${beadsSession}` : "")));
+    return sec;
   }
-  for (const i of rows) sec.appendChild(beadsIssueRow(i));
+  if (beadsLayout === "tree") {
+    // One lane's worth of rows over the whole visible board: every ancestor
+    // that survived the filter is beside its children, which is the reading
+    // the columns give up in exchange for showing state at a glance.
+    const list = el("div", "beads-tree");
+    for (const r of beadsLaneRows(shown, tree)) list.appendChild(beadsCard(r));
+    sec.appendChild(list);
+    return sec;
+  }
+  const lanes = beadsLanes(beadsFilter);
+  const grid = el("div", "beads-lanes");
+  for (const status of lanes) {
+    grid.appendChild(beadsLane(
+      status, beadsLaneRows(shown.filter((i) => i.status === status), tree)));
+  }
+  sec.appendChild(grid);
   return sec;
+}
+
+/* The opened issue's place in the family, built from the board listing's own
+   edges rather than from the issue payload. `br show` resolves what an issue
+   depends on, so the parent is in there — but nothing on that side names the
+   children, and the children are half of what a reader opens a parent to see.
+   The listing has both directions, so both come from there or neither does.
+
+   Returns null when there is no family to draw, so the pane spends no room
+   saying an issue is unrelated to everything — which is most of them. */
+function beadsRelationBlock(id) {
+  const board = ((beadsCache && beadsCache.boards) || []).find(
+    (b) => (b.issues || []).some((i) => i.id === id));
+  if (!board) return null;
+  const byId = new Map((board.issues || []).map((i) => [i.id, i]));
+  const tree = beadsHierarchy(board.issues, board.deps);
+  const up = tree.parent.get(id);
+  const kids = tree.kids.get(id) || [];
+  if (up === undefined && !kids.length) return null;
+  const box = el("div", "beads-detail-rel");
+  const line = (label, issue) => {
+    const row = el("div", "beads-rel-row");
+    row.appendChild(el("span", "beads-rel-label", label));
+    row.appendChild(beadsStatusBadge(issue.status));
+    const a = el("a", "beads-rel-link", issue.id);
+    a.href = "#/beads/" + encodeURIComponent(issue.id);
+    row.appendChild(a);
+    row.appendChild(el("span", "beads-rel-title", issue.title || "(untitled)"));
+    return row;
+  };
+  if (up !== undefined && byId.has(up)) {
+    box.appendChild(line("parent", byId.get(up)));
+  }
+  const rows = beadsSortIssues(kids.map((k) => byId.get(k)).filter(Boolean));
+  rows.forEach((k, n) => box.appendChild(
+    line(n ? "" : `children (${rows.length})`, k)));
+  return box;
 }
 
 /* The opened issue: what the row cannot show — description and comments. */
@@ -7051,6 +7304,8 @@ function beadsDetailPane() {
   if (i.updated_at) facts.push("updated " + String(i.updated_at).replace("T", " ").slice(0, 19));
   meta.appendChild(el("span", "beads-bits", facts.join("  ·  ")));
   pane.appendChild(meta);
+  const rel = beadsRelationBlock(i.id || beadsFocus);
+  if (rel) pane.appendChild(rel);
   if (i.description) pane.appendChild(el("pre", "beads-desc", i.description));
   if (i.close_reason) pane.appendChild(el("p", "wf-note", "closed: " + i.close_reason));
   // The rounds that were written up for this issue. Keyed by issue across
