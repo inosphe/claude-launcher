@@ -2672,11 +2672,14 @@ $("term-brief").addEventListener("click", () => {
   if (currentName) toggleBriefing(currentName);
 });
 
-/* The transcript button: fold the conversation over the terminal's space.
-   The session underneath stays attached and live — this is a reading mode,
-   not a detach — and what it reads is the one record of the session that is
-   actually whole (see the transcript pane's own block). */
-$("term-log").addEventListener("click", toggleTranscript);
+/* The transcript button: walk to this session's conversation page. A route,
+   not a toggle — see the transcript page's own block for why the fourth
+   reading of a session deserves the same standing as the other three. The
+   terminal is not torn down by the trip; it is parked like any navigation,
+   socket and all, and the back button brings it straight back. */
+$("term-log").addEventListener("click", () => {
+  if (currentName) location.hash = `#/log/${encodeURIComponent(currentName)}`;
+});
 
 /* Rebrief: have the daemon re-derive this session's briefing (mesh roster,
    owed replies, cflow position, parent/children, opening task) and type it
@@ -4299,7 +4302,7 @@ document.addEventListener("visibilitychange", () => {
   if (!document.hidden) resyncCli();
 });
 
-/* ---- the transcript pane ----
+/* ---- the transcript page (#/log/<name>) ----
 
    What the terminal cannot answer: "what did this session say an hour ago".
    claude repaints the alternate screen every frame instead of scrolling it,
@@ -4310,67 +4313,75 @@ document.addEventListener("visibilitychange", () => {
    conversation jsonl claude keeps, and the daemon serves it in pages
    (/api/sessions/<name>/transcript).
 
-   The pane is deliberately an ordinary div with `overflow-y: auto`. That is
-   the whole feature: the browser owns the wheel, so a scrollbar, momentum,
-   a touch drag, PgUp/Home/End, find-in-page and selection across the whole
-   conversation all come for free and none of them cost a frame of daemon
-   time. Older pages are fetched as the reader nears the top; while they are
-   sitting at the bottom the poll follows the session forward. */
+   A page of its own, not a pane folded over the terminal. A session already
+   has more than one reading: the terminal is what it is DOING, the run page
+   (#/wf) is where it has GOT TO, the trace (#/msg) is who it has TALKED to.
+   This is the fourth: what it SAID. Making it a route rather than a toggle is
+   what puts it in that company — it becomes a link you can send, a place the
+   back button returns to, and a page the view system parks and unparks like
+   any other (route() stops its poll on the way out, syncLayout gives it the
+   phone's page slot).
+
+   And it reaches further than the toggle could. The material is claude's
+   jsonl on disk, not the live PTY, and the daemon hands a record out for any
+   session it still knows — so an EXITED session's conversation reads exactly
+   like a running one's. The old pane could not show that at all: it had to be
+   opened over an attached terminal, and a dead session has none.
+
+   The scroller itself is deliberately an ordinary div with `overflow-y: auto`.
+   That is the whole feature: the browser owns the wheel, so a scrollbar,
+   momentum, a touch drag, PgUp/Home/End, find-in-page and selection across
+   the whole conversation all come for free and none of them cost a frame of
+   daemon time. Older pages are fetched as the reader nears the top; while
+   they sit at the bottom the poll follows the session forward. */
 const TRANSCRIPT_PAGE = 40;
 const TRANSCRIPT_NEAR_TOP = 400;   // px from the top that triggers an older page
 const TRANSCRIPT_NEAR_END = 40;    // px from the bottom that still counts as "live"
-let transcriptName = null;         // the session whose conversation is open
+let transcriptName = null;         // the session whose conversation this page is
 let transcriptCursor = null;       // oldest seq loaded; the next page ends here
 let transcriptSeen = -1;           // newest seq loaded, for the follow-forward
 let transcriptMore = false;        // is there anything above what is loaded
 let transcriptBusy = false;        // one fetch at a time, or a flick sends ten
 
-function transcriptIsOpen() {
-  return !!transcriptName && transcriptName === currentName;
-}
-
-/* The button owns the pane. Opening reads the tail; closing forgets the
-   cursor, so coming back lands at the bottom rather than wherever the reader
-   left off in a conversation that has moved on since. */
-function toggleTranscript() {
-  if (transcriptIsOpen()) {
-    transcriptName = null;
-  } else {
-    if (!currentName) return;
-    transcriptName = currentName;
-    transcriptCursor = null;
-    transcriptSeen = -1;
-    transcriptMore = false;
-    const pane = $("term-log-pane");
-    if (pane) pane.innerHTML = "";
-    loadTranscriptPage({ older: false });
-  }
-  applyTranscript();
-}
-
-/* Reconcile the button and the pane with (is it open, is a terminal up).
-   Safe to call any time — the view system hides both when no session is
-   attached, and walking to another session closes the pane with it. */
-function applyTranscript() {
-  const btn = $("term-log");
+/* Open the page for a session — the route's entry point. Re-entering the one
+   already on screen is a no-op rather than a reload: coming back from the
+   terminal is the common case, and re-reading would throw away where the
+   reader had scrolled to. */
+function openTranscript(name) {
+  showView("log");
+  $("log-title").textContent = name;
+  const back = $("log-back");
+  if (back) back.href = `#/s/${encodeURIComponent(name)}`;
+  if (transcriptName === name) return;
+  transcriptName = name;
+  transcriptCursor = null;
+  transcriptSeen = -1;
+  transcriptMore = false;
   const pane = $("term-log-pane");
-  if (!btn || !pane) return;
-  if (transcriptName && transcriptName !== currentName) transcriptName = null;
-  const open = transcriptIsOpen();
-  btn.disabled = !currentName;
-  btn.setAttribute("aria-pressed", open ? "true" : "false");
-  btn.textContent = (open ? "▾ " : "▸ ") + "transcript";
-  pane.classList.toggle("hidden", !open);
-  // The pane covers the terminal's space rather than sharing it, so the grid
-  // keeps the size it had and needs no refit on the way in or out — the
-  // session underneath is still live, still attached, still being typed to.
-  $("terminal").classList.toggle("under-log", open);
-  if (open && !pane.dataset.wired) {
-    pane.dataset.wired = "1";
-    pane.addEventListener("scroll", onTranscriptScroll);
+  if (pane) {
+    pane.innerHTML = "";
+    pane.scrollTop = 0;
+    if (!pane.dataset.wired) {
+      pane.dataset.wired = "1";
+      pane.addEventListener("scroll", onTranscriptScroll);
+    }
   }
-  if (open) startTranscriptPoll();
-  else stopTranscriptPoll();
+  loadTranscriptPage({ older: false });
+  startTranscriptPoll();
+}
+
+/* Leaving the page. Called centrally by route(), like every other page's
+   stop*, so the poll never outlives the view that reads it. The name is
+   forgotten too: a conversation moves on while you are away, and coming back
+   should land at the bottom rather than at a cursor into a stale page. */
+function closeTranscript() {
+  stopTranscriptPoll();
+  transcriptName = null;
+  transcriptBusy = false;
+}
+
+function transcriptIsOpen() {
+  return !!transcriptName;
 }
 
 /* Near the top, reach for the page above. Nothing else: this fires on every
@@ -4557,10 +4568,12 @@ function stopTranscriptPoll() {
 }
 
 function pollTranscript() {
+  // `transcriptIsOpen` is the whole guard now: route() clears the name (and
+  // stops this timer) the moment the reader leaves the page, so a live name
+  // means the page is the one on screen.
   if (!transcriptIsOpen() || transcriptBusy) return;
   const pane = $("term-log-pane");
-  if (!pane || pane.classList.contains("hidden")) return;
-  if (!transcriptAtEnd(pane)) return;
+  if (!pane || !transcriptAtEnd(pane)) return;
   loadTranscriptPage({ older: false });
 }
 
@@ -4722,6 +4735,7 @@ function mobileTitle() {
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     case "wf": return `workflow · ${shortenPath(wfCwd || "")}`;
+    case "log": return `transcript · ${transcriptName || ""}`;
     case "msg": return `messages · ${traceSession}`;
     case "session": return `session · ${sessName}`;
     default: return currentName || "no session";
@@ -4832,6 +4846,11 @@ const VIEWS = {
   cli: "cli-view",
   beads: "beads-view",
   wf: "wf-view",
+  // The session's conversation — the fourth reading of it, beside the
+  // terminal (what it is doing), the run page (where it has got to) and the
+  // trace (who it has talked to). Its own page for the same reason those
+  // are: it is a place you can be, with a link and a back button.
+  log: "log-view",
   msg: "msg-view",
   mesh: "mesh-view",
   flow: "flow-view",
@@ -4851,11 +4870,9 @@ function showView(name) {
   // detach() own that object's life.
   $("term-header").classList.toggle("hidden", !(showTerm && currentName));
   $("terminal").classList.toggle("hidden", !showTerm);
-  // The transcript pane stands in the terminal's own space, so it leaves with
-  // it. applyTranscript re-opens it on the way back if the reader left it
-  // open on this session; off the terminal page there is nothing to be over.
-  if (!showTerm) $("term-log-pane").classList.add("hidden");
-  else applyTranscript();
+  // The transcript is its own page now (VIEWS below hides and shows it like
+  // any other), so nothing here has to reach for it. The terminal button that
+  // walks to it lives in the header, which the line above already handles.
   // The queued-deliveries banner belongs to the terminal under it: gone with
   // the terminal, re-asked-for on the way back in (the 2s poll would repaint
   // it anyway, but a page swap should not flash a stale backlog first).
@@ -5218,6 +5235,10 @@ function parseHash(h) {
       ? { page: "wf", cwd: token.slice(sep + 1), scope: token.slice(0, sep) }
       : { page: "wf", cwd: token, scope: "default" };  // pre-scope links
   }
+  // What the session SAID — the fourth reading, and the only one that does
+  // not need the session to be alive: it comes off claude's jsonl on disk,
+  // so an exited record reads exactly like a running one.
+  if (parts[0] === "log" && parts[1]) return { page: "log", name: parts[1] };
   // The session's traffic, not the session — a third reading of it, beside
   // the terminal (what it is doing) and the run page (where it has got to).
   // The mesh is in the URL because a session is a different handle in each
@@ -5254,6 +5275,7 @@ function route() {
   if (r.page !== "flow") stopFlowPoll();
   if (r.page !== "ws") closeWorkspaces();
   if (r.page !== "beads") stopBeadsPoll();
+  if (r.page !== "log") closeTranscript();
 
   switch (r.page) {
     case "terminal":
@@ -5277,6 +5299,7 @@ function route() {
       if (sessName && sessName !== r.name) repointDetail(r.name);
       break;
     case "wf": openWorkflow(r.cwd, r.scope); break;
+    case "log": openTranscript(r.name); break;
     case "msg": openTrace(r.name, r.mesh); break;
     case "mesh": openMesh(r.name); break;
     case "flow": openFlowTopology(r.name); break;

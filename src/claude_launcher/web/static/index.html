@@ -194,12 +194,6 @@
          current session's briefing is open. -->
     <div id="term-brief-pane" class="hidden"></div>
     <div id="terminal"></div>
-    <!-- The transcript pane, over the terminal's own space while it is open
-         (the terminal stays live underneath, socket and all — this is a
-         reading mode, not a detach). One ordinary overflow scroller: the
-         browser owns the wheel here, and older pages are fetched as the
-         reader reaches the top. Rendered by renderTranscript(). -->
-    <div id="term-log-pane" class="hidden"></div>
     <!-- Split mode's bar and pane, under the terminal they halve. The pane
          renders the same material as #/wf/<scope|cwd>; both stay hidden
          unless the header's ⬒ run toggle is on for the attached session
@@ -353,6 +347,21 @@
     <div id="detail-split"></div>
     <div id="sess-view" class="hidden"></div>
     <div id="wf-view" class="hidden"></div>
+    <!-- The session's conversation (#/log/<name>) — the fourth reading of a
+         session, beside the terminal, the run page and the trace. Its own
+         page because it is a place you can be: a link that survives a reload,
+         a back button that returns to the terminal, and a reading that works
+         for an EXITED session too (the material is claude's jsonl on disk,
+         not the live PTY). #term-log-pane is one ordinary overflow scroller —
+         the browser owns the wheel here; older pages arrive as the reader
+         nears the top. Driven by openTranscript(). -->
+    <div id="log-view" class="hidden">
+      <div class="page-head">
+        <a id="log-back" class="term-btn" href="#/">← terminal</a>
+        <h2>transcript · <span id="log-title"></span></h2>
+      </div>
+      <div id="term-log-pane"></div>
+    </div>
     <div id="msg-view" class="hidden"></div>
     <div id="mesh-view" class="hidden"></div>
     <div id="flow-view" class="hidden"></div>

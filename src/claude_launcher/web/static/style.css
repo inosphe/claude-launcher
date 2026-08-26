@@ -781,24 +781,32 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   overscroll-behavior: contain; -webkit-overflow-scrolling: touch;
 }
 
-/* ---- the transcript pane ----
-   An ordinary scroller, on purpose. The terminal above it cannot hold the
-   conversation — claude repaints the alternate screen rather than scrolling
-   it, so nothing reaches any scrollback — and every attempt to serve that
-   history through the wheel cost a full-grid repaint per tick to move a
-   couple of lines. Here the browser scrolls: a real scrollbar, momentum, a
-   touch drag, PgUp/Home/End, find-in-page, and selection that spans the whole
-   conversation instead of one screenful. */
+/* ---- the transcript page (#/log/<name>) ----
+   A column like the other pages: a head that holds still and one scroller
+   under it. That scroller is deliberately an ordinary div. The terminal
+   cannot hold this conversation — claude repaints the alternate screen
+   rather than scrolling it, so nothing reaches any scrollback — and every
+   attempt to serve that history through the wheel cost a full-grid repaint
+   per tick to move a couple of lines. Here the browser scrolls: a real
+   scrollbar, momentum, a touch drag, PgUp/Home/End, find-in-page, and
+   selection that spans the whole conversation instead of one screenful. */
+#log-view {
+  flex: 1; min-height: 0; display: flex; flex-direction: column;
+}
+#log-view .page-head {
+  display: flex; align-items: baseline; gap: 12px; padding: 14px 20px 10px;
+}
+#log-view .page-head h2 { font-size: 18px; }
+#log-title { font-family: Cascadia Mono, Consolas, Menlo, monospace; }
+/* The way back to the terminal the reader came from. A link, not a button:
+   the page is a place, so leaving it is navigation. */
+#log-back { text-decoration: none; }
 #term-log-pane {
   flex: 1; min-height: 0; overflow-y: auto; overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  padding: 10px 14px 40px; background: #14161a;
+  padding: 10px 20px 40px; background: #14161a;
   font-size: 13px; line-height: 1.5; color: #c6cdd5;
 }
-/* The terminal keeps its socket and its grid while the pane is over it; only
-   its box gives up the height, so nothing is torn down to read and nothing is
-   refit on the way back. */
-#terminal.under-log { display: none; }
 
 .log-rec { padding: 8px 0; border-top: 1px solid #23272f; }
 .log-rec:first-child { border-top: 0; }
