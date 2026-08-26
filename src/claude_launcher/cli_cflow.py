@@ -14,6 +14,7 @@ import os
 import sys
 import textwrap
 from pathlib import Path
+from typing import Optional
 
 from . import daemon_client
 from .cflow import checkout, engine, install, model, responders, state as state_mod
@@ -109,10 +110,16 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
         return 0
     for wf_ref in flows:
         try:
-            wf = model.load(wf_ref.path)
+            composed = state_mod.compose_located(wf_ref)
+            wf = composed.workflow
             desc = wf.description or ""
             count = wf.step_count()
             print(f"{wf_ref.name:<24} {count:>3} steps  {desc}  [{wf_ref.path}]")
+            # A layer over something is not the whole workflow it looks like:
+            # the step count and the description are mostly the base's, and
+            # the reader should know which file to open to change them.
+            for base in composed.bases:
+                print(f"{'':<24} extends [{base}]")
         except model.WorkflowError as exc:
             print(f"{wf_ref.name:<24} (invalid: {exc})  [{wf_ref.path}]")
         # Which layer answered, and — the part worth the extra line — what it
@@ -124,9 +131,12 @@ def _cmd_ls(_args: argparse.Namespace) -> int:
 
 
 def _cmd_show(args: argparse.Namespace) -> int:
-    path = state_mod.find_workflow(args.workflow)
-    wf = model.load(path)
+    composed = state_mod.load_workflow(args.workflow)
+    path = composed.path
+    wf = composed.workflow
     print(f"{wf.name} — {wf.description}  [{path}]")
+    for base in composed.bases:
+        print(f"extends: {base}")
     recur = "    recur: yes (each finished round requests the next)" if wf.recur else ""
     print(f"start: {wf.start}    max_visits: {wf.max_visits}{recur}")
     if wf.filter_roles:
@@ -594,8 +604,9 @@ def _cmd_add(args: argparse.Namespace) -> int:
         # global layer is the common case, and it should not require knowing
         # where either layer keeps its files.
         try:
-            src = state_mod.locate(ref).path
-            wf = model.load(src)
+            located = state_mod.locate(ref)
+            src = located.path
+            wf = state_mod.compose_located(located).workflow
         except model.WorkflowError as exc:
             print(f"error: {ref}: {exc}", file=sys.stderr)
             failed = True
@@ -604,6 +615,12 @@ def _cmd_add(args: argparse.Namespace) -> int:
         if dest.resolve() == src.resolve():
             print(f"error: {src} is already the {layer} copy", file=sys.stderr)
             failed = True
+            continue
+        if args.overlay:
+            if not _write_overlay(
+                src, dest, ref, layer, args.project, force=args.force
+            ):
+                failed = True
             continue
         outcome = install.install_workflow(src, dest, force=args.force)
         if outcome == install.KEPT:
@@ -618,6 +635,65 @@ def _cmd_add(args: argparse.Namespace) -> int:
         print(f"{verb}: {dest}  ({wf.step_count()} steps, {layer})")
         _report_shadowing(dest.stem, layer)
     return 1 if failed else 0
+
+
+def _write_overlay(
+    src: Path,
+    dest: Path,
+    ref: str,
+    layer: str,
+    project: Optional[str],
+    *,
+    force: bool,
+) -> bool:
+    """Write a layer over ``src`` at ``dest``, and prove it composes.
+
+    The stub is deliberately almost empty. What makes a layer worth having is
+    that it holds ONLY what this repository changes — the moment it holds a
+    copy of a step's prose it is the old arrangement again, drifting from the
+    base with nobody to notice.
+
+    It is written and then loaded back: a stub whose ``extends`` cannot be
+    resolved from where it now sits (promoting a project overlay into the
+    global layer is the way to get one) is removed again rather than left as a
+    file that only fails when somebody tries to run it.
+    """
+    if dest.exists() and not force:
+        print(
+            f"error: {dest} already exists; pass --force to replace it",
+            file=sys.stderr,
+        )
+        return False
+    base_ref = ref if not ref.endswith((".yaml", ".yml")) else src.stem
+    stub = (
+        f"# A layer over {src}.\n"
+        f"#\n"
+        f"# Only what THIS project changes belongs here — every property not\n"
+        f"# named below is inherited from the base, one property at a time, so\n"
+        f"# the base stays the single place the workflow is written. An\n"
+        f"# explicit `null` deletes an inherited property; omitting it inherits.\n"
+        f"extends: {base_ref}\n"
+        f"\n"
+        f"# steps:\n"
+        f"#   <step id>:\n"
+        f"#     verify: <the command THIS project checks that step with>\n"
+    )
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    dest.write_text(stub, encoding="utf-8")
+    try:
+        composed = state_mod.compose_located(
+            state_mod.Located(dest.stem, dest, layer), project
+        )
+    except model.WorkflowError as exc:
+        dest.unlink(missing_ok=True)
+        print(f"error: the layer would not compose from {dest}: {exc}", file=sys.stderr)
+        return False
+    print(
+        f"wrote layer: {dest}  (extends {base_ref} -> {composed.bases[0]}, "
+        f"{composed.workflow.step_count()} steps inherited)"
+    )
+    print(f"  add only what this project changes; run it with: /cflow {dest.stem}")
+    return True
 
 
 def _report_shadowing(name: str, layer: str) -> None:
@@ -800,6 +876,14 @@ def register(sub) -> None:
         metavar="DIR",
         help=f"install into DIR/{state_mod.PROJECT_WORKFLOWS.as_posix()}/ "
         f"instead (DIR defaults to the current directory)",
+    )
+    q.add_argument(
+        "--overlay",
+        action="store_true",
+        help="write a LAYER over the workflow instead of copying it: a stub "
+        "declaring 'extends: <name>', where only the properties this "
+        "layer changes (a repo-specific verify, say) are written and "
+        "everything else is inherited",
     )
     q.add_argument(
         "--force", action="store_true", help="replace a different file already there"

@@ -1171,7 +1171,10 @@ def _startable_workflows(cwd: str) -> list:
             "shadowed": [str(p) for p in found.shadows],
         }
         try:
-            wf = cflow_model.load(found.path)
+            composed = cflow_state.compose_located(found, cwd)
+            wf = composed.workflow
+            if composed.layered:
+                entry["extends"] = [str(p) for p in composed.bases]
             entry["description"] = wf.description
             entry["steps"] = wf.step_count()
             entry["recur"] = wf.recur

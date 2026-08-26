@@ -39,7 +39,9 @@ TOOLS = [
         "description": (
             "Start a claunch workflow in the current directory. Returns the "
             "first step, and the file it came from ('source'/'origin' — the "
-            "project's copy of a name shadows the global one, and the payload "
+            "project's copy of a name shadows the global one (or LAYERS over "
+            "it with 'extends:', in which case 'extends' names the bases), "
+            "and the payload "
             "names what it shadowed). Workflows are YAML files in "
             ".claunch/workflows/ (project) or ~/.claude-launcher/workflows/ "
             "(global, every directory). Errors if a run is "
