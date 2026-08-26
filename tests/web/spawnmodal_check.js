@@ -707,6 +707,12 @@ async function main() {
   check("the preflight reports the slots",
     texts(modalEls["modal-body"]).includes("3 child slot(s) left"),
     texts(modalEls["modal-body"]).slice(-120));
+  // Under the cap the gate is not merely empty, it is gone: an action bar
+  // carrying a folded warning block is a bar that has grown a dead region.
+  const openGate = walk(modalEls["modal-actions"]).find((n) =>
+    n.classes && n.classes.has("sess-spawn-cap"));
+  check("under the cap the gate is folded",
+    openGate && openGate.hidden === true, openGate && openGate.hidden);
   const mSel = nodeSel(modalEls["modal-body"], "select") || [];
   // Inherit is the default, not merely an option — the row opens the way
   // Harness, Profile and Directory do. Naming the parent's mesh outright is
@@ -923,27 +929,70 @@ async function main() {
     capWf && (capWf.options || []).map((o) => o.value));
   check("...and the parent's pair is still auto-picked",
     capWf && capWf.value === "improv-worker", capWf && capWf.value);
-  const capOverRow = walk(modalEls["modal-body"]).find((n) =>
+  /* The layout of the cap, which is the half of it that kept failing in
+     practice. The reason used to be printed at the top of the form, the
+     crossing was the form's last row, and the button they explain lives in
+     the action bar outside the form's scroller — three places, twenty rows
+     apart. All three are now one glance: the gate holds reason AND crossing
+     and hangs in the bar, above the button. */
+  const capGate = walk(modalEls["modal-actions"]).find((n) =>
+    n.classes && n.classes.has("sess-spawn-cap"));
+  check("the cap gate is in the action bar, beside the button",
+    capGate && capGate.hidden === false, capGate && capGate.hidden);
+  check("...and holds the reason and the crossing together",
+    capGate && texts(capGate).includes(CAP) &&
+      texts(capGate).includes("spawn over the child limit"),
+    capGate && texts(capGate));
+  const capOverRow = capGate && walk(capGate).find((n) =>
     n.tag === "div" && n.classes.has("sess-spawn-row") &&
     texts(n).includes("spawn over the child limit"));
   check("the over-limit row is on offer at the cap",
     capOverRow && capOverRow.hidden === false, capOverRow && capOverRow.hidden);
-  check("the note quotes the cap and names the crossing",
-    texts(modalEls["modal-body"]).includes(CAP) &&
-      texts(modalEls["modal-body"]).includes("tick 'spawn over the child limit'"),
+  check("...with the cost of crossing under it, not inside its label",
+    capOverRow && texts(capOverRow).includes("the daemon counts it against you"),
+    capOverRow && texts(capOverRow));
+  check("the form's own note no longer repeats the cap",
+    !texts(modalEls["modal-body"]).includes(CAP),
     texts(modalEls["modal-body"]).slice(-200));
   const capActs = buttons(modalEls["modal-actions"]);
   const capBtn = capActs.find((b) => b.text.startsWith("Spawn"));
   check("the button stays dead until the cap is crossed",
     capBtn && capBtn.disabled === true);
+  check("...and says so to a pointer already resting on it",
+    capBtn && capBtn.title.includes("tick 'spawn over the child limit'"),
+    capBtn && capBtn.title);
   const capBox = capOverRow && capOverRow._find((k) => k.tag === "input");
   if (capBox) { capBox.checked = true; await capBox.fire("change"); }
   check("...and the crossing arms it", capBtn && capBtn.disabled === false);
+  check("...and takes the explanation off the armed button",
+    capBtn && capBtn.title === "", capBtn && capBtn.title);
   await capBtn.fire("click");
   await settle();
   const capPost = sent.find((x) => x.method === "POST");
   check("the crossing travels as over_limit",
     capPost && capPost.body.over_limit === true, capPost && capPost.body);
+
+  /* A soft refusal that names nothing to cross. The gate still has to open —
+     it is the only place the modal says why the button is dead now that the
+     reason has left the form's top note — but it opens on the reason alone,
+     with no box under it pretending there is a way through. */
+  routes["GET /api/sessions/lead1/children"] = { doc: {
+    can_spawn: false, blocked_by: [], soft_blocked_by: [],
+    may_choose: ["worktree"], spawnable_harnesses: [],
+  } };
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  const bareGate = walk(modalEls["modal-actions"]).find((n) =>
+    n.classes && n.classes.has("sess-spawn-cap"));
+  check("a crossing-less refusal still opens the gate on its reason",
+    bareGate && bareGate.hidden === false &&
+      texts(bareGate).includes("this session may not spawn"),
+    bareGate && [bareGate.hidden, texts(bareGate)]);
+  const bareRow = bareGate && walk(bareGate).find((n) =>
+    n.tag === "div" && n.classes.has("sess-spawn-row"));
+  check("...and offers no box there is no crossing for",
+    bareRow && bareRow.hidden === true, bareRow && bareRow.hidden);
 
   /* ---- a parent whose own record never arrived is not guessed at ---------
      The workflow and git questions are both about where the CHILD will
