@@ -22,6 +22,37 @@ OAUTH_TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
 #: Bearer token Claude Code sends to a custom (provider-overridden) backend.
 AUTH_TOKEN_ENV = "ANTHROPIC_AUTH_TOKEN"
 
+#: Backend keys a provider or profile owns outright — endpoint, auth, and the
+#: model pins. A stale value for any of these in the ambient environment must
+#: never reach the child: the daemon is usually started from inside a claude
+#: session (which itself may run on a borrowed backend), so its inherited env
+#: carries that backend's keys, and every later spawn would keep talking to it
+#: whenever the new profile/provider leaves the key unset. ``child_env`` drops
+#: these from the base env, together with every key any provider in the
+#: registry defines; the config file is the only legitimate source for them.
+BACKEND_ENV_KEYS = frozenset(
+    {
+        "ANTHROPIC_MODEL",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL",
+        "ANTHROPIC_SMALL_FAST_MODEL",
+        "ANTHROPIC_BASE_URL",
+        "ANTHROPIC_API_KEY",
+        AUTH_TOKEN_ENV,
+        "CLAUDE_CODE_SUBAGENT_MODEL",
+    }
+)
+
+
+def _managed_env_keys() -> frozenset:
+    """Keys stripped from the base env: backend keys plus any provider's."""
+    keys = set(BACKEND_ENV_KEYS)
+    for env in providers.registry().values():
+        keys.update(env)
+    return frozenset(keys)
+
 
 class RunnerError(Exception):
     """Raised when the selected harness cannot be launched."""
@@ -68,11 +99,20 @@ def child_env(
     swaps auth — and the backend it talks to — to another profile: the
     lender's provider token *and* its env come along, its env as a fill layer
     below the runner's own env, which keeps final responsibility for every key.
+    Backend keys (see :data:`BACKEND_ENV_KEYS`, plus anything any provider
+    defines) are dropped from the base env first, so a value leaked into the
+    daemon's or shell's environment by a *previous* backend cannot shadow a
+    profile that simply leaves the key unset.
     """
     harness = harnesses.get(harnesses.CLAUDE_HARNESS)
     if harness is None:
         raise RunnerError("the claude harness is not declared")
-    env = dict(os.environ if base_env is None else base_env)
+    managed = _managed_env_keys()
+    env = {
+        k: v
+        for k, v in (os.environ if base_env is None else base_env).items()
+        if k not in managed
+    }
     provider_env: dict = {}
     lender_env: dict = {}
     if with_token:
