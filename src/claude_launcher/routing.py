@@ -193,8 +193,16 @@ def log_file(fp: str) -> Path:
     return state_dir() / f"{fp}.log"
 
 
-def _record_file(fp: str) -> Path:
-    return state_dir() / f"{fp}.json"
+def _record_file(fp: str, port: int) -> Path:
+    """One record per *shim*, not per fingerprint.
+
+    Keying on the fingerprint alone loses shims: if two ever end up serving the
+    same pair (a crash between spawn and claim release, an orphan left by an
+    older build), the second record overwrites the first and ``stop`` can no
+    longer reach what it cannot see. A leaked proxy holding a port is not
+    something to leave for the next person to find.
+    """
+    return state_dir() / f"{fp}-{port}.json"
 
 
 def candidate_ports(fp: str) -> List[int]:
@@ -289,7 +297,7 @@ def _spawn(upstream: str, block: Dict, port: int, fp: str) -> None:
 
 def _record(fp: str, port: int, upstream: str, block: Dict, pid) -> None:
     state_dir().mkdir(parents=True, exist_ok=True)
-    _record_file(fp).write_text(
+    _record_file(fp, port).write_text(
         json.dumps(
             {
                 "fingerprint": fp,
@@ -488,6 +496,6 @@ def stop(fingerprints: Optional[List[str]] = None) -> List[str]:
         deadline = time.monotonic() + STOP_TIMEOUT
         while time.monotonic() < deadline and health(int(info["port"])) is not None:
             time.sleep(0.05)
-        _record_file(str(fp)).unlink(missing_ok=True)
+        _record_file(str(fp), int(info["port"])).unlink(missing_ok=True)
         stopped.append(str(fp))
     return stopped

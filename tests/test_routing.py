@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -294,6 +295,33 @@ def test_a_changed_spec_gets_its_own_shim(upstream, shims):
     second = routing.ensure_shim(upstream.url, {"order": ["together"]})
     assert first != second
     assert len(routing.instances()) == 2
+
+
+@pytest.mark.slow_shim
+def test_stop_reaches_a_second_shim_serving_the_same_pair(upstream, shims):
+    """Records are per shim, so a duplicate cannot hide from ``stop``.
+
+    Duplicates should no longer happen (the start claim prevents them), but one
+    left behind by a crash or an older build is a loopback proxy holding a port,
+    and `claunch routing` has to be able to see and end it.
+    """
+    routing.ensure_shim(upstream.url, SPEC)
+    fp = routing.fingerprint(upstream.url, SPEC)
+    stray = routing.candidate_ports(fp)[3]
+    routing._spawn(upstream.url, SPEC, stray, fp)
+    for _ in range(150):
+        info = routing.health(stray, timeout=0.5)
+        if info is not None:
+            routing._record(fp, stray, upstream.url, SPEC, info.get("pid"))
+            break
+        time.sleep(0.1)
+    else:
+        pytest.fail("the second shim never came up")
+
+    assert len(routing.instances()) == 2
+    assert routing.stop() == [fp, fp]
+    assert routing.instances() == []
+    assert routing.health(stray) is None
 
 
 @pytest.mark.slow_shim
