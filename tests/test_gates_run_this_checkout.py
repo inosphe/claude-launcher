@@ -70,13 +70,32 @@ NO_SYNC = "uv run --no-sync python "
 
 
 def _gates():
-    """Every armed gate in this repository's project layer: (file, step, cmd)."""
+    """Every armed gate in this repository's project layer: (file, step, cmd).
+
+    ``awaits`` probes count. They are the same kind of thing as a ``verify``
+    -- a command this repository names, whose exit code is taken as the fact
+    -- and the project layer grafts both fields for exactly that reason
+    (``tools/sync_project_layer.py``, ``GRAFT_FIELDS``). The difference is
+    who runs it: the daemon's reminder clock, on a run standing still, rather
+    than the engine on the way out of a step. That makes a probe *worse* to
+    get wrong, not better. A ``verify`` that resolves to the wrong tree fails
+    where somebody is waiting for it; a probe that does answers nobody, on a
+    clock, in a session that is idle by design -- and the run's whole reason
+    for having one is that nobody is watching. ``awaits: verify`` is the same
+    command as the step's own and is not counted twice.
+    """
     found = []
     for path in sorted(OVERRIDES.glob("*.yaml")):
         wf = model.load(path)
         for step_id, step in wf.steps.items():
-            if step.verify is not None:
-                found.append((path.name, step_id, step.verify.command))
+            seen = set()
+            for cmd in (
+                step.verify.command if step.verify else None,
+                step.awaits.command(step) if step.awaits else None,
+            ):
+                if cmd and cmd not in seen:
+                    seen.add(cmd)
+                    found.append((path.name, step_id, cmd))
     return found
 
 
@@ -116,23 +135,32 @@ def test_the_project_layer_actually_arms_some_gates():
     assert len(_gates()) >= 3
 
 
-def test_the_parser_sees_every_verify_the_files_spell():
+@pytest.mark.parametrize("field", ["verify", "awaits"])
+def test_the_parser_sees_every_gate_field_the_files_spell(field):
     """A ``verify:`` in the text is a ``verify`` in the model, or it is a typo.
 
     claunch-ybf: the workflow parser drops a field whose name it does not know,
     silently. A gate spelled ``verfiy:`` therefore does not exist, and nothing
     anywhere says so -- the step simply stops being gated. Counting the lines
     against the parsed model is the cheapest thing that notices.
+
+    ``awaits`` is held to it for the same reason and needs it more: a dropped
+    ``verify`` at least stops gating something a person is waiting on, while a
+    dropped ``awaits`` removes a signal nobody is waiting for by construction
+    -- the run sits idle exactly as it would have, and the silence it was
+    added to break is indistinguishable from the silence of it working.
     """
     for path in sorted(OVERRIDES.glob("*.yaml")):
         spelled = sum(
             1
             for line in path.read_text(encoding="utf-8").splitlines()
-            if line.strip().startswith("verify:")
+            if line.strip().startswith(f"{field}:")
         )
-        parsed = sum(1 for s in model.load(path).steps.values() if s.verify is not None)
+        parsed = sum(
+            1 for s in model.load(path).steps.values() if getattr(s, field) is not None
+        )
         assert spelled == parsed, (
-            f"{path.name}: {spelled} 'verify:' line(s) in the file but {parsed} "
+            f"{path.name}: {spelled} {field!r} line(s) in the file but {parsed} "
             "in the parsed workflow -- the parser discarded one. A gate the "
             "parser does not see is not a gate, and nothing else reports it."
         )

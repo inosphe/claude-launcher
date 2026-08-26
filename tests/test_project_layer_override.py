@@ -86,8 +86,18 @@ def _graft_fields() -> tuple:
 #: done. 세션 종료한다" and exited, and a request that was rejected, or asked
 #: for a rebase, or quietly dropped from a batch, had nobody left to notice.
 ARMED = {
-    "improv-worker": ("review", "landed", "wrapup"),
+    "improv-worker": ("review", "rebase", "landed", "wrapup"),
     "improv-leader": ("sweep", "reflect"),
+}
+
+#: Steps whose project-layer field is an ``awaits`` probe rather than (or as
+#: well as) a ``verify``. Kept apart from :data:`ARMED` because the two are
+#: run by different things -- the engine on the way out of a step, the daemon
+#: on a run standing still -- and only ``awaits`` may sit on a select step,
+#: which is the shape ``await-landing`` has.
+WATCHED = {
+    "improv-worker": ("await-landing", "landed"),
+    "improv-leader": ("reflect",),
 }
 
 # Every gate runs against a venv that is already there. A worker's worktree
@@ -120,9 +130,52 @@ GATES = {
     # nested formation is the normal shape, so containment reads as landed
     # when nothing landed.
     ("improv-worker", "landed"): "tools/landed_check.py",
+    # The measurement the leader's rejection used to be. A worker files a
+    # landing request, waits out a 300s batch window plus a sweep, and the
+    # target moves while it sits there; the leader then measures the
+    # divergence by hand and sends it back. Two git commands, spent as a
+    # leader turn, a mesh round trip and two board transitions. The same
+    # script answers it here and in the leader's preflight, so the two sides
+    # cannot disagree about the same branch.
+    ("improv-worker", "rebase"): "tools/merge_ready.py",
     ("improv-leader", "sweep"): "tools/sweep.py",
     ("improv-leader", "reflect"): "tools/deploy_check.py",
 }
+
+
+@pytest.mark.parametrize("stem", sorted(WATCHED))
+def test_the_override_adds_no_other_awaits(stem):
+    """The same census as ``ARMED``, for the field the daemon runs.
+
+    An ``awaits`` is cheaper to add than a ``verify`` and easier to forget:
+    nothing fails when one appears where it does not belong, it just puts a
+    command on a 60-second clock in every session that reaches the step.
+    """
+    wf = model.load(OVERRIDES / f"{stem}.yaml")
+    watched = [s.id for s in wf.steps.values() if s.awaits is not None]
+    assert watched == list(WATCHED[stem])
+
+
+def test_the_waiting_probe_is_the_gate_the_worker_already_passed():
+    """``await-landing`` re-measures what ``rebase`` gated, and that is the point.
+
+    The worker leaves ``rebase`` green and then waits, frozen, while the batch
+    window fills and the sweep runs. The same command on the same branch is
+    what turns "it was ready when I asked" into "it is ready now" -- and the
+    daemon speaks only when the exit code changes, so a branch that stays
+    ready costs nothing at all.
+    """
+    wf = model.load(OVERRIDES / "improv-worker.yaml")
+    step = wf.steps["await-landing"]
+    assert step.awaits is not None and step.awaits.probe is not None, (
+        "a select step takes no verify, so `awaits: verify` has nothing to "
+        "re-measure here -- the probe has to be named"
+    )
+    assert step.awaits.command(step) == wf.steps["rebase"].verify.command
+    assert step.awaits.describe, (
+        "without it the daemon's signal shows the command, which is true and "
+        "does not say what the waiting was about"
+    )
 
 
 @pytest.mark.parametrize("key, script", sorted(GATES.items()))
