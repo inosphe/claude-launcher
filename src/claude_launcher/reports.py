@@ -268,6 +268,31 @@ def for_issue(issue: str) -> List[dict]:
     return rows
 
 
+def index() -> List[dict]:
+    """Every report on this machine, newest first — the whole wall of them.
+
+    The third question, after :func:`listing` ("what did this session leave?")
+    and :func:`for_issue` ("what was written up for this issue?"): *what has
+    been written at all*. It is the one with no key in hand, which is exactly
+    the reader who has lost the thread — and it is answerable here for the
+    same reason the other two are, because the filenames are the index.
+
+    It asks the session registry no more than they do. That is not an
+    oversight to be tidied later: most of what this returns was written by
+    sessions the registry has already forgotten, and a listing that asked
+    would be hiding its own majority. A caller that wants to say which of
+    these sessions is still running annotates the rows afterwards.
+    """
+    rows: List[dict] = []
+    for session in sessions_with_reports():
+        rows.extend(listing(session))
+    # Same order as :func:`for_issue`, and for the same reason: the stamp
+    # leads the filename and sorts lexically, so name-descending is
+    # newest-first, with the session breaking a same-second tie.
+    rows.sort(key=lambda r: (r["file"], r["session"]), reverse=True)
+    return rows
+
+
 def names_in(session: str) -> List[str]:
     """Every correctly-named file in the directory, newest first.
 

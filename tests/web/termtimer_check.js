@@ -1,33 +1,31 @@
-/* The nudge countdown on the session's OWN header (#term-timer).
+/* The nudge countdown on the session's OWN header (#term-timer) — since the
+   rail's strip was removed (it duplicated this chip), the countdown's only
+   home.
 
-   railtimer_check covers the strip above the rail's nav: which of the two
-   clocks speaks, how the countdown ages, how the several silences stay told
-   apart. All of that is shared — the header chip calls the very same
-   railTimerPick and railTimerLine, deliberately, because two wordings for
-   one clock drift and the strip's are the tested ones.
+   railtimer_check guards that the rail stays free of any timer strip and
+   tests the shared clock vocabulary directly: which of the two clocks
+   speaks, how the countdown ages, how the several silences stay told apart.
+   The header chip calls the very same railTimerPick and railTimerLine,
+   deliberately — one vocabulary, one wording for one clock.
 
-   What is NOT shared is the whole reason this chip exists, and it is what
-   this check is about:
+   What this check adds is the chip's own subject, and it is the whole
+   reason this chip exists:
 
-   * the strip answers "is the daemon about to type into something on this
-     machine", and when the attached session drives no run it falls back to
-     whichever run fires soonest. That is right for a rail and wrong for a
-     header: a countdown drawn beside a session's name is read as that
-     session's. So termTimerRun has NO fallback — the attached session's run,
-     with timers of its own, or nothing;
+   * termTimerRun has NO fallback. A countdown drawn beside a session's name
+     is read as that session's, so the attached session's run — with timers
+     of its own — or nothing;
    * a reading is stamped with the session it was taken for. The chip
      repaints every second while the poll that feeds it comes round every
      two, so walking from one terminal to another leaves a whole second in
      which the previous session's countdown would sit on the new session's
      name;
-   * it is one line of a crowded header rather than a strip of its own, so it
-     clips rather than shoving the buttons along, and it drops the scope
-     label the strip carries — the name is already at the other end of the
-     same row.
+   * it is one line of a crowded header, so it clips rather than shoving the
+     buttons along, and it drops the scope label — the name is already at
+     the other end of the same row.
 
    And the three wirings, which no amount of correct arithmetic replaces: the
-   2s poll feeds it, every attach path reseeds it, and one interval ages both
-   faces of the clock so they cannot drift a second apart. */
+   2s poll feeds it, every attach path reseeds it, and the one interval ages
+   it. */
 const fs = require("fs");
 const path = require("path");
 const staticDir = path.join(__dirname, "..", "..", "src", "claude_launcher",
@@ -112,7 +110,7 @@ new Function(
   "let currentName = null, cflowCache = [];\n" +
   [table("RAIL_TIMER_RANK"), table("RAIL_TIMER_GLYPH"),
    slice("fmtCountdown"), slice("railTimerPick"), slice("railTimerTitle"),
-   slice("railTimerLine"), slice("sessCflowRun"), slice("railTimerRun"),
+   slice("railTimerLine"), slice("sessCflowRun"),
    slice("termTimerRun"), table("TERM_TIMER_HOLD_GLYPH"),
    slice("renderTermTimer"), slice("termTimerHold"), slice("termTimerTitle"),
    slice("paintTermTimer"),
@@ -122,7 +120,6 @@ new Function(
    "async " + slice("termTimerClick")].join("\n") + `
 let termTimerRead = null, termTimerBusy = false;
 exports.termRun = termTimerRun;
-exports.railRun = railTimerRun;
 exports.render = renderTermTimer;
 exports.paint = paintTermTimer;
 exports.hold = termTimerHold;
@@ -151,8 +148,9 @@ const run = (scope, over) => Object.assign({
 }, over);
 
 /* ---- whose clock this is: no fallback ------------------------------- */
-/* The header has a subject. Every case below is one the rail answers with
-   somebody else's run — which is the correct rail answer and a lie here. */
+/* The header has a subject. A countdown drawn beside a session's name is
+   read as that session's, so every case below must show nothing rather than
+   the soonest run on the machine — there is no fallback to fall back to. */
 const mine = run("s19");
 const other = Object.assign(run("s20"), { cwd: "F:/other" });
 other.timers.reminder.due_in = 30;
@@ -161,24 +159,18 @@ ctx.setWorld("s19", [other, mine]);
 check("the attached session's own run is the subject", ctx.termRun().scope, "s19");
 
 /* The attached session drives a run the daemon published no timers for (an
-   older daemon, or a slot that is idle). The rail falls through to the fleet
-   here; the header must not — both asserted, because the difference IS the
-   feature and a later edit that "unified" them would pass one check alone. */
+   older daemon, or a slot that is idle). Only the attached run counts — a
+   fleet clock is somebody else's clock. */
 const untimed = Object.assign(run("s19"), { timers: undefined });
 ctx.setWorld("s19", [untimed, other]);
 check("a run without timers is not this session's countdown", ctx.termRun(), null);
-check("...while the rail still falls through to the fleet, as it should",
-      ctx.railRun().scope, "s20");
 
 /* Attached to a session that drives no run at all. */
 ctx.setWorld("s21", [mine, other]);
 check("a session with no run of its own shows nothing", ctx.termRun(), null);
-/* Nothing attached: there is no subject, so there is no chip — the rail's
-   fallback would put a stranger's countdown on an empty header. */
+/* Nothing attached: there is no subject, so there is no chip. */
 ctx.setWorld(null, [mine, other]);
 check("nothing attached, nothing to speak for", ctx.termRun(), null);
-check("...where the rail would still have picked the soonest",
-      ctx.railRun().scope, "s20");
 /* An idle run is not this session's clock either — sessCflowRun drops it. */
 ctx.setWorld("s19", [Object.assign(run("s19"), { status: "idle" })]);
 check("an idle run is not a countdown", ctx.termRun(), null);
@@ -190,18 +182,17 @@ check("the chip is shown", chip.classList.contains("hidden"), false);
 check("...keeping the header's own button dress",
       ["term-btn", "timer-chip"].every((c) => chip.classList.contains(c)), true);
 check("...and wearing the clock's state", chip.classList.contains("counting"), true);
-/* The words are the strip's, unchanged — one clock, one vocabulary. The
-   glyph is NOT: on a chip with a subject those pixels are the switch, and
-   the strip's own vocabulary would put "⏱" here while the thing is running
+/* The words are the shared vocabulary's, unchanged — one clock, one
+   set of words. The glyph is NOT: on a chip with a subject those pixels
+   are the switch, and that vocabulary would put "⏱" while it is running
    and "○" once somebody paused it, which is the wrong way round for
    something pressable. */
-check("the strip's words, and the switch's glyph in front of them",
+check("the clock's words, and the switch's glyph in front of them",
       chip.kids.map((k) => k.text), ["⏸", "step reminder in 6:00"]);
 check("...and a running reminder is not dressed as a paused one",
       chip.classList.contains("timer-paused"), false);
-/* The strip prints the scope because it may be speaking for a run the reader
-   is not looking at. Here the session's name is at the other end of the same
-   row, so a second copy of it is noise. */
+/* The chip drops the scope label: the session's name is at the other end
+   of the same row, so a second copy of it is noise. */
 check("no scope label: the name is already on this row",
       chip.kids.some((k) => k.classes.has("rt-scope") || k.text === "s19"), false);
 check("the hover text still answers for the clock it is NOT reporting",
@@ -381,15 +372,15 @@ check("...and never both at once",
 /* ---- the wirings ----------------------------------------------------- */
 /* Correct arithmetic that nothing calls is a chip that never moves. */
 check("the 2s cflow poll feeds it",
-      /renderRailTimer\(\);[^\n]*\n\s*renderTermTimer\(\);/.test(src), true);
+      /renderTermTimer\(\);[^\n]*\n\s*if \(currentPage === "home"\) renderHome\(\);/
+        .test(src), true);
 /* setStatusBadge is the one point every attach path passes through
    (freshAttach and restoreTerminal both seed the header with it), which is
    what keeps the last session's clock off this session's name. */
 const badge = slice("setStatusBadge");
 check("every attach path reseeds it", /renderTermTimer\(\)/.test(badge), true);
-check("one interval ages both faces of the clock",
-      /setInterval\(\(\) => \{ paintRailTimer\(\); paintTermTimer\(\); \}, 1000\)/
-        .test(src), true);
+check("the one interval ages the chip",
+      /setInterval\(\(\) => \{ paintTermTimer\(\); \}, 1000\)/.test(src), true);
 
 /* ---- the shipped page ------------------------------------------------ */
 const headerAt = html.indexOf('id="term-header"');

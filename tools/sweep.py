@@ -78,11 +78,19 @@ with ``--no-ff`` then produces a different commit with **byte-identical
 content**, and without this the batch would pay for the whole suite twice
 over one tree.
 
-Safe here because nothing in this suite reads the repository's own history:
-every test that touches git (``tests/test_mergecheck.py``,
-``tests/test_worktree.py``, ``tests/test_sweep.py``, ``tests/test_spawn_api.py``,
-``tests/test_cflow_layers.py``) builds a throwaway repository under
-``tmp_path``. A suite that asserted on ``git log`` would need this turned off.
+Safe while nothing in this suite reads the repository's own HEAD or refs --
+and that is now watched rather than asserted. ``tests/_repo_history_guard.py``
+refuses such a read at the ``subprocess`` call that makes it, and
+``tests/test_repo_history_guard.py`` is the broken variant proving the guard
+is armed. This paragraph used to claim that every git-touching test digs a
+throwaway repository under ``tmp_path``; it was already wrong when it was
+written -- ``tests/test_mergecheck.py::test_the_real_commits`` reads this
+repository on purpose -- and wrong in a way only a machine was ever going to
+keep track of. It is safe there because it names its commits by *hash*, which
+is the line the guard actually draws: the object database is shared by every
+commit, so two same-tree commits cannot disagree about an object, while they
+disagree about HEAD by construction. A suite that asserted on ``git log``
+would go red at that guard, which is the point of it.
 Only *green* receipts carry over; a red one is a verdict the gate refuses to
 launder, and the tip is simply left without a receipt, which is red anyway.
 

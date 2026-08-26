@@ -871,90 +871,24 @@ function railTimerTitle(pick, state) {
   return lines.join("\n");
 }
 
-/* Which run the strip is about: the attached session's, or — when nothing is
-   attached, or what is attached drives no run — whichever run on this machine
-   is closest to being spoken to. The scope is always drawn beside it, so the
-   fallback can never be mistaken for the session on screen. */
-function railTimerRun() {
-  const mine = typeof currentName === "string" && currentName
-    ? sessCflowRun(currentName) : null;
-  if (mine && mine.timers) return mine;
-  let best = null;
-  for (const r of cflowCache || []) {
-    const p = railTimerPick(r);
-    if (!p || (p.state !== "counting" && p.state !== "due")) continue;
-    const due = p.due_in === null || p.due_in === undefined ? Infinity : p.due_in;
-    if (!best || due < best.due) best = { run: r, due };
-  }
-  return best ? best.run : null;
-}
-
-/* When the numbers currently on screen were read, so the second-by-second
-   repaint can age them. Set by renderRailTimer (the 2s poll), consumed by
-   paintRailTimer (the 1s tick). */
-let railTimerRead = null;
-let railTimerTicker = null;
-
-function renderRailTimer() {
-  railTimerRead = { pick: railTimerPick(railTimerRun()), at: Date.now() };
-  paintRailTimer();
-}
-
-function paintRailTimer() {
-  const box = $("rail-timer");
-  if (!box) return;
-  const read = railTimerRead;
-  const line = read && railTimerLine(read.pick, (Date.now() - read.at) / 1000);
-  if (!line) {
-    box.className = "hidden";
-    box.textContent = "";
-    box.removeAttribute("title");
-    return;
-  }
-  box.className = `rail-timer ${line.state}`;
-  box.title = line.title;
-  box.textContent = "";
-  box.append(
-    el("span", "rt-glyph", line.glyph),
-    el("span", "rt-scope", read.pick.scope || "default"),
-    el("span", "rt-text", line.text)
-  );
-  // The run page for the run being timed — where the interval is actually
-  // editable. Wired once for the node's lifetime: textContent above wipes the
-  // children, not the box, so a listener added per repaint would stack.
-  if (!box.dataset.wired) {
-    box.dataset.wired = "1";
-    box.addEventListener("click", () => {
-      const p = railTimerRead && railTimerRead.pick;
-      if (!p) return;
-      location.hash =
-        "#/wf/" + encodeURIComponent(`${p.scope || "default"}|${p.cwd}`);
-    });
-  }
-}
-
 /* ------------------------------------------------------------------ */
-/* the same clock, on the session's own header                        */
+/* the clock, on the session's own header                             */
 /* ------------------------------------------------------------------ */
-/* The rail's strip answers "is the daemon about to type into something on
-   this machine, and when". A person watching one terminal is asking a
-   narrower question — "is it about to type into THIS one" — and the strip
-   cannot answer it: when the attached session drives no run of its own it
-   falls back to whichever run on the machine fires soonest (railTimerRun),
-   which is the right answer for a rail and the wrong one for a header. A
-   countdown drawn beside a session's name is read as that session's.
-
-   So the chip below shares every judgement with the strip — the same pick,
-   the same words, the same ageing — and differs in exactly two ways, both
-   of them consequences of having a subject:
+/* The countdown's one home is the chip in the session's header: it answers
+   "is the daemon about to type into THIS session, and when". The attached
+   session's run, or nothing at all — a countdown drawn beside a session's
+   name is read as that session's, so any other run's clock would be a
+   confident lie. That is what the two differences from the rail's old strip
+   were for, and both stay because the reasoning survives the strip's
+   removal:
 
    * no fallback. The attached session's run or nothing;
-   * no scope label. The strip prints the scope because it may be speaking
-     for a run the reader is not looking at; here the name is already at the
-     other end of the same row, and repeating it would be noise.
+   * no scope label. The chip needs no "whose clock" tag — the name is
+     already at the other end of the same row, and repeating it would be
+     noise.
 
-   Reusing railTimerLine rather than writing a second one is the point: two
-   wordings for one clock drift, and the strip's words are the tested ones. */
+   Reusing railTimerLine rather than writing a second one is the point: one
+   vocabulary and one wording for one clock, tested through the chip. */
 
 /* The run the header's chip speaks for: the attached session's, or null. */
 function termTimerRun() {
@@ -976,6 +910,7 @@ function termTimerRun() {
    cflow_clock.ping_policy). So the reminder's own standing has to be kept,
    not re-derived from a pick that may be about the ping. */
 let termTimerRead = null;
+let termTimerTicker = null;
 let termTimerBusy = false;   // one flip at a time; a double-click is one flip
 
 function renderTermTimer() {
@@ -2107,11 +2042,11 @@ async function refreshCflow() {
   const runs = data.runs || [];
   cflowCache = runs;
   applyCflowBadges();  // the rail rows may have painted before this cache filled
-  renderRailTimer();   // ...and the nudge countdown above the nav reads it too
-  renderTermTimer();   // ...as does the attached session's own header chip
+  renderTermTimer();   // the attached session's own header chip
   if (currentPage === "home") renderHome();
-  // Everything above is what the *rail* reads: badges on rows, the nudge
-  // countdown, the home card's count. What follows rebuilds the Flows page's
+  // Everything above is what feeds the rail and the header: badges on rows,
+  // the attached session's countdown, the home card's count. What follows
+  // rebuilds the Flows page's
   // whole list from scratch — one card per run, a hundred of them on a
   // working machine — and this runs on the two-second tick from whatever page
   // you are on. Off the flows page there is nobody to see it, and the tick
@@ -5599,6 +5534,7 @@ function mobileTitle() {
     case "meshes": return "mesh";
     case "flows": return "workflows";
     case "ws": return "workspaces";
+    case "reports": return "reports";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     // The session first, for the reason the head carries it (wfOwnerChip):
@@ -5717,6 +5653,7 @@ const VIEWS = {
   flows: "flows-view",
   cli: "cli-view",
   beads: "beads-view",
+  reports: "reports-view",
   wf: "wf-view",
   // The session's conversation — the fourth reading of it, beside the
   // terminal (what it is doing), the run page (where it has got to) and the
@@ -6140,6 +6077,7 @@ function parseHash(h) {
   if (parts[0] === "cli") return { page: "cli" };
   // #/beads is the board; #/beads/<id> the board with one issue opened.
   if (parts[0] === "beads") return { page: "beads", id: parts[1] || "" };
+  if (parts[0] === "reports") return { page: "reports" };
   if (parts[0] === "workspaces") return { page: "ws" };
   return { page: "home" };   // an unknown link is a wrong turn, not an error
 }
@@ -6154,6 +6092,7 @@ function route() {
   if (r.page !== "flow") stopFlowPoll();
   if (r.page !== "ws") closeWorkspaces();
   if (r.page !== "beads") stopBeadsPoll();
+  if (r.page !== "reports") stopReportsPoll();
   if (r.page !== "log") closeTranscript();
 
   switch (r.page) {
@@ -6188,6 +6127,7 @@ function route() {
     case "cli": openCli(); break;
     case "ws": openWorkspaces(); break;
     case "beads": openBeads(r.id); break;
+    case "reports": openReports(); break;
     default: openHome();
   }
 }
@@ -7406,7 +7346,14 @@ function beadsDetailPane() {
   pane.appendChild(meta);
   const rel = beadsRelationBlock(i.id || beadsFocus);
   if (rel) pane.appendChild(rel);
-  if (i.description) pane.appendChild(el("pre", "beads-desc", i.description));
+  // The third section of this pane, and the last one still drawn without a
+  // heading. Reports and Comments both announce themselves; the issue's own
+  // text just began, so a reader scrolling in landed in the middle of prose
+  // with nothing saying what it was. One rule draws all three now.
+  if (i.description) {
+    pane.appendChild(el("h4", null, "Description"));
+    pane.appendChild(el("pre", "beads-desc", i.description));
+  }
   if (i.close_reason) pane.appendChild(el("p", "wf-note", "closed: " + i.close_reason));
   // The rounds that were written up for this issue. Keyed by issue across
   // every session, so a closed issue whose session ended long ago still hands
@@ -7506,11 +7453,22 @@ function sessBeads(data) {
   return box;
 }
 
-/* The HTML pages a session left behind, newest first. The daemon indexes them
+/* The HTML pages a round left behind, newest first. The daemon indexes them
    by reading its reports directory (the filenames carry the time and the
    issue), and serves each one sandboxed, so these are ordinary links — the
    dashboard's cookie authenticates them and a new tab is the right place for
-   a page that was written to be read on its own. */
+   a page that was written to be read on its own.
+
+   A card, and that is the whole of what was wrong here. This block sits in a
+   pane that goes on to stack tens of pre-formatted comment blocks under it,
+   and as one line of 13px blue text it disappeared into them: the most
+   valuable thing in the pane was the weakest thing drawn in it. The weight is
+   carried by the card, which is what lets the heading drop to an h4 and agree
+   with the section beside it instead of competing with it.
+
+   The card is drawn on this element itself, never on a wrapper around it —
+   the pane's order is checked elsewhere by reading its children's first class
+   (beads_check), so an extra div here would silently break that. */
 function sessReports(reports, opts = {}) {
   // Same rows in both places; only the label differs. On a session's page the
   // reports all share a session, so the issue is what tells them apart — on an
@@ -7518,20 +7476,44 @@ function sessReports(reports, opts = {}) {
   // whichever half is not already the heading of the page you are on.
   const bySession = opts.by === "session";
   const box = el("div", "sess-reports");
-  box.appendChild(el("h3", null, `Reports (${reports.length})`));
-  for (const r of reports) {
-    const row = el("div", "sess-report");
-    const a = el("a", "sess-report-link",
-      (bySession ? r.session : r.issue) || "round report");
-    a.href = r.url;
-    a.target = "_blank";
-    a.rel = "noopener";
-    row.appendChild(a);
-    row.appendChild(el("span", "beads-bits",
-      `${String(r.at || "").replace("T", " ").replace("Z", "")} · ${r.size} B`));
-    box.appendChild(row);
-  }
+  // An h4, deliberately: this was an h3 while Comments beside it was an h4,
+  // so two sections at the same level of the same pane were drawn at two
+  // different levels. They share one rule now (.beads-detail h4).
+  const head = el("h4", "sess-reports-head");
+  head.appendChild(el("span", "sess-reports-mark", "▤"));
+  head.appendChild(el("span", "sess-reports-name", "Round reports"));
+  head.appendChild(el("span", "sess-reports-count", String(reports.length)));
+  box.appendChild(head);
+  // What a row IS, said once for the block instead of not at all. Neither
+  // half of a row ("s121", "19 KB") says it, and a reader who has not met one
+  // of these pages cannot tell this link from any other link on the page.
+  box.appendChild(el("p", "sess-reports-what", bySession
+    ? "The write-up each session left when its round on this issue ended — " +
+      "one HTML page, opening in its own tab."
+    : "The write-up this session left at the end of each round — one HTML " +
+      "page, opening in its own tab."));
+  for (const r of reports) box.appendChild(sessReportRow(r, bySession));
   return box;
+}
+
+/* One round. The whole row is the link, because the report is the only thing
+   in this block worth clicking — the target used to be the four characters of
+   a session name, which is a hard thing to hit and an easy thing to miss. */
+function sessReportRow(r, bySession) {
+  const row = el("a", "sess-report sess-report-link");
+  row.href = r.url;
+  row.target = "_blank";
+  row.rel = "noopener";
+  row.title = bySession
+    ? `the round ${r.session || "a session"} wrote up for this issue`
+    : `this session's write-up of the round it spent on ${r.issue || "no issue"}`;
+  row.appendChild(el("span", "sess-report-name",
+    (bySession ? r.session : r.issue) || "round report"));
+  // Never the raw byte count: 19591 is what the filesystem knows, and 19 KB
+  // is what tells a reader whether this is a write-up or a stub.
+  row.appendChild(el("span", "sess-report-bits",
+    `${reportWhen(r.at)} · ${fmtReportSize(r.size)}`));
+  return row;
 }
 
 /* An issue for a session that has none — the one write this panel makes.
@@ -7571,6 +7553,250 @@ function sessBeadsCreate(name) {
   });
   sessBeadsBox = form;
   return form;
+}
+
+/* ------------------------------------------------------------------ */
+/* the Reports page: every round report on this machine               */
+/* ------------------------------------------------------------------ */
+/* The third reading of these pages, beside the two that already exist: a
+   session's rail block ("what did this one leave?") and an issue's detail
+   pane ("what was written up for this?"). Both of those need something in
+   hand. This page is for the reader who has neither — and it is the reading
+   the files were kept outside sessions/<name>/ for, because most of what it
+   lists was written by sessions the daemon has long since forgotten.
+
+   One fetch (/api/reports), whose rows come off the daemon's disk rather
+   than its registry, so a cleared session's round is still here. What the
+   registry does know rides along per row (session_status) and is DRAWN
+   rather than filtered on: the sessions that are gone are not an edge case
+   of this page, they are most of it. */
+let reportsCache = null;      // the rows, newest first; null until the first answer
+let reportsError = "";
+let reportsTimer = null;
+let reportsOpen = false;
+/* The narrowing, held across renders the way the Beads page holds its own —
+   a poll that redrew the table must not throw away what the reader picked. */
+let reportsState = "all";     // all | live | ended | gone
+let reportsSession = "";
+let reportsIssue = "";
+let reportsOldest = false;
+
+function openReports() {
+  reportsOpen = true;
+  showView("reports");
+  renderReports();
+  refreshReports();
+  // 30 s, not the rail's 2. A report is written once per round — tens of
+  // minutes apart at the very best — and each tick costs the daemon a
+  // listdir per session plus a read per file to tell a page from a stub.
+  if (!reportsTimer) reportsTimer = setInterval(refreshReports, 30000);
+}
+
+function stopReportsPoll() {
+  if (reportsTimer) { clearInterval(reportsTimer); reportsTimer = null; }
+  reportsOpen = false;
+}
+
+async function refreshReports() {
+  if (!reportsOpen) return;
+  try {
+    const resp = await api("/api/reports");
+    if (resp.status === 404) {
+      // The daemon on the other end is older than this page. Say so rather
+      // than drawing an empty table, which would read as "nothing written".
+      reportsError = "this daemon predates the Reports page — 'claunch " +
+        "daemon restart' to pick up this version";
+      reportsCache = reportsCache || [];
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) reportsError = data.error || `HTTP ${resp.status}`;
+      else { reportsCache = data.reports || []; reportsError = ""; }
+    }
+  } catch { return; }   // auth overlay is up, or the daemon is away
+  if (reportsOpen) renderReports();
+}
+
+/* What the daemon still knows about the session that wrote a row. Three
+   states, and the page draws all three: a report outlives its session by
+   design, so "no record" is this page's ordinary case rather than its broken
+   one — it is what a cleared session looks like from the one side that still
+   holds the evidence. */
+function reportSessionState(r) {
+  const st = (r && r.session_status) || "";
+  if (!st) return "gone";
+  return st === "exited" ? "ended" : "live";
+}
+
+/* The rows on screen: the narrowing, then the order. Never a re-sort — the
+   daemon already answered newest-first, and oldest-first is that same list
+   read the other way, so the two orders cannot disagree about a tie. */
+function reportsShown(rows) {
+  const out = (rows || []).filter((r) =>
+    (reportsState === "all" || reportSessionState(r) === reportsState) &&
+    (!reportsSession || r.session === reportsSession) &&
+    (!reportsIssue || (r.issue || "") === reportsIssue));
+  return reportsOldest ? out.slice().reverse() : out;
+}
+
+/* A report's size, said the way a person reads it. The bytes are what the
+   filesystem knows; "19 KB" is what tells a reader at a glance whether this
+   is a write-up or a stub. */
+function fmtReportSize(n) {
+  const b = Number(n);
+  if (!Number.isFinite(b) || b < 0) return "";
+  if (b < 1024) return `${Math.round(b)} B`;
+  const k = b / 1024;
+  if (k < 1024) return `${k < 10 ? k.toFixed(1) : Math.round(k)} KB`;
+  const m = k / 1024;
+  return `${m < 10 ? m.toFixed(1) : Math.round(m)} MB`;
+}
+
+/* The stamp, which came off the filename. It is UTC because the daemon names
+   the file that way (the name has to sort), and it is shown as written
+   rather than moved into the reader's zone — the same string is in the URL
+   of the page it opens, and the two must be readable as one thing. */
+function reportWhen(iso) {
+  return String(iso || "").replace("T", " ").replace("Z", " UTC");
+}
+
+const REPORT_STATES = [
+  ["all", "all", "every round on this machine"],
+  ["live", "live session", "rounds whose session is still running"],
+  ["ended", "ended", "rounds whose session finished, record still here"],
+  ["gone", "no record", "rounds whose session the daemon no longer knows — " +
+                        "cleared, or from an install that is gone"],
+];
+
+function reportsFilterBar() {
+  const bar = el("div", "seq-tabs reports-filters");
+  for (const [key, label, why] of REPORT_STATES) {
+    const b = el("button", "seq-tab" + (reportsState === key ? " on" : ""), label);
+    b.type = "button";
+    b.title = why;
+    b.addEventListener("click", () => { reportsState = key; renderReports(); });
+    bar.appendChild(b);
+  }
+  const rows = reportsCache || [];
+  bar.appendChild(reportsPick(
+    "session", [...new Set(rows.map((r) => r.session))].sort(), reportsSession,
+    (v) => { reportsSession = v; renderReports(); }));
+  bar.appendChild(reportsPick(
+    "issue", [...new Set(rows.map((r) => r.issue).filter(Boolean))].sort(),
+    reportsIssue, (v) => { reportsIssue = v; renderReports(); }));
+  const order = el("button", "wf-btn clear reports-order",
+    reportsOldest ? "oldest first" : "newest first");
+  order.type = "button";
+  order.title = "flip the order";
+  order.addEventListener("click", () => { reportsOldest = !reportsOldest; renderReports(); });
+  bar.appendChild(order);
+  return bar;
+}
+
+/* One of the two narrowing pickers. Its options are whatever the rows
+   actually carry, not the fleet: a filter offering a session with no report
+   would be offering an empty page. */
+function reportsPick(kind, values, current, onPick) {
+  const sel = document.createElement("select");
+  sel.className = "reports-pick";
+  sel.title = kind === "session"
+    ? "only the rounds this session wrote up"
+    : "only the rounds written up for this issue";
+  const any = document.createElement("option");
+  any.value = "";
+  any.textContent = kind === "session" ? "every session" : "every issue";
+  sel.appendChild(any);
+  for (const v of values) {
+    const o = document.createElement("option");
+    o.value = v;
+    o.textContent = v;
+    if (v === current) o.selected = true;
+    sel.appendChild(o);
+  }
+  sel.addEventListener("change", () => onPick(sel.value));
+  return sel;
+}
+
+/* One row. The link that matters is the report itself, so it leads and it is
+   the largest thing in the line; the rest says which round this was. The
+   session is a second link where there is still something to walk to, and
+   plain text where there is not — a link to a session the daemon has never
+   heard of is a promise the page cannot keep. */
+function reportsRow(r) {
+  const row = el("div", "reports-row");
+  const open = el("a", "reports-open");
+  open.href = r.url;
+  open.target = "_blank";
+  open.rel = "noopener";
+  open.title = `open the round ${r.session} wrote up` +
+    (r.issue ? ` for ${r.issue}` : ", which named no issue");
+  open.appendChild(el("span", "reports-mark", "▤"));
+  open.appendChild(el("span", "reports-issue", r.issue || "no issue"));
+  row.appendChild(open);
+
+  const state = reportSessionState(r);
+  const sess = el(state === "gone" ? "span" : "a", "reports-sess " + state);
+  if (state !== "gone") sess.href = `#/s/${encodeURIComponent(r.session)}`;
+  sess.title = state === "gone"
+    ? `${r.session} — no record of this session any more; its round is here ` +
+      "because reports are kept outside the session directory"
+    : `${r.session} — ${r.session_status}`;
+  sess.appendChild(el("span", "reports-sess-name", r.session));
+  sess.appendChild(el("span", "reports-sess-state",
+    { live: "running", ended: "ended", gone: "no record" }[state]));
+  row.appendChild(sess);
+
+  row.appendChild(el("span", "reports-when", reportWhen(r.at)));
+  row.appendChild(el("span", "reports-size", fmtReportSize(r.size)));
+  if (r.issue) {
+    const board = el("a", "reports-board", "issue ↗");
+    board.href = `#/beads/${encodeURIComponent(r.issue)}`;
+    board.title = `${r.issue} on the board`;
+    row.appendChild(board);
+  }
+  return row;
+}
+
+function renderReports() {
+  const view = $("reports-view");
+  view.innerHTML = "";
+  const head = el("div", "wf-head");
+  head.appendChild(el("h2", null, "Reports"));
+  const back = el("button", "wf-btn clear", "Back");
+  back.addEventListener("click", () => { location.hash = "#"; });
+  head.appendChild(back);
+  view.appendChild(head);
+  view.appendChild(el("p", "wf-note",
+    "Every round report on this machine, newest first. One HTML page per " +
+    "round, written by the session that ran it and kept outside that " +
+    "session's own directory — so the write-up stays readable long after " +
+    "the session itself was cleared. Most of the rows below are exactly " +
+    "that, which is why a session that is gone is marked here rather than " +
+    "dropped."));
+  if (reportsError) view.appendChild(el("p", "wf-warning", reportsError));
+  if (!reportsCache) {
+    if (!reportsError) view.appendChild(el("p", "wf-note", "loading…"));
+    return;
+  }
+  if (!reportsCache.length) {
+    view.appendChild(el("p", "wf-note",
+      "No round has been written up yet. A session files one with " +
+      "'claunch report save <file>'; the workflows' wrapup step is what " +
+      "asks for it."));
+    return;
+  }
+  view.appendChild(reportsFilterBar());
+  const rows = reportsShown(reportsCache);
+  const list = el("div", "reports-list");
+  list.appendChild(el("p", "reports-count",
+    rows.length === reportsCache.length
+      ? `${rows.length} report${rows.length === 1 ? "" : "s"}`
+      : `${rows.length} of ${reportsCache.length} reports`));
+  if (!rows.length) {
+    list.appendChild(el("p", "wf-note",
+      "nothing matches — the filters above are narrower than the machine"));
+  }
+  for (const r of rows) list.appendChild(reportsRow(r));
+  view.appendChild(list);
 }
 
 /* Sessions currently running in a directory. normcase-style comparison,
@@ -8800,6 +9026,44 @@ function fmtPace(sec) {
   return `${+(n / 3600).toFixed(2)}h`;
 }
 
+/* How wide a string draws at a given font size. SVG has no layout to ask, so
+   this estimates: a Hangul or CJK glyph takes a full em, the rest of what
+   step titles are written in takes about 0.55. The estimate only has to be
+   safe in one direction — it must not claim a string fits when it does not —
+   and 0.55em is the wide end of this face's Latin advances. */
+function wfdTextW(s, px) {
+  let w = 0;
+  for (const ch of String(s)) {
+    const c = ch.codePointAt(0);
+    const wide = (c >= 0x1100 && c <= 0x115f)
+      || (c >= 0x2e80 && c <= 0x303e) || (c >= 0x3041 && c <= 0x33ff)
+      || (c >= 0x3400 && c <= 0x4dbf) || (c >= 0x4e00 && c <= 0x9fff)
+      || (c >= 0xa000 && c <= 0xa4cf) || (c >= 0xac00 && c <= 0xd7a3)
+      || (c >= 0xf900 && c <= 0xfaff) || (c >= 0xfe30 && c <= 0xfe6f)
+      || (c >= 0xff00 && c <= 0xff60) || (c >= 0xffe0 && c <= 0xffe6);
+    w += wide ? px : px * 0.55;
+  }
+  return w;
+}
+
+/* Cut a string to a pixel budget, ellipsis included in the budget. A title
+   that overruns its box does not merely look wrong — it runs out over the
+   right rail and lands on the edge labels drawn there (improv-worker's
+   `landing` title crossed its own `request` label). The full text stays
+   reachable: the caller hangs it on the node as a <title>. */
+function wfdFit(s, px, max) {
+  const str = String(s);
+  if (wfdTextW(str, px) <= max) return str;
+  const budget = max - wfdTextW("…", px);
+  let out = "", w = 0;
+  for (const ch of str) {
+    const cw = wfdTextW(ch, px);
+    if (w + cw > budget) break;
+    out += ch; w += cw;
+  }
+  return `${out.replace(/\s+$/, "")}…`;
+}
+
 function wfDiagramSvg(wf, run, selected) {
   const steps = wf.steps || [];
   const byId = {};
@@ -8848,6 +9112,69 @@ function wfDiagramSvg(wf, run, selected) {
   const rowOf = (id) => (id === "end" ? endRow : rows[id]);
   const yTop = (id) => 8 + rowOf(id) * ROWH;
 
+  /* Two options that leave the same step for the same step are ONE route on
+     the page. Drawing one arc per option drew that route twice, and both
+     copies put their label on the same coordinate — improv-worker's `rebase`
+     and `remeasure` (both await-landing -> rebase) came out at x=127,y=649
+     on top of each other, and the loop cost two upward arcs where the reader
+     only ever had one way back. A route carries its options instead, so the
+     count of upward arcs is the count of loops: two for improv-worker, which
+     is the floor (each directed cycle must send one arc up, and the rest of
+     this graph flows down). */
+  const routes = [];
+  const byPair = new Map();
+  for (const e of edges) {
+    const key = `${e.from}>${e.to}`;
+    let r = byPair.get(key);
+    if (!r) {
+      r = { from: e.from, to: e.to, i: e.i, opts: [] };
+      byPair.set(key, r);
+      routes.push(r);
+    }
+    r.opts.push(e);
+  }
+
+  /* Gutter columns by row span, not by option index. The index is a number
+     about one step's menu; whether two arcs collide is a fact about the rows
+     they cross. improv-worker had both of its left-rail arcs on index 1 —
+     `changes` (rows 1..7) and the loop back to rebase (rows 6..9) — so they
+     ran down the same column and crossed. Shortest span first, so a long arc
+     nests outside a short one instead of cutting through it; arcs that share
+     no row reuse a column and the drawing stays as narrow as it was. */
+  const laneOf = new Map();
+  const lanes = (rs) => {
+    const taken = [];
+    for (const r of rs.slice().sort((a, b) => {
+      const sa = Math.abs(rowOf(a.to) - rowOf(a.from));
+      const sb = Math.abs(rowOf(b.to) - rowOf(b.from));
+      return (sa - sb) || (rowOf(a.from) - rowOf(b.from));
+    })) {
+      const lo = Math.min(rowOf(r.from), rowOf(r.to));
+      const hi = Math.max(rowOf(r.from), rowOf(r.to));
+      let lane = 0;
+      while (taken[lane] && taken[lane].some(([a, b]) => lo <= b && a <= hi)) lane++;
+      (taken[lane] = taken[lane] || []).push([lo, hi]);
+      laneOf.set(r, lane);
+    }
+  };
+  lanes(routes.filter((r) => rowOf(r.to) > rowOf(r.from) + 1));   // right rail
+  lanes(routes.filter((r) => rowOf(r.to) <= rowOf(r.from)));      // left rail
+
+  /* The centre column fans the same way, and for the same reason: a step's
+     one straight way out belongs on the centre line. Counting the option's
+     place in the MENU pushed it off — improv-worker's `landing` sends its
+     first option down the right rail and its second straight down, so the
+     only straight arrow it draws was offset as though it had a twin. Count
+     the straight ways out instead. */
+  const fanOf = new Map();
+  const straight = new Map();
+  for (const r of routes) {
+    if (rowOf(r.to) !== rowOf(r.from) + 1) continue;
+    const n = straight.get(r.from) || 0;
+    fanOf.set(r, n);
+    straight.set(r.from, n + 1);
+  }
+
   const parts = [];
   // width/height attrs pin the drawing at its natural size (one SVG unit =
   // one CSS pixel): the column growing must not blow the graph up with it.
@@ -8863,47 +9190,73 @@ function wfDiagramSvg(wf, run, selected) {
     '<path d="M 0 0 L 10 5 L 0 10 z" fill="#4d5566"/></marker></defs>'
   );
 
-  for (const e of edges) {
+  /* Two labels on one coordinate are one unreadable label. Every line the
+     loop below places goes through here, which pushes a line down until it
+     clears whatever already stands in that column. */
+  const placed = [];
+  const freeY = (x, y, anchor) => {
+    let out = y;
+    for (let n = 0; n < placed.length + 1; n++) {
+      const hit = placed.some((p) =>
+        p.anchor === anchor && Math.abs(p.x - x) < 40 && Math.abs(p.y - out) < 10);
+      if (!hit) break;
+      out += 11;
+    }
+    placed.push({ x, y: out, anchor });
+    return out;
+  };
+
+  for (const e of routes) {
     const r1 = rowOf(e.from), r2 = rowOf(e.to);
+    const lane = laneOf.get(e) || 0;
     let d, lx, ly, anchor = "start";
     if (r2 === r1 + 1) {
-      const x = W / 2 + (e.i ? (e.i % 2 ? -1 : 1) * 18 * Math.ceil(e.i / 2) : 0);
+      const f = fanOf.get(e) || 0;
+      const x = W / 2 + (f ? (f % 2 ? -1 : 1) * 18 * Math.ceil(f / 2) : 0);
       const y1 = yTop(e.from) + NH, y2 = yTop(e.to) - 2;
       d = `M ${x} ${y1} L ${x} ${y2}`;
       lx = x + 7; ly = (y1 + y2) / 2 + 4;
     } else if (r2 > r1) {
       const y1 = yTop(e.from) + NH / 2, y2 = yTop(e.to) + 8;
-      const b = NX + NW + 30 + 16 * (e.i || 0);
+      const b = NX + NW + 30 + 16 * lane;
       d = `M ${NX + NW} ${y1} C ${b} ${y1}, ${b} ${y2}, ${NX + NW + 2} ${y2}`;
       lx = NX + NW + 8; ly = y1 - 8;
     } else {
       const y1 = yTop(e.from) + NH / 2, y2 = yTop(e.to) + NH / 2;
-      const b = NX - 30 - 16 * (e.i || 0);
+      const b = NX - 30 - 16 * lane;
       d = `M ${NX} ${y1} C ${b} ${y1}, ${b} ${y2}, ${NX - 2} ${y2}`;
-      lx = NX - 8; ly = (y1 + y2) / 2 + 4; anchor = "end";
+      // At the end the arc LEAVES from, not at its middle: the middle of a
+      // long arc is beside rows that have nothing to do with the branch, and
+      // two arcs of different length can share a middle. The step a branch
+      // departs from is unique to it.
+      lx = NX - 8; ly = y1 - 8; anchor = "end";
     }
-    const hold = isHeld(e);
+    const hold = e.opts.some(isHeld);
+    const pace = e.opts.some((o) => o.pace);
     // Dashed for as long as the pacing exists, not only while it bites: that
     // this branch runs at most once per interval is a fact about the
     // workflow, and a reader planning a run needs it before anything is held.
-    const ecls = `wfd-edge${e.pace ? " paced" : ""}${hold ? " held" : ""}`;
+    const ecls = `wfd-edge${pace ? " paced" : ""}${hold ? " held" : ""}`;
     parts.push(`<path class="${ecls}" d="${d}" marker-end="url(#arrow)"/>`);
-    if (e.label) {
-      parts.push(
-        `<text class="wfd-elabel" x="${lx}" y="${ly}" text-anchor="${anchor}">` +
-        `${escXml(e.label)}</text>`
-      );
-    }
-    // Under the option's own name, in its column: what the pacing costs this
-    // branch — and, while it is actually held, when the window opens.
-    if (e.pace) {
-      const word = hold
-        ? `held → ${fmtOpensAt(run.opens_at)}`
-        : `every ${fmtPace(e.pace)}`;
-      parts.push(
-        `<text class="wfd-epace${hold ? " held" : ""}" x="${lx}" ` +
-        `y="${ly + 11}" text-anchor="${anchor}">${escXml(word)}</text>`
-      );
+    for (const o of e.opts) {
+      if (o.label) {
+        parts.push(
+          `<text class="wfd-elabel" x="${lx}" y="${freeY(lx, ly, anchor)}" ` +
+          `text-anchor="${anchor}">${escXml(o.label)}</text>`
+        );
+      }
+      // Under the option's own name, in its column: what the pacing costs this
+      // branch — and, while it is actually held, when the window opens.
+      if (o.pace) {
+        const word = isHeld(o)
+          ? `held → ${fmtOpensAt(run.opens_at)}`
+          : `every ${fmtPace(o.pace)}`;
+        parts.push(
+          `<text class="wfd-epace${isHeld(o) ? " held" : ""}" x="${lx}" ` +
+          `y="${freeY(lx, ly + 11, anchor)}" text-anchor="${anchor}">` +
+          `${escXml(word)}</text>`
+        );
+      }
     }
   }
 
@@ -8932,11 +9285,18 @@ function wfDiagramSvg(wf, run, selected) {
       flags.push("paced");
     }
     const title = s.title && s.title !== s.id ? `${s.id} — ${s.title}` : s.id;
+    // 12px of padding each side, and the visit counter takes the right end of
+    // the line when a step has been stood on twice.
+    const room = NW - 24 - (visits[id] > 1 ? 26 : 0);
+    const shown = wfdFit(title, 13, room);
     parts.push(`<g class="${cls.join(" ")}" data-step="${escXml(s.id)}">`);
+    // First child, where SVG says a <title> belongs: it is the group's
+    // tooltip, and what the cut title dropped is only reachable here.
+    if (shown !== title) parts.push(`<title>${escXml(title)}</title>`);
     parts.push(`<rect x="${NX}" y="${y}" width="${NW}" height="${NH}" rx="8"/>`);
     parts.push(
       `<text class="wfd-title" x="${NX + 12}" y="${y + (flags.length ? 19 : 27)}">` +
-      `${escXml(title)}</text>`
+      `${escXml(shown)}</text>`
     );
     if (flags.length) {
       parts.push(
@@ -11117,6 +11477,51 @@ function syncSpawnGates(ui) {
   ui.handleRow.hidden = noMesh;
   ui.connectRow.hidden = noMesh || !(ui.connectHandles || []).length;
   ui.contextRow.hidden = !ui.workflow.value;
+  syncSpawnBeads(ui);
+}
+
+/* The board row: which of its three answers is picked decides which of the
+   two detail rows exists, and only "existing" is allowed to ask what the
+   board holds — the fetch costs the daemon a `br` fork, so it happens once
+   somebody picks the one answer that looks at it (see refreshSpawnBeads).
+
+   Every row carries the daemon's own verdict on it (daemon/beads.adoption):
+   an issue nobody holds would be ASSIGNED to the child, one a running
+   session holds would be JOINED and the assignment left where it is. Saying
+   so here rather than in the child's opening block is the whole point of
+   the row — by then the choice has been made.
+
+   Optional like meshNote: a ui bag that predates the row (a test driving
+   only the older fields) must still pass through the gates. */
+function syncSpawnBeads(ui) {
+  if (!ui.beads) return;
+  const picking = ui.beads.value === "existing";
+  // Hidden, not cleared: somebody who types a specification, tries the other
+  // two answers and comes back should find their words where they left them.
+  ui.issueTextRow.hidden = ui.beads.value !== "new";
+  ui.issueRow.hidden = !picking;
+  const hint = ui.issueHint;
+  // Only the consequence a reader cannot see from the row is written out:
+  // an issue that would simply be assigned needs no warning.
+  const row = picking
+    ? (ui._issues || []).find((i) => i.id === ui.issuePick.value)
+    : null;
+  if (row && row.held_by) {
+    hint.textContent =
+      `${row.held_by} is assigned to ${row.id} and still running — this ` +
+      "session JOINS it: the assignment stays put and the two settle " +
+      "ownership between them.";
+    hint.hidden = false;
+  } else if (picking && ui._issuesRead && !(ui._issues || []).length) {
+    // Only once the board has actually answered: an empty list held while
+    // the fetch is still in flight would read as "this board has nothing",
+    // which is a different and wrong thing to tell somebody.
+    hint.textContent = ui._issuesError ||
+      "no open issue on this directory's board.";
+    hint.hidden = false;
+  } else {
+    hint.hidden = true;
+  }
 }
 
 /* The POST body, in the CLI's spelling: non-falsy keys only, and read
@@ -11178,6 +11583,21 @@ function spawnPayload(ui) {
     put("context", (ui.context.value || "").trim());
   } else if (paired) {
     body.workflow = "-";
+  }
+  // The board answer, the same contract as the create form's: "new" with
+  // an empty box sends nothing — a request that says nothing gets an issue
+  // minted from the task, which is what every client that has never heard
+  // of this field still wants. Only the key of the answer PICKED travels:
+  // issue_text beside "existing" or "none" is a contradiction the daemon
+  // refuses (beads.check_request).
+  if (ui.beads) {
+    const mode = ui.beads.value || "new";
+    if (mode === "none") body.beads = false;
+    else if (mode === "existing" && ui.issuePick.value) {
+      body.issue = ui.issuePick.value;
+    } else if (mode === "new" && (ui.issueText.value || "").trim()) {
+      body.issue_text = ui.issueText.value.trim();
+    }
   }
   put("task", (ui.task.value || "").trim());
   return body;
@@ -11424,6 +11844,39 @@ function buildSpawnForm(parentName, seed) {
   ui.task.rows = 3;
   ui.task.placeholder = "opened with this once it has booted — what it is for";
   box.appendChild(spawnRow("Opening task", ui.task, null));
+
+  /* The board row, after the opening task because it is still the fallback
+     two of its three shapes are read off: "new" mints from the box below
+     when that is filled and from the task when it is not, so an empty pair
+     has nothing to mint from. The third — an issue that already exists —
+     is a picker rather than a text box for the same reason every other row
+     here is: the daemon publishes the list, and an id it does not have
+     would be a refusal nobody needed to provoke. The child's issue is its
+     own answer — not something the spawn policy decides — so the row
+     stands ungated, exactly like the create form's #new-beads. */
+  ui.beads = spawnRadioGroup("spawn-beads", [
+    ["new", "new issue", "minted from the task or the box below"],
+    ["existing", "an existing issue", "assigned, or joined while its holder is running"],
+    ["none", "no issue", "the child starts without a board record"],
+  ]);
+  ui.beads.value = "new";
+  box.appendChild(spawnRow("Board issue", ui.beads.el, null));
+  ui.issueText = document.createElement("textarea");
+  ui.issueText.rows = 3;
+  ui.issueText.placeholder =
+    "what the issue says — first line is its title; empty uses the opening task";
+  ui.issueTextRow = spawnSubRow("Issue text", ui.issueText, null);
+  ui.issueTextRow.hidden = true;
+  box.appendChild(ui.issueTextRow);
+  ui.issuePick = document.createElement("select");
+  ui.issueHint = el("span", "sess-spawn-note");
+  ui.issueRow = spawnSubRow("Issue", ui.issuePick, ui.issueHint);
+  ui.issueRow.hidden = true;
+  box.appendChild(ui.issueRow);
+  ui._issues = [];
+  ui._issuesFor = null;
+  ui._issuesError = "";
+  ui._issuesRead = false;
 
   /* the inherited rows: what a child may be told to differ on */
   ui.profile = document.createElement("select");
@@ -11800,7 +12253,16 @@ async function spawnModalLoad(st) {
   ui.wtMode.listen(() => syncSpawnGates(ui));
   ui.wtPick.addEventListener("change", () => syncSpawnGates(ui));
   ui.update.addEventListener("change", () => syncSpawnGates(ui));
-  ui.workspace.addEventListener("change", () => syncSpawnGates(ui));
+  ui.workspace.addEventListener("change", () => {
+    syncSpawnGates(ui);
+    // The board follows the Directory row in the create form, and a child
+    // aimed at another workspace stands on that board — the issue memo is
+    // given back so the next "existing" reads there regardless (the same
+    // drop the create form does on its Directory row).
+    ui._issuesFor = null;
+    ui._issuesRead = false;
+    if (ui.beads.value === "existing") refreshSpawnBeads(st);
+  });
   ui.workflow.addEventListener("change", () => syncSpawnGates(ui));
   ui.mesh.addEventListener("change", () => refreshSpawnConnect(st).then(() => syncSpawnGates(ui)));
   ui.handle.addEventListener("input", () => refreshSpawnConnect(st).then(() => syncSpawnGates(ui)));
@@ -11809,6 +12271,76 @@ async function spawnModalLoad(st) {
     st.lastWfAuto = refillSpawnWorkflows(ui, ui.role.value, last).auto;
     syncSpawnGates(ui);
   });
+
+  /* The board row's own wiring. The radio listener exists for the FETCH —
+     the gates already re-sync the row on any change — because the list is
+     only worth a board read once somebody picks the one answer that looks
+     at it; the pick listener re-verdicts the hint under the picked row.
+     syncSpawnGates re-syncs the row on any other change. */
+  ui.beads.listen(() => {
+    if (ui.beads.value === "existing") refreshSpawnBeads(st);
+    syncSpawnBeads(ui);
+  });
+  ui.issuePick.addEventListener("change", () => syncSpawnBeads(ui));
+}
+
+/* The issues the "existing" answer offers, fetched from the daemon's own
+   verdicts (daemon/beads.py adoption) so the row promises exactly what the
+   spawn is about to do. The child stands in the parent's directory unless
+   the workspace row moves it, and the board follows the child — which is
+   why the candidates endpoint takes `?parent=` and resolves it to the
+   parent's cwd (api.py h_beads_candidates); a pick of a particular
+   workspace asks that board directly.
+
+   Claimed before the await and given back on failure, like the create
+   form's refreshIssueChoices: an empty list remembered as an answer would
+   leave the picker blank for the life of the open. */
+async function refreshSpawnBeads(st) {
+  const ui = st.ui;
+  const wsp = (!ui.workspace.disabled && ui.workspace.value)
+    ? ((ui.report && ui.report.workspaces) || [])
+        .find((w) => w.name === ui.workspace.value)
+    : null;
+  const key = wsp ? `cwd:${wsp.path || wsp.name}` : `parent:${st.parent}`;
+  if (key === ui._issuesFor) return;
+  ui._issuesFor = key;
+  let answered = false;
+  try {
+    const q = wsp && wsp.path
+      ? `cwd=${encodeURIComponent(wsp.path)}`
+      : `parent=${encodeURIComponent(st.parent)}`;
+    const resp = await api(`/api/beads/candidates?${q}`);
+    const doc = resp.ok ? await resp.json() : {};
+    ui._issues = doc.issues || [];
+    ui._issuesError = doc.error || "";
+    answered = resp.ok;
+  } catch {
+    ui._issues = [];
+    ui._issuesError = "";
+  }
+  if (!answered && ui._issuesFor === key) ui._issuesFor = null;
+  ui._issuesRead = true;
+  fillSpawnIssueOptions(ui);
+  if (spawnModal === st) syncSpawnBeads(ui);
+}
+
+/* The picker, filled from the last board answer and kept on the row the
+   operator already chose — the same "leave a value standing where it was"
+   rule the other pickers refill under. */
+function fillSpawnIssueOptions(ui) {
+  const kept = ui.issuePick.value;
+  fillSpawnSelect(
+    ui.issuePick,
+    (ui._issues || []).map((i) => {
+      const held = i.held_by ? ` — held by ${i.held_by}, would JOIN` : "";
+      return [
+        i.id,
+        `${i.id}  ${i.title || ""}`.trim() + ` [${i.status}]${held}`,
+      ];
+    }),
+    "(pick an issue)",
+    kept
+  );
 }
 
 /* The connect row: the members of the picked mesh the child may also message.
@@ -16162,10 +16694,8 @@ document.addEventListener("pointercancel", releaseRail, true);
 // The countdown, between polls. It fetches nothing — it ages the last
 // /api/cflow reading — so it is a second's worth of arithmetic, and it is
 // separate from the 2s poll because a clock that only moves every other
-// second reads as a clock that has stopped, which is the exact thing this
-// strip exists to tell apart. One interval, both faces of the same clock:
-// the rail's strip and the attached session's header chip must not be able
-// to drift a second apart from each other.
-railTimerTicker = setInterval(() => { paintRailTimer(); paintTermTimer(); }, 1000);
+// second reads as a clock that has stopped, which is the exact thing the
+// header chip exists to tell apart.
+termTimerTicker = setInterval(() => { paintTermTimer(); }, 1000);
 
 boot();

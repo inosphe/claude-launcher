@@ -162,21 +162,22 @@ taken in the past can say that), and the dash that means no reading, drawn on
 every row whether or not it has one so the three columns stay where the eye
 left them.
 
-``railtimer_check`` on the strip that sits above that nav — the countdown
+``railtimer_check`` on the nudge countdown's shared vocabulary — the clock
 for the daemon's automatic nudge, which is the one thing on this dashboard
 nobody could see coming: two clocks can produce it (a reminder into a
 session that is working, a stall ping into one that stopped), at most one of
 them applies at a time, and the check holds the pick to the clock a reader
 needs plus the several silences — off, not running, held, gated — that a
-lazier strip would collapse into one word. ``termtimer_check`` on the same
-clock drawn on the session's own header, where it has a subject: the strip's
-fallback to whichever run fires soonest is right for a rail and a lie beside
-one session's name, so the chip shows that session's own run or nothing, its
-reading is stamped with the session it was taken for (a terminal switch
-repaints a second before the poll comes round), and the three wirings that
-make it move at all — the 2s poll, every attach path, and one interval
-ageing both faces of the clock so they cannot drift apart — are held there
-too.
+lazier chip would collapse into one word. It also guards the monotony that
+made the rail's old strip a duplicate: no timer strip ships in the rail —
+the countdown lives on the session's own header. ``termtimer_check`` on
+that chip, where the clock has a subject: it shows that session's own run
+or nothing, with no fallback to whichever run fires soonest — a stranger's
+clock would be a lie beside one session's name — its reading is stamped
+with the session it was taken for (a terminal switch repaints a second
+before the poll comes round), and the three wirings that make it move at
+all — the 2s poll, every attach path, and the one interval that ages it —
+are held there too.
 
 ``wftime_check`` on the run page's second picture: the same journal the
 state graph's neighbours print as prose, laid on a time axis. One lane per
@@ -295,6 +296,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "termtimer_check.js",
         "mdrender_check.js",
         "railseen_check.js",
+        "reports_check.js",
     ],
 )
 def test_topology_diagram_logic(script):
