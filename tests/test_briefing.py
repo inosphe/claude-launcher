@@ -446,7 +446,8 @@ def test_call_llm_keeps_a_whole_answer_whatever_the_finish_reason(home):
 
 
 def test_default_max_tokens_budgets_for_reasoning_not_just_the_answer():
-    """The briefing is ~350 chars; the budget is not sized for the briefing.
+    """The briefing runs a few hundred characters; the budget is not sized
+    for the briefing.
 
     Pinned because the old 1024 was sized for the answer alone and the
     reasoning tokens are billed to the same allowance — the measured failure.
@@ -607,7 +608,12 @@ def test_briefing_endpoint_502s_on_a_truncated_answer(home, tmp_path):
     The live symptom this pins: one of 30 sessions came back with 68 bytes of
     a JSON object that stops mid-string, and the endpoint served it 200 with
     ``raw`` set — indistinguishable, to the UI and to the cache, from a model
-    that simply answered in prose. Only ``finish_reason`` tells them apart.
+    that simply answered in prose. ``finish_reason`` tells them apart, and
+    so does ``completion_tokens``: over the 48-call budget sweep it equalled
+    ``max_tokens`` in 5 of 5 cut-off calls and in 0 of 43 that finished (the
+    largest of those spent 1855). This test pins the first because that is
+    the field the contract defines for the purpose; the second is a
+    corroborator, not a substitute.
     """
     from aiohttp import web as aioweb
 

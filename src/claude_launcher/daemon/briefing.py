@@ -45,7 +45,12 @@ from ..profile import ProfileError
 #: (fireworks / deepseek-v4-flash) at 1024: 8 of 10 calls came back
 #: ``finish_reason="length"`` with ``completion_tokens=1024`` and an EMPTY
 #: ``content`` — the reasoning had eaten the lot. 4096 leaves room for both;
-#: the answer itself never ran past ~350 characters.
+#: the answer itself is far smaller, in both sets measured: the 25
+#: briefings that parsed in the 30-session end-to-end run rendered
+#: 149-633 characters of fields (p50 273), and the 43 that parsed in
+#: the 48-call budget sweep carried 244-686 characters of content
+#: (p50 385). Quote whichever set you mean — they do not agree, and
+#: neither one bounds the other.
 DEFAULT_MAX_TOKENS = 4096
 
 #: How much transcript feeds the prompt. ``TAIL_BYTES`` bounds the file read
