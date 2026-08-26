@@ -85,6 +85,25 @@ def _finalize_declared_auth(harness: harnesses.Harness, env: dict) -> None:
         env[name] = ""
 
 
+def _profile_backend_pins_apply(profile: Profile, provider: str) -> bool:
+    """Do ``profile``'s own backend pins still describe the backend in play?
+
+    ``provider`` is the backend this run actually talks to, after a borrow and
+    any ``--provider`` override. A profile's ``ANTHROPIC_MODEL`` and friends
+    are written against the provider the profile itself resolves to; when the
+    run is on that same provider they are the user's deliberate refinement and
+    keep their final say. When it is on another one they are leftovers naming
+    models and endpoints of a backend nobody is calling, and letting them win
+    is how a session ends up asking Anthropic for a Fireworks model id.
+    """
+    try:
+        return providers.resolve_name(profile) == provider
+    except Exception:  # pragma: no cover - a broken config file
+        # Unresolvable provider selection: leave the historical layering alone
+        # rather than dropping keys on a guess.
+        return True
+
+
 def child_env(
     profile: Profile,
     *,
@@ -112,6 +131,17 @@ def child_env(
     defines) are dropped from the base env first, so a value leaked into the
     daemon's or shell's environment by a *previous* backend cannot shadow a
     profile that simply leaves the key unset.
+
+    The same reasoning bounds the profile's own final say. A profile that pins
+    model ids or a base URL is describing *its* backend, so those pins stop
+    being true the moment this run talks to another one -- a borrow of a
+    lender on a different provider, or an explicit ``--provider``. Keeping
+    them then produces the one combination that cannot work: the lender's
+    endpoint asked for the borrower's model ids. So the profile layer keeps
+    final say over every key, except that :data:`BACKEND_ENV_KEYS` are dropped
+    from it when the backend in play is not the profile's own (see
+    :func:`_profile_backend_pins_apply`). Borrowing inside one provider is
+    unchanged: the pins still describe the backend being used.
     """
     harness = harnesses.get(harnesses.CLAUDE_HARNESS)
     if harness is None:
@@ -162,8 +192,14 @@ def child_env(
             env.update(lender_env)
     # Per-profile env vars (inherited from any parent, then the profile's own)
     # take precedence over the shell, the provider and a borrow's env — that is
-    # the point of an isolated profile.
+    # the point of an isolated profile. The exception is the backend keys when
+    # this run is not on the profile's own backend: those name a backend that
+    # is not the one being talked to (see the docstring).
     profile_env = lineage.effective_env(profile)
+    if with_token and not _profile_backend_pins_apply(profile, provider):
+        profile_env = {
+            k: v for k, v in profile_env.items() if k not in BACKEND_ENV_KEYS
+        }
     env.update(profile_env)
     if with_token:
         if provider != providers.DEFAULT_PROVIDER:
