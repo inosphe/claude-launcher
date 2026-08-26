@@ -3469,18 +3469,32 @@ async def h_beads_candidates(request: web.Request) -> web.Response:
 
 
 async def h_beads_issue(request: web.Request) -> web.Response:
-    """One issue in full, comments included. ``?cwd=`` says which board —
-    any directory inside the repository — and defaults to the daemon's."""
+    """One issue in full, comments included, with the round reports written
+    for it. ``?cwd=`` says which board — any directory inside the repository —
+    and defaults to the daemon's.
+
+    The reports ride along rather than sitting behind a second call because
+    they are the same answer: the issue says what the round was for, and the
+    report says what came of it. They are looked up by issue across every
+    session (:func:`reports.for_issue`), not under the session that happens to
+    be running now — the reader who needs this most is looking at a closed
+    issue whose session ended days ago.
+    """
     board = request.app["beads"]
     cwd = request.query.get("cwd") or os.getcwd()
     root = await board.root_for(cwd)
     if not board.has_board(root):
         return json_error(404, f"no board for {cwd}")
+    issue_id = request.match_info["id"]
     try:
-        issue = await board.show(root, request.match_info["id"])
+        issue = await board.show(root, issue_id)
     except BeadsError as exc:
         return json_error(404, str(exc))
-    return web.json_response({"root": str(root), "issue": issue})
+    return web.json_response({
+        "root": str(root),
+        "issue": issue,
+        "reports": reports_mod.for_issue(issue_id),
+    })
 
 
 async def h_session_beads(request: web.Request) -> web.Response:

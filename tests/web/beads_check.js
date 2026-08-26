@@ -6,6 +6,10 @@
    session to its terminal, with the match reason in the title; and the
    rail's block says why a board is unreadable, offers the create form only
    to a live session with no linked issue, and shows a running wind-down.
+   And a fifth: the issue's detail pane hands back the rounds written up for
+   it, labelled by the session that wrote them -- the reader there is looking
+   at a closed issue whose session is gone, so the session is the half of the
+   row that is news.
    Slice the real functions out of app.js and drive them against a stub
    DOM. */
 const fs = require("fs");
@@ -67,6 +71,9 @@ function el(tag, cls, text) {
 
 const stubs = `
 let beadsFocus = "";
+let beadsDetail = null;
+function setDetail(d) { beadsDetail = d; }
+function setFocus(f) { beadsFocus = f; }
 let sessBeadsBox = null;
 let sessionsCache = [];
 const gone = [];
@@ -84,10 +91,12 @@ new Function(
   + slice("beadsFilterIssues") + slice("beadsSortIssues")
   + slice("beadsStatusBadge") + slice("beadsIssueRow")
   + slice("sessBeads") + slice("sessBeadsCreate")
+  + slice("sessReports") + slice("beadsDetailPane")
   + `
 Object.assign(exports, {
   filter: beadsFilterIssues, sort: beadsSortIssues, row: beadsIssueRow,
-  rail: sessBeads, gone,
+  rail: sessBeads, reports: sessReports, pane: beadsDetailPane,
+  setDetail, setFocus, gone,
 });`)(ctx, document, el);
 
 let failures = 0;
@@ -170,6 +179,51 @@ check("and how to cut it short", box.find("wf-warning")[0].text.includes("Kill a
 const open = box.find("wf-btn").find((b) => b.text === "Open board");
 open.handlers.click[0]();
 check("open board routes to the page", ctx.gone, ["#/beads"]);
+
+/* ---- the issue detail pane: the rounds written up for this issue -------- */
+ctx.setFocus("claunch-j31");
+
+const ROWS = [
+  { file: "20260826T051322Z-claunch-j31.html", session: "s121",
+    at: "2026-08-26T05:13:22Z", issue: "claunch-j31", size: 19591,
+    url: "/api/sessions/s121/reports/20260826T051322Z-claunch-j31.html" },
+  { file: "20260825T090000Z-claunch-j31.html", session: "s99",
+    at: "2026-08-25T09:00:00Z", issue: "claunch-j31", size: 4200,
+    url: "/api/sessions/s99/reports/20260825T090000Z-claunch-j31.html" },
+];
+
+ctx.setDetail({ issue: { id: "claunch-j31", title: "the round", comments: [] },
+                reports: ROWS });
+let pane = ctx.pane();
+let links = pane.find("sess-report-link");
+check("the pane lists every round written for the issue", links.length, 2);
+check("labelled by the session, not by the issue the page already names",
+      links.map((a) => a.text), ["s121", "s99"]);
+check("each link opens the served page in its own tab",
+      [links[0].href, links[0].target, links[0].rel],
+      [ROWS[0].url, "_blank", "noopener"]);
+check("the heading counts", pane.find("sess-reports")[0].kids[0].text, "Reports (2)");
+
+/* A second session's report for the same issue is the case the by-session
+   index could not answer at all -- both must be reachable from here. */
+check("rounds from different sessions both survive to the pane",
+      links.map((a) => a.text).sort(), ["s121", "s99"]);
+
+ctx.setDetail({ issue: { id: "claunch-j31", title: "the round", comments: [] },
+                reports: [] });
+check("an issue nobody wrote up shows no empty Reports box",
+      ctx.pane().find("sess-reports").length, 0);
+
+ctx.setDetail({ issue: { id: "claunch-j31", title: "t", comments: [] } });
+check("an older payload with no reports field does not break the pane",
+      ctx.pane().find("sess-reports").length, 0);
+
+/* The rail keeps its own label: there the session is the heading, so the
+   issue is what tells two rounds apart. */
+const railBox = ctx.reports(ROWS);
+check("the rail labels the same rows by issue",
+      railBox.find("sess-report-link").map((a) => a.text),
+      ["claunch-j31", "claunch-j31"]);
 
 if (failures) process.exit(1);
 console.log("beads_check ok");

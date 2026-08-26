@@ -9,6 +9,10 @@ for keeping true:
   workflow's ``verify`` gates on.
 * the daemon — the listing rides in the session's board view, and the page is
   served sandboxed, both of them outliving the session record.
+* the *other* direction — a report found by its issue rather than its session,
+  which is the lookup left when the session that wrote it is gone from every
+  registry. The filename already carries the issue, so this needs no index to
+  keep in sync; what it must not do is ask the registry.
 * ``improv-worker`` — the workflow that must actually demand one.
 """
 
@@ -24,6 +28,7 @@ import pytest
 import yaml
 
 from claude_launcher import cli, reports
+from claude_launcher.cli_beads import BeadsError
 from claude_launcher.daemon import paths
 
 PAGE = (
@@ -195,6 +200,89 @@ def test_saving_a_missing_file_says_so(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# the other direction: found by issue, across every session
+# --------------------------------------------------------------------------- #
+def test_a_row_says_which_session_wrote_it(home):
+    """Rows from one session can leave it implicit; rows from several cannot."""
+    write(reports.target("s1", "claunch-j31"))
+    assert reports.listing("s1")[0]["session"] == "s1"
+
+
+def test_a_report_is_found_by_its_issue_without_knowing_the_session(home):
+    write(reports.target("s121", "claunch-j31"))
+    rows = reports.for_issue("claunch-j31")
+    assert [(r["session"], r["issue"]) for r in rows] == [("s121", "claunch-j31")]
+    assert rows[0]["url"].startswith("/api/sessions/s121/reports/")
+
+
+def test_two_sessions_that_wrote_up_the_same_issue_both_come_back(home):
+    """The case the by-session index cannot answer at all: a round handed on,
+    picked up by a second session, written up twice under one issue."""
+    write(reports.dir_for("s99", create=True) / "20260825T090000Z-claunch-j31.html")
+    write(reports.dir_for("s121", create=True) / "20260826T051322Z-claunch-j31.html")
+    rows = reports.for_issue("claunch-j31")
+    # Newest first, across sessions — the stamp leads the name, so the order
+    # is the same one a directory listing gives, only wider.
+    assert [r["session"] for r in rows] == ["s121", "s99"]
+
+
+def test_another_issues_report_is_not_swept_in(home):
+    write(reports.dir_for("s1", create=True) / "20260826T090000Z-claunch-j31.html")
+    write(reports.dir_for("s1", create=True) / "20260826T090001Z-claunch-tak.html")
+    assert [r["issue"] for r in reports.for_issue("claunch-tak")] == ["claunch-tak"]
+
+
+def test_the_issue_lookup_applies_the_same_readable_check(home):
+    """A stub that would not pass the gate must not be findable as an answer
+    here either — otherwise the board would link a reader to an empty page."""
+    write(reports.dir_for("s1", create=True) / "20260826T090000Z-i-1.html", "<html></html>")
+    assert reports.for_issue("i-1") == []
+
+
+def test_an_issue_nobody_wrote_up_is_an_empty_list_not_an_error(home):
+    # The board draws this pane for every issue; most have no report.
+    assert reports.for_issue("claunch-never") == []
+
+
+def test_no_issue_at_all_is_empty_rather_than_every_unattributed_round(home):
+    """``no-issue`` is a naming placeholder, not a query. A caller with
+    nothing in hand has not formed a question, and handing back every round
+    that named no issue would read as an answer to it."""
+    write(reports.target("s1", None))
+    assert reports.for_issue("") == []
+    assert reports.for_issue("   ") == []
+    # Asked for by its placeholder name, though, it is findable.
+    assert len(reports.for_issue(reports.NO_ISSUE)) == 1
+
+
+def test_the_issue_lookup_does_not_ask_the_session_registry(home):
+    """The reader this exists for is looking at a closed issue whose session
+    was cleared. ``clear-sessions`` drops the record and leaves the directory,
+    so a lookup that consulted the registry would hide exactly the reports
+    that most need finding."""
+    write(reports.dir_for("s-long-gone", create=True) / "20260826T090000Z-i-1.html")
+    # Nothing anywhere knows this session: no record, no directory of its own.
+    assert not paths.sessions_json().exists()
+    assert not paths.session_dir("s-long-gone").exists()
+    assert [r["session"] for r in reports.for_issue("i-1")] == ["s-long-gone"]
+    assert reports.sessions_with_reports() == ["s-long-gone"]
+
+
+def test_strays_in_the_reports_root_do_not_become_sessions(home):
+    base = reports.dir_for("s1", create=True)
+    write(base / "20260826T090000Z-i-1.html")
+    (paths.reports_root() / "notes.txt").write_text("x", encoding="utf-8")
+    (paths.reports_root() / "..bad").mkdir()
+    assert reports.sessions_with_reports() == ["s1"]
+    assert [r["session"] for r in reports.for_issue("i-1")] == ["s1"]
+
+
+def test_an_absent_reports_root_answers_empty(home):
+    assert reports.sessions_with_reports() == []
+    assert reports.for_issue("i-1") == []
+
+
+# --------------------------------------------------------------------------- #
 # the command line — and the exit code a verify gates on
 # --------------------------------------------------------------------------- #
 def run_cli(*argv) -> int:
@@ -274,6 +362,40 @@ def test_ls_json_is_the_same_rows_the_api_serves(home, capsys):
     assert run_cli("report", "ls", "--session", "s1", "--json") == 0
     doc = json.loads(capsys.readouterr().out)
     assert doc == {"session": "s1", "reports": reports.listing("s1")}
+
+
+def test_ls_by_issue_needs_no_session_at_all(home, capsys, monkeypatch):
+    """The point of the flag. A person asking "where is the write-up for this
+    closed issue?" has no session to name, and being asked for one would
+    refuse the only question they came with."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    write(reports.dir_for("s121", create=True) / "20260826T051322Z-claunch-j31.html")
+    assert run_cli("report", "ls", "--issue", "claunch-j31") == 0
+    out = capsys.readouterr().out
+    assert "s121" in out and "claunch-j31" in out
+
+
+def test_ls_by_issue_json_is_the_rows_the_api_serves(home, capsys, monkeypatch):
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    write(reports.target("s1", "i-1"))
+    assert run_cli("report", "ls", "--issue", "i-1", "--json") == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert doc == {"issue": "i-1", "reports": reports.for_issue("i-1")}
+
+
+def test_ls_by_issue_says_where_it_looked_when_there_is_nothing(home, capsys, monkeypatch):
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    assert run_cli("report", "ls", "--issue", "claunch-never") == 0
+    assert str(paths.reports_root()) in capsys.readouterr().out
+
+
+def test_ls_with_both_narrows_one_session_to_one_issue(home, capsys):
+    base = reports.dir_for("s1", create=True)
+    write(base / "20260826T090000Z-i-1.html")
+    write(base / "20260826T090001Z-i-2.html")
+    assert run_cli("report", "ls", "--session", "s1", "--issue", "i-2", "--json") == 0
+    doc = json.loads(capsys.readouterr().out)
+    assert [r["issue"] for r in doc["reports"]] == ["i-2"]
 
 
 def test_save_through_the_cli_prints_where_it_landed(home, tmp_path, capsys):
@@ -404,6 +526,61 @@ def test_a_stub_is_404_over_the_route_too(home):
         try:
             resp = await client.get(f"/api/sessions/s1/reports/{path.name}", headers=BEARER)
             assert resp.status == 404
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def _stub_board(client, issue):
+    """Answer the board without ``br`` — this route's reports half is what is
+    under test, not the issue half."""
+    board = client.app["beads"]
+
+    async def root_for(cwd):
+        return Path("/repo")
+
+    async def show(root, issue_id):
+        if issue_id != issue["id"]:
+            raise BeadsError(f"no issue {issue_id!r}")
+        return issue
+
+    board.root_for = root_for
+    board.has_board = lambda root: True
+    board.show = show
+
+
+def test_an_issue_hands_back_the_rounds_written_for_it(home):
+    """The lookup the Beads page makes. It is keyed by issue across every
+    session, not under whatever session is running now — the reader is on a
+    closed issue whose session ended days ago."""
+    write(reports.dir_for("s121", create=True) / "20260826T051322Z-claunch-j31.html")
+    write(reports.dir_for("s99", create=True) / "20260825T090000Z-claunch-j31.html")
+    write(reports.target("s1", "claunch-other"))
+
+    async def run():
+        client = await _client()
+        try:
+            _stub_board(client, {"id": "claunch-j31", "title": "t", "comments": []})
+            resp = await client.get("/api/beads/claunch-j31", headers=BEARER)
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["issue"]["id"] == "claunch-j31"
+            assert [r["session"] for r in doc["reports"]] == ["s121", "s99"]
+            assert doc["reports"] == reports.for_issue("claunch-j31")
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_an_issue_nobody_wrote_up_carries_an_empty_list(home):
+    async def run():
+        client = await _client()
+        try:
+            _stub_board(client, {"id": "claunch-quiet", "title": "t", "comments": []})
+            resp = await client.get("/api/beads/claunch-quiet", headers=BEARER)
+            assert (await resp.json())["reports"] == []
         finally:
             await client.close()
 
