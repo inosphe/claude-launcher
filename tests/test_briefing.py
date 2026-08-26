@@ -384,6 +384,41 @@ def test_call_llm_empty_content_is_an_error_not_an_answer(home):
     asyncio.run(run())
 
 
+def test_call_llm_blames_the_provider_not_the_budget_when_it_just_stops(home):
+    """An empty answer that was NOT cut off is a different fault.
+
+    Measured live while re-checking the budget fix: one session's call came
+    back ``finish_reason="stop"`` with ``completion_tokens=1`` and no content.
+    Raising ``max_tokens`` cannot touch that, so the error must not send the
+    reader to that knob — the two empties look identical without this field.
+    """
+    from aiohttp import web as aioweb
+
+    async def handler(request):
+        return aioweb.json_response(_llm_answer("", finish="stop", spent=1))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "m",
+                "api_key": "sk-quiet",
+                "max_tokens": 4096,
+                "params": {},
+            }
+            with pytest.raises(briefing.BriefingError) as err:
+                await briefing.call_llm(cfg, "hi")
+            msg = str(err.value)
+            assert "provider-side empty completion" in msg
+            assert "raise llm.max_tokens" not in msg  # the wrong knob
+            assert "finish_reason='stop'" in msg and "completion_tokens=1" in msg
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
 def test_call_llm_keeps_a_whole_answer_whatever_the_finish_reason(home):
     """``finish_reason`` is read, not obeyed: real text still comes back."""
     from aiohttp import web as aioweb

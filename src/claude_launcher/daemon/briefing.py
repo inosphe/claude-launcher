@@ -360,11 +360,27 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> L
     spent = usage.get("completion_tokens") if isinstance(usage, dict) else None
     text = str(content or "")
     if not text.strip():
+        # Two different things arrive here, and telling them apart is the
+        # whole point of reading finish_reason: "length" is OUR budget being
+        # too small for a reasoning model, and the operator can fix it.
+        # Anything else — measured live as finish_reason="stop" with
+        # completion_tokens=1 — is the endpoint returning a degenerate
+        # completion, which no local setting changes. Blaming the budget for
+        # that one would send whoever reads the log to the wrong knob.
+        if finish == "length":
+            why = (
+                f"the budget ran out (max_tokens={cfg['max_tokens']}); a "
+                "reasoning model spends it on its reasoning before it writes "
+                "anything, so raise llm.max_tokens in ~/.claunch.yaml"
+            )
+        else:
+            why = (
+                "the endpoint produced nothing and did not say it was cut off "
+                "— a provider-side empty completion, not a local setting"
+            )
         raise BriefingError(
             f"llm returned empty content (finish_reason={finish!r}, "
-            f"completion_tokens={spent}, max_tokens={cfg['max_tokens']}) — a "
-            "reasoning model spends this budget on its reasoning before it "
-            "writes anything; raise llm.max_tokens in ~/.claunch.yaml"
+            f"completion_tokens={spent}): {why}"
         )
     return LlmAnswer(text, str(finish) if finish is not None else None, spent)
 
