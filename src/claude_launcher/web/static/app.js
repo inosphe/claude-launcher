@@ -9345,7 +9345,15 @@ function syncSpawnGates(ui) {
     if (note) { note.hidden = !why; note.textContent = why || ""; }
   };
 
-  ui.overRow.hidden = !(report.soft_blocked_by || []).length;
+  // Two different folds, because they answer two different questions. The
+  // CROSSING is offered only where the daemon named something soft to cross;
+  // the GATE around it opens wherever the button is dead for a reason this
+  // form is allowed to state (`ui.capped`, set by the load) — including the
+  // policy's bare "this session may not spawn", which names no crossing and
+  // so opens the gate on its reason alone rather than on an empty box.
+  const overCap = !!(report.soft_blocked_by || []).length;
+  ui.overRow.hidden = !overCap;
+  if (ui.capGate) ui.capGate.hidden = !(overCap || ui.capped);
 
   const pickedProfile = ui.profile.value || "";
   const pickedDetail = (ui.profileDetails || {})[pickedProfile];
@@ -9821,9 +9829,30 @@ function buildSpawnForm(parentName, seed) {
   ui.forkNote = forkRow.querySelector(".sess-spawn-note");
   box.appendChild(forkRow);
 
-  ui.overRow = spawnCheckRow("spawn over the child limit (the daemon counts it against you)", null);
+  /* ---- the child cap: laid out at the press, not inside the form -------
+     The cap is not a property of the child being described — it is a gate on
+     the button — and it used to be laid out as if it were neither. Its three
+     parts stood in three places: the reason ("child limit reached (4/4)") in
+     the note at the TOP of a 21-row form, the crossing that revives the
+     button as the LAST row of that form, and the dead button itself out in
+     #modal-actions, which is not even inside the form's scroller. So the
+     operator read a warning, found the button under it dead, and had twenty
+     rows to scroll before meeting the box the warning had named — which is
+     the mismatch this row is being moved to end. Reason and crossing are
+     built here as ONE block, and openSpawnModal hangs it in the action bar
+     on the line above Spawn, where the button they explain actually is. */
+  ui.capNote = el("p", "sess-spawn-cap-msg");
+  // spawnCheckRow's second argument is a request for a note element, not its
+  // text; the cost of the crossing hangs there, under the action it costs,
+  // instead of riding inside the label as parentheses nobody reads.
+  ui.overRow = spawnCheckRow("spawn over the child limit", true);
   ui.over = ui.overRow.querySelector("input");
-  box.appendChild(ui.overRow);
+  ui.overNote = ui.overRow.querySelector(".sess-spawn-note");
+  ui.overNote.textContent = "the daemon counts it against you";
+  ui.overNote.hidden = false;
+  ui.capGate = el("div", "sess-spawn-cap");
+  ui.capGate.hidden = true;
+  ui.capGate.append(ui.capNote, ui.overRow);
 
   // Seed: a quick-job launch fingers role/workflow/worktree/task; everything
   // else falls back to what the browser used last, then the wizard's defaults.
@@ -9932,7 +9961,10 @@ async function openSpawnModal(parentName, opts = {}) {
                       (opts.seed && opts.seed.quick) ? "Spawn worker" : "Spawn child");
   const cancel = el("button", "wf-btn option", "Cancel");
   spawnBtn.disabled = true;
-  actions.append(cancel, spawnBtn);
+  // The cap gate first, so DOM order is reading order: the stylesheet gives
+  // it the whole first line of the bar and the buttons keep the second. It
+  // stays folded until syncSpawnGates finds a soft block to open it for.
+  actions.append(ui.capGate, cancel, spawnBtn);
   const st = { ui, parent: parentName, seed: opts.seed || null,
                spawnBtn, noteShow, busy: false };
   cancel.addEventListener("click", spawnModalClose);
@@ -10069,20 +10101,24 @@ async function spawnModalLoad(st) {
     "the spawn policy": report, roles, profiles: profDoc,
     meshes: meshDoc, "the git state": gitDoc, workflows: wfDoc,
   }));
-  // A soft verdict is carried too, not dropped: past the cap the note is the
-  // only thing that explains why the button is still dead, and it names the
-  // row that revives it.
+  // Where the verdict is SAID depends on which verdict it is. Below the cap
+  // it is a standing fact about the parent ("2 child slot(s) left") and reads
+  // with the form's other standing facts, at the top. At the cap it is the
+  // reason a particular button is dead, so it goes to that button — as the
+  // gate's heading, one line above the crossing that revives it. Carrying it
+  // in both places would only teach the operator to read neither.
   const capped = !verdict.ok;
   const lines = [];
   if (srcNote) lines.push(srcNote);
-  if (verdict.msg) {
-    lines.push(capped
-      ? `${verdict.msg} — tick 'spawn over the child limit' to cross it`
-      : verdict.msg);
-  }
+  if (verdict.msg && !capped) lines.push(verdict.msg);
   if (lines.length) {
-    st.noteShow(lines.join(" · "), (srcNote || capped) ? "wf-warning" : "wf-note");
+    st.noteShow(lines.join(" · "), srcNote ? "wf-warning" : "wf-note");
   }
+  ui.capped = capped;
+  ui.capNote.textContent = capped
+    ? `${verdict.msg || "this session may not spawn"} — Spawn stays dead${
+        (report.soft_blocked_by || []).length ? " until this box is ticked" : ""}`
+    : "";
 
   // The workflow picker's first fill: a seed names the workflow outright (the
   // quick-job default), otherwise the parent's own pair is offered.
@@ -10095,7 +10131,15 @@ async function spawnModalLoad(st) {
   // Past the cap the press is armed by the crossing and by nothing else: the
   // daemon would refuse a payload without `over_limit`, and a button that
   // provokes that refusal taught the operator nothing the form already knew.
-  const syncCap = () => { st.spawnBtn.disabled = capped && !ui.over.checked; };
+  // The title carries the same sentence to the one place the gate cannot
+  // reach: a pointer already resting on the dead button.
+  const syncCap = () => {
+    const shut = capped && !ui.over.checked;
+    st.spawnBtn.disabled = shut;
+    st.spawnBtn.title = shut
+      ? "at the child limit — tick 'spawn over the child limit' above to cross it"
+      : "";
+  };
   ui.over.addEventListener("change", syncCap);
   syncCap();
   // The default mesh's own members, fetched once so the connect offers are
