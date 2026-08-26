@@ -57,6 +57,21 @@ Named here so it is not mistaken for more than it is:
 Each of those is a way to break the premise without tripping this. What it
 covers is the shape every git-touching test in this suite actually uses, and
 the shape a new one would be written in.
+
+And one thing it sees and lets through
+--------------------------------------
+:data:`EXEMPT_CALLERS` is a short table of places that may make an otherwise
+refused read, each with its reason written beside it. There is one entry, and
+a full sweep is what put it there: six tests reach ``git rev-parse
+--abbrev-ref HEAD`` through ``worktree.current_branch`` because the product
+code under them builds a display label. The read is real; the *dependency* is
+not, and the evidence is that those six are green under every branch name
+this fleet has run them from. The exemption is on the caller, not the
+command -- the same command written in a test module is still a hard stop.
+
+Kept as a table rather than a special case for the reason this whole file
+exists: an exception you can count is not the same as one that is absent
+because nobody looked.
 """
 
 from __future__ import annotations
@@ -306,12 +321,67 @@ def offending(
     )
 
 
+#: Reads this refuses in general and allows from one named place, with the
+#: reason written down next to it. Kept in the idiom ``tools/changed_tests.py``
+#: uses for ``EXPLICIT_GUARDS``: derive the rule, and keep the exceptions as a
+#: short table you can count, rather than letting them be absent silently.
+#:
+#: Each entry is ``(module suffix, function, why)``. A refused call is allowed
+#: when that function is somewhere on the stack.
+EXEMPT_CALLERS = (
+    (
+        "claude_launcher/worktree.py",
+        "current_branch",
+        # A full sweep of this branch found six tests (test_prompt_input x2,
+        # test_cli x3, test_spawn_api x1) reaching `git rev-parse --abbrev-ref
+        # HEAD` through here. None of them asks for it: they exercise
+        # cli/attach/api against a session whose cwd is this checkout, and
+        # `worktree.pane_label` reads the branch to build a *display label*.
+        #
+        # The read is real and the guard was right to see it -- a branch name
+        # is a ref, and two commits with one tree sit on different branches.
+        # What is missing is a dependency: those six are green on master, on
+        # every worker branch this fleet has run them from, and on the
+        # integration previews -- names that all differ. A test whose outcome
+        # turned on the branch name could not have survived that.
+        #
+        # So the exemption is about the *caller*, not about the command:
+        # `rev-parse --abbrev-ref HEAD` written in a test module is still a
+        # hard stop. What is allowed is product code reading its own checkout
+        # for a label while a test happens to be driving it.
+        #
+        # Left on the board rather than closed: claunch-l8lh.
+        "product code reading the branch for a display label; no assertion "
+        "in this suite turns on it -- see claunch-l8lh",
+    ),
+)
+
+
+def exempt() -> Optional[tuple]:
+    """The :data:`EXEMPT_CALLERS` entry on the current stack, if any."""
+    import inspect
+
+    # ``context=0``: only the refused path reaches here, but reading source
+    # lines for every frame to answer a yes/no question is work nobody asked
+    # for, and it touches the disk from inside a subprocess call.
+    for frame in inspect.stack(0):
+        name = frame.function
+        path = frame.filename.replace("\\", "/")
+        for module, func, why in EXEMPT_CALLERS:
+            if func == name and path.endswith(module):
+                return (module, func, why)
+    return None
+
+
 class Guard:
     """The installed patch, so a test can prove it is armed and take it out."""
 
     def __init__(self, root: Path):
         self.root = Path(root).resolve()
         self.seen: list = []
+        #: Refused-by-rule reads that an :data:`EXEMPT_CALLERS` entry let
+        #: through. Kept so the exceptions can be counted, not just trusted.
+        self.exempted: list = []
         self._real = None
 
     def install(self) -> "Guard":
@@ -323,8 +393,11 @@ class Guard:
             def __init__(self, args, *rest, **kw):
                 problem = offending(args, kw.get("cwd"), guard.root)
                 if problem is not None:
-                    guard.seen.append(problem)
-                    raise RepoHistoryRead(problem)
+                    allowed = exempt()
+                    if allowed is None:
+                        guard.seen.append(problem)
+                        raise RepoHistoryRead(problem)
+                    guard.exempted.append((allowed, problem))
                 super().__init__(args, *rest, **kw)
 
         subprocess.Popen = GuardedPopen  # type: ignore[misc]

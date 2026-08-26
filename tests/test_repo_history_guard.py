@@ -180,3 +180,55 @@ def test_the_guard_comes_back_off(tmp_path):
     assert subprocess.Popen is not real
     guard.uninstall()
     assert subprocess.Popen is real
+
+
+# --------------------------------------------------------------------------- #
+# the one exemption, and the fact that it is on the caller
+# --------------------------------------------------------------------------- #
+def test_the_exemption_table_is_short_and_says_why():
+    """An exception you can count is not one that is absent because nobody looked.
+
+    The size assertion is the point: a table that grows without anybody
+    noticing is how the premise stops being watched while still looking
+    watched. If a second entry is genuinely needed, this line is where the
+    person adding it has to say so out loud.
+    """
+    from _repo_history_guard import EXEMPT_CALLERS
+
+    assert len(EXEMPT_CALLERS) == 1, EXEMPT_CALLERS
+    module, func, why = EXEMPT_CALLERS[0]
+    assert (module, func) == ("claude_launcher/worktree.py", "current_branch")
+    assert "claunch-l8lh" in why, "an exemption has to point at its own follow-up"
+
+
+def test_product_code_reading_the_branch_for_a_label_is_let_through(
+    repo_history_guard,
+):
+    """The six the sweep found: real reads, no dependency, so not a hard stop.
+
+    Driven through the real ``worktree.current_branch`` rather than a stub,
+    because what is exempt is that frame being on the stack -- a test that
+    faked the frame would pass while the thing it stands for had moved.
+    """
+    from claude_launcher import worktree
+
+    before = len(repo_history_guard.exempted)
+    assert worktree.current_branch(ROOT) != ""      # it really did run git
+    assert len(repo_history_guard.exempted) == before + 1
+    _, problem = repo_history_guard.exempted[-1]
+    assert "rev-parse --abbrev-ref HEAD" in problem
+
+
+def test_the_same_command_from_a_test_is_still_refused():
+    """The exemption is on the caller, not on the command.
+
+    Without this, adding ``current_branch`` to the table would quietly bless
+    ``rev-parse --abbrev-ref HEAD`` everywhere, and the next test that asserts
+    on this repository's branch name would sail through.
+    """
+    with pytest.raises(RepoHistoryRead):
+        subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=str(ROOT),
+            capture_output=True,
+        )
