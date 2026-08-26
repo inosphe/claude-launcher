@@ -362,18 +362,31 @@ def test_reborrow_to_profile_without_backend_keys_clears_lender_env(home, monkey
 
 def test_borrow_keeps_running_profile_env_over_lender_provider(home):
     # Borrow swaps the auth backend but not the running profile's env: the
-    # runner's own keys still beat the lender's provider defaults.
+    # runner's own keys still beat the lender's provider defaults. Asserted on
+    # a NON-backend key, because a backend key is exactly what a borrow across
+    # providers takes away (see the model-pin tests below): the model ids are
+    # the lender's business once the endpoint is, everything else is not.
     runner_p = profile.create("work")
-    settings.set_env(runner_p, {"ANTHROPIC_MODEL": "runner-model"})
+    settings.set_env(runner_p, {"CLAUDE_CODE_AUTO_COMPACT_WINDOW": "400000"})
     lender = profile.create("lender")
     store.update(
         lambda doc: doc.update(
-            {"providers": {"backend": {"env": {"ANTHROPIC_MODEL": "lender-model"}}}}
+            {
+                "providers": {
+                    "backend": {
+                        "env": {
+                            "ANTHROPIC_MODEL": "lender-model",
+                            "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "900000",
+                        }
+                    }
+                }
+            }
         )
     )
     store.set_profile_field("lender", "provider", "backend")
     env = runner.child_env(runner_p, with_token=True, borrow=lender)
-    assert env["ANTHROPIC_MODEL"] == "runner-model"
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "400000"
+    assert env["ANTHROPIC_MODEL"] == "lender-model"
 
 
 def test_borrow_lends_profile_env_above_provider_below_runner(home):
@@ -385,6 +398,9 @@ def test_borrow_lends_profile_env_above_provider_below_runner(home):
     runner_p = profile.create("work")
     settings.set_env(runner_p, {"ANTHROPIC_MODEL": "runner-model"})
     lender = profile.create("glmprof")
+    # Same provider on both sides, so the runner's pins still describe the
+    # backend in play and keep their final say. Across providers they do not:
+    # test_borrow_across_providers_drops_running_profile_model_pins.
     settings.set_env(
         lender,
         {
@@ -407,11 +423,142 @@ def test_borrow_lends_profile_env_above_provider_below_runner(home):
             }
         )
     )
+    store.set_profile_field("work", "provider", "backend")
     store.set_profile_field("glmprof", "provider", "backend")
     env = runner.child_env(runner_p, with_token=True, borrow=lender)
     assert env["ANTHROPIC_MODEL"] == "runner-model"  # runner's own key still wins
     assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "lender-opus"  # lender fills the gap
     assert env["ANTHROPIC_DEFAULT_SONNET_MODEL"] == "provider-sonnet"  # provider falls through
+
+
+def test_borrow_across_providers_drops_running_profile_model_pins(home):
+    """The reported bug: `ds4:claude` borrowing a plain-Anthropic profile.
+
+    ds4 pins Fireworks model ids in its own profile env and resolves to the
+    Fireworks provider. Borrowing a default-provider lender swings the
+    endpoint to api.anthropic.com -- and under the old layering the Fireworks
+    model ids came along, so claude asked Anthropic for a model id only
+    Fireworks has ("There's an issue with the selected model ... It may not
+    exist or you may not have access to it"). The pins describe a backend this
+    run is not talking to, so they do not get the final say.
+    """
+    fireworks_models = {
+        "ANTHROPIC_MODEL": "accounts/fireworks/models/deepseek-v4-flash-0731",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "accounts/fireworks/models/deepseek-v4-flash-0731",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "accounts/fireworks/models/deepseek-v4-flash-0731",
+    }
+    runner_p = profile.create("ds4")
+    settings.set_env(
+        runner_p, {**fireworks_models, "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "600000"}
+    )
+    store.update(
+        lambda doc: doc.update(
+            {
+                "providers": {
+                    "fireworks": {
+                        "env": {
+                            "ANTHROPIC_BASE_URL": "https://api.fireworks.ai/inference",
+                            "ANTHROPIC_AUTH_TOKEN": "fw-key",
+                            "CLAUDE_CODE_OAUTH_TOKEN": "",
+                            **fireworks_models,
+                        }
+                    }
+                }
+            }
+        )
+    )
+    store.set_profile_field("ds4", "provider", "fireworks")
+    lender = profile.create("sr")
+    credentials.save_token(lender, "sk-ant-oat01-lender")
+
+    env = runner.child_env(runner_p, with_token=True, borrow=lender)
+
+    # Anthropic's endpoint, Anthropic's auth -- and no Fireworks model id left.
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-lender"
+    assert "ANTHROPIC_BASE_URL" not in env
+    for key in fireworks_models:
+        assert key not in env, f"{key} names a backend this run does not call"
+    # Only the backend keys go. Everything else the profile pins is still its
+    # own business, borrow or not -- config dir included.
+    assert env["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "600000"
+    assert env["CLAUDE_CONFIG_DIR"] == str(runner_p.config_dir)
+
+
+def test_borrow_within_one_provider_keeps_model_pins(home):
+    # The carve-out: when the lender resolves to the *same* provider, the
+    # runner's pins still describe the backend being talked to, so they keep
+    # their final say exactly as before. This is the case that must not
+    # regress when the cross-provider one is fixed.
+    store.update(
+        lambda doc: doc.update(
+            {"providers": {"backend": {"env": {"ANTHROPIC_MODEL": "provider-model"}}}}
+        )
+    )
+    runner_p = profile.create("work")
+    settings.set_env(runner_p, {"ANTHROPIC_MODEL": "runner-model"})
+    store.set_profile_field("work", "provider", "backend")
+    lender = profile.create("lender")
+    store.set_profile_field("lender", "provider", "backend")
+
+    env = runner.child_env(runner_p, with_token=True, borrow=lender)
+
+    assert env["ANTHROPIC_MODEL"] == "runner-model"
+
+
+def test_provider_override_drops_running_profile_model_pins(home):
+    # The same mismatch without a borrow: `run work --provider other` swings
+    # the endpoint while the profile's pins still name its own backend.
+    store.update(
+        lambda doc: doc.update(
+            {
+                "providers": {
+                    "mine": {"env": {"ANTHROPIC_BASE_URL": "https://mine.example/"}},
+                    "other": {
+                        "env": {
+                            "ANTHROPIC_BASE_URL": "https://other.example/",
+                            "ANTHROPIC_MODEL": "other-model",
+                        }
+                    },
+                }
+            }
+        )
+    )
+    p = profile.create("work")
+    settings.set_env(p, {"ANTHROPIC_MODEL": "mine-model"})
+    store.set_profile_field("work", "provider", "mine")
+
+    env = runner.child_env(p, with_token=True, provider_override="other")
+
+    assert env["ANTHROPIC_BASE_URL"] == "https://other.example/"
+    assert env["ANTHROPIC_MODEL"] == "other-model"
+
+
+def test_borrow_across_providers_leaves_a_pinless_profile_alone(home):
+    # A profile that pins nothing has nothing to lose: the borrowed backend is
+    # the only source of model ids either way. Guards against the fix reaching
+    # further than the keys the profile actually set.
+    store.update(
+        lambda doc: doc.update(
+            {
+                "providers": {
+                    "backend": {
+                        "env": {
+                            "ANTHROPIC_BASE_URL": "https://lender.example/",
+                            "ANTHROPIC_MODEL": "lender-model",
+                        }
+                    }
+                }
+            }
+        )
+    )
+    runner_p = profile.create("work")
+    lender = profile.create("lender")
+    store.set_profile_field("lender", "provider", "backend")
+
+    env = runner.child_env(runner_p, with_token=True, borrow=lender)
+
+    assert env["ANTHROPIC_MODEL"] == "lender-model"
+    assert env["ANTHROPIC_BASE_URL"] == "https://lender.example/"
 
 
 def test_pi_gets_only_its_projected_profile_token(home, monkeypatch):
