@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from . import config, credentials, harnesses, lineage, providers
+from . import config, credentials, harnesses, lineage, providers, routing
 from .profile import Profile
 
 #: Environment variable Claude Code reads for a setup-token login.
@@ -185,6 +185,12 @@ def child_env(
         # `--null` means *no* OAuth token, full stop — even one pinned by the
         # profile's own env or a provider pattern loses to the explicit flag.
         env.pop(OAUTH_TOKEN_ENV, None)
+    if with_token:
+        # A backend that takes its routing in the request body (OpenRouter's
+        # provider pinning) cannot be reached by environment alone. When the
+        # provider declares one, the base URL is swung to a local shim that
+        # merges the spec into every request — see :mod:`routing`.
+        routing.apply(env, provider)
     # Claude gateways authenticate with the declared bearer-token route. When
     # it is active the packaged rule forces ANTHROPIC_API_KEY="", preventing
     # Claude Code from also emitting a competing X-Api-Key header.

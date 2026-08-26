@@ -112,6 +112,7 @@ claunch run work:claude                  # explicit Claude selector
 | `usage <name[:harness]>` | Query Claude or Codex subscription usage (`--json` for the raw response). |
 | `set-provider [p] <provider>` | Pin a provider globally or per profile (`--clear` to inherit). |
 | `providers`            | List API providers from the config file and the active one. |
+| `routing [set\|clear\|stop]` | Show or change [request-body routing](#pinning-the-upstream-provider-openrouter-routing) (e.g. pin OpenRouter to CoreWeave). |
 | `set-token <name> [t]` | Store the profile's one launcher token. The harness declaration chooses its destination env; OAuth harnesses ignore it. |
 | `get-token <name>`     | Print the profile's OAuth token (resolves inheritance; `--own`). |
 | `list`                 | List profiles and each login's state (alias: `ls`). |
@@ -578,6 +579,60 @@ profiles using a provider:
 > `set-token` (above) — the file is meant to be copied between machines. If you
 > do put an `ANTHROPIC_AUTH_TOKEN` in a provider's `env`, it is plaintext:
 > treat the file as a secret when committing or copying it.
+
+### Pinning the upstream provider (OpenRouter routing)
+
+A provider's `env` can say *which backend* to talk to, but not *which upstream
+compute inside it* serves the request. OpenRouter decides that from a `provider`
+object in the **request body** — and nothing else does it. A `:coreweave`
+suffix on the model slug is accepted and quietly ignored (your request lands on
+whichever endpoint the default router picks), and `@coreweave` is rejected
+outright. Environment variables cannot reach the body.
+
+So a provider may declare a **routing** spec, and the launcher runs a small
+loopback shim that merges it into every JSON request on the way out:
+
+```yaml
+providers:
+  openrouter:
+    routing:
+      order: [coreweave]        # try CoreWeave first
+      allow_fallbacks: false    # ...and fail rather than use anyone else
+    env:
+      ANTHROPIC_BASE_URL: "https://openrouter.ai/api/"
+      ANTHROPIC_MODEL: "deepseek/deepseek-v4-flash-0731"
+```
+
+The spec is forwarded verbatim, so every field the backend understands
+(`order`, `only`, `ignore`, `sort`, `max_price`, ...) works. Provider slugs come
+from the model's *Providers* tab, or from
+`https://openrouter.ai/api/v1/models/<author>/<slug>/endpoints`; a base slug
+(`coreweave`) matches all of that provider's endpoints, a full one
+(`coreweave/fp8`) pins one variant.
+
+Set it from the CLI instead of editing YAML:
+
+```bash
+claunch routing set openrouter --order coreweave --no-fallbacks
+claunch routing                      # what is pinned, and which shims are live
+claunch routing clear openrouter     # back to the backend's own routing
+```
+
+**How the shim behaves.** At launch, a provider with a `routing` block gets its
+`ANTHROPIC_BASE_URL` swung to `http://127.0.0.1:<port>/`; the shim forwards
+everything to the real upstream, adding the routing field to JSON object bodies
+and leaving every other request byte-identical. It streams responses, so
+token-by-token output is unaffected. One shim serves every session using the
+same (upstream, spec) pair — the port is derived from that pair, so simultaneous
+launches share one process, and editing the spec produces a different one that
+the next launch picks up. A body that already carries a `provider` field is left
+alone.
+
+The shim is loopback-only and holds no credentials of its own — it forwards the
+caller's. It outlives the session that started it; `claunch routing stop --all`
+ends them. If it cannot start, the **launch fails** rather than falling back to
+the direct URL: silently unpinning the request is the exact failure this
+feature exists to prevent.
 
 ## Migrating skills & MCP servers
 
