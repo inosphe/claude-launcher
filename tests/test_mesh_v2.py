@@ -208,7 +208,11 @@ async def _linked_pair(mgr, tmp_path, *, sessions=("sa", "sb")):
     mm_b = MeshManager(mgr, settle=0.05, root=tmp_path / "meshB")
     _wire({"pcA": mm_a, "pcB": mm_b})
     for s in sessions:
-        mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
+        # rows=80: a member whose harness takes no system prompt now has its
+        # stance pasted into the join briefing, which is taller than a
+        # default screen -- the header these tests wait on would scroll off
+        # before the wait saw it. See MeshManager._stance_lines.
+        mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path), rows=80))
     mm_a.create("m")
     await mm_a.join("m", sessions[0], handle="alice")
     # phase 6: the mirror is a side effect of the first member's join
@@ -230,7 +234,7 @@ def test_link_creates_mirror_with_snapshot(home, tmp_path):
         mm_b = MeshManager(mgr, settle=0.05, root=tmp_path / "meshB")
         _wire({"pcA": mm_a, "pcB": mm_b})
         for s in ("sa", "sa2", "sb"):
-            mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path), rows=80))
         mm_a.create("m")
         await mm_a.join("m", "sa", handle="alice")
         await mm_a.join("m", "sa2", handle="amy")
@@ -365,7 +369,7 @@ def test_guest_join_is_authoritative_at_primary(home, tmp_path):
         assert mesh_b.members["bob"].machine == "pcB"
 
         # B1: central uniqueness — a second 'bob' from anywhere is refused
-        mgr.create(SessionDef(name="sx", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sx", harness="py", cwd=str(tmp_path), rows=80))
         with pytest.raises(MeshError):
             await mm_b.join("m", "sx", handle="bob")
         with pytest.raises(MeshError):
@@ -397,7 +401,7 @@ def test_guest_join_fails_fast_when_primary_unreachable(home, tmp_path):
     async def run():
         mgr = _manager()
         mm_a, mm_b = await _linked_pair(mgr, tmp_path)
-        mgr.create(SessionDef(name="sx", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sx", harness="py", cwd=str(tmp_path), rows=80))
         _break_transport(mm_b)
         with pytest.raises(MeshError):
             await mm_b.join("m", "sx", handle="carol")
@@ -477,7 +481,7 @@ def test_guest_to_guest_via_hub_three_daemons(home, tmp_path):
         mm_c = MeshManager(mgr, settle=0.05, root=tmp_path / "meshC")
         _wire({"pcA": mm_a, "pcB": mm_b, "pcC": mm_c})
         for s in ("sa", "sb", "sc"):
-            mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path), rows=80))
         mm_a.create("m")
         await mm_a.join("m", "sa", handle="alice")
         await mm_b.join("m@pcA", "sb", handle="bob",
@@ -509,7 +513,7 @@ def test_guest_local_dm_goes_through_primary(home, tmp_path):
     async def run():
         mgr = _manager()
         mm_a, mm_b = await _linked_pair(mgr, tmp_path)
-        mgr.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path), rows=80))
         await mm_b.join("m", "sb2", handle="bea")
         mesh_a, mesh_b = mm_a.get("m"), mm_b.get("m")
 
@@ -550,7 +554,7 @@ def test_sections_reply_to_and_slicing_across_hop(home, tmp_path):
         mgr = _manager()
         mm_a, mm_b = await _linked_pair(mgr, tmp_path)
         mesh_a, mesh_b = mm_a.get("m"), mm_b.get("m")
-        mgr.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path), rows=80))
         await mm_b.join("m", "sb2", handle="bea")
 
         sent = await mm_b.send(
@@ -819,7 +823,7 @@ def test_stall_warning_reaches_remote_leader(home, tmp_path):
         mm_b = MeshManager(mgr, settle=0.05, root=tmp_path / "meshB")
         _wire({"pcA": mm_a, "pcB": mm_b})
         for s in ("sw", "sl"):
-            mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
+            mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path), rows=80))
         mm_a.create("m")
         await mm_a.join("m", "sw", handle="worker_1")
         await mm_b.join("m@pcA", "sl", handle="leader",
@@ -929,7 +933,7 @@ def test_authority_member_joined_after_federation_buckets_on_the_authority(
         mgr = _manager()
         mm_a, mm_b = await _linked_pair(mgr, tmp_path)
         # the mesh is federated; NOW the authority enrols one of its own
-        mgr.create(SessionDef(name="sa2", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sa2", harness="py", cwd=str(tmp_path), rows=80))
         await mm_a.join("m", "sa2", handle="amy")
         await asyncio.sleep(0.3)  # roster fanout to the mirror
 
@@ -997,7 +1001,7 @@ def test_unfederated_mesh_keeps_its_members_blank_and_local(home, tmp_path):
         mgr = _manager()
         mm = MeshManager(mgr, settle=0.05, root=tmp_path / "solo")
         _wire({"pcA": mm})
-        mgr.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sa", harness="py", cwd=str(tmp_path), rows=80))
         mm.create("m")
         await mm.join("m", "sa", handle="alice")
 
@@ -1206,7 +1210,7 @@ def test_migrating_a_legacy_mirror_leaves_blanks_to_the_primary(home, tmp_path):
     async def run():
         mgr = _manager()
         mm = MeshManager(mgr, settle=0.05, root=tmp_path / "legacy")
-        mgr.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sb", harness="py", cwd=str(tmp_path), rows=80))
         mm.create("m")
         mesh = mm.get("m")
         await mm.join("m", "sb", handle="bob")

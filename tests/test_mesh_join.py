@@ -192,7 +192,12 @@ async def _primary_with_alice(mgr, tmp_path):
     mm_b = MeshManager(mgr, settle=0.05, root=tmp_path / "meshB")
     _wire({"pcA": mm_a, "pcB": mm_b})
     for s in ("sa", "sb"):
-        mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path)))
+        # rows=80: these sessions are joined to a mesh and the tests wait on
+        # the briefing's HEADER. A member whose harness takes no system
+        # prompt now has its stance pasted into that block, which is taller
+        # than a default screen — the header would scroll off before the
+        # wait saw it. See MeshManager._stance_lines.
+        mgr.create(SessionDef(name=s, harness="py", cwd=str(tmp_path), rows=80))
     mm_a.create("m")
     await mm_a.join("m", "sa", handle="alice")
     return mm_a, mm_b
@@ -207,7 +212,7 @@ def test_coded_join_creates_mirror_member_and_briefing(home, tmp_path):
     async def run():
         mgr = _manager()
         mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
-        mgr.create(SessionDef(name="sa2", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sa2", harness="py", cwd=str(tmp_path), rows=80))
         await mm_a.join("m", "sa2", handle="amy")
         await mm_a.send("m", "alice", "amy", "pre-join history")
         code = mm_a.invite("m")["code"]
@@ -230,13 +235,13 @@ def test_coded_join_creates_mirror_member_and_briefing(home, tmp_path):
         # tickets are single-use
         mm_c = MeshManager(mgr, settle=0.05, root=tmp_path / "meshC")
         _wire({"pcA": mm_a, "pcB": mm_b, "pcC": mm_c})
-        mgr.create(SessionDef(name="sc", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sc", harness="py", cwd=str(tmp_path), rows=80))
         with pytest.raises(MeshError):
             await mm_c.join("m@pcA", "sc", handle="carol", code=code)
 
         # J7: a second member from the linked machine — plain join, by name
         # or by address, no code, no approval
-        mgr.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path), rows=80))
         bee = await mm_b.join("m@pcA", "sb2", handle="bee")
         assert isinstance(bee, Member)
         assert mesh_a.members["bee"].machine == "pcB"
@@ -282,7 +287,7 @@ def test_codeless_join_pends_then_approve_and_deny(home, tmp_path):
         # J4: a denied request evaporates on both sides
         mm_c = MeshManager(mgr, settle=0.05, root=tmp_path / "meshC")
         _wire({"pcA": mm_a, "pcB": mm_b, "pcC": mm_c})
-        mgr.create(SessionDef(name="sc", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sc", harness="py", cwd=str(tmp_path), rows=80))
         res_c = await mm_c.join("m@pcA", "sc", handle="carol")
         await mm_a.deny_request("m", res_c["request_id"])
         assert mm_a.request_list("m") == []
@@ -337,7 +342,7 @@ def test_join_address_collisions(home, tmp_path):
     async def run():
         mgr = _manager()
         mm_a, mm_b = await _primary_with_alice(mgr, tmp_path)
-        mgr.create(SessionDef(name="sx", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sx", harness="py", cwd=str(tmp_path), rows=80))
 
         # a local mesh of the same name blocks an establishment join
         mm_b.create("m")
@@ -560,7 +565,7 @@ def test_invite_member_pushes_establishment(home, tmp_path):
         await _wait_screen(mgr.get("sb"), "join briefing")
 
         # W2: a second invitation to the linked machine mints no ticket
-        mgr.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path)))
+        mgr.create(SessionDef(name="sb2", harness="py", cwd=str(tmp_path), rows=80))
         bee = await mm_a.invite_member("m", "pcB", "sb2", handle="bee")
         assert bee["handle"] == "bee"
         assert mm_a.invite_list("m") == []

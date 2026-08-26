@@ -71,22 +71,36 @@ def compose(name: str, *, manager, mesh_mgr) -> str:
     last, where it stays on screen closest to the agent's next turn.
     """
     sdef = manager.get(name).sdef
-    sections = [_header(name)]
-    sections.extend(
-        s
-        for s in (
-            _parent_section(sdef, manager, mesh_mgr),
-            *_mesh_sections(name, mesh_mgr),
-            _cflow_section(sdef),
-            _asks_section(name),
-            _children_section(name, manager),
-            _task_section(sdef.task or "", issue=sdef.issue),
-        )
-        if s
-    )
+
+    def assemble(inline_stance: bool) -> list:
+        return [
+            s
+            for s in (
+                _header(name),
+                _parent_section(sdef, manager, mesh_mgr),
+                *_mesh_sections(name, mesh_mgr, inline_stance=inline_stance),
+                _cflow_section(sdef),
+                _asks_section(name),
+                _children_section(name, manager),
+                _task_section(sdef.task or "", issue=sdef.issue),
+            )
+            if s
+        ]
+
+    sections = assemble(True)
     if len(sections) == 1:
         return ""
     block = "\n\n".join(sections)
+    if len(block) > BLOCK_LIMIT:
+        # Over budget: give up the pasted stance FIRST, and only then cut.
+        # The join briefing pastes a stance no system prompt is carrying
+        # (``MeshManager._stance_lines``), which is right where it is typed
+        # into a terminal — but here it competes with the owed ledger, the
+        # open decisions and the opening task, and it is the only one of the
+        # four that ``claunch mesh stance`` can hand back on demand. Dropping
+        # it costs the agent one command; a blind tail-cut costs it whichever
+        # section happened to be last, which is the task.
+        block = "\n\n".join(assemble(False))
     if len(block) > BLOCK_LIMIT:
         block = block[:BLOCK_LIMIT] + (
             "\n[rebrief cut at the hook's output budget -- run 'claunch "
@@ -156,7 +170,7 @@ def _parent_section(sdef, manager, mesh_mgr) -> str:
     )
 
 
-def _mesh_sections(name: str, mesh_mgr) -> list:
+def _mesh_sections(name: str, mesh_mgr, *, inline_stance: bool = True) -> list:
     """The join briefing again, per membership, plus the ledger it cannot know.
 
     :meth:`MeshManager.briefing_block` is reused rather than paraphrased: it
@@ -178,7 +192,9 @@ def _mesh_sections(name: str, mesh_mgr) -> list:
             member = mesh_mgr.member_for_session(mesh, name)
             if member is None:
                 continue
-            block = mesh_mgr.briefing_block(mesh, member)
+            block = mesh_mgr.briefing_block(
+                mesh, member, inline_stance=inline_stance
+            )
             owed = mesh.owed(member.handle)
         except MeshError:
             continue  # deleted between the listing and here

@@ -1281,7 +1281,11 @@ def test_join_briefing_lands_in_terminal(home, tmp_path):
         mgr = _manager()
         mm = MeshManager(mgr, settle=0.05)
         mm.create("brief")
-        mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+        # Tall enough to hold the whole block: this session has no role (the
+        # 'py' harness takes no system prompt), so the briefing pastes the
+        # stance rather than pointing at it, and a 30-row screen would scroll
+        # the header off before the assertions read it.
+        mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path), rows=80))
         s = mgr.get("s1")
         await _wait_screen(s, "READY")
         await mm.join("brief", "s1", handle="worker_1")
@@ -1295,6 +1299,11 @@ def test_join_briefing_lands_in_terminal(home, tmp_path):
         # the daemon prompts the agent to activate the member-protocol skill
         assert "/mesh brief" in text
         assert "'mesh' skill" in text
+        # nothing carries this session's stance but the briefing, so it is in
+        # the briefing — pointer AND prose
+        assert "claunch mesh stance brief" in text
+        assert "stance (worker), binding:" in text
+        assert "You are a PRODUCER" in text
         await mgr.shutdown_all()
 
     asyncio.run(run())
@@ -1516,6 +1525,8 @@ def test_mesh_mcp_tools(home, monkeypatch):
         # ended, re-drawn, wired
         "spawn", "children", "rebrief", "kill", "reparent", "connect",
         "disconnect",
+        # ... and answering the members who asked to be wired themselves
+        "wire_requests",
     ]
 
     # send requires a session identity

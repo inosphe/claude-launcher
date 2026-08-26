@@ -223,8 +223,20 @@ its parent and given the exact `mesh send` that reaches you, so expect reports
   two reviewers who cannot compare notes give you two opinions instead of
   one.
 - A send to a member you are not connected to is **refused**, and `'*'`
-  silently skips them. There is no routing: if a peer must be reached and is
-  not connected, ask whoever spawned you, or the user.
+  silently skips them. There is no routing. But the refusal **files a wire
+  request** for you: it names the peer you tried to reach and tells the one
+  session that can open that edge. So do not then message anybody about it,
+  and above all do not send that session the content you meant for the peer —
+  that is the relay this replaces, and it costs four injections and two of
+  their turns where the channel costs one. Carry on with what you can do
+  without the answer; you are told when it is granted or declined.
+- Your side of a request you are given: `wire_requests` (MCP) or `claunch
+  mesh wire-requests MESH` lists what is waiting on you. **Grant** with
+  `connect` — that is the whole answer. **Decline** with a reason when you
+  meant those two independent, or when what is really needed is your ruling
+  rather than a conversation; a decline is final, is carried into the
+  refusal the requester gets if it asks again, and therefore costs nothing
+  further. Leaving one open is the only answer that keeps costing you.
 
 Children come back when the daemon restarts, on their parent's terms — same
 conversation, same handle, same role. What does not come back is the drive:

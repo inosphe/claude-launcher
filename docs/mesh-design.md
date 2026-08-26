@@ -1020,13 +1020,48 @@ A member holding a role the new set dropped keeps it and simply matches no
 rule — no migration code, and the CLI/web surface it as an *orphan* so the
 state is visible rather than mysterious.
 
-**Stance is delivered by pointer.** The join briefing names the role and tells
-the agent to run `claunch mesh stance <mesh>`; it never pastes the prose.
-Inlining was tried and is wrong twice over — it doubles a block that is typed
-into a live terminal, and it freezes the stance into the agent's context at
-join time, so every later upload would leave that member acting on a
-vocabulary the mesh no longer has. The same command is the recovery path
-after a compaction drops the briefing.
+**Stance is delivered by pointer — when something else is carrying it.** The
+join briefing names the role and tells the agent to run `claunch mesh stance
+<mesh>`. Inlining unconditionally is wrong twice over: it doubles a block
+that is typed into a live terminal, and it freezes the stance into the
+agent's context at join time, so every later upload would leave that member
+acting on a vocabulary the mesh no longer has. The same command is the
+recovery path after a compaction drops the briefing.
+
+What that reasoning assumes is that the agent has the prose from somewhere
+else, and for the common case it does. A session **spawned with a role**
+carries its stance in an appended system prompt, re-injected on every spawn
+and restore (`harness.build_command`), which lives in the process rather
+than the transcript — so neither `/compact` nor `/clear` can take it, and a
+paste in the briefing would be a second copy of text already on screen.
+
+Three shapes carry no such copy, and for them the pointer is the *only*
+appearance the stance ever makes — one command away, on a turn the agent has
+to decide to spend, and replaced by another pointer at the next compaction:
+
+- a session with **no role** (a human started it; it joined afterwards);
+- a mesh that **replaced the vocabulary**, whose role names the packaged set
+  cannot resolve. `SessionManager._spawn_role` drops those rather than fail
+  the spawn — which is what keeps custom vocabularies spawnable — so nothing
+  reaches the system prompt for *any* member of such a mesh;
+- a member whose **mesh role is not the role its session was spawned as**.
+  The prompt then holds a different stance and both claim to bind; an
+  appended prompt cannot be rewritten, so the briefing names the clash and
+  says which wins (the mesh's — a role is per mesh).
+
+For those the prose goes in, capped at `mesh._INLINE_STANCE` (4 KB: every
+packaged stance fits whole, and a custom vocabulary writing up to the 8 KB
+`MAX_STANCE` gets a starting position rather than pushing the roster out of
+the block). The pointer rides along either way, because the pasted copy is a
+starting position and `mesh stance` is still the current text.
+
+The re-briefing has a harder budget than the join does — the SessionStart
+hook's stdout is capped around 9500 characters — so when a block overruns it,
+`rebrief.compose` **re-composes with the stance dropped back to a pointer**
+before it truncates anything. That ordering is the point: the stance is the
+one section with a guaranteed alternative one command away, while the owed
+ledger, the open decisions and the opening task have none, and a blind
+tail-cut takes whichever section happened to be last — which is the task.
 
 **Exclusive roles.** A role may declare `exclusive: true`: at most one **live**
 holder per mesh, enforced at join on the authority (`_resolve_role`, the one
@@ -1049,9 +1084,10 @@ history); and the **default role may not be exclusive** — an upload that
 tries is refused whole, since the second unlabelled join of a mesh's life
 must not be an error nobody asked for.
 
-**What a role actually drives** today: the stance pointer in the join
-briefing, `stall_watch` (who hears about a stuck member), `exclusive`
-(at most one live holder), and `task_poll` wording. Role-based **routing
+**What a role actually drives** today: the stance in the join briefing
+(pointed at, or pasted where nothing else carries it — above), `stall_watch`
+(who hears about a stuck member), `exclusive` (at most one live holder), and
+`task_poll` wording. Role-based **routing
 bans** (worker↔worker, the operator pipe) are still not implemented — the
 schema leaves room, but turning them on would make a `send` that works today
 start failing on an upload alone, so that stays a separate, explicit
@@ -1349,6 +1385,86 @@ refusal as a bug. CLI: `claunch spawn`, `claunch mesh connect|disconnect`,
 the connected pairs in `mesh members`, and `claunch sessions` indented by
 lineage. The join briefing lists only reachable peers, and says how many
 members it is *not* showing.
+
+### Wire requests: the refusal, kept instead of spent
+
+A mesh is a tree by default, so a send to a peer nobody wired is refused —
+and the refusal used to end:
+
+> Ask the session that spawned you to connect you, or route through a peer
+> you share.
+
+That sentence is where the traffic comes from. "Route through a peer you
+share" is an instruction to **relay**, and a relay costs four injections and
+two of the middleman's turns for one peer-to-peer exchange (A→L, L→B, B→L,
+L→A) where a channel costs one. Measured on a real fleet of sixteen:
+**1169 of 1256 injections (93.1%) touched the leader**, and 17 broadcasts —
+15 of them the leader's — accounted for 244 of them.
+
+Worse than the traffic is what the middle does to the content. An agent
+asked to carry another agent's *observation* restates it without the code in
+front of it, and the mesh reads the restatement as the middleman's own. On
+that same fleet a leader relayed one worker's claim about another's work to
+nine recipients; it was wrong, and the worker it was about had to refute it
+with measurements. The traffic is recoverable. That is not.
+
+So the refusal stops being a dead end and becomes the signal — and it is the
+best signal available anywhere in the system, because it is **the one moment
+an agent says, unprompted and by name, that it needs a specific peer**.
+Nothing has to guess from timing, correlate a send with a later send, or read
+a body to find it.
+
+```
+w1 --send--> w2      refused (no edge)
+                     |
+                     +-- request recorded on the mesh (persisted)
+                     +-- ONE 'decide' notice to the session that may grant it
+                     +-- the refusal itself tells w1 it is filed, and to
+                         stop there rather than message anyone about it
+```
+
+- **The ACL is not weakened.** The send is still refused and nothing is
+  delivered. Only an authorized grant changes the graph.
+- **The approver is not invented.** `MeshManager._require_member_authority`
+  already pins who may open an edge — an agent edits only edges touching a
+  session it commands. `wire.approver` picks from that same set, nearest
+  first, preferring the nearest **common** ancestor (a session choosing how
+  its own subtree talks to itself) and falling back to an ancestor of the
+  requester alone, which is what lets a request cross between two trees.
+  A root requester has no approver, and the refusal says so rather than
+  going quiet — "nobody answered" and "nobody was asked" are different
+  problems with different fixes.
+- **One notice, not a broadcast**, and typed `decide` rather than `ask`: the
+  answer is a `connect` call, not a reply, so an `ask` would sit in the owed
+  ledger until the approver said something unrelated and close as though a
+  decision had been made. Same reading as delegated decisions (below).
+- **Granting has no verb of its own.** `connect` *is* the grant: the request
+  asks for an edge, the edge existing is the whole of what was asked for, and
+  a separate "approved" state could only ever disagree with the graph. The
+  requester is told, in the daemon's own voice.
+- **Declining is a real answer.** Without it the only answers are connect and
+  silence, and silence is what a refused agent retries against forever. A
+  decline is recorded with its reason and carried into the *refusal itself*,
+  so a retry after a no costs no message in either direction. It is subject
+  to the same authority as connecting.
+- **A retry is not a re-ask.** Same pair inside `wire.RENOTIFY_AFTER` bumps a
+  count and sends nothing; the count rides on the next notice, so pressure is
+  visible without being repeated.
+
+Requests are **persisted** (`wire_requests` in `mesh.json`, absent while the
+table is empty, like `member_edges`) because an unanswered ask is exactly
+what a restart must not drop — losing one puts the requester back to waiting
+on a channel that will never be decided. They are deliberately **not
+federated**: a refusal happens on the sender's daemon, the lineage that
+decides who may grant it is knowable only there, and the approver it names
+has a terminal there. Shipping the table to the authority would move the
+record away from every party who can act on it.
+
+Surface: `GET /api/mesh/{m}/wire-requests`, `POST
+/api/mesh/{m}/wire-requests/decline`, MCP `wire_requests` (list, or
+`decline` + `reason`), CLI `claunch mesh wire-requests` — spelled with the
+hyphen because bare `requests` is the *join* queue, and two different
+approvals under one word is how an operator grants the wrong one.
 
 ## Lineage by default (phase 10 — implemented)
 

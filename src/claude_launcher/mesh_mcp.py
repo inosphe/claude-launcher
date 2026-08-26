@@ -389,7 +389,10 @@ TOOLS = [
         "description": (
             "Let two members of a mesh message each other. At least one of "
             "them must be a session you spawned (or a descendant of one) — "
-            "you wire up your own team, not somebody else's."
+            "you wire up your own team, not somebody else's. This is also "
+            "how a wire request is GRANTED: if either member was refused a "
+            "send to the other, connecting them answers that and tells the "
+            "requester ('wire_requests' lists what is waiting)."
         ),
         "inputSchema": {
             "type": "object",
@@ -416,6 +419,45 @@ TOOLS = [
                 "b": {"type": "string", "description": "the other member handle"},
             },
             "required": ["mesh", "a", "b"],
+        },
+    },
+    {
+        "name": "wire_requests",
+        "description": (
+            "Members that tried to message a peer they are not connected to "
+            "and are waiting on your decision. Each row says who asked, for "
+            "whom, and how many times. GRANT one with 'connect' — that is "
+            "the whole answer, and the requester is told. Say no with "
+            "'decline' here plus a 'reason': a decline is final and is "
+            "carried into the refusal the requester gets if it asks again, "
+            "so it costs no further messages. Leaving one open is the answer "
+            "that costs you every later round, because the pair then has "
+            "nowhere to settle their disagreement except through you."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "mesh": {"type": "string", "description": "mesh name"},
+                "state": {
+                    "type": "string",
+                    "description": "filter: open (default view), granted, declined",
+                },
+                "decline": {
+                    "type": "string",
+                    "description": (
+                        "answer this pair with no: two handles, "
+                        "comma-separated (e.g. 'w1,w2')"
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "why you declined — the requester is shown it, so "
+                        "say what to do instead of asking again"
+                    ),
+                },
+            },
+            "required": ["mesh"],
         },
     },
 ]
@@ -496,6 +538,26 @@ def call_tool(name: str, args: dict) -> dict:
         return _client().patch(
             f"/api/mesh/{mesh}/members/{a}/links/{b}",
             {"enabled": name == "connect", "actor": _session()},
+        )
+    if name == "wire_requests":
+        decline = str(args.get("decline") or "").strip()
+        if decline:
+            pair = [p.strip() for p in decline.split(",") if p.strip()]
+            if len(pair) != 2:
+                raise MeshMcpError(
+                    "'decline' takes exactly two handles, comma-separated"
+                )
+            return _client().post(
+                f"/api/mesh/{mesh}/wire-requests/decline",
+                {
+                    "a": pair[0], "b": pair[1],
+                    "reason": str(args.get("reason") or ""),
+                    "actor": _session(),
+                },
+            )
+        state = str(args.get("state") or "").strip()
+        return _client().get(
+            f"/api/mesh/{mesh}/wire-requests" + (f"?state={state}" if state else "")
         )
     if name == "send":
         sender = _session()
