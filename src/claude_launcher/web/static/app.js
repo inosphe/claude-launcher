@@ -5890,6 +5890,12 @@ function sessBeads(data) {
       `idle or after ${Math.round(b.winddown.grace || 0)}s. Kill again to stop now.`);
     box.appendChild(w);
   }
+  // Reports come before the board's error return on purpose, mirroring the
+  // daemon filling them before its own early returns: a machine without `br`
+  // still has the pages its sessions wrote, and the one thing this panel can
+  // still show must not be hidden behind the board being unreachable.
+  const reports = b.reports || [];
+  if (reports.length) box.appendChild(sessReports(reports));
   if (b.error) {
     box.appendChild(el("p", "wf-note", b.error));
     return box;
@@ -5908,6 +5914,28 @@ function sessBeads(data) {
     go("#/beads");
   });
   box.appendChild(open);
+  return box;
+}
+
+/* The HTML pages a session left behind, newest first. The daemon indexes them
+   by reading its reports directory (the filenames carry the time and the
+   issue), and serves each one sandboxed, so these are ordinary links — the
+   dashboard's cookie authenticates them and a new tab is the right place for
+   a page that was written to be read on its own. */
+function sessReports(reports) {
+  const box = el("div", "sess-reports");
+  box.appendChild(el("h3", null, `Reports (${reports.length})`));
+  for (const r of reports) {
+    const row = el("div", "sess-report");
+    const a = el("a", "sess-report-link", r.issue || "round report");
+    a.href = r.url;
+    a.target = "_blank";
+    a.rel = "noopener";
+    row.appendChild(a);
+    row.appendChild(el("span", "beads-bits",
+      `${String(r.at || "").replace("T", " ").replace("Z", "")} · ${r.size} B`));
+    box.appendChild(row);
+  }
   return box;
 }
 
