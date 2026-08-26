@@ -594,6 +594,20 @@ class SessionManager:
         self.persist()
         return session
 
+    def set_keep_alive(self, name: str, on: bool) -> AnySession:
+        """Set (or clear) a session's keep-alive flag.
+
+        The flag is read by the run-event clock right beside its kill: a
+        finished one-shot run whose driving session carries it gets the
+        durable ending record but not the termination — a user asked for that
+        session's context to stay. The session itself sets it on a user's
+        "don't close me", and the operator clears it when that ends.
+        """
+        session = self.get(name)
+        session.sdef = replace(session.sdef, keep_alive=bool(on))
+        self.persist()
+        return session
+
     def clear(
         self, *, logs: bool = False, keep: Iterable[str] = ()
     ) -> List[str]:

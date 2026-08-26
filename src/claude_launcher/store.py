@@ -218,6 +218,16 @@ DAEMON_DEFAULTS = {
     # oversees hits a human gate, finishes a recurring round, or loses its
     # driver. Read LIVE like the reminder keys.
     "cflow_events": True,
+    # Kill-on-end: when the same clock sees a finished ONE-SHOT run (status
+    # done, no recur, no pending next start), the daemon records a final
+    # "session ended" block into the driving session's own transcript (durably
+    # append+flush — the WAL) and then, after an idle wait of at most
+    # cflow_kill_on_end_grace seconds, terminates the session and returns its
+    # slot. Recurring workflows are never touched; a session whose record
+    # carries keep_alive is recorded but left running; a record that could not
+    # be made durable means no kill. Read LIVE like the keys above.
+    "cflow_kill_on_end": True,
+    "cflow_kill_on_end_grace": 120.0,
     # The stall ping clock: whether a session that has STOPPED at a step that
     # is its own to move — no gate, no selection, no delegated answer holding
     # it — is pinged after this many seconds, and with what text. The reminder

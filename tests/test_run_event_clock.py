@@ -77,20 +77,42 @@ def proj(home, tmp_path, monkeypatch):
 
 
 class _FakeSession:
-    def __init__(self, name: str, cwd: str, parent: str = None) -> None:
+    def __init__(
+        self, name: str, cwd: str, parent: str = None, *, keep_alive: bool = False
+    ) -> None:
         self.exited = False
-        self.sdef = SessionDef(name=name, cwd=cwd, parent=parent)
+        self.sdef = SessionDef(
+            name=name, cwd=cwd, parent=parent, keep_alive=keep_alive
+        )
         self.delivered: list = []
         self.deliver_ok = True
+        # The kill-on-end half: ``append_wal`` records (and fails when
+        # ``wal_ok`` is false), ``kill`` marks the end the way the clock's
+        # caller would, and ``status_value`` lets a test park the driver
+        # mid-turn.
+        self.recorded: list = []
+        self.wal_ok = True
+        self.killed = False
+        self.status_value = "idle"
 
     def status(self, threshold=None):
-        return "idle"
+        return self.status_value
 
     async def deliver(self, text: str) -> bool:
         if not self.deliver_ok:
             return False
         self.delivered.append(text)
         return True
+
+    def append_wal(self, text: str) -> bool:
+        if not self.wal_ok:
+            return False
+        self.recorded.append(text)
+        return True
+
+    def kill(self, *, force: bool = False) -> None:
+        self.killed = True
+        self.exited = True
 
 
 class _FakeManager:
@@ -101,6 +123,9 @@ class _FakeManager:
         if name not in self._sessions:
             raise KeyError(name)
         return self._sessions[name]
+
+    def persist(self) -> None:
+        pass
 
 
 class _FakeMesh:
@@ -294,3 +319,132 @@ def test_run_summary_shows_the_recur_wait(proj):
     # passes the record through rather than prettifying it
     assert out["pending_start"]["by"] == "recur"
     assert out["pending_start"]["workflow"].endswith("rounds.yaml")
+
+
+# --------------------------------------------------------------------------- #
+# kill-on-end: a finished ONE-SHOT run gets its session reaped — record first
+# --------------------------------------------------------------------------- #
+def _finish_linear(cwd: str, scope: str = "w1") -> None:
+    """Advance the two-step LINEAR workflow all the way to ``done``."""
+    for summary in ("did one", "did two"):
+        cflow_engine.report(summary, cwd=cwd, scope=scope)
+        cflow_engine.next_step(cwd=cwd, scope=scope)
+
+
+def _run_id(cwd: str, scope: str = "w1") -> str:
+    return cflow_engine.status(cwd, scope=scope)["run"]
+
+
+def test_kill_on_end_records_then_ends(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    worker = _FakeSession("w1", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()                                # arm at the step
+    _finish_linear(cwd)
+    run_id = _run_id(cwd)
+    assert clock.scan() == []                   # not an overseer event
+    assert len(worker.recorded) == 1            # the WAL landed first
+    assert "session ended" in worker.recorded[0]
+    assert [s[1] for s in clock._end_pending] == ["w1"]
+    asyncio.run(clock._finish_end(cwd, "w1", run_id))
+    assert worker.killed is True
+    assert worker.exited is True
+    assert clock.scan() == []                   # marked — never replayed
+
+
+def test_kill_on_end_record_failure_leaves_session_alive(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    worker = _FakeSession("w1", cwd)
+    worker.wal_ok = False
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    _finish_linear(cwd)
+    assert clock.scan() == []
+    assert clock._end_pending == []             # no kill queued
+    assert worker.recorded == []
+    assert worker.killed is False
+    assert worker.exited is False               # the session survives
+    assert clock.scan() == []                   # and it is not retried
+
+
+def test_kill_on_end_skips_a_recurring_round(proj):
+    cwd = str(proj)
+    cflow_engine.start("rounds", cwd=cwd, scope="w1")
+    worker = _FakeSession("w1", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    cflow_engine.report("round done", cwd=cwd, scope="w1")
+    cflow_engine.next_step(cwd=cwd, scope="w1")
+    events = clock.scan()
+    assert [e["kind"] for e in events] == ["round-done"]  # recur is an EVENT
+    assert worker.recorded == []                 # ...never a kill-on-end
+    assert clock._end_pending == []
+    assert worker.killed is False
+
+
+def test_kill_on_end_skips_a_session_that_already_exited(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    gone = _FakeSession("w1", cwd)
+    gone.exited = True
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": gone}))
+    # The run finished while the clock was away (a restart): first sight at
+    # done, session already gone — there is nothing to record into or to reap.
+    _finish_linear(cwd)
+    assert clock.scan() == []
+    assert gone.recorded == []
+    assert gone.killed is False
+
+
+def test_kill_on_end_keep_alive_records_but_ends_nothing(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    worker = _FakeSession("w1", cwd, keep_alive=True)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    _finish_linear(cwd)
+    assert clock.scan() == []
+    assert len(worker.recorded) == 1            # the record is still written
+    assert "keep-alive" in worker.recorded[0]
+    assert [s[1] for s in clock._end_pending] == ["w1"]
+    asyncio.run(clock._finish_end(cwd, "w1", _run_id(cwd)))
+    assert worker.killed is False               # ...but nothing is ended
+    assert worker.exited is False
+
+
+def test_kill_on_end_waits_out_a_busy_turn_then_kills(proj):
+    cwd = str(proj)
+    store.set_daemon_field("cflow_kill_on_end_grace", 0.3)
+    try:
+        cflow_engine.start("linear", cwd=cwd, scope="w1")
+        worker = _FakeSession("w1", cwd)
+        worker.status_value = "busy"            # the finishing turn is running
+        clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+        clock.scan()
+        _finish_linear(cwd)
+        assert clock.scan() == []
+        assert len(worker.recorded) == 1
+        assert worker.killed is False           # not cut mid-turn
+        asyncio.run(clock._finish_end(cwd, "w1", _run_id(cwd)))
+        assert worker.killed is True            # the cap, then ended
+    finally:
+        store.set_daemon_field("cflow_kill_on_end_grace", None)
+
+
+def test_kill_on_end_disabled_tracks_silently(proj):
+    cwd = str(proj)
+    store.set_daemon_field("cflow_kill_on_end", False)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    worker = _FakeSession("w1", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    _finish_linear(cwd)
+    assert clock.scan() == []                   # off: silence
+    assert worker.recorded == []
+    assert clock._end_pending == []
+    store.set_daemon_field("cflow_kill_on_end", True)
+    assert clock.scan() == []                   # ...and no replay
+    assert worker.recorded == []
+    assert worker.killed is False

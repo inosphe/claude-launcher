@@ -345,7 +345,21 @@ def test_the_worker_wrapup_no_longer_says_landing_does_not_matter():
             f"{label}: wrapup should point at the landed step it now sits "
             "behind, so the reader knows the confirmation already happened"
         )
-        assert "claunch kill-session $CLAUNCH_SESSION" in wrapup
+        # The corollary of the mechanical end: the agent's wrapup no longer
+        # runs the kill — that is the "가장 흔한 미완료" the daemon-side
+        # kill-on-end exists to close, and an instruction that survives here
+        # would make the agent race the daemon. The one lever that stays in
+        # prose is the keep-alive exception.
+        assert "claunch kill-session $CLAUNCH_SESSION" not in wrapup, (
+            f"{label}: wrapup still tells the agent to kill its own session — "
+            "the daemon ends a finished one-shot run mechanically (record, "
+            "then terminate), and this instruction was the most common "
+            "incompletion it replaces"
+        )
+        assert "keep-alive" in wrapup, (
+            f"{label}: wrapup should name the keep-alive lever for the one "
+            "exception — a user explicitly says not to close the session"
+        )
 
 
 def test_the_leader_requests_a_rebase_when_a_branch_has_drifted():
@@ -973,7 +987,12 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
     assert waiting.options["landed"].next == "wrapup"
     assert waiting.options["restack"].next == "handoff"
 
-    assert "claunch kill-session $CLAUNCH_SESSION" in wf.steps["wrapup"].instructions
+    # The mechanical end: the daemon records and terminates a finished
+    # one-shot run's session, so the wrap-up no longer carries the kill
+    # instruction (the most common incompletion it replaces); only the
+    # keep-alive exception stays in prose.
+    assert "claunch kill-session $CLAUNCH_SESSION" not in wf.steps["wrapup"].instructions
+    assert "keep-alive" in wf.steps["wrapup"].instructions
     assert wf.steps["wrapup"].next is None
 
 

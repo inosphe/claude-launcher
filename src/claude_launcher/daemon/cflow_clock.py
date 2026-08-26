@@ -995,6 +995,13 @@ EVENT_POLL = 20.0
 #: blocked/parked positions the events below report entering.
 _RUNNING = ("step", "select")
 
+#: Kill-on-end's timing (the same wind-down shape the beads hook uses — no
+#: immediate kill). The done run's own final turn may still be running (the
+#: agent advanced to end and is crossing the finish line), so the clock waits
+#: out a busy driver before terminating, capped at ``cflow_kill_on_end_grace``
+#: (below the beads default, this is the only clock reading it, read live).
+_END_MAX = 120.0
+
 
 class RunEventClock:
     """Tells a run's overseer when the run stops being its own agent's.
@@ -1037,6 +1044,29 @@ class RunEventClock:
     fresh every pass like the reminder's. While it is off, positions are
     still tracked — silently — so turning it back on does not replay every
     transition that happened in the dark.
+
+    One more duty, gated by its own switch (``cflow_kill_on_end``, default
+    on): a finished ``done`` run of a **one-shot** workflow gets its session
+    reaped. Nobody tells the clock the work is over — the wrap-up prose used
+    to ask the agent itself to run ``kill-session``, and the most common
+    incompletion in this fleet was the agent finishing the report and then
+    stopping short of the kill. So the clock does it: on sight of the done
+    position it writes a final "session ended" block into the session's own
+    transcript (durably append+flush — a record that must survive the kill),
+    then waits out the driver's current turn and terminates the session.
+    Recurring workflows are exempt by construction (they file the next round
+    instead of ending), a run that reached done with a pending next start is
+    exempt (its driver is expected to perform it), and a session whose record
+    carries ``keep_alive`` — the user said keep it — is recorded but not
+    killed. A record that could not be written is reported loudly and the
+    session is left alive: killing behind a record that did not land is the
+    exact thing this mechanical end exists to prevent.
+
+    Scan-budget note (five clocks already share one sequential pass over
+    ``known_runs()``): this detection adds no pass of its own and no per-run
+    cost beyond the orphaned branch's own two lookups — one dict get for the
+    run state, one ``manager.get(scope)``. The idle-wait runs once per
+    finished run as one bounded task, at most ``cflow_kill_on_end_grace``.
     """
 
     def __init__(self, manager, mesh=None, *, poll: float = EVENT_POLL) -> None:
@@ -1049,6 +1079,20 @@ class RunEventClock:
         self._seen: Dict[Tuple[str, str], tuple] = {}
         #: (cwd, scope, run) whose orphaning was already reported.
         self._orphaned: Set[Tuple[str, str, str]] = set()
+        #: (cwd, scope, run) whose ending was already recorded. Like the
+        #: orphaned set: state fires on sight, once per run — a daemon restart
+        #: that first-sees a done run still mops it up, and one that was in
+        #: the middle of an ending does not re-record it. The switch off is
+        #: still tracked (the ledger below gets the mark) so toggling it back
+        #: on replays nothing.
+        self._end_done: Set[Tuple[str, str, str]] = set()
+        #: One-shot done runs whose session is queued for the end-sequence.
+        #: scan() fills this; the loop drains it into :meth:`_finish_end`
+        #: tasks. Same in-memory trade as the reminder's timers.
+        self._end_pending: List[Tuple[str, str, str]] = []
+        #: In-flight end-sequences — cancelled at shutdown, resumed by the
+        #: state-on-sight rule on the next boot.
+        self._end_tasks: Set[asyncio.Task] = set()
         #: Events found but not yet delivered — retried every poll.
         self._debt: List[dict] = []
 
@@ -1062,6 +1106,15 @@ class RunEventClock:
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
+        # In-flight end-sequences are dropped, not finished: the sessions
+        # come back on restart with the same names and the done runs the
+        # same positions, so the state-on-sight rule re-runs the sequence —
+        # record, wait, kill — and a kill that never landed is completed.
+        for t in list(self._end_tasks):
+            t.cancel()
+        if self._end_tasks:
+            await asyncio.gather(*self._end_tasks, return_exceptions=True)
+        self._end_tasks.clear()
 
     async def _run(self) -> None:
         while True:
@@ -1073,6 +1126,7 @@ class RunEventClock:
                     if not await self._deliver(event):
                         remaining.append(event)
                 self._debt = remaining
+                self._drain_ends()
             except asyncio.CancelledError:
                 raise
             except Exception:
@@ -1089,6 +1143,7 @@ class RunEventClock:
             log.warning("cflow run events: config unreadable, skipping: %s", exc)
             return []
         enabled = bool(cfg.get("cflow_events"))
+        kill_on_end = bool(cfg.get("cflow_kill_on_end", True))
         events: List[dict] = []
         live = set()
         for cwd, scope in cflow_state.known_runs():
@@ -1107,6 +1162,49 @@ class RunEventClock:
             )
             prev, self._seen[key] = self._seen.get(key), pos
             run_id = payload.get("run")
+            # --- kill-on-end -------------------------------------------- #
+            # A finished ONE-SHOT run returns its session's slot: done is
+            # not a position an operator should have to notice. State, not a
+            # transition — it fires on sight, once per run (a daemon restart
+            # that first-sees the run at done still mops it up) — and is
+            # tracked silently while the switch is off, so toggling it back
+            # on replays nothing. The durable record goes FIRST, right here:
+            # the kill stands behind it, and a record that did not land must
+            # not end a session. Only the idle-wait and the kill are handed
+            # to the loop as a task. Recurring workflows and runs done with a
+            # pending next start both keep their driver.
+            if (
+                run_id and status == "done"
+                and not payload.get("recur")
+                and not pending_by
+                and (cwd, scope, run_id) not in self._end_done
+            ):
+                self._end_done.add((cwd, scope, run_id))
+                if kill_on_end:
+                    session = session_for(self.manager, cwd, scope)
+                    if session is not None:
+                        block = end_block(
+                            scope, run_id,
+                            str(payload.get("workflow") or "?"),
+                            keep_alive=bool(session.sdef.keep_alive),
+                        )
+                        if not session.append_wal(block):
+                            # The one failure the contract forbids killing
+                            # through — recorded, so this is not retried into
+                            # an endless loop; the session stays alive and the
+                            # operator can see why in the log.
+                            log.error(
+                                "cflow kill-on-end: could not durably record "
+                                "the ending of %r (run %s); leaving the "
+                                "session alive", scope, run_id,
+                            )
+                        else:
+                            log.info(
+                                "cflow kill-on-end: recorded the ending of %r "
+                                "(run %s)", scope, run_id,
+                            )
+                            self._end_pending.append((cwd, scope, run_id))
+                continue
             if (
                 enabled and run_id and status not in ("done", "aborted")
                 and (cwd, scope, run_id) not in self._orphaned
@@ -1169,6 +1267,68 @@ class RunEventClock:
         except Exception:
             return False
         return bool(session.exited)
+
+    def _drain_ends(self) -> None:
+        """Hand the queued end-sequences to the loop as tasks.
+
+        Called from :meth:`_run` only — it needs a running loop. Each
+        sequence is detached (a kill can wait out a turn, seconds); failures
+        are caught inside :meth:`_finish_end`.
+        """
+        while self._end_pending:
+            cwd, scope, run_id = self._end_pending.pop(0)
+            task = asyncio.get_running_loop().create_task(
+                self._finish_end(cwd, scope, run_id)
+            )
+            self._end_tasks.add(task)
+            task.add_done_callback(self._end_tasks.discard)
+
+    async def _finish_end(self, cwd: str, scope: str, run_id: str) -> None:
+        """End a finished one-shot run's session: wait out its current turn
+        (bounded), then kill unless it was kept alive.
+
+        The durable record is already in the session's transcript — the scan
+        that queued this wrote it first, and would not have queued a kill it
+        could not record. What remains is timing and the flag: no immediate
+        kill (the driver may still be finishing the turn that produced the
+        done position), and the keep-alive flag re-read right beside the kill,
+        so one set while the wait ran still protects the session. An exited
+        session is left alone at every step — the kill verbs are idempotent,
+        but nothing here needs to call one twice.
+        """
+        session = session_for(self.manager, cwd, scope)
+        if session is None:
+            return  # exited (or unmapped) while waiting — nothing to end
+        cfg = store.daemon_config()
+        grace = float(cfg.get("cflow_kill_on_end_grace", _END_MAX) or 0)
+        if grace > 0:
+            # The done run's own final turn may still be running — the agent
+            # advanced to end and is crossing the finish line, and killing
+            # mid-turn would cut whatever it is flushing. Wait for idle,
+            # capped by grace. An already-idle driver has no turn to wait out
+            # (nothing was delivered into its PTY; there is nothing to pick
+            # up), so there the wait is zero.
+            started = time.monotonic()
+            while (
+                not session.exited
+                and session.status() == STATUS_BUSY
+                and time.monotonic() - started < grace
+            ):
+                await asyncio.sleep(0.5)
+        if session.exited:
+            return
+        if session.sdef.keep_alive:
+            log.info(
+                "cflow kill-on-end: %r recorded but left running (keep-alive)",
+                scope,
+            )
+            return
+        try:
+            session.kill(force=False)
+            self.manager.persist()
+            log.info("cflow kill-on-end: ended %r (run %s)", scope, run_id)
+        except Exception as exc:
+            log.warning("cflow kill-on-end: ending %r failed: %s", scope, exc)
 
     async def _deliver(self, event: dict) -> bool:
         """Type the event into its overseer. True = settled (delivered, or
@@ -1260,6 +1420,39 @@ class RunEventClock:
             return ""
         finally:
             cflow_state.pop_scope(token)
+
+
+def end_block(scope: str, run_id: str, workflow: str, *, keep_alive: bool) -> str:
+    """The final record a finished one-shot run's session carries.
+
+    Appended to the session's own transcript (:meth:`Session.append_wal`)
+    before the daemon ends it — durably, so the ending reads like part of the
+    session itself for every future reader, whichever viewer or restart
+    happens to look. That is the point of the block: the web view's injected
+    ``[session exited (code N)]`` line only shows while someone is attached;
+    this one is in the record.
+    """
+    lines = [
+        "---",
+        "# claunch: session ended -- machine-generated, not typed by the user",
+        f"session: {scope}",
+        f"run: {run_id}",
+        f"workflow: {workflow} (one-shot — no next round)",
+    ]
+    if keep_alive:
+        lines += [
+            "outcome: keep-alive is set — the round's record is closed above "
+            "and the session was left running",
+            "resume: `claunch keep-alive " + scope + " off` to permit ending",
+        ]
+    else:
+        lines += [
+            "outcome: the run finished, this record was written first, and "
+            "the session is ended to return its slot",
+            "resume: `claunch respawn " + scope + "`",
+        ]
+    lines.append("---")
+    return "\n".join(lines)
 
 
 def event_block(scope: str, kind: str, payload: dict) -> str:

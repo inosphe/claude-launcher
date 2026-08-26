@@ -404,6 +404,32 @@ class Session:
         except OSError:
             pass
 
+    def append_wal(self, text: str) -> bool:
+        """Durably append one block to this session's own transcript.
+
+        The record-before-end act for a session the daemon is about to end:
+        the ending must survive the termination, so the block is written
+        through an append handle of its own and flushed, and a write that
+        could not be made durable is reported as failure — the caller is
+        forbidden to end the session behind a record that did not land.
+
+        Opened fresh rather than through the pump's ``self._log`` because the
+        callers (the run-event clock's scan) run on a different thread than
+        the session's reader task; two threads sharing one buffered file
+        object is the interleaving this avoids. ``self._log_path`` is the
+        live transcript either way — rotation re-targets it, never renames
+        the archive over it.
+        """
+        if self.exited:
+            return False
+        try:
+            with self._log_path.open("ab") as log:
+                log.write(text.encode("utf-8"))
+                log.flush()
+            return True
+        except OSError:
+            return False
+
     def _on_eof(self) -> None:
         if self.exited:
             return
