@@ -42,7 +42,10 @@ const code = [
   // — a rail check that first walked the held path died on the missing
   // function — so it is named here rather than left to luck.
   slice("/* A paced option's opening moment", "/* One line under each rail row"),
-  slice("function escXml(", RULE),                  // fmtPace + wfDiagramSvg
+  // wfStepOrder + fmtPace + wfDiagramSvg. The row order is its own function
+  // now, shared with the timing diagram under the graph (s157), and it sits
+  // inside this slice precisely so the harnesses did not have to learn that.
+  slice("function escXml(", RULE),
   slice("function answerFellToUs(", "function shortenPath("),
   slice("function flowNeedsHuman(", "/* ---- drawing ---"), // + flowState(Word)
 ].join("\n");
