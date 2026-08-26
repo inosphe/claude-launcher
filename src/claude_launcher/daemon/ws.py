@@ -86,10 +86,13 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import logging
 
 from aiohttp import WSMsgType, web
 
 from .session import Session, SessionGone
+
+log = logging.getLogger("claunch.daemon.ws")
 
 
 @dataclasses.dataclass
@@ -117,6 +120,21 @@ def _wants_scrollback(request: web.Request) -> bool:
     having to know to turn it off.
     """
     return request.query.get("scrollback") in ("1", "true")
+
+
+def _viewer_left(ws: web.WebSocketResponse, where: str) -> None:
+    """A frame could not be written because the viewer had already gone.
+
+    Closing a tab, a laptop lid, or ``claunch attach`` under ^C drops the
+    socket mid-frame, and aiohttp reports that as a
+    ``ClientConnectionResetError`` ("Cannot write to closing transport") out
+    of whichever send was in flight. There is nothing to recover: the reader
+    is gone and the socket is finished either way. Left to propagate it
+    reaches the server's own handler and writes a twenty-line traceback for
+    an event that is ordinary — enough of them to make the daemon log
+    unreadable — so it is caught, noted at debug, and the handler returns.
+    """
+    log.debug("viewer disconnected mid-frame (%s)", where)
 
 
 async def _synced(session) -> None:
@@ -260,6 +278,8 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                 await sender
             except (asyncio.CancelledError, Exception):
                 pass
+    except ConnectionResetError:
+        _viewer_left(ws, "terminal")
     finally:
         request.app["websockets"].discard(ws)
         session.unsubscribe(queue)
@@ -329,6 +349,8 @@ async def cli_ws(request: web.Request) -> web.WebSocketResponse:
                 await sender
             except (asyncio.CancelledError, Exception):
                 pass
+    except ConnectionResetError:
+        _viewer_left(ws, "cli")
     finally:
         request.app["websockets"].discard(ws)
         shell.unsubscribe(queue)

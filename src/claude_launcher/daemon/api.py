@@ -17,7 +17,7 @@ import time
 from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Set, Tuple
 
 from aiohttp import web
 
@@ -727,12 +727,67 @@ def _session_cwd(session) -> str:
 _BRANCH_TTL = 30.0
 _branch_cache: Dict[str, Tuple[str, float]] = {}
 
+#: Directories whose reading is in flight. One at a time per directory: a
+#: stale entry is served on every poll until the reader lands, and without
+#: this each of those polls would start a reader of its own.
+_branch_reading: Set[str] = set()
+
+
+def _read_branch_later(cwd: str) -> None:
+    """Start (or leave running) an off-loop reading of ``cwd``'s branch.
+
+    Off the loop because this is a git process, and a git process is a thing
+    that can hang: a lock another program holds, a checkout on a filesystem
+    that stopped answering. Read inline — as this was — such a git does not
+    delay one response, it stops the daemon: the event loop sits inside
+    ``subprocess.run`` and every session, every socket and every timer waits
+    on it, including the shutdown that would end the wedge. That is not
+    hypothetical; it is where a daemon was found, frozen, mid-``rev-parse``.
+
+    So the loop never waits for git. The reading happens in a worker thread
+    and lands in the cache for whoever asks next; callers get the last known
+    answer meanwhile.
+    """
+    if cwd in _branch_reading:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop — a CLI or a test calling straight in. Nothing to block,
+        # so read it here and answer with it.
+        try:
+            branch = worktree_mod.current_branch(Path(cwd))
+        except Exception:  # noqa: BLE001 — a branch is never worth raising for
+            branch = ""
+        _branch_cache[cwd] = (branch, time.monotonic())
+        return
+
+    def _read() -> str:
+        try:
+            return worktree_mod.current_branch(Path(cwd))
+        except Exception:  # noqa: BLE001 — same: no branch, not an error
+            return ""
+
+    def _landed(fut) -> None:
+        _branch_reading.discard(cwd)
+        try:
+            branch = fut.result()
+        except Exception:  # noqa: BLE001
+            branch = ""
+        _branch_cache[cwd] = (branch, time.monotonic())
+
+    _branch_reading.add(cwd)
+    loop.run_in_executor(None, _read).add_done_callback(_landed)
+
 
 def _branch_of(cwd: str) -> str:
     """The git branch checked out at ``cwd``, or ``''``.
 
     Empty for a directory that is not a git checkout, for a detached HEAD,
     and for no directory — the three cases the UI must not dress as a branch.
+    Also empty for a directory nobody has read yet: the reading is started
+    here and answered on a later poll, which costs the rail one refresh to
+    show a branch and costs the daemon nothing to wait for it.
     """
     if not cwd or not os.path.isdir(cwd):
         return ""
@@ -740,9 +795,8 @@ def _branch_of(cwd: str) -> str:
     hit = _branch_cache.get(cwd)
     if hit is not None and now - hit[1] < _BRANCH_TTL:
         return hit[0]
-    branch = worktree_mod.current_branch(Path(cwd))
-    _branch_cache[cwd] = (branch, now)
-    return branch
+    _read_branch_later(cwd)
+    return hit[0] if hit is not None else ""
 
 
 def _scope_sessions(manager: SessionManager, cwd: str, scope: str) -> list:

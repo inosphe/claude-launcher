@@ -102,7 +102,29 @@ class Worktree:
 # --------------------------------------------------------------------------- #
 # git
 # --------------------------------------------------------------------------- #
-def _git(args: List[str], *, cwd: str) -> subprocess.CompletedProcess:
+#: Seconds a *read-only* git (branch, root, listing) may take before it is
+#: given up on. Generous for the answer — these are local, index-only reads
+#: that finish in milliseconds — and finite for the case that matters: a git
+#: that wedges (a lock held by something else, a checkout on a filesystem
+#: that stopped answering) must not become a caller that wedges with it.
+_READ_TIMEOUT = 10.0
+
+
+def _git(
+    args: List[str], *, cwd: str, timeout: Optional[float] = None
+) -> subprocess.CompletedProcess:
+    """Run git in ``cwd`` and hand back the finished process.
+
+    ``timeout`` bounds the wait for callers that are only *reading* — a
+    reading that never returns is worse than one that fails, because the
+    caller has nothing to fall back on and nowhere to give up. A git that
+    outstays it is killed and reported as a failure (returncode 1, the
+    message on stderr), which is the same shape every caller here already
+    handles for a git that simply said no. Left as ``None`` for the callers
+    that change something: cutting a worktree or rebasing one is allowed to
+    take as long as it takes, and killing it half-done would leave the
+    checkout in a state nobody asked for.
+    """
     try:
         return subprocess.run(
             ["git", *args],
@@ -111,6 +133,15 @@ def _git(args: List[str], *, cwd: str) -> subprocess.CompletedProcess:
             text=True,
             encoding="utf-8",
             errors="replace",
+            timeout=timeout,
+            stdin=subprocess.DEVNULL,
+        )
+    except subprocess.TimeoutExpired:
+        return subprocess.CompletedProcess(
+            ["git", *args],
+            1,
+            "",
+            f"git {' '.join(args)} did not finish within {timeout}s",
         )
     except FileNotFoundError as exc:
         raise WorktreeError(
@@ -190,7 +221,11 @@ def pane_label(identity: str, cwd: str, role: str = "") -> str:
 
 def current_branch(cwd: Path) -> str:
     """Branch checked out in ``cwd``; empty on a detached HEAD or on error."""
-    done = _git(["rev-parse", "--abbrev-ref", "HEAD"], cwd=str(cwd))
+    done = _git(
+        ["rev-parse", "--abbrev-ref", "HEAD"],
+        cwd=str(cwd),
+        timeout=_READ_TIMEOUT,
+    )
     if done.returncode != 0:
         return ""
     branch = (done.stdout or "").strip()

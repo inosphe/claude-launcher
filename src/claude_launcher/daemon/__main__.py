@@ -47,7 +47,35 @@ def _setup_logging(foreground: bool) -> None:
     )
 
 
+def _quiet_reset_errors(loop: asyncio.AbstractEventLoop) -> None:
+    """Stop a peer's abrupt disconnect from logging as a daemon error.
+
+    On Windows the proactor closes a socket by calling ``shutdown()`` on it
+    from a callback; when the far end already sent a reset (WinError 10054 —
+    a closed browser tab, a killed ``claunch attach``) that call raises inside
+    asyncio itself, with no coroutine to receive it, and the default handler
+    reports it at ERROR. Nothing is wrong and nothing can be done about it
+    from here — the connection is over either way — so a connection reset with
+    no task behind it is demoted to debug and everything else keeps the
+    default handling.
+    """
+    default = loop.get_exception_handler()
+
+    def handler(loop_: asyncio.AbstractEventLoop, context: dict) -> None:
+        exc = context.get("exception")
+        if isinstance(exc, ConnectionResetError) and context.get("future") is None:
+            log.debug("connection reset by peer: %s", context.get("message"))
+            return
+        if default is None:
+            loop_.default_exception_handler(context)
+        else:
+            default(loop_, context)
+
+    loop.set_exception_handler(handler)
+
+
 async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) -> int:
+    _quiet_reset_errors(asyncio.get_running_loop())
     manager = SessionManager(
         idle_threshold=float(cfg["idle_threshold"]),
         scrollback=int(cfg["scrollback_lines"]),
