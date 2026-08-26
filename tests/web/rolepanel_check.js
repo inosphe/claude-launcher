@@ -416,7 +416,10 @@ async function main() {
     // wfStepOrder is the graph's row order, lifted out to be shared with the
     // timing diagram under it (s157) — named here because this harness
     // slices by function name rather than by span.
-    slice("escXml") + slice("wfStepOrder") + slice("wfDiagramSvg")
+    // wfdTextW/wfdFit cut a step title to its box; wfDiagramSvg calls them on
+    // every node, so a slice without them crashes rather than draws.
+    slice("escXml") + slice("wfStepOrder") + slice("wfdTextW") + slice("wfdFit")
+    + slice("wfDiagramSvg")
     + "Object.assign(exports, { wfDiagramSvg });")(diaCtx);
   const svg = diaCtx.wfDiagramSvg(
     { start: "a", steps: [{ id: "a", title: "A" }] }, { visits: {} }, null
