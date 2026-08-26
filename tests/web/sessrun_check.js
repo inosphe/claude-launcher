@@ -142,7 +142,8 @@ new Function(
   sliceConst("const FLOW = {") + "\n" +
   sliceLine("const SESS_RUN_REPORTS") + sliceLine("const SESS_RUN_JOURNAL") +
   MARKDOWN +
-  [slice("flowOrder"), slice("flowTrack"), slice("flowNeedsHuman"),
+  [slice("wfStepOrder"), slice("flowOrder"), slice("flowTrack"),
+   slice("flowNeedsHuman"),
    slice("flowState"), slice("flowMetrics"), slice("flowPipShape"),
    slice("flowTrackSvg"), slice("svg"), slice("askWho"),
    slice("answerFellToUs"), slice("wfActions"),

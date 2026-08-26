@@ -8385,33 +8385,99 @@ function wfReports(data, ui) {
   return box;
 }
 
-/* SVG graph: BFS rows from start, forward edges on the right rail,
-   back edges (cycles) on the left rail, select options as edge labels. */
+/* SVG graph: layered rows from start (wfStepOrder), forward edges on the
+   right rail, back edges (the cycle arcs) on the left rail, select options
+   as edge labels. */
 function escXml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
 }
 
-/* The steps top to bottom: BFS from `start`, then anything unreachable. The
-   two pictures in this column share it deliberately — a lane that is not on
-   the same row as its box is a lane the reader has to hunt for. */
+/* The steps top to bottom, one row per layer: a step sits on the row below
+   its DEEPEST predecessor, so every edge runs downward and the picture
+   reads as a flow. A breadth-first walk cannot promise that — BFS rows a
+   step by its SHORTEST path from `start`, and a join reachable only by a
+   long chain lands above the branch that waits for it (improv-worker's
+   wrapup sat above its own landed, and the final chain ran backward up the
+   rail). The loops are the exception, and they are chosen, not accidental:
+   a DFS over the graph marks the edge that closes each cycle (its target is
+   still on the walk's stack); those edges alone may point up, and they
+   become the left-rail arcs. Steps `start` cannot reach are walked as
+   islands of their own and laid below the reachable ones, not interleaved.
+   The two pictures in this column share it deliberately — a lane that is
+   not on the same row as its box is a lane the reader has to hunt for. */
 function wfStepOrder(wf) {
   const steps = (wf && wf.steps) || [];
   const byId = {};
   for (const s of steps) byId[s.id] = s;
   const outs = (s) => (s.select ? s.select.options.map((o) => o.next) : [s.next]);
-  const order = [];
-  const seen = new Set();
-  const queue = [wf && wf.start];
-  while (queue.length) {
-    const id = queue.shift();
-    if (!id || seen.has(id) || !byId[id]) continue;
-    seen.add(id);
-    order.push(id);
-    for (const t of outs(byId[id])) if (t && !seen.has(t)) queue.push(t);
+
+  /* Walk every step (one DFS per island, siblings in option order) and mark
+     the cycle-closing edge of each loop: u->v with v still on the stack.
+     Remove those edges and the graph is a DAG, which is what makes the
+     longest-path pass below terminate. */
+  const pre = [], pos = new Map(), color = new Map(), back = new Set();
+  const comp = new Map();
+  let comps = 0;
+  const stack = [];
+  for (const root of [wf && wf.start, ...steps.map((s) => s.id)]) {
+    if (!root || !byId[root] || color.has(root)) continue;
+    const island = comps++;
+    stack.push([root, 0]);
+    while (stack.length) {
+      const top = stack[stack.length - 1];
+      const u = top[0];
+      if (!color.has(u)) {
+        color.set(u, 1);
+        comp.set(u, island);
+        pos.set(u, pre.length);
+        pre.push(u);
+      }
+      const ways = outs(byId[u]);
+      if (top[1] < ways.length) {
+        const t = ways[top[1]++];
+        if (!t || !byId[t]) continue;   // a dangling `next` costs an edge, not the picture
+        if (!color.has(t)) stack.push([t, 0]);
+        else if (color.get(t) === 1) back.add(`${u}>${t}`);
+      } else {
+        color.set(u, 2);
+        stack.pop();
+      }
+    }
   }
-  for (const s of steps) if (!seen.has(s.id)) order.push(s.id);
-  return order;
+
+  /* Longest path across the DAG: v is one row below the deepest step that
+     points at it. Each pass relaxes paths one edge longer, so the pass
+     count is bounded by the number of steps. */
+  const level = new Map(pre.map((id) => [id, 0]));
+  for (let pass = 0; pass <= pre.length; pass++) {
+    let moved = false;
+    for (const u of pre) {
+      for (const t of outs(byId[u])) {
+        if (!t || !byId[t] || back.has(`${u}>${t}`)) continue;
+        if (level.get(t) < level.get(u) + 1) {
+          level.set(t, level.get(u) + 1);
+          moved = true;
+        }
+      }
+    }
+    if (!moved) break;
+  }
+
+  /* Each island below the last: an orphaned step is a mistake worth seeing
+     at the tail, not worth hiding among the flow. */
+  const offsets = new Array(comps).fill(0);
+  let floor = -1;
+  for (let c = 0; c < comps; c++) {
+    offsets[c] = floor + 1;
+    for (let i = 0; i < pre.length; i++) {
+      if (comp.get(pre[i]) !== c) continue;
+      floor = Math.max(floor, offsets[c] + level.get(pre[i]));
+    }
+  }
+  const final = (id) => offsets[comp.get(id)] + level.get(id);
+  return pre.slice().sort((a, b) =>
+    (final(a) - final(b)) || (pos.get(a) - pos.get(b)));
 }
 
 /* A cadence in the largest unit that still reads whole: 300 -> "5m",
@@ -14211,29 +14277,15 @@ function flowMetrics(maxPips) {
   };
 }
 
-/* The steps of a workflow in the order the run page lays them out: breadth
-   first from `start`, then whatever the walk could not reach (an orphaned
-   step is a mistake worth seeing, not worth hiding). Deliberately the same
-   walk as wfDiagramSvg's — not shared with it, because that one builds a
-   string and this one builds data, but a test pins the two orders together.
-   If they ever drift, the strip stops being the run page's diagram. */
+/* The steps of a workflow in the order the run page lays them out. The
+   strip's dial is the diagram's, so this borrows wfStepOrder rather than
+   walking the graph a second way. It was once its own breadth-first walk —
+   deliberately the same as the diagram's, but not shared because one built
+   a string and the other data. The test that pinned the two orders
+   together still sits in flowtrack_check: if they ever drift, the strip
+   stops being the run page's diagram, loudly. */
 function flowOrder(wf) {
-  const steps = wf.steps || [];
-  const byId = {};
-  for (const s of steps) byId[s.id] = s;
-  const outs = (s) => (s.select ? s.select.options.map((o) => o.next) : [s.next]);
-  const order = [];
-  const seen = new Set();
-  const queue = [wf.start];
-  while (queue.length) {
-    const id = queue.shift();
-    if (!id || seen.has(id) || !byId[id]) continue;
-    seen.add(id);
-    order.push(id);
-    for (const t of outs(byId[id])) if (t && !seen.has(t)) queue.push(t);
-  }
-  for (const s of steps) if (!seen.has(s.id)) order.push(s.id);
-  return order;
+  return wfStepOrder(wf);
 }
 
 /* One agent's whole state machine, squeezed onto a line. Pure: everything
