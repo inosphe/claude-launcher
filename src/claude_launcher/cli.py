@@ -107,7 +107,7 @@ def _cmd_create(args: argparse.Namespace) -> int:
             print(f"applied template env: {', '.join(sorted(applied))}")
     entry = harnesses.get(selected)
     if entry and entry.auth == "api-key":
-        print(f"next: claunch set-key {p.name}")
+        print(f"next: claunch set-token {p.name}")
     else:
         print(f"next: claunch login {p.name}")
     return 0
@@ -182,22 +182,26 @@ def _cmd_list(_args: argparse.Namespace) -> int:
 
 
 def _cmd_path(args: argparse.Namespace) -> int:
-    p = profile.require(args.name)
-    print(p.config_dir)
+    p = profile.require_selector(args.name)
+    if not p.harness_override:
+        print(p.config_dir)
+        return 0
+    entry = runner.profile_harness(p)
+    print(entry.profile_home(p.config_dir))
     return 0
 
 
 def _cmd_login(args: argparse.Namespace) -> int:
-    p = profile.require(args.name)
+    p = profile.require_selector(args.name)
     entry = runner.profile_harness(p)
     if entry.auth == "api-key":
         raise runner.RunnerError(
-            f"harness {entry.name!r} uses a profile API key; run "
-            f"'claunch set-key {p.name}'"
+            f"harness {entry.name!r} uses the profile token as an API key; run "
+            f"'claunch set-token {p.name}'"
         )
     command = [entry.program(), *(entry.login_args or ["setup-token"])]
     print(
-        f"running {' '.join(command)!r} for profile {p.name!r} "
+        f"running {' '.join(command)!r} for profile {p.selector!r} "
         f"(harness: {entry.name})...",
         file=sys.stderr,
     )
@@ -303,7 +307,9 @@ def _cmd_migrate(args: argparse.Namespace) -> int:
 
 
 def _cmd_validate(args: argparse.Namespace) -> int:
-    targets = [profile.require(args.name)] if args.name else profile.list_all()
+    targets = (
+        [profile.require_selector(args.name)] if args.name else profile.list_all()
+    )
     if not targets:
         print("no profiles to validate")
         return 0
@@ -319,25 +325,26 @@ def _cmd_validate(args: argparse.Namespace) -> int:
             if claude_credential is None:
                 failed += 1
                 print(
-                    f"{p.name:<20} FAIL  no auth "
-                    f"(run 'claunch login {p.name}' or set its provider key)"
+                    f"{p.selector:<20} FAIL  no auth "
+                    f"(run 'claunch login {p.name}' or "
+                    f"'claunch set-token {p.name}')"
                 )
                 continue
         if entry.auth == "api-key" and lineage.login_state(p) == "none":
             failed += 1
             print(
-                f"{p.name:<20} FAIL  no API key "
-                f"(run 'claunch set-key {p.name}')"
+                f"{p.selector:<20} FAIL  no API key "
+                f"(run 'claunch set-token {p.name}')"
             )
             continue
         result = runner.heartbeat(p, prompt=args.prompt, timeout=args.timeout)
         if result.ok:
             snippet = " ".join(result.output.split())[:50]
-            print(f"{p.name:<20} OK    {snippet}")
+            print(f"{p.selector:<20} OK    {snippet}")
         else:
             failed += 1
             reason = " ".join(result.reason.split())[:60]
-            print(f"{p.name:<20} FAIL  {reason}")
+            print(f"{p.selector:<20} FAIL  {reason}")
     return 1 if failed else 0
 
 
@@ -355,35 +362,24 @@ def _cmd_prune(args: argparse.Namespace) -> int:
     return 0
 
 
+def _credential_profile(value: str, command: str) -> profile.Profile:
+    """Resolve the base profile used by the one shared credential file."""
+    name, harness_override = profile.split_selector(value)
+    if harness_override:
+        raise CredentialsError(
+            f"{command} targets the base profile because all harness variants "
+            f"share one token; use 'claunch {command} {name}'"
+        )
+    return profile.require(name)
+
+
 def _cmd_set_token(args: argparse.Namespace) -> int:
-    p = profile.require(args.name)
+    p = _credential_profile(args.name, "set-token")
     token = args.token
     if not token:
         token = sys.stdin.readline()
     credentials.save_token(p, token)
     print(f"stored token for profile {p.name!r}")
-    return 0
-
-
-def _cmd_set_key(args: argparse.Namespace) -> int:
-    """Store an API key without conflating it with Claude OAuth/provider auth."""
-    p = profile.require(args.name)
-    entry = runner.profile_harness(p)
-    if not entry.api_key_env:
-        raise CredentialsError(
-            f"profile {p.name!r} selects {entry.name!r}, which uses "
-            f"{entry.auth} authentication and declares no API-key route"
-        )
-    key = args.key or sys.stdin.readline()
-    credentials.save_api_key(p, key)
-    # Brief development builds stored this route on the profile. The harness
-    # declaration is authoritative now; prune the obsolete field when touched.
-    if "api_key_env" in store.profile_entry(p.name):
-        store.set_profile_field(p.name, "api_key_env", None)
-    print(
-        f"stored API key for profile {p.name!r}; "
-        f"{entry.name} injects it as {entry.api_key_env}"
-    )
     return 0
 
 
@@ -410,7 +406,7 @@ def _cmd_set_harness(args: argparse.Namespace) -> int:
 
 
 def _cmd_get_token(args: argparse.Namespace) -> int:
-    p = profile.require(args.name)
+    p = _credential_profile(args.name, "get-token")
     if args.own:
         token = credentials.own_token(p)
         if not token:
@@ -432,7 +428,7 @@ def _cmd_get_token(args: argparse.Namespace) -> int:
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
-    p = profile.require(args.name)
+    p = profile.require_selector(args.name)
     selected = lineage.effective_harness(p)
     # `args` is argparse.REMAINDER, so it also captures launcher flags like
     # --borrow / --add-prompt that appear after the profile name; pull those out
@@ -675,14 +671,14 @@ def _cmd_mcp(_args: argparse.Namespace) -> int:
 
 
 def _cmd_usage(args: argparse.Namespace) -> int:
-    p = profile.require(args.name)
+    p = profile.require_selector(args.name)
     report = usage.fetch(p)
     if args.json:
         import json
 
         print(json.dumps(report.raw, indent=2))
         return 0
-    _print_usage(p.name, report)
+    _print_usage(p.selector, report)
     return 0
 
 
@@ -891,7 +887,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_list = sub.add_parser("list", aliases=["ls"], help="list profiles")
     p_list.set_defaults(func=_cmd_list)
 
-    p_path = sub.add_parser("path", help="print a profile's storage root")
+    p_path = sub.add_parser(
+        "path", help="print a profile root, or a PROFILE:HARNESS namespaced home"
+    )
     p_path.add_argument("name")
     p_path.set_defaults(func=_cmd_path)
 
@@ -901,19 +899,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_set = sub.add_parser(
         "set-token",
-        help="store a setup-token manually (paste it or pipe via stdin)",
+        help="store the profile's one shared token (paste it or pipe via stdin)",
     )
     p_set.add_argument("name")
     p_set.add_argument("token", nargs="?", help="token value; read from stdin if omitted")
     p_set.set_defaults(func=_cmd_set_token)
-
-    p_key = sub.add_parser(
-        "set-key",
-        help="store the profile's API key; its harness declares the env route",
-    )
-    p_key.add_argument("name")
-    p_key.add_argument("key", nargs="?", help="key value; read from stdin if omitted")
-    p_key.set_defaults(func=_cmd_set_key)
 
     p_hselect = sub.add_parser(
         "set-harness", help="show, pin or clear a profile's harness"
@@ -940,7 +930,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_run = sub.add_parser(
         "run",
-        help="launch the harness selected by the profile (extra args pass through; "
+        help="launch PROFILE or PROFILE:HARNESS (extra args pass through; "
         "--borrow NAME uses another profile's token for this run only; "
         "--null clears CLAUDE_CODE_OAUTH_TOKEN and injects nothing; "
         "--provider NAME overrides the API provider for this run only; "

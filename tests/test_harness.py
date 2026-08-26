@@ -77,6 +77,28 @@ def test_unknown_harness_rejected(home):
         harness.normalize(SessionDef(name="x", profile="work"))
 
 
+def test_qualified_profile_pins_harness_across_restore(home, tmp_path):
+    _declare_harness("other", home_env="OTHER_HOME")
+    base = profile.create("work")
+    lineage.set_harness(base, "claude")
+
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work:other", cwd=str(tmp_path))
+    )
+    assert sdef.profile == "work:other"
+    assert sdef.harness == "other"
+
+    # The explicit selector, not a stale harness field or the mutable profile
+    # default, remains the source of truth when a saved definition returns.
+    lineage.set_harness(base, "pi")
+    restored = harness.normalize(sdef, restoring=True)
+    assert restored.profile == "work:other"
+    assert restored.harness == "other"
+    argv, env, _ = harness.build_command(restored, restoring=True)
+    assert argv[0] == sys.executable
+    assert env["OTHER_HOME"] == str(base.config_dir / "other")
+
+
 def test_claude_command_uses_profile_env(home, monkeypatch, tmp_path):
     p = profile.create("work")
     from claude_launcher import settings

@@ -668,7 +668,16 @@ async function main() {
       spawnable_harnesses: ["claude"], workspaces: null,
     } },
     "GET /api/roles": { doc: { roles: [{ name: "leader" }, { name: "worker" }] } },
-    "GET /api/profiles": { doc: { profiles: ["p1", "p2"] } },
+    "GET /api/profiles": { doc: {
+      profiles: ["p1", "p2"],
+      profile_selectors: ["p1:claude", "p1:pi", "p2:claude", "p2:pi"],
+      profile_details: [
+        { name: "p1:claude", harness: "claude", harness_available: true },
+        { name: "p1:pi", harness: "pi", harness_available: true },
+        { name: "p2:claude", harness: "claude", harness_available: true },
+        { name: "p2:pi", harness: "pi", harness_available: true },
+      ],
+    } },
     "GET /api/mesh": { doc: { meshes: [{ name: "m0" }] } },
     "GET /api/git?cwd=C%3A%2Frepo": { doc: { repo: true, worktrees: [] } },
     "GET /api/cflow/workflows?cwd=C%3A%2Frepo": { doc: {
@@ -705,6 +714,15 @@ async function main() {
   // the payload takes the rule away from daemon/onboard.py inherit_mesh.
   const meshSel = mSel.find((s) => (s.options || [])
     .some((o) => o.text === "(inherit the parent's mesh)"));
+  const profileSel = mSel.find((s) => (s.options || [])
+    .some((o) => o.value === "p1:pi"));
+  const borrowSel = mSel.find((s) => (s.options || [])
+    .some((o) => o.value === "p1") && !(s.options || [])
+      .some((o) => o.value === "p1:pi"));
+  check("profile choices are qualified execution selectors",
+    profileSel && (profileSel.options || []).some((o) => o.value === "p2:pi"));
+  check("borrow choices remain base profiles sharing the one token",
+    borrowSel && (borrowSel.options || []).some((o) => o.value === "p2"));
   check("the mesh picker opens on inherit", meshSel && meshSel.value === "",
     meshSel && meshSel.value);
   check("...with the parent's own mesh still on offer to name outright",

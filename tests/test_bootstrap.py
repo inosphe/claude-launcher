@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 
-from claude_launcher import bootstrap, config, store
+from claude_launcher import bootstrap, config, credentials, profile, store
 
 
 def _make_profile_dir(home, name):
@@ -90,6 +90,32 @@ def test_token_only_profile_is_registered(home):
     (d / ".launcher-token").write_text("sk-ant-oat01-X\n", encoding="utf-8")
     bootstrap.run()
     assert "tok" in store.profiles()
+
+
+def test_unambiguous_set_key_file_is_moved_to_the_single_token_path(home):
+    d = _make_profile_dir(home, "old-key")
+    (d / credentials.LEGACY_API_KEY_FILENAME).write_text(
+        "shared-secret\n", encoding="utf-8"
+    )
+    store.ensure_profile("old-key")
+
+    bootstrap.reconcile()
+
+    assert credentials.stored_token(profile.require("old-key")) == "shared-secret"
+    assert not (d / credentials.LEGACY_API_KEY_FILENAME).exists()
+
+
+def test_conflicting_legacy_key_is_left_for_manual_review(home):
+    d = _make_profile_dir(home, "two-secrets")
+    (d / credentials.TOKEN_FILENAME).write_text("canonical\n", encoding="utf-8")
+    legacy = d / credentials.LEGACY_API_KEY_FILENAME
+    legacy.write_text("different\n", encoding="utf-8")
+    store.ensure_profile("two-secrets")
+
+    bootstrap.reconcile()
+
+    assert credentials.stored_token(profile.require("two-secrets")) == "canonical"
+    assert legacy.read_text(encoding="utf-8").strip() == "different"
 
 
 def test_migration_runs_once_via_marker(home):

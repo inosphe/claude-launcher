@@ -1743,7 +1743,7 @@ async function refreshProfiles() {
       if (item && item.name) profileDetails[item.name] = item;
     }
     select.innerHTML = "";
-    for (const name of data.profiles || []) {
+    for (const name of data.profile_selectors || data.profiles || []) {
       const opt = document.createElement("option");
       opt.value = name;
       opt.textContent = name;
@@ -9390,7 +9390,9 @@ async function spawnModalLoad(st) {
   ui.git = gitDoc || { repo: false, worktrees: [] };
   ui._wfs = (wfDoc && wfDoc.workflows) || [];
   const roleNames = ((roles && roles.roles) || []).map((r) => r.name).filter(Boolean);
-  const profileNames = (ui.report.profiles) ||
+  const profileNames = (ui.report.profile_selectors) ||
+    (profDoc && (profDoc.profile_selectors || profDoc.profiles)) || [];
+  const borrowProfileNames = (ui.report.profiles) ||
     (profDoc && profDoc.profiles) || [];
   const meshNames = (meshDoc && meshDoc.meshes || []).map((m) => (m && m.name) || "");
   const seed = st.seed || {};
@@ -9405,7 +9407,7 @@ async function spawnModalLoad(st) {
   fillSpawnSelect(ui.profile, profileNames.map((n) => [n, n]), "(inherit the parent's profile)",
     (seed.profile !== undefined && seed.profile !== null) ? seed.profile :
       (re.profile || ""));
-  fillSpawnSelect(ui.borrow, profileNames.map((n) => [n, n]), "(runs its own token)",
+  fillSpawnSelect(ui.borrow, borrowProfileNames.map((n) => [n, n]), "(runs its own token)",
     (seed.borrow !== undefined && seed.borrow !== null) ? seed.borrow :
       (re.borrow || ""));
   fillSpawnSelect(ui.role, roleNames.map((r) => [r, r]), "(no role)",

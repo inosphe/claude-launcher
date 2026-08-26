@@ -76,7 +76,9 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     # Resolve from the shared config without requiring a local directory: a
     # CLI may be pointed at a named daemon instance whose reconciled storage
     # is authoritative. The daemon still performs the existence check.
-    selected = lineage.effective_harness(profile_mod.resolve(args.profile))
+    selected = lineage.effective_harness(
+        profile_mod.resolve_selector(args.profile)
+    )
     if selected != harnesses.CLAUDE_HARNESS:
         claude_only = []
         for flag, given in (

@@ -85,17 +85,18 @@ class Harness:
     home_env: str = ""
     #: ``claude`` uses the launcher's provider/token machinery, ``oauth``
     #: keeps credentials in the harness-owned home, and ``api-key`` receives
-    #: a launcher-managed key through this packaged declaration.
+    #: the profile's one launcher-managed token through this declaration.
     auth: str = "none"
-    #: Destination for ``claunch set-key``. This belongs to the harness, not
-    #: each profile: users choose the route once by choosing a harness.
-    api_key_env: str = ""
+    #: Destination for the profile's single ``claunch set-token`` value. This
+    #: belongs to the harness declaration, not to the profile/YAML env.
+    token_env: str = ""
     #: Variables always removed before launching this harness (principally
     #: ambient API keys that would bypass an OAuth login).
     clear_env: List[str] = field(default_factory=list)
-    #: Variables forced to the empty string when ``api_key_env`` is populated.
-    #: Claude gateways use this to suppress the competing X-Api-Key header.
-    api_key_clear_env: List[str] = field(default_factory=list)
+    #: Variables forced to the empty string on every launch. Claude uses this
+    #: to suppress its competing X-Api-Key route even when profile/YAML or the
+    #: parent shell happened to define it.
+    empty_env: List[str] = field(default_factory=list)
     login_args: List[str] = field(default_factory=list)
     #: Non-interactive argv placed before the health-check prompt. Empty
     #: means this custom harness cannot be checked safely by ``validate``.
@@ -147,9 +148,9 @@ class Harness:
             "builtin": self.builtin,
             "home_env": self.home_env,
             "auth": self.auth,
-            "api_key_env": self.api_key_env,
+            "token_env": self.token_env,
             "clear_env": list(self.clear_env),
-            "api_key_clear_env": list(self.api_key_clear_env),
+            "empty_env": list(self.empty_env),
             "login_args": list(self.login_args),
             "heartbeat_args": list(self.heartbeat_args),
             "usage": self.usage,
@@ -171,6 +172,7 @@ def _as_list(value, what: str) -> List[str]:
 
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_HARNESS_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _env_names(value, what: str) -> List[str]:
@@ -201,19 +203,22 @@ def _parse_entry(name: str, body) -> Harness:
         raise HarnessConfigError(
             f"harness {name!r} auth must be claude, oauth, api-key or none"
         )
-    api_key_env = str(body.get("api_key_env") or "").strip()
-    if api_key_env and not _ENV_NAME_RE.fullmatch(api_key_env):
+    # ``api_key_*`` was briefly exposed before the credential model was
+    # collapsed back to one profile token. Accept it as an input-only alias so
+    # an existing local harness declaration keeps launching after upgrade.
+    token_env = str(body.get("token_env") or body.get("api_key_env") or "").strip()
+    if token_env and not _ENV_NAME_RE.fullmatch(token_env):
         raise HarnessConfigError(
-            f"harness {name!r} api_key_env is not a valid env name: "
-            f"{api_key_env!r}"
+            f"harness {name!r} token_env is not a valid env name: "
+            f"{token_env!r}"
         )
-    if auth == "api-key" and not api_key_env:
+    if auth == "api-key" and not token_env:
         raise HarnessConfigError(
-            f"harness {name!r} uses api-key auth but has no api_key_env"
+            f"harness {name!r} uses api-key auth but has no token_env"
         )
-    if auth == "oauth" and api_key_env:
+    if auth == "oauth" and token_env:
         raise HarnessConfigError(
-            f"harness {name!r} uses oauth auth and cannot declare api_key_env"
+            f"harness {name!r} uses oauth auth and cannot declare token_env"
         )
     return Harness(
         name=name,
@@ -226,11 +231,14 @@ def _parse_entry(name: str, body) -> Harness:
         builtin=builtin,
         home_env=str(body.get("home_env") or "").strip(),
         auth=auth,
-        api_key_env=api_key_env,
+        token_env=token_env,
         clear_env=_env_names(body.get("clear_env"), f"harness {name!r} clear_env"),
-        api_key_clear_env=_env_names(
-            body.get("api_key_clear_env"),
-            f"harness {name!r} api_key_clear_env",
+        empty_env=_env_names(
+            body.get(
+                "empty_env",
+                body.get("token_clear_env", body.get("api_key_clear_env")),
+            ),
+            f"harness {name!r} empty_env",
         ),
         login_args=_as_list(body.get("login_args"), f"harness {name!r} login_args"),
         heartbeat_args=_as_list(
@@ -267,6 +275,10 @@ def parse(document) -> Dict[str, Optional[dict]]:
         name = str(raw_name).strip()
         if not name:
             continue
+        if not _HARNESS_NAME_RE.fullmatch(name):
+            raise HarnessConfigError(
+                f"invalid harness name {name!r}: use letters, digits, '.', '_' or '-'"
+            )
         if body is None:
             out[name] = None
             continue
@@ -292,6 +304,8 @@ def registry(doc: Optional[dict] = None) -> Dict[str, Harness]:
         for raw_name, body in section.items():
             name = str(raw_name).strip()
             if not name:
+                continue
+            if not _HARNESS_NAME_RE.fullmatch(name):
                 continue
             if body is None:
                 merged.pop(name, None)  # tombstone

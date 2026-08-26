@@ -323,6 +323,10 @@ class Sources:
     def profiles(self) -> List[str]:
         return []
 
+    def profile_selectors(self) -> List[str]:
+        """Execution choices; old sources fall back to their bare profiles."""
+        return self.profiles()
+
     def profile_details(self) -> List[dict]:
         return [
             {"name": name, "harness": "claude", "harness_available": True}
@@ -421,6 +425,11 @@ class DaemonSources(Sources):
 
     def profiles(self) -> List[str]:
         return self._get("profiles", "/api/profiles", "profiles", [])
+
+    def profile_selectors(self) -> List[str]:
+        return self._get(
+            "profile_selectors", "/api/profiles", "profile_selectors", []
+        ) or self.profiles()
 
     def profile_details(self) -> List[dict]:
         details = self._get(
@@ -1267,7 +1276,8 @@ class Wizard(Form):
             disabled_note="set with 'claunch set-harness PROFILE HARNESS'",
         )
 
-        profiles = self.sources.profiles() or []
+        profiles = self.sources.profile_selectors() or []
+        credential_profiles = self.sources.profiles() or []
         profile = ChoiceField(
             key="profile", label="Profile",
             hint="which login and config the harness runs under ('claunch list')",
@@ -1286,7 +1296,7 @@ class Wizard(Form):
             hint="run with ANOTHER profile's token and backend; this "
                  "profile's config, env and skills stay put",
             options=[Option("(this profile's own token)", "")]
-            + [Option(p, p) for p in profiles],
+            + [Option(p, p) for p in credential_profiles],
         )
         borrow.select(get("borrow") or "")
 
@@ -2119,7 +2129,13 @@ class SpawnWizard(Form):
         # The report carries the names when the field is unlocked (the same
         # courtesy as workspaces); an older daemon that unlocked the field
         # without naming the options falls back to asking for the list.
-        names = report.get("profiles") or self.sources.profiles() or []
+        names = (
+            report.get("profile_selectors")
+            or report.get("profiles")
+            or self.sources.profile_selectors()
+            or []
+        )
+        borrow_names = report.get("profiles") or self.sources.profiles() or []
 
         profile = self.field("profile")
         keep = profile.value
@@ -2147,7 +2163,7 @@ class SpawnWizard(Form):
         )
         borrow.options = [
             Option(f"(as the parent authenticates{inherited})", "")
-        ] + [Option(p, p) for p in names]
+        ] + [Option(p, p) for p in borrow_names]
         borrow.index = 0
         borrow.select(self._preset_borrow or keep)
         self._preset_borrow = ""

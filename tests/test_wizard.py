@@ -173,6 +173,30 @@ def test_the_form_defaults_to_a_real_profile():
     assert wiz.field("profile").options[0].value == ""  # empty placeholder
 
 
+def test_profile_selector_picker_is_qualified_but_borrow_stays_base_profile():
+    class SelectorSources(FakeSources):
+        def profile_selectors(self):
+            return ["work:claude", "work:pi", "ds4:claude", "ds4:pi"]
+
+        def profile_details(self):
+            return [
+                {"name": "work:claude", "harness": "claude", "harness_available": True},
+                {"name": "work:pi", "harness": "pi", "harness_available": True},
+                {"name": "ds4:claude", "harness": "claude", "harness_available": True},
+                {"name": "ds4:pi", "harness": "pi", "harness_available": True},
+            ]
+
+    wiz = form(sources=SelectorSources())
+    profile_values = [o.value for o in wiz.field("profile").options]
+    borrow_values = [o.value for o in wiz.field("borrow").options]
+
+    assert "work:pi" in profile_values
+    assert "work:pi" not in borrow_values
+    assert "work" in borrow_values
+    pick(wiz, "profile", "work:pi")
+    assert wiz.value("harness") == "pi"
+
+
 # --------------------------------------------------------------------------- #
 # fields that depend on other fields
 # --------------------------------------------------------------------------- #

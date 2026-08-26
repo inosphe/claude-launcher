@@ -305,11 +305,15 @@ def test_capabilities_lists_the_profiles_only_when_the_field_is_unlocked():
     assert "profile" not in report["may_choose"]
     assert "borrow" not in report["may_choose"]
     assert "profiles" not in report
+    assert "profile_selectors" not in report
 
     report = spawn.capabilities(_policy(allow_profile=True), depth=0, children=0)
     assert "profile" in report["may_choose"]
     assert "borrow" in report["may_choose"]  # the same unlock covers both
     assert report["profiles"] == ["other", "talk", "work"]
+    assert "other:claude" in report["profile_selectors"]
+    assert "other:pi" in report["profile_selectors"]
+    assert all(":" in item for item in report["profile_selectors"])
 
 
 def test_capabilities_always_offers_null_token():
@@ -489,6 +493,16 @@ def test_changing_profile_changes_harness_and_drops_inherited_args():
     child = spawn.check(
         policy, {"profile": "codex-profile"}, parent=PARENT, depth=0, children=0
     )
+    assert child["harness"] == "codex"
+    assert child["args"] == []
+
+
+def test_qualified_profile_changes_harness_without_a_second_profile():
+    policy = _policy(allow_profile=True)
+    child = spawn.check(
+        policy, {"profile": "work:codex"}, parent=PARENT, depth=0, children=0
+    )
+    assert child["profile"] == "work:codex"
     assert child["harness"] == "codex"
     assert child["args"] == []
 
@@ -864,6 +878,32 @@ def test_outside_a_session_new_session_is_untouched(monkeypatch, tmp_path):
 
     assert cli.main(["new-session", "--profile", "nc", "-c", str(tmp_path)]) == 0
     assert reached["body"]["profile"] == "nc"
+
+
+def test_new_session_sends_the_qualified_profile_as_the_harness_source(
+    monkeypatch, tmp_path
+):
+    from claude_launcher import cli, daemon_client
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    reached = {}
+
+    class _Client:
+        base_url = "http://x"
+
+        def get(self, path):
+            return {}
+
+        def post(self, path, body=None):
+            reached["body"] = body
+            return {"name": "s0", "harness": "pi", "profile": "nc:pi"}
+
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: _Client())
+
+    assert cli.main(
+        ["new-session", "--profile", "nc:pi", "-c", str(tmp_path)]
+    ) == 0
+    assert reached["body"]["profile"] == "nc:pi"
 
 
 # --------------------------------------------------------------------------- #

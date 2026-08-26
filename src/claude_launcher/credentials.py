@@ -1,13 +1,14 @@
-"""Separate Claude token and generic API-key storage for a profile.
+"""The single launcher-managed token and native Claude login for a profile.
 
 ``claude setup-token`` prints a long-lived OAuth token but does **not** write it
 into the config dir — Claude Code consumes it via the ``CLAUDE_CODE_OAUTH_TOKEN``
 environment variable. So the launcher captures that token at login and stores it
 inside the profile (``<CLAUDE_CONFIG_DIR>/.launcher-token``, ``0600``).
 
-This module owns both secret files. Claude token lookup checks the
-launcher-stored token first and falls back to a ``.credentials.json`` written
-by an interactive ``/login``; generic API keys never enter that fallback.
+Harness declarations decide how the one launcher token is projected at
+process launch. Claude token lookup also falls back to a ``.credentials.json``
+written by an interactive ``/login``; that native OAuth file is not projected
+into other harnesses.
 """
 
 from __future__ import annotations
@@ -20,11 +21,12 @@ from typing import Optional
 
 from .profile import Profile
 
-#: Launcher-managed token captured from ``claude setup-token``.
+#: The one launcher-managed profile token (setup-token or provider/API token).
 TOKEN_FILENAME = ".launcher-token"
-#: Launcher-managed generic API key. Its destination environment variable is
-#: declared by the selected harness, never inferred from the key text.
-API_KEY_FILENAME = ".launcher-api-key"
+#: Transitional filename written by the short-lived ``set-key`` design. It is
+#: never a runtime source; bootstrap only moves it when no canonical token
+#: exists, preserving a safe upgrade without keeping two credential stores.
+LEGACY_API_KEY_FILENAME = ".launcher-api-key"
 #: Credentials file an interactive ``/login`` writes (fallback source).
 CREDENTIALS_FILENAME = ".credentials.json"
 
@@ -35,10 +37,6 @@ class CredentialsError(Exception):
 
 def _token_path(profile: Profile):
     return profile.config_dir / TOKEN_FILENAME
-
-
-def _api_key_path(profile: Profile):
-    return profile.config_dir / API_KEY_FILENAME
 
 
 def _save_secret(path, value: str, what: str) -> None:
@@ -57,17 +55,19 @@ def save_token(profile: Profile, token: str) -> None:
     _save_secret(_token_path(profile), token, "token")
 
 
-def save_api_key(profile: Profile, key: str) -> None:
-    """Persist a harness API key separately from Claude OAuth/provider auth."""
-    _save_secret(_api_key_path(profile), key, "API key")
+def migrate_legacy_api_key(profile: Profile) -> bool:
+    """Move an unambiguous old ``set-key`` file to the single token path.
 
-
-def stored_api_key(profile: Profile) -> Optional[str]:
-    path = _api_key_path(profile)
-    if not path.is_file():
-        return None
-    value = path.read_text(encoding="utf-8").strip()
-    return value or None
+    If both files exist, the canonical token wins and the old file is left in
+    place for manual review; silently discarding either different secret would
+    be an unsafe migration.
+    """
+    target = _token_path(profile)
+    legacy = profile.config_dir / LEGACY_API_KEY_FILENAME
+    if target.exists() or not legacy.is_file():
+        return False
+    legacy.replace(target)
+    return True
 
 
 def stored_token(profile: Profile) -> Optional[str]:

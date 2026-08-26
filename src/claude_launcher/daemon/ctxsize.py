@@ -260,7 +260,9 @@ def compact_window_of(sdef) -> Optional[int]:
         return hit[0]
     raw = os.environ.get(COMPACT_WINDOW_ENV)
     try:
-        prof = profile_mod.require(str(getattr(sdef, "profile", "") or ""))
+        prof = profile_mod.require_selector(
+            str(getattr(sdef, "profile", "") or "")
+        )
         if not getattr(sdef, "null_token", False):
             borrow = getattr(sdef, "borrow", None)
             auth = profile_mod.require(str(borrow)) if borrow else prof

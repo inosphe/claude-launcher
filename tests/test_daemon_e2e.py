@@ -1610,6 +1610,13 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             }
             assert details["pi-profile"]["harness"] == "pi"
             assert details["pi-profile"]["harness_available"] is False
+            assert details["pi-profile:claude"]["harness"] == "claude"
+            assert details["pi-profile:pi"]["harness"] == "pi"
+            resp = await client.get("/api/profiles", headers=bearer)
+            profile_doc = await resp.json()
+            assert profile_doc["profiles"] == ["pi-profile"]
+            assert "pi-profile:claude" in profile_doc["profile_selectors"]
+            assert "pi-profile:pi" in profile_doc["profile_selectors"]
             resp = await client.get("/api/harnesses", headers=bearer)
             assert resp.status == 200
             by_name = {h["name"]: h for h in (await resp.json())["harnesses"]}

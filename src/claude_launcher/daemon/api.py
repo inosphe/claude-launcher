@@ -446,25 +446,56 @@ async def h_daemon_restart(request: web.Request) -> web.Response:
 
 
 async def h_profiles(request: web.Request) -> web.Response:
+    profiles = profile_mod.list_all()
+    registry = harness_registry.registry()
+    harness_names = harness_registry.names()
     items = []
-    for p in profile_mod.list_all():
+    selectors = []
+    for p in profiles:
         try:
             name = lineage.effective_harness(p)
-            entry = harness_registry.get(name)
+            entry = registry.get(name)
             items.append(
                 {
                     "name": p.name,
+                    "profile": p.name,
                     "harness": name,
                     "harness_available": bool(entry and entry.available()),
+                    "explicit": False,
                 }
             )
         except lineage.LineageError as exc:
             items.append(
-                {"name": p.name, "harness": "?", "harness_available": False,
-                 "error": str(exc)}
+                {
+                    "name": p.name,
+                    "profile": p.name,
+                    "harness": "?",
+                    "harness_available": False,
+                    "explicit": False,
+                    "error": str(exc),
+                }
+            )
+        for harness_name in harness_names:
+            entry = registry.get(harness_name)
+            selector = f"{p.name}:{harness_name}"
+            selectors.append(selector)
+            items.append(
+                {
+                    "name": selector,
+                    "profile": p.name,
+                    "harness": harness_name,
+                    "harness_available": bool(entry and entry.available()),
+                    "explicit": True,
+                }
             )
     return web.json_response(
-        {"profiles": [item["name"] for item in items], "profile_details": items}
+        {
+            # Bare names remain for credential/profile-management clients.
+            "profiles": [p.name for p in profiles],
+            # Session creation uses the stable execution selectors instead.
+            "profile_selectors": selectors,
+            "profile_details": items,
+        }
     )
 
 
