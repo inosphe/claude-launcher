@@ -1820,6 +1820,15 @@ async function refreshCflow() {
   applyCflowBadges();  // the rail rows may have painted before this cache filled
   renderRailTimer();   // ...and the nudge countdown above the nav reads it too
   if (currentPage === "home") renderHome();
+  // Everything above is what the *rail* reads: badges on rows, the nudge
+  // countdown, the home card's count. What follows rebuilds the Flows page's
+  // whole list from scratch — one card per run, a hundred of them on a
+  // working machine — and this runs on the two-second tick from whatever page
+  // you are on. Off the flows page there is nobody to see it, and the tick
+  // was spending its main-thread budget building a list behind a terminal.
+  // route() calls refreshCflow on the way in, so arriving still finds it
+  // drawn from the poll that just landed.
+  if (currentPage !== "flows") return;
   const list = $("cflow-list");
   list.innerHTML = "";
   if (runs.length === 0) {

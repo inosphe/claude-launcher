@@ -100,6 +100,12 @@ class ScreenState:
         self._stream = pyte.ByteStream(self._screen)
         self._mode_tail = b""
         self._mouse_modes: Set[bytes] = set()
+        # Bumped by the two calls that can move the grid (feed_render and
+        # resize), so a reader can tell "nothing has happened here" apart
+        # from "I have not looked lately" without touching a cell. What
+        # line_hashes memoises against; see there for why.
+        self._revision = 0
+        self._hashes: Optional[Tuple[int, Tuple[int, ...]]] = None
         self.app_cursor_keys = False
         self.bracketed_paste = False
         self.alt_screen = False
@@ -165,6 +171,7 @@ class ScreenState:
         is ~144 ms of solid CPU.
         """
         self._stream.feed(data)
+        self._revision += 1
 
     def _track_modes(self, data: bytes) -> None:
         window = self._mode_tail + data
@@ -223,6 +230,7 @@ class ScreenState:
 
     def resize(self, cols: int, rows: int) -> None:
         self._screen.resize(lines=rows, columns=cols)
+        self._revision += 1
 
     # ------------------------------------------------------------------ #
     # capture
@@ -311,8 +319,23 @@ class ScreenState:
         on a wide-char stub. Idle detection samples every session on a timer,
         so it is the most frequent caller of the two — and the one whose
         exception would be swallowed into "this session never goes idle".
+
+        Memoised against the grid's revision, because "the most frequent
+        caller" understates it: every session is sampled every 0.4s whether
+        or not anything was printed, and one sample materialises every cell
+        of the grid (a 303x77 screen is 23k pyte namedtuple reads). Sixteen
+        idle sessions were spending a quarter of a core re-hashing screens
+        nothing had touched. Only feed_render and resize can move the grid,
+        and both bump the revision, so an unchanged grid is answered from the
+        last tuple -- and the sample the tracker gets is the same tuple it
+        would have computed, which is exactly what "no change" has to mean to
+        it.
         """
-        return tuple(hash(line) for line in self.render_screen())
+        if self._hashes is not None and self._hashes[0] == self._revision:
+            return self._hashes[1]
+        out = tuple(hash(line) for line in self.render_screen())
+        self._hashes = (self._revision, out)
+        return out
 
     def bottom_line(self) -> str:
         """The bottom row of the visible grid, right-trimmed.

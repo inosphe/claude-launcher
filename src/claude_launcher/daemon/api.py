@@ -610,8 +610,31 @@ async def h_roles(request: web.Request) -> web.Response:
     )
 
 
-#: Recent step reports included per run in the /api/cflow payload.
+#: Recent step reports included per run in a run's own payload.
 _CFLOW_REPORT_TAIL = 10
+
+#: What the *list* poll carries instead. /api/cflow is fetched every two
+#: seconds by every open page, and it answers for every run slot this machine
+#: knows about -- around a hundred of them on a working machine, most of them
+#: finished. Sending each one its whole journal and its step's whole
+#: instructions made that poll a multi-megabyte response the daemon spent
+#: longer building than the interval it was asked on, which starved the event
+#: loop that also serves the terminals. The list draws a card per run: three
+#: report lines, with the details as their tooltip. So it is sent three, with
+#: the details clipped to a tooltip's worth -- everything the whole run holds
+#: is one click away on /api/cflow/run, which is not polled.
+_CFLOW_LIST_REPORTS = 3
+_CFLOW_LIST_DETAILS = 400
+
+#: Free text no card in the list draws: a finished run's replayed journal, the
+#: current step's instructions and completion criteria, the run's opening
+#: context, and the prose an agent is meant to read. Composed anyway (they are
+#: what ``status`` answers with) and dropped here rather than made conditional
+#: deeper down, so the agent-facing payload keeps its exact shape.
+_CFLOW_LIST_DROP = (
+    "journal", "instructions", "note", "done_when", "context", "report",
+    "how_to_unblock",
+)
 
 
 def _session_cwd(session) -> str:
@@ -802,7 +825,7 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
 
     runs = []
     for cwd, scope in keys:
-        entry = _cflow_entry(manager, cwd, scope)
+        entry = _cflow_entry(manager, cwd, scope, slim=True)
         # An idle slot is only interesting when it was asked about explicitly,
         # or when a human's start request is waiting to be picked up there.
         if (
@@ -818,13 +841,17 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
 
 
 def _cflow_entry(
-    manager: SessionManager, cwd: str, scope: str, *, reports: bool = True
+    manager: SessionManager, cwd: str, scope: str, *, reports: bool = True,
+    slim: bool = False,
 ) -> dict:
     """One (cwd, scope) slot as the dashboard sees it: live status, the recent
     step reports, and any pending start request.
 
     ``reports=False`` skips reading the run's journal — a whole file, parsed
     per slot per poll — for the callers that show a track rather than prose.
+    ``slim=True`` is the shape the two-second list poll takes: the same entry
+    with the free text no list card draws cut out of it (see
+    ``_CFLOW_LIST_DROP``) and its reports clipped to what one card shows.
     """
     entry = {
         "cwd": cwd,
@@ -848,7 +875,21 @@ def _cflow_entry(
         for e in cflow_state.read_journal(cwd, scope, run_id=payload.get("run"))
         if e.get("event") == "step_report"
     ]
+    if slim:
+        payload = {k: v for k, v in payload.items() if k not in _CFLOW_LIST_DROP}
+        recent = [
+            {**r, "details": _clip(r.get("details"), _CFLOW_LIST_DETAILS)}
+            for r in recent[-_CFLOW_LIST_REPORTS:]
+        ]
+        return {**entry, **payload, "reports": recent}
     return {**entry, **payload, "reports": recent[-_CFLOW_REPORT_TAIL:]}
+
+
+def _clip(text, limit: int):
+    """``text`` shortened to ``limit`` characters, with the cut marked."""
+    if not isinstance(text, str) or len(text) <= limit:
+        return text
+    return text[:limit].rstrip() + "…"
 
 
 def _serialize_workflow(wf) -> dict:

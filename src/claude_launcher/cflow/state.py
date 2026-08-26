@@ -239,6 +239,13 @@ def _write_registry(entries: List[Dict[str, str]]) -> None:
         pass
 
 
+#: How long a canonicalised directory is trusted (see :func:`resolve_cwd`).
+RESOLVE_TTL = 30.0
+
+#: Canonical form of a directory, keyed by the string handed in.
+_resolved: Dict[str, Tuple[str, float]] = {}
+
+
 def resolve_cwd(cwd: Optional[str] = None) -> str:
     """A run's directory, canonical.
 
@@ -248,8 +255,24 @@ def resolve_cwd(cwd: Optional[str] = None) -> str:
     point passes its own resolved copy. Half of what identifies a run is this
     string — the registry stores it, ``_scope_sessions`` compares it — so it
     is canonicalised in one place rather than at each caller.
+
+    Remembered for :data:`RESOLVE_TTL`, because the daemon asks the same
+    question hundreds of times a second: the runs list walks every known slot
+    on a two-second poll, and every state/snapshot/journal/request path under
+    a slot resolves its directory again. Each of those is a realpath walk down
+    the whole path, which on Windows is a syscall per component. What the
+    cache can be wrong about is a directory that becomes a symlink (or moves)
+    while the daemon runs -- a reconfiguration, not a thing that happens
+    mid-poll -- and it is wrong for at most the TTL.
     """
-    return str(Path(cwd or os.getcwd()).resolve())
+    raw = cwd or os.getcwd()
+    now = time.monotonic()
+    hit = _resolved.get(raw)
+    if hit is not None and now - hit[1] < RESOLVE_TTL:
+        return hit[0]
+    out = str(Path(raw).resolve())
+    _resolved[raw] = (out, now)
+    return out
 
 
 def cflow_dir(cwd: Optional[str] = None) -> Path:
@@ -592,6 +615,7 @@ def clear_state(cwd: Optional[str] = None) -> None:
             path.unlink()
         except OSError:
             pass
+        _forget(path)
 
 
 #: Files that make up one run inside its scope directory.
@@ -616,6 +640,7 @@ def archive_run(cwd: Optional[str] = None) -> Path:
         src = sdir / name
         if src.is_file():
             src.rename(target / name)
+        _forget(src)
     return target
 
 
@@ -623,13 +648,50 @@ def snapshot_workflow(text: str, cwd: Optional[str] = None) -> None:
     path = _snapshot_path(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+    _forget(path)
+
+
+def _forget(path: Path) -> None:
+    """Drop any parse remembered for ``path``.
+
+    The mtime/size keys below already catch every *cross-process* rewrite
+    (the daemon reading what an agent's MCP server wrote). This is for the
+    one case they cannot see: a same-process archive-and-restart that puts a
+    different file of the same length back at the same path inside one clock
+    tick. Called from the three writers, so the caches are exact for anything
+    this process does and merely eventually-right for anything it does not.
+    """
+    key = str(path)
+    _snapshots.pop(key, None)
+    _journals.pop(key, None)
+
+
+#: Parsed snapshots, keyed by path -> (mtime, size, workflow). A snapshot is
+#: written once at ``start`` (and again per recur round), while the daemon's
+#: runs list re-reads *every* known run's snapshot on a two-second poll --
+#: re-parsing ~90 YAML files a second was the single largest consumer of the
+#: daemon's event loop. Keyed on the file's own mtime/size like
+#: :mod:`daemon.ctxsize`'s transcript cache, so a rewritten snapshot re-parses
+#: and a poll where nothing changed costs one stat. Sharing the parse is safe
+#: because :class:`model.Workflow` (and every node under it) is frozen.
+_snapshots: Dict[str, Tuple[int, int, model.Workflow]] = {}
 
 
 def load_snapshot(cwd: Optional[str] = None, scope: Optional[str] = None) -> model.Workflow:
     path = _snapshot_path(cwd, scope)
     if not path.is_file():
         raise StateError("cflow run state exists but the workflow snapshot is missing")
-    return model.load(path)
+    key = str(path)
+    try:
+        st = path.stat()
+    except OSError:
+        return model.load(path)  # let the reader raise the real error
+    hit = _snapshots.get(key)
+    if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2]
+    workflow = model.load(path)
+    _snapshots[key] = (st.st_mtime_ns, st.st_size, workflow)
+    return workflow
 
 
 def journal(event: str, data: Optional[Dict] = None, cwd: Optional[str] = None) -> None:
@@ -642,6 +704,43 @@ def journal(event: str, data: Optional[Dict] = None, cwd: Optional[str] = None) 
         fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+#: Parsed journals, keyed by path -> (mtime, size, entries). Same bargain as
+#: ``_snapshots``: the runs list reads every known run's journal on a
+#: two-second poll, and a finished run's journal never changes again. The
+#: entries are handed out (filtered into a fresh list) rather than copied, so
+#: callers must treat them as read-only -- every one of them builds new dicts
+#: out of the fields it wants.
+_journals: Dict[str, Tuple[int, int, List[dict]]] = {}
+
+
+def _journal_entries(path: Path) -> List[dict]:
+    """Every entry in ``path``, parsed at most once per write of the file."""
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    key = str(path)
+    hit = _journals.get(key)
+    if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return hit[2]
+    out: List[dict] = []
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return []
+    for line in text.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        out.append(entry)
+    _journals[key] = (st.st_mtime_ns, st.st_size, out)
+    return out
+
+
 def read_journal(
     cwd: Optional[str] = None,
     scope: Optional[str] = None,
@@ -651,15 +750,7 @@ def read_journal(
     path = journal_path(cwd, scope)
     if not path.is_file():
         return []
-    out = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        if run_id is None or entry.get("run") == run_id:
-            out.append(entry)
-    return out
+    entries = _journal_entries(path)
+    if run_id is None:
+        return list(entries)
+    return [e for e in entries if e.get("run") == run_id]
