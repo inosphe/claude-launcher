@@ -463,15 +463,30 @@ def test_only_the_project_layer_arms_the_gate():
     """
     assert wrapup_of(BUNDLED).get("verify") is None
     assert wrapup_of(OVERRIDE)["verify"] == (
-        "uv run --no-sync python -m claude_launcher.cli report check"
+        "uv run --no-sync python tools/report_check.py"
     )
 
 
 def test_the_gate_runs_the_checkout_rather_than_whatever_claunch_is_installed():
-    """`claunch report check` would have been the obvious command and is the
-    wrong one: the `claunch` on PATH is an installed copy, not this tree. It
-    was measured answering "invalid choice: 'report'" with exit 2 — a gate
-    that fails in every session until the branch lands and is reinstalled."""
+    """Two obvious spellings of this gate were tried, and both ran another tree.
+
+    `claunch report check` first: the `claunch` on PATH is an installed copy,
+    not this tree, and it was measured answering "invalid choice: 'report'"
+    with exit 2 — a gate that fails in every session until the branch lands
+    and is reinstalled.
+
+    Then `-m claude_launcher.cli report check`, which reads like it fixed
+    that and did not. This is a src layout, so `-m` cannot find the package
+    under the working directory and takes it from site-packages — and
+    `--no-sync` is a promise that a worktree's .venv is never populated.
+    Measured in a worker worktree: ModuleNotFoundError, exit 1.
+
+    So the gate names a file in this checkout, and that file puts this
+    checkout's src ahead of every installed copy. The mechanism itself, and
+    the silent-green case where an installed copy answers to the same name
+    with different behaviour, are pinned in
+    tests/test_gates_run_this_checkout.py."""
     verify = wrapup_of(OVERRIDE)["verify"]
     assert verify.startswith("uv run --no-sync python")
-    assert "-m claude_launcher.cli" in verify
+    assert "tools/report_check.py" in verify
+    assert " -m " not in verify

@@ -1089,9 +1089,12 @@ steps:
     # 그 저장소의 것이기 때문이다(test_cflow_layers의
     # test_the_improv_workflows_carry_no_repo_specific_verify가 정본 셋 전부에
     # 대해 그것을 못박는다). 기계 검사를 원하는 저장소는 프로젝트 레이어
-    # (.claunch/workflows/)에서 이 스텝에 `verify: 'claunch report check'`를
-    # 얹는다 — stat 한 번과 앞 4KB 읽기가 전부라 review가 경고하는
-    # 「안 보이는 스윕」이 아니다. 얹지 않은 저장소에서는 위 산문만 남고,
+    # (.claunch/workflows/)에서 이 스텝에 verify를 얹는다 — stat 한 번과 앞 4KB
+    # 읽기가 전부라 review가 경고하는 「안 보이는 스윕」이 아니다.
+    # **`verify: 'claunch report check'`로 적지 마라.** 여기 그렇게 적혀 있었고,
+    # 그대로 옮겨 적은 저장소에서 게이트가 exit 2를 냈다: PATH의 claunch는 검사받는
+    # 체크아웃이 아니라 마지막에 설치된 것이다. 게이트 명령은 검사받는 트리의
+    # 파일을 이름으로 불러야 한다(이 저장소의 오버라이드가 그 형태의 실례다). 얹지 않은 저장소에서는 위 산문만 남고,
     # 그것이 이 층 나눔이 받아들이는 대가다: 산문은 어디서나 읽히고
     # 게이트는 그 명령이 실제로 도는 곳에서만 선다.
     done_when: |
@@ -1108,11 +1111,20 @@ steps:
     # 산문이 「항상 보고서를 남긴다」고 말하고 기계가 안 보면, 보고서는
     # 바쁘 회차에서 가장 먼저 빠지는 줄이 된다 — 종료 직전에 있고,
     # 안 써도 이 턴은 끝나기 때문이다. 그래서 게이트로 묶는다.
-    # `claunch report check`가 아니라 이 형태인 이유: PATH의 claunch는 이
-    # 체크아웃이 아니라 설치된 것이라, 검사받는 트리에 있는 코드를 안 부른다
-    # (실측: PATH의 claunch가 'invalid choice: report'로 exit 2를 냈다).
-    # 나머지 세 게이트가 tools/*.py를 uv run으로 부르는 것과 같은 이유이고,
-    # --no-sync도 같은 이유다 — 살아 있는 데몬이 claunch.exe를 물고 있어
+    # 이 형태인 이유 — 앞서 두 철자가 각각 다른 방식으로 틀렸다.
+    #  · `claunch report check`: PATH의 claunch는 이 체크아웃이 아니라 설치된
+    #    것이라 검사받는 트리의 코드를 안 부른다(실측: 'invalid choice: report',
+    #    exit 2). 시끄러워서 첫 통과 시도에 걸렸다.
+    #  · `python -m claude_launcher.cli report check`: 그 고침인데 더 조용하다.
+    #    src 레이아웃이라 -m은 cwd에서 패키지를 못 찾고 site-packages에서
+    #    가져와야 하는데, --no-sync는 워크트리 .venv를 영원히 비워 두겠다는
+    #    약속이고 uv는 ambient VIRTUAL_ENV를 (경고하고) 무시한다. 손으로 sync한
+    #    적 없는 워크트리에서는 ModuleNotFoundError, exit 1(실측).
+    # 그래서 게이트는 이 체크아웃의 파일을 이름으로 부르고, 그 파일이 자기
+    # __file__ 기준으로 이 체크아웃의 src를 sys.path 앞에 꽂는다. .venv도 PATH도
+    # 답을 바꾸지 못한다. 나머지 세 게이트도 같은 형태이고,
+    # tests/test_gates_run_this_checkout.py가 넷 전부를 이 규칙에 묶는다.
+    # --no-sync 자체의 이유는 따로다 — 살아 있는 데몬이 claunch.exe를 물고 있어
     # 게이트 안의 sync가 os error 5로 막힌 실사례가 있다.
-    verify: 'uv run --no-sync python -m claude_launcher.cli report check'
+    verify: 'uv run --no-sync python tools/report_check.py'
     next: end

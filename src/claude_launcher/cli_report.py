@@ -18,6 +18,7 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import List, Optional
 
 from . import reports
 
@@ -123,6 +124,37 @@ def _cmd_check(args: argparse.Namespace) -> int:
         file=sys.stderr,
     )
     return 1
+
+
+def check_main(argv: Optional[List[str]] = None) -> int:
+    """``report check`` without building the whole CLI — the gate's entry point.
+
+    ``tools/report_check.py`` calls this rather than :func:`cli.main`, and the
+    difference is not style. A gate runs under ``uv run --no-sync``, which is a
+    promise never to populate the worktree's ``.venv``; in a worktree nobody
+    synced by hand, the only packages that exist are the standard library and
+    this checkout's own ``src``. :func:`cli.main` builds every subparser, and
+    one of them imports :mod:`claude_launcher.harnesses`, which imports
+    ``yaml`` — so routing the gate through it fails with
+    ``ModuleNotFoundError: No module named 'yaml'`` (measured) before it ever
+    reaches the check. Everything reached from here is standard library plus
+    :mod:`claude_launcher.reports`, so the gate holds on a bare interpreter.
+
+    Same flags and same exit codes as ``claunch report check``: 0 when a
+    readable report exists, 1 when it does not, 2 when the session cannot be
+    named.
+    """
+    parser = argparse.ArgumentParser(
+        prog="report check",
+        description="exit 0 only if this session has left a readable round report",
+    )
+    parser.add_argument(
+        "--session", help="session name (default: $CLAUNCH_SESSION)"
+    )
+    parser.add_argument("--issue", help="require the report to be for this issue")
+    args = parser.parse_args(argv)
+    args.report_func = _cmd_check
+    return _cmd(args)
 
 
 def _cmd(args: argparse.Namespace) -> int:

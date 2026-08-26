@@ -78,6 +78,13 @@ import sys
 from pathlib import Path
 from typing import List, Optional
 
+# A gate runs the tree it is checking. This checkout's ``src`` goes in front of
+# every installed copy, so the ``claude_launcher`` imports below resolve HERE --
+# whatever the worktree's .venv holds (``uv run --no-sync`` promises never to
+# populate it) and whatever else on the path answers to the same name.
+# Pinned by tests/test_gates_run_this_checkout.py.
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
 CANNOT_TELL = 2
 
 #: Parallelism is bounded by how little there is to do. Each xdist worker
