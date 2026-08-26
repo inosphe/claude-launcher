@@ -11017,6 +11017,51 @@ function syncSpawnGates(ui) {
   ui.handleRow.hidden = noMesh;
   ui.connectRow.hidden = noMesh || !(ui.connectHandles || []).length;
   ui.contextRow.hidden = !ui.workflow.value;
+  syncSpawnBeads(ui);
+}
+
+/* The board row: which of its three answers is picked decides which of the
+   two detail rows exists, and only "existing" is allowed to ask what the
+   board holds — the fetch costs the daemon a `br` fork, so it happens once
+   somebody picks the one answer that looks at it (see refreshSpawnBeads).
+
+   Every row carries the daemon's own verdict on it (daemon/beads.adoption):
+   an issue nobody holds would be ASSIGNED to the child, one a running
+   session holds would be JOINED and the assignment left where it is. Saying
+   so here rather than in the child's opening block is the whole point of
+   the row — by then the choice has been made.
+
+   Optional like meshNote: a ui bag that predates the row (a test driving
+   only the older fields) must still pass through the gates. */
+function syncSpawnBeads(ui) {
+  if (!ui.beads) return;
+  const picking = ui.beads.value === "existing";
+  // Hidden, not cleared: somebody who types a specification, tries the other
+  // two answers and comes back should find their words where they left them.
+  ui.issueTextRow.hidden = ui.beads.value !== "new";
+  ui.issueRow.hidden = !picking;
+  const hint = ui.issueHint;
+  // Only the consequence a reader cannot see from the row is written out:
+  // an issue that would simply be assigned needs no warning.
+  const row = picking
+    ? (ui._issues || []).find((i) => i.id === ui.issuePick.value)
+    : null;
+  if (row && row.held_by) {
+    hint.textContent =
+      `${row.held_by} is assigned to ${row.id} and still running — this ` +
+      "session JOINS it: the assignment stays put and the two settle " +
+      "ownership between them.";
+    hint.hidden = false;
+  } else if (picking && ui._issuesRead && !(ui._issues || []).length) {
+    // Only once the board has actually answered: an empty list held while
+    // the fetch is still in flight would read as "this board has nothing",
+    // which is a different and wrong thing to tell somebody.
+    hint.textContent = ui._issuesError ||
+      "no open issue on this directory's board.";
+    hint.hidden = false;
+  } else {
+    hint.hidden = true;
+  }
 }
 
 /* The POST body, in the CLI's spelling: non-falsy keys only, and read
@@ -11078,6 +11123,21 @@ function spawnPayload(ui) {
     put("context", (ui.context.value || "").trim());
   } else if (paired) {
     body.workflow = "-";
+  }
+  // The board answer, the same contract as the create form's: "new" with
+  // an empty box sends nothing — a request that says nothing gets an issue
+  // minted from the task, which is what every client that has never heard
+  // of this field still wants. Only the key of the answer PICKED travels:
+  // issue_text beside "existing" or "none" is a contradiction the daemon
+  // refuses (beads.check_request).
+  if (ui.beads) {
+    const mode = ui.beads.value || "new";
+    if (mode === "none") body.beads = false;
+    else if (mode === "existing" && ui.issuePick.value) {
+      body.issue = ui.issuePick.value;
+    } else if (mode === "new" && (ui.issueText.value || "").trim()) {
+      body.issue_text = ui.issueText.value.trim();
+    }
   }
   put("task", (ui.task.value || "").trim());
   return body;
@@ -11324,6 +11384,39 @@ function buildSpawnForm(parentName, seed) {
   ui.task.rows = 3;
   ui.task.placeholder = "opened with this once it has booted — what it is for";
   box.appendChild(spawnRow("Opening task", ui.task, null));
+
+  /* The board row, after the opening task because it is still the fallback
+     two of its three shapes are read off: "new" mints from the box below
+     when that is filled and from the task when it is not, so an empty pair
+     has nothing to mint from. The third — an issue that already exists —
+     is a picker rather than a text box for the same reason every other row
+     here is: the daemon publishes the list, and an id it does not have
+     would be a refusal nobody needed to provoke. The child's issue is its
+     own answer — not something the spawn policy decides — so the row
+     stands ungated, exactly like the create form's #new-beads. */
+  ui.beads = spawnRadioGroup("spawn-beads", [
+    ["new", "new issue", "minted from the task or the box below"],
+    ["existing", "an existing issue", "assigned, or joined while its holder is running"],
+    ["none", "no issue", "the child starts without a board record"],
+  ]);
+  ui.beads.value = "new";
+  box.appendChild(spawnRow("Board issue", ui.beads.el, null));
+  ui.issueText = document.createElement("textarea");
+  ui.issueText.rows = 3;
+  ui.issueText.placeholder =
+    "what the issue says — first line is its title; empty uses the opening task";
+  ui.issueTextRow = spawnSubRow("Issue text", ui.issueText, null);
+  ui.issueTextRow.hidden = true;
+  box.appendChild(ui.issueTextRow);
+  ui.issuePick = document.createElement("select");
+  ui.issueHint = el("span", "sess-spawn-note");
+  ui.issueRow = spawnSubRow("Issue", ui.issuePick, ui.issueHint);
+  ui.issueRow.hidden = true;
+  box.appendChild(ui.issueRow);
+  ui._issues = [];
+  ui._issuesFor = null;
+  ui._issuesError = "";
+  ui._issuesRead = false;
 
   /* the inherited rows: what a child may be told to differ on */
   ui.profile = document.createElement("select");
@@ -11700,7 +11793,16 @@ async function spawnModalLoad(st) {
   ui.wtMode.listen(() => syncSpawnGates(ui));
   ui.wtPick.addEventListener("change", () => syncSpawnGates(ui));
   ui.update.addEventListener("change", () => syncSpawnGates(ui));
-  ui.workspace.addEventListener("change", () => syncSpawnGates(ui));
+  ui.workspace.addEventListener("change", () => {
+    syncSpawnGates(ui);
+    // The board follows the Directory row in the create form, and a child
+    // aimed at another workspace stands on that board — the issue memo is
+    // given back so the next "existing" reads there regardless (the same
+    // drop the create form does on its Directory row).
+    ui._issuesFor = null;
+    ui._issuesRead = false;
+    if (ui.beads.value === "existing") refreshSpawnBeads(st);
+  });
   ui.workflow.addEventListener("change", () => syncSpawnGates(ui));
   ui.mesh.addEventListener("change", () => refreshSpawnConnect(st).then(() => syncSpawnGates(ui)));
   ui.handle.addEventListener("input", () => refreshSpawnConnect(st).then(() => syncSpawnGates(ui)));
@@ -11709,6 +11811,76 @@ async function spawnModalLoad(st) {
     st.lastWfAuto = refillSpawnWorkflows(ui, ui.role.value, last).auto;
     syncSpawnGates(ui);
   });
+
+  /* The board row's own wiring. The radio listener exists for the FETCH —
+     the gates already re-sync the row on any change — because the list is
+     only worth a board read once somebody picks the one answer that looks
+     at it; the pick listener re-verdicts the hint under the picked row.
+     syncSpawnGates re-syncs the row on any other change. */
+  ui.beads.listen(() => {
+    if (ui.beads.value === "existing") refreshSpawnBeads(st);
+    syncSpawnBeads(ui);
+  });
+  ui.issuePick.addEventListener("change", () => syncSpawnBeads(ui));
+}
+
+/* The issues the "existing" answer offers, fetched from the daemon's own
+   verdicts (daemon/beads.py adoption) so the row promises exactly what the
+   spawn is about to do. The child stands in the parent's directory unless
+   the workspace row moves it, and the board follows the child — which is
+   why the candidates endpoint takes `?parent=` and resolves it to the
+   parent's cwd (api.py h_beads_candidates); a pick of a particular
+   workspace asks that board directly.
+
+   Claimed before the await and given back on failure, like the create
+   form's refreshIssueChoices: an empty list remembered as an answer would
+   leave the picker blank for the life of the open. */
+async function refreshSpawnBeads(st) {
+  const ui = st.ui;
+  const wsp = (!ui.workspace.disabled && ui.workspace.value)
+    ? ((ui.report && ui.report.workspaces) || [])
+        .find((w) => w.name === ui.workspace.value)
+    : null;
+  const key = wsp ? `cwd:${wsp.path || wsp.name}` : `parent:${st.parent}`;
+  if (key === ui._issuesFor) return;
+  ui._issuesFor = key;
+  let answered = false;
+  try {
+    const q = wsp && wsp.path
+      ? `cwd=${encodeURIComponent(wsp.path)}`
+      : `parent=${encodeURIComponent(st.parent)}`;
+    const resp = await api(`/api/beads/candidates?${q}`);
+    const doc = resp.ok ? await resp.json() : {};
+    ui._issues = doc.issues || [];
+    ui._issuesError = doc.error || "";
+    answered = resp.ok;
+  } catch {
+    ui._issues = [];
+    ui._issuesError = "";
+  }
+  if (!answered && ui._issuesFor === key) ui._issuesFor = null;
+  ui._issuesRead = true;
+  fillSpawnIssueOptions(ui);
+  if (spawnModal === st) syncSpawnBeads(ui);
+}
+
+/* The picker, filled from the last board answer and kept on the row the
+   operator already chose — the same "leave a value standing where it was"
+   rule the other pickers refill under. */
+function fillSpawnIssueOptions(ui) {
+  const kept = ui.issuePick.value;
+  fillSpawnSelect(
+    ui.issuePick,
+    (ui._issues || []).map((i) => {
+      const held = i.held_by ? ` — held by ${i.held_by}, would JOIN` : "";
+      return [
+        i.id,
+        `${i.id}  ${i.title || ""}`.trim() + ` [${i.status}]${held}`,
+      ];
+    }),
+    "(pick an issue)",
+    kept
+  );
 }
 
 /* The connect row: the members of the picked mesh the child may also message.

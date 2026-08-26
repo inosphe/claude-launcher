@@ -161,7 +161,8 @@ new Function(
   + slice("spawnMeshNow") + slice("spawnWtFragment")
   + slice("spawnAutoWorktree") + slice("spawnAutoWorktreeHint")
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
-  + slice("profileBorrowCapability") + slice("syncSpawnGates") + slice("spawnPayload")
+  + slice("profileBorrowCapability") + slice("syncSpawnGates") + slice("syncSpawnBeads")
+  + slice("spawnPayload")
   + slice("spawnReport") + slice("spawnPreflightNote")
   + slice("spawnHardBlocks") + slice("postSpawn")
   + slice("spawnMissingSources") + slice("spawnSourceNote")
@@ -171,14 +172,16 @@ new Function(
   + slice("buildSpawnForm")
   + slice("spawnModalKey") + slice("spawnModalClose") + slice("openSpawnModal")
   + slice("spawnModalLoad") + slice("refreshSpawnConnect") + slice("spawnModalGo")
+  + slice("refreshSpawnBeads") + slice("fillSpawnIssueOptions")
   + `
 Object.assign(exports, {
-  spawnPayload, syncSpawnGates, spawnRankWorkflows, spawnWorkflowAdmits,
+  spawnPayload, syncSpawnGates, syncSpawnBeads, spawnRankWorkflows, spawnWorkflowAdmits,
   spawnWorkflowEntry, spawnAutoWorktree, spawnAutoWorktreeHint,
   spawnMeshNow, spawnRadioGroup,
   spawnRecall, saveSpawnRecall, buildSpawnForm, openSpawnModal, spawnModalClose,
   refillSpawnWorkflows, spawnConnectNow,
   spawnMissingSources, spawnSourceNote,
+  refreshSpawnBeads, fillSpawnIssueOptions,
   setSessions: (a) => { sessionsCache = a; },
   setSess: (n) => { sessName = n; },
   isOpen: () => spawnModal !== null,
@@ -213,6 +216,18 @@ const wtGroup = (value = "", off = false) => {
   return g;
 };
 
+/* The board row's radios, the same real group the worktree row uses — a
+   ctl() would agree with any payload, and the three answers are exactly
+   what the gates fold and unfold. */
+let beadsGroupN = 0;
+const beadsGroup = (value = "new") => {
+  const g = ctx.spawnRadioGroup(`bd${beadsGroupN++}`, [
+    ["new", "new issue"], ["existing", "an existing issue"], ["none", "no issue"],
+  ]);
+  g.value = value;
+  return g;
+};
+
 function uiStub(over = {}) {
   return Object.assign({
     parent: { value: "lead1" }, parentSess: {}, parentMesh: "", report: {},
@@ -230,6 +245,9 @@ function uiStub(over = {}) {
     updateRow: ctl(), rebaseRow: ctl(),
     handleRow: ctl(), connectRow: ctl(), connectHandles: [],
     meshNote: ctl(), parentMeshes: [],
+    beads: beadsGroup(), issueText: ctl(), issueTextRow: ctl({ hidden: true }),
+    issuePick: ctl(), issueRow: ctl({ hidden: true }), issueHint: ctl({ hidden: true }),
+    _issues: [], _issuesFor: null, _issuesError: "", _issuesRead: false,
     connect: () => [],
   }, over);
 }
@@ -388,6 +406,96 @@ async function main() {
     greyBody.mesh === "-" && greyBody.handle === undefined, greyBody);
   check("only the '-' mesh travels from an all-greyed form",
     Object.keys(greyBody).join(",") === "mesh", Object.keys(greyBody));
+
+  /* ---- the board row: three answers, one key each in the payload ---------
+     The same contract as the create form's #new-beads: "new" with the box
+     empty sends nothing (the daemon mints from the task), "existing"
+     adopts by id, "none" is an explicit refusal, and the keys never mix —
+     issue_text beside "existing" or "none" is a contradiction the daemon
+     refuses (beads.check_request). */
+  const bdNew = uiStub({
+    beads: beadsGroup("new"), issueText: ctl({ value: "  find the bug  " }),
+  });
+  const bdNewBody = ctx.spawnPayload(bdNew);
+  check("'new' with a filled box writes the issue text",
+    bdNewBody.issue_text === "find the bug", bdNewBody);
+  check("...and nothing else board-shaped",
+    bdNewBody.issue === undefined && !("beads" in bdNewBody), bdNewBody);
+  const bdEmpty = uiStub({ beads: beadsGroup("new") });
+  check("'new' with an empty box sends nothing — the task mints",
+    ctx.spawnPayload(bdEmpty).issue_text === undefined, ctx.spawnPayload(bdEmpty));
+  const bdPick = uiStub({
+    beads: beadsGroup("existing"), issuePick: ctl({ value: "claunch-2lb" }),
+  });
+  const bdPickBody = ctx.spawnPayload(bdPick);
+  check("'existing' with a pick adopts it by id",
+    bdPickBody.issue === "claunch-2lb", bdPickBody);
+  check("...and never carries a minting text",
+    bdPickBody.issue_text === undefined, bdPickBody);
+  const bdNone = uiStub({ beads: beadsGroup("none") });
+  check("'none' travels as an explicit refusal",
+    ctx.spawnPayload(bdNone).beads === false, ctx.spawnPayload(bdNone));
+  const bdUnpicked = uiStub({ beads: beadsGroup("existing") });
+  check("'existing' with nothing picked sends nothing",
+    ctx.spawnPayload(bdUnpicked).issue === undefined, ctx.spawnPayload(bdUnpicked));
+
+  /* ---- the board row's two detail rows follow the picked answer ---------- */
+  const sg = uiStub({});
+  ctx.syncSpawnBeads(sg);
+  check("'new' shows the box and folds the picker",
+    sg.issueTextRow.hidden === false && sg.issueRow.hidden === true);
+  sg.beads.value = "existing";
+  ctx.syncSpawnBeads(sg);
+  check("'existing' shows the picker and folds the box",
+    sg.issueTextRow.hidden === true && sg.issueRow.hidden === false);
+  sg.beads.value = "none";
+  ctx.syncSpawnBeads(sg);
+  check("'none' folds both",
+    sg.issueTextRow.hidden === true && sg.issueRow.hidden === true);
+  sg.issueText.value = "the spec";
+  sg.beads.value = "new";
+  ctx.syncSpawnBeads(sg);
+  check("the box keeps its words across the other answers",
+    sg.issueText.value === "the spec", sg.issueText.value);
+
+  /* The hint speaks only the consequence the row cannot show. */
+  const held = uiStub({
+    beads: beadsGroup("existing"), issuePick: ctl({ value: "k1" }),
+    _issues: [{ id: "k1", status: "in_progress", held_by: "w9" }],
+    _issuesRead: true,
+  });
+  ctx.syncSpawnBeads(held);
+  check("a held issue is spelled out as a JOIN",
+    held.issueHint.hidden === false && /JOINS it/.test(held.issueHint.textContent),
+    held.issueHint.textContent);
+  const vacant = uiStub({
+    beads: beadsGroup("existing"), _issues: [], _issuesRead: true,
+  });
+  ctx.syncSpawnBeads(vacant);
+  check("an answered-but-empty board says so",
+    vacant.issueHint.hidden === false &&
+      /no open issue on this directory/.test(vacant.issueHint.textContent),
+    vacant.issueHint.textContent);
+  const awaiting = uiStub({
+    beads: beadsGroup("existing"), _issues: [], _issuesRead: false,
+  });
+  ctx.syncSpawnBeads(awaiting);
+  check("an unanswered board stays quiet — in flight is not 'nothing'",
+    awaiting.issueHint.hidden === true, awaiting.issueHint.textContent);
+  const errBoard = uiStub({
+    beads: beadsGroup("existing"), _issuesRead: true,
+    _issuesError: "no board in this directory",
+  });
+  ctx.syncSpawnBeads(errBoard);
+  check("the board's own error is the message, not the empty list",
+    errBoard.issueHint.hidden === false &&
+      errBoard.issueHint.textContent === "no board in this directory",
+    errBoard.issueHint.textContent);
+  const noRow = uiStub({});
+  delete noRow.beads;
+  ctx.syncSpawnGates(noRow);
+  ctx.syncSpawnBeads(noRow);
+  check("a bag without the row passes the gates untouched", true);
 
   /* ---- the brain: gates -------------------------------------------------- */
   const g = uiStub({
@@ -653,11 +761,17 @@ async function main() {
   const bui = built.ui;
   for (const k of ["name", "role", "workflow", "context", "mesh", "handle", "task",
                    "profile", "borrow", "args", "workspace", "wtMode",
-                   "wtPick", "wtName", "update", "rebase", "fork", "over"]) {
+                   "wtPick", "wtName", "update", "rebase", "fork", "over",
+                   "beads", "issueText", "issueTextRow", "issuePick", "issueRow",
+                   "issueHint"]) {
     check(`form builds ${k}`, bui[k] && typeof bui[k] === "object", k);
   }
   check("the qualified Profile : Harness picker has no duplicate harness control",
     bui.harness === undefined, bui.harness);
+  check("the board row opens on 'new'", bui.beads.value === "new", bui.beads.value);
+  check("...with its two detail rows folded until the gates run",
+    bui.issueTextRow.hidden === true && bui.issueRow.hidden === true,
+    [bui.issueTextRow.hidden, bui.issueRow.hidden]);
   check("parent is pinned to the opener", bui.parent.value === "lead1", bui.parent);
   check("the seed task lands in the field", bui.task.value === "fix the tab", bui.task.value);
   check("the seed name lands in the field", bui.name.value === "w7");
@@ -869,11 +983,14 @@ async function main() {
   await settle();
   await settle();
   const wui = ctx.spawnUi();
-  const radios = tags(modalEls["modal-body"], "input").filter((i) => i.type === "radio");
+  // Read the group through the bag, not the DOM: the board row added a
+  // second triplet of radios, so a page-wide count would no longer isolate
+  // the worktree row.
+  const wtRadios = Object.keys(wui.wtMode.inputs).map((k) => wui.wtMode.inputs[k].value);
   check("the row is three radios, not a list of four kinds of answer",
-    radios.length === 3 &&
-      JSON.stringify(radios.map((r) => r.value)) === JSON.stringify(["", "new", "existing"]),
-    radios.map((r) => r.value));
+    wtRadios.length === 3 &&
+      JSON.stringify(wtRadios) === JSON.stringify(["", "new", "existing"]),
+    wtRadios);
   check("a seeded name the repository has opens on reuse",
     wui.wtMode.value === "existing" && wui.wtPick.value === "oak",
     [wui.wtMode.value, wui.wtPick.value]);
@@ -919,6 +1036,126 @@ async function main() {
   check("no seed opens on no worktree at all",
     ctx.spawnUi().wtMode.value === "" && ctx.spawnUi().wtPickRow.hidden === true);
   routes["GET /api/git?cwd=C%3A%2Frepo"] = goodGit;
+
+  /* ---- the board row: the daemon's verdicts fill the picker --------------
+     "existing" is the one answer that reads the board, and only then — a
+     board read costs the daemon a `br` fork, so opening the modal on the
+     default 'new' must cost nothing. The picker rows carry the daemon's
+     adoption verdict, the same promise the create form makes. */
+  routes["GET /api/beads/candidates"] = { doc: {
+    issues: [
+      { id: "claunch-aaa", title: "fix it", status: "open", held_by: null },
+      { id: "claunch-bbb", title: "do it", status: "in_progress", held_by: "w2" },
+    ],
+  } };
+  sent = [];
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  const bui2 = ctx.spawnUi();
+  check("the board row opens on 'new' with the box out",
+    bui2.beads.value === "new" && bui2.issueTextRow.hidden === false &&
+      bui2.issueRow.hidden === true,
+    [bui2.beads.value, bui2.issueTextRow.hidden, bui2.issueRow.hidden]);
+  check("...and nobody pays for a board read the answer never looks at",
+    !sent.some((s) => s.path.startsWith("/api/beads")),
+    sent.filter((s) => s.path.startsWith("/api/beads")));
+  bui2.beads.inputs.existing.checked = true;
+  await bui2.beads.inputs.existing.fire("change");
+  await settle();
+  const fetchB = sent.find((s) => s.path.startsWith("/api/beads/candidates"));
+  check("'existing' asks the board of the parent's directory",
+    fetchB && fetchB.path === "/api/beads/candidates?parent=lead1",
+    fetchB && fetchB.path);
+  check("...and opens the picker over the daemon's verdicts",
+    bui2.issueRow.hidden === false &&
+      (bui2.issuePick.options || []).some((o) => o.value === "claunch-aaa") &&
+      (bui2.issuePick.options || []).some((o) => /held by w2/.test(o.text)),
+    (bui2.issuePick.options || []).map((o) => o.text));
+  bui2.issuePick.value = "claunch-bbb";
+  await bui2.issuePick.fire("change");
+  check("picking the held issue says 'JOINS'",
+    bui2.issueHint.hidden === false && /JOINS it/.test(bui2.issueHint.textContent),
+    bui2.issueHint.textContent);
+  const actsB = buttons(modalEls["modal-actions"]);
+  const spawnB = actsB.find((b) => b.text.startsWith("Spawn"));
+  sent = [];
+  await spawnB.fire("click");
+  await settle();
+  const bdPost = sent.find((s) => s.method === "POST");
+  check("a picked issue travels as the adopt key",
+    bdPost && bdPost.body.issue === "claunch-bbb", bdPost && bdPost.body);
+
+  /* The minting box and the refusal ride the same three modes. */
+  await ctx.openSpawnModal("lead1", { seed: { task: "fix the tab" } });
+  await settle();
+  await settle();
+  const bui3 = ctx.spawnUi();
+  bui3.issueText.value = "the spec lives here";
+  const actsC = buttons(modalEls["modal-actions"]);
+  const spawnC = actsC.find((b) => b.text.startsWith("Spawn"));
+  sent = [];
+  await spawnC.fire("click");
+  await settle();
+  const textPost = sent.find((s) => s.method === "POST");
+  check("'new' with a filled box writes a separate issue",
+    textPost && textPost.body.issue_text === "the spec lives here" &&
+      textPost.body.task === "fix the tab", textPost && textPost.body);
+  check("'new' never also adopts",
+    textPost && textPost.body.issue === undefined, textPost && textPost.body);
+
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  const bui4 = ctx.spawnUi();
+  bui4.beads.inputs.none.checked = true;
+  await bui4.beads.inputs.none.fire("change");
+  const actsD = buttons(modalEls["modal-actions"]);
+  const spawnD = actsD.find((b) => b.text.startsWith("Spawn"));
+  sent = [];
+  await spawnD.fire("click");
+  await settle();
+  const nonePost = sent.find((s) => s.method === "POST");
+  check("'none' travels as an explicit refusal",
+    nonePost && nonePost.body.beads === false &&
+      nonePost.body.issue === undefined && nonePost.body.issue_text === undefined,
+    nonePost && nonePost.body);
+
+  /* A workspace the operator aimed the child at moves the board question
+     with it — the bear-trap of asking the parent's board in a modal set to
+     open on it. */
+  routes["GET /api/sessions/lead1/children"] = { doc: {
+    can_spawn: true, children_remaining: 3,
+    may_choose: ["workspace"], spawnable_harnesses: [],
+    workspaces: [{ name: "wsx", path: "C:/other", exists: true }],
+  } };
+  sent = [];
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  const wui3 = ctx.spawnUi();
+  wui3.workspace.value = "wsx";
+  await wui3.workspace.fire("change");
+  wui3.beads.inputs.existing.checked = true;
+  await wui3.beads.inputs.existing.fire("change");
+  await settle();
+  const wsFetch = sent.find((s) => s.path.startsWith("/api/beads/candidates"));
+  check("a workspace pick asks that board directly",
+    wsFetch && wsFetch.path === "/api/beads/candidates?cwd=C%3A%2Fother",
+    wsFetch && wsFetch.path);
+  sent = [];
+  const actsE = buttons(modalEls["modal-actions"]);
+  const spawnE = actsE.find((b) => b.text.startsWith("Spawn"));
+  await spawnE.fire("click");
+  await settle();
+  const wsPost = sent.find((s) => s.method === "POST");
+  check("the aimed workspace travels with the child",
+    wsPost && wsPost.body.workspace === "wsx", wsPost && wsPost.body);
+  routes["GET /api/sessions/lead1/children"] = { doc: {
+    can_spawn: true, children_remaining: 3,
+    may_choose: ["profile", "args", "worktree", "fork", "borrow"],
+    spawnable_harnesses: ["claude"], workspaces: null,
+  } };
 
   /* ---- the child cap is a crossing, not a dead end ----------------------
      spawn.py folds the SOFT cap into `blocked_by` as well, so `can_spawn` is
