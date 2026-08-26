@@ -120,7 +120,7 @@ option:disabled { color: #6b7280; }
    The invariant the rest of this rail depends on: everything that belongs on
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
-   (.rail-cwd, .rail-ctx-line, .sess-cflow, .sess-brief) are full-width, and they carry
+   (.rail-cwd, .rail-ctx-line, .rail-seen, .sess-cflow, .sess-brief) are full-width, and they carry
    an `order` above the ▸ toggle's so the toggle still lands at the end of the
    name line. A full-width child at order 0 would break the line before the
    toggle got there.
@@ -373,6 +373,40 @@ option:disabled { color: #6b7280; }
 }
 /* no directory of its own: the daemon's, said in words and set apart */
 #session-list .rail-cwd.unknown { color: #6e7681; font-style: italic; font-family: inherit; }
+/* Who has been near this session, the third full-width line (order 2 again,
+   appended after the gauge so it lands under it): three key/value pairs —
+   last looked at, last typed into, last moved on its own.
+
+   `nowrap` and `overflow: hidden` on the line, not on the pairs: three pairs
+   is the most this rail can hold at 260px, and a fourth reading or a "3d"
+   where a "4m" was must clip at the right edge rather than take a second
+   line — twenty rows that each grew a line would push the list's tail off
+   the screen. The pairs themselves are `flex: none` so they clip whole
+   rather than each shedding a character.
+
+   The key is dimmer than the value and not monospaced; the value is, so the
+   three numbers line up against each other down the rail, which is the
+   comparison the line exists for. Three states on the value and no more:
+   green while somebody is actually looking (that one is not a duration and
+   must not be read as one), amber past an hour, and a greyed dash where
+   there is no reading at all. */
+#session-list .rail-seen {
+  flex-basis: 100%; order: 2; display: flex; align-items: center; gap: 8px;
+  min-width: 0; padding-left: 16px; margin-top: 2px;
+  white-space: nowrap; overflow: hidden; line-height: 16px;
+}
+#session-list .rail-seen-pair { flex: none; display: flex; gap: 3px; align-items: baseline; }
+#session-list .rail-seen-key { font-size: 10px; color: #6e7681; }
+#session-list .rail-seen-val {
+  font-family: SFMono-Regular, Consolas, monospace; font-size: 11px;
+  color: #7d8590;
+}
+/* somebody has this terminal open right now — a state, not an age */
+#session-list .rail-seen-val.live { color: #3fb950; font-weight: 600; }
+/* nobody, and nothing, for an hour: the row this line is scanned for */
+#session-list .rail-seen-val.cold { color: #d29922; }
+/* no reading at all — the dash is a fact, so it is not dressed as a number */
+#session-list .rail-seen-val.unknown { color: #484f58; font-family: inherit; }
 .sess-brief-refresh {
   margin-left: auto; flex: none; background: none; border: none;
   color: #6e7681; font-size: 13px; line-height: 1; padding: 0 2px;
