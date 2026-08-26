@@ -38,6 +38,7 @@ from . import (
 )
 from .daemon import harness as harness_def
 from .daemon import paths as daemon_paths
+from .daemon import restart_notice
 from .daemon import runtime_state
 from .daemon_client import DaemonClientError
 
@@ -863,6 +864,14 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         print(f"daemon started at {client.base_url}")
         return 0
     if action == "stop":
+        # A stop is recorded for the same reason a restart is, and for only
+        # one of the two reasons: nobody is owed a notice (nothing is coming
+        # back to send one), but the successor needs the alibi. Without this
+        # line an operator's 'daemon stop' followed later by 'daemon start'
+        # looks, from inside the new daemon, exactly like a restart nobody
+        # asked for -- and it would say so, wrongly, to every session it
+        # brought back.
+        restart_notice.record_request_from_env(kind=restart_notice.KIND_STOP)
         if daemon_client.stop():
             print("daemon stopped")
         else:
@@ -892,6 +901,12 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
                 _print_wedged(report, confirm)
                 return 1
             report = confirm  # it moved between looks — busy, not wedged
+        # Written first, and this order is the whole fix. Everything below
+        # this line runs in a turn that is about to die: the daemon takes
+        # every terminal attached to it down, so the print at the end reaches
+        # a stdout nobody will read. Only what is on disk before the stop can
+        # be handed back to the asker once a daemon exists again.
+        restart_notice.record_request_from_env()
         daemon_client.stop()
         time.sleep(0.3)
         client = daemon_client.ensure_running()
@@ -1051,6 +1066,7 @@ def _force_replace() -> int:
             "restarting it the ordinary way",
             file=sys.stderr,
         )
+        restart_notice.record_request_from_env(via="cli-force")
         daemon_client.stop()
         time.sleep(0.3)
         client = daemon_client.ensure_running()
@@ -1063,6 +1079,12 @@ def _force_replace() -> int:
     pid = report.get("pid") or 0
     if state == daemon_client.WEDGED:
         print(f"daemon pid {pid} is wedged ({report['why']}); ending it")
+        # A killed daemon is still a restart somebody asked for, so it leaves
+        # the same record. The stale_record branch below deliberately does
+        # not: there the daemon was already dead when this command arrived,
+        # and claiming that death was asked for would excuse exactly the boot
+        # the notice exists to flag.
+        restart_notice.record_request_from_env(via="cli-force")
         if not daemon_client.terminate_process(int(pid)):
             print(
                 f"error: could not end pid {pid} — end it by hand, "
@@ -1104,6 +1126,10 @@ def _restart_all_instances() -> int:
             if daemon_client.connect() is None:
                 print(f"{label}: not running -- skipped")
                 continue
+            # Per instance, because every path this module reads resolves
+            # through CLAUNCH_DAEMON -- the record lands in the instance
+            # directory whose daemon is about to be stopped.
+            restart_notice.record_request_from_env()
             daemon_client.stop()
             time.sleep(0.3)
             client = daemon_client.ensure_running()

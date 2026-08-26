@@ -33,6 +33,7 @@ from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
 from . import mesh_roles
+from . import restart_notice
 from .harness import CLAUDE_HARNESS, HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
 from .mesh import MeshConflict, MeshError, MeshManager
@@ -429,8 +430,14 @@ async def h_daemon_restart(request: web.Request) -> web.Response:
     the singleton lock is released, so it finds the lock free instead of
     spending its grace window waiting this process out. Sessions come back
     the way they do on any restart: relaunched per their ``restore`` flag.
+
+    It records itself first, exactly as the CLI door does. The API cannot
+    name a caller -- an HTTP request carries no session -- so this record
+    owes nobody a notice; what it does is stop the successor from reporting
+    this boot as one that nothing asked for.
     """
     request.app["restart_requested"] = True
+    restart_notice.record_request(via="api")
     loop = asyncio.get_running_loop()
     loop.call_later(0.1, request.app["shutdown_event"].set)
     return web.json_response({"ok": True, "restarting": True})
