@@ -508,6 +508,9 @@ def _print_onboarding(result: dict) -> None:
         )
     board = result.get("beads") or {}
     if board.get("issue"):
+        # Compared as literals rather than against daemon.beads' constants:
+        # this is the daemon's JSON answer, so the strings ARE the contract,
+        # and the CLI does not import the daemon package to read one.
         mode = board.get("mode")
         if mode == "joined":
             # The one outcome a human must not have to go looking for: the
@@ -1352,8 +1355,8 @@ ISSUE_HELP = (
     "put this session on an EXISTING board issue instead of minting one from "
     "the task. What that means is the daemon's call, not the flag's: an issue "
     "nobody holds is assigned to the session, one a running session holds is "
-    "joined without moving the assignment, and both sessions are told "
-    "('claunch beads list --status open')"
+    "joined without moving the assignment, and both sessions are told so "
+    "they can settle it"
 )
 NOISSUE_HELP = (
     "no board issue at all -- neither minted nor adopted (without this, a "
