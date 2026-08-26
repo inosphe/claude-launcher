@@ -11,11 +11,13 @@ nothing gets what it always got.
 
 - server -> client, binary: raw PTY output bytes (feed straight to xterm.js).
   On connect the server first sends a JSON ``init`` text frame
-  (``{"type":"init","cols":..,"rows":..,"status":..,"pid":..,"boot_id":..}``),
-  then one binary frame repainting the current screen so a fresh viewer sees
-  live state. Because the repaint comes with every socket, a client that lost
-  one may simply open another against the same terminal: ``pid`` and
-  ``boot_id`` together say whether it is the same program it was talking to.
+  (``{"type":"init","cols":..,"rows":..,"status":..,"pid":..,"boot_id":..,
+  "exited":..,"exit_code":..}``), then one binary frame repainting the current
+  screen so a fresh viewer sees live state. Because the repaint comes with
+  every socket, a client that lost one may simply open another against the
+  same terminal: ``pid`` and ``boot_id`` together say whether it is the same
+  program it was talking to. ``exited`` says whether there is a program there
+  at all — see "Landing on a session that already finished" below.
 - client -> server, binary: keystrokes/paste, written verbatim to the PTY.
 - text frames are JSON control messages:
   client: ``{"type":"resize","cols":..,"rows":..}``, ``{"type":"repaint"}``
@@ -58,6 +60,21 @@ viewer can browse history while another watches live. A grid-shape change
 (resize), the TUI leaving the alternate screen, or the session exiting all
 make the frozen snapshot stale, so the pump unfreezes (repaints at offset 0)
 before announcing such a frame.
+
+Landing on a session that already finished: a viewer may attach to a record
+whose child is long gone (the web UI's ``#/s/<name>`` for a killed session,
+``claunch attach`` on an exited one). Such a socket never receives an ``exit``
+frame — that one is published by the child ending, and this one ended before
+anybody subscribed — so ``init`` carries ``exited``/``exit_code`` instead, the
+same way ``cli_ws`` tells a viewer it landed on a dead shell. A client that
+reads only the ``exit`` frame would treat the socket as a live pipe, and the
+repaint hands it the program's own mouse modes back (``?1000h``/``?1002h``/
+``?1003h`` are in the replayed screen): under ``?1003h`` a mouse *movement*
+over the terminal is a report, the report is a write, the write finds no
+child, and the socket used to close on it — which a link machine reads as an
+outage and answers by reconnecting, repainting, and being closed again. Hence
+also the exit frame sent below when a write finds the child gone: a bare
+close is the one thing a viewer cannot tell apart from a broken network.
 
 Auth: the route sits under ``/api/``, so the shared middleware enforces the
 Bearer header (CLI/scripts — WebSocket client libraries can set headers) or
@@ -160,6 +177,15 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                     # and a viewer that swallows them to scroll something else
                     # leaves the program believing nobody touched the wheel.
                     "mouse": session.screen.mouse_tracking,
+                    # And whether there is a program on the other end at all.
+                    # A viewer that arrives after the child is gone will never
+                    # be sent an ``exit`` frame (nothing is left to publish
+                    # one), so this is the only place it can learn that what
+                    # it is looking at is a final screen rather than a live
+                    # terminal. Same field, for the same reason, as the one
+                    # ``cli_ws`` puts on a dead shell's init.
+                    "exited": bool(getattr(session, "exited", False)),
+                    "exit_code": getattr(session, "exit_code", None),
                 }
             )
         )
@@ -202,6 +228,27 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                     try:
                         await session.write_bytes(msg.data)
                     except SessionGone:
+                        # The child is gone — it died under this socket, or it
+                        # was already gone when the viewer arrived and the
+                        # repaint handed its terminal the program's mouse
+                        # modes back, so a mouse movement became a write. Say
+                        # which before the socket ends: a close with nothing
+                        # behind it is indistinguishable from a dropped
+                        # network, and a client that guesses "network" will
+                        # reconnect into the very same repaint and do this
+                        # again. A duplicate of the pump's own exit frame is
+                        # harmless — clients act on the first.
+                        try:
+                            await ws.send_str(
+                                json.dumps(
+                                    {
+                                        "type": "exit",
+                                        "code": getattr(session, "exit_code", None),
+                                    }
+                                )
+                            )
+                        except Exception:  # noqa: BLE001 — the socket is going anyway
+                            pass
                         break
                 elif msg.type == WSMsgType.TEXT:
                     await _handle_control(ws, session, msg.data, state)
