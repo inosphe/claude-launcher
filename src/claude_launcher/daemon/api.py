@@ -2820,11 +2820,16 @@ async def h_session_queued(request: web.Request) -> web.Response:
 async def h_session_queued_flush(request: web.Request) -> web.Response:
     """Deliver this session's held backlog now, because a human said so.
 
-    The button beside the banner :func:`h_session_queued` feeds. It drops the
-    delivery worker's idle-gate for one pass (see
-    :meth:`MeshManager.flush_session`) — the operator has decided that
+    The button beside the banner :func:`h_session_queued` feeds, and the
+    ``claunch deliver-now`` command. It drops every hold a person is in a
+    position to overrule (see :meth:`MeshManager.flush_session`): the pinned
+    hold, the idle-gate, and the keyboard holds inside
+    :meth:`Session.deliver`, where an unsent line is submitted ahead of the
+    delivery instead of refusing it. The operator has decided that
     interleaving with the running turn is fine, which is a judgement the
-    daemon is not in a position to make on its own.
+    daemon is not in a position to make on its own — and the one wait that
+    survives, a TUI whose input has not come up, is not that judgement but
+    the difference between delivering and typing into nothing.
 
     Answers with the flush result *and* the re-read backlog, so a caller can
     render the truth after the attempt in one round trip instead of racing
