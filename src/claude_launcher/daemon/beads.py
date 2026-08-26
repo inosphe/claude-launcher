@@ -12,6 +12,13 @@ the board and a session's life meet and no agent is in a position to act:
    issue (``issue: <id>`` in the task or context, or an ``issue`` field) adopts
    that one instead of minting a duplicate.
 
+   What a minted issue SAYS need not be the opening task any more: a request
+   may carry ``issue_text``, the creation forms' own box, and then the board
+   holds the specification while the terminal holds only the first
+   instruction. The three answers are exclusive — text, an existing issue, or
+   none — and a request that gives two is refused (:func:`check_request`)
+   rather than having one of them quietly dropped.
+
    Adopting is not the same as *taking*. Two sessions assigned to one issue is
    an ownership conflict nobody notices until both have committed, so the
    daemon decides it here, mechanically, from the board and its own session
@@ -188,13 +195,27 @@ def issue_title(task: str, limit: int = DEFAULT_TITLE_LIMIT) -> str:
     return ""
 
 
-def compose_description(task: str, *, name: str, parent: Optional[str]) -> str:
+def compose_description(
+    task: str, *, name: str, parent: Optional[str], text: bool = False
+) -> str:
     """The description of a daemon-minted issue, in the shape the workflows
     require (목표 / 범위 / 완료 증거 기준 / 출처) so ``br lint`` and the next
-    reader find the sections they expect. The task is the goal verbatim; the
-    rest is left for the agent's intake to fill."""
+    reader find the sections they expect. The goal is that text verbatim; the
+    rest is left for the agent's intake to fill.
+
+    ``text`` says the goal came from the creation form's own issue box
+    rather than being read off the opening task. Only the 출처 line differs,
+    and it has to: the two are no longer the same words, so a later reader
+    who wants the wording the operator actually filed must be told which of
+    the two they are looking at.
+    """
     origin = (
         f"session {parent} (spawn)" if parent else "operator (new session)"
+    )
+    source = (
+        f"issue text written when session {name} was created"
+        if text
+        else f"opening task of session {name}"
     )
     return (
         "## 목표\n"
@@ -205,8 +226,56 @@ def compose_description(task: str, *, name: str, parent: Optional[str]) -> str:
         "## 완료 증거 기준\n"
         "(the assignee fills this in at intake: test counts, commit hash)\n\n"
         "## 출처\n"
-        f"{origin}, {_utcnow()}, opening task of session {name}"
+        f"{origin}, {_utcnow()}, {source}"
     )
+
+
+class BoardRequestError(ValueError):
+    """A creation request whose board answer contradicts itself."""
+
+
+def check_request(body: dict) -> None:
+    """Refuse a creation request that asks for two board answers at once.
+
+    The board question has exactly one answer per session, and each of the
+    three ways of giving it is a different key: ``issue_text`` writes a new
+    one, ``issue`` (or an ``issue: <id>`` inside the task or context) adopts
+    one that exists, ``beads: false`` asks for none. Sent together they are
+    not a preference to resolve — :meth:`Board.ensure_issue` would take the
+    adopt branch and the written text would vanish without a word, which is
+    the failure shape this whole area was built to remove. So the request is
+    refused with both halves named instead.
+
+    Pure and body-only: every field it reads is one the caller sent, and the
+    session definition's own ``task``/``issue`` are built from these same
+    keys, so there is no conflict here that the body does not already show.
+    Raises :class:`BoardRequestError` (a ``ValueError``); the HTTP layer turns
+    that into a 400 before anything is created.
+    """
+    text = str(body.get("issue_text") or "").strip()
+    if not text:
+        return
+    named = str(body.get("issue") or "").strip()
+    if named:
+        raise BoardRequestError(
+            f"'issue_text' writes a new issue and 'issue' adopts {named!r} — "
+            "a request cannot mean both. Send one: drop 'issue_text' to work "
+            "the issue you named, or drop 'issue' to have one written from "
+            "that text"
+        )
+    if body.get("beads") is False:
+        raise BoardRequestError(
+            "'issue_text' writes a new issue and 'beads: false' asks for "
+            "none — a request cannot mean both. Send one"
+        )
+    refs = issue_refs(body.get("task"), body.get("context"))
+    if refs:
+        raise BoardRequestError(
+            f"'issue_text' writes a new issue, but the task or context names "
+            f"issue {refs[0]!r} ('issue: {refs[0]}'), which would be adopted "
+            "instead — a request cannot mean both. Drop 'issue_text', or take "
+            "that reference out of the text"
+        )
 
 
 def adoption(
@@ -253,7 +322,12 @@ def adoption(
 
 
 def compose_link_note(
-    issue: str, *, mode: str, held_by: Optional[str] = None, mesh: str = ""
+    issue: str,
+    *,
+    mode: str,
+    held_by: Optional[str] = None,
+    mesh: str = "",
+    text: bool = False,
 ) -> str:
     """The ``issue: <id>`` line appended to a new session's opening task.
 
@@ -261,6 +335,12 @@ def compose_link_note(
     own: which record is its own, whether it is the assignee, and — when it
     is not — who to settle that with and how. The read command is spelled out
     because the workflows teach that exact call.
+
+    ``text`` is the fourth such thing, and the newest: the issue was minted
+    from text the operator wrote into the creation form, so it says something
+    the opening task does not. An agent told "registered from this task" would
+    reasonably skip reading a record it believes it has already read — which
+    is exactly the half of its instructions it would then be missing.
     """
     read = f"read it with `claunch beads show {issue} --json`"
     if mode == JOIN:
@@ -283,6 +363,13 @@ def compose_link_note(
         return (
             f"issue: {issue} -- your board record, assigned to you; {read} "
             "and keep its status current (claunch beads update/comments)."
+        )
+    if text:
+        return (
+            f"issue: {issue} -- your board record. It was written separately "
+            f"from this opening task and says MORE than it does: {read} "
+            "before you start, and treat that text as the specification. Keep "
+            "its status current (claunch beads update/comments)."
         )
     return (
         f"issue: {issue} -- your board record, registered from this task; "
@@ -697,10 +784,19 @@ class Board:
         what makes that distinction possible -- the daemon's session list, used
         to tell a live holder from a dead name.
 
+        A minted issue is written from ``issue_text`` when the request carries
+        one -- the creation forms' own box for what the work IS, as opposed to
+        the opening task, which is what the session is TOLD. They started as
+        the same words and no longer have to be: an operator who wants the
+        board to hold the specification and the terminal to hold the first
+        instruction writes both. With the box empty it falls back to the task,
+        which is what every caller that predates the field still gets.
+
         Never raises: a board that cannot be written must not cost a session
         its launch. Returns ``{"issue": id, "created": bool, "mode": ...,
-        "held_by": name|None, "why": str}`` on success, where ``mode`` is one
-        of :data:`MINTED`, :data:`TAKE`, :data:`JOIN`.
+        "held_by": name|None, "from_issue_text": bool, "why": str}`` on
+        success, where ``mode`` is one of :data:`MINTED`, :data:`TAKE`,
+        :data:`JOIN` (``from_issue_text`` only on a mint).
         """
         cfg = store.daemon_config()
         if not cfg.get("beads_auto_issue", True) or body.get("beads") is False:
@@ -708,11 +804,16 @@ class Board:
         sdef = session.sdef
         task = str(body.get("task") or sdef.task or "")
         context = str(body.get("context") or "")
+        written = str(body.get("issue_text") or "").strip()
         explicit = str(body.get("issue") or sdef.issue or "").strip() or None
         refs = ([explicit] if explicit else []) + [
             r for r in issue_refs(task, context) if r != explicit
         ]
-        if not refs and not task.strip():
+        # Written text is a reason to mint on its own: "no task" no longer
+        # means "nothing to write down" now that the two are separate boxes,
+        # and a session created with only an issue text must still get its
+        # issue.
+        if not refs and not task.strip() and not written:
             return None
         if not self.available():
             return None
@@ -758,7 +859,12 @@ class Board:
                     "held_by": verdict["held_by"], "why": verdict["why"],
                     "issue_row": current,
                 }
-            title = issue_title(task) or f"session {name}"
+            # The written text wins over the task when both are there: it is
+            # the more deliberate of the two, and the only reason to fill the
+            # box at all is that the task's wording is not what belongs on the
+            # board.
+            goal = written or task
+            title = issue_title(goal) or f"session {name}"
             label = "leader" if parent else "user"
             data = await self.br(
                 root,
@@ -769,7 +875,9 @@ class Board:
                     "--labels", f"{SESSION_LABEL},{label}",
                     "--assignee", name,
                     "--description",
-                    compose_description(task, name=name, parent=parent),
+                    compose_description(
+                        goal, name=name, parent=parent, text=bool(written)
+                    ),
                 ],
                 actor=name,
             )
@@ -782,7 +890,9 @@ class Board:
                 return None
             return {
                 "issue": str(iid), "created": True, "mode": MINTED,
-                "held_by": None, "why": "minted from the opening task",
+                "held_by": None, "from_issue_text": bool(written),
+                "why": "minted from the issue text" if written
+                       else "minted from the opening task",
             }
         except cli_beads.BeadsError as exc:
             log.warning("beads: could not register an issue for %r: %s", name, exc)

@@ -271,9 +271,14 @@ def test_every_br_call_names_the_board_and_stamps_the_actor(repo):
     async def run():
         sess = _Sess(_sdef("s3", repo, task="Build the widget"))
         made = await board.ensure_issue(sess, body={"task": "Build the widget"}, parent=None)
+        # Equality, not containment: the report IS the contract the CLI and
+        # the web read back, so a key appearing or vanishing is a change to
+        # be made on purpose. ``from_issue_text`` says which of the two boxes
+        # the issue was written from.
         assert made == {
             "issue": "t-1", "created": True, "mode": beads_mod.MINTED,
-            "held_by": None, "why": "minted from the opening task",
+            "held_by": None, "from_issue_text": False,
+            "why": "minted from the opening task",
         }
         create = br.calls[-1]
         assert create[:5] == ["br", "--db", str(repo / ".beads" / "beads.db"), "--actor", "s3"]
@@ -421,6 +426,105 @@ def test_beads_false_is_the_no_issue_answer(repo):
         assert br.calls == []
 
     asyncio.run(run())
+
+
+def test_issue_text_writes_the_issue_and_the_task_is_left_alone(repo):
+    """The whole point of the box: the board holds the specification and the
+    terminal holds the first instruction, and they are no longer one text."""
+    br = FakeBr()
+    board = _board(br, repo)
+
+    async def run():
+        made = await board.ensure_issue(
+            _Sess(_sdef("s3", repo)),
+            body={
+                "task": "read your issue and start",
+                "issue_text": (
+                    "Rail must answer the board" + chr(10) * 2
+                    + "every row, one call"
+                ),
+            },
+            parent=None,
+        )
+        issue = br.issues[made["issue"]]
+        assert issue["title"] == "Rail must answer the board"
+        assert "every row, one call" in issue["description"]
+        # the task is NOT what was written down, and the record says so
+        assert "read your issue and start" not in issue["description"]
+        assert "issue text written when session s3 was created" in issue["description"]
+        assert made["from_issue_text"] is True
+
+    asyncio.run(run())
+
+
+def test_issue_text_alone_still_mints(repo):
+    """The guard used to read "no task, nothing to write down". With two
+    boxes that is no longer the same sentence: a session created with only a
+    specification must still get its issue."""
+    br = FakeBr()
+    board = _board(br, repo)
+
+    async def run():
+        made = await board.ensure_issue(
+            _Sess(_sdef("s1", repo)), body={"issue_text": "the whole job"},
+            parent=None,
+        )
+        assert made and made["created"] is True
+        assert br.issues[made["issue"]]["title"] == "the whole job"
+
+    asyncio.run(run())
+
+
+def test_an_empty_issue_text_changes_nothing(repo):
+    """Every caller that predates the field, and every form left blank."""
+    br = FakeBr()
+    board = _board(br, repo)
+
+    async def run():
+        made = await board.ensure_issue(
+            _Sess(_sdef("s1", repo)),
+            body={"task": "mint from me", "issue_text": "   "}, parent=None,
+        )
+        issue = br.issues[made["issue"]]
+        assert issue["title"] == "mint from me"
+        assert "opening task of session s1" in issue["description"]
+        assert made["from_issue_text"] is False
+
+    asyncio.run(run())
+
+
+def test_a_contradictory_board_answer_is_refused_rather_than_half_applied():
+    """``issue_text`` says "write a new one" and each of the other three ways
+    of answering says "do something else with the board". Sent together the
+    adopt branch would win and the written text would vanish without a word,
+    which is the failure this area exists to remove."""
+    check = beads_mod.check_request
+    assert check({"issue_text": "spec"}) is None          # alone: fine
+    assert check({"issue": "x-1", "task": "go"}) is None  # without it: fine
+    assert check({"issue_text": "  ", "issue": "x-1"}) is None  # blank is absent
+
+    for body, expect in (
+        ({"issue_text": "spec", "issue": "x-1"}, "x-1"),
+        ({"issue_text": "spec", "beads": False}, "beads"),
+        ({"issue_text": "spec", "task": "do it" + chr(10) + "issue: x-9"}, "x-9"),
+        ({"issue_text": "spec", "context": "issue: x-9"}, "x-9"),
+    ):
+        with pytest.raises(beads_mod.BoardRequestError) as exc:
+            check(body)
+        # both halves named, so the caller knows which one to drop
+        assert "issue_text" in str(exc.value) and expect in str(exc.value)
+
+
+def test_the_link_note_points_a_session_at_a_record_it_has_not_read():
+    """An agent told "registered from this task" reasonably skips a record it
+    believes it has already read — which is the half of its instructions it
+    would then be missing."""
+    plain = beads_mod.compose_link_note("x-1", mode=beads_mod.MINTED)
+    assert "registered from this task" in plain
+    written = beads_mod.compose_link_note("x-1", mode=beads_mod.MINTED, text=True)
+    assert "registered from this task" not in written
+    assert "says MORE than it does" in written
+    assert "claunch beads show x-1" in written
 
 
 def test_the_link_note_tells_a_joiner_it_is_not_the_assignee():
@@ -764,6 +868,119 @@ def test_no_shared_mesh_means_no_notice_and_the_session_still_starts(home, tmp_p
             assert doc["beads"]["mode"] == beads_mod.JOIN
             assert doc["beads"]["notified"] == ""
             assert br.issues["claunch-7"]["assignee"] == "holder"
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_issue_text_files_the_spec_and_sends_the_session_to_read_it(
+    home, tmp_path, repo
+):
+    """End to end, both doors. The board gets the specification, the terminal
+    gets the instruction, and the opening block is what joins the two — a
+    session told "registered from this task" would skip the record it has in
+    fact never seen."""
+    from claude_launcher.daemon import onboard
+
+    _register_py_harness()
+    br = FakeBr()
+    board = _board(br, repo)
+    seen = {}
+    real = onboard.arrange
+
+    async def spy(plan, **kw):
+        seen[kw["name"]] = plan.task
+        return await real(plan, **kw)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        onboard.arrange = spy
+        try:
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "lead", "profile": "py", "cwd": str(repo),
+                      "task": "start when ready",
+                      "issue_text": "Rail must answer the board"
+                                    + chr(10) * 2 + "every row, one call"},
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert doc["beads"]["from_issue_text"] is True
+            issue = br.issues[doc["beads"]["issue"]]
+            assert issue["title"] == "Rail must answer the board"
+            assert "every row, one call" in issue["description"]
+            assert "start when ready" not in issue["description"]
+            # the opening block joins the two: the instruction it was given,
+            # then the record it has NOT been given
+            assert seen["lead"].startswith("start when ready" + chr(10) * 2)
+            assert f"issue: {doc['beads']['issue']}" in seen["lead"]
+            assert "says MORE than it does" in seen["lead"]
+            assert "registered from this task" not in seen["lead"]
+
+            # a child gets the same door, from its parent's own hand
+            resp = await client.post(
+                "/api/sessions/lead/children",
+                json={"name": "w1", "task": "go",
+                      "issue_text": "Wire the picker"},
+                headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 201, doc
+            assert br.issues[doc["beads"]["issue"]]["title"] == "Wire the picker"
+            await mgr.shutdown_all()
+        finally:
+            onboard.arrange = real
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_two_board_answers_at_once_are_refused_and_nothing_is_created(
+    home, tmp_path, repo
+):
+    """The adopt branch would win and the written text would go nowhere. A
+    400 before anything is staged is the whole of the fix — and the name must
+    come back into circulation, or the refusal costs the caller its session
+    name as well."""
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="claunch-5", title="already written")
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            for extra in ({"issue": "claunch-5"}, {"beads": False},
+                          {"task": "go" + chr(10) + "issue: claunch-5"}):
+                resp = await client.post(
+                    "/api/sessions",
+                    json={"name": "nope", "profile": "py", "cwd": str(repo),
+                          "issue_text": "the real spec", **extra},
+                    headers=BEARER,
+                )
+                doc = await resp.json()
+                assert resp.status == 400, doc
+                assert "issue_text" in doc["error"]
+                # nothing staged, nothing written, and the name is free again
+                with pytest.raises(Exception):
+                    mgr.get("nope")
+                assert br.calls == []
+
+            # the same name creates fine once the request means one thing
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "nope", "profile": "py", "cwd": str(repo),
+                      "issue_text": "the real spec"},
+                headers=BEARER,
+            )
+            assert resp.status == 201, await resp.json()
             await mgr.shutdown_all()
         finally:
             await client.close()

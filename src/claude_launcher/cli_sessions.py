@@ -161,6 +161,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         ("mesh", args.mesh), ("handle", args.handle),
         ("workflow", args.workflow), ("context", args.context),
         ("task", args.task), ("issue", getattr(args, "issue", None)),
+        ("issue_text", getattr(args, "issue_text", None)),
     ):
         if value:
             body[key] = value
@@ -291,6 +292,7 @@ def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
         ("--mesh", args.mesh), ("--as", args.handle), ("--role", args.role),
         ("--workflow", args.workflow), ("--context", args.context),
         ("--task", args.task), ("--issue", getattr(args, "issue", None)),
+        ("--issue-text", getattr(args, "issue_text", None)),
     ):
         if value:
             out.append(f"{flag} {value!r}" if " " in str(value) else f"{flag} {value}")
@@ -423,6 +425,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("context", args.context),
             ("task", args.task),
             ("issue", getattr(args, "issue", None)),
+            ("issue_text", getattr(args, "issue_text", None)),
             ("profile", args.profile),
             ("borrow", args.borrow),
             ("null_token", args.null_token),
@@ -522,6 +525,8 @@ def _print_onboarding(result: dict) -> None:
                   + (f" (told {held} on mesh {went})" if went else ""))
         elif mode == "assigned":
             print(f"  issue {board['issue']}: assigned to it")
+        elif board.get("from_issue_text"):
+            print(f"  issue {board['issue']}: created from the issue text")
         else:
             print(f"  issue {board['issue']}: created from the task")
     if result.get("task"):
@@ -1396,6 +1401,13 @@ NOISSUE_HELP = (
     "no board issue at all -- neither minted nor adopted (without this, a "
     "session created with --task gets one minted for it)"
 )
+ISSUETEXT_HELP = (
+    "what the minted issue SAYS, written here instead of being read off "
+    "--task. Its first line becomes the title and the whole of it the goal, "
+    "so the board can hold the specification while --task holds only the "
+    "first instruction; the session is told to go read it. Without this the "
+    "issue is minted from --task, exactly as before"
+)
 
 
 def register(sub) -> None:
@@ -1507,6 +1519,13 @@ def register(sub) -> None:
     n_issue.add_argument(
         "--no-issue", action="store_true", dest="no_issue", help=NOISSUE_HELP,
     )
+    # In the same group as the other two: the text only has meaning under the
+    # answer that mints, so "this text, and also that existing issue" and
+    # "this text, and also no issue" are both contradictions and are refused
+    # here rather than silently resolved by the daemon.
+    n_issue.add_argument(
+        "--issue-text", metavar="TEXT", dest="issue_text", help=ISSUETEXT_HELP,
+    )
     p_new.add_argument(
         "-a", "--attach", action="store_true",
         help="attach this terminal to the new session right away (detach: Ctrl+])",
@@ -1584,6 +1603,9 @@ def register(sub) -> None:
     s_issue.add_argument("--issue", metavar="ID", help=ISSUE_HELP)
     s_issue.add_argument(
         "--no-issue", action="store_true", dest="no_issue", help=NOISSUE_HELP,
+    )
+    s_issue.add_argument(
+        "--issue-text", metavar="TEXT", dest="issue_text", help=ISSUETEXT_HELP,
     )
     p_spawn.add_argument(
         "--harness", help="deprecated/read-only: the selected profile owns it"

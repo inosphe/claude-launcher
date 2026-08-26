@@ -105,8 +105,8 @@ check("the form's controls read in the new order", named(form.text), [
   // what it is told first
   "task",
   // where that job is written down — three radios sharing one name, then
-  // the picker that only one of them opens
-  "beads", "beads", "beads", "issue",
+  // the two rows each of which only one of them opens
+  "beads", "beads", "beads", "issue_text", "issue",
 ]);
 
 check("the arrangement is asked before the machinery",
@@ -125,8 +125,9 @@ check("the harness stays read-only wherever it is shown",
       /name="harness"[^>]*\sdisabled[\s>]/s.test(runsOn.text), true);
 check("the credential hint travels with the profile it qualifies",
       ids(runsOn.text).includes("profile-hint"), true);
+const BOARD_ROWS = ["beads", "issue_text", "issue"];
 check("the opening task is the last thing asked before the board",
-      named(form.text).filter((n) => n !== "beads" && n !== "issue").slice(-1),
+      named(form.text).filter((n) => !BOARD_ROWS.includes(n)).slice(-1),
       ["task"]);
 check("...and it is not inside the fold",
       named(fold.text).includes("task"), false);
@@ -147,10 +148,19 @@ const beadsBox = block('<fieldset id="new-beads">', "</fieldset>", form.start);
 check("the board question offers exactly three answers",
       [...beadsBox.text.matchAll(/name="beads" value="(\w+)"/g)].map((m) => m[1]),
       ["new", "existing", "none"]);
-check("minting from the task is the one that is checked",
+check("the answer that mints is the one that is checked",
       /value="new" checked/.test(beadsBox.text), true);
 check("the issue picker is hidden until it is the answer",
       /id="new-issue-row" class="hidden"/.test(beadsBox.text), true);
+/* The other conditional row, and the opposite default: "new" is the answer
+   the form arrives on, so the box its text goes in has to be on screen at
+   that moment. Shipped with class="hidden" it would be a field nobody could
+   find without first picking another answer and coming back. */
+check("the issue text is a textarea, not a one-line input",
+      /<textarea name="issue_text"/.test(beadsBox.text), true);
+check("...and it is visible on arrival, under the answer it belongs to",
+      /id="new-issue-text-row"(?![^>]*class="hidden")/.test(beadsBox.text),
+      true);
 
 /* The hints travel with the field they explain — a directory warning left
    above the fold would be pointing at a row that is not on screen. */
@@ -214,6 +224,13 @@ check("only 'none' and 'existing' put a board key on the request",
        /body\.beads = true/.test(submit)],
       [true, true, false]);
 
+/* ...and the text rides only under "new". Sent beside "existing" or "none"
+   it is a contradiction the daemon refuses outright (beads.check_request),
+   so a form that always attached it would turn the other two answers into
+   400s the moment somebody typed in the box and changed their mind. */
+check("the issue text is sent only under the answer that mints",
+      /beads === "new" && f\.issue_text\.value/.test(submit), true);
+
 /* ---- the board row, against stubs ----
    The whole reason this row exists is that picking an issue somebody is
    already working means something different from picking a free one, and the
@@ -227,7 +244,9 @@ check("only 'none' and 'existing' put a board key on the request",
   };
   const hintBox = { textContent: "", classList: cls() };
   const rowBox = { classList: cls() };
-  const bf = { beads: { value: "new" }, issue: issueSel };
+  const textBox = { classList: cls() };
+  const bf = { beads: { value: "new" }, issue: issueSel,
+               issue_text: { value: "" } };
   const bctx = {};
   new Function("exports", "$", "Option", "issuesCache", "issuesError",
     "issuesRead",
@@ -239,6 +258,7 @@ check("only 'none' and 'existing' put a board key on the request",
     "exports.render = renderIssueOptions;\n")(
     bctx,
     (id) => ({ "new-session": bf, "new-issue-row": rowBox,
+               "new-issue-text-row": textBox,
                "new-issue-hint": hintBox }[id] || null),
     function Opt(text, value) { return { text, value }; },
     [
@@ -261,6 +281,8 @@ check("only 'none' and 'existing' put a board key on the request",
   check("the picker is hidden while the answer is 'new'",
         [rowBox.classList.has("hidden"), hintBox.classList.has("hidden")],
         [true, true]);
+  check("...and the text box, which belongs to that answer, is not",
+        textBox.classList.has("hidden"), false);
 
   bf.beads.value = "existing";
   bf.issue.value = "cl-1";
@@ -268,6 +290,20 @@ check("only 'none' and 'existing' put a board key on the request",
   check("choosing a free issue opens the row and warns about nothing",
         [rowBox.classList.has("hidden"), hintBox.classList.has("hidden")],
         [false, true]);
+  /* Hidden, not cleared. Somebody who writes a specification, tries the
+     other two answers and comes back must find their words still there —
+     a box that emptied itself would lose them without ever saying so. */
+  bf.issue_text.value = "make the rail answer";
+  bctx.sync();
+  check("the text box closes under the other answers, keeping what was typed",
+        [textBox.classList.has("hidden"), bf.issue_text.value],
+        [true, "make the rail answer"]);
+  bf.beads.value = "none";
+  bctx.sync();
+  check("...and under 'no issue' too",
+        [textBox.classList.has("hidden"), rowBox.classList.has("hidden")],
+        [true, true]);
+  bf.beads.value = "existing";
 
   bf.issue.value = "cl-2";
   bctx.sync();
@@ -291,8 +327,10 @@ check("only 'none' and 'existing' put a board key on the request",
        "exports.sync = syncBeadsRow;"].join("\n"))(
       ctx2,
       (id) => ({ "new-session": { beads: { value: "existing" },
-                                  issue: { value: "" } },
+                                  issue: { value: "" },
+                                  issue_text: { value: "" } },
                  "new-issue-row": { classList: cls() },
+                 "new-issue-text-row": { classList: cls() },
                  "new-issue-hint": box }[id] || null),
       [], "", read);
     ctx2.sync();

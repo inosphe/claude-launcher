@@ -118,6 +118,17 @@ def pick(wiz: wizard.Wizard, key: str, label: str) -> None:
     raise AssertionError(f"no option {label!r} in {key!r}")
 
 
+def type_into(wiz: wizard.Wizard, key: str, text: str) -> None:
+    """Fill a text row the way a person would: open it, type, commit."""
+    focus_on(wiz, key)
+    wiz.handle("enter")
+    assert wiz.mode == wizard.EDIT
+    for ch in text:
+        wiz.handle(ch)
+    wiz.handle("enter")
+    assert wiz.value(key) == text
+
+
 # --------------------------------------------------------------------------- #
 # keyboard
 # --------------------------------------------------------------------------- #
@@ -1817,6 +1828,57 @@ def test_the_board_question_has_three_answers_and_only_one_opens_the_picker():
     assert not wiz.field("issue").hidden
     pick(wiz, "beads", "no issue")
     assert wiz.field("issue").hidden
+
+
+def test_the_issue_text_row_belongs_to_the_answer_that_mints():
+    """Each of the two conditional rows is a question under exactly one
+    answer, and the text row's answer is the one the form arrives on — so it
+    is the row that is visible before anybody touches anything."""
+    wiz = form()
+    text = wiz.field("issue_text")
+    assert isinstance(text, wizard.TextField)
+    assert not text.hidden and wiz.field("issue").hidden
+
+    pick(wiz, "beads", "an existing issue")
+    assert text.hidden and not wiz.field("issue").hidden
+    pick(wiz, "beads", "no issue")
+    assert text.hidden
+
+
+def test_the_text_row_keeps_what_was_typed_while_the_answer_is_tried_out():
+    """Hidden, not cleared. Somebody who writes a specification, looks at the
+    other two answers and comes back must find their words where they were —
+    a row that emptied itself would lose them without saying so."""
+    wiz = form()
+    type_into(wiz, "issue_text", "Rail must answer the board")
+    pick(wiz, "beads", "no issue")
+    pick(wiz, "beads", "new issue")
+    assert wiz.value("issue_text") == "Rail must answer the board"
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.issue_text == "Rail must answer the board"
+
+
+def test_only_the_answer_that_mints_sends_a_text():
+    """The daemon refuses a request that carries two board answers at once
+    (beads.check_request), so a form that let a hidden row's leftovers ride
+    along would turn the other two answers into 400s."""
+    for answer in ("an existing issue", "no issue"):
+        wiz = form()
+        type_into(wiz, "issue_text", "left behind")
+        pick(wiz, "beads", answer)
+        args = argparse.Namespace()
+        wiz.apply(args)
+        assert args.issue_text is None
+
+
+def test_the_closing_line_says_which_of_the_two_boxes_the_issue_came_from():
+    """The form vanishes with the alternate screen, so this line is the only
+    trace of where to go looking for what the session was actually asked."""
+    wiz = form()
+    assert "new issue from the task" in wiz.summary()
+    type_into(wiz, "issue_text", "the real spec")
+    assert "new issue, written here" in wiz.summary()
 
 
 def test_the_issue_picker_says_which_rows_would_only_be_joined():

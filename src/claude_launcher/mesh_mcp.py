@@ -203,6 +203,20 @@ TOOLS = [
                         "rather than letting it mint a duplicate"
                     ),
                 },
+                "issue_text": {
+                    "type": "string",
+                    "description": (
+                        "what the child's NEW issue says, written here "
+                        "instead of being read off its task. First line "
+                        "becomes the title, the whole of it the goal — so "
+                        "the board holds the specification while 'task' "
+                        "holds only the first instruction, and the child is "
+                        "told to go read the record. Cannot be combined with "
+                        "'issue' or 'no_issue': those are the other two "
+                        "answers to the same question and the request is "
+                        "refused rather than one of them quietly dropped"
+                    ),
+                },
                 "no_issue": {
                     "type": "boolean",
                     "description": (
@@ -551,8 +565,9 @@ def _my_handle(members: list) -> str:
 #: fields are the policy's to unlock, not the schema's to advertise.
 _SPAWN_KEYS = (
     "name", "mesh", "handle", "role", "connect", "workflow", "context",
-    "task", "issue", "harness", "workspace", "worktree", "rebase_onto",
-    "profile", "borrow", "null_token", "cwd", "args", "env", "fork",
+    "task", "issue", "issue_text", "harness", "workspace", "worktree",
+    "rebase_onto", "profile", "borrow", "null_token", "cwd", "args", "env",
+    "fork",
 )
 
 

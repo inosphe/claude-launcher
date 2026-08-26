@@ -348,3 +348,30 @@ def test_set_provider_pin_and_clear(home, capsys):
 def test_set_provider_clear_with_value_errors(home, capsys):
     run("create", "work", "--no-seed")
     assert run("set-provider", "work", "glm", "--clear") == 1
+
+
+def test_the_board_answers_are_mutually_exclusive_on_both_creation_commands():
+    """One session, one board answer. ``--issue-text`` writes a new issue,
+    ``--issue`` adopts one that exists, ``--no-issue`` asks for none — sent in
+    pairs the daemon would have to guess, and the guess it makes today drops
+    the written text without a word. argparse refuses the pair first, so the
+    CLI and the API agree about what a request may mean."""
+    import itertools
+
+    import pytest
+
+    parser = cli.build_parser()
+    answers = (
+        ["--issue", "cl-1"], ["--no-issue"], ["--issue-text", "the spec"],
+    )
+    for cmd in (["new-session"], ["spawn"]):
+        for one, two in itertools.combinations(answers, 2):
+            with pytest.raises(SystemExit):
+                parser.parse_args(cmd + one + two)
+        # ...and each on its own parses, landing in its own field
+        for flags in answers:
+            parser.parse_args(cmd + flags)
+
+    args = parser.parse_args(["new-session", "--issue-text", "the spec"])
+    assert args.issue_text == "the spec"
+    assert args.issue is None and args.no_issue is False

@@ -369,9 +369,10 @@
             placeholder="typed in once it has booted — what it is for"></textarea>
         </fieldset>
 
-        <!-- The board answer, after the task because two of its three shapes
-             are read off it: "new" mints an issue from that text, and there
-             is nothing to mint from when the box is empty. The third — an
+        <!-- The board answer, after the task because it is still the fallback
+             two of its three shapes are read off: "new" mints from the box
+             below when that is filled and from the task when it is not, so
+             an empty pair has nothing to mint from. The third — an
              issue that already exists — is a picker rather than a text box
              for the same reason every other row here is: the daemon
              publishes the list, and an id it does not have would be a
@@ -386,7 +387,7 @@
           <legend>Board issue</legend>
           <label class="check">
             <input type="radio" name="beads" value="new" checked>
-            <span>New issue, from the opening task</span>
+            <span>New issue</span>
           </label>
           <label class="check">
             <input type="radio" name="beads" value="existing">
@@ -395,6 +396,18 @@
           <label class="check">
             <input type="radio" name="beads" value="none">
             <span>No issue</span>
+          </label>
+          <!-- Under the first answer, and a textarea rather than an input:
+               what an issue says is a specification, not a name. It is here
+               at all because the opening task and the issue body stopped
+               being the same words — the task is what the session is TOLD
+               when it boots, this is the record of the work — and there was
+               nowhere to write the second without writing it into the first.
+               Left empty it changes nothing: the issue is minted from the
+               task, exactly as every release before this did. -->
+          <label id="new-issue-text-row">Issue text
+            <textarea name="issue_text" rows="3"
+              placeholder="what the issue says — first line is its title; empty uses the opening task"></textarea>
           </label>
           <label id="new-issue-row" class="hidden">
             Issue <select name="issue"></select>
