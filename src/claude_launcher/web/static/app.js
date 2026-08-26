@@ -8693,8 +8693,10 @@ function wfDiagramSvg(wf, run, selected) {
     const room = NW - 24 - (visits[id] > 1 ? 26 : 0);
     const shown = wfdFit(title, 13, room);
     parts.push(`<g class="${cls.join(" ")}" data-step="${escXml(s.id)}">`);
-    parts.push(`<rect x="${NX}" y="${y}" width="${NW}" height="${NH}" rx="8"/>`);
+    // First child, where SVG says a <title> belongs: it is the group's
+    // tooltip, and what the cut title dropped is only reachable here.
     if (shown !== title) parts.push(`<title>${escXml(title)}</title>`);
+    parts.push(`<rect x="${NX}" y="${y}" width="${NW}" height="${NH}" rx="8"/>`);
     parts.push(
       `<text class="wfd-title" x="${NX + 12}" y="${y + (flags.length ? 19 : 27)}">` +
       `${escXml(shown)}</text>`

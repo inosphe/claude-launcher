@@ -291,7 +291,7 @@ const WORKER = {
   const yOf = (id) => {
     const m = svg.match(
       new RegExp(`class="[^"]*wfd-node[^"]*" data-step="${id}"[^>]*>` +
-                 `<rect x="[^"]+" y="(\\d+)"`));
+                 `(?:<title>[^<]*</title>)?<rect x="[^"]+" y="(\\d+)"`));
     return m ? +m[1] : NaN;
   };
   check("end is the bottom row of the picture",
