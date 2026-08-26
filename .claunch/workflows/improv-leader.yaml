@@ -81,7 +81,14 @@ steps:
         맞춰 본다. assignee 세션이 exited인 in_progress 이슈는 고아다 —
         `claunch beads comments add <id> "ORPHANED: <세션> exited, branch
         <브랜치>"` 후 `update <id> --status open`으로 되돌린다(재배정은
-        관제 대기에서). 보드에 없는데 돌고 있는 워커 런이 있으면 그 워커에게
+        관제 대기에서). in_review인데 assignee가 exited인 것은 갈래가 하나
+        더 있다: 그 브랜치가 이미 실렸는지를 git으로 본다 — `git rev-list
+        --parents --merges <tip>..master`의 부모 목록에 그 tip이 있는가
+        (워커의 landed와 같은 질문이고, contains로 묻지 않는 이유도 같다).
+        실렸으면 마감만 남은 것이므로 리더가 닫는다(`close <id> --reason
+        "merged <해시>"`, 스윕 수치를 알면 붙인다) — 워커가 wrapup에 닿기
+        전에 죽어서 못 닫은 것이고, 그대로 두면 표에 영원히 남는다.
+        안 실렸으면 위와 같이 open으로 되돌린다. 보드에 없는데 돌고 있는 워커 런이 있으면 그 워커에게
         이슈를 만들어 올리라고 한다 — 리더가 대신 만들지 않는다.
       합의(또는 무변경 확인)와 보드 대조 결과를 보고에 남긴다.
 
@@ -134,8 +141,12 @@ steps:
       상태 전이의 주인: open→in_progress는 assignee 워커(intake 끝,
       --external-ref에 run id) / in_progress→in_review는 assignee 워커
       (landing request) / in_review→in_progress는 리더(rebase 재요청) /
-      in_review→closed는 리더만(`claunch beads close <id> --reason "merged
-      <hash>, sweep N/M"`; 중간 워커는 자기 --parent 자식만) / 아무
+      in_review→closed는 assignee 세션이다 — 누가 배정했든 그 이슈를 끝까지
+      관리하는 것은 assignee다. 닫는 자리는 wrapup 하나, 닫을 자격은 landed가
+      git으로 증명한 머지 커밋 해시다(`claunch beads close <id> --reason
+      "merged <머지 해시>"`; 중간 워커는 자기 --parent 자식을 같은 방식으로
+      닫는다). assignee가 비었거나 그 세션이 exited면 리더가 닫는다 — 고아만
+      리더 몫이고, 그때 사유에 스윕 수치를 붙일 수 있으면 붙인다 / 아무
       상태→blocked는 그 게이트에 걸린 세션(`BLOCKED: <스텝>`), 해소되면
       같은 세션이 되돌린다 / reopen은 리더만. update --status closed는
       없다 — close뿐이다.
@@ -559,9 +570,14 @@ steps:
       있는 저장소에서는 그 verify가 초록이 될 때까지 이 단계를 떠나지
       못한다 — 그 초록을 만드는 것은 리더가 스윕을 다시 도는 것이 아니라
       **subagent를 다시 띄우는 것**이다.
-      ── 보드 마감 (리더만 닫는다) ──
-      머지와 스윕이 끝난 이슈마다 `claunch beads close <id> --reason "merged
-      <머지 해시>, sweep N/M"`. 그 다음 보드를 저장소에 싣는다 — `claunch
+      ── 보드 싣기 (닫는 것은 assignee, 싣는 것은 리더) ──
+      머지된 이슈를 닫는 것은 그 이슈의 assignee 세션이고 자리는 각자의
+      wrapup이다 — 리더가 대신 닫지 않는다. 리더가 닫는 것은 둘뿐이다:
+      assignee가 exited라 스스로 못 닫은 고아(보드 대조에서 걸러진 것)와,
+      중간 워커의 스택 부모 이슈. 그 둘에 한해 `claunch beads close <id>
+      --reason "merged <머지 해시>, sweep N/M"`.
+      리더의 자리는 그 다음이다 — 워커들의 close는 DB에만 쓰였으므로 싣는
+      것이 남는다. 보드를 저장소에 싣는다 — `claunch
       beads sync --flush-only` 후 master에서 `git add .beads/issues.jsonl`,
       `git commit -m "chore(beads): close <id들>"`; 이 커밋도 subagent가
       실행하고 리더가 해시를 되확인한다. `.beads/`를 커밋하는 자리는 여기
@@ -571,8 +587,10 @@ steps:
       = 명령 전문, 트리 해시, 시작 시각)가 보고에 있고, 그 스윕이 **spawn된
       subagent 안에서** 돌았음과 그 subagent의 식별이 적혀 있다(리더의 턴도
       엔진 verify도 아니다 — 둘 다 이 스텝이 금지한 경로다). 스윕이 돈
-      트리가 깨끗했음(남의 미커밋 없음)이 적혀 있다. 머지된 이슈는
-      close되었고 chore(beads) 커밋 해시가 보고에 있다.
+      트리가 깨끗했음(남의 미커밋 없음)이 적혀 있다. 이번 배치에서 닫힌
+      이슈 수가 보고에 있고(닫은 주체는 각 assignee다), 리더가 직접 닫은
+      고아·스택 부모가 있으면 그 id와 사유가 적혀 있으며, chore(beads)
+      커밋 해시가 보고에 있다.
     # 저장소 특화 verify는 정본이 아니라 프로젝트 레이어(.claunch/workflows/)에.
     # 여기 있던 것은 `pytest tests -q -n 8`, 전체 스위트 그 자체였다. 엔진은
     # verify를 스텝을 떠날 때 동기로 돌리므로(cflow/engine.py의 _run_verify)
