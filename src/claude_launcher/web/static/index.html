@@ -128,6 +128,16 @@
     <div id="term-header" class="hidden">
       <span id="term-title"></span>
       <span id="term-status" class="badge"></span>
+      <!-- When the daemon will next type into THIS session by itself, and how
+           long is left of it. The rail's strip answers the same question for
+           the machine — and falls back to whichever run is closest to being
+           spoken to when the attached session drives none, which is exactly
+           why it cannot serve here: on a session's own header a countdown
+           belonging to some other session is a confident lie. So this chip
+           speaks for the attached session's run or shows nothing at all.
+           Rendered by renderTermTimer(); aged every second by
+           paintTermTimer(). -->
+      <button id="term-timer" class="term-btn timer-chip hidden" type="button"></button>
       <!-- What would happen to a message arriving RIGHT NOW: typed straight
            in, or queued — and, when it is queued, by what. The badge before
            it says what the session is doing; this says what that means for

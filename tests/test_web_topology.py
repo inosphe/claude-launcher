@@ -144,7 +144,15 @@ nobody could see coming: two clocks can produce it (a reminder into a
 session that is working, a stall ping into one that stopped), at most one of
 them applies at a time, and the check holds the pick to the clock a reader
 needs plus the several silences — off, not running, held, gated — that a
-lazier strip would collapse into one word.
+lazier strip would collapse into one word. ``termtimer_check`` on the same
+clock drawn on the session's own header, where it has a subject: the strip's
+fallback to whichever run fires soonest is right for a rail and a lie beside
+one session's name, so the chip shows that session's own run or nothing, its
+reading is stamped with the session it was taken for (a terminal switch
+repaints a second before the poll comes round), and the three wirings that
+make it move at all — the 2s poll, every attach path, and one interval
+ageing both faces of the clock so they cannot drift apart — are held there
+too.
 
 ``leak_check`` is the odd one out and deliberately so: instead of slicing a
 function it boots the WHOLE of ``app.js`` against a stub browser built by
@@ -231,6 +239,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "wfdpace_check.js",
         "askdoor_check.js",
         "railtimer_check.js",
+        "termtimer_check.js",
     ],
 )
 def test_topology_diagram_logic(script):

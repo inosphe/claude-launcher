@@ -929,6 +929,79 @@ function paintRailTimer() {
 }
 
 /* ------------------------------------------------------------------ */
+/* the same clock, on the session's own header                        */
+/* ------------------------------------------------------------------ */
+/* The rail's strip answers "is the daemon about to type into something on
+   this machine, and when". A person watching one terminal is asking a
+   narrower question — "is it about to type into THIS one" — and the strip
+   cannot answer it: when the attached session drives no run of its own it
+   falls back to whichever run on the machine fires soonest (railTimerRun),
+   which is the right answer for a rail and the wrong one for a header. A
+   countdown drawn beside a session's name is read as that session's.
+
+   So the chip below shares every judgement with the strip — the same pick,
+   the same words, the same ageing — and differs in exactly two ways, both
+   of them consequences of having a subject:
+
+   * no fallback. The attached session's run or nothing;
+   * no scope label. The strip prints the scope because it may be speaking
+     for a run the reader is not looking at; here the name is already at the
+     other end of the same row, and repeating it would be noise.
+
+   Reusing railTimerLine rather than writing a second one is the point: two
+   wordings for one clock drift, and the strip's words are the tested ones. */
+
+/* The run the header's chip speaks for: the attached session's, or null. */
+function termTimerRun() {
+  if (typeof currentName !== "string" || !currentName) return null;
+  const run = sessCflowRun(currentName);
+  return run && run.timers ? run : null;
+}
+
+/* The last reading, stamped with the session it was taken FOR. A terminal
+   switch repaints long before the 2s poll comes round, and the previous
+   session's countdown left on the new session's header would be the one
+   mistake this chip exists to avoid. */
+let termTimerRead = null;
+
+function renderTermTimer() {
+  termTimerRead = {
+    name: currentName, pick: railTimerPick(termTimerRun()), at: Date.now(),
+  };
+  paintTermTimer();
+}
+
+function paintTermTimer() {
+  const box = $("term-timer");
+  if (!box) return;
+  const read = termTimerRead;
+  const line = read && read.name === currentName
+    ? railTimerLine(read.pick, (Date.now() - read.at) / 1000) : null;
+  if (!line) {
+    box.className = "term-btn timer-chip hidden";
+    box.textContent = "";
+    box.removeAttribute("title");
+    return;
+  }
+  box.className = `term-btn timer-chip ${line.state}`;
+  box.title = line.title;
+  box.textContent = "";
+  box.append(el("span", "tt-glyph", line.glyph), el("span", "tt-text", line.text));
+  // The run page, where the interval is actually editable — the strip's
+  // click, on the strip's own reading. Wired once: textContent above wipes
+  // the children, not the box.
+  if (!box.dataset.wired) {
+    box.dataset.wired = "1";
+    box.addEventListener("click", () => {
+      const p = termTimerRead && termTimerRead.pick;
+      if (!p) return;
+      location.hash =
+        "#/wf/" + encodeURIComponent(`${p.scope || "default"}|${p.cwd}`);
+    });
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* context size                                                       */
 /* ------------------------------------------------------------------ */
 /* How full each session's conversation is. The daemon reads it out of the
@@ -1831,6 +1904,7 @@ async function refreshCflow() {
   cflowCache = runs;
   applyCflowBadges();  // the rail rows may have painted before this cache filled
   renderRailTimer();   // ...and the nudge countdown above the nav reads it too
+  renderTermTimer();   // ...as does the attached session's own header chip
   if (currentPage === "home") renderHome();
   // Everything above is what the *rail* reads: badges on rows, the nudge
   // countdown, the home card's count. What follows rebuilds the Flows page's
@@ -3107,6 +3181,11 @@ function setStatusBadge(status) {
   $("term-rebrief").classList.toggle("hidden", exited);
   $("term-kill").classList.toggle("hidden", exited);
   $("term-remove").classList.toggle("hidden", !exited);
+  // Every attach path passes through here (freshAttach and restoreTerminal
+  // both seed the header with it), so this is where the countdown is told
+  // which session it is now about — a whole second of the last session's
+  // clock would otherwise sit on this one's name.
+  renderTermTimer();
   syncMobileBars();  // the mobile bars mirror this header
 }
 
@@ -14579,7 +14658,9 @@ document.addEventListener("pointercancel", releaseRail, true);
 // /api/cflow reading — so it is a second's worth of arithmetic, and it is
 // separate from the 2s poll because a clock that only moves every other
 // second reads as a clock that has stopped, which is the exact thing this
-// strip exists to tell apart.
-railTimerTicker = setInterval(paintRailTimer, 1000);
+// strip exists to tell apart. One interval, both faces of the same clock:
+// the rail's strip and the attached session's header chip must not be able
+// to drift a second apart from each other.
+railTimerTicker = setInterval(() => { paintRailTimer(); paintTermTimer(); }, 1000);
 
 boot();
