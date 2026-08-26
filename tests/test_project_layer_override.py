@@ -68,7 +68,17 @@ def _graft_fields() -> tuple:
 #: ``reflect`` asks whether the live daemon was actually restarted onto that
 #: merge. Both exist because their step used to be prose alone -- a round
 #: could be filed as swept, or as deployed, with nothing having happened.
-ARMED = {"improv-worker": ("review",), "improv-leader": ("sweep", "reflect")}
+#:
+#: The worker arms two. ``review`` runs the tests its own change can affect;
+#: ``wrapup`` asks whether the round left its HTML report behind. The second
+#: is armed for the same reason the leader's two are -- the step was prose
+#: alone, and it sits in the last thing a session does before killing itself,
+#: which is the line a busy round drops first: skipping it costs nothing,
+#: because the turn ends either way.
+ARMED = {
+    "improv-worker": ("review", "wrapup"),
+    "improv-leader": ("sweep", "reflect"),
+}
 
 # Every gate runs against a venv that is already there. A worker's worktree
 # builds its venv once during the work ('uv sync --extra test'); after that,
@@ -83,6 +93,15 @@ NO_SYNC = "uv run --no-sync python"
 #: (a sweep receipt, a daemon's boot time).
 GATES = {
     ("improv-worker", "review"): "tools/changed_tests.py",
+    # Not a script under tools/, and the odd one out for a reason worth
+    # keeping: the check ships inside claunch itself, so the gate calls the
+    # module rather than the `claunch` on PATH. That PATH entry is whichever
+    # copy happens to be installed -- measured, it answered
+    # "invalid choice: 'report'" and exited 2, which would have failed the
+    # gate in every session until the branch landed and was reinstalled.
+    # Calling it through `uv run` runs the tree being checked, which is the
+    # same reason the other three name a path into this checkout.
+    ("improv-worker", "wrapup"): "claude_launcher.cli report check",
     ("improv-leader", "sweep"): "tools/sweep.py",
     ("improv-leader", "reflect"): "tools/deploy_check.py",
 }
@@ -155,6 +174,37 @@ def test_the_leader_override_gates_the_deploy_on_a_real_restart():
     assert verify is not None, "the deploy gate is gone from reflect"
     assert "tools/deploy_check.py" in verify.command
     assert "--branch master" in verify.command
+
+
+def test_no_gate_calls_a_binary_off_PATH():
+    """Every gate must run the tree it is checking, not whatever is installed.
+
+    This is a rule the other three gates already followed without anyone
+    writing it down: they name a path into this checkout and reach it through
+    ``uv run``. The first gate that did not follow it proved why. It was
+    ``claunch report check`` -- the obvious spelling -- and the ``claunch`` on
+    PATH is an installed copy, not this tree, so it answered
+    ``invalid choice: 'report'`` and exited 2. That gate could not have passed
+    in any session until the branch landed and was reinstalled.
+
+    ``ARMED``/``GATES`` almost cover this already, but only for steps somebody
+    remembered to list there. This walks the files instead, so a gate added to
+    the layer without touching either table is still held to the rule.
+    """
+    offenders = []
+    for path in sorted(OVERRIDES.glob("*.yaml")):
+        wf = model.load(path)
+        for step_id, step in wf.steps.items():
+            if step.verify is None:
+                continue
+            if not step.verify.command.startswith(NO_SYNC):
+                offenders.append(f"{path.name}:{step_id} -> {step.verify.command}")
+    assert not offenders, (
+        "a gate must run this checkout, not a binary off PATH. Reach it "
+        f"with '{NO_SYNC} ...'. Measured: 'claunch report check' exited 2 "
+        "with \"invalid choice: 'report'\" because PATH held an older "
+        "install. Offending gates: " + "; ".join(offenders)
+    )
 
 
 @pytest.mark.parametrize("stem", sorted(ARMED))

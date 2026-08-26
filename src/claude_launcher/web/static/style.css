@@ -1040,6 +1040,17 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 }
 .sess-beads > .wf-note, .sess-beads > .wf-warning { margin: 0 0 8px; line-height: 1.5; }
 .sess-beads .wf-btn.option { margin-top: 8px; }
+.sess-reports { margin: 0 0 12px; }
+.sess-reports h3 {
+  font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 8px;
+}
+.sess-report {
+  display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap;
+  padding: 4px 0; border-bottom: 1px solid #23262d;
+}
+.sess-report:last-child { border-bottom: none; }
+.sess-report-link { color: #6cb6ff; text-decoration: none; font-size: 13px; }
+.sess-report-link:hover { text-decoration: underline; }
 .sess-beads-create { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 .sess-beads-create input {
   flex: 1 1 200px; min-width: 0; padding: 6px 8px; background: #0d1117;

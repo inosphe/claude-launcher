@@ -22,7 +22,8 @@ from typing import List, Optional
 from aiohttp import web
 
 from .. import __version__, harnesses as harness_registry
-from .. import lineage, profile as profile_mod, quickjob, spawn as spawn_mod, store, workspaces
+from .. import lineage, profile as profile_mod, quickjob, reports as reports_mod
+from .. import spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import beads as beads_mod
 from . import briefing, cflow_clock, clipty, ctxsize, onboard, rebrief
@@ -326,6 +327,12 @@ def build_app(
     r.add_get("/api/beads/{id}", h_beads_issue)
     r.add_get("/api/sessions/{name}/beads", h_session_beads)
     r.add_post("/api/sessions/{name}/beads", h_session_beads_create)
+    # A session's round reports: the index, and the page itself. The index is
+    # already inside the beads view above (one panel, one fetch); this route
+    # exists for a caller that wants only the files, and the second one is
+    # what a link in that panel actually opens.
+    r.add_get("/api/sessions/{name}/reports", h_session_reports)
+    r.add_get("/api/sessions/{name}/reports/{file}", h_session_report_file)
     r.add_get("/", h_index)
     if _STATIC_DIR.is_dir():
         r.add_static("/static", _STATIC_DIR)
@@ -3057,6 +3064,55 @@ async def h_session_beads_create(request: web.Request) -> web.Response:
     return web.json_response(
         {**made, "beads": await request.app["beads"].session_view(session)},
         status=201,
+    )
+
+
+async def h_session_reports(request: web.Request) -> web.Response:
+    """A session's round reports, newest first — the same list the beads view
+    carries, for a caller that wants only the files.
+
+    No session lookup, like the page route below and for the same reason: the
+    point of keeping reports outside ``sessions/<name>/`` is that they outlive
+    the record, and a listing that 404'd once ``clear-sessions`` ran would
+    hand back exactly nothing at the moment the files matter most.
+    """
+    name = request.match_info["name"]
+    try:
+        reports_mod.check_session(name)
+    except reports_mod.ReportError as exc:
+        return json_error(400, str(exc))
+    return web.json_response({"session": name, "reports": reports_mod.listing(name)})
+
+
+async def h_session_report_file(request: web.Request) -> web.StreamResponse:
+    """Serve one report page.
+
+    The session need not exist any more: a report outlives the pane it was
+    written in, and refusing to serve a dead session's report would defeat the
+    reason it is kept outside ``sessions/<name>/``. The name is validated as a
+    path component instead, and the filename must match the indexed form,
+    which admits no separators — that, not the session lookup, is what keeps
+    the read inside the reports directory.
+
+    The page is agent-written HTML served from the daemon's own origin, where
+    the dashboard's auth cookie lives. ``Content-Security-Policy: sandbox``
+    drops it into an opaque origin, so a report can style and script itself
+    but cannot turn around and call the API as the logged-in operator.
+    """
+    try:
+        path = reports_mod.resolve(request.match_info["name"], request.match_info["file"])
+    except reports_mod.ReportError as exc:
+        return json_error(400, str(exc))
+    if not reports_mod.is_report(path):
+        return json_error(404, f"no such report: {request.match_info['file']}")
+    return web.FileResponse(
+        path,
+        headers={
+            "Content-Type": "text/html; charset=utf-8",
+            "Content-Security-Policy": "sandbox allow-scripts allow-popups",
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "no-cache",
+        },
     )
 
 

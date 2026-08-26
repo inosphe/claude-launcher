@@ -119,3 +119,19 @@ def mesh_root() -> Path:
 def mesh_dir(name: str) -> Path:
     """Per-mesh directory: ``mesh.json``, ``log.jsonl``, ``cursors.json``."""
     return mesh_root() / name
+
+
+def reports_root() -> Path:
+    """Root for session round reports — HTML a session leaves behind.
+
+    A sibling of ``sessions/``, deliberately *not* inside it: ``clear-sessions
+    --logs`` rmtree's :func:`session_dir` (see ``manager.clear``), and a report
+    is the one artefact of a round that must outlive the terminal it was
+    written in. The session name is only the key, not a lifetime.
+    """
+    return daemon_dir() / "reports"
+
+
+def session_reports(name: str) -> Path:
+    """Where one session's reports live: ``<daemon dir>/reports/<name>``."""
+    return reports_root() / name
