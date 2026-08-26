@@ -81,11 +81,21 @@ def _gates():
 
 
 def _gate_scripts():
+    """The files the gates name, for the tests that ask what those files do.
+
+    Only targets that are actually files. A command naming a bare executable
+    or a ``-m`` module has no file to examine, and that is not this axis's
+    complaint anyway -- :func:`test_no_gate_command_names_a_bare_executable`
+    owns it, and owning it alone is what keeps a broken gate to one red test
+    with the right name on it. An absolute path *is* a file and stays in:
+    resolving to a file in another checkout is exactly what the next test
+    catches.
+    """
     scripts = []
     for _file, _step, cmd in _gates():
         rest = cmd[len(NO_SYNC):] if cmd.startswith(NO_SYNC) else cmd
         target = ROOT / rest.split()[0]
-        if target not in scripts:
+        if target.is_file() and target not in scripts:
             scripts.append(target)
     return scripts
 
