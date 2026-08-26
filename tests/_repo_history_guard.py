@@ -1,0 +1,298 @@
+"""The premise tree-reuse rests on, watched by a machine instead of by hand.
+
+``tools/sweep.py`` accepts a green receipt recorded for a *different commit
+with the same tree* (``find_receipt_by_tree``), and ``tools/changed_tests.py``
+keys the worker's gate on the same identity. Both are sound only while one
+thing is true:
+
+    **no test's outcome depends on this repository's HEAD or its refs.**
+
+A preview commit and the merge commit that lands the same candidates have
+byte-identical trees and different histories. If a test read that history the
+two would deserve different verdicts, and the tree key would hand one of them
+the other's -- in the direction nobody notices, because the wrong answer is
+*green*.
+
+Until now the premise was a sentence in ``tools/sweep.py``'s docstring,
+grepped by hand on 2026-08-26 and true that day. A hand check does not
+survive the next round. This does.
+
+What is forbidden, exactly
+--------------------------
+Not "no test may run git in this checkout". That rule is wider than the
+premise, and it is already false here. What may not happen is a read of
+something two same-tree commits disagree about. Two shapes, one of them safe:
+
+* ``git cat-file -e 41fcfc8^{commit}`` names an object by its hash. The
+  object database is shared by every commit and every worktree of this
+  repository, so no pair of commits can disagree about the answer.
+  ``tests/test_mergecheck.py::test_the_real_commits`` reads the real
+  repository in exactly that way, deliberately, and is not a violation --
+  which is why this rule is written about revisions and not about paths.
+  (``tools/sweep.py`` used to say every git-touching test digs its own
+  repository under ``tmp_path``. That test is the counter-example and the
+  sentence was already wrong. It was wrong *harmlessly* -- hex object names
+  cannot vary -- but nothing was checking which kind of wrong it was.)
+* ``git log``, ``git rev-parse HEAD``, ``git describe``, ``git status``
+  resolve HEAD or a ref. Those are precisely the parts that differ between
+  two commits holding the same tree.
+
+So a git command aimed at this repository is a violation when its subcommand
+answers from the refs however it is called (:data:`REF_RELATIVE`), or when
+one of its arguments is a *symbolic* revision rather than an object name
+(:func:`symbolic`).
+
+What this does NOT see
+----------------------
+Named here so it is not mistaken for more than it is:
+
+* Only ``subprocess`` in the test process. A test that runs a *script* which
+  then reads HEAD (``python tools/x.py`` with ``cwd`` inside this repository)
+  spawns its git in a child, where this patch does not reach.
+* Only git through ``subprocess``. ``os.system``, a git library, or a direct
+  read of ``.git/HEAD`` all pass.
+* ``GIT_DIR``/``GIT_WORK_TREE`` in a call's ``env`` are not followed: the
+  target is read from ``-C`` or from ``cwd``.
+
+Each of those is a way to break the premise without tripping this. What it
+covers is the shape every git-touching test in this suite actually uses, and
+the shape a new one would be written in.
+"""
+
+from __future__ import annotations
+
+import re
+import subprocess
+from pathlib import Path
+from typing import Optional, Sequence, Union
+
+
+class RepoHistoryRead(AssertionError):
+    """A test read this repository's HEAD or refs. See this module's docstring."""
+
+
+#: Subcommands whose answer comes from HEAD or the refs however they are
+#: called, so no argument makes them safe against this repository. ``describe``
+#: belongs here rather than below because its answer is decided by the *tags*,
+#: which are refs, even when the commit it is describing is named by hash.
+ALWAYS_REF_RELATIVE = frozenset(
+    {
+        "branch",
+        "tag",
+        "for-each-ref",
+        "show-ref",
+        "symbolic-ref",
+        "reflog",
+        "status",
+        "describe",
+        "blame",
+        "bisect",
+        "worktree",
+        "stash",
+        "switch",
+        "checkout",
+        "merge",
+        "rebase",
+        "pull",
+        "push",
+        "fetch",
+    }
+)
+
+#: Subcommands that walk history but only from where they are pointed, and
+#: fall back to **HEAD** when they are pointed nowhere. Naming a commit by
+#: hash makes them safe -- the graph above a fixed object is the same in every
+#: commit of this repository -- so what is forbidden is the implicit form.
+#:
+#: This distinction is not pedantry: it is the difference between banning
+#: ``tests/test_mergecheck.py::test_the_real_commits`` and allowing it. That
+#: test asks ``git merge-base 41fcfc8 744e88d`` of the real repository on
+#: purpose, and two commits with one tree cannot answer it differently.
+HEAD_BY_DEFAULT = frozenset(
+    {"log", "shortlog", "whatchanged", "rev-list", "show", "name-rev"}
+)
+
+#: Subcommands that read a revision at all. Only these have their arguments
+#: inspected -- ``git config user.name`` and ``git commit -m msg`` carry
+#: word-shaped arguments that are not revisions, and a scan that did not know
+#: the difference would call them history reads.
+REV_TAKING = HEAD_BY_DEFAULT | frozenset(
+    {
+        "rev-parse",
+        "cat-file",
+        "diff",
+        "diff-tree",
+        "difftool",
+        "range-diff",
+        "cherry",
+        "merge-base",
+        "ls-tree",
+        "archive",
+        "merge-tree",
+    }
+)
+
+#: Flags that take a separate value, so the word after them is not a revision.
+_TAKES_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
+
+#: An object name -- the thing two same-tree commits cannot disagree about.
+#: The ``^{commit}`` / ``^{tree}`` peel is part of the name, not a ref.
+_OBJECT_NAME = re.compile(r"^[0-9a-fA-F]{7,40}(\^\{\w+\})?$")
+
+#: Revision spellings that are HEAD or a ref by construction.
+_REF_SPELLING = re.compile(r"HEAD|(^|[^\w])@($|[^\w])|^refs/|^origin/")
+
+#: A word that could be a revision at all: anything else (a URL, a glob, a
+#: config assignment) is not being resolved against this repository's refs.
+_WORDLIKE = re.compile(r"^[\w./~^{}:-]+$")
+
+
+def symbolic(arg: str, repo: Path) -> bool:
+    """Is ``arg`` a revision that HEAD or the refs decide?
+
+    Object names are not (``41fcfc8``, ``41fcfc8^{commit}``). Paths that
+    exist in the tree are not -- that is a pathspec. Flags are not. What is
+    left standing in a revision position is a branch or tag name, and those
+    are exactly what two commits with one tree disagree about.
+    """
+    if arg.startswith("-"):
+        return False
+    if _REF_SPELLING.search(arg):
+        return True
+    if _OBJECT_NAME.match(arg.split("..")[0] or arg):
+        return False
+    if (repo / arg).exists():
+        return False
+    return bool(_WORDLIKE.match(arg))
+
+
+def _argv(args: Union[str, Sequence]) -> list:
+    """Popen's ``args`` as a list of strings.
+
+    A ``shell=True`` string is split on whitespace, on purpose: the callers
+    in this repository that pass a string pass pytest command lines, not git,
+    and whitespace is enough to tell those apart. Carrying a shell parser
+    here would be more machinery than the question needs.
+    """
+    if isinstance(args, str):
+        return args.split()
+    return [str(a) for a in args]
+
+
+def _is_git(argv: list) -> bool:
+    return bool(argv) and Path(argv[0]).stem.lower() == "git"
+
+
+def _target(argv: list, cwd: Optional[Union[str, Path]]) -> Path:
+    """Which repository the command speaks to: ``-C`` if given, else ``cwd``."""
+    for i, arg in enumerate(argv[1:], start=1):
+        if arg == "-C" and i + 1 < len(argv):
+            return Path(argv[i + 1])
+        if arg.startswith("--git-dir="):
+            return Path(arg.split("=", 1)[1])
+    return Path(cwd) if cwd is not None else Path.cwd()
+
+
+def _inside(path: Path, root: Path) -> bool:
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    return resolved == root or root in resolved.parents
+
+
+def _bare(argv: list) -> list:
+    """``argv[1:]`` with the pre-subcommand flags and their values removed."""
+    rest, skip = [], False
+    for arg in argv[1:]:
+        if skip:
+            skip = False
+            continue
+        if arg in _TAKES_VALUE:
+            skip = True
+            continue
+        if arg.startswith("--git-dir=") or arg.startswith("--work-tree="):
+            continue
+        rest.append(arg)
+    return rest
+
+
+def offending(
+    args: Union[str, Sequence], cwd: Optional[Union[str, Path]], root: Path
+) -> Optional[str]:
+    """The violation this call is, or ``None``. The pure, testable half.
+
+    ``root`` is this repository's working tree (``pytestconfig.rootpath``).
+    Every worktree of it lives underneath, so they are covered by the same
+    comparison.
+    """
+    argv = _argv(args)
+    if not _is_git(argv):
+        return None
+    target = _target(argv, cwd)
+    if not _inside(target, Path(root).resolve()):
+        return None  # a throwaway repository under tmp_path: the good case
+
+    rest = _bare(argv)
+    sub = next((a for a in rest if not a.startswith("-")), None)
+    after = rest[rest.index(sub) + 1 :] if sub in rest else []
+    if "--" in after:
+        after = after[: after.index("--")]
+
+    named = (
+        next((a for a in after if symbolic(a, Path(root))), None)
+        if sub in REV_TAKING
+        else None
+    )
+    if sub in ALWAYS_REF_RELATIVE:
+        why = f"`git {sub}` answers from HEAD and the refs"
+    elif named is not None:
+        why = f"`{named}` is a symbolic revision, not an object name"
+    elif sub in HEAD_BY_DEFAULT and not any(
+        _OBJECT_NAME.match(a.split("..")[-1] or a) for a in after
+    ):
+        why = f"`git {sub}` with no revision named walks from HEAD"
+    else:
+        return None
+
+    return (
+        f"this test read {target}'s history: {' '.join(argv)}\n"
+        f"  {why}, and HEAD and the refs are the one thing two commits with\n"
+        f"  the same tree disagree about. tools/sweep.py and\n"
+        f"  tools/changed_tests.py both reuse a green receipt across such a\n"
+        f"  pair, so a test that reads history gets handed the other commit's\n"
+        f"  verdict -- as a GREEN, which is why this is a hard stop and not a\n"
+        f"  warning. Dig a repository under tmp_path (tests/test_sweep.py has\n"
+        f"  the idiom), or name objects by hash if you really do mean this\n"
+        f"  repository. Full reasoning: tests/_repo_history_guard.py."
+    )
+
+
+class Guard:
+    """The installed patch, so a test can prove it is armed and take it out."""
+
+    def __init__(self, root: Path):
+        self.root = Path(root).resolve()
+        self.seen: list = []
+        self._real = None
+
+    def install(self) -> "Guard":
+        guard = self
+        real = subprocess.Popen
+        self._real = real
+
+        class GuardedPopen(real):  # type: ignore[misc,valid-type]
+            def __init__(self, args, *rest, **kw):
+                problem = offending(args, kw.get("cwd"), guard.root)
+                if problem is not None:
+                    guard.seen.append(problem)
+                    raise RepoHistoryRead(problem)
+                super().__init__(args, *rest, **kw)
+
+        subprocess.Popen = GuardedPopen  # type: ignore[misc]
+        return self
+
+    def uninstall(self) -> None:
+        if self._real is not None:
+            subprocess.Popen = self._real  # type: ignore[misc]
+            self._real = None

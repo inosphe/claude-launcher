@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 
@@ -37,3 +39,27 @@ def home(tmp_path, monkeypatch):
 def config_file(home):
     """Path to the live config file (``~/.claunch.yaml`` equivalent)."""
     return home / ".claunch.yaml"
+
+
+@pytest.fixture(scope="session", autouse=True)
+def repo_history_guard(pytestconfig):
+    """Refuse, for the whole session, any read of THIS repository's history.
+
+    Autouse and session-scoped for the same reason ``home`` is autouse: the
+    thing it prevents is not a test failure, it is a *silent* one. Both
+    ``tools/sweep.py`` and ``tools/changed_tests.py`` hand a green receipt
+    recorded for one commit to another commit with the same tree, and that is
+    only correct while nothing in this suite can tell the two apart. See
+    ``tests/_repo_history_guard.py`` for what counts as telling them apart --
+    naming an object by its hash does not, and one test does that on purpose.
+
+    Yielded so a test can prove the patch is really installed, and so a test
+    that genuinely needs the real ``Popen`` can call ``uninstall()``.
+    """
+    from _repo_history_guard import Guard
+
+    guard = Guard(Path(pytestconfig.rootpath)).install()
+    try:
+        yield guard
+    finally:
+        guard.uninstall()
