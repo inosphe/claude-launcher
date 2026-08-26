@@ -321,6 +321,30 @@ class MeshConflict(MeshError):
     """Raised when a mesh or handle already exists (HTTP 409)."""
 
 
+class MeshBusy(MeshError):
+    """Every recipient of a send is too far behind to accept it (HTTP 429).
+
+    Backpressure, and the one refusal in this module that is not about the
+    message being wrong. The mesh has no way to make a terminal read faster,
+    so the only honest thing it can do when a member's backlog is already
+    deeper than a turn can act on is stop taking more and say so — to the
+    SENDER, synchronously, while it is still standing there and can decide
+    what to do instead. A queue that only ever grows would have accepted the
+    same message and told the sender ``sent``.
+
+    ``entries`` is one ``{handle, queued, inbox_max, retry_after, remote}``
+    per refused recipient (see
+    :meth:`MeshManager.congested_recipients`), so a caller can mark the row
+    rather than parse the sentence; ``retry_after`` is the soonest of them,
+    in seconds, and is advisory — nothing enforces the wait.
+    """
+
+    def __init__(self, message: str, entries: List[dict], retry_after: float):
+        super().__init__(message)
+        self.entries = entries
+        self.retry_after = retry_after
+
+
 class PeerUnreachable(MeshError):
     """A peer call failed at the *transport* level (relay down, bridge broken).
 
