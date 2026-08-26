@@ -410,10 +410,17 @@ def test_a_session_with_no_transcript_carries_no_key(home, tmp_path, monkeypatch
 def test_both_endpoints_carry_the_git_branch(home, tmp_path, monkeypatch):
     """The rail row and the detail panel read the branch from the session's
     own checkout — the same reading, so whichever one someone believes holds.
-    A directory with no git carries '' rather than a guess."""
+    A directory with no git carries '' rather than a guess.
+
+    The reading itself happens off the event loop, so it is the *second* poll
+    that carries a branch for a directory nobody has read yet. That is the
+    daemon's side of the bargain — a git that hangs costs a branch, never the
+    loop — and every screen that shows a branch is on a 2s poll, so the cost
+    is one tick rather than a blank that never fills."""
     import subprocess
 
     from claude_launcher import store
+    from claude_launcher.daemon import api as api_mod
     from claude_launcher.daemon.manager import SessionManager
 
     def git(*args, cwd):
@@ -453,6 +460,34 @@ def test_both_endpoints_carry_the_git_branch(home, tmp_path, monkeypatch):
             mgr.create(SessionDef(name="no-repo", harness="py", cwd=str(plain),
                                   conversation_id="cafe0000-0000-0000-0000-0000000000fe"))
 
+            # A directory nobody has read yet: the poll starts the reading
+            # and is answered from the empty cache, immediately. Deterministic
+            # rather than racy — the value is captured while the response is
+            # built, before any worker thread can land.
+            resp = await client.get("/api/sessions", headers=BEARER)
+            assert resp.status == 200
+            first = {s["name"]: s for s in (await resp.json())["sessions"]}
+            assert first["on-branch"]["branch"] == ""
+
+            # Wait for both readings to land — both, not merely the one with a
+            # branch to show. Off the loop, an empty branch is two different
+            # answers ("looked, no git there" and "not looked at yet"), and
+            # only the first is worth asserting; waiting until the repository
+            # answers would let the plain directory pass without ever having
+            # been read. The keys come from the API's own canonicaliser so the
+            # wait cannot drift from what the cache is actually keyed by.
+            keys = [api_mod._session_cwd(s) for s in mgr.list()]
+            assert len(keys) == 2
+            deadline = time.monotonic() + 10.0
+            while not all(k in api_mod._branch_cache for k in keys):
+                assert time.monotonic() < deadline, (
+                    f"branch readings never landed: {keys} / {api_mod._branch_cache}"
+                )
+                await asyncio.sleep(0.02)
+
+            # Both endpoints now carry it, and carry the same thing — one
+            # cache behind both. The plain directory's '' is a reading that
+            # happened and found no git, not one still in flight.
             resp = await client.get("/api/sessions", headers=BEARER)
             assert resp.status == 200
             rows = {s["name"]: s for s in (await resp.json())["sessions"]}
