@@ -3933,7 +3933,8 @@ function renderTermQueued(q) {
   flush.type = "button";
   flush.title =
     "type these in immediately instead of waiting for the agent's turn to " +
-    "end — the paste still waits for the terminal to be able to take it";
+    "end, a keyboard to fall quiet, or a hold to be lifted — an unsent line " +
+    "in the composer is submitted first, never typed over";
   flush.addEventListener("click", async () => {
     const { note } = await flushQueued(currentName, flush);
     tqNote = note;
@@ -9070,8 +9071,9 @@ function sessQueued(data) {
     const flush = el("button", "wf-btn", `deliver to ${s.name} now`);
     flush.type = "button";
     flush.title =
-      "stop waiting for the agent's turn to end and type these in — the " +
-      "paste still waits for the terminal to be able to take it";
+      "stop waiting for the agent's turn to end, for a keyboard to fall " +
+      "quiet or for a hold to be lifted, and type these in — an unsent " +
+      "line in the composer is submitted first, never typed over";
     flush.addEventListener("click", async () => {
       const { note } = await flushQueued(s.name, flush);
       status.textContent = note;

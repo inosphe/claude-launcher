@@ -188,6 +188,78 @@ def test_the_delivery_lands_the_moment_the_human_sends_their_own_line(
     assert writes == [b"\x1b[200~[T]\rmesh: hello\x1b[201~", b"\r"]
 
 
+# --------------------------------------------------------------------------- #
+# ...and the one exception to it: a person who says "deliver now"
+# --------------------------------------------------------------------------- #
+def test_a_forced_delivery_submits_the_unsent_line_instead_of_refusing(
+    monkeypatch,
+):
+    """The refusal above is right for a background sender and wrong for the
+    only sender that is a human pressing a button: it answers "still waiting"
+    to somebody who is watching, which is the same as answering nothing.
+
+    So ``force`` delivers — and still does not splice. The unsent line is
+    SUBMITTED first, as its own bare CR, and the paste lands on the composer
+    that clears behind it. Both texts survive whole, in the order they were
+    written, which is the part of the refusal worth keeping.
+    """
+    monkeypatch.setattr(session_mod, "FORCE_TYPING_GRACE", 0.05)
+    monkeypatch.setattr(session_mod, "FORCE_DRAFT_SETTLE", 0.0)
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "delivery_stamp", lambda: "[T]")
+    s, writes = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"a long prompt in progress")
+
+    assert s.draft_open() is True
+    assert asyncio.run(s.deliver("mesh: hello", force=True)) is True
+    # Their Enter first — the line goes to the agent as they wrote it — then
+    # the delivery as a separate message. Never one write containing both.
+    assert writes == [
+        b"\r",
+        b"\x1b[200~[T]\rmesh: hello\x1b[201~",
+        b"\r",
+    ]
+
+
+def test_a_forced_delivery_does_not_park_for_the_background_sender_s_timeout(
+    monkeypatch,
+):
+    """The wait shortens as well as ending differently. ``force`` is reached
+    through an HTTP request somebody is holding open, and the ordinary
+    ``TYPING_HOLD_TIMEOUT`` would spend half a minute of it before doing what
+    it was always going to do."""
+    monkeypatch.setattr(session_mod, "TYPING_HOLD_TIMEOUT", 30.0)
+    monkeypatch.setattr(session_mod, "FORCE_TYPING_GRACE", 0.05)
+    monkeypatch.setattr(session_mod, "FORCE_DRAFT_SETTLE", 0.0)
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "delivery_stamp", lambda: "[T]")
+    s, writes = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"still typing")
+
+    started = time.monotonic()
+    assert asyncio.run(s.deliver("mesh: hello", force=True)) is True
+    assert time.monotonic() - started < 5.0, (
+        "a forced delivery waited out the background sender's hold"
+    )
+    assert writes[0] == b"\r"
+
+
+def test_a_forced_delivery_with_a_quiet_keyboard_writes_nothing_extra(
+    monkeypatch,
+):
+    """No draft, no stray CR. The submitted line exists to clear a composer
+    that has something in it; sending one into an empty composer would put a
+    blank message in somebody's transcript every time the button is used on
+    an idle session."""
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "delivery_stamp", lambda: "[T]")
+    s, writes = _fake_session()
+
+    assert s.draft_open() is False
+    assert asyncio.run(s.deliver("mesh: hello", force=True)) is True
+    assert writes == [b"\x1b[200~[T]\rmesh: hello\x1b[201~", b"\r"]
+
+
 def test_keys_that_leave_no_draft_still_get_the_old_bounded_hold(monkeypatch):
     """The refusal is scoped to a half-written line, not to a busy keyboard.
     Thirty seconds of arrows and modifiers leaves the composer empty, there

@@ -87,6 +87,21 @@ TYPING_HOLD_TIMEOUT = float(os.environ.get("CLAUNCH_TYPING_HOLD_TIMEOUT") or 30.
 #: types one character and walks away.
 DRAFT_GUARD = float(os.environ.get("CLAUNCH_DRAFT_GUARD") or 180.0)
 
+#: How long a FORCED delivery ("deliver now", pressed by a person) waits for
+#: the keyboard before it stops waiting. The ordinary wait is
+#: :data:`TYPING_HOLD_TIMEOUT`, which is right for a background sender and
+#: wrong here twice over: the caller is an HTTP request somebody is watching,
+#: and parking it for half a minute is the same non-answer as refusing. Kept
+#: long enough to slip between two keystrokes of ordinary typing, short
+#: enough that "now" means now.
+FORCE_TYPING_GRACE = float(os.environ.get("CLAUNCH_FORCE_TYPING_GRACE") or 1.5)
+
+#: After a forced delivery submits somebody's unsent line to get it out of the
+#: way, how long to let the TUI clear its composer before pasting. Too short
+#: and the paste lands in a composer that still holds the line it is meant to
+#: follow -- the splice this whole path exists to avoid.
+FORCE_DRAFT_SETTLE = float(os.environ.get("CLAUNCH_FORCE_DRAFT_SETTLE") or 0.4)
+
 log = logging.getLogger(__name__)
 
 
@@ -601,7 +616,7 @@ class Session:
             return None
         return idle_for
 
-    async def deliver(self, text: str) -> bool:
+    async def deliver(self, text: str, *, force: bool = False) -> bool:
         """Put ``text`` in front of the agent running here, as a user message.
 
         **The** way anything automated hands an agent something to act on —
@@ -624,6 +639,26 @@ class Session:
         for their Enter — seconds away, since they are typing — and the next
         attempt goes in behind it.
 
+        ``force`` is a person at a dashboard pressing "deliver now", and it
+        is the one caller whose message must not come back undelivered: the
+        hold it overrules is a hold that person can see, and answering them
+        with "still waiting" is answering with nothing. It changes two things
+        and no others.
+
+        * The keyboard wait shortens to :data:`FORCE_TYPING_GRACE`. The full
+          :data:`TYPING_HOLD_TIMEOUT` is right for a background sender with
+          nowhere to be and wrong for an HTTP request somebody is watching —
+          half a minute of parking is the same non-answer as a refusal.
+        * An open composer no longer refuses the delivery. It is still not
+          spliced into: the unsent line is **submitted first**, as its own
+          message, and the delivery is pasted behind it. Both texts survive,
+          in the order they were written, each one whole — which is the part
+          of the refusal worth keeping once somebody has said "now".
+
+        What ``force`` does not touch is :meth:`_await_readable`: a TUI that
+        cannot yet take input is not a person holding the message back, and
+        typing into one delivers nothing at all rather than delivering sooner.
+
         Every message is stamped with the wall-clock time it actually lands
         (after the readiness/keyboard holds, in the machine's local zone), so
         the receiving agent — and anyone reading its transcript — can tell
@@ -631,19 +666,39 @@ class Session:
         """
         try:
             await self._await_readable()
-            if not await self.await_keyboard_quiet() and self.draft_open():
-                # Not a failure to report to anyone: somebody is mid-sentence
-                # at this keyboard. Said out loud all the same, because from a
-                # sender's side "held behind a human's prompt" and "the TUI
-                # never came up" look identical — both are just an undelivered
-                # message — and only one of them resolves on its own.
+            quiet = await self.await_keyboard_quiet(
+                timeout=FORCE_TYPING_GRACE if force else None
+            )
+            if not quiet and self.draft_open():
+                if not force:
+                    # Not a failure to report to anyone: somebody is
+                    # mid-sentence at this keyboard. Said out loud all the
+                    # same, because from a sender's side "held behind a
+                    # human's prompt" and "the TUI never came up" look
+                    # identical — both are just an undelivered message — and
+                    # only one of them resolves on its own.
+                    log.info(
+                        "deliver to %r held: an unsent line is in that "
+                        "terminal's composer; nothing was typed, and the "
+                        "message stays with its sender until the human sends "
+                        "or clears it",
+                        self.sdef.name,
+                    )
+                    return False
+                # Forced past it. The line is submitted rather than typed
+                # over: a bare CR is the keypress the composer was waiting
+                # for, so the human's text reaches the agent as they wrote it
+                # and the paste below starts on an empty composer. Clearing
+                # the line instead would throw somebody's writing away to
+                # make room for a message that can simply follow it.
                 log.info(
-                    "deliver to %r held: an unsent line is in that "
-                    "terminal's composer; nothing was typed, and the message "
-                    "stays with its sender until the human sends or clears it",
+                    "deliver to %r forced past an unsent line: submitting "
+                    "that line first, so the delivery follows it instead of "
+                    "landing inside it",
                     self.sdef.name,
                 )
-                return False
+                await self.write_bytes(b"\r")
+                await asyncio.sleep(FORCE_DRAFT_SETTLE)
             await self.paste(f"{delivery_stamp()}\n{text}", enter=True)
         except Exception as exc:  # noqa: BLE001 — SessionGone, PTY write, ...
             log.debug("deliver to %r failed: %s", self.sdef.name, exc)
@@ -813,7 +868,9 @@ class Session:
             return False
         return time.monotonic() - last < guard
 
-    async def await_keyboard_quiet(self, *, terminal_only: bool = False) -> bool:
+    async def await_keyboard_quiet(
+        self, *, terminal_only: bool = False, timeout: Optional[float] = None
+    ) -> bool:
         """Hold a write while a human is typing into this terminal, and say
         whether the keyboard ever went quiet.
 
@@ -844,8 +901,16 @@ class Session:
           seconds of keys that left nothing in the composer is somebody
           holding a modifier or leaning on an arrow key, and there is no
           half-written line for the paste to land in.
+
+        ``timeout`` shortens the bound for a caller who cannot afford the
+        default one (a forced delivery: see :data:`FORCE_TYPING_GRACE`). It
+        changes how long the wait is, never what the answer means — a
+        ``False`` from a short wait is the same "still typing" as a ``False``
+        from a long one, and the decision above stays with the caller.
         """
-        deadline = time.monotonic() + TYPING_HOLD_TIMEOUT
+        deadline = time.monotonic() + (
+            TYPING_HOLD_TIMEOUT if timeout is None else timeout
+        )
         while not self.exited and time.monotonic() < deadline:
             if not self.keyboard_busy(terminal_only=terminal_only):
                 return True
@@ -1123,8 +1188,8 @@ class DeadSession:
     async def paste(self, text: str, *, enter: bool = False) -> bytes:
         raise self._gone()
 
-    async def deliver(self, text: str) -> bool:
-        return False  # nothing is running to read it
+    async def deliver(self, text: str, *, force: bool = False) -> bool:
+        return False  # nothing is running to read it, forced or not
 
     async def write_bytes(self, data: bytes) -> None:
         raise self._gone()

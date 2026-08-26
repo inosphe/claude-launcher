@@ -279,6 +279,28 @@ def test_deliver_waits_out_the_startup_that_follows_the_keyboard(monkeypatch):
     assert s._input_ready is True  # latched: the next message pays nothing
 
 
+def test_force_does_not_drop_the_readiness_wait(monkeypatch):
+    """"Deliver now" overrules the holds a person can see and this one only
+    looks like one. A TUI that has not mounted its input is not somebody
+    keeping the message out; writing into it does not deliver the message
+    sooner, it delivers the typed-but-never-sent one this whole module
+    exists to prevent. So force waits here exactly as an ordinary delivery
+    does — and the wait ends by itself."""
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    monkeypatch.setattr(session_mod, "INPUT_SETTLE", 0.0)
+    s, writes = _fake_session(bracketed=False, ready=False)
+
+    async def run():
+        sending = asyncio.ensure_future(s.deliver("mesh: hello", force=True))
+        await asyncio.sleep(0.3)
+        assert writes == [], "forced a paste into a terminal that was not reading"
+        s.screen.feed(b"\x1b[?2004h")  # the TUI takes the keyboard
+        assert await asyncio.wait_for(sending, timeout=5) is True
+
+    asyncio.run(run())
+    assert writes == [b"\x1b[200~[T]\rmesh: hello\x1b[201~", b"\r"]
+
+
 def test_deliver_does_not_wait_on_a_harness_that_never_sets_the_mode():
     """A shell or a REPL never enables bracketed paste, so waiting for it would
     be waiting forever. Only the harness known to be an Ink TUI is held back."""
