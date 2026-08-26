@@ -201,6 +201,18 @@ _COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|skipped|error|errors|xfailed|xpa
 #: a tree nobody judged. This repository has already paid for a green over an
 #: unswept tree once (six issues closed citing a contaminated 1562), so the
 #: rule is that being wrong here must cost time, never correctness.
+#:
+#: **What is prose here and what is enforced.** The pin in
+#: ``tests/test_sweep.py`` catches a name being *added*, and the cases around
+#: it catch the digest ceasing to discriminate. Neither catches the other
+#: direction: a test added later that reads the repository's own ``.beads/``
+#: would make the second bullet false, and nothing would go red -- the gate
+#: would be green over a tree it did not judge, which is the one failure this
+#: whole axis is arranged to avoid. That is a rule about what may be written,
+#: not a rule the code keeps, and it is written down rather than guarded
+#: because guarding it needs the machinery of
+#: ``tests/_repo_history_guard.py``. Read this paragraph as the limit it is,
+#: not as an assurance.
 NON_CODE_ENTRIES = frozenset({".beads"})
 
 
