@@ -259,6 +259,63 @@ for (const state of ["off", "blocked", "stopped", "arming", "watching"]) {
         [null, true, ""]);
 }
 
+/* And the skip is decided from the REMINDER, never from the line — which the
+   five cases above cannot show, because a silent ping leaves the chip
+   speaking for the reminder anyway. The one arrangement that separates them
+   is a quiet reminder under a LOUD ping: the ranking hands the line to the
+   ping, so a skip read off the line would be offered here — for a clock this
+   button cannot touch (the stall ping is machine-wide) and with no reminder
+   coming to skip at all.
+
+   What it settles is narrower than it looks, and the narrowing is the
+   point. Against a SILENT ping this is the only arrangement that separates
+   the two readings: a skippable reminder (due 0, counting 1, held 2)
+   outranks every silence a ping can be in (waiting 3 … off 8), so a quiet
+   ping can never take the line from a reminder that has something to skip.
+
+   It settles nothing about a LOUD ping, and an earlier version of this
+   comment claimed it did (caught in review). A ping is `due` or `counting`
+   often enough, and then it does take the line — ping due(0) over reminder
+   counting(1) or held(2), ping counting(1) over reminder held(2). There
+   BOTH readings are skippable, so the button is up either way and hiding
+   cannot tell them apart. The case below is where that half is settled. */
+ctx.setWorld("s19", [run("s19", { timers: {
+  reminder: { running: true, enabled: false, interval: 600, due_in: null,
+              fired_ago: null, state: "off" },
+  ping: { running: true, enabled: true, interval: 900, due_in: 120,
+          fired_ago: null, state: "counting" },
+} })]);
+ctx.render();
+check("the line is the ping's, because the ping is the loud one",
+      chip.kids.map((k) => k.text)[1], "stall ping in 2:00");
+check("...but the skip speaks for the reminder, which has nothing to skip",
+      [ctx.skip(), skipBtn.classList.contains("hidden")], [null, true]);
+
+/* The half hiding cannot catch: a loud ping over a reminder that HAS
+   something to skip. Both readings are skippable, so the button is up
+   whichever one is read — what diverges is the state it wears and the
+   sentence it says, because those come from the same target the press does.
+   Read off the line instead and this press dresses in the ping's clothes
+   while still sending the reminder's interval: a held reminder — a debt
+   retried every poll — described as a countdown to the next one. */
+ctx.setWorld("s19", [run("s19", { timers: {
+  reminder: { running: true, enabled: true, interval: 600, due_in: -42,
+              fired_ago: null, state: "held" },
+  ping: { running: true, enabled: true, interval: 900, due_in: 300,
+          fired_ago: null, state: "counting" },
+} })]);
+ctx.render();
+check("a loud ping takes the line even from a skippable reminder",
+      chip.kids.map((k) => k.text)[1], "stall ping in 5:00");
+check("...and the skip is offered, because the reminder is the one it reads",
+      [ctx.skip().state, skipBtn.classList.contains("hidden")],
+      ["held", false]);
+check("...wearing the reminder's state, not the line's",
+      [skipBtn.classList.contains("held"),
+       skipBtn.classList.contains("counting")], [true, false]);
+check("...and saying the debt rather than a countdown",
+      /retried every poll/.test(skipBtn.title), true);
+
 /* ---- the countdown ages, and cannot run past zero -------------------- */
 ctx.setWorld("s19", [run("s19", { timers: {
   reminder: { running: true, enabled: true, interval: 600, due_in: 65,
