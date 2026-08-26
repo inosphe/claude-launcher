@@ -127,6 +127,13 @@ def test_the_checks_are_commands_not_adjectives(layer):
     prompt = " ".join(wf.steps["landing"].select.prompt.split())
     for anchor in (
         "git status --porcelain",   # 1. working tree
+        # 2. the green was measured on THIS tip. The round measures at
+        # ``review`` and commits after it, so "the numbers are green" and
+        # "the numbers describe what I am offering" are different claims --
+        # a nested worker's commit step merges its children in between.
+        # Comparing the measured commit to HEAD by equality would fail every
+        # normal round; comparing their file lists is the check that holds.
+        "git diff --name-only",
         "git merge-tree",           # 3. preview merge onto the target
         "CHANGES REQUESTED",        # 4. open brake markers
         "BLOCKED",
