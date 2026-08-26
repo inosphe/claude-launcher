@@ -7,6 +7,7 @@ This module only parses arguments and formats output; all behaviour lives in the
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from datetime import datetime, timezone
@@ -33,6 +34,7 @@ from . import (
     profile,
     prompt_input,
     providers,
+    routing,
     prune as prune_mod,
     runner,
     seed,
@@ -54,6 +56,7 @@ from .lineage import LineageError
 from .migrate import MigrateError
 from .prompt_input import PromptInputError
 from .providers import ProviderError
+from .routing import RoutingError
 from .sync import SyncError
 from .syncserver.docs import SyncServerError
 from .wizard import WizardUnavailable
@@ -551,9 +554,14 @@ def _cmd_providers(_args: argparse.Namespace) -> int:
     print(f"config file: {config.sync_file()}")
     print(f"global provider: {global_choice}")
     print("available providers:")
+    pinned = routing.configured()
     for name in sorted(registry):
         url = registry[name].get("ANTHROPIC_BASE_URL", "")
         suffix = f"  -> {url}" if url else ""
+        # A routing pin changes which upstream actually serves the request, so
+        # it belongs next to the backend URL rather than one command away.
+        if name in pinned:
+            suffix += f"  [routing: {_routing_line(pinned[name])}]"
         print(f"  {name}{suffix}")
     rows = []
     for p in profile.list_all():
@@ -564,6 +572,98 @@ def _cmd_providers(_args: argparse.Namespace) -> int:
         print("profiles using a provider:")
         for n, v in rows:
             print(f"  {n:<20} {v}")
+    return 0
+
+
+def _routing_line(block: dict) -> str:
+    """One-line rendering of a routing spec, in the field order people read."""
+    order = ["order", "only", "ignore", "sort", "allow_fallbacks"]
+    keys = [k for k in order if k in block] + [k for k in block if k not in order]
+    parts = []
+    for key in keys:
+        value = block[key]
+        if isinstance(value, list):
+            rendered = ",".join(map(str, value))
+        else:
+            # JSON spelling, because that is what goes over the wire — a
+            # Python-shaped `False` here would read as a different setting.
+            rendered = json.dumps(value)
+        parts.append(f"{key}={rendered}")
+    return " ".join(parts)
+
+
+def _cmd_routing(_args: argparse.Namespace) -> int:
+    """Show which providers pin their routing, and which shims are serving it."""
+    doc = store.load()
+    declared = routing.configured(doc)
+    print(f"config file: {config.sync_file()}")
+    if not declared:
+        print("no provider declares a routing spec")
+        print(
+            "  set one with: claunch routing set <provider> --order coreweave "
+            "--no-fallbacks"
+        )
+    else:
+        print("providers with body routing:")
+        for name in sorted(declared):
+            url = providers.registry(doc).get(name, {}).get("ANTHROPIC_BASE_URL", "")
+            print(f"  {name}{f'  -> {url}' if url else ''}")
+            print(f"    {_routing_line(declared[name])}")
+    live = routing.instances()
+    if live:
+        print("running shims:")
+        for info in live:
+            print(
+                f"  {info['fingerprint']}  {info['url']}  -> {info['upstream']}"
+                f"  (pid {info.get('pid', '?')})"
+            )
+            print(f"    {_routing_line(info.get('spec') or {})}")
+    else:
+        print("running shims: none (one starts with the next launch)")
+    return 0
+
+
+def _cmd_routing_set(args: argparse.Namespace) -> int:
+    block: dict = {}
+    for key, raw in (("order", args.order), ("only", args.only), ("ignore", args.ignore)):
+        if raw:
+            slugs = [s.strip() for s in raw.split(",") if s.strip()]
+            if not slugs:
+                print(f"error: --{key} needs at least one provider slug", file=sys.stderr)
+                return 2
+            block[key] = slugs
+    if args.sort:
+        block["sort"] = args.sort
+    if args.allow_fallbacks is not None:
+        block["allow_fallbacks"] = args.allow_fallbacks
+    if not block:
+        print(
+            "error: nothing to set (try --order coreweave --no-fallbacks)",
+            file=sys.stderr,
+        )
+        return 2
+    routing.set_spec(args.provider, block)
+    print(f"provider {args.provider!r} routing: {_routing_line(block)}")
+    print("takes effect on the next launch (running sessions keep their shim)")
+    return 0
+
+
+def _cmd_routing_clear(args: argparse.Namespace) -> int:
+    routing.set_spec(args.provider, None)
+    print(f"cleared routing on provider {args.provider!r}")
+    return 0
+
+
+def _cmd_routing_stop(args: argparse.Namespace) -> int:
+    if not args.all and not args.fingerprint:
+        print("error: name a shim fingerprint, or pass --all", file=sys.stderr)
+        return 2
+    stopped = routing.stop(None if args.all else [args.fingerprint])
+    if not stopped:
+        print("no matching shim was running")
+        return 0
+    for fp in stopped:
+        print(f"stopped shim {fp}")
     return 0
 
 
@@ -1075,6 +1175,54 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_provs.set_defaults(func=_cmd_providers)
 
+    p_routing = sub.add_parser(
+        "routing",
+        help="show (and manage) providers that pin routing in the request body, "
+        "plus the local shims serving them",
+    )
+    p_routing.set_defaults(func=_cmd_routing)
+    routing_sub = p_routing.add_subparsers(dest="routing_cmd")
+
+    p_rset = routing_sub.add_parser(
+        "set", help="declare a routing spec on a provider (e.g. pin CoreWeave)"
+    )
+    p_rset.add_argument("provider")
+    p_rset.add_argument(
+        "--order", help="comma-separated provider slugs to try, in order"
+    )
+    p_rset.add_argument("--only", help="comma-separated slugs to allow, nothing else")
+    p_rset.add_argument("--ignore", help="comma-separated slugs to skip")
+    p_rset.add_argument(
+        "--sort", help="upstream sort key (backend's vocabulary, e.g. price)"
+    )
+    fallbacks = p_rset.add_mutually_exclusive_group()
+    fallbacks.add_argument(
+        "--no-fallbacks",
+        dest="allow_fallbacks",
+        action="store_false",
+        default=None,
+        help="fail rather than serve the request from an unlisted provider",
+    )
+    fallbacks.add_argument(
+        "--allow-fallbacks",
+        dest="allow_fallbacks",
+        action="store_true",
+        default=None,
+        help="let the backend fall back to other providers (its default)",
+    )
+    p_rset.set_defaults(func=_cmd_routing_set)
+
+    p_rclear = routing_sub.add_parser(
+        "clear", help="drop a provider's routing spec (back to the backend's default)"
+    )
+    p_rclear.add_argument("provider")
+    p_rclear.set_defaults(func=_cmd_routing_clear)
+
+    p_rstop = routing_sub.add_parser("stop", help="shut a running routing shim down")
+    p_rstop.add_argument("fingerprint", nargs="?")
+    p_rstop.add_argument("--all", action="store_true", help="stop every shim")
+    p_rstop.set_defaults(func=_cmd_routing_stop)
+
     p_harn = sub.add_parser(
         "harnesses",
         help="list the declared harnesses (claude, codex, pi, ...) and "
@@ -1148,6 +1296,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         MigrateError,
         PromptInputError,
         ProviderError,
+        RoutingError,
         store.StoreError,
         SyncError,
         SyncServerError,

@@ -51,4 +51,8 @@ markers = [
     # the default run still includes everything, so CI and pre-commit runs
     # lose nothing.
     "worktree: creates real git worktrees on disk; the slow tail of the suite",
+    # Each spawns a real routing shim process (~1s). Deselect with
+    # -m "not slow_shim" while iterating on anything else; the merge and
+    # config assertions in the same file stay in the fast set.
+    "slow_shim: starts a real routing-shim subprocess",
 ]
