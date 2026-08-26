@@ -280,6 +280,32 @@ def test_redefine_refuses_a_noop(home, tmp_path, monkeypatch):
     asyncio.run(run())
 
 
+def test_reborrow_survives_a_daemon_restart(home, tmp_path, monkeypatch):
+    """A swapped borrow is part of the definition, so it must be persisted:
+    a restart restores the session on the *new* lender, not the original."""
+    profile_mod.create("p1")
+    profile_mod.create("p2")
+    monkeypatch.setattr(harness_mod, "build_command", _fake_claude_build_command)
+
+    async def run():
+        mgr = _manager()
+        mgr.create(
+            SessionDef(name="s1", harness="claude", profile="p1", cwd=str(tmp_path))
+        )
+        relaunched = await mgr.reborrow("s1", "p2")
+        assert relaunched.sdef.borrow == "p2"
+        await mgr.shutdown_all()
+
+        # A fresh manager reads the persisted definitions off disk, the way a
+        # restarted daemon does.
+        restarted = _manager()
+        assert not restarted.restore_all()
+        assert restarted.get("s1").sdef.borrow == "p2"
+        await restarted.shutdown_all()
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # the API
 # --------------------------------------------------------------------------- #

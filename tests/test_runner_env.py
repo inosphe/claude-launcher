@@ -277,6 +277,89 @@ def test_profile_without_key_uses_provider_value(home):
     assert env["ANTHROPIC_MODEL"] == "provider-model"
 
 
+def test_stale_backend_env_never_leaks_from_base(home, monkeypatch):
+    # The daemon is usually started from inside a claude session that itself
+    # ran on a borrowed backend, so its env carries that backend's keys. A
+    # later session whose profile/provider sets none of them must not inherit
+    # the stale backend — the config file is the only source for these keys.
+    p = profile.create("work")
+    credentials.save_token(p, "sk-ant-oat01-abc")
+    stale = {
+        "ANTHROPIC_BASE_URL": "https://stale.example/coding/",
+        "ANTHROPIC_MODEL": "stale-model",
+        "ANTHROPIC_DEFAULT_HAIKU_MODEL": "stale-model",
+        "ANTHROPIC_DEFAULT_OPUS_MODEL": "stale-model",
+        "ANTHROPIC_DEFAULT_SONNET_MODEL": "stale-model",
+        "ANTHROPIC_DEFAULT_FABLE_MODEL": "stale-model",
+        "ANTHROPIC_SMALL_FAST_MODEL": "stale-model",
+        "ANTHROPIC_API_KEY": "stale-key",
+        "ANTHROPIC_AUTH_TOKEN": "stale-token",
+        "CLAUDE_CODE_SUBAGENT_MODEL": "stale-model",
+    }
+    for key, value in stale.items():
+        monkeypatch.setenv(key, value)
+    env = runner.child_env(p, with_token=True)
+    for key in stale:
+        if key == "ANTHROPIC_API_KEY":
+            # The packaged Claude harness deliberately keeps this variable
+            # present but empty so Claude Code cannot send X-Api-Key auth.
+            assert env[key] == ""
+        else:
+            assert key not in env, f"{key} leaked from the base env"
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-abc"
+
+
+def test_provider_defined_key_does_not_leak_to_other_profiles(home, monkeypatch):
+    # A key defined by *any* provider is config-managed: switching to a
+    # profile that uses neither that provider nor the key must clear it, even
+    # when it lingers in the ambient (daemon-inherited) environment.
+    p = profile.create("work")
+    credentials.save_token(p, "sk-ant-oat01-abc")
+    store.update(
+        lambda doc: doc.update(
+            {"providers": {"alt": {"env": {"MY_CUSTOM_BACKEND_FLAG": "1"}}}}
+        )
+    )
+    monkeypatch.setenv("MY_CUSTOM_BACKEND_FLAG", "1")
+    env = runner.child_env(p, with_token=True)
+    assert "MY_CUSTOM_BACKEND_FLAG" not in env
+
+
+def test_reborrow_to_profile_without_backend_keys_clears_lender_env(home, monkeypatch):
+    # The reported bug: reborrow kimi -> nc kept k3. The lender's backend keys
+    # (in the daemon's env from a previous spawn context) must not survive
+    # into a borrow-less profile that pins none of them.
+    runner_p = profile.create("work")
+    lender = profile.create("lender")
+    credentials.save_token(runner_p, "sk-ant-oat01-abc")
+    store.update(
+        lambda doc: doc.update(
+            {
+                "providers": {
+                    "backend": {
+                        "env": {
+                            "ANTHROPIC_BASE_URL": "https://lender.example/",
+                            "ANTHROPIC_MODEL": "lender-model",
+                            "ANTHROPIC_DEFAULT_HAIKU_MODEL": "lender-model",
+                        }
+                    }
+                }
+            }
+        )
+    )
+    store.set_profile_field("lender", "provider", "backend")
+    borrowed = runner.child_env(runner_p, with_token=True, borrow=lender)
+    assert borrowed["ANTHROPIC_MODEL"] == "lender-model"
+    # The stale base simulates the daemon env after hosting borrowed children.
+    monkeypatch.setenv("ANTHROPIC_MODEL", "lender-model")
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_HAIKU_MODEL", "lender-model")
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", "https://lender.example/")
+    unborrowed = runner.child_env(runner_p, with_token=True)
+    assert "ANTHROPIC_MODEL" not in unborrowed
+    assert "ANTHROPIC_DEFAULT_HAIKU_MODEL" not in unborrowed
+    assert "ANTHROPIC_BASE_URL" not in unborrowed
+
+
 def test_borrow_keeps_running_profile_env_over_lender_provider(home):
     # Borrow swaps the auth backend but not the running profile's env: the
     # runner's own keys still beat the lender's provider defaults.
