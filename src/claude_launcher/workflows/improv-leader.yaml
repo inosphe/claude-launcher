@@ -194,6 +194,19 @@ steps:
         comments <id>` — 모자라면 claunch cflow status/journal -t <세션>. 통합 대기 표의 상태를 아는 것이
         나이므로 이 결정이 나에게 온 것이다 — 답을 미루면 그 워커의 회차가
         선다(30분 뒤 timeout으로 사용자에게 넘어간다)
+        **착지 결정이 오는 것 자체가 예외 신호다.** 깨끗한 요청은 워커가
+        스스로 올려 나를 부르지 않는다 — improv-worker/improv-mid의 landing은
+        기계 확인(작업 트리 깨끗, 표적 green, 미리 병합 충돌 0, 열린 제동
+        마커 없음, 동결 지시 없음)이 전부 참이면 워커가 request를 고르고
+        지나가고, 하나라도 깨졌을 때만 landing-review가 열려 나에게 온다.
+        그러니 이 질문이 왔으면 먼저 **무엇이 깨졌는지**부터 읽는다: 그
+        워커가 landing의 select reason에 적어 저널에 남겼다(`claunch cflow
+        journal -t <그 세션> -n 10`). 그것을 안 읽고 request로 답하는 것은
+        문을 없애는 것과 같다 — 이 문은 이제 예외만 오므로 매번 실질이 있다.
+        반대로 여기서 내가 후보의 뒤처짐·충돌을 처음부터 다시 재지 않는다:
+        그 심사는 integrate-preflight의 일이고, 착지 답에서 한 번 재고
+        preflight에서 또 재면 내 턴 하나가 중복 심사에 쓰인다. 착지에서는
+        「이 회차에 줄을 세울 것인가」만 답한다.
       - 침묵 판독: 워커가 오래 조용하면 추측하거나 바로 묻지 말고 먼저
         런 상태를 읽는다 — claunch cflow status -t <세션> --json (상세는
         claunch cflow journal -t <세션> -n 20). waiting_approval/

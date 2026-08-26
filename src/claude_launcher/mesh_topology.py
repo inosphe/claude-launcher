@@ -198,9 +198,12 @@ master ← MID branch (stack base; merge commits only)
   any other (two-way diff, `merge-tree`, one full sweep) and merge it with
   ONE `--no-ff`; never merge its children separately. A rebase re-request
   to MID is a restack: it re-aligns with `--rebase-merges` and re-requests.
-- Landing gates are unchanged: each moved worker's `landing` (request/hold)
-  is still the user's, and so is MID's; what MID decides alone is landing a
-  child on ITS OWN branch (the way you decide master alone).
+- Landing decisions are unchanged: a moved worker's `landing` is its own
+  when the machine checks are clean (it picks `request` and goes), and only
+  an `escalate` puts `landing-review` (request/hold) in front of its parent
+  -- which after a reparent is MID, not you. MID's own landing works the
+  same way and escalates to you. What MID decides alone is landing a child
+  on ITS OWN branch (the way you decide master alone).
 - Undo: `reparent` a worker back to yourself; `kill` MID once its branch has
   landed and its report is in (it kills itself at the end of its run).
 
@@ -264,9 +267,9 @@ follow each move.
   thinned out to one worker, or the stack is blocking more than it batches.
   Move the members back, then `kill` the mid once its report is in.
 
-Do not move a session mid-landing (its `landing` gate is waiting on the
-user, or its request is on a mid's stack and about to land): let the landing
-finish, then move. And do not move to "tidy" — every move costs a briefing.
+Do not move a session mid-landing (its `landing-review` is out with its
+parent, or its request is on a mid's stack and about to land): let the
+landing finish, then move. And do not move to "tidy" — every move costs a briefing.
 
 ## Procedure
 

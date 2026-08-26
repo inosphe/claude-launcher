@@ -189,8 +189,10 @@ def test_the_bundled_improv_worker_teaches_the_nested_merge_contract():
     assert "트리" in collect
 
     landing = wf.steps["landing"].select
-    assert "상위" in landing.prompt
-    assert set(landing.options) == {"request", "hold"}
+    assert set(landing.options) == {"request", "escalate"}
+    review = wf.steps["landing-review"].select
+    assert "상위" in review.prompt
+    assert set(review.options) == {"request", "hold"}
 
     request = wf.steps["integration-request"].instructions
     assert "상위 세션" in request and "--no-ff" in request
@@ -319,7 +321,7 @@ def test_a_worker_round_is_not_done_until_the_merge_is_confirmed():
         _bundled("improv-worker"),
         model.load(PROJECT_OVERRIDES / "improv-worker.yaml"),
     ):
-        assert wf.steps["landing"].select.options["hold"].next == "wrapup"
+        assert wf.steps["landing-review"].select.options["hold"].next == "wrapup"
 
 
 def test_the_worker_wrapup_no_longer_says_landing_does_not_matter():
@@ -946,8 +948,8 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
     assert wf.default_role is None
     assert wf.max_visits > model.DEFAULT_MAX_VISITS  # standby <-> land loops
     assert set(wf.steps) == {
-        "intake", "standby", "land", "landing", "handoff", "await-landing",
-        "wrapup",
+        "intake", "standby", "land", "landing", "landing-review", "handoff",
+        "await-landing", "wrapup",
     }
 
     intake = wf.steps["intake"].instructions
@@ -970,11 +972,21 @@ def test_the_bundled_improv_mid_runs_an_area_as_a_stack():
     assert "master는 어떤 경우에도 머지 대상이 아니다" in land.instructions
 
     landing = wf.steps["landing"].select
+    # The fast path: a clean stack is offered up without asking the leader.
+    # ``hold`` is not reachable from here -- it lives on ``landing-review``,
+    # which is where the delegation went. Both are pinned in
+    # test_landing_fast_path.py.
+    assert landing.chooser == "agent"
+    assert set(landing.options) == {"request", "escalate"}
+    assert landing.options["request"].next == "handoff"
+    assert landing.options["escalate"].next == "landing-review"
+
+    review = wf.steps["landing-review"].select
     # Delegated to the leader, as for every worker -- the route itself is
     # pinned in test_landing_is_decided_by_the_session_above_not_by_a_person.
-    assert landing.chooser == "delegate"
-    assert landing.options["request"].next == "handoff"
-    assert landing.options["hold"].next == "wrapup"
+    assert review.chooser == "delegate"
+    assert review.options["request"].next == "handoff"
+    assert review.options["hold"].next == "wrapup"
 
     handoff = wf.steps["handoff"]
     assert handoff.next == "await-landing"
@@ -1035,8 +1047,12 @@ def test_both_leader_layers_route_a_crowded_area_through_improv_mid():
 
 
 def _landing_route(wf):
-    """The landing select's candidate roles/scopes and its fallback."""
-    sel = wf.steps["landing"].select
+    """The landing decision's candidate roles/scopes and its fallback.
+
+    It lives on ``landing-review`` since the clean case stopped asking: the
+    delegation moved off the fast path, it did not weaken.
+    """
+    sel = wf.steps["landing-review"].select
     assert sel.chooser == "delegate", (
         "landing is a delegated decision, not a human gate or a self-decision"
     )
