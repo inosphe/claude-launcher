@@ -22,11 +22,12 @@ allowed on purpose, and one real test depends on that
 from __future__ import annotations
 
 import subprocess
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
 
-from _repo_history_guard import Guard, RepoHistoryRead, offending
+from _repo_history_guard import Guard, RepoHistoryRead, decide, offending
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -238,6 +239,30 @@ def test_a_test_that_asks_for_the_branch_itself_is_not_exempt():
         worktree.current_branch(ROOT)
 
 
+def test_a_test_that_asks_for_the_branch_itself_is_not_exempt():
+    """The exemption's ground, held by machinery rather than by a paragraph.
+
+    ``EXEMPT_CALLERS`` rests on a claim about the six tests the sweep found:
+    none of them asks for the branch -- they drive ``cli``/``attach``/``api``
+    and the product code reads it to build a label. That claim was first
+    established by grep, and a grep result is precisely the kind of evidence
+    this file exists to stop trusting: it was a hand-grepped premise going
+    stale that put the guard here.
+
+    So the claim is enforced instead. Calling ``current_branch`` on THIS
+    repository from a test module is a test asking for the branch, and it is
+    refused even though ``current_branch`` is the exempted frame. A test that
+    wants a branch name digs a repository under ``tmp_path`` -- which never
+    reaches the guard at all, because the target is not this repository. That
+    is why ``tests/test_worktree.py`` and ``tests/test_attach.py`` can go on
+    naming these helpers freely.
+    """
+    from claude_launcher import worktree
+
+    with pytest.raises(RepoHistoryRead):
+        worktree.current_branch(ROOT)
+
+
 def test_product_code_reading_the_branch_for_a_label_is_let_through(
     repo_history_guard,
 ):
@@ -279,3 +304,113 @@ def test_a_test_that_asks_for_the_branch_itself_is_not_exempt():
 
     with pytest.raises(RepoHistoryRead):
         worktree.current_branch(ROOT)
+
+
+# --------------------------------------------------------------------------- #
+# the exemption's rule, as stack shapes
+# --------------------------------------------------------------------------- #
+_GUARD = "F:/x/tests/_repo_history_guard.py"
+_WT = "F:/x/src/claude_launcher/worktree.py"
+_CLI = "F:/x/src/claude_launcher/cli.py"
+
+_Frame = namedtuple("_Frame", "filename function")
+
+
+def _stack(*pairs):
+    """A stack as ``decide`` sees it: nearest frame first, plumbing on top."""
+    plumbing = [
+        _Frame(_GUARD, "exempt"),
+        _Frame(_GUARD, "__init__"),
+        _Frame(subprocess.__file__, "run"),
+    ]
+    return plumbing + [_Frame(f, n) for f, n in pairs]
+
+
+@pytest.mark.parametrize(
+    "exempted, name, frames",
+    [
+        (
+            True,
+            "the six: a test drives cli, which builds a label",
+            _stack(
+                (_WT, "_git"),
+                (_WT, "current_branch"),
+                (_WT, "pane_label"),
+                (_CLI, "_cmd_run"),
+                ("F:/x/tests/test_cli.py", "test_run"),
+            ),
+        ),
+        (
+            True,
+            # tests/test_cli.py really does this, and reading its shim as a
+            # foreign caller turned three green tests red once already.
+            "...with the test's own subprocess.run shim in the middle",
+            _stack(
+                ("F:/x/tests/test_cli.py", "fake_launch"),
+                (_WT, "_git"),
+                (_WT, "current_branch"),
+                (_WT, "pane_label"),
+                (_CLI, "_cmd_run"),
+                ("F:/x/tests/test_cli.py", "test_run"),
+            ),
+        ),
+        (
+            False,
+            # The label embeds the branch, so a test asserting on it depends
+            # on which branch is out. Measuring the hop to current_branch's
+            # immediate caller let this through, because pane_label lives in
+            # the same module.
+            "a test calls pane_label itself: the same-module wrapper leak",
+            _stack(
+                (_WT, "_git"),
+                (_WT, "current_branch"),
+                (_WT, "pane_label"),
+                ("F:/x/tests/test_x.py", "test_label"),
+            ),
+        ),
+        (
+            False,
+            "a test calls current_branch itself",
+            _stack(
+                (_WT, "_git"),
+                (_WT, "current_branch"),
+                ("F:/x/tests/test_x.py", "test_branch"),
+            ),
+        ),
+        (
+            False,
+            # Helpers are where people actually put this call.
+            "a test asks through a tests/ helper",
+            _stack(
+                (_WT, "_git"),
+                (_WT, "current_branch"),
+                (_WT, "pane_label"),
+                ("F:/x/tests/conftest.py", "helper"),
+                ("F:/x/tests/test_x.py", "test_branch"),
+            ),
+        ),
+        (
+            False,
+            # What (a) is for: the exemption must not spread to whatever else
+            # runs git while current_branch happens to be on the stack.
+            "a different module's git call, under an exempt frame",
+            _stack(
+                ("F:/x/src/claude_launcher/other.py", "sneak"),
+                (_WT, "current_branch"),
+                (_CLI, "_cmd_run"),
+                ("F:/x/tests/test_cli.py", "test_run"),
+            ),
+        ),
+    ],
+)
+def test_the_exemption_reads_the_stack_shape(exempted, name, frames):
+    """Every shape the rule has to tell apart, as data.
+
+    A table rather than live calls, because these are *stack shapes* and the
+    interesting ones are awkward to produce for real -- the shim case only
+    appears when a test has monkeypatched ``subprocess.run``, and two of the
+    refusals cannot be staged at all without writing the very test they
+    forbid. Each row here is a mistake this rule made before it stopped
+    making it.
+    """
+    assert (decide(frames) is not None) is exempted, name

@@ -379,34 +379,65 @@ def exempt() -> Optional[tuple]:
     # ``context=0``: only the refused path reaches here, but reading source
     # lines for every frame to answer a yes/no question is work nobody asked
     # for, and it touches the disk from inside a subprocess call.
-    frames = inspect.stack(0)
+    return decide(inspect.stack(0))
+
+
+def decide(frames: Sequence) -> Optional[tuple]:
+    """:func:`exempt`'s rule, over a plain list of frames so it can be tested.
+
+    Anything with ``.filename`` and ``.function`` will do. Kept separate from
+    ``inspect`` because every interesting case here is a *shape of stack*, and
+    the shapes that matter are awkward to produce for real -- one of them only
+    turns up when a test has monkeypatched ``subprocess.run``.
+
+    Two questions, in order, and each was wrong once before it was right:
+
+    (a) **Did this call come out of the exempt module?** Otherwise a deeper,
+        unrelated git call is exempt for as long as ``current_branch`` sits on
+        the stack. Frames belonging to a *test* are skipped here rather than
+        counted: a test that monkeypatches ``subprocess.run`` puts its own
+        shim in the middle of the chain (``tests/test_cli.py`` does), and that
+        shim re-dispatches the same call rather than making a new one.
+        Reading it as a foreign caller turned three green tests red.
+
+    (b) **Did a test ask, or did a test drive product code that asked?** The
+        hop is measured to the first frame *outside the exempt module*, not
+        to the exempt function's immediate caller -- because the module holds
+        a wrapper (``pane_label`` calls ``current_branch``), and measuring to
+        the immediate caller let ``test -> pane_label -> current_branch``
+        through. That leak matters: the label embeds the branch name, so a
+        test asserting on it does depend on which branch is out.
+
+        Do NOT widen this into "a test frame anywhere below". Product code
+        driven by a test always has a test frame somewhere below it, so that
+        version exempts nothing and the six come back red. The first frame
+        outside the module is the only line that separates "a test asked"
+        from "a test drove product code that asked".
+    """
     for i, frame in enumerate(frames):
-        name = frame.function
-        path = _posix(frame.filename)
         for module, func, why in EXEMPT_CALLERS:
-            if func != name or not path.endswith(module):
+            if frame.function != func or not _posix(frame.filename).endswith(module):
                 continue
 
-            # (a) The exempt frame must be the one that MADE this call, not
-            # merely somewhere above it. Without this, every deeper git call
-            # is exempt for as long as ``current_branch`` is on the stack --
-            # harmless today, when ``worktree._git`` is the only thing below
-            # it, and a silent widening the moment the table grows.
-            between = [f for f in frames[:i] if not _plumbing(f.filename)]
+            between = [
+                f
+                for f in frames[:i]
+                if not _plumbing(f.filename) and not _is_test_file(f.filename)
+            ]
             if any(not _posix(f.filename).endswith(module) for f in between):
-                continue
+                continue                              # (a) not this module's call
 
-            # (b) One hop, and exactly one. If the frame directly beneath is
-            # test code, a test asked for this and the exemption is off.
-            #
-            # Do NOT "fix" this into a scan of the whole stack: product code
-            # driven by a test ALWAYS has a test frame somewhere below it, so
-            # that version exempts nothing and the six come back red. One hop
-            # is the only line that separates "a test asked" from "a test
-            # drove product code that asked".
-            caller = frames[i + 1] if i + 1 < len(frames) else None
-            if caller is not None and _is_test_file(caller.filename):
-                return None
+            outside = next(
+                (
+                    f
+                    for f in frames[i + 1 :]
+                    if not _posix(f.filename).endswith(module)
+                    and not _plumbing(f.filename)
+                ),
+                None,
+            )
+            if outside is not None and _is_test_file(outside.filename):
+                return None                           # (b) a test asked
 
             return (module, func, why)
     return None
