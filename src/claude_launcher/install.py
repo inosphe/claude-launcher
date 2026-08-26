@@ -27,6 +27,12 @@ package. That seeding is what makes the layer a real thing rather than a
 documented empty directory — but it is machine state, so it belongs to the
 machine-scoped installs; a project install never writes outside its project.
 
+They also ask Windows Defender to stop scanning the trees claunch works in
+(:mod:`claude_launcher.defender`), for the same scoping reason: an antivirus
+exclusion is machine state. It needs an elevated shell, so on an ordinary one
+it fails — and that failure is *printed with the command to re-run*, rather
+than aborting an install whose real work has already succeeded.
+
 Separate skills, one server, on purpose. A skill's body is loaded whole when
 it triggers, so folding the workflow protocol and the mesh protocol into one
 file would make every session that runs a workflow carry the messaging rules
@@ -52,7 +58,7 @@ import sys
 from pathlib import Path
 from typing import List
 
-from . import commit_stamp, config, mesh_install, mesh_topology, settings
+from . import commit_stamp, config, defender, mesh_install, mesh_topology, settings
 from .cflow import authoring as cflow_authoring, install as cflow_install
 from .cflow import state as cflow_state
 from .profile import Profile
@@ -196,6 +202,7 @@ def install_into_user() -> List[str]:
         + _skill_lines(skills)
         + _gate_guard_lines(config.default_config_dir() / settings.SETTINGS_FILENAME)
         + _workflow_lines()
+        + defender.lines()
     )
 
 
@@ -213,7 +220,7 @@ def _profile_lines(profile: Profile) -> List[str]:
 
 def install_into_profile(profile: Profile) -> List[str]:
     """Register the MCP server + every skill inside a profile's config dir."""
-    return _profile_lines(profile) + _workflow_lines()
+    return _profile_lines(profile) + _workflow_lines() + defender.lines()
 
 
 def install_into_all_profiles() -> List[str]:
@@ -233,7 +240,7 @@ def install_into_all_profiles() -> List[str]:
         lines += _profile_lines(p)
     if not lines:
         return []
-    return lines + _workflow_lines()
+    return lines + _workflow_lines() + defender.lines()
 
 
 def install_into_project(project_dir: Path) -> List[str]:
