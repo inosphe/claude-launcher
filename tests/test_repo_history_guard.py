@@ -86,6 +86,10 @@ def test_the_fixture_hands_over_the_guard_it_installed(repo_history_guard):
         ["git", "merge-base", "master", "HEAD"],
         ["git", "for-each-ref"],
         ["git", "show", "HEAD~1"],
+        # the shapes mergecheck uses, aimed at a *ref* instead of a hash
+        ["git", "show", "master:tests/test_x.py"],
+        ["git", "diff", "--unified=0", f"{'0' * 40}...master"],
+        ["git", "diff", "--unified=0", "..41fcfc8"],   # empty side means HEAD
     ],
 )
 def test_history_reads_against_this_repository_are_refused(argv):
@@ -130,9 +134,14 @@ def test_the_real_commits_test_is_still_legal():
     If a future tightening of the guard makes this red, that test goes red
     with it, and the tightening is wrong rather than that test.
     """
+    base = "0" * 40
     for argv in (
+        # what the test itself runs
         ["git", "cat-file", "-e", "41fcfc8^{commit}"],
+        # ...and what mergecheck.check_pair runs underneath it, in order
         ["git", "merge-base", "41fcfc8", "744e88d"],
+        ["git", "diff", "--unified=0", f"{base}...41fcfc8"],
+        ["git", "show", "41fcfc8:tests/test_session_queued_api.py"],
     ):
         assert offending(argv, str(ROOT), ROOT) is None, argv
 

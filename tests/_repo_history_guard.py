@@ -136,8 +136,12 @@ REV_TAKING = HEAD_BY_DEFAULT | frozenset(
 _TAKES_VALUE = frozenset({"-C", "-c", "--git-dir", "--work-tree", "--namespace"})
 
 #: An object name -- the thing two same-tree commits cannot disagree about.
-#: The ``^{commit}`` / ``^{tree}`` peel is part of the name, not a ref.
-_OBJECT_NAME = re.compile(r"^[0-9a-fA-F]{7,40}(\^\{\w+\})?$")
+_OBJECT_NAME = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
+#: The suffixes that navigate *from* a revision: ``^{commit}``, ``^2``, ``~3``.
+#: They are part of the expression, not part of the name, and they do not
+#: change which of the two -- object or ref -- decided where it started.
+_PEEL = re.compile(r"(\^\{\w*\}|\^\d*|~\d*)+$")
 
 #: Revision spellings that are HEAD or a ref by construction.
 _REF_SPELLING = re.compile(r"HEAD|(^|[^\w])@($|[^\w])|^refs/|^origin/")
@@ -147,23 +151,59 @@ _REF_SPELLING = re.compile(r"HEAD|(^|[^\w])@($|[^\w])|^refs/|^origin/")
 _WORDLIKE = re.compile(r"^[\w./~^{}:-]+$")
 
 
+def endpoints(arg: str) -> list:
+    """The commits a revision *expression* starts from.
+
+    A single argument can name more than one, and can bury the name inside
+    punctuation that has nothing to do with history. All three of these
+    appear in this repository's own code
+    (``src/claude_launcher/mergecheck.py``):
+
+    * ``41fcfc8`` -- one endpoint;
+    * ``<base>...41fcfc8`` -- two, and a rule that only read the first would
+      wave through ``<hash>...master``;
+    * ``41fcfc8:tests/test_x.py`` -- one, with a path after it. Reading the
+      whole token as a name is how the first version of this guard managed
+      to refuse ``test_the_real_commits``, the one test it was written to
+      keep allowing.
+
+    An empty endpoint (``..master``, ``master..``) is git's shorthand for
+    HEAD, so it is returned as the empty string and refused by the caller.
+    """
+    rev = arg.split(":", 1)[0]
+    if not rev:
+        return []                       # ``:path`` is the index, not history
+    parts = rev.split("...") if "..." in rev else rev.split("..")
+    return [_PEEL.sub("", p) for p in parts]
+
+
+def names_object(arg: str) -> bool:
+    """Does ``arg`` name commits by hash, and only by hash?"""
+    if arg.startswith("-"):
+        return False
+    ends = endpoints(arg)
+    return bool(ends) and all(_OBJECT_NAME.match(e or "") for e in ends)
+
+
 def symbolic(arg: str, repo: Path) -> bool:
     """Is ``arg`` a revision that HEAD or the refs decide?
 
-    Object names are not (``41fcfc8``, ``41fcfc8^{commit}``). Paths that
-    exist in the tree are not -- that is a pathspec. Flags are not. What is
-    left standing in a revision position is a branch or tag name, and those
-    are exactly what two commits with one tree disagree about.
+    Object names are not (``41fcfc8``, ``41fcfc8^{commit}``,
+    ``41fcfc8:some/path``). Paths that exist in the tree are not -- that is a
+    pathspec. Flags are not. What is left standing in a revision position is
+    a branch, a tag, or HEAD, and those are exactly what two commits with one
+    tree disagree about.
     """
     if arg.startswith("-"):
         return False
-    if _REF_SPELLING.search(arg):
-        return True
-    if _OBJECT_NAME.match(arg.split("..")[0] or arg):
-        return False
     if (repo / arg).exists():
-        return False
-    return bool(_WORDLIKE.match(arg))
+        return False                    # a pathspec, not a revision
+    if not _WORDLIKE.match(arg):
+        return False                    # a URL, a glob, a message: not a rev
+    for end in endpoints(arg):
+        if not end or _REF_SPELLING.search(end) or not _OBJECT_NAME.match(end):
+            return True
+    return False
 
 
 def _argv(args: Union[str, Sequence]) -> list:
@@ -248,9 +288,7 @@ def offending(
         why = f"`git {sub}` answers from HEAD and the refs"
     elif named is not None:
         why = f"`{named}` is a symbolic revision, not an object name"
-    elif sub in HEAD_BY_DEFAULT and not any(
-        _OBJECT_NAME.match(a.split("..")[-1] or a) for a in after
-    ):
+    elif sub in HEAD_BY_DEFAULT and not any(names_object(a) for a in after):
         why = f"`git {sub}` with no revision named walks from HEAD"
     else:
         return None

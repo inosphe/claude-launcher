@@ -107,6 +107,13 @@ whose confirming run would therefore be concurrent load that no scan counted
 22 and come away with no verdict at all. A reviewer reads the receipt, or
 abstains; either is cheaper than a run nobody budgeted.
 
+What the reviewer has to stand on for that to work is the *same content*, and
+the key says so rather than trusting it: a clean checkout of the author's
+commit hashes to what the author's gate hashed, and anything uncommitted on
+either side hashes to something else and abstains. That is the right answer,
+not a limitation -- a reviewer looking at a different tree than the one that
+was judged has no verdict, and should say so.
+
 Exit codes match ``tools/deploy_check.py``: 0 = the selected tests passed (or
 there were none), 1 = they failed, 2 = could not tell -- which is what
 ``--check`` returns when no receipt answers, because "nobody has run this"
