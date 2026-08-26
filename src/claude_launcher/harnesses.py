@@ -103,6 +103,19 @@ class Harness:
     heartbeat_args: List[str] = field(default_factory=list)
     usage: str = ""
 
+    @property
+    def borrow_mode(self) -> str:
+        """How this harness can consume another base profile's credential."""
+        if self.builtin and self.auth == "claude":
+            return "provider-token"
+        if self.auth == "api-key" and self.token_env:
+            return "token"
+        return "none"
+
+    @property
+    def borrowable(self) -> bool:
+        return self.borrow_mode != "none"
+
     def program(self) -> str:
         """The executable whose presence decides :meth:`available`."""
         if self.builtin:
@@ -154,6 +167,8 @@ class Harness:
             "login_args": list(self.login_args),
             "heartbeat_args": list(self.heartbeat_args),
             "usage": self.usage,
+            "borrowable": self.borrowable,
+            "borrow_mode": self.borrow_mode,
             # Resolved per call, never stored: installing pi should not need a
             # config edit, and a PATH change is exactly what this reports.
             "available": self.available(),

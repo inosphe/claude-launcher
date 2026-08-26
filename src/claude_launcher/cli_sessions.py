@@ -79,13 +79,13 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     selected = lineage.effective_harness(
         profile_mod.resolve_selector(args.profile)
     )
+    selected_entry = harnesses.get(selected)
     if selected != harnesses.CLAUDE_HARNESS:
         claude_only = []
         for flag, given in (
             ("--role", args.role),
             ("--resume", args.resume is not None),
             ("--fork-session", args.fork_session),
-            ("--borrow", args.borrow),
             ("--null", args.null_token),
         ):
             if given:
@@ -94,6 +94,26 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
             print(
                 f"error: {', '.join(claude_only)} only applies to the claude "
                 f"harness; profile {args.profile!r} selects {selected!r}",
+                file=sys.stderr,
+            )
+            return 1
+    if args.borrow and not (selected_entry and selected_entry.borrowable):
+        print(
+            f"error: --borrow is not supported by harness {selected!r}; "
+            "OAuth harnesses use the selected profile's own namespaced login",
+            file=sys.stderr,
+        )
+        return 1
+    if args.borrow:
+        try:
+            lender_name, lender_harness = profile_mod.split_selector(args.borrow)
+        except profile_mod.ProfileError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        if lender_harness:
+            print(
+                f"error: borrow targets a base profile; use {lender_name!r}, "
+                f"not {args.borrow!r}",
                 file=sys.stderr,
             )
             return 1
@@ -1536,9 +1556,10 @@ def register(sub) -> None:
     auth = p_new.add_mutually_exclusive_group()
     auth.add_argument(
         "--borrow", metavar="NAME",
-        help="use profile NAME's token (and backend) for this session, "
-        "keeping --profile's config, env and skills -- what 'claunch run "
-        "--borrow' does, for a managed session; reapplied on every restore",
+        help="use base profile NAME's shared token for this session, keeping "
+        "--profile's harness/config/env/skills; Claude also borrows NAME's "
+        "provider/backend, API-key harnesses only project the token; reapplied "
+        "on every restore",
     )
     auth.add_argument(
         "--null", dest="null_token", action="store_true",

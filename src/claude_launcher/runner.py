@@ -13,7 +13,7 @@ import sys
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from . import config, credentials, harnesses, lineage, providers, routing
+from . import borrowing, config, credentials, harnesses, lineage, providers, routing
 from .profile import Profile
 
 #: Environment variable Claude Code reads for a setup-token login.
@@ -206,26 +206,40 @@ def harness_child_env(
     harness: harnesses.Harness,
     *,
     base_env: Optional[dict] = None,
+    borrow: Optional[Profile] = None,
 ) -> dict:
     """Environment for a non-Claude profile harness.
 
-    Non-Claude-safe profile env remains available, while Claude Code's
-    namespace is filtered below. Authentication storage is separate: OAuth
-    CLIs read their own namespaced home, while a launcher-managed API key is
-    injected only into the route declared by the selected harness.
+    Non-Claude-safe runtime-profile env remains available, while Claude Code's
+    namespace is filtered below. OAuth CLIs read their own namespaced home;
+    API-key harnesses receive the runtime profile's shared token, or the base
+    lender's when ``borrow`` is given, through their declared route.
     """
     if harness.builtin:
-        return child_env(profile, with_token=True, base_env=base_env)
+        return child_env(
+            profile, with_token=True, base_env=base_env, borrow=borrow
+        )
+    if borrow is not None:
+        try:
+            borrow, _report = borrowing.require_allowed(
+                profile, borrow.selector, entry=harness
+            )
+        except borrowing.BorrowError as exc:
+            raise RunnerError(str(exc)) from exc
     env = dict(os.environ if base_env is None else base_env)
     env.update(harness.env)
     env.update(lineage.effective_env(profile))
 
-    finalize_harness_env(profile, harness, env)
+    finalize_harness_env(profile, harness, env, borrow=borrow)
     return env
 
 
 def finalize_harness_env(
-    profile: Profile, harness: harnesses.Harness, env: dict
+    profile: Profile,
+    harness: harnesses.Harness,
+    env: dict,
+    *,
+    borrow: Optional[Profile] = None,
 ) -> None:
     """Enforce profile auth/storage boundaries after all environment layers.
 
@@ -242,8 +256,11 @@ def finalize_harness_env(
         _finalize_declared_auth(harness, env)
         return
     token_env = harness.token_env
+    auth_source = borrow if borrow is not None else profile
     managed_token = (
-        lineage.stored_auth_token(profile) if harness.auth == "api-key" else None
+        lineage.stored_auth_token(auth_source)
+        if harness.auth == "api-key"
+        else None
     )
     for key in list(env):
         if key.startswith(("CLAUDE_CODE_", "ANTHROPIC_")) and not (
@@ -287,11 +304,14 @@ def _plain_spawn(
     args: Sequence[str],
     *,
     cwd: Optional[str] = None,
+    borrow: Optional[Profile] = None,
 ) -> int:
     cmd = [*harness.launch_command(), *harness.args, *args]
     try:
         return subprocess.run(
-            cmd, cwd=cwd, env=harness_child_env(profile, harness)
+            cmd,
+            cwd=cwd,
+            env=harness_child_env(profile, harness, borrow=borrow),
         ).returncode
     except FileNotFoundError as exc:
         raise RunnerError(
@@ -397,9 +417,9 @@ def run(
     """
     harness = profile_harness(profile)
     if not harness.builtin:
+        if borrow is not None and not harness.borrowable:
+            raise RunnerError(borrowing.capability(harness)["message"])
         incompatible = []
-        if borrow is not None:
-            incompatible.append("--borrow")
         if provider:
             incompatible.append("--provider")
         if null_token:
@@ -409,7 +429,9 @@ def run(
                 f"{', '.join(incompatible)} only applies to the claude harness; "
                 f"profile {profile.selector!r} selects {harness.name!r}"
             )
-        return _plain_spawn(profile, harness, list(args), cwd=cwd)
+        return _plain_spawn(
+            profile, harness, list(args), cwd=cwd, borrow=borrow
+        )
 
     auth_source = borrow if borrow is not None else profile
     if provider:

@@ -438,6 +438,25 @@ def test_pi_gets_only_its_projected_profile_token(home, monkeypatch):
     assert env["PI_CODING_AGENT_DIR"] == str(p.config_dir / "pi")
 
 
+def test_pi_can_borrow_a_base_profiles_token_without_borrowing_its_env(home):
+    runtime = profile.create("pi-work")
+    lender = profile.create("ds4")
+    lineage.set_harness(runtime, "pi")
+    credentials.save_token(runtime, "own-secret")
+    credentials.save_token(lender, "lender-secret")
+    settings.set_env(runtime, {"RUNTIME_SETTING": "kept"})
+    settings.set_env(lender, {"LENDER_SETTING": "must-not-cross"})
+
+    env = runner.harness_child_env(
+        runtime, harnesses.get("pi"), base_env={}, borrow=lender
+    )
+
+    assert env["ANTHROPIC_API_KEY"] == "lender-secret"
+    assert env["RUNTIME_SETTING"] == "kept"
+    assert "LENDER_SETTING" not in env
+    assert env["PI_CODING_AGENT_DIR"] == str(runtime.config_dir / "pi")
+
+
 @pytest.mark.parametrize(
     "name,key_name,home_name",
     [

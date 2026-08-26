@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 from aiohttp import web
 
-from .. import __version__, harnesses as harness_registry
+from .. import __version__, borrowing, harnesses as harness_registry
 from .. import lineage, profile as profile_mod, quickjob, reports as reports_mod
 from .. import spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
@@ -502,12 +502,15 @@ async def h_profiles(request: web.Request) -> web.Response:
     for p in profiles:
         try:
             name = lineage.effective_harness(p, doc)
+            borrow_cap = borrowing.capability(registry.get(name))
             items.append(
                 {
                     "name": p.name,
                     "profile": p.name,
                     "harness": name,
                     "harness_available": available.get(name, False),
+                    "borrow_allowed": borrow_cap["allowed"],
+                    "borrow_mode": borrow_cap["mode"],
                     "explicit": False,
                 }
             )
@@ -524,6 +527,7 @@ async def h_profiles(request: web.Request) -> web.Response:
             )
         for harness_name in harness_names:
             selector = f"{p.name}:{harness_name}"
+            borrow_cap = borrowing.capability(registry.get(harness_name))
             selectors.append(selector)
             items.append(
                 {
@@ -531,6 +535,8 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "profile": p.name,
                     "harness": harness_name,
                     "harness_available": available.get(harness_name, False),
+                    "borrow_allowed": borrow_cap["allowed"],
+                    "borrow_mode": borrow_cap["mode"],
                     "explicit": True,
                 }
             )
@@ -2681,6 +2687,12 @@ async def h_session_meta(request: web.Request) -> web.Response:
     cwd = _session_cwd(session)
 
     harness = harness_registry.registry().get(info.get("harness") or "")
+    borrowed_auth = None
+    if info.get("borrow") and info.get("profile"):
+        runtime_profile = profile_mod.resolve_selector(info["profile"])
+        borrowed_auth = borrowing.validate(
+            runtime_profile, info["borrow"], entry=harness
+        ).to_dict()
     # Containment, not equality: a session launched with `--worktree` sits in
     # `<repo>/.claude/worktrees/<name>`, which is the workspace the user
     # vouched for with another branch checked out -- not a directory nobody
@@ -2698,6 +2710,10 @@ async def h_session_meta(request: web.Request) -> web.Response:
     body = {
         "session": info,
         "harness": harness.to_dict() if harness else None,
+        # A live, secret-free validation rather than a creation-time snapshot:
+        # deleting/expiring the lender's credential must turn the detail rail
+        # red on its next poll, without restarting or exposing the value.
+        "borrowed_auth": borrowed_auth,
         "workspace": workspace.to_dict() if workspace else None,
         # Empty when the session is at the workspace root, which is the usual
         # case; the worktree's own directory name when it is not.

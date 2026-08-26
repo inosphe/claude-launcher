@@ -329,7 +329,13 @@ class Sources:
 
     def profile_details(self) -> List[dict]:
         return [
-            {"name": name, "harness": "claude", "harness_available": True}
+            {
+                "name": name,
+                "harness": "claude",
+                "harness_available": True,
+                "borrow_allowed": True,
+                "borrow_mode": "provider-token",
+            }
             for name in self.profiles()
         ]
 
@@ -1651,15 +1657,20 @@ class Wizard(Form):
         ]
         harness.index = 0
         claude = harness_name == "claude"
-        for key in ("role", "resume", "borrow", "null_token"):
+        for key in ("role", "resume", "null_token"):
             f = self.field(key)
             f.disabled = not claude
             f.disabled_note = "the claude harness only"
+        borrow_allowed = bool(detail.get("borrow_allowed", claude))
+        borrow = self.field("borrow")
+        borrow.disabled = not borrow_allowed
+        borrow.disabled_note = (
+            "the selected harness keeps auth in its own profile storage"
+        )
         if claude and self.value("null_token"):
             # `run` refuses the pair outright ("--null launches without any
             # OAuth token"); the form's way of never provoking that refusal
             # is to never offer it.
-            borrow = self.field("borrow")
             borrow.disabled = True
             borrow.disabled_note = "--null launches without any token"
             borrow.select("")
@@ -1726,8 +1737,12 @@ class Wizard(Form):
         args.name = self.value("name")
         args.harness = None
         args.profile = self.value("profile") or None
+        detail = self.sources.profile_harness(self.value("profile") or "")
         claude = self.value("harness") == "claude"
-        args.borrow = (self.value("borrow") or None) if claude else None
+        borrow_allowed = bool(detail.get("borrow_allowed", claude))
+        args.borrow = (
+            (self.value("borrow") or None) if borrow_allowed else None
+        )
         args.null_token = bool(self.value("null_token")) if claude else False
         args.cwd = self.value("cwd") or self.cwd
 
@@ -2197,35 +2212,46 @@ class SpawnWizard(Form):
         # rather than provoking the daemon's refusal of the pair. Re-derived
         # every pass, because the answers follow the Harness and Null rows.
         picked_profile = self.value("profile") or ""
+        parent_info = self._session(parent)
+        detail = self.sources.profile_harness(
+            picked_profile or parent_info.get("profile") or ""
+        )
+        # An older daemon may unlock a profile without publishing selector
+        # details. In that compatibility case the child still inherits the
+        # parent's harness until the daemon resolves the pick.
         child_harness = (
-            (self.sources.profile_harness(picked_profile).get("harness") or "")
-            if picked_profile
-            else self._session(parent).get("harness") or ""
+            detail.get("harness") or parent_info.get("harness") or ""
         )
         harness_f = self.field("harness")
         harness_f.options = [Option(child_harness or "(unknown)", child_harness)]
         harness_f.index = 0
         borrow_f = self.field("borrow")
         null_f = self.field("null_token")
+        borrow_allowed = bool(
+            detail.get("borrow_allowed", child_harness == "claude")
+        )
         if child_harness and child_harness != "claude":
             null_f.disabled, null_f.disabled_note = (
                 True, "the claude harness only",
             )
-            borrow_f.disabled, borrow_f.disabled_note = (
-                True, "the claude harness only",
-            )
         else:
             null_f.disabled = False
-            if null_f.value:
-                borrow_f.disabled = True
-                borrow_f.disabled_note = "--null launches without any token"
-                borrow_f.select("")
-            else:
-                borrow_f.disabled = "borrow" not in may
-                borrow_f.disabled_note = (
-                    "the child authenticates as its parent does "
-                    "(spawn.allow_profile)"
-                )
+        if not borrow_allowed:
+            borrow_f.disabled = True
+            borrow_f.disabled_note = (
+                "the selected harness keeps auth in its own profile storage"
+            )
+            borrow_f.select("")
+        elif child_harness == "claude" and null_f.value:
+            borrow_f.disabled = True
+            borrow_f.disabled_note = "--null launches without any token"
+            borrow_f.select("")
+        else:
+            borrow_f.disabled = "borrow" not in may
+            borrow_f.disabled_note = (
+                "the child authenticates as its parent does "
+                "(spawn.allow_profile)"
+            )
 
         mesh_field = self.field("mesh")
         no_mesh = mesh_field.value == self.NO_MESH

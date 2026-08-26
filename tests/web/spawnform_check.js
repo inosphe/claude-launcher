@@ -117,8 +117,10 @@ const fetched = [];
 const reports = {};
 const ctx = {};
 const PROFILE_DETAILS = {
-  work: { name: "work", harness: "claude", harness_available: true },
-  home: { name: "home", harness: "claude", harness_available: true },
+  work: { name: "work", harness: "claude", harness_available: true,
+          borrow_allowed: true, borrow_mode: "provider-token" },
+  home: { name: "home", harness: "claude", harness_available: true,
+          borrow_allowed: true, borrow_mode: "provider-token" },
 };
 new Function(
   "exports", "$", "document", "Option", "sessionsCache", "syncForkAvailability",
@@ -132,6 +134,7 @@ new Function(
    // it holds off is pollselect_check's; here it only has to exist, so that
    // slicing the function does not slice it away from its own state.
    sliceLet("parentsRendered"),
+   slice("profileBorrowCapability"),
    slice("spawnUnlocked"), slice("refreshSpawnPolicy"),
    slice("spawnWorkspaceName"), slice("refreshParentChoices"),
    slice("spawnParent"), slice("syncSpawnMode"), slice("syncSpawnHarnessRow"),
@@ -306,8 +309,10 @@ async function main() {
   check("entering child mode seeds the row with the parent's own harness",
         form.harness.value, "claude");
 
-  /* A child on another profile-owned harness: auth and role are Claude's. */
+  /* An OAuth child has no shared token route and no Claude-only rows. */
   PROFILE_DETAILS.home.harness = "codex";
+  PROFILE_DETAILS.home.borrow_allowed = false;
+  PROFILE_DETAILS.home.borrow_mode = "none";
   form.profile.value = "home";
   ctx.sync();
   check("a non-claude child has no token rows and no role",
@@ -316,7 +321,18 @@ async function main() {
         [true, true, true, "", ""]);
   check("the stance was re-rendered when the role was taken back",
         stances > 0, true);
+  /* An API-key child keeps Borrow, but still has no Claude-only rows. */
+  PROFILE_DETAILS.home.harness = "pi";
+  PROFILE_DETAILS.home.borrow_allowed = true;
+  PROFILE_DETAILS.home.borrow_mode = "token";
+  form.profile.value = "home";
+  ctx.sync();
+  check("an API-key child can borrow but cannot use Claude null/role",
+        [form.null_token.disabled, form.borrow.disabled, form.role.disabled],
+        [true, false, true]);
   PROFILE_DETAILS.home.harness = "claude";
+  PROFILE_DETAILS.home.borrow_allowed = true;
+  PROFILE_DETAILS.home.borrow_mode = "provider-token";
   ctx.sync();
   check("back on claude the rows come back",
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled],

@@ -245,6 +245,8 @@ WEB = Path(__file__).resolve().parent / "web"
         "owed_check.js",
         "panel_check.js",
         "sesssend_check.js",
+        "reborrow_check.js",
+        "borrowform_check.js",
         "sessrun_check.js",
         "wfstart_check.js",
         "wheel_check.js",

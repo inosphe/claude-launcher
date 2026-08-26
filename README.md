@@ -101,7 +101,7 @@ claunch run work:claude                  # explicit Claude selector
 | `create <name>`        | Create a profile (`--harness`, `--parent` to inherit). Claude profiles seed/apply Claude config; other harnesses start clean. |
 | `set-harness <name> [h]` | Show or pin the profile's harness; `--clear` inherits from its parent/default. |
 | `login <name[:harness]>` | Run the selected OAuth harness's login flow (Claude setup-token, Codex/Kimi/Cursor login). |
-| `run <name[:harness]> [args...]` | Launch the profile default or an explicit harness. Claude-only launcher flags are `--borrow`, `--null`, `--provider`, `--add-prompt`; other args pass through untouched. |
+| `run <name[:harness]> [args...]` | Launch the profile default or an explicit harness. `--borrow BASE_PROFILE` works for Claude and declared API-key harnesses; `--null`, `--provider` and `--add-prompt` are Claude-only. Other args pass through untouched. |
 | `env <name> [...]`     | View/edit the profile's env vars (`--effective` for merged). |
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
@@ -161,23 +161,31 @@ claude, put it after `--`.
 
 ### Borrowing another profile's token
 
-Run a profile but authenticate with **another profile's** login, just for that
-run — the running profile's config dir, env and skills are unchanged, only the
-token is swapped:
+Run a profile selector but authenticate with **another base profile's** shared
+credential, just for that run. The running selector still owns the harness,
+config dir, env and skills; the lender never selects the program:
 
 ```bash
-claunch run company --borrow company2
-claunch run company --borrow company2 --resume   # extra args still pass through
+claunch run company:claude --borrow company2
+claunch run company:pi --borrow company2
 ```
 
-Nothing is persisted: it only sets `CLAUDE_CODE_OAUTH_TOKEN` from the borrowed
-profile for this one launch. The borrowed profile must have a token (its own or
-inherited). To forward a literal `--borrow` to claude, put it after `--`.
+`--borrow` always takes a bare name. `--borrow company2:claude` is rejected:
+the harness belongs to the running selector and all variants of `company2`
+share the one credential. For Claude, the lender's
+**[provider](#api-providers-third-party-backends)** comes with its token, so a
+Kimi/other backend brings its base URL, model pins and auth. For an `auth:
+api-key` harness such as Pi, only the lender's launcher token crosses the
+boundary and the packaged `token_env` decides its destination. Lender env,
+storage and harness do not cross. OAuth harnesses (Codex, Kimi and Cursor)
+cannot borrow: select `company2:HARNESS` to use that profile's namespaced OAuth
+home instead.
 
-`--borrow` also borrows the lender's **[provider](#api-providers-third-party-backends)**:
-if `company2` is configured to use a third-party backend, `--borrow company2`
-adopts that backend (base URL, model overrides and its auth) for the run — so a
-borrowed provider profile needs no Anthropic OAuth token of its own.
+The direct `run` form persists nothing. A missing or expired lender credential
+is reported by the shared borrow validation; managed sessions expose the same
+live verdict under **Borrowed auth** in the Web detail pane, so deleting a token
+after creation turns the next poll into a warning without exposing its value.
+To forward a literal `--borrow` to a harness, put it after `--`.
 
 `--null` launches with **no OAuth token at all**: the profile's stored token is
 not injected, and any `CLAUDE_CODE_OAUTH_TOKEN` inherited from the shell or set
@@ -196,10 +204,9 @@ is part of the session's *definition*, so it holds across daemon restarts and
 borrows what the lender holds *then*, not a copy from creation day. And
 because it is the definition's, it can be changed later: `claunch reborrow
 S NAME` stops the session and relaunches it on another profile's token
-— same name, same conversation, same directory. The three auth answers are
-one choice, so `--none` (its own token again) and `--null` (no token at
-all) are the same verb, and picking any of the three clears the others —
-a borrow set on a `--null` session turns the token back on.
+— same name, same conversation, same directory. Claude offers three answers:
+borrow, `--none` (its own token again), or `--null` (no token). API-key
+harnesses offer borrow or their own token; OAuth harnesses offer neither.
 
 ### Running in a git worktree
 
@@ -1110,11 +1117,11 @@ The rest is the same list the daemon would have checked afterwards, so a mesh
 that does not exist or a workflow not declared in that directory is never
 offered rather than refused once the session is half arranged. Fields that do
 not apply grey out rather than vanish: `Fork` says *needs a conversation to
-fork* until you pick one under `Resume`, and `Role`/`Resume`/`Borrow`/`Null
-token` say *the claude harness only* when the selected profile uses another
-harness. The Harness row itself is always read-only; use `claunch set-harness`
-outside the wizard. `Borrow` and
-`Null token` are `--borrow`/`--null` as rows — and since the daemon refuses
+fork* until you pick one under `Resume`; `Role`/`Resume`/`Null token` are
+Claude-only; `Borrow` remains open for Claude and API-key harnesses and greys
+for OAuth/none harnesses. The Harness row itself is always read-only; use
+`claunch set-harness` outside the wizard. `Borrow` and `Null token` are
+`--borrow`/`--null` as rows — and since the daemon refuses
 the pair outright, saying yes to null greys the borrow row and resets it,
 so the form can never offer a combination the flags would error on.
 
@@ -1222,7 +1229,7 @@ and a form painted into its PTY would hang the session it was creating.
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
 | `migrate-session S`   | Move a session to another checkout: `--worktree [NAME]` cuts (or reuses) a worktree of its own repository, `--to DIR` moves it anywhere else — the daemon stops it, carries its claude conversation's transcript, and relaunches it there. `--children` moves the descendants standing in the same directory too; `-a` attaches. Also a **Move to worktree** picker in the web UI's session panel. |
-| `reborrow S [NAME]`   | Restart a session on another answer to "whose token": `NAME` borrows that profile's token (`--borrow`), `--none` runs it on its own profile's, `--null` on no token at all — picking one clears the others. Stops and relaunches the session — same name, same conversation, same directory. `-a` attaches. Also a **Borrowed auth** picker in the web UI's session panel. |
+| `reborrow S [NAME]`   | Restart a token-capable session on another answer to "whose token": base profile `NAME` borrows its shared token (`--borrow`), `--none` uses the runtime profile's own, and Claude also supports `--null`. Stops and relaunches the session — same name, same conversation, same directory. `-a` attaches. The Web detail pane's **Borrowed auth** picker includes live credential validation. |
 | `skip-permissions S on\|off` | Restart a session with claude's `--dangerously-skip-permissions` added (`on`) or removed (`off`) — the flag lives in the definition's args, so toggling it stops and relaunches the session: same name, same conversation, same directory. `-a` attaches. Also a **Permissions** toggle in the web UI's session panel. |
 | `send-keys [-l] S KEYS...` | tmux semantics: `Enter`, `Escape`, `Tab`, `C-c`, `M-x`, `Up`... are keys; everything else is literal text. `-l` sends all args literally. `-t S` also accepted. |
 | `capture-pane S`      | Print the current rendered screen (`--history` for scrolled-off lines, `--json` for lines + cursor + status). |
@@ -2398,7 +2405,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/kill`           | stop every running session (`?force=1`). Records stay, so all of them are still respawnable; `killed`/`failed` name both halves |
 | POST   | `/api/sessions/respawn`        | relaunch every exited session under its own name, in creation order; `respawned`/`failed` |
 | GET/DELETE | `/api/sessions/{name}`     | info / kill (`?force=1`) |
-| GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it |
+| GET    | `/api/sessions/{name}/meta`    | everything known *about* one session: definition, workspace, harness, role stance, mesh memberships, its cflow slot and the workflows startable in it; borrowed sessions also include a secret-free live `borrowed_auth` validation |
 | POST   | `/api/sessions/{name}/respawn` | relaunch an exited session (claude resumes its conversation) |
 | POST   | `/api/sessions/{name}/migrate` | move to another checkout: exactly one of `{worktree: NAME-or-""}` / `{cwd: DIR}`; `{children: true}` moves the descendants standing in the same directory. The claude transcript is carried to the new directory's slug |
 | POST   | `/api/sessions/{name}/reborrow` | restart on another answer to "whose token": `{borrow: NAME-or-null, null_token?}` — picking one clears the others; the session is relaunched with the definition's auth swapped, the directory untouched |

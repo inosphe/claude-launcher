@@ -204,10 +204,10 @@ def test_profile_selector_picker_is_qualified_but_borrow_stays_base_profile():
 
         def profile_details(self):
             return [
-                {"name": "work:claude", "harness": "claude", "harness_available": True},
-                {"name": "work:pi", "harness": "pi", "harness_available": True},
-                {"name": "ds4:claude", "harness": "claude", "harness_available": True},
-                {"name": "ds4:pi", "harness": "pi", "harness_available": True},
+                {"name": "work:claude", "harness": "claude", "harness_available": True, "borrow_allowed": True},
+                {"name": "work:pi", "harness": "pi", "harness_available": True, "borrow_allowed": True},
+                {"name": "ds4:claude", "harness": "claude", "harness_available": True, "borrow_allowed": True},
+                {"name": "ds4:pi", "harness": "pi", "harness_available": True, "borrow_allowed": True},
             ]
 
     wiz = form(sources=SelectorSources())
@@ -219,17 +219,23 @@ def test_profile_selector_picker_is_qualified_but_borrow_stays_base_profile():
     assert "work" in borrow_values
     pick(wiz, "profile", "work:pi")
     assert wiz.value("harness") == "pi"
+    assert wiz.field("borrow").selectable
+    pick(wiz, "borrow", "ds4")
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.profile == "work:pi"
+    assert args.borrow == "ds4"
 
 
 # --------------------------------------------------------------------------- #
 # fields that depend on other fields
 # --------------------------------------------------------------------------- #
-def test_role_and_resume_belong_to_claude_only():
+def test_role_resume_and_null_belong_to_claude_but_pi_can_borrow():
     class PiSources(FakeSources):
         def profile_details(self):
             return [
-                {"name": "work", "harness": "claude", "harness_available": True},
-                {"name": "ds4", "harness": "pi", "harness_available": True},
+                {"name": "work", "harness": "claude", "harness_available": True, "borrow_allowed": True},
+                {"name": "ds4", "harness": "pi", "harness_available": True, "borrow_allowed": True},
             ]
 
     wiz = form(sources=PiSources())
@@ -239,8 +245,22 @@ def test_role_and_resume_belong_to_claude_only():
     assert not wiz.field("role").selectable
     assert not wiz.field("resume").selectable
     assert not wiz.field("fork_session").selectable
-    assert not wiz.field("borrow").selectable
+    assert wiz.field("borrow").selectable
     assert not wiz.field("null_token").selectable
+
+
+def test_oauth_harness_cannot_borrow_in_the_wizard():
+    class KimiSources(FakeSources):
+        def profile_details(self):
+            return [
+                {"name": "work", "harness": "claude", "harness_available": True, "borrow_allowed": True},
+                {"name": "ds4", "harness": "kimi", "harness_available": True, "borrow_allowed": False},
+            ]
+
+    wiz = form(sources=KimiSources())
+    pick(wiz, "profile", "ds4")
+    assert not wiz.field("borrow").selectable
+    assert "own profile storage" in wiz.field("borrow").disabled_note
 
 
 def test_the_borrow_picker_offers_the_profiles():

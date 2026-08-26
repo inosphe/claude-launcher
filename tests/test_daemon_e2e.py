@@ -1599,7 +1599,11 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
                     {
                         "harnesses": {
                             "codex": {"command": sys.executable},
-                            "pi": {"command": "no-such-program-xyz"},
+                            "pi": {
+                                "command": "no-such-program-xyz",
+                                "auth": "api-key",
+                                "token_env": "ANTHROPIC_API_KEY",
+                            },
                         }
                     }
                 )
@@ -1613,7 +1617,10 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             }
             assert details["pi-profile"]["harness"] == "pi"
             assert details["pi-profile"]["harness_available"] is False
+            assert details["pi-profile"]["borrow_allowed"] is True
+            assert details["pi-profile"]["borrow_mode"] == "token"
             assert details["pi-profile:claude"]["harness"] == "claude"
+            assert details["pi-profile:claude"]["borrow_mode"] == "provider-token"
             assert details["pi-profile:pi"]["harness"] == "pi"
             resp = await client.get("/api/profiles", headers=bearer)
             profile_doc = await resp.json()

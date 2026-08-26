@@ -307,6 +307,44 @@ def test_non_claude_run_does_not_steal_the_harness_provider_flag(
     assert lineage.effective_harness(profile.require("pi-work")) == "claude"
 
 
+def test_pi_run_consumes_base_profile_borrow_as_a_launcher_flag(
+    home, monkeypatch, capsys
+):
+    run("create", "pi-work", "--no-seed")
+    run("create", "ds4", "--no-seed")
+    run("set-token", "pi-work", "own-secret")
+    run("set-token", "ds4", "lender-secret")
+    reached = {}
+
+    def fake_run(cmd, **kwargs):
+        if cmd and cmd[0] == "git":
+            return _REAL_RUN(cmd, **kwargs)
+        if kwargs.get("env") is not None:
+            reached["cmd"] = list(cmd)
+            reached["env"] = kwargs.get("env")
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+    capsys.readouterr()
+
+    assert run(
+        "run", "pi-work:pi", "--no-worktree", "--borrow", "ds4", "--verbose"
+    ) == 0
+    assert reached["cmd"][-1] == "--verbose"
+    assert "--borrow" not in reached["cmd"]
+    assert reached["env"]["ANTHROPIC_API_KEY"] == "lender-secret"
+    assert "exported as ANTHROPIC_API_KEY" in capsys.readouterr().err
+
+
+def test_run_rejects_a_qualified_borrow_selector(home, capsys):
+    run("create", "work", "--no-seed")
+    run("create", "ds4", "--no-seed")
+    capsys.readouterr()
+
+    assert run("run", "work", "--no-worktree", "--borrow", "ds4:claude") == 1
+    assert "borrow targets a base profile" in capsys.readouterr().err
+
+
 def test_run_null_conflicts_with_borrow(home, capsys):
     run("create", "work", "--no-seed")
     run("create", "other", "--no-seed")

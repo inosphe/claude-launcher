@@ -136,8 +136,8 @@ def test_a_child_authenticates_the_way_its_parent_does():
 
 
 def test_a_harness_swap_drops_the_inherited_auth_with_the_args():
-    """borrow/null are claude-only machinery; dragged onto another harness
-    they would fail the spawn over a field nobody in the request named."""
+    """An OAuth harness cannot inherit a shared-token arrangement over a
+    field nobody in the request named."""
     codex = profile.create("codex-profile")
     lineage.set_harness(codex, "codex")
     policy = _policy(allow_profile=True)
@@ -146,6 +146,21 @@ def test_a_harness_swap_drops_the_inherited_auth_with_the_args():
         policy, {"profile": "codex-profile"}, parent=parent, depth=0, children=0
     )
     assert child["borrow"] is None
+    assert child["null_token"] is False
+
+
+def test_an_explicit_api_key_profile_and_base_borrow_travel_together():
+    policy = _policy(allow_profile=True)
+    child = spawn.check(
+        policy,
+        {"profile": "talk:pi", "borrow": "work"},
+        parent=PARENT,
+        depth=0,
+        children=0,
+    )
+    assert child["profile"] == "talk:pi"
+    assert child["harness"] == "pi"
+    assert child["borrow"] == "work"
     assert child["null_token"] is False
 
 
@@ -850,6 +865,13 @@ def test_new_session_carries_its_auth_choice_to_the_daemon(monkeypatch, tmp_path
     ]) == 0
     assert reached["body"]["borrow"] == "lender"
     assert "null_token" not in reached["body"]
+
+    assert cli.main([
+        "new-session", "--profile", "nc:pi", "-c", str(tmp_path),
+        "--borrow", "lender",
+    ]) == 0
+    assert reached["body"]["profile"] == "nc:pi"
+    assert reached["body"]["borrow"] == "lender"
 
     assert cli.main([
         "new-session", "--profile", "nc", "-c", str(tmp_path), "--null",
