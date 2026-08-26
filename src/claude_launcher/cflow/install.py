@@ -51,9 +51,10 @@ workflow to be started here), that is the answer; otherwise list candidates
    completely, then file the step's completion report — `report {summary,
    details}` — and advance with `next {}`. The summary is 2–4 honest
    sentences on what actually happened; put evidence in `details` (commands
-   run, test names, failure lines, files touched). Reports are journaled,
-   shown live on the daemon web dashboard, and become the PR text. Failures
-   belong in the report too. If the payload carries `done_when`, that is the
+   run, test names, failure lines, files touched). Both fields are MARKDOWN
+   — see "Reports are markdown" below. Reports are journaled, shown live on
+   the daemon web dashboard, and become the PR text. Failures belong in the
+   report too. If the payload carries `done_when`, that is the
    step's completion criterion: before calling `next`, check the statement is
    actually TRUE — and if it is not yet, keep working instead of advancing.
    If the payload carries `awaits`, the step declares something it is waiting
@@ -143,6 +144,32 @@ workflow to be started here), that is the answer; otherwise list candidates
    the chat). If a human request is clearly wrong, do NOT start it: say why
    and stop. A recur request is never wrong to fulfil — it is the loop the
    workflow declared. The request clears once you start.
+
+## Reports are markdown
+
+`summary` and `details` are rendered as markdown on the daemon web
+dashboard, so write them as markdown and not as one wall of prose — a
+report is read by a person who did not watch you work, and the shape is
+half of what makes it readable.
+
+- Line breaks are kept. A single newline is a line break, so one fact per
+  line stays one fact per line; a blank line starts a new paragraph.
+- Evidence goes in a `- ` list, not a comma-spliced sentence. Nest with two
+  spaces. Numbers, paths and test counts are the point — put them on their
+  own lines.
+- Commands, file paths, test ids and identifiers go in `backticks`.
+  Multi-line output — a failure trace, a diff, a test tail — goes in a
+  fenced ```` ``` ```` block, which is the only thing that keeps its exact
+  spacing.
+- `**bold**` for the verdict of a section, `## ` headings only when
+  `details` is long enough to have sections. A short report needs neither.
+- A pipe table (`| axis | value |` with a `|---|---|` rule) is right for
+  (axis, tree, value) evidence and wrong for anything else.
+- Underscores in names are left alone, so `test_web_topology.py` is safe to
+  write bare — but backtick it anyway and it reads as what it is.
+
+The one rule that is not about markdown: the summary still has to be true,
+and the shape must not be used to make a thin result look thorough.
 
 ## Asking a person to decide
 
