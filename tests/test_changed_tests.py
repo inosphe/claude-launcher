@@ -35,6 +35,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -814,6 +815,27 @@ def test_an_edit_the_stat_cache_cannot_see_does_not_reuse_the_green(repo, gate):
 
     assert gate() == 0
     assert gate.runs() == 2, "the previous content's receipt answered for this one"
+def test_a_same_second_same_size_rewrite_still_changes_the_tree(repo):
+    """The stat cache must never answer for content (claunch-vuta).
+
+    A rewrite inside the cached stat's second, at the same size, leaves
+    mtime-second and size matching the index exactly, and git calls the
+    file clean without reading it -- the scratch tree then carries the
+    PRE-edit blob, and a green verdict answers for the edit that
+    replaced it. The mtimes are pinned with os.utime so the race does
+    not have to happen for the hole to be tested.
+    """
+    target = repo / "src/pkg/mesh.py"
+    _git(repo, "add", "-A")          # cache the committed content's stat
+    cached = os.stat(target)
+    target.write_text("x = 9\n")     # same size, different content
+    os.utime(target, ns=(cached.st_atime_ns, cached.st_mtime_ns))
+    index = repo / ".git" / "index"
+    later = time.time() + 5          # and the index reads as newer than
+    os.utime(index, (later, later))  # the entry, so nothing is racy
+
+    tree = changed_tests.worktree_tree(repo)
+    assert tree != _git(repo, "rev-parse", "HEAD^{tree}").strip()
 
 
 def test_the_scratch_index_leaves_the_real_one_alone(repo):
