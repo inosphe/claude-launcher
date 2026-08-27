@@ -74,12 +74,40 @@ lines did not collide. The leader's post-merge sweep is the authority there,
 and ``mergecheck.py`` covers the one silent case in between (one side deletes
 a symbol the other started calling).
 
+Ready on the branch side is not "the merge can run"
+---------------------------------------------------
+Everything above is about two commits. A merge happens in a **working tree**,
+and git refuses to start one whose result would write over a file that tree is
+dirty on -- before the merge begins, with no conflict and nothing for the
+branch's owner to fix. This repository shares one checkout between many
+sessions, so that is a normal state rather than an exception, and it caught
+two consecutive integration rounds: the gate answered ``0``, the leader
+entered its merge step, and ``git merge`` refused because another session's
+uncommitted work sat in four of the files being merged. Both times a human
+found it by running ``git status`` on a hunch.
+
+``--checkout`` closes that: give it the tree the merge will run in (or pass it
+bare and it finds whichever worktree has the target checked out), and it
+intersects "files the merge writes" with "files that tree is dirty on". A
+non-empty intersection is exit ``4``. It is **off by default** because this
+same script is the worker's alignment gate, run from the worker's own
+worktree, and a worker's worktree is dirty because it is working -- on by
+default it would answer ``4`` for every worker doing its job.
+
 Exit codes -- ``0`` ready, ``1`` re-measure, ``2`` could not tell, ``3``
-rebase. Two failure codes rather than one because ``awaits.probe`` compares
-**exit codes only** and deliberately ignores output (``cflow/model.py``,
-:class:`Awaits`): folded into a single ``1``, a branch that went from stale to
-conflicted would flip nothing and the daemon would say nothing. ``2`` keeps
-the meaning ``landed_check.py`` gave it so the two gates read alike.
+rebase, ``4`` dirty checkout. Separate codes rather than one because
+``awaits.probe`` compares **exit codes only** and deliberately ignores output
+(``cflow/model.py``, :class:`Awaits`): folded together, a branch that went
+from stale to conflicted would flip nothing and the daemon would say nothing.
+``2`` keeps the meaning ``landed_check.py`` gave it so the two gates read
+alike, and ``4`` is new rather than a reuse so that no existing caller's
+reading of ``0``/``1``/``2``/``3`` changes.
+
+What the output has to carry, per the board's convention on quiet empty
+answers (``claunch-peyn``): an empty answer prints its denominator ("0 of 12
+files the merge writes"), an input that cannot be read is refused rather than
+matched to nothing, entries that did not parse are counted and keep the answer
+off green, and a verdict that skipped the tree check says it skipped it.
 
 Output is ASCII only, for the reason ``mergecheck`` gives: it prints into a
 Windows console as often as a Unix one, and a character outside the code page
@@ -106,6 +134,14 @@ REMEASURE = 1
 CANNOT_TELL = 2
 REBASE = 3
 
+#: The branch side is ready and the merge still cannot start, because the
+#: working tree it would run in is dirty on a file the merge writes. A fifth
+#: code rather than folding into ``1`` or ``3`` for the reason the other four
+#: are separate: ``awaits.probe`` compares exit codes and ignores output, and
+#: the remedy here is neither a rebase nor a re-measurement -- nothing the
+#: branch's owner can do fixes it. Only reachable with ``--checkout``.
+DIRTY_CHECKOUT = 4
+
 #: The target a branch integrates into when nothing says otherwise. A nested
 #: worker's target is its parent's branch, not this -- see :func:`_target`.
 DEFAULT_TARGET = "master"
@@ -115,6 +151,18 @@ DEFAULT_TARGET = "master"
 #: ``git branch``, must not be pushed by default, and must never be something
 #: the leader could merge by mistake.
 PREVIEW_NS = "refs/claunch/preview"
+
+#: ``--checkout`` with no path: find the tree from the target instead of being
+#: told where it is. Passing a path means the caller remembers where the
+#: target lives, and that memory is the thing that goes stale -- an
+#: integration branch is often checked out nowhere at all, and master moves
+#: between checkouts. git already knows; ask it.
+DERIVE_FROM_TARGET = "@target"
+
+#: How many blocking paths are printed before the rest are counted instead.
+#: The count is printed either way: a gate that truncates without saying so
+#: reads as "that was all of them".
+BLOCKED_LISTED = 10
 
 
 def _resolve_repo(explicit: Optional[str]) -> Tuple[Path, str]:
@@ -247,6 +295,314 @@ def _preview_covers(repo: Path, ref: str, tip: str, target_tip: str) -> Optional
     return None
 
 
+def _worktrees(repo: Path) -> Optional[List[Tuple[Path, Optional[str], str]]]:
+    """Every checkout of this repository: ``(path, branch, HEAD)``.
+
+    ``branch`` is ``None`` for a detached worktree, and that is not a gap to
+    paper over: a detached checkout holds no branch, so no named target can be
+    found in it and it can never be the tree a named merge runs in.
+    """
+    proc = _git(repo, "worktree", "list", "--porcelain")
+    if proc.returncode != 0:
+        return None
+    found: List[Tuple[Path, Optional[str], str]] = []
+    path: Optional[str] = None
+    head = ""
+    branch: Optional[str] = None
+
+    def flush() -> None:
+        if path is not None:
+            found.append((Path(path), branch, head))
+
+    for line in proc.stdout.splitlines():
+        if line.startswith("worktree "):
+            flush()
+            path, head, branch = line[len("worktree ") :].strip(), "", None
+        elif line.startswith("HEAD "):
+            head = line[len("HEAD ") :].strip()
+        elif line.startswith("branch "):
+            ref = line[len("branch ") :].strip()
+            branch = ref[len("refs/heads/") :] if ref.startswith("refs/heads/") else ref
+    flush()
+    return found
+
+
+def _dirty(checkout: Path) -> Tuple[Optional[set], int]:
+    """Paths this checkout is not clean on, and how many entries went unread.
+
+    ``-z`` rather than plain ``--porcelain``: porcelain v1 quotes and escapes
+    any path it cannot print raw, so the plain form hands back a spelling that
+    does not match what ``git diff --name-only`` returns for the same file --
+    an intersection computed across the two would silently miss it.
+
+    The second number is why this returns a pair. The board's output
+    convention (``claunch-peyn``, rule 4) is that a gate says how much it
+    could not read: an unparsed status entry is a file this check is blind
+    to, and dropping it quietly is how a check ends up green about a tree it
+    did not finish reading.
+    """
+    proc = _git(checkout, "status", "--porcelain", "-z")
+    if proc.returncode != 0:
+        return None, 0
+    fields = proc.stdout.split("\0")
+    paths: set = set()
+    unread = 0
+    i = 0
+    while i < len(fields):
+        entry = fields[i]
+        i += 1
+        if not entry:
+            continue
+        if len(entry) < 4 or entry[2] != " ":
+            unread += 1
+            continue
+        paths.add(entry[3:])
+        if entry[0] in "RC" or entry[1] in "RC":
+            # A rename or copy carries its source as the next NUL-separated
+            # field. Both ends matter: the merge can be blocked by either.
+            if i < len(fields) and fields[i]:
+                paths.add(fields[i])
+                i += 1
+            else:
+                unread += 1
+    return paths, unread
+
+
+def _merge_updates(repo: Path, base: str, tip: str) -> Tuple[Optional[set], str]:
+    """Paths that differ between ``base`` and the tree that merges ``tip`` in.
+
+    This is the set git actually checks before it will begin a merge, and it
+    is **not** "the files the branch changed". What stops a merge is a path
+    whose content the merge would write, which is a property of the *result*
+    tree measured against the tree the checkout is sitting on.
+
+    Measured here on git 2.48.1, three cases:
+
+    * the merge updates ``a.py`` and ``a.py`` is locally modified -> refused,
+      ``error: Your local changes to the following files would be overwritten
+      by merge``
+    * an untouched ``b.py`` is locally modified -> the merge runs
+    * ``a.py`` is locally modified to byte-for-byte what the merge would
+      write -> still refused; git compares the index, not the content
+
+    The third case is why this compares path sets and never contents: there
+    is no local edit to a written path that git lets through, so reading the
+    files could only produce a false green.
+
+    Old git without ``merge-tree --write-tree`` falls back to the fork-point
+    diff, which is the branch-side path set -- close, and not the same
+    measurement. The caller prints which of the two answered.
+    """
+    merged = _git(repo, "merge-tree", "--write-tree", base, tip)
+    if merged.returncode == 0:
+        lines = merged.stdout.strip().splitlines()
+        tree = lines[0].strip() if lines else ""
+        if not tree:
+            return None, "merge-tree --write-tree returned no tree"
+        diff = _git(repo, "diff", "--name-only", "-z", base, tree)
+        if diff.returncode != 0:
+            return None, "git could not diff the merge result"
+        return {p for p in diff.stdout.split("\0") if p}, "merge-tree --write-tree"
+    if merged.returncode == 1:
+        return None, "merge-tree --write-tree reports the merge conflicts"
+    fork = _git(repo, "merge-base", base, tip)
+    if fork.returncode != 0 or not fork.stdout.strip():
+        return None, "no merge base"
+    diff = _git(repo, "diff", "--name-only", "-z", fork.stdout.strip(), tip)
+    if diff.returncode != 0:
+        return None, "git could not diff the fork point"
+    return (
+        {p for p in diff.stdout.split("\0") if p},
+        "fork-point diff (git too old for merge-tree --write-tree)",
+    )
+
+
+def _checkout_check(
+    repo: Path,
+    checkout: str,
+    branch: str,
+    target: str,
+    tip: str,
+) -> Tuple[int, List[str], List[str]]:
+    """Would the tree the merge runs in refuse to start it?
+
+    Returns the verdict and the lines that justify it, rather than printing:
+    the same measurement is reported two ways -- as the gate's own answer when
+    the branch side is ready, and as a note beside a verdict it does not get
+    to change when it is not.
+    """
+    out: List[str] = []
+    err: List[str] = []
+
+    if checkout == DERIVE_FROM_TARGET:
+        trees = _worktrees(repo)
+        if trees is None:
+            err.append(
+                f"cannot tell: git could not list the checkouts of {repo}, so "
+                f"there is no way to find where {target} lives -- name the "
+                f"tree with --checkout <path>"
+            )
+            return CANNOT_TELL, out, err
+        holding = [t for t in trees if t[1] and _same_branch(t[1], target)]
+        if not holding:
+            # An empty answer carrying its denominator: rule 1 of
+            # claunch-peyn. And a real pass, not a shrug -- a branch that is
+            # checked out nowhere has no working tree that could refuse the
+            # merge, and a merge worktree made fresh is clean by construction.
+            out.append(
+                f"checkout: none of {len(trees)} worktree(s) has {target} "
+                f"checked out -- no working tree can refuse this merge"
+            )
+            return READY, out, err
+        where = holding[0][0]
+    else:
+        where = Path(checkout)
+
+    head = _git(where, "rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+    if head.returncode != 0 or not head.stdout.strip():
+        err.append(
+            f"cannot tell: --checkout {where} is not a git checkout with a "
+            f"commit on HEAD. It wants the working tree the merge will run "
+            f"in; pass --checkout with no value (or {DERIVE_FROM_TARGET!r}) "
+            f"to find that tree from {target} instead"
+        )
+        return CANNOT_TELL, out, err
+    head_sha = head.stdout.strip()
+    on = _head_name(where) or "detached"
+
+    updates, how = _merge_updates(repo, head_sha, tip)
+    if updates is None:
+        err.append(
+            f"cannot tell: could not work out which files the merge writes in "
+            f"{where} ({how})"
+        )
+        return CANNOT_TELL, out, err
+    dirty, unread = _dirty(where)
+    if dirty is None:
+        err.append(f"cannot tell: git status failed in {where}")
+        return CANNOT_TELL, out, err
+
+    stamp = (
+        f"{where} (on {on}, {head_sha[:12]}) -- {len(updates)} file(s) the "
+        f"merge writes, {len(dirty)} dirty entry(ies) in that tree [{how}]"
+    )
+    if not _same_branch(on, target):
+        # Answered anyway, because the intersection below IS the true answer
+        # for that tree -- but said out loud, so this verdict cannot later be
+        # quoted as an answer about the target.
+        stamp += f"; note: that tree is on {on}, not the target {target}"
+
+    blocked = sorted(updates & dirty)
+    if blocked:
+        out.append(f"dirty checkout: {len(blocked)} of {len(updates)} -- {stamp}")
+        for path in blocked[:BLOCKED_LISTED]:
+            out.append(f"    {path}")
+        if len(blocked) > BLOCKED_LISTED:
+            out.append(f"    ... and {len(blocked) - BLOCKED_LISTED} more, not listed")
+        out.append(
+            f"  git merge {branch} is refused there before it starts: "
+            f'"Your local changes to the following files would be '
+            f'overwritten by merge"'
+        )
+        out.append(
+            "  a rebase does not fix this and neither does a re-measurement "
+            "-- either that tree gets clean, or the merge runs somewhere that "
+            "is"
+        )
+        return DIRTY_CHECKOUT, out, err
+
+    if unread:
+        # Rule 3 of claunch-peyn: what was not read does not count as green.
+        # An unparsed status entry could be the one file that blocks.
+        err.append(
+            f"cannot tell: {unread} status entry(ies) in {where} did not "
+            f"parse, so 0 blocked files is not an answer -- {stamp}"
+        )
+        return CANNOT_TELL, out, err
+
+    out.append(f"checkout: 0 of {len(updates)} blocked -- {stamp}")
+    return READY, out, err
+
+
+def _ready(
+    repo: Path,
+    checkout: Optional[str],
+    branch: str,
+    target: str,
+    tip: str,
+) -> int:
+    """``READY``, unless the tree the merge lands in would refuse to start it.
+
+    The gap this closes was measured in two consecutive rounds, both times
+    found by a human after the gate had already answered ``0``: the branch was
+    ready, the checkout holding the target had another session's uncommitted
+    work in files the merge writes, and ``git merge`` refused before it began.
+    The gate had never looked at a working tree -- it asked only about the
+    relationship between two commits, and that relationship was genuinely
+    fine. Board ``claunch-merge-ready-dirty-checkout-7w7g``.
+
+    **Off unless ``--checkout`` is given**, and the default is the design
+    rather than caution. This same script is the *worker's* alignment gate,
+    run from the worker's own worktree, and a worker's worktree is dirty
+    because it is working. On by default it would answer ``4`` for every
+    worker doing its job and wall off the step it exists to open. Only the
+    side about to run the merge knows where the merge runs, so only that side
+    asks.
+    """
+    if checkout is None:
+        return READY
+    code, out, err = _checkout_check(repo, checkout, branch, target, tip)
+    for line in out:
+        print(f"  {line}")
+    for line in err:
+        print(line, file=sys.stderr)
+    return code
+
+
+def _checkout_note(
+    repo: Path,
+    checkout: Optional[str],
+    branch: str,
+    target: str,
+    tip: str,
+) -> None:
+    """Report the tree check beside a verdict it does not get to change.
+
+    A conflict (``3``) and a moved baseline (``1``) have to be dealt with
+    whatever the tree looks like, so they keep the exit code. The dirty tree
+    is a different problem with a different owner -- the session whose
+    uncommitted work is in the way -- and clearing it needs a human, so it is
+    the slowest thing in the loop. Both times this gap bit, what it cost was
+    the delay between the gate answering and somebody happening to run ``git
+    status``; holding the finding back until the branch side is ready would
+    rebuild exactly that delay one step further along.
+
+    Silence would be the other error. A ``--checkout`` run that printed
+    nothing about any tree reads as a tree that was looked at and found
+    clean, which is rule 3 of ``claunch-peyn`` -- so this prints on every
+    path, including the ones where it found nothing.
+
+    All of it goes to **stdout**, including the lines saying the tree could
+    not be read, and that is rule 7 of the same document: a warning written
+    only to stderr is not a record, because the thing reading a gate does not
+    read stderr. Here it would be worse than not recorded -- the header
+    below is on stdout, so a reader who gets the header and nothing under it
+    sees a tree that was examined and found clean. The gate's own verdict
+    keeps stderr, because there the exit code is what distinguishes it.
+    """
+    if checkout is None:
+        return
+    code, out, err = _checkout_check(repo, checkout, branch, target, tip)
+    print("  also, the working tree this merge would run in:")
+    for line in out + err:
+        print(f"    {line}")
+    if code == DIRTY_CHECKOUT:
+        print(
+            "    that is a second, independent problem -- this branch cannot "
+            "clear it, and the verdict above stays the exit code"
+        )
+
+
 def _recipe(branch: str, target: str, ref: str) -> str:
     """The cheaper remedy, spelled out where the verdict is read."""
     return (
@@ -295,6 +651,23 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"where a preview merge is left for this gate to find (default: "
             f"{PREVIEW_NS}/<branch>). A merge commit whose two parents are "
             f"this tip and the target's tip answers the moved baseline."
+        ),
+    )
+    parser.add_argument(
+        "--checkout",
+        nargs="?",
+        const=DERIVE_FROM_TARGET,
+        default=None,
+        metavar="PATH",
+        help=(
+            "also ask whether the merge could start in the working tree it "
+            "will run in. Give a path, or pass it bare (same as "
+            f"{DERIVE_FROM_TARGET!r}) to use whichever worktree has the "
+            "target checked out. A non-empty intersection of 'files the merge "
+            f"writes' and 'files that tree is dirty on' answers "
+            f"{DIRTY_CHECKOUT}, a code no other verdict uses. OFF BY DEFAULT: "
+            "this same gate is the worker's alignment gate, and a worker's "
+            "own worktree is dirty because it is working"
         ),
     )
     parser.add_argument(
@@ -367,7 +740,10 @@ def main(argv: Optional[List[str]] = None) -> int:
             print(f"ready: nothing to land -- {args.branch} is {target} ({tip[:12]})")
         else:
             print(f"ready: landed -- {target} already contains {tip[:12]}")
-        return READY
+        # Both of these merge nothing, so the tree check runs against an
+        # empty write set and says so with the denominator rather than being
+        # special-cased out. "0 of 0" is a value.
+        return _ready(repo, args.checkout, branch_name, target, tip)
 
     behind = _count(repo, f"{tip}..{target_tip}")
     ahead = _count(repo, f"{target_tip}..{tip}")
@@ -381,7 +757,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     where = f"target {target} ({how}) +{behind} / branch +{ahead}"
     if behind == 0:
         print(f"ready: aligned -- {where}")
-        return READY
+        return _ready(repo, args.checkout, branch_name, target, tip)
 
     conflicted, asked_by = _conflicts(repo, tip, target_tip)
     if conflicted is None:
@@ -393,6 +769,7 @@ def main(argv: Optional[List[str]] = None) -> int:
     if conflicted:
         print(f"rebase: pre-merge conflicts -- {where} [{asked_by}]")
         print(f"  git rebase {target}")
+        _checkout_note(repo, args.checkout, branch_name, target, tip)
         return REBASE
     if args.max_behind is not None and behind > args.max_behind:
         print(
@@ -400,6 +777,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"{where} (the merge itself is clean)"
         )
         print(f"  git rebase {target}")
+        _checkout_note(repo, args.checkout, branch_name, target, tip)
         return REBASE
 
     preview = _preview_covers(repo, ref, tip, target_tip)
@@ -408,7 +786,7 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"ready: re-measured on {preview[:12]} -- {where} [{asked_by}, "
             f"preview {ref}]"
         )
-        return READY
+        return _ready(repo, args.checkout, branch_name, target, tip)
 
     print(f"re-measure: baseline moved, merge is clean -- {where} [{asked_by}]")
     print(
@@ -416,6 +794,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         f"behind {target}, so they do not describe the tree that will land"
     )
     print(_recipe(branch_name, target, ref))
+    _checkout_note(repo, args.checkout, branch_name, target, tip)
     return REMEASURE
 
 
