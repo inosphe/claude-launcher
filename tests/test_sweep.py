@@ -884,6 +884,123 @@ def test_a_receipt_filed_before_this_field_existed_still_reads(repo, receipts, c
     assert "full output" not in err, "the gate named a file that was never written"
 
 
+def test_a_green_run_that_cannot_clear_the_old_output_still_files(
+    repo, receipts, capsys
+):
+    """The clearing must not be able to cost the verdict either.
+
+    ``Path.unlink(missing_ok=True)`` swallows only FileNotFoundError. A lock,
+    a permission, a directory in the path -- each propagated from here, which
+    is *before* the receipt is written, so the suite ran to completion and
+    filed nothing and the gate charged another full sweep. Measured on this
+    repository, and the exception that did it was ``PermissionError [WinError
+    5]``: the same failure whose mechanism this whole change exists to keep.
+    """
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    sweep.output_path(repo, tip, receipts).mkdir(parents=True)  # unremovable
+
+    assert _run(repo, receipts, "--command", GREEN) == 0, "a green run died"
+
+    filed = sweep.receipt_path(repo, tip, receipts)
+    assert filed.is_file(), "the suite ran and no receipt was filed"
+    receipt = json.loads(filed.read_text("utf-8"))
+    assert sweep.is_green(receipt)
+    assert "does not belong to this green sweep" in receipt["output_error"]
+
+    # Green still passes -- a bookkeeping failure is not a verdict about the
+    # tree -- but the gate does not pass in silence.
+    capsys.readouterr()
+    assert _check(repo, receipts) == 0
+    assert "could not be removed" in capsys.readouterr().err
+
+
+def test_the_gate_tells_the_five_receipt_states_apart(repo, receipts, capsys):
+    """``output_error`` split the receipt into more states than two, and a
+    reader has to land on the right one.
+
+    There are five, and the pairs that share a shape are what make it a test:
+    two receipts carry *neither* key (a clean green one, and a red one filed
+    before the field existed) and two carry ``output_error`` (a green run that
+    could not clear the old file, and a red run that could not write its own).
+    Neither pair may collapse. The old receipt matters most: it must read as
+    "nothing was ever meant to be here", not as a loss.
+
+    | state                        | keys          | gate                     |
+    |------------------------------|---------------|--------------------------|
+    | green, nothing beside it     | none          | green, no warning        |
+    | green, stale file left over  | output_error  | green + WARNING          |
+    | red, output saved            | output        | red, full output: <path> |
+    | red, output lost             | output_error  | red, full output: NOT SAVED |
+    | red, filed before this field | none          | red, neither line        |
+
+    (The count was four when this was first written. It missed the second row
+    -- a state the green-branch guard had just introduced -- and s181 caught
+    it in review.)
+    """
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    tree = _git(repo, "rev-parse", "HEAD^{tree}").strip()
+    filed = sweep.receipt_path(repo, tip, receipts)
+    filed.parent.mkdir(parents=True, exist_ok=True)
+    GREEN_COUNTS = {"passed": 12}
+    RED_COUNTS = {"failed": 1, "passed": 11}
+
+    def gate(**over):
+        receipt = {
+            "commit": tip,
+            "tree": tree,
+            "code_tree": sweep.code_tree(repo, tree),
+            "branch": "master",
+            "command": "pytest",
+            "exit_code": 1,
+            "counts": RED_COUNTS,
+            "failures": ["FAILED tests/test_x.py::test_a - AssertionError"],
+            "dirty": False,
+            "session": "t",
+            "seconds": 3.4,
+        }
+        receipt.update(over)
+        filed.write_text(json.dumps(receipt), encoding="utf-8")
+        capsys.readouterr()
+        code = _check(repo, receipts)
+        return code, capsys.readouterr()
+
+    green = dict(exit_code=0, counts=GREEN_COUNTS, failures=[])
+    states = {
+        "green_clean": gate(**green),
+        "green_leftover": gate(
+            **green, output_error=f"{tip}.output.txt: could not be removed"
+        ),
+        "red_saved": gate(output=f"{tip}.output.txt"),
+        "red_lost": gate(output_error=f"{tip}.output.txt: [WinError 5]"),
+        "red_old": gate(),
+    }
+
+    codes = {k: v[0] for k, v in states.items()}
+    assert codes == {
+        "green_clean": 0,
+        "green_leftover": 0,   # bookkeeping is not a verdict about the tree
+        "red_saved": 1,
+        "red_lost": 1,
+        "red_old": 1,
+    }
+
+    said = {k: (v[1].out + v[1].err) for k, v in states.items()}
+
+    assert "WARNING" not in said["green_clean"]
+    assert "could not be removed" in said["green_leftover"]
+    assert f"{tip}.output.txt" in said["red_saved"]
+    assert "NOT SAVED" not in said["red_saved"]
+    assert "NOT SAVED" in said["red_lost"]
+    assert "full output" not in said["red_old"], (
+        "a receipt from before this field reads as a loss it never had"
+    )
+
+    assert len(set(said.values())) == 5, (
+        "two receipt states are reported identically: "
+        + repr({k: v[:60] for k, v in said.items()})
+    )
+
+
 def test_the_red_gate_names_the_parked_output(repo, receipts, capsys):
     """The gate's red message is where a reader meets this, so the path goes
     there. Without it the file is present and unfindable, which is how the one
@@ -919,6 +1036,57 @@ def test_the_receipt_is_still_filed_when_the_output_cannot_be_saved(
     assert receipt["counts"] == {"failed": 1, "passed": 11}
     assert "output" not in receipt
     assert "could not save the suite output" in capsys.readouterr().err
+
+    # ...and the loss is recorded, which is the half a warning cannot do. The
+    # warning goes to a terminal; terminals end. What survives is this file,
+    # and without the next two lines it is byte-for-byte a receipt from before
+    # the field existed -- so a reader would conclude no output was ever meant
+    # to exist, and stop looking. That is the failure this change removes,
+    # rebuilt one level down.
+    assert receipt["output_error"].startswith(f"{tip}.output.txt: ")
+
+    assert _check(repo, receipts) == 1
+    err = capsys.readouterr().err
+    assert "NOT SAVED" in err, "the gate hid a red run whose mechanism was lost"
+
+
+def test_a_lost_output_does_not_read_like_a_receipt_that_never_had_one(
+    repo, receipts, capsys
+):
+    """The pair that has to stay apart, stated directly.
+
+    Both are red receipts with no ``output`` key, and before ``output_error``
+    they were the same bytes:
+
+    * one was filed before this field existed -- nothing was lost, there was
+      never anything beside it;
+    * one tried to save its output and could not -- the mechanism behind those
+      failures is gone, and re-running the sweep is the only way back.
+
+    A reader who cannot tell them apart treats the second as the first and
+    stops looking. That is this issue's own failure mode, one level down.
+    """
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    filed = sweep.receipt_path(repo, tip, receipts)
+
+    sweep.output_path(repo, tip, receipts).mkdir(parents=True)
+    assert _run(repo, receipts, "--command", RED_TRACEBACK) == 1
+    lost = json.loads(filed.read_text("utf-8"))
+    capsys.readouterr()
+
+    old = {k: v for k, v in lost.items() if k != "output_error"}
+    assert old != lost, "the two states are the same bytes"
+
+    filed.write_text(json.dumps(old), encoding="utf-8")
+    assert _check(repo, receipts) == 1
+    before = capsys.readouterr().err
+
+    filed.write_text(json.dumps(lost), encoding="utf-8")
+    assert _check(repo, receipts) == 1
+    after = capsys.readouterr().err
+
+    assert before != after, "the gate reports both states identically"
+    assert "NOT SAVED" in after and "NOT SAVED" not in before
 
 
 # --------------------------------------------------------------------------- #

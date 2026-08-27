@@ -637,14 +637,51 @@ def cmd_run(args) -> int:
     # red output beside a green receipt reads as this sweep's.
     saved = output_path(repo, commit, args.receipts)
     if is_green(receipt):
-        saved.unlink(missing_ok=True)
+        try:
+            saved.unlink(missing_ok=True)
+        except OSError as exc:
+            # ``missing_ok`` covers only FileNotFoundError. Anything else --
+            # a lock, a permission, a directory standing in the path -- used
+            # to propagate from here, which is *before* the receipt is
+            # written: the suite would run to completion and file nothing,
+            # and the gate reads that as "no sweep receipt" and charges
+            # another full run. Measured, and the exception that did it was
+            # ``PermissionError: [WinError 5]`` -- the same failure this
+            # change exists to make legible.
+            #
+            # Recorded as well as survived, for the same reason as the red
+            # branch: what is left on disk is a green receipt with a *red*
+            # run's output file beside it, and the one way such a file has
+            # ever been read here is by eye. Unexplained, it reads as this
+            # sweep's own output.
+            receipt["output_error"] = (
+                f"{saved.name}: a previous red run's output could not be "
+                f"removed and does not belong to this green sweep ({exc})"
+            )
+            print(
+                f"WARNING: {saved} is left over from an earlier red run at "
+                f"this commit and could not be removed ({exc}); it is not "
+                f"this sweep's output. The receipt is filed and says so.",
+                file=sys.stderr,
+            )
     else:
         try:
             saved.write_text(_truncated(output), encoding="utf-8", errors="replace")
         except OSError as exc:
-            # A companion file that cannot be written must not cost the
-            # verdict the suite just spent minutes earning: warn, file the
-            # receipt without the pointer, let the run report its result.
+            # A companion file that cannot be written must not cost the verdict
+            # the suite just spent minutes earning -- so the failure is caught
+            # and the receipt is still filed.
+            #
+            # But it is recorded, and that half is not optional. Warning to
+            # stderr alone would put the only account of the loss in a terminal,
+            # which is the exact failure this whole change exists to remove: the
+            # process that knows dies, and what is left on disk is a red receipt
+            # with no output -- indistinguishable, byte for byte, from one filed
+            # before this field existed. A reader would conclude nothing was
+            # ever meant to be there. `output_error` is what makes "there is
+            # nothing beside this receipt" and "something should be beside this
+            # receipt and here is why it is not" different states on disk.
+            receipt["output_error"] = f"{saved.name}: {exc}"
             print(
                 f"WARNING: could not save the suite output to {saved} ({exc}); "
                 f"the receipt is filed without it, so this red run keeps only "
@@ -745,7 +782,20 @@ def cmd_check(args) -> int:
         # read, it was found by eye. A reader of this message should not have
         # to guess that something is lying next to the receipt.
         parked = receipt.get("output")
-        where = f"\nfull output: {path.parent / parked}" if parked else ""
+        if parked:
+            where = f"\nfull output: {path.parent / parked}"
+        elif receipt.get("output_error"):
+            # Say that the output is missing rather than absent. Otherwise this
+            # message reads exactly like a receipt from before the field
+            # existed, and the reader spends the search this line exists to
+            # save them.
+            where = (
+                f"\nfull output: NOT SAVED -- {receipt['output_error']}"
+                f"\n  (the mechanism behind these failures was not recorded; "
+                f"re-running the sweep is the only way to get it back)"
+            )
+        else:
+            where = ""
         print(
             f"sweep of {commit[:12]} was red: {summary}, exit "
             f"{receipt.get('exit_code')}\n  {failures}\n"
@@ -754,6 +804,12 @@ def cmd_check(args) -> int:
         )
         return 1
 
+    # A green verdict still passes -- the sweep judged the tree and found
+    # nothing wrong, and a bookkeeping failure beside it does not change that.
+    # But it is said out loud rather than swallowed: the file it is about is
+    # sitting in the receipts directory looking like this sweep's output.
+    if receipt.get("output_error"):
+        print(f"WARNING: {receipt['output_error']}", file=sys.stderr)
     print(
         f"sweep of {args.branch} tip {commit[:12]} green: {summary} "
         f"in {receipt.get('seconds')}s\ncommand: {receipt.get('command')}\n"
