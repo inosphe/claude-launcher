@@ -150,3 +150,41 @@ def check(*, session: Optional[str] = None, cwd: Optional[str] = None) -> Option
     """``warning(inspect(...))`` — the one call the engine needs."""
     who = session if session is not None else state_mod.current_scope()
     return warning(inspect(session=who, cwd=cwd))
+
+
+#: How :func:`own_checkout` came to its answer. The caller prints this, so a
+#: gate's verdict always says which tree it was measured in.
+NAMED = "named"
+SESSION = "session"
+RUN_CWD = "run cwd"
+
+
+def own_checkout(
+    *, session: Optional[str] = None, cwd: Optional[str] = None
+) -> Tuple[str, str]:
+    """The checkout whose branch a gate under ``tools/`` should ask about.
+
+    :func:`check` reports the mismatch; this resolves it. A gate that asks
+    "did *my* branch land" has to find the session's own tree, and the run's
+    directory is not it whenever the run was keyed somewhere the session does
+    not stand -- the shape that made ``landed_check`` ask whether ``master``
+    had been merged into something, a question with no true answer.
+
+    The ambient ``CLAUNCH_SESSION`` is the session's own, not the daemon's:
+    ``_run_verify`` passes no ``env=``, so a verify subprocess inherits the
+    environment of whoever called :func:`..engine.next_step`, and the only
+    production caller is the in-session MCP server (``cflow/mcp.py``). The
+    daemon never runs a verify -- its clock runs ``run_probe``, a different
+    function. Measured in a worker session: a verify command printing
+    ``CLAUNCH_SESSION`` printed that session's own name.
+
+    Degrades in one direction only. No daemon, no managed session, or a
+    session the daemon does not know all fall back to ``cwd`` -- the answer
+    every caller gave before this existed, so nothing that worked stops.
+    """
+    who = session if session is not None else state_mod.current_scope()
+    here = state_mod.resolve_cwd(cwd)
+    occ = inspect(session=who, cwd=cwd)
+    if occ.session_cwd:
+        return occ.session_cwd, SESSION
+    return here, RUN_CWD

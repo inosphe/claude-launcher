@@ -117,6 +117,31 @@ DEFAULT_TARGET = "master"
 PREVIEW_NS = "refs/claunch/preview"
 
 
+def _resolve_repo(explicit: Optional[str]) -> Tuple[Path, str]:
+    """Which checkout to ask about, and how we came to think so.
+
+    Same resolution as ``landed_check.py``, and for the same defect: the run's
+    directory was assumed to be this session's own tree, and it is not
+    whenever the run was keyed at the repository root while the worker stands
+    in a worktree. This gate failed that shape in the other direction --
+    standing on ``master`` it read ``tip == target_tip`` and answered
+    ``ready: nothing to land``, exit 0, about a branch it never looked at.
+
+    ``--repo`` wins outright so tests and hand-runs never depend on a daemon.
+    Every failure of the lookup falls back to the working directory, the
+    answer this always gave.
+    """
+    if explicit is not None:
+        return Path(explicit).resolve(), "named"
+    try:
+        from claude_launcher.cflow import checkout
+
+        where, how = checkout.own_checkout()
+        return Path(where), how
+    except Exception:
+        return Path(".").resolve(), "run cwd"
+
+
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git", "-C", str(repo), *args], capture_output=True, text=True
@@ -224,7 +249,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
     )
     parser.add_argument(
-        "--repo", default=".", help="repository to ask about (default: cwd)"
+        "--repo",
+        default=None,
+        help=(
+            "repository to ask about. Omitted: this session's own checkout as "
+            "the daemon records it, falling back to the working directory"
+        ),
     )
     parser.add_argument(
         "--branch", default="HEAD", help="the branch asking to land (default: HEAD)"
@@ -260,7 +290,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
-    repo = Path(args.repo).resolve()
+    repo, how = _resolve_repo(args.repo)
 
     tip = _resolve(repo, args.branch)
     if tip is None:
@@ -278,6 +308,27 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"cannot tell: no branch {target!r} in {repo} ({how}) -- name the "
             f"integration target with --target, or set it as this branch's "
             f"upstream",
+            file=sys.stderr,
+        )
+        return CANNOT_TELL
+
+    branch_name = args.branch if args.branch != "HEAD" else _head_name(repo) or "HEAD"
+
+    # Standing on the integration target is not a landing candidate, and the
+    # ancestry shortcut below cannot tell that apart from "branch cut, nothing
+    # committed yet": both reach tip == target_tip. The shortcut's own comment
+    # says calling that "landed" would be a gate telling a lie, and it is the
+    # same lie here with none of the same excuse -- this checkout holds no
+    # branch that is asking to land. Measured: run cwd = repository root,
+    # HEAD = master, verdict "ready: nothing to land", exit 0, while the
+    # worker's actual branch sat unexamined in its own worktree.
+    if branch_name == target:
+        print(
+            f"cannot tell: this checkout ({repo}, {how}) is on {target}, the "
+            f"integration target itself -- it is not a landing candidate, so "
+            f"there is no readiness to report here. Ask about the candidate "
+            f"branch: run this in that branch's worktree, or pass --repo "
+            f"<that worktree> / --branch <it>.",
             file=sys.stderr,
         )
         return CANNOT_TELL
@@ -314,7 +365,6 @@ def main(argv: Optional[List[str]] = None) -> int:
         print(f"cannot tell: {asked_by} -- {where}", file=sys.stderr)
         return CANNOT_TELL
 
-    branch_name = args.branch if args.branch != "HEAD" else _head_name(repo) or "HEAD"
     ref = args.preview_ref or f"{PREVIEW_NS}/{branch_name}"
 
     if conflicted:
