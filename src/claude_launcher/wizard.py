@@ -327,6 +327,12 @@ class Sources:
         """Execution choices; old sources fall back to their bare profiles."""
         return self.profiles()
 
+    def profile_options(self) -> List[dict]:
+        return [
+            {"value": value, "label": value}
+            for value in self.profile_selectors()
+        ]
+
     def profile_details(self) -> List[dict]:
         return [
             {
@@ -344,6 +350,19 @@ class Sources:
             if item.get("name") == name:
                 return item
         return {"name": name, "harness": "", "harness_available": False}
+
+    def borrow_options(self, profile_selector: str) -> List[dict]:
+        return [
+            {
+                "name": name,
+                "label": name,
+                "selectable": True,
+                "valid": True,
+                "message": "",
+            }
+            for name in self.profiles()
+            if name != str(profile_selector or "").split(":", 1)[0]
+        ]
 
     def workspaces(self) -> List[dict]:
         return []
@@ -448,11 +467,29 @@ class DaemonSources(Sources):
             "profile_selectors", "/api/profiles", "profile_selectors", []
         ) or self.profiles()
 
+    def profile_options(self) -> List[dict]:
+        options = self._get(
+            "profile_options", "/api/profiles", "profile_options", []
+        )
+        return options or super().profile_options()
+
     def profile_details(self) -> List[dict]:
         details = self._get(
             "profile_details", "/api/profiles", "profile_details", []
         )
         return details or super().profile_details()
+
+    def borrow_options(self, profile_selector: str) -> List[dict]:
+        from urllib.parse import quote
+
+        selector = str(profile_selector or "")
+        key = "borrow_options:" + selector
+        return self._get(
+            key,
+            "/api/borrow-options?profile=" + quote(selector, safe=""),
+            "options",
+            [],
+        )
 
     def workspaces(self) -> List[dict]:
         return self._get("workspaces", "/api/workspaces", "workspaces", [])
@@ -1427,21 +1464,26 @@ class Wizard(Form):
         self._members_for: Optional[str] = None
         self._worktrees_for: Optional[str] = None
         self._issues_for: Optional[tuple] = None
+        self._borrow_for: Optional[str] = None
+        self._preset_borrow: str = get("borrow") or ""
 
-        harness = ChoiceField(
-            key="harness", label="Harness",
-            hint="read-only: configured on the selected profile",
-            options=[Option("(select a profile)", "")],
-            disabled=True,
-            disabled_note="set with 'claunch set-harness PROFILE HARNESS'",
-        )
-
-        profiles = self.sources.profile_selectors() or []
-        credential_profiles = self.sources.profiles() or []
+        profile_defs = self.sources.profile_options() or [
+            {"value": p, "label": p}
+            for p in (self.sources.profile_selectors() or [])
+        ]
+        profiles = [str(item.get("value") or "") for item in profile_defs]
         profile = ChoiceField(
-            key="profile", label="Profile",
+            key="profile", label="Profile : Harness",
             hint="which login and config the harness runs under ('claunch list')",
-            options=[Option("(select a profile)", "")] + [Option(p, p) for p in profiles],
+            options=[Option("(select a profile)", "")] + [
+                Option(
+                    str(item.get("label") or item.get("value") or ""),
+                    str(item.get("value") or ""),
+                    str(item.get("harness") or ""),
+                )
+                for item in profile_defs
+                if item.get("value")
+            ],
         )
         # Every harness comes from a profile, so the first real one is
         # the default: "(no profile)" should be an answer somebody gave, not
@@ -1455,10 +1497,8 @@ class Wizard(Form):
             key="borrow", label="Borrow",
             hint="run with ANOTHER profile's token and backend; this "
                  "profile's config, env and skills stay put",
-            options=[Option("(this profile's own token)", "")]
-            + [Option(p, p) for p in credential_profiles],
+            options=[Option("(this profile's own token)", "")],
         )
-        borrow.select(get("borrow") or "")
 
         null = ChoiceField(
             key="null_token", label="Null token",
@@ -1593,7 +1633,7 @@ class Wizard(Form):
         )
 
         return [
-            name, harness, profile, borrow, null, directory,
+            name, profile, borrow, null, directory,
             *worktree_fields(""), role,
             resume, fork,
             args_field, mesh, handle, connect, workflow, context, task,
@@ -1636,6 +1676,32 @@ class Wizard(Form):
                 options.append(Option(full, full, ""))
         return options
 
+    def _sync_borrow_options(self, selector: str, own_label: str) -> None:
+        if self._borrow_for == selector:
+            return
+        self._borrow_for = selector
+        field = self.field("borrow")
+        keep = self._preset_borrow or field.value or ""
+        reports = self.sources.borrow_options(selector) if selector else []
+        field.options = [Option(own_label, "")] + [
+            Option(
+                str(item.get("label") or item.get("name") or ""),
+                str(item.get("name") or ""),
+                str(item.get("message") or ""),
+                disabled=not bool(item.get("selectable", item.get("valid", True))),
+            )
+            for item in reports
+            if item.get("name")
+        ]
+        field.index = 0
+        field.select(keep)
+        # A remembered/typed lender that is now denied must not survive as an
+        # invisible value. The disabled option remains visible with its reason.
+        selected = next((o for o in field.options if o.value == field.value), None)
+        if selected is None or selected.disabled:
+            field.select("")
+        self._preset_borrow = ""
+
     # -- dependencies between fields ------------------------------------- #
     def _sync(self) -> None:
         """Re-derive what is offered and what is greyed out.
@@ -1648,14 +1714,10 @@ class Wizard(Form):
         """
         detail = self.sources.profile_harness(self.value("profile") or "")
         harness_name = detail.get("harness") or ""
-        harness = self.field("harness")
-        harness.options = [
-            Option(
-                harness_name or "(select a profile)", harness_name,
-                "" if detail.get("harness_available", True) else "(not installed)",
-            )
-        ]
-        harness.index = 0
+        self._sync_borrow_options(
+            self.value("profile") or "",
+            "(this profile's own token)",
+        )
         claude = harness_name == "claude"
         for key in ("role", "resume", "null_token"):
             f = self.field(key)
@@ -1738,7 +1800,7 @@ class Wizard(Form):
         args.harness = None
         args.profile = self.value("profile") or None
         detail = self.sources.profile_harness(self.value("profile") or "")
-        claude = self.value("harness") == "claude"
+        claude = detail.get("harness") == "claude"
         borrow_allowed = bool(detail.get("borrow_allowed", claude))
         args.borrow = (
             (self.value("borrow") or None) if borrow_allowed else None
@@ -1777,13 +1839,13 @@ class Wizard(Form):
         the scrollback would show a session appearing out of nothing.
         """
         parts = [
-            "harness " + str(self.value("harness")),
             "profile " + str(self.value("profile") or "(none)"),
             "in " + str(self.value("cwd")),
         ]
-        if self.value("harness") == "claude":
-            if self.value("borrow"):
-                parts.append("borrowing " + str(self.value("borrow")))
+        if self.value("borrow"):
+            parts.append("borrowing " + str(self.value("borrow")))
+        detail = self.sources.profile_harness(self.value("profile") or "")
+        if detail.get("harness") == "claude":
             if self.value("null_token"):
                 parts.append("no oauth token")
         wt, base = worktree_answer(self)
@@ -1994,18 +2056,12 @@ class SpawnWizard(Form):
             hint="the child's session name, how every other command refers to it",
             text=get("name") or "",
         )
-        harness = ChoiceField(
-            key="harness", label="Harness",
-            hint="read-only: inherited from the child's selected profile",
-            options=[Option("(the parent's profile)", "")],
-            disabled=True,
-            disabled_note="change the Profile row to change its harness",
-        )
         # Options for these two are the parent's to decide (they are rebuilt
         # in _rebuild_for_parent), so a flag given alongside --wizard is
         # remembered here and consumed on the first rebuild.
         self._preset_profile: str = get("profile") or ""
         self._preset_borrow: str = get("borrow") or ""
+        self._borrow_for: Optional[str] = None
         #: The same flag, kept rather than consumed: `_preset_profile` is
         #: spent seeding the row on the first rebuild, and after that
         #: nothing remembers that the user asked for a profile at all.
@@ -2019,7 +2075,7 @@ class SpawnWizard(Form):
             "" if d is None else str(wizard_recall.typed(d, "profile") or "")
         )
         profile = ChoiceField(
-            key="profile", label="Profile",
+            key="profile", label="Profile : Harness",
             hint="a different profile for the child (spawn.allow_profile "
                  "decides whether it may be one)",
             options=[],
@@ -2140,7 +2196,7 @@ class SpawnWizard(Form):
         )
         attach.select(bool(get("attach")))
         return [
-            parent, over_limit, name, harness, profile, borrow, null, fork,
+            parent, over_limit, name, profile, borrow, null, fork,
             workspace,
             *worktree_fields(""), args_field,
             mesh, handle, role, connect, workflow, context, task,
@@ -2188,6 +2244,31 @@ class SpawnWizard(Form):
             return ""
         return picked or self.sources.mesh_of(self.value("parent") or "")
 
+    def _sync_borrow_options(self, selector: str, own_label: str) -> None:
+        key = selector + "|" + own_label
+        if self._borrow_for == key:
+            return
+        self._borrow_for = key
+        field = self.field("borrow")
+        keep = self._preset_borrow or field.value or ""
+        reports = self.sources.borrow_options(selector) if selector else []
+        field.options = [Option(own_label, "")] + [
+            Option(
+                str(item.get("label") or item.get("name") or ""),
+                str(item.get("name") or ""),
+                str(item.get("message") or ""),
+                disabled=not bool(item.get("selectable", item.get("valid", True))),
+            )
+            for item in reports
+            if item.get("name")
+        ]
+        field.index = 0
+        field.select(keep)
+        selected = next((o for o in field.options if o.value == field.value), None)
+        if selected is None or selected.disabled:
+            field.select("")
+        self._preset_borrow = ""
+
     # -- dependencies between fields ------------------------------------- #
     def _sync(self) -> None:
         """Re-derive the form from the parent, then from what was picked.
@@ -2215,11 +2296,12 @@ class SpawnWizard(Form):
         # another harness both rows are moot however the policy is set — and
         # like the other form, saying yes to null greys the borrow row
         # rather than provoking the daemon's refusal of the pair. Re-derived
-        # every pass, because the answers follow the Harness and Null rows.
+        # every pass, because the answers follow the Profile and Null rows.
         picked_profile = self.value("profile") or ""
         parent_info = self._session(parent)
+        effective_selector = picked_profile or parent_info.get("profile") or ""
         detail = self.sources.profile_harness(
-            picked_profile or parent_info.get("profile") or ""
+            effective_selector
         )
         # An older daemon may unlock a profile without publishing selector
         # details. In that compatibility case the child still inherits the
@@ -2227,11 +2309,18 @@ class SpawnWizard(Form):
         child_harness = (
             detail.get("harness") or parent_info.get("harness") or ""
         )
-        harness_f = self.field("harness")
-        harness_f.options = [Option(child_harness or "(unknown)", child_harness)]
-        harness_f.index = 0
         borrow_f = self.field("borrow")
         null_f = self.field("null_token")
+        inherited = (
+            " - no token" if parent_info.get("null_token")
+            else f" - borrows {parent_info['borrow']}"
+            if parent_info.get("borrow")
+            else ""
+        )
+        self._sync_borrow_options(
+            effective_selector,
+            f"(as the parent authenticates{inherited})",
+        )
         borrow_allowed = bool(
             detail.get("borrow_allowed", child_harness == "claude")
         )
@@ -2346,24 +2435,24 @@ class SpawnWizard(Form):
         # soft_blocked_by, and would refuse the override anyway).
         self.field("over_limit").hidden = not report.get("soft_blocked_by")
 
-        harness = self.field("harness")
-        parent_harness = info.get("harness") or ""
-        harness.options = [Option(parent_harness or "(unknown)", parent_harness)]
-        harness.index = 0
-        harness.disabled = True
-        harness.disabled_note = "the selected profile owns the harness"
-
         may = report.get("may_choose") or []
         # The report carries the names when the field is unlocked (the same
         # courtesy as workspaces); an older daemon that unlocked the field
         # without naming the options falls back to asking for the list.
-        names = (
-            report.get("profile_selectors")
-            or report.get("profiles")
-            or self.sources.profile_selectors()
-            or []
-        )
-        borrow_names = report.get("profiles") or self.sources.profiles() or []
+        option_defs = report.get("profile_options")
+        if not option_defs and (
+            report.get("profile_selectors") or report.get("profiles")
+        ):
+            option_defs = [
+                {"value": value, "label": value}
+                for value in (
+                    report.get("profile_selectors")
+                    or report.get("profiles")
+                    or []
+                )
+            ]
+        if not option_defs:
+            option_defs = self.sources.profile_options()
 
         profile = self.field("profile")
         keep = profile.value
@@ -2373,7 +2462,15 @@ class SpawnWizard(Form):
                 + (f": {info['profile']}" if info.get("profile") else "") + ")",
                 "",
             )
-        ] + [Option(p, p) for p in names]
+        ] + [
+            Option(
+                str(item.get("label") or item.get("value") or ""),
+                str(item.get("value") or ""),
+                str(item.get("harness") or ""),
+            )
+            for item in option_defs
+            if item.get("value")
+        ]
         profile.index = 0
         profile.select(self._preset_profile or keep)
         self._preset_profile = ""
@@ -2383,19 +2480,8 @@ class SpawnWizard(Form):
         )
 
         borrow = self.field("borrow")
-        keep = borrow.value
-        inherited = (
-            " - no token" if info.get("null_token")
-            else f" - borrows {info['borrow']}" if info.get("borrow")
-            else ""
-        )
-        borrow.options = [
-            Option(f"(as the parent authenticates{inherited})", "")
-        ] + [Option(p, p) for p in borrow_names]
-        borrow.index = 0
-        borrow.select(self._preset_borrow or keep)
-        self._preset_borrow = ""
-        # The base state; _sync layers the claude-only and --null greys on
+        self._borrow_for = None
+        # The base state; _sync layers auth capability and --null greys on
         # top of it every pass.
         borrow.disabled = "borrow" not in may
         borrow.disabled_note = (
@@ -2608,8 +2694,8 @@ class SpawnWizard(Form):
         if not self.field("fork").disabled and self.value("fork"):
             parts.append("forking the parent's conversation")
         for label, key in (
-            ("harness", "harness"), ("workspace", "workspace"),
-            ("role", "role"), ("workflow", "workflow"),
+            ("workspace", "workspace"), ("role", "role"),
+            ("workflow", "workflow"),
         ):
             if self.value(key):
                 parts.append(label + " " + str(self.value(key)))

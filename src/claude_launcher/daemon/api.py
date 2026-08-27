@@ -212,6 +212,7 @@ def build_app(
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
     r.add_post("/api/daemon/restart", h_daemon_restart)
     r.add_get("/api/profiles", h_profiles)
+    r.add_get("/api/borrow-options", h_borrow_options)
     r.add_get("/api/roles", h_roles)
     r.add_get("/api/workspaces", h_workspaces)
     r.add_get("/api/git", h_git)
@@ -507,11 +508,27 @@ async def h_profiles(request: web.Request) -> web.Response:
     }
     items = []
     selectors = []
+    profile_options = []
     for p in profiles:
+        default_name = None
+        bare_allowed = False
         try:
             name = lineage.effective_harness(p, doc)
+            default_name = name
+            bare_allowed = True
             borrow_cap = borrowing.capability(registry.get(name))
             policy_doc = harness_policy.evaluate(p, name, doc=doc).to_dict()
+            selectors.append(p.name)
+            profile_options.append(
+                {
+                    "value": p.name,
+                    "label": f"{p.name} (default: {name})",
+                    "profile": p.name,
+                    "harness": name,
+                    "default": True,
+                    "harness_available": available.get(name, False),
+                }
+            )
             items.append(
                 {
                     "name": p.name,
@@ -558,8 +575,24 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "reason": str(exc),
                 }
             allowed = bool(policy and policy.allowed)
-            if allowed:
+            # The bare option already represents the effective default. A
+            # second ``p:default`` entry repeats the same choice and hides the
+            # fact that the bare profile follows future default changes.
+            offered = allowed and not (
+                bare_allowed and harness_name == default_name
+            )
+            if offered:
                 selectors.append(selector)
+                profile_options.append(
+                    {
+                        "value": selector,
+                        "label": selector,
+                        "profile": p.name,
+                        "harness": harness_name,
+                        "default": False,
+                        "harness_available": available.get(harness_name, False),
+                    }
+                )
             items.append(
                 {
                     "name": selector,
@@ -577,9 +610,48 @@ async def h_profiles(request: web.Request) -> web.Response:
         {
             # Bare names remain for credential/profile-management clients.
             "profiles": [p.name for p in profiles],
-            # Session creation uses the stable execution selectors instead.
+            # Session creation uses these policy-filtered execution choices.
             "profile_selectors": selectors,
+            "profile_options": profile_options,
             "profile_details": items,
+        }
+    )
+
+
+async def h_borrow_options(request: web.Request) -> web.Response:
+    """Validated base-profile lenders for one runtime profile selector."""
+    selector = str(request.query.get("profile") or "").strip()
+    if not selector:
+        return json_error(400, "query parameter 'profile' is required")
+    try:
+        runtime = profile_mod.require_selector(selector)
+        harness_name = lineage.effective_harness(runtime)
+    except (ProfileError, lineage.LineageError) as exc:
+        return json_error(400, str(exc))
+    entry = harness_registry.get(harness_name)
+    capability = borrowing.capability(entry)
+    options = []
+    if capability["allowed"]:
+        for lender in profile_mod.list_all():
+            if lender.name == runtime.name:
+                continue  # represented by the separate "own token" choice
+            report = borrowing.validate(
+                runtime, lender.name, entry=entry
+            ).to_dict()
+            report["name"] = lender.name
+            report["selectable"] = bool(report["valid"])
+            report["label"] = (
+                lender.name
+                if report["valid"]
+                else f"{lender.name} — {report['message']}"
+            )
+            options.append(report)
+    return web.json_response(
+        {
+            "profile": runtime.selector,
+            "harness": harness_name,
+            "capability": capability,
+            "options": options,
         }
     )
 

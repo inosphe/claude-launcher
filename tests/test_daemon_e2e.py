@@ -1610,6 +1610,11 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             )
             pi_profile = profile.create("pi-profile")
             lineage.set_harness(pi_profile, "pi")
+            codex_only = profile.create("codex-only")
+            lineage.set_harness(codex_only, "codex")
+            store.set_profile_field(
+                codex_only.name, "allowed_harnesses", ["codex"]
+            )
             restricted = profile.create("restricted")
             store.update(
                 lambda doc: (
@@ -1645,11 +1650,34 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             assert details["restricted:claude"]["harness_allowed"] is True
             assert details["restricted:pi"]["harness_allowed"] is False
             assert "provider 'claude-only'" in details["restricted:pi"]["harness_policy"]["reason"]
-            assert profile_doc["profiles"] == ["pi-profile", "restricted"]
+            assert profile_doc["profiles"] == [
+                "codex-only", "pi-profile", "restricted"
+            ]
+            assert "codex-only" in profile_doc["profile_selectors"]
+            assert "codex-only:claude" not in profile_doc["profile_selectors"]
             assert "pi-profile:claude" in profile_doc["profile_selectors"]
-            assert "pi-profile:pi" in profile_doc["profile_selectors"]
-            assert "restricted:claude" in profile_doc["profile_selectors"]
+            assert "pi-profile" in profile_doc["profile_selectors"]
+            assert "pi-profile:pi" not in profile_doc["profile_selectors"]
+            assert "restricted" in profile_doc["profile_selectors"]
+            assert "restricted:claude" not in profile_doc["profile_selectors"]
             assert "restricted:pi" not in profile_doc["profile_selectors"]
+            options = {
+                item["value"]: item for item in profile_doc["profile_options"]
+            }
+            assert options["pi-profile"]["label"] == "pi-profile (default: pi)"
+            assert options["restricted"]["label"] == "restricted (default: claude)"
+            assert options["codex-only"]["label"] == "codex-only (default: codex)"
+
+            resp = await client.get(
+                "/api/borrow-options?profile=pi-profile", headers=bearer
+            )
+            assert resp.status == 200
+            borrow_doc = await resp.json()
+            lenders = {item["name"]: item for item in borrow_doc["options"]}
+            assert lenders["restricted"]["status"] == "harness-policy-denied"
+            assert lenders["restricted"]["selectable"] is False
+            assert lenders["codex-only"]["status"] == "harness-policy-denied"
+            assert lenders["codex-only"]["selectable"] is False
             resp = await client.get("/api/harnesses", headers=bearer)
             assert resp.status == 200
             by_name = {h["name"]: h for h in (await resp.json())["harnesses"]}

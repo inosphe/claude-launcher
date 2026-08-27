@@ -161,7 +161,8 @@ new Function(
   + slice("spawnMeshNow") + slice("spawnWtFragment")
   + slice("spawnAutoWorktree") + slice("spawnAutoWorktreeHint")
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
-  + slice("profileBorrowCapability") + slice("syncSpawnGates") + slice("syncSpawnBeads")
+  + slice("profileBorrowCapability") + slice("readBorrowOptions")
+  + slice("fillValidatedBorrow") + slice("syncSpawnGates") + slice("syncSpawnBeads")
   + slice("spawnPayload")
   + slice("spawnReport") + slice("spawnPreflightNote")
   + slice("spawnHardBlocks") + slice("postSpawn")
@@ -170,7 +171,8 @@ new Function(
   + slice("spawnCheckRow") + slice("spawnRadioGroup")
   + slice("refillSpawnWorkflows") + slice("spawnConnectNow")
   + slice("buildSpawnForm")
-  + slice("spawnModalKey") + slice("spawnModalClose") + slice("openSpawnModal")
+  + slice("spawnModalKey") + slice("spawnModalClose")
+  + slice("refreshSpawnBorrowOptions") + slice("openSpawnModal")
   + slice("spawnModalLoad") + slice("refreshSpawnConnect") + slice("spawnModalGo")
   + slice("refreshSpawnBeads") + slice("fillSpawnIssueOptions")
   + `
@@ -786,7 +788,7 @@ async function main() {
                                 { handle: "w2", role: "worker" }] };
   routes = {
     "GET /api/sessions/lead1/meta": { doc: {
-      session: { name: "lead1", cwd: "C:/repo", harness: "claude" },
+      session: { name: "lead1", cwd: "C:/repo", profile: "p1", harness: "claude" },
       meshes: [{ mesh: "m0", handle: "lead1", role: "leader" }],
     } },
     "GET /api/sessions/lead1/children": { doc: {
@@ -796,19 +798,39 @@ async function main() {
     } },
     "GET /api/roles": { doc: { roles: [{ name: "leader" }, { name: "worker" }] } },
     "GET /api/profiles": { doc: {
-      profiles: ["p1", "p2"],
-      profile_selectors: ["p1:claude", "p1:pi", "p2:claude", "p2:pi"],
+      profiles: ["codex", "p1", "p2"],
+      profile_selectors: ["codex", "p1", "p1:pi", "p2", "p2:pi"],
+      profile_options: [
+        { value: "codex", label: "codex (default: codex)", harness: "codex" },
+        { value: "p1", label: "p1 (default: claude)", harness: "claude" },
+        { value: "p1:pi", label: "p1:pi", harness: "pi" },
+        { value: "p2", label: "p2 (default: claude)", harness: "claude" },
+        { value: "p2:pi", label: "p2:pi", harness: "pi" },
+      ],
       profile_details: [
+        { name: "codex", harness: "codex", harness_available: true,
+          borrow_allowed: false, borrow_mode: "none" },
+        { name: "codex:claude", harness: "claude", harness_available: true,
+          harness_allowed: false, borrow_allowed: false },
+        { name: "p1", harness: "claude", harness_available: true,
+          borrow_allowed: true, borrow_mode: "provider-token" },
         { name: "p1:claude", harness: "claude", harness_available: true,
           borrow_allowed: true, borrow_mode: "provider-token" },
         { name: "p1:pi", harness: "pi", harness_available: true,
           borrow_allowed: true, borrow_mode: "token" },
+        { name: "p2", harness: "claude", harness_available: true,
+          borrow_allowed: true, borrow_mode: "provider-token" },
         { name: "p2:claude", harness: "claude", harness_available: true,
           borrow_allowed: true, borrow_mode: "provider-token" },
         { name: "p2:pi", harness: "pi", harness_available: true,
           borrow_allowed: true, borrow_mode: "token" },
       ],
     } },
+    "GET /api/borrow-options?profile=": { doc: { options: [
+      { name: "p2", label: "p2", selectable: true, valid: true, message: "ready" },
+      { name: "blocked", label: "blocked — harness policy denied",
+        selectable: false, valid: false, message: "harness policy denied" },
+    ] } },
     "GET /api/mesh": { doc: { meshes: [{ name: "m0" }] } },
     "GET /api/git?cwd=C%3A%2Frepo": { doc: { repo: true, worktrees: [] } },
     "GET /api/cflow/workflows?cwd=C%3A%2Frepo": { doc: {
@@ -846,7 +868,7 @@ async function main() {
     openGate && openGate.hidden === true, openGate && openGate.hidden);
   const mSel = nodeSel(modalEls["modal-body"], "select") || [];
   // Inherit is the default, not merely an option — the row opens the way
-  // Harness, Profile and Directory do. Naming the parent's mesh outright is
+  // Profile and Directory do. Naming the parent's mesh outright is
   // the same answer only while the parent is in ONE mesh, and spelling it into
   // the payload takes the rule away from daemon/onboard.py inherit_mesh.
   const meshSel = mSel.find((s) => (s.options || [])
@@ -854,12 +876,18 @@ async function main() {
   const profileSel = mSel.find((s) => (s.options || [])
     .some((o) => o.value === "p1:pi"));
   const borrowSel = mSel.find((s) => (s.options || [])
-    .some((o) => o.value === "p1") && !(s.options || [])
-      .some((o) => o.value === "p1:pi"));
+    .some((o) => o.value === "p2") && (s.options || [])
+      .some((o) => o.value === "blocked"));
   check("profile choices are qualified execution selectors",
     profileSel && (profileSel.options || []).some((o) => o.value === "p2:pi"));
+  check("the child picker omits codex:claude",
+    profileSel && (profileSel.options || []).some((o) => o.value === "codex") &&
+      !(profileSel.options || []).some((o) => o.value === "codex:claude"));
   check("borrow choices remain base profiles sharing the one token",
     borrowSel && (borrowSel.options || []).some((o) => o.value === "p2"));
+  check("policy-denied borrow choices are disabled with their verdict",
+    borrowSel && (borrowSel.options || []).some((o) =>
+      o.value === "blocked" && o.disabled && /policy denied/.test(o.text)));
   check("the mesh picker opens on inherit", meshSel && meshSel.value === "",
     meshSel && meshSel.value);
   check("...with the parent's own mesh still on offer to name outright",

@@ -1072,8 +1072,7 @@ claunch new -s api --wizard           # flags typed alongside pre-fill the form
 claunch new-session
 
    Name            api
-   Harness         claude  (read-only; selected by profile)
- > Profile         work
+ > Profile : Harness  work (default: claude)
    Borrow          (this profile's own token)
    Null token      no - inject the profile's token
    Directory       this directory  F:\works\claude-launcher
@@ -1126,8 +1125,10 @@ offered rather than refused once the session is half arranged. Fields that do
 not apply grey out rather than vanish: `Fork` says *needs a conversation to
 fork* until you pick one under `Resume`; `Role`/`Resume`/`Null token` are
 Claude-only; `Borrow` remains open for Claude and API-key harnesses and greys
-for OAuth/none harnesses. The Harness row itself is always read-only; use
-`claunch set-harness` outside the wizard. `Borrow` and `Null token` are
+for OAuth/none harnesses. `Profile : Harness` is the only execution selector;
+use `claunch set-harness` to change a profile's default. `Borrow` candidates
+are base profiles validated for the selected harness and current credential
+state. `Borrow` and `Null token` are
 `--borrow`/`--null` as rows — and since the daemon refuses
 the pair outright, saying yes to null greys the borrow row and resets it,
 so the form can never offer a combination the flags would error on.
@@ -1147,8 +1148,7 @@ claunch spawn
 
  > Parent          lead  idle, work, /work/repo
    Name            (auto)
-   Harness         claude (read-only; selected by the child profile)
-   Profile         the child runs under its parent's profile (spawn.allow_profile)
+   Profile : Harness  the child inherits its parent's selection (spawn.allow_profile)
    Borrow          the child authenticates as its parent does (spawn.allow_profile)
    Null token      no - authenticate as the parent does
    Workspace       (the parent's directory: /work/repo)
@@ -1230,8 +1230,8 @@ and a form painted into its PTY would hang the session it was creating.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn the harness owned by required `--profile P` in a managed PTY. `--wizard` displays Harness read-only and picks every other field (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, Claude-only `--role R`/`--resume [S]`/`--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH`, `-a/--attach`; trailing args pass through). Also **what it is for**: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."`. `--harness` remains only as a deprecated, refused compatibility flag. **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
-| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` displays the profile-owned Harness read-only; by flag: (`--parent S`, `-s NAME`, `--profile P` when allowed, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `-w/--workspace NAME`, `--worktree NAME --rebase-onto BRANCH`). `--harness` is refused; changing an allowed profile is the only way to change the child harness. `--mesh` defaults to the parent's own. |
+| `new-session` (`new`) | Spawn the harness owned by required `--profile P` in a managed PTY. `--wizard` uses one `Profile : Harness` picker and picks every other field (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, Claude-only `--role R`/`--resume [S]`/`--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH`, `-a/--attach`; trailing args pass through). Also **what it is for**: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."`. `--harness` remains only as a deprecated, refused compatibility flag. **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
+| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` uses the inherited or allowed replacement `Profile : Harness`; by flag: (`--parent S`, `-s NAME`, `--profile P` when allowed, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `-w/--workspace NAME`, `--worktree NAME --rebase-onto BRANCH`). `--harness` is refused; changing an allowed profile is the only way to change the child harness. `--mesh` defaults to the parent's own. |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
@@ -1745,11 +1745,13 @@ borrowed auth (the lender must also allow the consuming harness). API and UI
 selector lists omit denied combinations; `profile_details[].harness_policy`
 retains the denial reason for diagnostics.
 
-The Web create form and Spawn modal show one `Profile : Harness` picker — the
-qualified selector already contains both values, so there is no duplicate
-Harness row. The terminal `new --wizard` and `spawn --wizard` retain their
-read-only Harness projection for terminal readability. Sending a separate
-`harness` field/flag is rejected. A session saves the qualified selector, so
+The Web create form, Spawn modal, `new --wizard` and `spawn --wizard` show one
+`Profile : Harness` picker. A bare entry is labelled with its effective
+default, such as `ds4 (default: pi)`; allowed non-default alternatives use
+the explicit form, such as `ds4:claude`. Denied combinations are omitted, so
+a `codex` profile restricted to `[codex]` does not show `codex:claude`.
+Sending a separate `harness` field/flag is rejected. A session saves the
+selector, so
 `ds4:pi` restores as Pi even if `profiles.ds4.harness` later changes.
 The colon is logical only and never becomes part of a Windows path.
 
@@ -2285,10 +2287,10 @@ daemon answering with a boot id the page has not seen) tries again. The rail's
 version readout says `daemon offline` for as long as nothing answers, so a
 list of sessions is never mistaken for a list of *current* sessions.
 
-**Harness** is read-only: it reflects the selected profile and cannot be
-submitted independently. Configure it with `claunch set-harness`; the web UI,
-`new --wizard`, `spawn --wizard`, and the session API all preserve that one
-source of truth.
+**Profile : Harness** is the only execution picker. It reflects the profile
+default and its allowed explicit alternatives; Harness cannot be submitted
+independently. Configure the default with `claunch set-harness`. The web UI,
+`new --wizard`, `spawn --wizard`, and the session API use that source.
 
 The create form's **Directory** is a picker over your
 [workspaces](#workspaces-where-a-session-may-be-spawned) — free-text paths are
@@ -2460,7 +2462,8 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/sessions/{name}/wait`    | long-poll `?state=idle\|exited&timeout=&threshold=` |
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
-| GET    | `/api/profiles`                | profile names (for the UI's create form) |
+| GET    | `/api/profiles`                | base profile names, policy-filtered execution selectors, labelled default options, and diagnostic selector details |
+| GET    | `/api/borrow-options`          | `?profile=PROFILE[:HARNESS]` — secret-free lender validation; returns base-profile options with policy/credential status and `selectable` |
 | GET    | `/api/roles`                   | the roles a session can be spawned with, each with its aliases, stance and the exact system-prompt injection |
 | GET    | `/api/workspaces`              | registered directories, for the create form's picker and the manage page |
 | POST   | `/api/workspaces`              | register one — `{"path": "...", "name": "..."}`; `400` (with the reason) if the directory is not there |

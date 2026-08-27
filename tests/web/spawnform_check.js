@@ -123,6 +123,7 @@ new Function(
   "renderRoleStance", "refreshWorkflowChoices", "spawnReport", "workspacesCache",
   "profileDetails",
   "syncRuntimeFold", "renderRuntimeSummary", "renderProfileHint",
+  "syncNewBorrowOptions",
   [sliceConst("SPAWN_INHERITS"), sliceLet("newSpawnReport"),
    sliceLet("newSpawnReportFor"), sliceLet("newSpawnDefaultsFor"),
    // The picker's signature guard against the two-second poll, which lives
@@ -159,7 +160,7 @@ exports.setSessions = (s) => { sessionsCache = s; };
    // and it is newform_check's to hold — here it only has to exist. The
    // summary line the fold carries, and the credential hint under the
    // promoted Profile row, are the same story.
-   () => {}, () => {}, () => {});
+   () => {}, () => {}, () => {}, () => {});
 
 let failures = 0;
 function check(what, got, want) {
