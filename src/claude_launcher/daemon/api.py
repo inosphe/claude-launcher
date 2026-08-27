@@ -2096,10 +2096,12 @@ async def h_mesh_rewire(request: web.Request) -> web.Response:
     sweep is confined to the edges touching that session's subtree; omitted,
     the whole graph is in scope. The field is declared rather than proven —
     the shared machine token authenticates the daemon's door, not which
-    session is behind it — and today nothing sends one: ``claunch mesh
-    rewire`` posts an empty body, no MCP tool reaches this route, and the
-    dashboard does not call it. So it is not what makes the operation safe,
-    and it is not doing anything yet. What makes it safe is that it opens
+    session is behind it — and the one caller this change ships does not
+    send one: ``claunch mesh rewire`` posts an empty body. Nothing else
+    reaches this route yet because nothing else knows it — this change is
+    what adds the route, so "nothing else" is not a survey of the existing
+    ecosystem. So ``actor`` is not what makes the operation safe, and it is
+    not doing anything yet. What makes it safe is that it opens
     only edges the mesh's rules already sanction and overrules no recorded
     decision.
     """
