@@ -16,6 +16,7 @@ def test_packaged_set_declares_supported_harnesses(home):
     reg = harnesses.registry()
     assert {"claude", "codex", "pi", "kimi", "agent"} <= set(reg)
     assert reg["codex"].command == ["codex"]
+    assert reg["codex"].restore_args == ["resume", "--last"]
     assert reg["pi"].command == ["pi"]
     assert reg["kimi"].auth == "oauth"
     assert reg["agent"].home_env == "CURSOR_CONFIG_DIR"

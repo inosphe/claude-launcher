@@ -15,7 +15,7 @@ import time
 import pytest
 
 from claude_launcher import lineage, profile, store
-from claude_launcher.daemon import paths
+from claude_launcher.daemon import codex_sessions, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
@@ -118,6 +118,34 @@ def test_sessions_json_persistence(home, tmp_path):
         entries = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
         assert entries[0]["def"]["name"] == "keep"
         assert entries[0]["was_running"] is True
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_codex_conversation_id_is_claimed_and_persisted(
+    home, tmp_path, monkeypatch
+):
+    store.update(lambda doc: doc.update({"harnesses": {"codex": {
+        "command": [sys.executable, "-u", "-c", CHILD],
+        "home_env": "CODEX_HOME",
+        "restore_args": ["resume", "--last"],
+    }}}))
+    lineage.set_harness(profile.create("codex"), "codex")
+    monkeypatch.setattr(codex_sessions, "snapshot", lambda _home: {"old"})
+    monkeypatch.setattr(
+        codex_sessions, "claim_new",
+        lambda _home, cwd, known: "codex-thread-1",
+    )
+
+    async def run():
+        mgr = _manager()
+        session = mgr.create(SessionDef(
+            name="cx", profile="codex", cwd=str(tmp_path)
+        ))
+        assert session.sdef.conversation_id == "codex-thread-1"
+        entries = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+        assert entries[0]["def"]["conversation_id"] == "codex-thread-1"
         await mgr.shutdown_all()
 
     asyncio.run(run())

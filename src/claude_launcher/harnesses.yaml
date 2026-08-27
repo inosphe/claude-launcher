@@ -13,6 +13,7 @@ harnesses:
 
   codex:
     command: codex
+    restore_args: [resume, --last]
     home_env: CODEX_HOME
     auth: oauth
     clear_env: [OPENAI_API_KEY, CODEX_API_KEY, CODEX_ACCESS_TOKEN]

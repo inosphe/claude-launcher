@@ -524,6 +524,11 @@ def build_command(
         if entry is None:  # normalize() refuses these; belt and braces
             raise HarnessError(f"unknown harness {sdef.harness!r}")
         argv = [*entry.launch_command(), *entry.args, *sdef.args]
+        if restoring:
+            if sdef.harness == "codex" and sdef.conversation_id:
+                argv.extend(["resume", sdef.conversation_id])
+            else:
+                argv.extend(entry.restore_args)
         if prof is None:
             # Legacy restored definitions may lack a profile. Preserve their
             # old plain-command environment until they are recreated.
