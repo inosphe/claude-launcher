@@ -2536,13 +2536,14 @@ async function readBorrowOptions(selector) {
   return doc;
 }
 
-function fillValidatedBorrow(select, doc, ownLabel, current) {
+function fillValidatedBorrow(select, doc, ownLabel, current, omitName = "") {
   select.innerHTML = "";
   const own = document.createElement("option");
   own.textContent = ownLabel;
   own.value = "";
   select.appendChild(own);
   for (const item of (doc && doc.options) || []) {
+    if (item.name === omitName) continue;
     const opt = document.createElement("option");
     opt.textContent = item.label || item.name;
     opt.value = item.name;
@@ -2563,6 +2564,7 @@ async function syncNewBorrowOptions(force = false) {
   const ownLabel = parent
     ? `(as ${parent.name} authenticates)`
     : "(this profile's own token)";
+  const omitName = parent ? "" : baseProfileName(selector);
   const key = `${selector}|${ownLabel}`;
   if (!force && key === newBorrowFor) return;
   newBorrowFor = key;
@@ -2572,15 +2574,15 @@ async function syncNewBorrowOptions(force = false) {
   f.borrow._validationError = "";
   // Clear the previous harness's lenders before waiting for the new policy
   // answer. A quick submit during the request can then only mean own auth.
-  fillValidatedBorrow(f.borrow, { options: [] }, ownLabel, "");
+  fillValidatedBorrow(f.borrow, { options: [] }, ownLabel, "", omitName);
   f.borrow.disabled = true;
   try {
     const doc = await readBorrowOptions(selector);
     if (seq !== newBorrowSeq || key !== newBorrowFor) return;
-    fillValidatedBorrow(f.borrow, doc, ownLabel, current);
+    fillValidatedBorrow(f.borrow, doc, ownLabel, current, omitName);
   } catch (e) {
     if (seq !== newBorrowSeq || key !== newBorrowFor) return;
-    fillValidatedBorrow(f.borrow, { options: [] }, ownLabel, "");
+    fillValidatedBorrow(f.borrow, { options: [] }, ownLabel, "", omitName);
     f.borrow._validationError =
       `borrow validation unavailable: ${e.message || e}`;
     f.borrow.title = f.borrow._validationError;
@@ -10948,12 +10950,14 @@ function sessReborrow(data) {
       ...(s.harness === "claude"
         ? [{ value: "null", label: "no token (--null)", selectable: true }]
         : []),
-      ...(doc.options || []).map((item) => ({
-        value: `b:${item.name}`,
-        label: `borrow: ${item.label || item.name}`,
-        selectable: !!item.selectable,
-        message: item.message || "",
-      })),
+      ...(doc.options || [])
+        .filter((item) => item.name !== baseProfile)
+        .map((item) => ({
+          value: `b:${item.name}`,
+          label: `borrow: ${item.label || item.name}`,
+          selectable: !!item.selectable,
+          message: item.message || "",
+        })),
     ];
     if (s.borrow && !choices.some((item) => item.value === currentChoice)) {
       choices.push({

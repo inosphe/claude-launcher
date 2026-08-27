@@ -69,6 +69,7 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 const api = async (url) => ({
   ok: true, status: 200,
   json: async () => ({ options: [
+    { name: "work", label: "work", selectable: true, valid: true, message: "ready" },
     { name: "ds4", label: "ds4", selectable: true, valid: true, message: "ready" },
     { name: "codex", label: "codex — harness policy denied", selectable: false,
       valid: false, message: "harness policy denied" },

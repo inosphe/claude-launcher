@@ -126,7 +126,52 @@ exports.details = () => profileDetails;`
     profileSelect.options.map((o) => o.value));
 }
 
-checkProfilePicker().then(() => {
+async function checkBorrowAuthModes() {
+  const borrow = {
+    kids: [], value: "", disabled: false, title: "",
+    set innerHTML(value) { this.kids = []; },
+    get innerHTML() { return ""; },
+    appendChild(child) { this.kids.push(child); return child; },
+    get options() { return this.kids; },
+  };
+  const authForm = { profile: { value: "work:claude" }, borrow };
+  const authDocument = {
+    createElement: () => ({ value: "", textContent: "", title: "", disabled: false }),
+  };
+  let parent = null;
+  const authApi = async () => ({
+    ok: true, status: 200,
+    json: async () => ({ options: [
+      { name: "work", label: "work", selectable: true, message: "ready" },
+      { name: "ds4", label: "ds4", selectable: true, message: "ready" },
+    ] }),
+  });
+  const auth = {};
+  new Function(
+    "exports", "api", "document", "form", "parentNow",
+    `let newBorrowFor = null, newBorrowSeq = 0;
+function $(id) { return id === "new-session" ? form : null; }
+function spawnParent() { return parentNow(); }
+function syncSpawnMode() {}
+function syncForkAvailability() {}
+` + slice("baseProfileName") + slice("readBorrowOptions")
+    + slice("fillValidatedBorrow") + slice("syncNewBorrowOptions") + `
+exports.sync = syncNewBorrowOptions;`
+  )(auth, authApi, authDocument, authForm, () => parent);
+
+  await auth.sync(true);
+  check("new-session folds its base profile into the own-token choice",
+    borrow.options.map((o) => o.value).join(",") === ",ds4",
+    borrow.options.map((o) => o.value));
+
+  parent = { name: "lead", profile: "other:claude" };
+  await auth.sync(true);
+  check("child creation retains the selected profile as an explicit lender",
+    borrow.options.some((o) => o.value === "work"),
+    borrow.options.map((o) => o.value));
+}
+
+Promise.all([checkProfilePicker(), checkBorrowAuthModes()]).then(() => {
   console.log("borrowform_check: " + (failures ? `${failures} failing` : "ok"));
   process.exitCode = failures ? 1 : 0;
 }).catch((error) => {

@@ -361,7 +361,6 @@ class Sources:
                 "message": "",
             }
             for name in self.profiles()
-            if name != str(profile_selector or "").split(":", 1)[0]
         ]
 
     def workspaces(self) -> List[dict]:
@@ -1683,6 +1682,7 @@ class Wizard(Form):
         field = self.field("borrow")
         keep = self._preset_borrow or field.value or ""
         reports = self.sources.borrow_options(selector) if selector else []
+        runtime_base = str(selector or "").split(":", 1)[0]
         field.options = [Option(own_label, "")] + [
             Option(
                 str(item.get("label") or item.get("name") or ""),
@@ -1691,7 +1691,7 @@ class Wizard(Form):
                 disabled=not bool(item.get("selectable", item.get("valid", True))),
             )
             for item in reports
-            if item.get("name")
+            if item.get("name") and item.get("name") != runtime_base
         ]
         field.index = 0
         field.select(keep)

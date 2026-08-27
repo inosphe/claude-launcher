@@ -620,7 +620,13 @@ async def h_profiles(request: web.Request) -> web.Response:
 
 
 async def h_borrow_options(request: web.Request) -> web.Response:
-    """Validated base-profile lenders for one runtime profile selector."""
+    """Validated base-profile lenders for one runtime profile selector.
+
+    The response includes the runtime's base profile.  A spawn uses that
+    explicit lender to replace authentication inherited from its parent;
+    creation and reborrow clients have a separate own-profile authentication
+    choice and collapse the duplicate there.
+    """
     selector = str(request.query.get("profile") or "").strip()
     if not selector:
         return json_error(400, "query parameter 'profile' is required")
@@ -634,8 +640,6 @@ async def h_borrow_options(request: web.Request) -> web.Response:
     options = []
     if capability["allowed"]:
         for lender in profile_mod.list_all():
-            if lender.name == runtime.name:
-                continue  # represented by the separate "own token" choice
             report = borrowing.validate(
                 runtime, lender.name, entry=entry
             ).to_dict()
