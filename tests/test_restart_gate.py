@@ -432,6 +432,42 @@ def test_a_session_restarting_an_absent_daemon_starts_it(home, monkeypatch, caps
     assert "daemon started" in capsys.readouterr().out
 
 
+def test_a_sessions_force_stands_down_into_the_gate(home, monkeypatch, capsys):
+    """``--force`` against a daemon that answers lands in the gate too.
+
+    ``_force_replace`` re-diagnoses before ending anything, and a daemon that
+    answers sends it down "the ordinary way" -- which, inside a session, is
+    the gate. That hand-off is a second door into ``_gated_restart``, reached
+    by a flag whose own docstring says it does not pass through here, so it is
+    pinned separately from the plain restart above.
+
+    It was covered by accident until 2026-08-27 and by nothing after:
+    ``tests/test_daemon_wedge.py`` drove this line only because
+    ``CLAUNCH_SESSION`` happened to be set in the process running the suite,
+    which made three of its tests fail inside a claunch session and pass
+    outside one (``claunch-uf7m``). That module now declares the immediate
+    path, so this is where the session half of the stand-down lives.
+    """
+    from claude_launcher import cli_sessions
+
+    fake = _FakeDaemon(record={"id": "g4", "session": "s9", "deadline": _future()})
+    fake.client.record["status"] = "approved"
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.setattr(cli_sessions.time, "sleep", lambda s: None)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+
+    args = _daemon_args()          # _daemon_args pins force=False positionally
+    args.force = True
+
+    assert cli_sessions._cmd_daemon(args) == 0
+
+    err = capsys.readouterr().err
+    assert "no force needed" in err                 # force stood down
+    assert "restart requested by session s9" in err  # ...into the gate
+    assert fake.client.posted == [("/api/daemon/restart-request", {"session": "s9"})]
+    assert fake.stop_calls == 0                      # nothing died on the spot
+
+
 def test_a_human_shell_stays_on_the_immediate_path(home, monkeypatch, capsys):
     from claude_launcher import cli_sessions
 
