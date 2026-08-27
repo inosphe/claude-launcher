@@ -223,10 +223,18 @@ def test_the_exemption_table_is_short_and_says_why():
     conditions -- one of which is this test: checking only
     ``EXEMPT_CALLERS[0]``, as it used to, would have let the new row through
     unexamined, so it now runs over every row.
+
+    The ceiling stays spelled as the value ``2``, on both tables, rather than
+    as ``len(EXPECTED_EXEMPTIONS)`` or a named constant. Derived, it would
+    move whenever somebody edited the table it is supposed to hold still, and
+    the pair would go on agreeing with each other while agreeing with nothing
+    anybody decided. The number is the record of a decision, so it is written
+    where the decision has to be re-made to change it.
     """
     from _repo_history_guard import EXEMPT_CALLERS
 
-    assert len(EXEMPT_CALLERS) == len(EXPECTED_EXEMPTIONS), EXEMPT_CALLERS
+    assert len(EXEMPT_CALLERS) == 2, EXEMPT_CALLERS
+    assert len(EXPECTED_EXEMPTIONS) == 2, EXPECTED_EXEMPTIONS
     for entry, expected in zip(EXEMPT_CALLERS, EXPECTED_EXEMPTIONS):
         module, func, command, why = entry
         who, allowed, follow_up = expected
