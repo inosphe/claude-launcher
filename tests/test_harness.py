@@ -587,6 +587,28 @@ def test_a_harness_with_no_prompt_argument_is_not_given_one(home, tmp_path):
     assert harness.takes_opening_argv(harness.CLAUDE_HARNESS) is True
 
 
+def test_a_declared_argv_opening_strategy_gets_the_positional_prompt(home, tmp_path):
+    _declare_harness("h", opening_transport="argv")
+    _profile_for("custom", "h")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="custom", cwd=str(tmp_path))
+    )
+    argv, _, _ = harness.build_command(sdef, opening="take the API")
+    assert argv[-2] == "--"
+    assert argv[-1].endswith("\ntake the API")
+    assert harness.takes_opening_argv("h") is True
+
+
+def test_the_packaged_codex_strategies_name_its_tui_contract(home):
+    from claude_launcher import harnesses
+
+    codex = harnesses.get("codex")
+    assert codex is not None
+    assert codex.opening_transport == "argv"
+    assert codex.input_readiness == "bracketed-paste"
+    assert codex.submit_strategy == "screen"
+
+
 def test_task_is_a_recorded_field(home):
     """The opening task is kept on the definition — the one piece of a
     session's setup a re-briefing could not otherwise reconstruct."""

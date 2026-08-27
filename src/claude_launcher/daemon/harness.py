@@ -389,14 +389,14 @@ def _normalize_resume(sdef: SessionDef) -> SessionDef:
 def takes_opening_argv(harness: str) -> bool:
     """Whether this harness accepts an opening message on its command line.
 
-    ``claude`` does (``claude [options] [prompt]``), and that is worth a lot
-    more than a convenience: a message handed over as argv is read by the
-    process before it ever reads a key, so it cannot be caught in the window
-    between the harness going quiet and its input actually being live. Every
-    other harness has to be typed into, which is what :func:`onboard.deliver`
-    is for.
+    Declared per harness because both Claude and Codex accept a positional
+    prompt, while arbitrary configured agents may not. A message handed over
+    as argv is read before the process ever reads a key, so it cannot be
+    caught between the harness going quiet and its input actually being live.
+    Harnesses declaring ``pty`` are typed into by :func:`onboard.open_with`.
     """
-    return harness == CLAUDE_HARNESS
+    entry = harness_registry.get(harness)
+    return entry is not None and entry.opening_transport == "argv"
 
 
 def restores_blank(sdef: SessionDef) -> bool:
@@ -588,6 +588,13 @@ def build_command(
                 )
             except runner.RunnerError as exc:
                 raise HarnessError(str(exc)) from exc
+        if opening and not restoring and entry.opening_transport == "argv":
+            # Declared positional-prompt transport. Like Claude's builtin
+            # path, keep the prompt behind the option terminator: opening
+            # blocks often begin with a markdown fence made of dashes.
+            from . import session as session_mod  # late: session imports us
+
+            argv.extend(["--", f"{session_mod.delivery_stamp()}\n{opening}"])
     # The session's identity, tmux's ``$TMUX`` equivalent. Children (claude,
     # its MCP servers, `!` shells) inherit it — cflow keys its run state by
     # it, mapping each session 1:1 to its own workflow run.
