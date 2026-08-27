@@ -50,11 +50,13 @@ function stubDom() {
   for (const id of ["modal-overlay", "modal-title", "modal-body"]) {
     const el = {
       id, textContent: "", onclick: null,
+      children: [],
       classes: new Set(id === "modal-overlay" ? ["hidden"] : []),
       classList: {
         add: (c) => el.classes.add(c),
         remove: (c) => el.classes.delete(c),
       },
+      appendChild(c) { this.children.push(c); },
     };
     els[id] = el;
   }
@@ -67,12 +69,16 @@ function stubDom() {
   els["modal-actions"] = row;
   const doc = {
     keydown: [],
+    createTextNode(text) { return { textContent: text }; },
     createElement() {
       const el = {
-        type: "", textContent: "", focused: false,
+        type: "", textContent: "", focused: false, disabled: false,
+        checked: false, children: [],
         classes: new Set(), handlers: {},
         classList: { add: (c) => el.classes.add(c) },
         addEventListener(ev, fn) { el.handlers[ev] = fn; },
+        append(...kids) { el.children.push(...kids); },
+        appendChild(kid) { el.children.push(kid); },
         click() { if (el.handlers.click) el.handlers.click(); },
         focus() { el.focused = true; },
       };
@@ -138,6 +144,25 @@ async function checkShowModal() {
           overlay.classes.has("hidden"), false);
     overlay.onclick({ target: overlay });
     check("the backdrop is a null answer", await p, null);
+  }
+  {
+    const { showModal, els } = stubDom();
+    const p = showModal({
+      title: "Force remove?", body: "still in mesh0",
+      checkbox: { label: "I understand" },
+      actions: [
+        { label: "Cancel", value: null },
+        { label: "Remove", value: true, requiresCheck: true },
+      ],
+    });
+    const checkBox = els["modal-body"].children[0].children[0];
+    const remove = els["modal-actions"].children[1];
+    check("a guarded action starts disabled", remove.disabled, true);
+    checkBox.checked = true;
+    checkBox.handlers.change();
+    check("checking the acknowledgement enables it", remove.disabled, false);
+    remove.click();
+    check("the enabled guarded action resolves", await p, true);
   }
 }
 
@@ -215,9 +240,63 @@ async function checkOfferForce() {
   }
 }
 
+/* -------- individual remove: membership is decided before DELETE -------- */
+
+function removeHarness(meshes, answer, response = { ok: true }) {
+  const calls = [], modals = [], infos = [];
+  const ctx = {};
+  const api = async (url, opts) => {
+    calls.push({ url, method: opts.method });
+    return { ...response, json: async () => ({ error: "refused" }) };
+  };
+  const showModal = async (q) => { modals.push(q); return answer; };
+  const modalInfo = async (title, body) => infos.push({ title, body });
+  const refreshSessions = () => {};
+  const detach = () => {};
+  const location = { hash: "#/s/s1" };
+  new Function(
+    "exports", "sessMeshes", "showModal", "api", "modalInfo",
+    "refreshSessions", "detach", "location",
+    slice("async function removeExitedSession(") +
+      "\nexports.removeExitedSession = removeExitedSession;"
+  )(ctx, () => meshes, showModal, api, modalInfo,
+    refreshSessions, detach, location);
+  return { remove: ctx.removeExitedSession, calls, modals, infos, location };
+}
+
+async function checkIndividualRemove() {
+  {
+    const h = removeHarness([], { force: false });
+    check("a non-mesh remove uses one dialog and a plain DELETE",
+          [await h.remove("s1"), h.modals.length, h.calls],
+          [true, 1, [{ url: "/api/sessions/s1", method: "DELETE" }]]);
+    check("non-mesh remove needs no acknowledgement",
+          [h.modals[0].checkbox, h.modals[0].actions[1].requiresCheck],
+          [null, false]);
+  }
+  {
+    const h = removeHarness([{ mesh: "mesh0" }], { force: true });
+    const removed = await h.remove("s 1");
+    check("a mesh remove names its mesh and gates the same dialog",
+          [/mesh0/.test(h.modals[0].body),
+           h.modals[0].actions[1].requiresCheck],
+          [true, true]);
+    check("mesh acknowledgement makes the first DELETE forced",
+          [removed, h.calls],
+          [true, [{ url: "/api/sessions/s%201?force=1", method: "DELETE" }]]);
+    check("mesh remove still used only one dialog", h.modals.length, 1);
+  }
+  {
+    const h = removeHarness([{ mesh: "mesh0" }], null);
+    check("cancel sends no DELETE", [await h.remove("s1"), h.calls],
+          [false, []]);
+  }
+}
+
 (async () => {
   await checkShowModal();
   await checkOfferForce();
+  await checkIndividualRemove();
   if (failures) {
     console.error(`${failures} check(s) failed`);
     process.exit(1);
