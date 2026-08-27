@@ -1030,11 +1030,78 @@ async function main() {
     ctx.spawnUi().wtMode.value === "new" && ctx.spawnUi().wtName.value === "",
     ctx.spawnUi().wtName.value);
 
+  /* ---- silence opens on a checkout of its own --------------------------
+     The row's opening answer is "new worktree", so a child spawned without
+     anyone touching the row lands in a checkout of its own rather than in
+     the parent's. Only silence gets that: the three seeded cases above are
+     answers and keep theirs, and `worktree: false` -- the quick-job panel's
+     unticked box -- is an answer too. */
   await ctx.openSpawnModal("lead1", {});
   await settle();
   await settle();
-  check("no seed opens on no worktree at all",
-    ctx.spawnUi().wtMode.value === "" && ctx.spawnUi().wtPickRow.hidden === true);
+  const wui4 = ctx.spawnUi();
+  check("no seed opens on a new worktree",
+    wui4.wtMode.value === "new" && wui4.wtPickRow.hidden === true &&
+      wui4.wtNameRow.hidden === false,
+    [wui4.wtMode.value, wui4.wtPickRow.hidden, wui4.wtNameRow.hidden]);
+  check("...with the name left blank, so the daemon cuts the generated one",
+    wui4.wtName.value === "", wui4.wtName.value);
+  const acts4 = buttons(modalEls["modal-actions"]);
+  const spawn4 = acts4.find((b) => b.text.startsWith("Spawn"));
+  sent = [];
+  await spawn4.fire("click");
+  await settle();
+  const defPost = sent.find((x) => x.method === "POST");
+  check("...and an untouched form spawns into one",
+    defPost && defPost.body.worktree === true, defPost && defPost.body.worktree);
+
+  await ctx.openSpawnModal("lead1", { seed: { quick: true, worktree: false } });
+  await settle();
+  await settle();
+  const wui5 = ctx.spawnUi();
+  check("an unticked quick-job box is an answer, not silence",
+    wui5.wtMode.value === "" && wui5.wtNameRow.hidden === true,
+    [wui5.wtMode.value, wui5.wtNameRow.hidden]);
+  const acts5 = buttons(modalEls["modal-actions"]);
+  const spawn5 = acts5.find((b) => b.text.startsWith("Spawn"));
+  sent = [];
+  await spawn5.fire("click");
+  await settle();
+  const noPost = sent.find((x) => x.method === "POST");
+  check("...and no checkout travels with it",
+    noPost && noPost.body.worktree === undefined, noPost && noPost.body.worktree);
+
+  /* The default is only for a row that can be used. A locked
+     `spawn.allow_worktree` greys every radio, and a "new worktree" standing
+     checked under a note that reads "a child inherits its parent's
+     directory" would name a checkout the spawn is not going to cut. */
+  const goodKids = routes["GET /api/sessions/lead1/children"];
+  routes["GET /api/sessions/lead1/children"] = { doc: {
+    can_spawn: true, children_remaining: 3,
+    may_choose: ["profile", "args", "fork", "borrow"],
+    spawnable_harnesses: ["claude"], workspaces: null,
+  } };
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  const wui6 = ctx.spawnUi();
+  check("a locked worktree row keeps the harmless default",
+    wui6.wtMode.value === "" && wui6.wtMode.disabled === true &&
+      /spawn.allow_worktree/.test(wui6.worktreeNote.textContent),
+    [wui6.wtMode.value, wui6.wtMode.disabled, wui6.worktreeNote.textContent]);
+  routes["GET /api/sessions/lead1/children"] = goodKids;
+
+  /* A directory that is no repository has nothing to cut a checkout from,
+     and syncSpawnGates takes the row away entirely -- the default must not
+     leave "new" standing behind it. */
+  routes["GET /api/git?cwd=C%3A%2Frepo"] = { doc: { repo: false, worktrees: [] } };
+  await ctx.openSpawnModal("lead1", {});
+  await settle();
+  await settle();
+  const wui7 = ctx.spawnUi();
+  check("no repository here keeps the harmless default too",
+    wui7.wtMode.value === "" && wui7.wtRow.hidden === true,
+    [wui7.wtMode.value, wui7.wtRow.hidden]);
   routes["GET /api/git?cwd=C%3A%2Frepo"] = goodGit;
 
   /* ---- the board row: the daemon's verdicts fill the picker --------------

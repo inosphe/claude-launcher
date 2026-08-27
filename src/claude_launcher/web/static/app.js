@@ -12328,7 +12328,25 @@ async function spawnModalLoad(st) {
   const reuse = named && wts.includes(named);
   fillSpawnSelect(ui.wtPick, wts.map((n) => [n, n]),
     wts.length ? null : "(no worktree here yet)", reuse ? named : "");
-  ui.wtMode.value = wt === true || (named && !reuse) ? "new"
+  /* Silence in the seed opens on "new". A checkout of its own is what a
+     child usually needs -- two sessions in one checkout tread on each
+     other's edits and branch switches -- so the form opens on the mode that
+     keeps them apart, and sharing the parent's directory becomes an answer
+     the operator gives rather than one they forget to take away. Only
+     SILENCE, though: `worktree: false` is what the quick-job panel sends for
+     an unticked box, and that is an answer already.
+
+     Where the row cannot be used the default stays the harmless one. A
+     directory that is no repository takes the row away and a locked
+     `spawn.allow_worktree` greys every radio (syncSpawnGates), and
+     spawnPayload reads through both -- so a "new worktree" left checked
+     there would send nothing while telling the operator, over a note reading
+     "a child inherits its parent's directory", that a checkout is coming. */
+  const wtSaid = wt !== undefined && wt !== null;
+  const wtOpen = !!ui.git.repo &&
+    ((ui.report.may_choose || []).includes("worktree"));
+  ui.wtMode.value = wt === true || (named && !reuse) || (!wtSaid && wtOpen)
+    ? "new"
     : reuse ? "existing" : "";
   if (named && !reuse) ui.wtName.value = named;
   if (seed.wtName) ui.wtName.value = seed.wtName;
