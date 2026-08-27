@@ -17317,6 +17317,109 @@ function dismissNotice(key) {
 }
 
 /* ------------------------------------------------------------------ */
+/* the restart gate: an agent session's restart, waiting on a person   */
+/* ------------------------------------------------------------------ */
+/* A managed session's `claunch daemon restart` opens this gate instead
+   of restarting on the spot (daemon/restart_gate.py): the request sits
+   here until the operator approves, rejects, or lets its timeout count
+   it as approved. Polled with the page's 2s heartbeat — pending keeps
+   the card drawn with a live countdown, a settled or gone request takes
+   it down. Approving is the daemon's own restart door, so the existing
+   restarting announcement (the daemon card's NOTICE_LINK) labels the
+   outage that follows; rejecting just closes the card. */
+const NOTICE_GATE = "restart-gate";
+
+function gateCountdown(deadlineIso) {
+  const dead = new Date(deadlineIso).getTime();
+  if (isNaN(dead)) return "";
+  const ms = Math.max(0, dead - Date.now());
+  const m = Math.floor(ms / 60000);
+  const s = Math.floor((ms % 60000) / 1000);
+  return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+async function gatePost(path, btn) {
+  btn.disabled = true;
+  try {
+    await api(path, { method: "POST" });
+  } catch {
+    btn.disabled = false;
+    return false;
+  }
+  return true;
+}
+
+async function refreshRestartGate() {
+  const host = $("notices");
+  if (!host) return;
+  let body;
+  try {
+    body = await api("/api/daemon/restart-request");
+  } catch {
+    return; // daemon down or auth up — pollOnce's own channels own both
+  }
+  const rec = body && body.request ? body.request : null;
+  if (!rec || rec.status !== "pending") {
+    dismissNotice(NOTICE_GATE);
+    return;
+  }
+  let card = notices.get(NOTICE_GATE);
+  if (!card || !card.node.isConnected) {
+    dismissNotice(NOTICE_GATE);
+    const node = el("div", "notice warn gate");
+    const title = el("div", "notice-title", "daemon restart requested");
+    const sub = el("div", "notice-sub");
+    const actions = el("div", "gate-actions");
+    const approve = el("button", "wf-btn approve", "Approve");
+    const reject = el("button", "wf-btn clear", "Reject");
+    approve.title =
+      "the daemon restarts now — or the timeout counts the request as " +
+      "approved on its own — either way every attached terminal goes " +
+      "down with it";
+    reject.title = "nothing restarts; the asking session keeps working";
+    approve.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (await gatePost("/api/daemon/restart-request/approve", approve)) {
+        // The daemon's own door: it finishes the reply, drains, and spawns
+        // the successor; label the gap the way the daemon card's button
+        // does, so the outage is not read as a mystery.
+        setDaemonOnline(false);
+        $("daemon-info").textContent = "restarting…";
+        notify(
+          "restarting the daemon",
+          `approved at ${noticeClock()} — the page reconnects on its own ` +
+            "once the successor is up",
+          { key: NOTICE_LINK, kind: "warn", sticky: true }
+        );
+        dismissNotice(NOTICE_GATE);
+      }
+    });
+    reject.addEventListener("click", async (ev) => {
+      ev.stopPropagation();
+      if (await gatePost("/api/daemon/restart-request/reject", reject)) {
+        dismissNotice(NOTICE_GATE);
+      }
+    });
+    actions.appendChild(approve);
+    actions.appendChild(reject);
+    node.appendChild(title);
+    node.appendChild(sub);
+    node.appendChild(actions);
+    host.appendChild(node);
+    notices.set(NOTICE_GATE, { node, timer: null });
+  }
+  const sub = card.node.querySelector(".notice-sub");
+  if (sub) {
+    sub.textContent =
+      `session ${rec.session || "?"}` +
+      (rec.requested_at
+        ? ` asked at ${new Date(rec.requested_at).toLocaleTimeString()}`
+        : "") +
+      ` — auto-approves in ${gateCountdown(rec.deadline)}`;
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* boot                                                               */
 /* ------------------------------------------------------------------ */
 /* The poll is installed here rather than at the end of boot(), and is never
@@ -17475,6 +17578,9 @@ async function pollOnce() {
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
   refreshWorkspaces();
+  // The restart gate can be opened from any session's terminal, so the card
+  // is fed by the same heartbeat as the registry.
+  refreshRestartGate();
 }
 
 pollTimer = setInterval(pollTick, 2000);

@@ -33,6 +33,7 @@ import pytest
 from claude_launcher import cli_sessions, daemon_client
 from claude_launcher.daemon import restart_notice, resume
 from claude_launcher.daemon.harness import SessionDef
+from test_restart_gate import _FakeDaemon  # noqa: F401 — the gate's fake daemon_client
 
 LIVE = {"pid": 4242, "started_at": "2026-08-26T02:36:00+00:00"}
 
@@ -113,8 +114,16 @@ def _daemon_args(action: str = "restart", **kw) -> argparse.Namespace:
 
 def test_the_record_is_on_disk_before_the_daemon_is_stopped(home, monkeypatch):
     """The whole fix is this ordering, so the test is about the moment, not
-    the outcome: what ``stop`` can see when it is called."""
-    monkeypatch.setenv("CLAUNCH_SESSION", "s45")
+    the outcome: what ``stop`` can see when it is called.
+
+    A *session's* shell never reaches this path any more — its restart goes
+    through the approval gate, and the record is written at approval time
+    (see test_restart_gate). This is the human's immediate path: no
+    CLAUNCH_SESSION (pinned here because the suite may itself run inside a
+    managed session, whose environment carries one), and nobody is owed a
+    debt.
+    """
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
     monkeypatch.setattr(
         "claude_launcher.daemon.runtime_state.read_daemon_json", lambda: dict(LIVE)
     )
@@ -139,11 +148,37 @@ def test_the_record_is_on_disk_before_the_daemon_is_stopped(home, monkeypatch):
 
     [record] = seen["requests"]
     assert record["kind"] == restart_notice.KIND_RESTART
-    assert record["requested_by"] == "s45"
+    assert record["requested_by"] is None
     # The identity of the daemon about to die, captured while it can still be
     # read: after the stop, daemon.json is gone.
     assert record["daemon_pid"] == LIVE["pid"]
     assert record["daemon_started_at"] == LIVE["started_at"]
+
+
+def test_a_sessions_restart_never_reaches_the_immediate_path(home, monkeypatch, capsys):
+    """The gate is the whole difference: with CLAUNCH_SESSION set, the CLI
+    opens the gate instead of stopping anything — no record, no stop — and
+    waits for the web UI's settlement."""
+    from datetime import datetime, timedelta, timezone
+
+    future = (
+        datetime.now(timezone.utc) + timedelta(minutes=4)
+    ).isoformat(timespec="seconds")
+    fake = _FakeDaemon(record={"id": "g1", "session": "s45", "deadline": future})
+    fake.client.record["status"] = "rejected"
+    monkeypatch.setattr(cli_sessions, "daemon_client", fake)
+    monkeypatch.setattr(
+        "claude_launcher.daemon.runtime_state.read_daemon_json", lambda: dict(LIVE)
+    )
+    monkeypatch.setattr(cli_sessions.time, "sleep", lambda s: None)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s45")
+
+    assert cli_sessions._cmd_daemon(_daemon_args()) == 1
+
+    assert fake.client.posted == [("/api/daemon/restart-request", {"session": "s45"})]
+    assert fake.stop_calls == 0
+    assert restart_notice.read_requests() == []
+    assert "rejected" in capsys.readouterr().err
 
 
 def test_a_stop_records_itself_too(home, monkeypatch):
