@@ -739,14 +739,33 @@ def _edit_git_cannot_see_by_stat(repo: Path, rel: str, text: str) -> None:
     the cases below pass on the direct path. They do not go flaky there;
     they go quiet.
     """
+    _blind_edit(repo, rel, text, _blind_setup(repo, rel))
+
+
+def _blind_setup(repo: Path, rel: str) -> int:
+    """Park ``rel`` and the index at one instant in the past, and cache it.
+
+    Split out from the edit because a case that wants the *gate* to be fooled
+    has to be set up before the run it will reuse, not after: the stale
+    answer is the tree of whatever content this cached, so the run being
+    reused has to be a run of that same content. Do it in between and the
+    stale answer accidentally differs from the receipt's key, the gate runs
+    again for the wrong reason, and the case passes against broken code.
+    Measured: that ordering passed 1 time in 1 against the unfixed tree.
+    """
     path = repo / rel
-    size = path.stat().st_size
     past = path.stat().st_mtime_ns - 60 * 10**9
     os.utime(path, ns=(past, past))
     _git(repo, "add", "-A")
     index = Path(_git(repo, "rev-parse", "--absolute-git-dir").strip()) / "index"
     os.utime(index, ns=(past, past))
+    return past
 
+
+def _blind_edit(repo: Path, rel: str, text: str, past: int) -> None:
+    """The edit itself: same size, and the parked mtime put straight back."""
+    path = repo / rel
+    size = path.stat().st_size
     path.write_text(text, encoding="utf-8")
     assert path.stat().st_size == size, "the case needs the size to stay put"
     os.utime(path, ns=(past, past))
@@ -786,10 +805,12 @@ def test_an_edit_the_stat_cache_cannot_see_does_not_reuse_the_green(repo, gate):
     second run, this costs the run itself.
     """
     _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    past = _blind_setup(repo, "src/pkg/mesh.py")
+
     assert gate() == 0
     assert gate.runs() == 1
 
-    _edit_git_cannot_see_by_stat(repo, "src/pkg/mesh.py", "x = 3\n")
+    _blind_edit(repo, "src/pkg/mesh.py", "x = 3\n", past)
 
     assert gate() == 0
     assert gate.runs() == 2, "the previous content's receipt answered for this one"
