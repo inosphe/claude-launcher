@@ -130,7 +130,7 @@ option:disabled { color: #6b7280; }
    The invariant the rest of this rail depends on: everything that belongs on
    the name's line keeps the default `order: 0` and declares no
    `flex-basis: 100%`. Only the deliberate line-breakers below
-   (.rail-cwd, .rail-ctx-line, .rail-seen, .sess-cflow, .sess-brief) are full-width, and they carry
+   (.rail-cwd, .rail-ctx-line, .rail-seen, .rail-quiet, .sess-cflow, .sess-brief) are full-width, and they carry
    an `order` above the ▸ toggle's so the toggle still lands at the end of the
    name line. A full-width child at order 0 would break the line before the
    toggle got there.

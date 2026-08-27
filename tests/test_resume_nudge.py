@@ -95,9 +95,17 @@ class _Recorded:
         self.last_visited_at = None
         self.last_input_at = None
         self.exited_at = None
+        self.held = False
 
     def status(self, threshold=None) -> str:
         return self._status
+
+    def delivery_held(self) -> bool:
+        # persist() records the pinned delivery hold beside the stamps above,
+        # for the same reason: it is a setting a person made, and a restart
+        # must not quietly undo one — so the double reports back whatever the
+        # relaunch handed it (see _NoSpawnManager.create).
+        return self.held
 
 
 class _NoSpawnManager(SessionManager):
@@ -117,6 +125,7 @@ class _NoSpawnManager(SessionManager):
         created_at: str = "",
         last_visited_at: str = "",
         last_input_at: str = "",
+        delivery_hold: bool = False,
     ):
         session = _Recorded(sdef.name, "starting", cwd=sdef.cwd)
         # Carried like the real one does: a restore relaunches into a new
@@ -128,6 +137,7 @@ class _NoSpawnManager(SessionManager):
         session.created_at = created_at or None
         session.last_visited_at = last_visited_at or None
         session.last_input_at = last_input_at or None
+        session.held = bool(delivery_hold)
         self._sessions[sdef.name] = session
         return session
 
