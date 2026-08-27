@@ -322,13 +322,23 @@ strictly down the tree — so a sibling reviewer is exactly as trustworthy as a
 parent, and is the shape most of these take. Add `scope: ancestor` when only
 the chain of command will do.
 
-**Reach is deliberate.** A spawned session is wired to its parent and nobody
-else, so by default the direct parent is the only candidate. Making a sibling
-reviewer reachable is somebody's decision: `claunch mesh connect dev1 rev1`,
-the `connect` tool from a session above them, or an `auto_link` rule. When a
-role matches but is not wired, the skip reason names the command that fixes
-it — and `claunch cflow request` reports the whole picture before the run
-even starts.
+**Reach is deliberate, but a reviewer is standing.** A spawned session is
+wired to its parent and nobody else, so by default the direct parent is the
+only candidate. The exceptions are the two packaged `auto_link` rules: roots
+reach each other (sessions a human started), and every **reviewer** reaches
+every **worker**, at whichever of the two joins second — which is the pair
+these gates are usually about, so `{role: reviewer}` resolves in an ordinary
+fleet with nobody wiring anything. Outside those two it is somebody's
+decision: `claunch mesh connect dev1 spec1`, the `connect` tool from a
+session above them, or a rule the mesh adds. When a role matches but is not
+wired, the skip reason names the command that fixes it — and `claunch cflow
+request` reports the whole picture before the run even starts.
+
+If your fleet was already running when the rule (or the daemon that ships
+it) arrived, `claunch mesh rewire <mesh>` applies the rules to the members
+already there. It only opens edges, and leaves alone any pair somebody
+decided by hand — so a reviewer you deliberately kept away from one worker
+stays away.
 
 **What a responder does.** It sees the question through `asks`, investigates,
 and calls `answer {ask, decision, reason}`. The decision must be one of the

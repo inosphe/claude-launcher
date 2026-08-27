@@ -1305,8 +1305,9 @@ parse time, rather than by quietly matching nothing forever after.
 ```yaml
 auto_link:
   rules:
-    - between: [{tier: root}, {tier: root}]        # the packaged rule
-    - between: [{role: worker}, {role: reviewer}]  # a mesh that adds one
+    - between: [{tier: root}, {tier: root}]        # packaged
+    - between: [{role: reviewer}, {role: worker}]  # packaged
+    - between: [{role: worker}, {role: worker}]    # a mesh that adds one
       within: tree
 ```
 
@@ -1318,10 +1319,19 @@ through) and `tier` (depth in the spawn forest, `root` or a number); an
 omitted field matches anything. `within: tree` confines a rule to one spawn
 tree. Any matching rule connects the pair.
 
-The packaged set has exactly one rule, and it is the one that keeps a mesh
-usable: sessions a human started are all tier 0 and all reach each other, the
-way every member always did. Everything spawned hangs off its parent and goes
-no further — so a fleet is a **tree** until somebody says otherwise, either by
+The packaged set has two rules. The first keeps a mesh usable: sessions a
+human started are all tier 0 and all reach each other, the way every member
+always did. The second connects **every reviewer to every worker**, and it is
+not a convenience — a shipped workflow already asks for it. `improv-worker`
+delegates its review step to `{role: reviewer}`, and `cflow/responders.py`
+resolves that candidate against this graph, so without a standing rule the
+reviewer gate could only ever fire where somebody had hand-wired that exact
+pair, and the declaration and the wiring shipped contradicting each other.
+It is `within: any` on purpose: a reviewer is normally a root a human
+started, or a sibling under the lead, while the workers hang off their own
+parents, so confining it to one spawn tree would exclude the shape it exists
+for. Beyond those two, everything spawned hangs off its parent and goes no
+further — so a fleet is a **tree** until somebody says otherwise, either by
 adding a rule or by wiring two members directly.
 
 Three things the rules are deliberately **not**:
@@ -1331,7 +1341,20 @@ Three things the rules are deliberately **not**:
   writes an edge, and an edge outranks any default.
 - **Not retroactive.** They run at join and the result is recorded, exactly as
   a role is resolved once and stored. Edit them and the members already wired
-  keep the wiring they were given.
+  keep the wiring they were given. That is the default, not the only option:
+  `claunch mesh rewire <mesh>` (`POST /api/mesh/{mesh}/rewire`) applies the
+  rules in force to the members already enrolled — the run a join cannot
+  perform for a rule that did not exist yet, or for a packaged rule a daemon
+  upgrade brought in under a fleet already assembled. It only ever **opens**,
+  and it skips every pair somebody already decided, so a link cut on purpose
+  survives it and a second run writes nothing. `actor` gates it as it gates a
+  single edit: named, the sweep is confined to the edges touching that
+  session's subtree, and a pair it does not command is skipped rather than
+  refused — a sweep names no pair, so there is nothing in it to reject.
+  Omitted, the caller is the human who owns the whole graph. As on a single
+  edit the field is *declared*, not proven, so it narrows an honest agent
+  and is not what makes the operation safe: what does is that only edges a
+  rule already names can open, whoever asks.
 - **Not a second source of truth.** `tier` and `root` are read off the lineage
   at join and never again, so a parent that exits — which re-roots its child
   in the drawn tree — cannot silently re-wire a member already wired.

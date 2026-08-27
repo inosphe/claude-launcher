@@ -319,6 +319,24 @@ default: reviewer
 auto_link:
   rules:
     - between: [{tier: root}, {tier: root}]
+    # ...and every producer reaches every auditor. This one is not a
+    # convenience: a shipped workflow already ASKS for it. The improv-worker
+    # review step delegates to `{role: reviewer}` as its first candidate
+    # group, and `cflow/responders.py` resolves a candidate against the
+    # member graph -- so without a standing rule the reviewer gate could only
+    # ever fire where somebody had hand-wired that exact pair, and the
+    # declaration and the wiring shipped contradicting each other. A rule
+    # here is also the only form that survives the order a fleet comes up in:
+    # it is evaluated at BOTH joins, so a reviewer arriving after the workers
+    # is wired to them, and a worker spawned after the reviewer is wired to
+    # it, with nobody having to notice either time.
+    #
+    # `within: any` on purpose. A reviewer is normally a root the human
+    # started, or a sibling under the lead, while the workers hang off their
+    # own parents -- confining this to one spawn tree would exclude exactly
+    # the shape it exists for. It opens reach, not traffic: an edge is a
+    # capability, and nothing is sent along it until somebody addresses it.
+    - between: [{role: reviewer}, {role: worker}]
 
 roles:
 
@@ -713,12 +731,28 @@ def resolve(override: Optional[dict] = None) -> RoleSet:
     return RoleSet(
         roles=roles,
         default=default,
-        auto_link=_resolve_auto_link(doc.get("auto_link"), index, roles),
+        auto_link=_resolve_auto_link(
+            doc.get("auto_link"),
+            index,
+            roles,
+            # Strict only for rules the UPLOAD stated. Rules that merely rode
+            # in from the packaged set — because this upload said nothing
+            # about wiring — are the daemon's, not the author's, and a mesh
+            # that renames its vocabulary must not be refused over a default
+            # rule it never wrote. See :func:`_resolve_auto_link`.
+            stated=bool((patch or {}).get("auto_link") is not None),
+        ),
         index=index,
     )
 
 
-def _resolve_auto_link(doc, index: Dict[str, str], roles: Dict[str, Role]) -> AutoLink:
+def _resolve_auto_link(
+    doc,
+    index: Dict[str, str],
+    roles: Dict[str, Role],
+    *,
+    stated: bool = True,
+) -> AutoLink:
     """Rules -> the resolved predicate, with every role reference checked.
 
     This is the payoff for keeping the wiring in the same document as the
@@ -726,6 +760,17 @@ def _resolve_auto_link(doc, index: Dict[str, str], roles: Dict[str, Role]) -> Au
     at parse time, instead of quietly matching nothing for the rest of the
     mesh's life. Role names go through the alias index too, so a rule may say
     ``coder`` and mean ``worker`` exactly as a handle does.
+
+    ``stated`` is who wrote the rules, and it decides what an unknown role
+    means. A rule the UPLOAD stated is its author's, and a role it names but
+    does not define is a mistake with an author to report it to — refuse the
+    whole document. A rule that merely rode in from the packaged set, because
+    the upload said nothing about wiring (:func:`_merge` carries it), has no
+    such author: refusing there would mean a mesh that brings its own role
+    names is rejected over a default it never wrote, and ``replace: true``
+    would stop being about the vocabulary alone. Those are DROPPED instead —
+    the packaged rules are offered to every vocabulary, and each mesh keeps
+    the ones its own roles can express.
     """
     if not doc:
         return AutoLink()
@@ -738,12 +783,22 @@ def _resolve_auto_link(doc, index: Dict[str, str], roles: Dict[str, Role]) -> Au
             if token is not None:
                 canon = index.get(token)
                 if canon is None:
+                    if not stated:
+                        ends = []
+                        log.debug(
+                            "auto_link: dropping packaged rule %d — role %r is "
+                            "not in this mesh's vocabulary (roles: %s)",
+                            i + 1, token, ", ".join(sorted(roles)),
+                        )
+                        break
                     raise RoleError(
                         f"auto_link rule {i + 1} names role {token!r}, which "
                         f"this vocabulary does not define (roles: "
                         f"{', '.join(sorted(roles))})"
                     )
             ends.append(LinkPattern(role=canon, tier=end.get("tier")))
+        if len(ends) != 2:
+            continue
         out.append(
             LinkRule(a=ends[0], b=ends[1], within=str(rule.get("within") or "any"))
         )

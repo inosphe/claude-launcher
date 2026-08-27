@@ -29,6 +29,9 @@ C. Rules and standing isolation
    C3 a role rule connects across the tree; `within: tree` keeps it home
    C4 no rule ever withholds the parent edge, at either end of it — a parent
       that rejoins after its children is wired back to them
+   C5 the packaged reviewer rule wires a reviewer to the workers whichever
+      of the two joined first — a rule is a predicate over a pair, so the
+      wiring does not depend on the order a fleet comes up in
 
 D. Authority
    D1 an agent may rewire an edge touching a session it spawned
@@ -39,6 +42,13 @@ E. Lifecycle
    E1 edges naming a departed member are pruned, so a rejoining handle does
       not inherit its predecessor's isolation
    E2 the graph survives a reload from disk
+
+G. Wiring that arrives after the members
+   G1 `rewire` applies the rules in force to the members already enrolled —
+      what a join cannot do for a rule that did not exist yet
+   G2 it only ever opens: a pair somebody decided is untouched (so a cut
+      stays cut), and a second run is a no-op
+   G3 the HTTP surface the CLI drives
 """
 
 from __future__ import annotations
@@ -70,6 +80,15 @@ auto_link:
     - between: [{tier: root}, {tier: root}]
     - between: [{role: worker}, {role: reviewer}]
       within: tree
+"""
+
+#: The same pair without the tree confinement — a single reviewer serving a
+#: whole mesh, which is what the packaged rule ships as.
+RULES_WORKER_REVIEWER_ANY = """
+auto_link:
+  rules:
+    - between: [{tier: root}, {tier: root}]
+    - between: [{role: worker}, {role: reviewer}]
 """
 
 
@@ -408,6 +427,37 @@ def test_no_rule_can_withhold_the_parent_edge(home, tmp_path):
     asyncio.run(run())
 
 
+def test_the_packaged_reviewer_rule_holds_whichever_end_joins_first(home, tmp_path):
+    """C5: the packaged rule, on the packaged vocabulary — no upload at all.
+
+    Both orders matter because both happen: a reviewer is usually added to a
+    fleet already working, and workers keep being spawned after it. A rule is
+    evaluated at BOTH joins, so neither order needs anyone to notice.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mm.create("team")
+        # the worker is here first; the reviewer arrives into a running fleet
+        for name, parent in (("lead", None), ("coder1", "lead"), ("qa1", None)):
+            mgr.create(SessionDef(name=name, harness="py", parent=parent))
+            await mm.join("team", name)
+        mesh = mm.get("team")
+        assert mesh.connected("coder1", "qa1") is True
+        # ...and a worker spawned afterwards is wired to the reviewer too,
+        # across the tree boundary: `within: any` on this rule
+        mgr.create(SessionDef(name="coder2", harness="py", parent="lead"))
+        await mm.join("team", "coder2")
+        assert mesh.connected("coder2", "qa1") is True
+        # the rule names a PAIR — two workers are still strangers
+        assert mesh.connected("coder1", "coder2") is False
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # D. authority
 # --------------------------------------------------------------------------- #
@@ -557,6 +607,264 @@ def test_a_cut_elsewhere_leaves_a_real_debt_being_chased(home, tmp_path):
         assert _unanswered(mesh, "w1") is True  # ...so the chase continues
 
         await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# G. wiring that arrives after the members
+# --------------------------------------------------------------------------- #
+async def _fleet_wired_by_nothing(mm, mgr):
+    """A mesh whose members joined while no rule named any of their pairs."""
+    mm.create("team")
+    await mm.set_roles("team", "auto_link: {rules: []}")
+    for name, parent in (
+        ("lead", None), ("coder1", "lead"), ("coder2", "lead"), ("qa1", None)
+    ):
+        mgr.create(SessionDef(name=name, harness="py", parent=parent))
+        await mm.join("team", name)
+    return mm.get("team")
+
+
+def test_rewire_applies_a_later_rule_to_the_members_already_here(home, tmp_path):
+    """G1: a join wires the member that is joining, so a rule that arrives
+    afterwards has no join left to run in. Without this the only remedy is
+    hand-wiring the fleet — the manual act the rules exist to remove."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mesh = await _fleet_wired_by_nothing(mm, mgr)
+        assert mesh.connected("coder1", "qa1") is False
+
+        await mm.set_roles("team", RULES_WORKER_REVIEWER_ANY)
+        # still nothing: uploading a document does not rewire anybody
+        assert mesh.connected("coder1", "qa1") is False
+
+        # every rule in force is applied, not just the one that changed --
+        # `lead` and `qa1` are both roots, so the standing root rule that was
+        # switched off at their join lands here too
+        opened = await mm.rewire_members("team")
+        assert opened == [
+            {"a": "coder1", "b": "qa1"},
+            {"a": "coder2", "b": "qa1"},
+            {"a": "lead", "b": "qa1"},
+        ]
+        assert mesh.connected("coder1", "qa1") is True
+        assert mesh.connected("coder2", "qa1") is True
+        # ...and nothing was invented: no rule names two workers
+        assert mesh.connected("coder1", "coder2") is False
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_rewire_only_opens_and_never_overrules_a_decision(home, tmp_path):
+    """G2: the property that makes it safe to hand an operator. A pair
+    somebody decided — a hand cut above all — is skipped whichever way it was
+    decided, so no rule and no rerun can take reach back off a person."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mesh = await _fleet_wired_by_nothing(mm, mgr)
+        await mm.set_roles("team", RULES_WORKER_REVIEWER_ANY)
+        # coder2 was deliberately kept away from the reviewer
+        await mm.set_member_link("team", "coder2", "qa1", enabled=False)
+
+        opened = await mm.rewire_members("team")
+        assert opened == [{"a": "coder1", "b": "qa1"}, {"a": "lead", "b": "qa1"}]
+        assert mesh.connected("coder2", "qa1") is False   # the cut stands
+        assert mesh.connected("lead", "coder1") is True   # nothing was closed
+
+        # ...and running it again says nothing and writes nothing
+        before = dict(mesh.member_edges)
+        assert await mm.rewire_members("team") == []
+        assert mesh.member_edges == before
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_the_http_surface_rewires_a_mesh(home, tmp_path):
+    """G3: the route `claunch mesh rewire` drives. POST, because it changes
+    the graph — and with no `actor` in the body the caller is the operator,
+    who owns the whole graph. This covers that the route runs, not who may
+    call it: the token authenticates the daemon's door, not the session
+    behind it, which is why G4 puts the confinement on the parameter."""
+    _register_py_harness()
+    import time
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, root=tmp_path / "mesh")
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        auth = {"Authorization": "Bearer sekrit"}
+        try:
+            await client.post("/api/mesh", json={"name": "web"}, headers=auth)
+            await client.put(
+                "/api/mesh/web/roles",
+                json={"yaml": "auto_link: {rules: []}"}, headers=auth,
+            )
+            for session, handle in (("s1", "coder1"), ("s2", "qa1")):
+                mgr.create(SessionDef(name=session, harness="py", cwd=str(tmp_path)))
+                await client.post(
+                    "/api/mesh/web/members",
+                    json={"session": session, "handle": handle}, headers=auth,
+                )
+            mesh = mm.get("web")
+            assert mesh.connected("coder1", "qa1") is False
+
+            await client.put(
+                "/api/mesh/web/roles",
+                json={"yaml": RULES_WORKER_REVIEWER_ANY}, headers=auth,
+            )
+            resp = await client.post("/api/mesh/web/rewire", json={}, headers=auth)
+            assert resp.status == 200
+            assert (await resp.json())["opened"] == [{"a": "coder1", "b": "qa1"}]
+            assert mesh.connected("coder1", "qa1") is True
+        finally:
+            await client.close()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_the_http_surface_carries_actor_through(home, tmp_path):
+    """G6: the route reads `actor` from the body and hands it on.
+
+    G3 posts an empty body and G4 calls the manager directly, so between
+    them nothing measured the line that connects the two -- the route could
+    drop `actor` on the floor and both would still pass. s183 named that gap
+    while re-reviewing the repair: the negative side stands (D3 runs over
+    the route in G3), the positive side did not exist.
+
+    Measured by difference rather than by inspection: the same request, once
+    naming a caller that commands nothing and once naming nobody. If the
+    parameter were dropped, the first call would open the edge too.
+    """
+    _register_py_harness()
+    import time
+
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, root=tmp_path / "mesh")
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        auth = {"Authorization": "Bearer sekrit"}
+        try:
+            await client.post("/api/mesh", json={"name": "web"}, headers=auth)
+            await client.put(
+                "/api/mesh/web/roles",
+                json={"yaml": "auto_link: {rules: []}"}, headers=auth,
+            )
+            for session, handle in (("s1", "coder1"), ("s2", "qa1")):
+                mgr.create(SessionDef(name=session, harness="py", cwd=str(tmp_path)))
+                await client.post(
+                    "/api/mesh/web/members",
+                    json={"session": session, "handle": handle}, headers=auth,
+                )
+            await client.put(
+                "/api/mesh/web/roles",
+                json={"yaml": RULES_WORKER_REVIEWER_ANY}, headers=auth,
+            )
+            mesh = mm.get("web")
+
+            # coder1 spawned nothing, so the pair is not its to hurry along
+            resp = await client.post(
+                "/api/mesh/web/rewire", json={"actor": "coder1"}, headers=auth
+            )
+            assert resp.status == 200
+            assert (await resp.json())["opened"] == []
+            assert mesh.connected("coder1", "qa1") is False
+
+            # ...and the operator, over the same route, still gets it
+            resp = await client.post("/api/mesh/web/rewire", json={}, headers=auth)
+            assert (await resp.json())["opened"] == [{"a": "coder1", "b": "qa1"}]
+            assert mesh.connected("coder1", "qa1") is True
+        finally:
+            await client.close()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_rewire_by_an_agent_reaches_only_its_own_subtree(home, tmp_path):
+    """G4: the sweep is the same authority as an edit, not a way around it.
+
+    D2 says an agent edits only the edges touching a session it spawned. A
+    fleet-wide operation would be the one place that rule could be walked
+    past, so `actor` puts every candidate edge through the same check --
+    and a pair the caller does not command is *skipped*, not refused: a
+    sweep names no pair, so there is nothing in it to reject, and one
+    unowned pair must not abort the wiring the caller did ask for.
+
+    `actor` is declared, not proven -- the same as on `set_member_link` --
+    so this narrows an honest agent and is not what makes the operation
+    safe. What makes it safe is the bound checked at the end: whoever calls,
+    only edges a rule already names can open.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mesh = await _fleet_wired_by_nothing(mm, mgr)
+        await mm.set_roles("team", RULES_WORKER_REVIEWER_ANY)
+
+        # coder1 spawned nothing, so it commands no session and owns no edge
+        # -- not even the two it is an endpoint of. It gets silence, not an
+        # error: nothing it was entitled to was withheld.
+        assert await mm.rewire_members("team", actor="coder1") == []
+        assert mesh.connected("coder1", "qa1") is False
+
+        # lead spawned both coders, so the edges touching them are its own to
+        # hurry along. `lead <-> qa1` is not: two roots, neither spawned by
+        # lead, and `commands` does not include the actor itself (D2).
+        opened = await mm.rewire_members("team", actor="lead")
+        assert opened == [{"a": "coder1", "b": "qa1"}, {"a": "coder2", "b": "qa1"}]
+        assert mesh.connected("lead", "qa1") is False
+
+        # D3 still holds through this door: the human owns the whole graph,
+        # and gets the pair the agent could not reach.
+        assert await mm.rewire_members("team") == [{"a": "lead", "b": "qa1"}]
+        assert mesh.connected("lead", "qa1") is True
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_rewire_opens_no_edge_a_rule_does_not_name_whoever_calls(home, tmp_path):
+    """G5: the negative control for the sentence above -- the bound that
+    actually carries the safety, measured on both doors rather than asserted
+    in a comment. No rule names two workers, so no caller opens that pair:
+    not the agent that spawned them both, not the operator.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        mesh = await _fleet_wired_by_nothing(mm, mgr)
+        await mm.set_roles("team", RULES_WORKER_REVIEWER_ANY)
+
+        await mm.rewire_members("team", actor="lead")   # owns both coders
+        await mm.rewire_members("team")                 # owns everything
+        assert mesh.connected("coder1", "coder2") is False
         await mgr.shutdown_all()
 
     asyncio.run(run())

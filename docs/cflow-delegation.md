@@ -123,10 +123,22 @@ it, or a human, can add an edge.
 
 **Reach in practice.** A spawned member is `wired`, so its join records the
 parent edge and nothing else — by default the only reachable candidate is the
-direct parent. A sibling or a grandparent becomes reachable when the session
-above them wires it (`claunch mesh connect a b`, the `connect` MCP tool, or an
-`auto_link` rule). That is a deliberate, operator-controlled act, and the skip
-reason names it.
+direct parent. The exceptions are the packaged `auto_link` rules, and there
+are two of them: roots reach each other (sessions a human started), and
+**every reviewer reaches every worker** — the shape this feature exists
+for, which is why `{role: reviewer}` resolves in an ordinary fleet without
+anybody wiring anything. Outside those two, a pair — a grandparent, a
+sibling specialist — becomes
+reachable when the session above them wires it (`claunch mesh connect a b`,
+the `connect` MCP tool, or a rule the mesh adds). That is a deliberate,
+operator-controlled act, and the skip reason names it.
+
+A fleet assembled *before* the rule existed is the case a join cannot cover:
+rules run at join and the result is stored, so a rule added later reaches
+nobody already in the room. `claunch mesh rewire <mesh>` is the explicit run
+of the same evaluation over the members already enrolled. It only opens, and
+never touches a pair somebody decided — so a `disconnect` that deliberately
+kept a worker away from a reviewer outlives it.
 
 **Failure reasons must be specific**, because they are what a human reads when
 a question lands on them: no mesh membership / no member holds that role among

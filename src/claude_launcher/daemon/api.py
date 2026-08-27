@@ -275,6 +275,7 @@ def build_app(
     r.add_patch("/api/mesh/{mesh}/members/{a}/links/{b}", h_mesh_member_link_set)
     r.add_get("/api/mesh/{mesh}/wire-requests", h_mesh_wire_requests)
     r.add_post("/api/mesh/{mesh}/wire-requests/decline", h_mesh_wire_decline)
+    r.add_post("/api/mesh/{mesh}/rewire", h_mesh_rewire)
     r.add_get("/api/mesh/{mesh}/policy", h_mesh_policy_get)
     r.add_put("/api/mesh/{mesh}/policy", h_mesh_policy_set)
     r.add_get("/api/mesh/{mesh}/roles", h_mesh_roles_get)
@@ -2184,6 +2185,34 @@ async def h_mesh_wire_decline(request: web.Request) -> web.Response:
         reason=str(body.get("reason") or ""),
     )
     return web.json_response(result)
+
+
+async def h_mesh_rewire(request: web.Request) -> web.Response:
+    """Apply the mesh's ``auto_link`` rules to the members already enrolled.
+
+    The explicit form of a join's wiring, for the case a join cannot cover:
+    the rule (or the packaged default carrying it) arrived after the members
+    did. Opens only, and never touches a pair somebody already decided — so
+    it is safe to run twice, and a deliberate ``disconnect`` outlives it.
+
+    ``actor`` gates it exactly as it gates a single link edit: named, the
+    sweep is confined to the edges touching that session's subtree; omitted,
+    the whole graph is in scope. The field is declared rather than proven —
+    the shared machine token authenticates the daemon's door, not which
+    session is behind it — and the one caller this change ships does not
+    send one: ``claunch mesh rewire`` posts an empty body. Nothing else
+    reaches this route yet because nothing else knows it — this change is
+    what adds the route, so "nothing else" is not a survey of the existing
+    ecosystem. So ``actor`` is not what makes the operation safe, and it is
+    not doing anything yet. What makes it safe is that it opens
+    only edges the mesh's rules already sanction and overrules no recorded
+    decision.
+    """
+    body = await _json_body(request)
+    opened = await _mesh_mgr(request).rewire_members(
+        request.match_info["mesh"], actor=str(body.get("actor") or "")
+    )
+    return web.json_response({"opened": opened})
 
 
 async def h_peer_member_link(request: web.Request) -> web.Response:
