@@ -137,7 +137,14 @@ def _cmd_show(args: argparse.Namespace) -> int:
     print(f"{wf.name} — {wf.description}  [{path}]")
     for base in composed.bases:
         print(f"extends: {base}")
-    recur = "    recur: yes (each finished round requests the next)" if wf.recur else ""
+    if wf.recur:
+        recur = (
+            "    recur: yes (auto — the daemon starts each next round)"
+            if wf.recur_auto
+            else "    recur: yes (each finished round requests the next)"
+        )
+    else:
+        recur = ""
     print(f"start: {wf.start}    max_visits: {wf.max_visits}{recur}")
     if wf.filter_roles:
         print(
@@ -180,6 +187,13 @@ def _cmd_show(args: argparse.Namespace) -> int:
             # `awaits: verify` is only legible beside the command it names.
             flags.append(
                 f"awaits: {s.awaits.command(s)} (every {s.awaits.poll:g}s)"
+            )
+        if s.timer:
+            # A timed wait: the daemon moves the run on this schedule (see
+            # the model's "Timed wait" section).
+            flags.append(
+                f"timer: every {s.timer.every:g}s x{s.timer.max} "
+                f"-> {s.timer.then}, then {s.timer.after}"
             )
         suffix = f"  ({'; '.join(flags)})" if flags else ""
         if s.select:

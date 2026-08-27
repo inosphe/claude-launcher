@@ -853,6 +853,75 @@ def _ask_payload(base: dict, ask: dict) -> dict:
     return payload
 
 
+def _settle_timers(workflow: Workflow, state: dict, target: Optional[str], cwd) -> None:
+    """Leave a timed wait when the run moves away from it.
+
+    ``target != current_step.timer.then`` means the loop is over: the
+    agent's early ``next``, the budget's ``after``, a human's ``goto``, or
+    termination — the arm AND the fire count die with it. Moving to ``then``
+    — a fire — is the one move that keeps the budget alive: the arm dies
+    with the step it waited on, but ``timer_fires`` survives the round trip
+    so the return to the timer step re-arms with the count intact.
+    """
+    current = state.get("current")
+    if not current:
+        return
+    step = workflow.steps[current]
+    if step.timer is None:
+        return
+    if target == step.timer.then:
+        state.pop("timer_armed", None)
+        return
+    state.pop("timer_armed", None)
+    state.pop("timer_fires", None)
+
+
+def _arrive_timer(
+    workflow: Workflow, state: dict, target: str, from_step: Optional[str], cwd
+) -> None:
+    """Arm (or re-arm) a timed wait when the run arrives at its step.
+
+    The fire count carries across the ``then`` round trip — the budget is
+    the number of polls per round, not the number of visits — and resets
+    when the step is entered from anywhere else. Expects ``state["current"]``
+    and ``visits`` already set for ``target``.
+    """
+    step = workflow.steps[target]
+    timer = step.timer
+    if timer is None:
+        return
+    # Carried only when this arrival is the RETURN FROM A FIRE: the arrival
+    # follows the run having sat at the fire's `then` AND a fire having
+    # recorded a count for this step. The first arrival (the agent's own
+    # poll -> wait) is a fresh arm. `from_step == timer.then` alone is not
+    # enough — poll is also the timer's `then`.
+    carried = from_step == timer.then and target in (state.get("timer_fires") or {})
+    fires = int((state.get("timer_fires") or {}).get(target, 0)) if carried else 0
+    fires_by_step = dict(state.get("timer_fires") or {})
+    fires_by_step[target] = fires
+    state["timer_fires"] = fires_by_step
+    opens = _utc_now() + timedelta(seconds=float(timer.every))
+    state["timer_armed"] = {
+        "step": target,
+        "visit": _visits(state, target),
+        "fires": fires,
+        "opens_at": _iso(opens),
+    }
+    state_mod.journal(
+        "timer_re_armed" if carried else "timer_armed",
+        {
+            "run": state["run_id"],
+            "step": target,
+            "visit": _visits(state, target),
+            "fires": fires,
+            "max": timer.max,
+            "opens_at": _iso(opens),
+            "carried": carried,
+        },
+        cwd,
+    )
+
+
 def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> None:
     """Advance to ``target`` (None = termination)."""
     # An ask still open here is one nobody answered — a human forced the run
@@ -891,20 +960,23 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
     state["declined"] = None
     state["unanswered"] = None
     state["report"] = None
+    from_step = state.get("current")
+    _settle_timers(workflow, state, target, cwd)
     if target is None:
         state["current"] = None
         state["status"] = "done"
         state_mod.save_state(state, cwd)
         state_mod.journal("done", {"run": state["run_id"]}, cwd)
         if workflow.recur:
-            _request_next_round(state, cwd)
+            _request_next_round(workflow, state, cwd)
         return
     state["current"] = target
     state["visits"][target] = _visits(state, target) + 1
+    _arrive_timer(workflow, state, target, from_step, cwd)
     state_mod.save_state(state, cwd)
 
 
-def _request_next_round(state: dict, cwd) -> None:
+def _request_next_round(workflow: Workflow, state: dict, cwd) -> None:
     """A recurring run's normal end files the start request for its round + 1.
 
     Recurrence is a property of the run's LIFECYCLE, not of the graph: every
@@ -917,6 +989,11 @@ def _request_next_round(state: dict, cwd) -> None:
     --cancel', or the dashboard) and mid-round by aborting or archiving: an
     aborted run never comes through here, which is precisely what makes those
     the off switch.
+
+    ``workflow.recur_auto`` (``recur: {auto: true}``) stamps the request as
+    the DAEMON's to fulfil: the machine that reads it is
+    :func:`auto_start_next_round`, not the driving agent — see that function
+    for why the single-writer rule stays intact there.
     """
     if state_mod.read_request(cwd):
         # Somebody asked for something while this round was finishing. Their
@@ -938,6 +1015,11 @@ def _request_next_round(state: dict, cwd) -> None:
         "context": str(state.get("context") or ""),
         "by": "recur",
         "round": int(state.get("round") or 1) + 1,
+        # ``auto`` — the daemon starts this round (recur: {auto: true}).
+        # ``mesh`` — carried so the auto-start hands the delegation lookup
+        # the same mesh the loop started with.
+        "auto": bool(workflow.recur_auto),
+        "mesh": str(state.get("mesh") or ""),
         "at": state_mod.utcnow(),
     }
     state_mod.write_request(request, cwd)
@@ -976,13 +1058,27 @@ def _done_payload(state: dict, cwd: Optional[str]) -> dict:
     if pending:
         payload["pending_start"] = pending
         if pending.get("by") == "recur":
-            payload["note"] = (
-                "round finished; this workflow recurs — report this round's "
-                "journal to the user, then start the next round: call 'start' "
-                "with exactly the requested workflow and context. Do not "
-                "invent a reason to stop: only a human ends the loop "
-                "('claunch cflow request --cancel', or archiving the run)"
-            )
+            if pending.get("auto"):
+                # The daemon performs this loop's next start (see
+                # auto_start_next_round): the agent pointed at it would race
+                # the clock. Ending the turn is the whole instruction.
+                payload["note"] = (
+                    "round finished; this workflow recurs and the daemon "
+                    "starts the next round itself — report this round's "
+                    "journal to the user and END your turn here. Do not call "
+                    "'start': the requested next round begins on its own. "
+                    "Only a human stops the loop ('claunch cflow request "
+                    "--cancel', or aborting/archiving the run)"
+                )
+            else:
+                payload["note"] = (
+                    "round finished; this workflow recurs — report this "
+                    "round's journal to the user, then start the next round: "
+                    "call 'start' with exactly the requested workflow and "
+                    "context. Do not invent a reason to stop: only a human "
+                    "ends the loop ('claunch cflow request --cancel', or "
+                    "archiving the run)"
+                )
         else:
             # A human already asked for the next run; telling the agent to go
             # ask again would bounce the request back at its own author.
@@ -1129,6 +1225,44 @@ def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: boo
         # `otherwise: self`: nobody could be asked and the workflow says to go
         # on regardless. The gate is open (unapproved, and journaled as such),
         # so fall through to the step itself.
+
+    # A timed wait: the run sits here and the DAEMON moves it (see
+    # `fire_timer`), so the position reads as waiting, never as work to do.
+    # The `fires`/`opens_at` fields are the clock's contract with the agent —
+    # what is scheduled, not what is asked of it.
+    if step.timer is not None:
+        armed = state.get("timer_armed") or {}
+        armed_here = armed.get("step") == step.id
+        fires = int(armed.get("fires") or 0) if armed_here else 0
+        opens = armed.get("opens_at") if armed_here else None
+        payload = {
+            **base,
+            "status": "waiting_timer",
+            "instructions": step.instructions,
+            "fires": fires,
+            "max": step.timer.max,
+            "then": step.timer.then,
+            "after": step.timer.after,
+            "opens_at": opens,
+            "note": (
+                f"this step is a timed wait: the daemon moves the run to "
+                f"'{step.timer.then}' when the timer fires (next fire at "
+                f"{opens or 'arming'}), at most {step.timer.max} times this "
+                f"round, then to '{step.timer.after}'. End your turn — do "
+                f"not poll by hand, and do not read silence as the timer "
+                f"having stopped. To close the round early, file a one-line "
+                f"'report' and call 'next'"
+            ),
+        }
+        if mutate and not state["delivered"]:
+            state["delivered"] = True
+            state_mod.journal(
+                "timer_presented",
+                {"run": state["run_id"], "step": step.id, "visit": visit},
+                cwd,
+            )
+            state_mod.save_state(state, cwd)
+        return payload
 
     if step.is_select:
         pending = state.get("pending_select")
@@ -1450,6 +1584,31 @@ def start(
     is in is a fact about this deployment. It is only needed when the driving
     session belongs to more than one — with a single membership the run finds
     it, and with none the delegation falls to a human either way.
+
+    The body is :func:`_start_impl`; this wrapper holds the slot lock, and the
+    daemon performs the same body for a recurring run's own request through
+    :func:`auto_start_next_round`.
+    """
+    return _start_impl(
+        workflow_ref, context=context, force=force, mesh=mesh, cwd=cwd
+    )
+
+
+def _start_impl(
+    workflow_ref: str,
+    context: Optional[str] = None,
+    *,
+    force: bool = False,
+    mesh: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> dict:
+    """Begin a run here, without the slot lock.
+
+    :func:`start` and :func:`auto_start_next_round` both call this, each
+    holding the lock themselves — the cross-process lock is O_EXCL, so a
+    daemon-side start must never enter a locked :func:`start` from inside one.
+    Otherwise this is the whole of the start: settle the old run, resolve
+    layers, snapshot, journal, and read the first step's payload.
     """
     pending = state_mod.read_request(cwd)
     if state_mod.has_run(cwd):
@@ -1579,6 +1738,58 @@ def start(
     if check:
         payload["delegation_check"] = check
     return payload
+
+
+@_locked_op
+def auto_start_next_round(*, cwd: Optional[str] = None) -> Optional[dict]:
+    """Start a recurring run's next round for it. Daemon-driven.
+
+    The engine half of ``recur: {auto: true}``: when a run finished and its
+    pending start request is its OWN next round (``by: recur`` + ``auto``),
+    the daemon's clock (:class:`..daemon.cflow_clock.RoundStartClock`)
+    performs the start instead of the driving agent — the loop continues
+    without anyone looking. The single-writer rule is not bent: the request
+    channel is single-use, so exactly one start consumes it. The same fact
+    makes this idempotent and restart-safe — a request the clock did not get
+    to between scans (daemon down, slot locked) survives and is performed by
+    the next scan, and a request already consumed by a human's or the
+    driver's own start is a no-op here.
+
+    ``None`` is every no-op: no pending request, a human's request, or a
+    plain ``recur: true`` request (those keep the driver-performs-start flow).
+    """
+    pending = state_mod.read_request(cwd)
+    if (
+        not pending
+        or pending.get("by") != "recur"
+        or not pending.get("auto")
+    ):
+        return None
+    workflow_ref = str(pending.get("workflow") or pending.get("resolved") or "")
+    if not workflow_ref:
+        return None
+    payload = _start_impl(
+        workflow_ref,
+        context=str(pending.get("context") or ""),
+        mesh=str(pending.get("mesh") or ""),
+        cwd=cwd,
+    )
+    round_no = int(payload.get("round") or 1)
+    state_mod.journal(
+        "round_auto_started",
+        {
+            "run": payload.get("run"),
+            "request": pending.get("id"),
+            "workflow": payload.get("workflow"),
+            **({"round": round_no} if round_no > 1 else {}),
+        },
+        cwd,
+    )
+    return {
+        "workflow": payload.get("workflow"),
+        "round": round_no,
+        "step": payload.get("step_id"),
+    }
 
 
 @_locked_op
@@ -2149,6 +2360,78 @@ def release_window(
         "opens_at": window.get("opens_at"),
         "now_at": state.get("current"),
         "status": state["status"],
+    }
+
+
+@_locked_op
+def fire_timer(*, cwd: Optional[str] = None) -> Optional[dict]:
+    """A timed wait's next fire: the run moves on schedule, or nothing.
+
+    Daemon-driven, the same shape as :func:`release_window`: the one agent
+    that would notice the moment is the one that ended its turn to wait for
+    it. The daemon's clock (:class:`..daemon.cflow_clock.TimerClock`) calls
+    this over every run and nudges the driver when something moved. Without
+    a daemon nothing fires — a timed wait holds, and the agent's own next
+    ``next`` past the moment leaves the step normally.
+
+    ``None`` is every "nothing to do yet" answer: no armed timer, the run
+    left the step, or the window has not opened — the clock simply tries
+    again next tick. A due fire moves the run to ``timer.then`` (a paid
+    visit, delivered on the next read) and journals ``timer_fired``; the
+    fire past the budget moves it to ``timer.after`` instead
+    (``timer_budget_spent``) and clears the arm — the inner loop is closed.
+    """
+    if not state_mod.has_run(cwd):
+        return None
+    workflow, state = _load(cwd)
+    if state["status"] in ("done", "aborted") or not state.get("current"):
+        return None
+    step = workflow.step(state["current"])
+    armed = state.get("timer_armed")
+    if not armed or armed.get("step") != step.id or step.timer is None:
+        return None
+    opens = _parse_at(armed.get("opens_at"))
+    if opens is not None and opens > _utc_now():
+        return None
+    fires = int(armed.get("fires") or 0) + 1
+    if fires > step.timer.max:
+        # `after` is kept as written in the workflow (`end` included), so the
+        # move target is normalized the way every other engine edge is.
+        target = None if step.timer.after == model.END else step.timer.after
+        state_mod.journal(
+            "timer_budget_spent",
+            {"run": state["run_id"], "step": step.id,
+             "fires": fires, "max": step.timer.max},
+            cwd,
+        )
+        _move_to(workflow, state, target, cwd)
+        return {
+            "run": state["run_id"],
+            "workflow": state["workflow"],
+            "step": step.id,
+            "fires": fires,
+            "max": step.timer.max,
+            "moved_to": "end" if target is None else target,
+            "opens_at": armed.get("opens_at"),
+        }
+    fires_by_step = dict(state.get("timer_fires") or {})
+    fires_by_step[step.id] = fires
+    state["timer_fires"] = fires_by_step
+    state_mod.journal(
+        "timer_fired",
+        {"run": state["run_id"], "step": step.id, "fires": fires,
+         "max": step.timer.max},
+        cwd,
+    )
+    _move_to(workflow, state, step.timer.then, cwd)
+    return {
+        "run": state["run_id"],
+        "workflow": state["workflow"],
+        "step": step.id,
+        "fires": fires,
+        "max": step.timer.max,
+        "moved_to": step.timer.then,
+        "opens_at": armed.get("opens_at"),
     }
 
 

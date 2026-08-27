@@ -97,6 +97,13 @@ normally files the start request for its next round (see the engine). The
 repetition is a property of the run's lifecycle, stopped by a human — never
 a cycle the reachability rule would have to excuse.
 
+``recur: {auto: true}`` is the same service loop with the repetition
+performed by the daemon: when the pending next-round request is the run's
+own (``by: recur``), the daemon starts the round by itself instead of the
+driving agent performing the start — the loop keeps going while nobody is
+looking. Plain ``recur: true`` keeps the original flow, where the agent
+performs each next start per the protocol.
+
 Cadence
 -------
 A select option may declare ``interval: <seconds>``: the driving agent may
@@ -112,6 +119,35 @@ accumulated every N minutes" is written without a timer in the agent: the
 first take is immediate (nothing to pace against yet), the rest batch. A
 human confirming the option (CLI, dashboard) is not paced — that is the
 override, and it is journaled as one.
+
+Timed wait — `timer:`
+----------------------
+A step may declare a ``timer:`` — a bounded, daemon-driven wait that MOVES
+the run instead of reminding its agent::
+
+    wait:
+      timer:
+        every: 300      # seconds between fires
+        max: 4          # fires per round; once the budget is spent the
+                        # run goes to `after`
+        then: poll      # each fire moves the run HERE (a real state
+                        # transition: the step is delivered, waking the
+                        # session even when it is idle)
+        after: end      # where the run goes when the budget is spent
+      instructions: wait for the timer
+      next: end         # the agent's own exit (close the round early)
+
+While the run sits at a timer step it reports ``waiting_timer``: the agent
+is told to end its turn, the ReminderClock stays quiet (a timed wait is not
+a stall), and the daemon's clock fires every ``every`` seconds. A fire
+moves the run to ``then`` (visit counted, delivered like any arrival) and
+counts against ``max`` per round — the count survives the ``then`` round
+trip, so the budget is the number of polls, not the number of visits — and
+the fire past the budget moves the run to ``after`` instead, closing the
+inner loop. The agent may close it early with a report and ``next``. This
+is the tier inside a ``recur`` loop: one round polls at most ``max`` times,
+and ``recur`` (possibly ``{auto: true}``) repeats the round. Fires count as
+visits, so size ``max_visits`` past ``max``.
 
 Waiting for a signal
 --------------------
@@ -448,6 +484,24 @@ class Ask:
 
 
 @dataclass(frozen=True)
+class Timer:
+    """A step's timed wait: the daemon moves the run on a schedule.
+
+    ``every`` — seconds between fires; ``max`` — fires per round; ``then``
+    — where each fire moves the run (the step is delivered, waking the
+    session); ``after`` — where the run goes when the budget is spent.
+    ``after`` is an ordinary graph edge (it participates in reachability),
+    while ``then`` is entered only by a fire, so graph validation checks it
+    separately.
+    """
+
+    every: float
+    max: int
+    then: str
+    after: str
+
+
+@dataclass(frozen=True)
 class Select:
     prompt: str
     chooser: str  # "agent" | "user" | "delegate"
@@ -473,6 +527,12 @@ class Step:
     #: the standing still is for — and it is the only one of the three the
     #: run itself never reads. See :class:`Awaits`.
     awaits: Optional[Awaits] = None
+    #: A timed wait: the daemon moves the run to :attr:`Timer.then` every
+    #: :attr:`Timer.every` seconds, at most :attr:`Timer.max` times per round,
+    #: then to :attr:`Timer.after` once the budget is spent. While the run
+    #: sits here it reports ``waiting_timer`` and the ReminderClock stays
+    #: quiet — a timed wait is not a stall. See :class:`Timer`.
+    timer: Optional[Timer] = None
     select: Optional[Select] = None
     next: Optional[str] = None  # None = termination (non-select steps)
 
@@ -501,6 +561,13 @@ class Step:
             out.extend(o.next for o in self.select.options.values())
         else:
             out.append(self.next)
+        if self.timer is not None:
+            # `after` is where the run goes when the timer's budget is spent —
+            # an exit edge, so it participates in reachability exactly like
+            # `next`. `then` is deliberately NOT an edge here: it is entered
+            # only by a fire, and counting it would make every timer loop read
+            # as a warned agent cycle.
+            out.append(None if self.timer.after == END else self.timer.after)
         return out
 
 
@@ -518,6 +585,12 @@ class Workflow:
     #: act (withdraw the request, or abort/archive mid-round), never the
     #: driving agent's decision.
     recur: bool = False
+    #: Daemon-driven recurrence: when a recurring run's own next-round
+    #: request is pending, the daemon performs the start (see the engine's
+    #: ``auto_start_next_round``) instead of the driving agent. Only ever set
+    #: together with ``recur``; plain ``recur: true`` leaves the start to the
+    #: agent exactly as before.
+    recur_auto: bool = False
     #: Which mesh roles may drive a run of this workflow; ``None`` = any.
     filter_roles: Optional[RoleFilter] = None
     #: The mesh role this workflow volunteers itself to: pickers auto-select
@@ -686,9 +759,26 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         raise WorkflowError("'max_visits' must be an integer")
     if max_visits < 1:
         raise WorkflowError("'max_visits' must be >= 1")
-    recur = doc.get("recur", False)
-    if not isinstance(recur, bool):
-        raise WorkflowError("'recur' must be true or false")
+    recur_raw = doc.get("recur", False)
+    recur_auto = False
+    if isinstance(recur_raw, bool):
+        recur = recur_raw
+    elif isinstance(recur_raw, dict):
+        unknown = sorted(set(recur_raw) - {"auto"})
+        if unknown:
+            raise WorkflowError(
+                f"'recur' has unknown key(s): {', '.join(unknown)} "
+                f"(allowed: auto)"
+            )
+        auto = recur_raw.get("auto", False)
+        if not isinstance(auto, bool):
+            raise WorkflowError("'recur.auto' must be true or false")
+        recur, recur_auto = True, auto
+    else:
+        raise WorkflowError(
+            "'recur' must be true or false, or a mapping {auto: true} — "
+            "'auto' hands the next round's start to the daemon"
+        )
     filter_roles = _parse_role_filter(doc.get("filter_roles"))
     default_role: Optional[str] = None
     if doc.get("default_role") is not None:
@@ -714,6 +804,7 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         steps=steps,
         max_visits=max_visits,
         recur=recur,
+        recur_auto=recur_auto,
         filter_roles=filter_roles,
         default_role=default_role,
         default_child_cflow=default_child_cflow,
@@ -728,6 +819,7 @@ def parse_doc(doc: dict, *, default_name: str = "workflow") -> Workflow:
         steps=workflow.steps,
         max_visits=workflow.max_visits,
         recur=workflow.recur,
+        recur_auto=workflow.recur_auto,
         filter_roles=workflow.filter_roles,
         default_role=workflow.default_role,
         default_child_cflow=workflow.default_child_cflow,
@@ -755,10 +847,12 @@ def _advice(workflow: Workflow) -> List[str]:
     A select step is exempt (its completion is the choice), and one line
     covers them all: this is a review aid, not a per-step nag.
     """
+    # A timer step is exempt like a select: its leave is timed (or the
+    # agent's own reported exit), not certified against a criterion.
     silent = [
         s.id
         for s in workflow.steps.values()
-        if not s.is_select and not s.verify and not s.done_when
+        if not s.is_select and s.timer is None and not s.verify and not s.done_when
     ]
     if not silent:
         return []
@@ -1015,7 +1109,20 @@ def _parse_step(step_id: str, raw) -> Step:
         )
     done_when = done_when.strip() if done_when else None
     awaits = _parse_awaits(raw.get("awaits"), step_id)
+    timer = _parse_timer(raw.get("timer"), step_id)
     select = _parse_select(raw.get("select"), step_id)
+    if timer is not None and select is not None:
+        raise WorkflowError(
+            f"step {step_id!r}: a select step routes via its options; "
+            f"'timer' is not allowed on one"
+        )
+    if timer is not None and awaits is not None:
+        raise WorkflowError(
+            f"step {step_id!r}: 'awaits' has nothing to probe on a timer "
+            f"step — a timed wait is a ``waiting_timer`` position, and the "
+            f"ReminderClock never samples one. Wait either on a probe "
+            f"('awaits:') or on a schedule ('timer:'), not both"
+        )
     if (
         awaits is not None
         and awaits.probe is None
@@ -1061,6 +1168,7 @@ def _parse_step(step_id: str, raw) -> Step:
         verify=verify,
         done_when=done_when,
         awaits=awaits,
+        timer=timer,
         select=select,
         next=_parse_next(raw.get("next"), step_id),
     )
@@ -1304,6 +1412,71 @@ def _parse_interval(raw, where: str) -> Optional[float]:
     return interval
 
 
+def _parse_timer(raw, step_id: str) -> Optional[Timer]:
+    """Parse a step's ``timer:`` — a bounded, daemon-driven wait.
+
+    Required keys are all four: ``every`` (seconds between fires, positive),
+    ``max`` (fires per round, >= 1), ``then`` (where a fire moves the run —
+    validated against the step graph later, since it is entered only by a
+    fire), ``after`` (where the run goes when the budget is spent — an
+    ordinary edge, so it flows through the usual graph check).
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise WorkflowError(
+            f"step {step_id!r}: 'timer' must be a mapping "
+            f"{{every, max, then, after}}"
+        )
+    unknown = sorted(set(raw) - {"every", "max", "then", "after"})
+    if unknown:
+        raise WorkflowError(
+            f"step {step_id!r}: 'timer' has unknown key(s): "
+            f"{', '.join(unknown)} (allowed: every, max, then, after)"
+        )
+    every_raw = raw.get("every")
+    if isinstance(every_raw, bool) or every_raw is None:
+        raise WorkflowError(
+            f"step {step_id!r}: 'timer.every' must be a number of seconds"
+        )
+    try:
+        every = float(every_raw)
+    except (TypeError, ValueError):
+        raise WorkflowError(
+            f"step {step_id!r}: 'timer.every' must be a number of seconds, "
+            f"got {every_raw!r}"
+        ) from None
+    if every <= 0:
+        raise WorkflowError(
+            f"step {step_id!r}: 'timer.every' must be greater than 0"
+        )
+    max_raw = raw.get("max")
+    try:
+        max_fires = int(max_raw)
+    except (TypeError, ValueError):
+        raise WorkflowError(
+            f"step {step_id!r}: 'timer.max' must be an integer — how many "
+            f"fires the budget holds per round"
+        ) from None
+    if max_fires < 1:
+        raise WorkflowError(
+            f"step {step_id!r}: 'timer.max' must be >= 1"
+        )
+    then = str(raw.get("then") or "").strip()
+    if not then:
+        raise WorkflowError(
+            f"step {step_id!r}: 'timer.then' is required — where each fire "
+            f"moves the run"
+        )
+    after = str(raw.get("after") or "").strip()
+    if not after:
+        raise WorkflowError(
+            f"step {step_id!r}: 'timer.after' is required — where the run "
+            f"goes when the budget is spent"
+        )
+    return Timer(every=every, max=max_fires, then=then, after=after)
+
+
 def _parse_select(raw, step_id: str) -> Optional[Select]:
     if raw is None:
         return None
@@ -1368,6 +1541,19 @@ def _validate_graph(workflow: Workflow) -> None:
                 raise WorkflowError(
                     f"step {step.id!r} points at unknown step {target!r} "
                     f"(use '{END}' to terminate)"
+                )
+        if step.timer is not None:
+            # `timer.then` is entered only by a fire, so it is not one of the
+            # successors() above; it still must name a real, different step.
+            if step.timer.then not in workflow.steps:
+                raise WorkflowError(
+                    f"step {step.id!r}: 'timer.then' names unknown step "
+                    f"{step.timer.then!r}"
+                )
+            if step.timer.then == step.id:
+                raise WorkflowError(
+                    f"step {step.id!r}: 'timer.then' must be a different "
+                    f"step — a fire that re-enters the same step is a livelock"
                 )
     # 2. at least one termination must be reachable from start (error).
     #    In an acyclic graph this always holds; only cycles can starve it,

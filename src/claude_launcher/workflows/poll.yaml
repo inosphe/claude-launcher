@@ -1,0 +1,58 @@
+# poll — a repeating poll on a fixed cadence.
+#
+# One round polls at most `max` times, once per `every` seconds (the `timer:`
+# on the wait step moves the run back to `poll`; the fire past the budget
+# closes the round). The round's end files the next-round request, and
+# `recur: {auto: true}` lets the daemon perform that start — the loop keeps
+# repeating until a human stops it ('claunch cflow request --cancel', or
+# abort/archive).
+#
+# What to poll comes from the run context: JSON with a `command` (and an
+# optional `note` saying what you are watching for), or the bare command
+# string. Examples:
+#   context: '{"command": "claunch mesh history mesh-0826 -n 10", "note": "new mesh messages"}'
+#   context: 'git -C F:/works/claude-launcher log --oneline -3'
+name: poll
+description: >-
+  Repeating polls: one round runs the context command up to `max` times, once
+  per `every` seconds; the budget spent, the round closes and the daemon starts
+  the next one (recur, auto). context = JSON {"command": ..., "note": ...} or a
+  bare command string.
+recur: {auto: true}
+# A timer fire counts as a visit (it IS a delivery): the wait step is entered
+# once per fire plus the initial arrival, so the per-round rework budget must
+# clear `max + 2`. 22 polls per round keeps the journal digestible; raise
+# `max` (and this) together for a longer context-free stretch.
+max_visits: 60
+steps:
+  poll:
+    instructions: |
+      Run this round's poll. The command is the run's `context`: if it parses
+      as JSON, use its `command` field (with `note` as what you are watching
+      for); otherwise treat the whole context as the command.
+
+      Run the command, read the output, and compare it with your previous
+      reports (track last-seen markers — e.g. message ids, commit hashes —
+      in a session-scratch file per CLAUDE.md; never in the repo tree). File
+      a report naming what changed, or 'no change' when nothing did, then
+      call 'next' — the run goes to the timed wait, and the timer returns it
+      here every `every` seconds until the round's budget is spent.
+    done_when: the poll ran, the comparison with previous reports was made,
+      and the report (findings, or 'no change') was filed.
+    next: wait
+  wait:
+    # The timed wait: the daemon fires `timer.then` (back to `poll`) every
+    # `timer.every` seconds, `timer.max` times per round, then moves the run
+    # to `timer.after` — closing this round so the daemon starts the next one.
+    timer:
+      every: 300
+      max: 22
+      then: poll
+      after: end
+    instructions: |
+      Timed wait. The daemon moves this run back to 'poll' when the timer
+      fires (see the payload's `opens_at`); you are only re-entered to be
+      told it fired. End your turn — do not poll by hand. To close this
+      round early (the next one starts on its own), file a one-line report
+      and call 'next'.
+    next: end

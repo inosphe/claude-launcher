@@ -84,6 +84,14 @@ workflow to be started here), that is the answer; otherwise list candidates
      call `select` again: the same option with an updated reason replaces
      the held reason (the one confirmed at release is the latest), a
      different option cancels the hold. Nobody else is asked anything here.
+   - `waiting_timer` — this step is a TIMED WAIT (the workflow's `timer:`):
+     the run sits here and the daemon moves it on a schedule; `opens_at`
+     says when, `fires`/`max` say how many polls the round's budget holds,
+     and `then`/`after` say where it goes. STOP your turn and do not poll —
+     the daemon transitions the run itself and nudges you (a "timer fired"
+     frame); your next `next` past the moment leaves the step normally if
+     there is no daemon. To close the round early, file a one-line `report`
+     and call `next`.
    - `select` with `chooser: user`, or `waiting_selection` — call `select`
      once to record your RECOMMENDATION with reasoning, then STOP your turn
      and write the decision brief below. Ask them to confirm with `!
@@ -128,8 +136,11 @@ workflow to be started here), that is the answer; otherwise list candidates
    - `done` — report the run using the returned journal and finish. If the
      payload carries a `pending_start` filed `by: "recur"`, this workflow is
      a service loop: report this round's journal, then immediately start the
-     next round (`start` with exactly the requested workflow and context).
-     Never decide to stop the loop yourself — only a human ends it
+     next round (`start` with exactly the requested workflow and context) —
+     UNLESS the request's `auto` is true (`recur: {auto: true}`): then the
+     daemon starts the next round itself, and your instruction is to report
+     the journal and END your turn; do not call `start` or you will race the
+     clock. Never decide to stop the loop yourself — only a human ends it
      (`! claunch cflow request --cancel`, or archiving the run).
 4. Resuming after a stop: when nudged (any user message), call `status`
    first to see whether the gate/selection was granted, then continue with

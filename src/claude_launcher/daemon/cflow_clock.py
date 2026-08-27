@@ -984,6 +984,242 @@ def window_block(moved: dict) -> str:
     )
 
 
+class TimerClock:
+    """Fires a timed wait: a step's ``timer:`` moves the run on schedule.
+
+    A timer step reports ``waiting_timer`` — a wait the run performs on its
+    own, no agent action between fires. The one agent that would notice a
+    fire is the one that ended its turn to wait for it, so the daemon
+    carries the clock, the same shape as :class:`WindowClock`: each due
+    fire MOVES the run (:func:`cflow.engine.fire_timer`) to the step's
+    ``timer.then`` — a paid visit, delivered like any arrival — counting
+    against the budget per round, and the fire past the budget moves the
+    run to ``timer.after`` and closes the inner loop.
+
+    Nothing here decides anything: the schedule and the budget are the
+    workflow's, and the run's own state is the only reader, so no in-memory
+    table needs to survive a restart — a fire that the daemon did not get to
+    is simply late, delivered by the driver's own next ``next`` past the
+    moment (the no-daemon path in the engine). Without a daemon nothing
+    fires: a timed wait holds, which is the safe direction.
+    """
+
+    def __init__(self, manager, *, poll: float = DEFAULT_INTERVAL) -> None:
+        self.manager = manager
+        self.poll = poll
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.poll)
+                for cwd, scope, block in await asyncio.to_thread(self.scan):
+                    await self._deliver(cwd, scope, block)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One unreadable run must not stop the clock for the rest.
+                log.exception("cflow timer clock tick failed")
+
+    def scan(self) -> List[Tuple[str, str, str]]:
+        """Fire every due timer on the machine. Blocking (it writes run
+        state); call it in a thread. Public for the tests."""
+        fired: List[Tuple[str, str, str]] = []
+        for cwd, scope in cflow_state.known_runs():
+            try:
+                payload = cflow_engine.status(cwd, scope=scope)
+            except Exception as exc:
+                # Includes the slot being locked by the agent mid-transition:
+                # the fire stays armed, so the next tick is soon enough.
+                log.debug("cflow timer skipped %s/%s: %s", cwd, scope, exc)
+                continue
+            if payload.get("status") != "waiting_timer":
+                continue
+            moved = cflow_engine.fire_timer(cwd=cwd, scope=scope)
+            if not moved:
+                continue
+            log.info(
+                "cflow timer fired %s/%s: %s %s/%s -> %s",
+                cwd, scope, moved.get("step"), moved.get("fires"),
+                moved.get("max"), moved.get("moved_to"),
+            )
+            fired.append((cwd, scope, timer_block(moved)))
+        return fired
+
+    async def _deliver(self, cwd: str, scope: str, block: str) -> None:
+        """The wake-up after a fire — the run has ALREADY moved."""
+        session = session_for(self.manager, cwd, scope)
+        if session is None:
+            # A CLI-driven run, or a driver that exited: the run has moved
+            # regardless, and whoever picks it up reads the new position.
+            return
+        try:
+            delivered = await session.deliver(block)
+        except Exception:
+            log.exception("cflow timer notice delivery to %r failed", scope)
+            return
+        if delivered:
+            log.info("cflow timer notice delivered to %r (%s)", scope, cwd)
+
+
+def timer_block(moved: dict) -> str:
+    """The text the driver hears when a timed wait moved the run.
+
+    Framed like the window block, for the same reason: it lands in a session
+    that ended its turn, and an unframed line reads as a user message. It
+    says what fired and that the run has ALREADY moved — the reader's next
+    act is to read the new step, not to answer the timer.
+    """
+    spent = int(moved.get("fires") or 0) > int(moved.get("max") or 0)
+    count = "budget spent" if spent else f"{moved.get('fires')}/{moved.get('max')}"
+    position = (
+        "the run finished"
+        if moved.get("moved_to") == "end"
+        else f"step '{moved.get('moved_to')}'"
+    )
+    return "\n".join(
+        [
+            "---",
+            "# claunch cflow: timer fired -- machine-generated, not typed by "
+            "the user",
+            f"workflow: {moved.get('workflow')}",
+            f"fired: {moved.get('step')!r} ({count})",
+            f"position: {position}",
+            "protocol: the timed wait has moved the run on its own -- nothing "
+            "was decided for you and there is nothing to confirm. Call the "
+            "cflow 'status' tool for the step you are now on and continue per "
+            "the /cflow protocol.",
+            "---",
+        ]
+    )
+
+
+class RoundStartClock:
+    """Starts a recurring run's next round when its workflow opted in.
+
+    ``recur: {auto: true}`` makes the repetition the daemon's: a finished
+    round files its own next-round request (``by: recur``), and THIS clock
+    performs the start (:func:`cflow.engine.auto_start_next_round`) instead
+    of the driving agent — the loop keeps going while nobody is looking.
+    What lands in the driver's terminal is a machine-generated frame saying
+    the loop moved on, so a session that ended its turn learns a new round
+    is running.
+
+    Idempotent by construction, so there is no in-memory table to survive a
+    restart: the request channel is single-use, a start consumes it, and a
+    scan that finds nothing pending starts nothing. A request the clock did
+    not get to between scans (daemon down, slot locked) survives and is
+    performed by the next scan; a human's request, and a plain
+    ``recur: true`` request, are never touched — those keep the
+    driver-performs-start flow.
+    """
+
+    def __init__(self, manager, *, poll: float = DEFAULT_INTERVAL) -> None:
+        self.manager = manager
+        self.poll = poll
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.poll)
+                for cwd, scope, block in await asyncio.to_thread(self.scan):
+                    await self._deliver(cwd, scope, block)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One unreadable run must not stop the clock for the rest.
+                log.exception("cflow round-start clock tick failed")
+
+    def scan(self) -> List[Tuple[str, str, str]]:
+        """Start every due auto-recur round on the machine. Blocking (it
+        writes run state); call it in a thread. Public for the tests."""
+        started: List[Tuple[str, str, str]] = []
+        for cwd, scope in cflow_state.known_runs():
+            try:
+                payload = cflow_engine.status(cwd, scope=scope)
+            except Exception as exc:
+                # Locked by the agent mid-transition: the pending request
+                # survives, so the next tick is soon enough.
+                log.debug("cflow round start skipped %s/%s: %s", cwd, scope, exc)
+                continue
+            pending = payload.get("pending_start") or {}
+            if pending.get("by") != "recur" or not pending.get("auto"):
+                continue
+            started_round = cflow_engine.auto_start_next_round(cwd=cwd, scope=scope)
+            if not started_round:
+                continue
+            log.info(
+                "cflow round %s started for %s/%s: %s",
+                started_round.get("round"), cwd, scope,
+                started_round.get("workflow"),
+            )
+            started.append((cwd, scope, round_block(started_round)))
+        return started
+
+    async def _deliver(self, cwd: str, scope: str, block: str) -> None:
+        """The wake-up after a round started — the run has ALREADY moved."""
+        session = session_for(self.manager, cwd, scope)
+        if session is None:
+            # A CLI-driven run, or a driver that exited: the new round is
+            # running regardless, and whoever picks it up reads its position.
+            return
+        try:
+            delivered = await session.deliver(block)
+        except Exception:
+            log.exception("cflow round notice delivery to %r failed", scope)
+            return
+        if delivered:
+            log.info("cflow round notice delivered to %r (%s)", scope, cwd)
+
+
+def round_block(started: dict) -> str:
+    """The text the driver hears when the daemon started its next round.
+
+    Framed like the window block, for the same reason: it lands in a session
+    that ended its turn, and an unframed line reads as a user message. It
+    says the round IS RUNNING — the reader's next act is to read the new
+    position, not to start anything.
+    """
+    return "\n".join(
+        [
+            "---",
+            "# claunch cflow: round started -- machine-generated, not typed "
+            "by the user",
+            f"workflow: {started.get('workflow')}",
+            f"round: {started.get('round')}",
+            f"position: step '{started.get('step')}'",
+            "protocol: the daemon started this round for you -- it is "
+            "already running and there is nothing to confirm. Call the cflow "
+            "'status' tool for the step you are now on and continue per the "
+            "/cflow protocol.",
+            "---",
+        ]
+    )
+
+
 # --------------------------------------------------------------------------- #
 # the run event clock
 # --------------------------------------------------------------------------- #

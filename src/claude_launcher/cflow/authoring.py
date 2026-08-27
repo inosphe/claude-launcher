@@ -204,6 +204,43 @@ it at once (journaled as an override). Put it on the option whose cost is
 per-take — a merge, a deploy, a sweep — never on one whose delay loses
 information.
 
+## Timed steps — `timer:`
+
+An `interval:` paces an agent's choices; a `timer:` moves the run when
+nothing is being chosen at all. It is what a poller is written from — the
+daemon wakes an idle session by transitioning the run, instead of a
+reminder restating a step it was told to wait on:
+
+```yaml
+poll:
+  instructions: run the poll; report what changed
+  next: wait
+wait:
+  timer:
+    every: 300      # seconds between fires
+    max: 4          # fires per round
+    then: poll      # each fire MOVES the run here (delivered to the
+                    # session, waking it)
+    after: end      # budget spent: the run moves here instead
+  instructions: wait for the timer
+  next: end         # the agent's own early exit
+```
+
+While the run sits at the timer step it reports `waiting_timer` — the
+agent is told to end its turn, and the ReminderClock stays quiet: a timed
+wait is not a stall, and polling it by hand is exactly the noise the watch
+exists to remove. Each fire is a real state transition (a paid visit to
+`then`, delivered like any arrival), the budget counts *polls per round*
+across the round trip, and the fire past the budget closes the inner loop
+at `after`. Fires count as visits, so size `max_visits` past `max`.
+
+The tier outside the timer loop is `recur` — one round polls at most `max`
+times, and the round keeps repeating. `recur: {auto: true}` (rather than
+`recur: true`) hands the next round's `start` to the daemon, which performs
+it the moment the round ends — the loop continues without the driver
+performing each start, which is the point when the round is a wait. A human
+still stops either form (`claunch cflow request --cancel`, abort, archive).
+
 ## `awaits:` — what the step is WAITING for
 
 `verify` and `done_when` both answer "may this step be left?". `awaits`
@@ -338,6 +375,9 @@ Cycles are legal and are warned about (`cflow show` prints them). Two rules:
   see its section above.
 - `awaits` states what a step WAITS for, so the daemon can signal the change
   instead of repeating the step on a clock — see its section above.
+- `timer: {every, max, then, after}` declares a timed wait: the daemon moves
+  the run on a schedule, ticking at most `max` times per round — see its
+  section above.
 - Steps should say what **evidence** to file in the report. Reports are
   journaled, shown live on the dashboard, and become the PR text; a step whose
   report is "done" has taught the agent nothing about what to record.
