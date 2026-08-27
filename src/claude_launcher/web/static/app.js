@@ -7782,6 +7782,56 @@ function sessBeadsCreate(name) {
   return form;
 }
 
+/* ---- the rail's block: what this session committed ---- */
+/* The commits carrying this session's `Claunch-Session` trailer, newest
+   first, read straight out of the repository under the session's directory
+   (see session_commits.py). Nothing is recorded for this block to read, so
+   there is no state to go stale: a session killed mid-round still shows every
+   commit it managed to make, and a commit someone rewrites away stops being
+   listed the moment it stops existing.
+
+   Empty is a real answer and is drawn, not hidden — a block that appears only
+   on success reads as one that failed to load the rest of the time. But it is
+   said as a fact about the READING, not about the session: "no stamped commit
+   found" rather than "this session committed nothing". The difference is not
+   pedantry. `for_session` returns the same empty list for a repository it
+   could not read as for one it read and found nothing in — a pruned worktree,
+   no git on PATH, a walk that timed out — so the strong sentence would be a
+   claim this page has no way to check. Telling those two apart is
+   claunch-j5kp; until it lands, the weaker sentence is the true one.
+
+   Nothing at all is drawn when the daemon serves no `commits` — an older
+   daemon, or a session with no directory to read, which api.py reports as
+   null for exactly the reason above. */
+function sessCommits(data) {
+  const c = data.commits;
+  const box = el("div", "sess-commits");
+  // No answer is not an answer of "none": an old daemon, or a session whose
+  // directory the daemon has none of, and neither is evidence about commits.
+  if (!c) return box;
+  const rows = c.commits || [];
+  box.appendChild(el("h3", null, `Commits (${c.count || rows.length || 0})`));
+  box.appendChild(el("p", "wf-note",
+    "what this session committed in its directory, read from the " +
+    "Claunch-Session trailer on each commit — `claunch commits` prints the " +
+    "same list."));
+  if (!rows.length) {
+    box.appendChild(el("p", "wf-note", "no stamped commit found"));
+    return box;
+  }
+  for (const r of rows) {
+    const row = el("div", "sess-commit");
+    row.appendChild(el("span", "sess-commit-sha", r.short || ""));
+    row.appendChild(el("span", "sess-commit-subject", r.subject || ""));
+    const bits = [String(r.committed_at || "").replace("T", " ").slice(0, 19)];
+    if (r.worktree) bits.push(r.worktree);
+    row.appendChild(el("span", "sess-commit-bits", bits.join("  ·  ")));
+    row.title = r.sha || "";
+    box.appendChild(row);
+  }
+  return box;
+}
+
 /* ------------------------------------------------------------------ */
 /* the Reports page: every round report on this machine               */
 /* ------------------------------------------------------------------ */
@@ -10381,6 +10431,10 @@ function renderSession(data) {
   // answer the same question from two registries — where it belongs, and
   // what it is on.
   view.appendChild(sessBeads(data));
+  // And what it actually left in the repository. Beside the board and the
+  // round reports because the three are one answer read from three places:
+  // what it was asked to do, what it wrote up, what it committed.
+  view.appendChild(sessCommits(data));
 
   // What this session is FOR, by role: a leader gets its dispatch and reaping
   // panels here, other roles whatever ROLE_PANELS declares for them. Between

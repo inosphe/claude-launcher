@@ -23,6 +23,7 @@ from aiohttp import web
 
 from .. import __version__, borrowing, harness_policy, harnesses as harness_registry
 from .. import lineage, profile as profile_mod, providers, quickjob, reports as reports_mod
+from .. import session_commits
 from .. import spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import beads as beads_mod
@@ -2877,10 +2878,31 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # issue that names it (see beads.match). Keyed by repository, not by
         # session — one board per repo, reached from any worktree.
         "beads": await request.app["beads"].session_view(session),
+        # What this session actually committed, read back off the
+        # ``Claunch-Session`` trailers rather than kept in a registry (see
+        # :mod:`claude_launcher.session_commits`). It belongs beside the
+        # round report for the same reason the report exists: the terminal
+        # closes, and then the commits are the only thing left that says what
+        # the round did.
+        #
+        # ``None`` until a directory is known, and it stays ``None`` for a
+        # session that has none — deliberately, because the alternative is a
+        # lie. An empty summary here would reach the panel as "this session
+        # committed nothing", which is a claim about the SESSION; what is
+        # actually true is that there was no repository to look in. The panel
+        # draws nothing for ``None`` and says so for ``[]``, and those are the
+        # two different facts.
+        "commits": None,
     }
     if cwd:
         body["cflow"] = _cflow_entry(manager, cwd, name)
         body["workflows"] = _startable_workflows(cwd)
+        # In a thread: this is a git walk over every ref, and the detail
+        # panel polls. A pathological repository must cost this response,
+        # never the whole daemon's loop.
+        body["commits"] = session_commits.summary(
+            await asyncio.to_thread(session_commits.for_session, cwd, name)
+        )
     return web.json_response(body)
 
 

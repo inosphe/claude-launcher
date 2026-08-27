@@ -1284,6 +1284,26 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
    design. */
 .sess-beads .sess-reports { padding: 8px 9px 4px; }
 .sess-beads .sess-report { padding: 5px; margin: 0 -3px; }
+/* The commits block, beside the reports card in the same rail. Rows, not
+   links: a commit hash is not a page to open here, and the shortened sha is
+   the thing a reader copies out — so it is monospace, first, and the full sha
+   is the row's title. Wraps rather than truncates, because a subject cut at
+   the rail's width is a subject that says nothing. */
+.sess-commits { margin: 14px 0 16px; }
+.sess-commit {
+  display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap;
+  padding: 5px 6px; margin: 0 -4px; border-radius: 5px;
+  border-top: 1px solid #21262d;
+}
+.sess-commit:hover { background: #1b2430; }
+.sess-commit-sha {
+  color: #6cb6ff; font-size: 12.5px; font-family: ui-monospace, monospace;
+}
+.sess-commit-subject { color: #c9d1d9; font-size: 12.5px; flex: 1 1 140px; min-width: 0; }
+.sess-commit-bits {
+  color: #7d8590; font-size: 11px; margin-left: auto;
+  font-variant-numeric: tabular-nums;
+}
 .sess-beads-create { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
 .sess-beads-create input {
   flex: 1 1 200px; min-width: 0; padding: 6px 8px; background: #0d1117;

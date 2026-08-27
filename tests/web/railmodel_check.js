@@ -105,6 +105,7 @@ function sessPerms() { return el("div", "sess-perms"); }
 function sessMigrate() { return el("div", "sess-migrate"); }
 function rolePanels() { return []; }
 function sessBeads() { return el("div", "sess-beads"); }
+function sessCommits() { return el("div", "sess-commits"); }
 function go() {}
 `;
 
