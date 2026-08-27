@@ -79,8 +79,9 @@ steps:
       - 사용자에게 올릴 에스컬레이션의 기준(가치·우선순위·범위·권한에
         해당하는 것만, 선택지+권고안 형태로)
       - 보드 대조(회차의 첫 행동 — 컴팩션·재기동 뒤의 복구가 이것이다):
-        `claunch beads list --status in_progress,in_review --json`의 이슈마다
-        assignee 세션의 런 위치(claunch cflow status -t <세션> --json)와
+        `claunch beads list --status in_progress --status in_review
+        --json`의 이슈마다 assignee 세션의 런 위치(claunch cflow status
+        -t <세션> --json)와
         맞춰 본다. assignee 세션이 exited인 in_progress 이슈는 고아다 —
         `claunch beads comments add <id> "ORPHANED: <세션> exited, branch
         <브랜치>"` 후 `update <id> --status open`으로 되돌린다(재배정은
@@ -869,7 +870,8 @@ steps:
       지워야 한다면 그 네 값을 먼저 보고에 적는다). 최종 보고: 교대 동안의 회차
       요약 — 처리한 요청, 확정한 규칙, 머지 커밋, 반영 여부, 남은 통합
       대기 브랜치 — 를 저널 기반으로 남기고, 보드의 잔량(`claunch beads list
-      --status open,in_progress,in_review --json`)을 붙인다. 이 런은 recur라서 종료 후에도
+      --status open --status in_progress --status in_review --json`)을
+      붙인다. 이 런은 recur라서 종료 후에도
       다음 회차 요청이 접수된다 — 교대를 정말 끝내려면 사용자가 요청을
       철회해야 함을 안내한다(claunch cflow request --cancel).
     done_when: |

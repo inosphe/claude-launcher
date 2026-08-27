@@ -22,6 +22,19 @@ from the JSONL first, so the caller never has to know that step exists.
 What this deliberately is not: a wrapper that re-spells ``br``'s commands.
 The improv workflows teach ``claunch beads <br arguments>`` and nothing
 else, so ``br``'s own ``--help`` stays the reference.
+
+There is one exception, and it refuses rather than re-spells: a
+``--status`` value that is not a status. ``br`` matches the string
+literally without checking it against anything, so ``--status
+in_progress,in_review`` reads as one status nothing is in and answers
+``total: 0`` with exit 0 — indistinguishable from a board with nothing
+active — while ``update --status in_reviw`` stores the typo and drops
+that issue out of every status filter and out of ``ready``. Both are the
+same failure: the answer to "I could not read your question" and the
+answer to "there is nothing" arrive identical. So the value is checked
+here, before ``br`` sees it. That one named check is the whole of it —
+no other argument is inspected, and this is not a place to grow a
+general validation layer.
 """
 
 from __future__ import annotations
@@ -53,7 +66,108 @@ BINARY = "br"
 
 
 class BeadsError(Exception):
-    """Raised when the board cannot be reached — no root, no board, no ``br``."""
+    """The command cannot go to ``br`` — no root, no board, no ``br``, or a
+    ``--status`` value that is not a status. The command surfaces it as
+    exit 2 with the message on stderr."""
+
+
+#: The statuses this repository's own protocol names. The improv
+#: workflows are where they are declared — an issue opens, an assignee
+#: takes it to ``in_progress``, a landing request moves it to
+#: ``in_review``, a gate parks it at ``blocked``, and ``br close`` ends it
+#: at ``closed`` — and every value the tracked board carries is one of
+#: them (``.beads/issues.jsonl``). Those two are the source; a test in
+#: ``tests/test_cli_beads.py`` reads both and fails if either grows a
+#: value this tuple does not have, so the list cannot go stale quietly.
+PROTOCOL_STATUSES = (
+    "open",
+    "in_progress",
+    "in_review",
+    "blocked",
+    "closed",
+)
+
+#: Statuses ``br`` itself declares that the protocol above never names.
+#: Accepted, so a question about an issue actually in one of them can be
+#: asked — refusing a real status would be this same defect with the sides
+#: swapped. Read wide, write narrow: what costs is an unreal value being
+#: stored, and a real one being unaskable.
+#:
+#: Where each comes from, checked against **br 0.2.14** (``br <cmd>
+#: --help``, ``br schema issue``):
+#:
+#: ==========  ============================================================
+#: deferred    ``br defer`` (``br undefer`` takes it back)
+#: tombstone   ``br delete`` — the tombstone it leaves behind
+#: draft       no subcommand found that writes it; it appears only in the
+#:             schema enum. Origin unrecorded.
+#: pinned      same — schema enum only, no writer found.
+#: ==========  ============================================================
+#:
+#: A ``br`` that changes this list changes it silently, so the source note
+#: above is what a later reader checks it against. Which of the two sets is
+#: authoritative is an open divergence, filed as claunch-dx5j.
+UNUSED_BR_STATUSES = (
+    "deferred",
+    "draft",
+    "tombstone",
+    "pinned",
+)
+
+#: What ``--status`` is allowed to carry.
+STATUSES = PROTOCOL_STATUSES + UNUSED_BR_STATUSES
+
+
+def status_values(args: List[str]) -> List[str]:
+    """Every value given to ``--status``/``-s`` in ``args``, in order.
+
+    The spellings read are the ones clap accepts as a token of their own:
+    ``--status V``, ``--status=V``, ``-s V``, ``-sV`` (and ``-s=V``). A
+    bundled short group such as ``-as V`` is not read — telling a bundle
+    from a word needs ``br``'s per-subcommand flag table, and a filter that
+    goes unchecked is a smaller cost than a valid call refused. Parsing
+    stops at a bare ``--``, after which everything is a positional.
+    """
+    values: List[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        if token == "--":
+            break
+        if token in ("--status", "-s"):
+            if i + 1 < len(args):
+                values.append(args[i + 1])
+            i += 2
+            continue
+        if token.startswith("--status="):
+            values.append(token[len("--status=") :])
+        elif token.startswith("-s") and not token.startswith("--") and len(token) > 2:
+            values.append(token[2:].lstrip("="))
+        i += 1
+    return values
+
+
+def check_statuses(args: List[str]) -> None:
+    """Refuse a ``--status`` value that is not one of :data:`STATUSES`.
+
+    Raises :class:`BeadsError`, which the command surfaces as exit 2. A
+    value carrying a comma or a space gets the extra line, because that is
+    the shape the workflows kept writing and the one whose silent answer
+    cost the most: several statuses are a repeated flag, not a list.
+    """
+    for value in status_values(args):
+        if value in STATUSES:
+            continue
+        hint = ""
+        if "," in value or " " in value:
+            hint = (
+                " — several statuses are a repeated flag, not a list: "
+                "'--status open --status in_progress'"
+            )
+        raise BeadsError(
+            f"unknown status {value!r}{hint}; "
+            f"valid: {', '.join(STATUSES)}"
+        )
 
 
 def repo_root(cwd: Optional[str] = None) -> Optional[Path]:
@@ -114,8 +228,10 @@ def plan(
     through (it is how a board is first made). Anything else against a
     missing database rebuilds it from the tracked JSONL when that exists,
     and refuses when nothing is there to rebuild from — a typo'd directory
-    must not grow a board of its own.
+    must not grow a board of its own. A ``--status`` value that is not a
+    status is refused here too, before any ``br`` runs.
     """
+    check_statuses(args)
     beads_dir = root / BEADS_DIR
     db = str(beads_dir / DB_NAME)
     base = [BINARY, "--db", db]
