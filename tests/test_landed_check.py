@@ -179,8 +179,15 @@ def test_the_exit_status_reaches_a_shell(tmp_path_factory):
     )
     assert proc.returncode == 1, proc.stderr
 
+    # Merge, then step back onto the branch that landed. Leaving HEAD on
+    # master was how this test used to reach exit 0, and that reading was
+    # empty: the tip it compared was master's own, so "landed: master
+    # contains <master tip>" is true of every repository at every moment.
+    # A worker is on its own branch when the gate runs, which is the case
+    # worth pinning here.
     _git(repo, "checkout", "master")
     _git(repo, "merge", "--no-ff", "feature", "-m", "merge feature")
+    _git(repo, "checkout", "feature")
     proc = subprocess.run(
         [sys.executable, str(CHECK), "--repo", str(repo), "--target", "master"],
         capture_output=True,
@@ -189,3 +196,104 @@ def test_the_exit_status_reaches_a_shell(tmp_path_factory):
         errors="replace",
     )
     assert proc.returncode == 0, proc.stderr
+
+
+# --------------------------------------------------------------------------- #
+# whose branch the gate asks about
+# --------------------------------------------------------------------------- #
+# A cflow run is keyed to the directory it was started in, and its ``verify``
+# executes there. Nothing required that directory to be the worker's own
+# checkout, and when it was not, this gate read the wrong HEAD and said so
+# with confidence. Measured on a live mesh (run ``run-1a318163``): branch
+# ``s192-persist-session-flags``, tip ``b847cb7``, merged as ``774c964``
+# (``^2 b847cb7``) -- landed by every test git has. Called in the branch's
+# worktree the gate said "landed", exit 0; called at the repository root,
+# where the run happened to be keyed, it said
+#
+#     not yet: no merge on any branch but branch master took 0505c8dd7dc3 in
+#
+# exit 1, and the round could not leave the step. The sentence names the
+# worker's branch nowhere and is read as "your branch did not land", which is
+# where that round's time went. No test drew "run directory != the worker's
+# tree", which is why the defect survived.
+from claude_launcher.cflow import checkout  # noqa: E402
+
+
+def _root_and_worktree(tmp_path_factory, label):
+    """A repo on ``master``; the work is on ``feature`` in a linked worktree.
+
+    ``feature`` is merged with ``--no-ff``, so the true answer is "landed" --
+    and the repository root, where the run is keyed, is standing on master.
+    """
+    root = tmp_path_factory.mktemp(label)
+    _git(root, "init", "-b", "master")
+    _commit(root, "base")
+    wt = root.parent / (root.name + "-wt")
+    _git(root, "worktree", "add", "-b", "feature", str(wt))
+    _commit(wt, "work")
+    _git(root, "merge", "--no-ff", "-m", "Merge branch 'feature'", "feature")
+    return root, wt
+
+
+def test_the_run_directory_is_not_taken_for_the_workers_tree(
+    tmp_path_factory, monkeypatch, capsys
+):
+    """The rescue: the gate asks the daemon where this session stands."""
+    root, wt = _root_and_worktree(tmp_path_factory, "keyed-away")
+    monkeypatch.setattr(
+        checkout, "own_checkout", lambda *a, **k: (str(wt), checkout.SESSION)
+    )
+    monkeypatch.chdir(root)
+    assert landed_check.main([]) == 0
+    assert "landed" in capsys.readouterr().out
+
+
+def test_standing_on_the_integration_target_is_not_an_answer(
+    tmp_path_factory, capsys
+):
+    """The half no lookup can rescue, so it must not be answered confidently.
+
+    A session whose recorded directory is not the tree it works in leaves no
+    machine fact linking the run to its branch: the daemon records a session's
+    cwd when it is created, and only an operator migration (stop, relaunch)
+    changes it. Naming that beats "not yet", which sends the reader to look
+    for a fault in a branch the gate never read.
+    """
+    root, _ = _root_and_worktree(tmp_path_factory, "on-target")
+    assert _run(root) == landed_check.CANNOT_TELL
+    err = capsys.readouterr().err
+    assert "integration target itself" in err
+    assert "master" in err
+
+
+def test_naming_this_very_branch_as_the_target_is_not_a_landing(
+    tmp_path_factory, capsys
+):
+    """``--target`` made the same mistake green rather than red.
+
+    Ancestry is reflexive: ``merge-base --is-ancestor master master`` exits 0,
+    so the gate printed "landed: master contains <tip>" and passed a step
+    whose branch it had never looked at. Confidently wrong in the other
+    direction, and worse -- a red gate stops the run and gets investigated.
+    """
+    root, _ = _root_and_worktree(tmp_path_factory, "target-self")
+    assert _run(root, "--target", "master") == landed_check.CANNOT_TELL
+    assert "integration target itself" in capsys.readouterr().err
+
+
+def test_an_explicit_repo_survives_the_lookup_failing(
+    tmp_path_factory, monkeypatch, capsys
+):
+    """``--repo`` is the escape the gate tells people to use.
+
+    It may not depend on a daemon: the case where someone reaches for it is
+    the case where the machine could not work the tree out by itself.
+    """
+    _, wt = _root_and_worktree(tmp_path_factory, "explicit")
+
+    def boom(*a, **k):
+        raise RuntimeError("no daemon")
+
+    monkeypatch.setattr(checkout, "own_checkout", boom)
+    assert _run(wt) == 0
+    assert "landed" in capsys.readouterr().out

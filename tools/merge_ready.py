@@ -127,19 +127,20 @@ def _resolve_repo(explicit: Optional[str]) -> Tuple[Path, str]:
     standing on ``master`` it read ``tip == target_tip`` and answered
     ``ready: nothing to land``, exit 0, about a branch it never looked at.
 
-    ``--repo`` wins outright so tests and hand-runs never depend on a daemon.
-    Every failure of the lookup falls back to the working directory, the
-    answer this always gave.
+    ``--repo`` wins outright so tests and hand-runs never depend on a daemon;
+    that precedence lives in ``own_checkout`` so all three answers are decided
+    in one place. Every failure of the lookup falls back to the working
+    directory, the answer this always gave.
     """
-    if explicit is not None:
-        return Path(explicit).resolve(), "named"
     try:
         from claude_launcher.cflow import checkout
 
-        where, how = checkout.own_checkout()
+        where, how = checkout.own_checkout(explicit)
         return Path(where), how
     except Exception:
-        return Path(".").resolve(), "run cwd"
+        # No package, no daemon, no managed session: the answer every caller
+        # gave before this existed.
+        return Path(explicit or ".").resolve(), "named" if explicit else "run cwd"
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -169,6 +170,24 @@ def _target(repo: Path, branch: str) -> Tuple[str, str]:
     if up.returncode == 0 and up.stdout.strip():
         return up.stdout.strip(), "upstream"
     return DEFAULT_TARGET, "default"
+
+
+def _same_branch(branch: str, target: str) -> bool:
+    """Are these two names the same branch?
+
+    ``master`` and ``origin/master`` are one branch under two names, and
+    :func:`_target` hands back whichever one git records as the upstream. The
+    first version of this check compared the two names for equality and so
+    missed exactly the case it was written for: standing on ``master`` with
+    the upstream set, the target came back ``origin/master``, the check did
+    not fire, and the gate answered ``ready: aligned`` exit 0 about a branch
+    it had never looked at.
+
+    The suffix test is not a convenience about remotes. Asking "is X ready to
+    merge into X" has no answer whichever spelling each side arrives in, and a
+    branch tracking its own remote counterpart is that question too.
+    """
+    return branch == target or target.endswith("/" + branch)
 
 
 def _count(repo: Path, rng: str) -> Optional[int]:
@@ -290,7 +309,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
-    repo, how = _resolve_repo(args.repo)
+    repo, repo_how = _resolve_repo(args.repo)
 
     tip = _resolve(repo, args.branch)
     if tip is None:
@@ -319,16 +338,20 @@ def main(argv: Optional[List[str]] = None) -> int:
     # committed yet": both reach tip == target_tip. The shortcut's own comment
     # says calling that "landed" would be a gate telling a lie, and it is the
     # same lie here with none of the same excuse -- this checkout holds no
-    # branch that is asking to land. Measured: run cwd = repository root,
-    # HEAD = master, verdict "ready: nothing to land", exit 0, while the
-    # worker's actual branch sat unexamined in its own worktree.
-    if branch_name == target:
+    # branch that is asking to land. Measured at run cwd = repository root,
+    # HEAD = master, with the worker's actual branch unexamined in its own
+    # worktree: exit 0 either way, by two different routes -- "ready: nothing
+    # to land" when the target resolved to `master`, and "ready: aligned --
+    # target origin/master (upstream) +0 / branch +660" when it resolved
+    # through the upstream. Hence _same_branch rather than ==.
+    if _same_branch(branch_name, target):
         print(
-            f"cannot tell: this checkout ({repo}, {how}) is on {target}, the "
-            f"integration target itself -- it is not a landing candidate, so "
-            f"there is no readiness to report here. Ask about the candidate "
-            f"branch: run this in that branch's worktree, or pass --repo "
-            f"<that worktree> / --branch <it>.",
+            f"cannot tell: this checkout ({repo}, {repo_how}) is on "
+            f"{branch_name}, which is the integration target itself "
+            f"({target}, {how}) -- it is not a landing candidate, so there is "
+            f"no readiness to report here. Ask about the candidate branch: "
+            f"run this in that branch's worktree, or pass --repo <that "
+            f"worktree> / --branch <it>.",
             file=sys.stderr,
         )
         return CANNOT_TELL
