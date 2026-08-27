@@ -881,6 +881,60 @@ def test_check_abstains_when_no_receipt_answers(repo, gate, capsys):
     assert "abstain" not in captured.err
 
 
+def test_the_selection_only_grows_as_changed_paths_are_added(repo):
+    """Adding a changed path can never remove a test module from the selection.
+
+    This is not decoration -- a session used it to decide what NOT to run.
+    Asked whether a wide ``--base master`` selection would contain a module it
+    had found in its own narrower one, worker-deploy answered from the
+    structure instead of spending 220 seconds measuring: the changed-path set
+    of the wider base is a superset, and the selection only ever unions, so
+    the answer follows. That reasoning is now load-bearing, so the property it
+    rests on is pinned here.
+
+    The property lives in :func:`changed_tests.map_one` being *pure* -- one
+    path in, a set out, no accumulator. Keep it that way: if it were ever
+    given the running set to add into, :func:`changed_tests.select` would read
+    exactly as it does today, four lines that look like a union, and this
+    guarantee would be gone with nothing at the call site to show it. That is
+    what this case is watching, and it is why the assertion is about subsets
+    rather than about any particular module (observed by worker-deploy,
+    2026-08-27).
+    """
+    _seed_on_base(
+        repo,
+        {
+            "src/pkg/facade.py": "from . import deep\n",
+            "src/pkg/deep.py": "x = 1\n",
+            "tests/test_deep.py": "x = 1\n",
+            "tests/test_facade_user.py": "from pkg import facade\n",
+        },
+    )
+    # Two of these select tests/test_mesh.py -- the module by rule 2, the test
+    # itself by rule 1. The overlap is the point: a union and a symmetric
+    # difference are the same function until some module arrives twice, so a
+    # case built only from disjoint paths cannot tell them apart. (Measured:
+    # without this pair, a symmetric-difference mutant passed here.)
+    every = [
+        "src/pkg/mesh.py",
+        "tests/test_mesh.py",
+        "src/pkg/deep.py",
+        "tools/deploy_check.py",
+        "tests/test_unrelated.py",
+        "assets/logo.bin",
+    ]
+    assert "tests/test_mesh.py" in changed_tests.map_one(repo, "src/pkg/mesh.py")
+    assert "tests/test_mesh.py" in changed_tests.map_one(repo, "tests/test_mesh.py")
+    whole = set(changed_tests.select(repo, every))
+    for i in range(len(every)):
+        fewer = every[:i] + every[i + 1:]
+        assert set(changed_tests.select(repo, fewer)) <= whole, (
+            f"dropping {every[i]} grew the selection"
+        )
+    for rel in every:
+        assert set(changed_tests.select(repo, [rel])) <= whole
+
+
 def test_a_base_it_cannot_resolve_says_so_on_stdout(repo, capsys):
     """The other exit-2 path, and the same rule.
 
