@@ -27,6 +27,15 @@ const src = fs.readFileSync(
     __dirname, "..", "..", "src", "claude_launcher", "web", "static", "app.js"),
   "utf8"
 );
+/* The colours are half of what this line says, and a class the stylesheet
+   has no rule for is the one failure the DOM checks below cannot see: the
+   markup keeps saying "stale" and the value keeps rendering in the plain
+   grey it always had. */
+const css = fs.readFileSync(
+  path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "static",
+            "style.css"),
+  "utf8"
+);
 
 function slice(name) {
   const start = src.indexOf(`function ${name}(`);
@@ -119,7 +128,7 @@ const ctx = {};
 new Function(
   "exports", "document", "el", "api", "list", "meshCache",
   stubs + constLine("RAIL_MESH_TAGS") + constLine("CTX_DOMAIN")
-  + constLine("SEEN_COLD")
+  + constLine("SEEN_COLD") + constLine("TYPED_STALE")
   + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags")
   + slice("fmtAge") + slice("ctxShort") + slice("ctxAgeOf")
   + slice("ctxKnowable") + slice("ctxSentence") + slice("ctxBreakdown")
@@ -134,6 +143,7 @@ Object.assign(exports, {
   ago: seenAgo,
   line: railSeenLine,
   COLD: SEEN_COLD,
+  STALE: TYPED_STALE,
 });`)(ctx, document, el, api, list, []);
 
 let failures = 0;
@@ -258,6 +268,78 @@ check("...and go cold past the hour, which is the row being hunted for",
       ["rail-seen-val cold", "rail-seen-val cold"]);
 
 /* ------------------------------------------------------------------ */
+/* the second step, on the typed reading alone                         */
+/* ------------------------------------------------------------------ */
+/* Half an hour since a person typed is drawn as an error state rather than
+   as an age: the session somebody handed a task to and then walked away from
+   is legible well before the hour at which the other two readings become
+   interesting, and it is the row the whole line is scanned for.
+
+   The threshold is checked on both sides, because a step that fires early is
+   the same defect as one that never fires: a rail where most rows are red
+   says nothing, and the reader stops looking at the colour. */
+check("the typed reading is drawn plainly right up to the half hour",
+      classOf({ last_input_at: ago(ctx.STALE - 60) }, "typed"),
+      "rail-seen-val");
+check("...and past it, it is an error state",
+      classOf({ last_input_at: ago(ctx.STALE + 60) }, "typed"),
+      "rail-seen-val stale");
+/* Both steps read the same field, so the order between them is a real
+   choice and not an accident: the later, quieter one must not take back a
+   row the earlier one has already flagged. */
+check("...which the hour mark does not downgrade back to amber",
+      classOf({ last_input_at: ago(ctx.COLD * 5) }, "typed"),
+      "rail-seen-val stale");
+/* It is asked for per pair. If it ever leaks onto the other two, the rail
+   goes red for a condition nobody asked to see — a session read an hour ago,
+   an agent quiet for an hour — and the reading that IS about the keyboard
+   stops standing out. */
+check("the step is the typed reading's alone, at an age past it",
+      [classOf({ last_visited_at: ago(ctx.STALE + 60) }, "seen"),
+       classOf({ last_activity_at: ago(ctx.STALE + 60) }, "moved")],
+      ["rail-seen-val", "rail-seen-val"]);
+/* Absence is not a stale timer. Almost every session on this rail was
+   spawned by an agent and never typed into by anybody, so colouring the dash
+   would paint the rail red and bury the rows the step exists to pick out. */
+check("a session nobody has ever typed into is not an error, it is a dash",
+      [classOf({}, "typed"), pairs({}).typed],
+      ["rail-seen-val unknown", "\u2013"]);
+
+/* The colour has to exist. This is the failure the DOM cannot see: the class
+   keeps being written onto the value and the value keeps rendering grey. */
+check("the stylesheet paints the state the markup claims",
+      /#session-list \.rail-seen-val\.stale\s*\{[^}]*color:/.test(css), true);
+/* ...and not by borrowing the global `.error` rule, which carries a
+   font-size and a margin-top that would lift this value off the baseline its
+   two neighbours sit on. */
+check("...with its own rule, not the global .error box",
+      /"rail-seen-val" \+ \([^;]*\berror\b/.test(src), false);
+
+/* The tooltip is where the number explains itself. A red value with a
+   hover that still says only "when a person last typed here" leaves the
+   reader to guess which threshold tripped. */
+const titleOf = (s, key) => {
+  for (const p of ctx.line(s).kids) {
+    if (p.kids[0].textContent === key) return p.title;
+  }
+  return null;
+};
+check("a red value says on hover what tripped it",
+      /over 30m since anyone typed here/.test(
+        titleOf({ last_input_at: ago(ctx.STALE + 60) }, "typed")),
+      true);
+check("...and a value that has not tripped does not carry the note",
+      /since anyone typed here/.test(
+        titleOf({ last_input_at: ago(60) }, "typed")),
+      false);
+/* The dash again, from the only side that can see it. The class expression
+   answers "no reading" before it answers "past the step", so a threshold
+   that counts absence as tripped still renders a dash and leaves no trace in
+   the markup at all. The hover is where that flag shows through. */
+check("...and neither does a reading that was never taken",
+      /since anyone typed here/.test(titleOf({}, "typed")), false);
+
+/* ------------------------------------------------------------------ */
 /* and it is actually ON the row the poll builds                       */
 /* ------------------------------------------------------------------ */
 const WATCHED = {
@@ -316,6 +398,27 @@ served = { sessions: [WATCHED, FORGOTTEN, PLAIN, GONE] };
         { seen: "–", typed: "–", moved: "–" });
   check("an exited record keeps the human stamps and drops the screen one",
         readOff("gone"), { seen: "30m", typed: "40m", moved: "–" });
+
+  /* And the colour survives the trip through the row builder, which is a
+     separate question from whether seenPair computes it: the row is where
+     the class actually reaches a stylesheet. `forgotten` is the shape this
+     step was asked for — typed into once, then left. */
+  const classOnRow = (name, key) => {
+    for (const p of lineOf(name).kids) {
+      if (p.kids[0].textContent === key) return p.kids[1].className;
+    }
+    return null;
+  };
+  check("the row the poll builds carries the error state on typed",
+        classOnRow("forgotten", "typed"), "rail-seen-val stale");
+  check("...and the row typed into ten minutes ago does not",
+        classOnRow("watched", "typed"), "rail-seen-val");
+  /* The exited record's 40-minute stamp is past the threshold too. Nothing
+     special is done for exited rows: the reading is a fact about when a
+     person was last at this session's keyboard, and it does not stop being
+     true because the process went away. */
+  check("an exited record is coloured off the same reading as any other",
+        classOnRow("gone", "typed"), "rail-seen-val stale");
 
   /* The stylesheet's invariant, which this line is now part of: the rail row
      wraps, and only the declared full-width children may break it. A

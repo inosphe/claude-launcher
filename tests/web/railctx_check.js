@@ -38,6 +38,8 @@ const domLine = src.match(/^const CTX_DOMAIN = .+$/m);
 if (!domLine) throw new Error("cannot locate CTX_DOMAIN in app.js");
 const coldLine = src.match(/^const SEEN_COLD = .+$/m);
 if (!coldLine) throw new Error("cannot locate SEEN_COLD in app.js");
+const staleLine = src.match(/^const TYPED_STALE = .+$/m);
+if (!staleLine) throw new Error("cannot locate TYPED_STALE in app.js");
 
 /* ---- stub DOM: nested nodes, because the note may be hung on a child ---- */
 function node(tag) {
@@ -145,7 +147,8 @@ new Function(
   // ...and a line saying who has been near it (railseen_check's subject);
   // sliced rather than stubbed for the same reason as the directory line
   // above — the real call is what has to keep resolving.
-  + coldLine[0] + "\n" + slice("seenAgo") + slice("seenPair")
+  + coldLine[0] + "\n" + staleLine[0] + "\n"
+  + slice("seenAgo") + slice("seenPair")
   + slice("railSeenLine")
   + slice("ctxRailLine") + slice("refreshSessions")
   + `
