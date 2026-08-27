@@ -122,6 +122,14 @@ def test_parse_rejects_a_malformed_document():
         )
     with pytest.raises(HarnessConfigError, match="invalid harness name"):
         harnesses.parse({"harnesses": {"not:selectable": {}}})
+    with pytest.raises(HarnessConfigError, match="opening_transport"):
+        harnesses.parse(
+            {"harnesses": {"x": {"opening_transport": "clipboard"}}}
+        )
+    with pytest.raises(HarnessConfigError, match="paste_enter_delay"):
+        harnesses.parse(
+            {"harnesses": {"x": {"paste_enter_delay": -1}}}
+        )
 
 
 def test_brief_api_key_field_is_an_input_only_compatibility_alias(home):

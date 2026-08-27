@@ -7,6 +7,8 @@ harnesses:
     auth: claude
     token_env: ANTHROPIC_AUTH_TOKEN
     empty_env: [ANTHROPIC_API_KEY]
+    opening_transport: argv
+    input_readiness: bracketed-paste
     description: >-
       Claude Code, run under a claunch profile (isolated config dir, provider
       and token). Needs --profile; the executable is CLAUDE_LAUNCHER_BIN.
@@ -20,6 +22,10 @@ harnesses:
     login_args: [login]
     heartbeat_args: [exec, --skip-git-repo-check]
     usage: codex-app-server
+    opening_transport: argv
+    input_readiness: bracketed-paste
+    submit_strategy: screen
+    paste_enter_delay: 0.2
     description: OpenAI's Codex CLI.
 
   pi:

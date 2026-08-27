@@ -24,6 +24,7 @@ import time
 from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
+from .. import harnesses as harness_registry
 from . import keys as keys_mod
 from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
@@ -47,6 +48,14 @@ REPLAY_TAIL_BYTES = 256 * 1024
 #: its own PTY read — see :meth:`Session.paste`. Measured against Claude Code:
 #: 0 never submits, 20ms already does; 150ms leaves room for a busy renderer.
 PASTE_ENTER_DELAY = float(os.environ.get("CLAUNCH_PASTE_ENTER_DELAY") or 0.15)
+
+#: Bound on waiting for a TUI to repaint after a paste. A repaint is positive
+#: evidence that the consumer processed the paste; the timeout preserves
+#: delivery for TUIs that update their composer without changing the sampled
+#: screen (or whose repaint is hidden behind an animation).
+PASTE_RENDER_TIMEOUT = float(
+    os.environ.get("CLAUNCH_PASTE_RENDER_TIMEOUT") or 2.0
+)
 
 #: How long a TUI has, from spawn, to become deliverable-to before
 #: :meth:`Session.deliver` stops waiting and writes anyway. Generous: it is
@@ -769,7 +778,9 @@ class Session:
         """
         if self._input_ready or self.exited:
             return
-        if self.sdef.harness != CLAUDE_HARNESS:
+        entry = harness_registry.get(self.sdef.harness)
+        readiness = entry.input_readiness if entry is not None else "immediate"
+        if readiness != "bracketed-paste":
             self._input_ready = True  # not a TUI we know; nothing to wait for
             return
         deadline = self._started_mono + INPUT_READY_TIMEOUT
@@ -1028,10 +1039,35 @@ class Session:
         if self.exited:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
         data = keys_mod.encode_paste(text, bracketed=self.screen.bracketed_paste)
+        entry = harness_registry.get(self.sdef.harness)
+        strategy = entry.submit_strategy if entry is not None else "fixed"
+        delay = (
+            entry.paste_enter_delay
+            if entry is not None and entry.paste_enter_delay is not None
+            else PASTE_ENTER_DELAY
+        )
+        before = (
+            self.tracker.last_meaningful_change()
+            if strategy == "screen" and self.screen.bracketed_paste
+            else None
+        )
         await self.write_bytes(data)
         if not enter:
             return data
-        await asyncio.sleep(PASTE_ENTER_DELAY)
+        if strategy == "screen" and self.screen.bracketed_paste:
+            # Codex acknowledges a large paste by rendering its compact
+            # placeholder. Waiting for that repaint keeps Enter out of the
+            # consumer's own paste-suppression window; a producer-side sleep
+            # alone cannot, because ConPTY may batch two separate writes into
+            # one read. Bounded fallback keeps an unobservable repaint from
+            # losing the message.
+            deadline = time.monotonic() + PASTE_RENDER_TIMEOUT
+            while time.monotonic() < deadline and not self.exited:
+                changed = self.tracker.last_meaningful_change()
+                if changed is not None and changed != before:
+                    break
+                await asyncio.sleep(0.05)
+        await asyncio.sleep(delay)
         await self.write_bytes(b"\r")
         return data + b"\r"
 

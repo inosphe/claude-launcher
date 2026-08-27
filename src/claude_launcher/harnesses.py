@@ -105,6 +105,14 @@ class Harness:
     #: means this custom harness cannot be checked safely by ``validate``.
     heartbeat_args: List[str] = field(default_factory=list)
     usage: str = ""
+    #: One-time opening message: positional prompt (``argv``) or terminal
+    #: delivery after launch (``pty``).
+    opening_transport: str = "pty"
+    #: Readiness evidence required before terminal delivery.
+    input_readiness: str = "immediate"
+    #: How Enter is paced after a bracketed paste.
+    submit_strategy: str = "fixed"
+    paste_enter_delay: Optional[float] = None
 
     @property
     def borrow_mode(self) -> str:
@@ -171,6 +179,10 @@ class Harness:
             "login_args": list(self.login_args),
             "heartbeat_args": list(self.heartbeat_args),
             "usage": self.usage,
+            "opening_transport": self.opening_transport,
+            "input_readiness": self.input_readiness,
+            "submit_strategy": self.submit_strategy,
+            "paste_enter_delay": self.paste_enter_delay,
             "borrowable": self.borrowable,
             "borrow_mode": self.borrow_mode,
             # Resolved per call, never stored: installing pi should not need a
@@ -239,6 +251,40 @@ def _parse_entry(name: str, body) -> Harness:
         raise HarnessConfigError(
             f"harness {name!r} uses oauth auth and cannot declare token_env"
         )
+    strategies = {
+        "opening_transport": (
+            str(body.get("opening_transport") or "pty").strip(),
+            {"argv", "pty"},
+        ),
+        "input_readiness": (
+            str(body.get("input_readiness") or "immediate").strip(),
+            {"immediate", "bracketed-paste"},
+        ),
+        "submit_strategy": (
+            str(body.get("submit_strategy") or "fixed").strip(),
+            {"fixed", "screen"},
+        ),
+    }
+    for field_name, (value, allowed) in strategies.items():
+        if value not in allowed:
+            expected = ", ".join(sorted(allowed))
+            raise HarnessConfigError(
+                f"harness {name!r} {field_name} must be one of {expected}, "
+                f"got {value!r}"
+            )
+    raw_delay = body.get("paste_enter_delay")
+    paste_enter_delay = None
+    if raw_delay is not None:
+        try:
+            paste_enter_delay = float(raw_delay)
+        except (TypeError, ValueError):
+            raise HarnessConfigError(
+                f"harness {name!r} paste_enter_delay must be a number"
+            ) from None
+        if paste_enter_delay < 0:
+            raise HarnessConfigError(
+                f"harness {name!r} paste_enter_delay must be non-negative"
+            )
     return Harness(
         name=name,
         command=command,
@@ -267,6 +313,10 @@ def _parse_entry(name: str, body) -> Harness:
             body.get("heartbeat_args"), f"harness {name!r} heartbeat_args"
         ),
         usage=str(body.get("usage") or "").strip(),
+        opening_transport=strategies["opening_transport"][0],
+        input_readiness=strategies["input_readiness"][0],
+        submit_strategy=strategies["submit_strategy"][0],
+        paste_enter_delay=paste_enter_delay,
     )
 
 

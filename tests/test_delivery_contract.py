@@ -24,12 +24,13 @@ from pathlib import Path
 import pytest
 
 from claude_launcher.daemon import keys as keys_mod, session as session_mod
+from claude_launcher.daemon.harness import SessionDef
+from claude_launcher.daemon.idle import IdleTracker
+from claude_launcher.daemon.screen import ScreenState
 
 #: The real stamp function, held before any test monkeypatches the module
 #: attribute (the autouse ``_fixed_stamp`` pins it for the exact-write tests).
 _REAL_STAMP = session_mod.delivery_stamp
-from claude_launcher.daemon.harness import SessionDef
-from claude_launcher.daemon.screen import ScreenState
 
 SRC = Path(__file__).resolve().parents[1] / "src" / "claude_launcher"
 
@@ -137,6 +138,7 @@ def _fake_session(*, bracketed: bool, ready: bool = True):
         exited = False
         sdef = SessionDef(name="s")
         screen = ScreenState(80, 24)
+        tracker = IdleTracker()
         idle_threshold = 0.0
         _last_human_input = 0.0
         _last_terminal_input = 0.0
@@ -175,6 +177,35 @@ def test_deliver_sends_the_enter_as_its_own_write(monkeypatch):
     s, writes = _fake_session(bracketed=True)
     assert asyncio.run(s.deliver("cflow: go")) is True
     assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
+
+
+def test_codex_waits_for_the_paste_repaint_before_submitting(home, monkeypatch):
+    """Codex's strategy does not submit until its TUI consumed the paste."""
+    monkeypatch.setattr(session_mod, "PASTE_RENDER_TIMEOUT", 1.0)
+    s, writes = _fake_session(bracketed=True)
+    s.sdef = SessionDef(name="s", harness="codex")
+    rendered = asyncio.Event()
+
+    async def write_bytes(data: bytes) -> None:
+        writes.append(data)
+        if data != b"\r":
+            async def repaint():
+                await asyncio.sleep(0.02)
+                s.tracker.sample((1,), time.monotonic())
+                rendered.set()
+
+            asyncio.create_task(repaint())
+
+    s.write_bytes = write_bytes
+
+    async def run():
+        sending = asyncio.create_task(s.deliver("mesh: go"))
+        await rendered.wait()
+        assert writes == [b"\x1b[200~[T]\rmesh: go\x1b[201~"]
+        assert await sending is True
+
+    asyncio.run(run())
+    assert writes[-1] == b"\r"
 
 
 def test_deliver_reports_failure_instead_of_raising(monkeypatch):
@@ -277,6 +308,23 @@ def test_deliver_waits_out_the_startup_that_follows_the_keyboard(monkeypatch):
     asyncio.run(run())
     assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
     assert s._input_ready is True  # latched: the next message pays nothing
+
+
+def test_codex_uses_the_declared_tui_readiness_gate(home, monkeypatch):
+    monkeypatch.setattr(session_mod, "INPUT_SETTLE", 0.0)
+    s, writes = _fake_session(bracketed=False, ready=False)
+    s.sdef = SessionDef(name="s", harness="codex")
+
+    async def run():
+        waiting = asyncio.create_task(s._await_readable())
+        await asyncio.sleep(0.1)
+        assert not waiting.done()
+        s.screen.feed(b"\x1b[?2004h")
+        await asyncio.wait_for(waiting, timeout=5)
+
+    asyncio.run(run())
+    assert writes == []
+    assert s._input_ready is True
 
 
 def test_force_does_not_drop_the_readiness_wait(monkeypatch):
