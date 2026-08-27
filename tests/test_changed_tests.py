@@ -33,6 +33,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -840,6 +841,36 @@ def test_a_same_second_same_size_rewrite_still_changes_the_tree(repo):
 
     tree = changed_tests.worktree_tree(repo)
     assert tree != _git(repo, "rev-parse", "HEAD^{tree}").strip()
+
+
+def test_a_restore_that_preserves_mtime_still_changes_the_tree(repo):
+    """The same hole, reached without touching a single timestamp by hand.
+
+    git protects the ordinary same-second rewrite itself: writing the
+    index smudges a racily-clean entry's cached size to 0, so it is
+    re-read forever after. Preserving the scratch copy's mtime keeps that
+    guard armed and is worth doing -- but the guard only fires while the
+    entry is racy, and any restore that carries the old mtime (cp -p,
+    tar -x, rsync -t, unzip -- here shutil.copystat) puts stale content
+    behind a non-racy entry. Nothing below fabricates a state git would
+    not write: add, commit, status, diff, and a file copy.
+    """
+    target = repo / "src/pkg/mesh.py"
+    head_tree = _git(repo, "rev-parse", "HEAD^{tree}").strip()
+    backup = repo.parent / "mesh.py.backup"
+    shutil.copy2(target, backup)     # any mtime-preserving tool
+
+    time.sleep(1.1)
+    _git(repo, "status", "--porcelain")   # rehashes the entry and rewrites
+    _git(repo, "diff", "--name-only", "HEAD")   # the index a second later,
+                                                # so nothing is racy now
+    target.write_text("x = 9\n")     # same size, different content,
+    shutil.copystat(backup, target)  # restored under the old mtime
+
+    tree = changed_tests.worktree_tree(repo)
+    assert tree != head_tree, (
+        "git status calls this tree clean; the gate must not"
+    )
 
 
 def test_the_scratch_index_leaves_the_real_one_alone(repo):
