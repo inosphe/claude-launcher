@@ -654,12 +654,30 @@ def capabilities(
         profiles = profile_mod.list_all()
         report["profiles"] = [p.name for p in profiles]
         selectors = []
+        options = []
         errors = {}
         for p in profiles:
             try:
-                selectors.extend(
-                    f"{p.name}:{name}"
-                    for name in harness_policy.allowed_names(p)
+                allowed = harness_policy.allowed_names(p)
+            except (
+                harness_policy.HarnessPolicyError,
+                lineage.LineageError,
+                providers.ProviderError,
+            ) as exc:
+                errors[p.name] = str(exc)
+                continue
+            default_name = None
+            try:
+                default_name = lineage.effective_harness(p)
+                selectors.append(p.name)
+                options.append(
+                    {
+                        "value": p.name,
+                        "label": f"{p.name} (default: {default_name})",
+                        "profile": p.name,
+                        "harness": default_name,
+                        "default": True,
+                    }
                 )
             except (
                 harness_policy.HarnessPolicyError,
@@ -670,7 +688,22 @@ def capabilities(
                 # report names malformed profile policy instead of taking the
                 # whole child form down or offering unrestricted selectors.
                 errors[p.name] = str(exc)
+            for name in allowed:
+                if name == default_name:
+                    continue
+                selector = f"{p.name}:{name}"
+                selectors.append(selector)
+                options.append(
+                    {
+                        "value": selector,
+                        "label": selector,
+                        "profile": p.name,
+                        "harness": name,
+                        "default": False,
+                    }
+                )
         report["profile_selectors"] = selectors
+        report["profile_options"] = options
         if errors:
             report["profile_errors"] = errors
     if policy.allow_workspace:

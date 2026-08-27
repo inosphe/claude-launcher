@@ -12,13 +12,14 @@ const src = fs.readFileSync(
 function slice(name) {
   const start = src.indexOf(`function ${name}(`);
   if (start < 0) throw new Error("missing " + name);
+  const head = src.slice(start - 6, start) === "async " ? start - 6 : start;
   const body = src.indexOf(") {", start) + 2;
   let depth = 0;
   for (let i = body; i < src.length; i++) {
     if (src[i] === "{") depth++;
     else if (src[i] === "}") {
       depth--;
-      if (!depth) return src.slice(start, i + 1);
+      if (!depth) return src.slice(head, i + 1);
     }
   }
   throw new Error("unbalanced " + name);
@@ -40,6 +41,7 @@ function node(tag) {
     fire(kind) { return Promise.all((this.handlers[kind] || []).map((fn) => fn())); },
     set innerHTML(value) { this.kids = []; this.value = undefined; },
     get innerHTML() { return ""; },
+    get options() { return this.kids.filter((child) => child.tag === "option"); },
     get textContent() { return this.text; },
     set textContent(value) { this.text = String(value); },
     get className() { return [...this.classes].join(" "); },
@@ -66,7 +68,11 @@ const settle = () => new Promise((resolve) => setImmediate(resolve));
 
 const api = async (url) => ({
   ok: true, status: 200,
-  json: async () => ({ profiles: ["work", "ds4"] }),
+  json: async () => ({ options: [
+    { name: "ds4", label: "ds4", selectable: true, valid: true, message: "ready" },
+    { name: "codex", label: "codex — harness policy denied", selectable: false,
+      valid: false, message: "harness policy denied" },
+  ] }),
 });
 const stubs = `
 let sessReborrowBox = null;
@@ -78,7 +84,7 @@ function attach() {}
 const ctx = {};
 new Function(
   "exports", "document", "el", "api",
-  stubs + slice("sessReborrow") + `
+  stubs + slice("readBorrowOptions") + slice("sessReborrow") + `
 Object.assign(exports, {
   render: sessReborrow,
   drop: () => { sessReborrowBox = null; },
@@ -113,8 +119,10 @@ async function main() {
   const piSelect = tags(pi, "select")[0];
   check("API-key harness has the reborrow picker", !!piSelect);
   check("Pi picker has no Claude --null answer",
-    tags(piSelect, "option").map((o) => o.value).join(",") === "own,b:work,b:ds4",
+    tags(piSelect, "option").map((o) => o.value).join(",") === "own,b:ds4,b:codex",
     tags(piSelect, "option").map((o) => o.value));
+  check("policy-denied lenders stay visible and disabled",
+    tags(piSelect, "option").some((o) => o.value === "b:codex" && o.disabled));
   check("ready borrowed auth is visibly validated",
     text(pi).includes("✓ validation") && text(pi).includes("ANTHROPIC_API_KEY"), text(pi));
 

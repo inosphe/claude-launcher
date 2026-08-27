@@ -163,18 +163,17 @@ def test_width_counts_wide_cells_twice():
 # --------------------------------------------------------------------------- #
 def test_every_closed_set_is_a_picker_not_a_text_box():
     wiz = form()
-    for key in ("harness", "profile", "cwd", "worktree", "role", "resume",
+    for key in ("profile", "cwd", "worktree", "role", "resume",
                 "mesh", "workflow", "restore", "attach"):
         assert isinstance(wiz.field(key), wizard.ChoiceField), key
     for key in ("name", "task", "args", "handle", "context", "worktree_name"):
         assert isinstance(wiz.field(key), wizard.TextField), key
 
 
-def test_harness_is_read_only_and_derived_from_the_profile():
+def test_profile_is_the_only_harness_choice():
     wiz = form()
-    assert not wiz.field("harness").selectable
-    assert "profile" in wiz.field("harness").disabled_note.lower()
-    assert wiz.value("harness") == "claude"
+    assert "harness" not in [field.key for field in wiz.fields]
+    assert wiz.field("profile").label == "Profile : Harness"
 
 
 def test_a_missing_workspace_is_shown_and_unpickable():
@@ -197,6 +196,35 @@ def test_the_form_defaults_to_a_real_profile():
     assert wiz.field("profile").options[0].value == ""  # empty placeholder
 
 
+def test_profile_picker_labels_the_default_and_omits_denied_selectors():
+    class PolicySources(FakeSources):
+        def profile_options(self):
+            return [
+                {"value": "codex", "label": "codex (default: codex)",
+                 "harness": "codex"},
+                {"value": "work", "label": "work (default: claude)",
+                 "harness": "claude"},
+            ]
+
+        def profile_details(self):
+            return [
+                {"name": "codex", "harness": "codex",
+                 "harness_available": True, "borrow_allowed": False},
+                {"name": "codex:claude", "harness": "claude",
+                 "harness_available": True, "harness_allowed": False},
+                {"name": "work", "harness": "claude",
+                 "harness_available": True, "borrow_allowed": True},
+            ]
+
+    wiz = form(sources=PolicySources())
+    options = wiz.field("profile").options
+    assert any(
+        option.value == "codex" and option.label == "codex (default: codex)"
+        for option in options
+    )
+    assert "codex:claude" not in [option.value for option in options]
+
+
 def test_profile_selector_picker_is_qualified_but_borrow_stays_base_profile():
     class SelectorSources(FakeSources):
         def profile_selectors(self):
@@ -216,9 +244,9 @@ def test_profile_selector_picker_is_qualified_but_borrow_stays_base_profile():
 
     assert "work:pi" in profile_values
     assert "work:pi" not in borrow_values
-    assert "work" in borrow_values
+    assert "work" not in borrow_values
+    assert "ds4" in borrow_values
     pick(wiz, "profile", "work:pi")
-    assert wiz.value("harness") == "pi"
     assert wiz.field("borrow").selectable
     pick(wiz, "borrow", "ds4")
     args = argparse.Namespace()
@@ -241,7 +269,6 @@ def test_role_resume_and_null_belong_to_claude_but_pi_can_borrow():
     wiz = form(sources=PiSources())
     assert wiz.field("role").selectable
     pick(wiz, "profile", "ds4")
-    assert wiz.value("harness") == "pi"
     assert not wiz.field("role").selectable
     assert not wiz.field("resume").selectable
     assert not wiz.field("fork_session").selectable
@@ -269,8 +296,28 @@ def test_the_borrow_picker_offers_the_profiles():
     wiz = form()
     labels = [o.label for o in wiz.field("borrow").options]
     assert labels[0].startswith("(this profile's own token)")
-    assert "work" in labels and "ds4" in labels
+    assert "work" not in labels and "ds4" in labels
     assert wiz.value("borrow") == ""  # borrowing is an answer somebody gives
+
+
+def test_the_borrow_picker_disables_a_failed_validation():
+    class ValidatedSources(FakeSources):
+        def borrow_options(self, profile_selector):
+            return [
+                {"name": "ds4", "label": "ds4", "selectable": True,
+                 "valid": True, "message": "ready"},
+                {"name": "codex", "label": "codex — harness policy denied",
+                 "selectable": False, "valid": False,
+                 "message": "harness policy denied"},
+            ]
+
+    wiz = form(sources=ValidatedSources())
+    denied = next(
+        option for option in wiz.field("borrow").options
+        if option.value == "codex"
+    )
+    assert denied.disabled
+    assert "harness policy denied" in denied.detail
 
 
 def test_null_takes_the_borrow_with_it():
@@ -956,6 +1003,15 @@ class FakeSpawnSources(FakeSources):
         self.report_calls.append(parent)
         return self._report
 
+    def borrow_options(self, profile_selector):
+        names = self._report.get("profiles") or self.profiles()
+        own = str(profile_selector or "").split(":", 1)[0]
+        return [
+            {"name": name, "label": name, "selectable": True, "valid": True}
+            for name in names
+            if name != own
+        ]
+
     def mesh_of(self, session):
         return "team" if session == "lead" else ""
 
@@ -1140,12 +1196,27 @@ def test_an_older_daemon_keeps_the_cap_hard():
 
 def test_the_policy_decides_which_rows_are_open():
     wiz = spawn_form()
-    # Harness is never a policy gate: the selected profile owns it.
-    assert not wiz.field("harness").selectable
-    assert "profile" in wiz.field("harness").disabled_note
+    assert "harness" not in [field.key for field in wiz.fields]
+    assert wiz.field("profile").label == "Profile : Harness"
     # allow_workspace is on, so the registry it published is pickable
     assert wiz.field("workspace").selectable
     assert [o.value for o in wiz.field("workspace").options] == ["", "api"]
+
+
+def test_spawn_profile_picker_uses_policy_filtered_labelled_options():
+    report = _open_report(profile_options=[
+        {"value": "codex", "label": "codex (default: codex)",
+         "harness": "codex"},
+        {"value": "work", "label": "work (default: claude)",
+         "harness": "claude"},
+    ])
+    wiz = spawn_form(report=report)
+    options = wiz.field("profile").options
+    assert any(
+        option.value == "codex" and option.label == "codex (default: codex)"
+        for option in options
+    )
+    assert "codex:claude" not in [option.value for option in options]
 
 
 def test_the_policy_keeps_profile_borrow_and_args_locked_by_default():
@@ -1268,7 +1339,7 @@ def test_an_unlocked_row_answers_with_whatever_it_holds():
 def test_unlocked_profile_borrow_and_args_travel_on_apply():
     wiz = spawn_form(report=_open_report())
     pick(wiz, "profile", "other")
-    pick(wiz, "borrow", "other")
+    pick(wiz, "borrow", "work")
     focus_on(wiz, "args")
     for ch in "--verbose":
         wiz.handle(ch)
@@ -1277,7 +1348,7 @@ def test_unlocked_profile_borrow_and_args_travel_on_apply():
     args = argparse.Namespace()
     wiz.apply(args)
     assert args.profile == "other"
-    assert args.borrow == "other"
+    assert args.borrow == "work"
     assert args.null_token is False
     assert args.args == ["--verbose"]
     assert args.attach is True
@@ -1304,15 +1375,14 @@ def test_null_needs_no_unlock_and_takes_the_borrow_with_it():
     assert args.borrow is None and args.profile is None
 
 
-def test_even_an_old_daemon_harness_unlock_stays_read_only():
+def test_an_old_daemon_harness_list_creates_no_separate_control():
     wiz = spawn_form(report={
         "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
         "children_used": 0, "children_remaining": 4,
         "may_choose": [], "spawnable_harnesses": ["codex"],
     })
-    harness = wiz.field("harness")
-    assert not harness.selectable
-    assert [o.value for o in harness.options] == ["claude"]
+    assert "harness" not in [field.key for field in wiz.fields]
+    assert wiz.field("profile").label == "Profile : Harness"
     # allow_workspace off means the report carries no workspace list at all
     assert not wiz.field("workspace").selectable
 

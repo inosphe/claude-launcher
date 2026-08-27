@@ -11,11 +11,12 @@ const src = fs.readFileSync(
 function slice(name) {
   const start = src.indexOf(`function ${name}(`);
   if (start < 0) throw new Error("missing " + name);
+  const head = src.slice(start - 6, start) === "async " ? start - 6 : start;
   const body = src.indexOf(") {", start) + 2;
   let depth = 0;
   for (let i = body; i < src.length; i++) {
     if (src[i] === "{") depth++;
-    else if (src[i] === "}") { depth--; if (!depth) return src.slice(start, i + 1); }
+    else if (src[i] === "}") { depth--; if (!depth) return src.slice(head, i + 1); }
   }
   throw new Error("unbalanced " + name);
 }
@@ -70,5 +71,57 @@ ctx.sync();
 check("Claude --null locks Borrow", form.borrow.disabled === true);
 check("and clears the contradictory lender", form.borrow.value === "");
 
-console.log("borrowform_check: " + (failures ? `${failures} failing` : "ok"));
-process.exitCode = failures ? 1 : 0;
+/* The main Web create form consumes the labelled, policy-filtered option
+   objects. Keep a denied compatibility selector in profile_selectors to
+   prove that profile_options is authoritative when the daemon publishes it. */
+async function checkProfilePicker() {
+  const profileSelect = {
+    kids: [], value: "",
+    set innerHTML(value) { this.kids = []; },
+    get innerHTML() { return ""; },
+    appendChild(child) { this.kids.push(child); return child; },
+    get options() { return this.kids; },
+  };
+  const pickerDoc = {
+    createElement: () => ({ value: "", textContent: "", title: "", disabled: false }),
+    querySelector: (selector) => selector.includes("name=profile") ? profileSelect : null,
+  };
+  const pickerApi = async () => ({
+    ok: true, status: 200,
+    json: async () => ({
+      profile_selectors: ["codex", "codex:claude", "work"],
+      profile_options: [
+        { value: "codex", label: "codex (default: codex)", harness: "codex" },
+        { value: "work", label: "work (default: claude)", harness: "claude" },
+      ],
+      profile_details: [
+        { name: "codex", harness: "codex" },
+        { name: "codex:claude", harness: "claude", harness_allowed: false },
+      ],
+    }),
+  });
+  const picker = {};
+  new Function(
+    "exports", "api", "document", "syncNewBorrowOptions", "syncForkAvailability",
+    `let profileDetails = {};` + slice("refreshProfiles") + `
+exports.refresh = refreshProfiles;
+exports.details = () => profileDetails;`
+  )(
+    picker, pickerApi, pickerDoc, async () => {}, () => {}
+  );
+  await picker.refresh();
+  check("the create picker labels the bare default",
+    profileSelect.options.some((o) =>
+      o.value === "codex" && o.textContent === "codex (default: codex)"));
+  check("the create picker omits codex:claude",
+    !profileSelect.options.some((o) => o.value === "codex:claude"),
+    profileSelect.options.map((o) => o.value));
+}
+
+checkProfilePicker().then(() => {
+  console.log("borrowform_check: " + (failures ? `${failures} failing` : "ok"));
+  process.exitCode = failures ? 1 : 0;
+}).catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});

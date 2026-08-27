@@ -2322,6 +2322,8 @@ async function refreshCflow() {
 }
 
 let profileDetails = {};
+let newBorrowFor = null;
+let newBorrowSeq = 0;
 
 /* Borrow is a property of the selected harness's auth contract, not of its
    name. Old daemons did not publish borrow_allowed, so Claude remains the
@@ -2344,6 +2346,70 @@ function profileHarnessName(selector, parent) {
   return detail ? (detail.harness || "") : ((parent || {}).harness || "");
 }
 
+async function readBorrowOptions(selector) {
+  if (!selector) return { options: [], capability: { allowed: false } };
+  const resp = await api(
+    `/api/borrow-options?profile=${encodeURIComponent(selector)}`
+  );
+  const doc = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
+  return doc;
+}
+
+function fillValidatedBorrow(select, doc, ownLabel, current) {
+  select.innerHTML = "";
+  const own = document.createElement("option");
+  own.textContent = ownLabel;
+  own.value = "";
+  select.appendChild(own);
+  for (const item of (doc && doc.options) || []) {
+    const opt = document.createElement("option");
+    opt.textContent = item.label || item.name;
+    opt.value = item.name;
+    opt.disabled = !item.selectable;
+    opt.title = item.message || "";
+    select.appendChild(opt);
+  }
+  const kept = [...select.options].find((o) => o.value === current);
+  select.value = kept && !kept.disabled ? current : "";
+  select.title = "";
+}
+
+async function syncNewBorrowOptions(force = false) {
+  const f = $("new-session");
+  if (!f || !f.borrow || !f.profile) return;
+  const parent = spawnParent();
+  const selector = f.profile.value || (parent && parent.profile) || "";
+  const ownLabel = parent
+    ? `(as ${parent.name} authenticates)`
+    : "(this profile's own token)";
+  const key = `${selector}|${ownLabel}`;
+  if (!force && key === newBorrowFor) return;
+  newBorrowFor = key;
+  const seq = ++newBorrowSeq;
+  const current = f.borrow.value;
+  f.borrow._validationPending = true;
+  f.borrow._validationError = "";
+  // Clear the previous harness's lenders before waiting for the new policy
+  // answer. A quick submit during the request can then only mean own auth.
+  fillValidatedBorrow(f.borrow, { options: [] }, ownLabel, "");
+  f.borrow.disabled = true;
+  try {
+    const doc = await readBorrowOptions(selector);
+    if (seq !== newBorrowSeq || key !== newBorrowFor) return;
+    fillValidatedBorrow(f.borrow, doc, ownLabel, current);
+  } catch (e) {
+    if (seq !== newBorrowSeq || key !== newBorrowFor) return;
+    fillValidatedBorrow(f.borrow, { options: [] }, ownLabel, "");
+    f.borrow._validationError =
+      `borrow validation unavailable: ${e.message || e}`;
+    f.borrow.title = f.borrow._validationError;
+  }
+  f.borrow._validationPending = false;
+  if (spawnParent()) syncSpawnMode();
+  else syncForkAvailability();
+}
+
 async function refreshProfiles() {
   try {
     const resp = await api("/api/profiles");
@@ -2354,24 +2420,18 @@ async function refreshProfiles() {
       if (item && item.name) profileDetails[item.name] = item;
     }
     select.innerHTML = "";
-    for (const name of data.profile_selectors || data.profiles || []) {
+    const optionDefs = data.profile_options ||
+      (data.profile_selectors || data.profiles || []).map(
+        (name) => ({ value: name, label: name })
+      );
+    for (const item of optionDefs) {
       const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
+      opt.value = item.value;
+      opt.textContent = item.label || item.value;
+      opt.title = item.harness ? `runs ${item.harness}` : "";
       select.appendChild(opt);
     }
-    // The same closed set feeds --borrow: another profile whose token (and
-    // backend) this session runs with, its own config left in place.
-    const borrow = document.querySelector("#new-session select[name=borrow]");
-    const previous = borrow.value;
-    borrow.innerHTML = "";
-    borrow.appendChild(new Option("(this profile's own token)", ""));
-    for (const name of data.profiles || []) {
-      borrow.appendChild(new Option(name, name));
-    }
-    if ([...borrow.options].some((o) => o.value === previous)) {
-      borrow.value = previous;
-    }
+    await syncNewBorrowOptions(true);
     syncForkAvailability();
   } catch { /* ignore */ }
 }
@@ -2568,7 +2628,11 @@ function syncForkAvailability() {
   // OAuth harnesses keep auth in their own profile home. --null remains a
   // Claude-only answer and cannot coexist with a borrow.
   f.null_token.disabled = !claude;
-  f.borrow.disabled = !borrowCap.allowed || (claude && f.null_token.checked);
+  f.borrow.disabled = !!f.borrow._validationPending ||
+    !!f.borrow._validationError ||
+    !borrowCap.allowed || (claude && f.null_token.checked);
+  f.borrow.title = f.borrow._validationError ||
+    (f.borrow._validationPending ? "validating borrow candidates" : "");
   if (f.borrow.disabled) f.borrow.value = "";
   if (!claude) {
     f.role.value = "";
@@ -2890,6 +2954,7 @@ function syncSpawnMode() {
   newSpawnDefaultsFor = parent ? parent.name : null;
   syncSpawnProfileRow(f, !!parent);
   syncSpawnCwdRow(f, !!parent);
+  syncNewBorrowOptions();
   if (parent) {
     // Auth is claude's token machinery: on a child running anything else
     // both rows are moot however the policy is set, and a yes on --null greys
@@ -2908,7 +2973,12 @@ function syncSpawnMode() {
       f.role.value = "";
       renderRoleStance();
     }
-    if (!borrowCap.allowed) {
+    if (f.borrow._validationPending || f.borrow._validationError) {
+      f.borrow.value = "";
+      f.borrow.disabled = true;
+      f.borrow.title = f.borrow._validationError ||
+        "validating borrow candidates";
+    } else if (!borrowCap.allowed) {
       f.borrow.value = "";
       f.borrow.disabled = true;
     } else if (f.null_token.checked && !f.null_token.disabled) {
@@ -3067,6 +3137,7 @@ document
   });
 $("new-session").resume.addEventListener("change", syncForkAvailability);
 $("new-session").profile.addEventListener("change", () => {
+  syncNewBorrowOptions(true);
   syncForkAvailability();
   syncSpawnMode();
   renderProfileHint();
@@ -10539,31 +10610,55 @@ function sessReborrow(data) {
   // changes nothing is the daemon's refusal, mirrored here as a dead button.
   const currentChoice = s.borrow ? `b:${s.borrow}` : s.null_token ? "null" : "own";
   (async () => {
-    let profiles = [];
+    let doc = { options: [] };
+    let readError = "";
     try {
-      const resp = await api("/api/profiles");
-      const doc = await resp.json().catch(() => ({}));
-      if (!resp.ok) throw new Error(doc.error || `HTTP ${resp.status}`);
-      profiles = doc.profiles || [];
+      // A bare saved profile may have acquired a different YAML default
+      // since this process started. Validate against the harness the live
+      // session will actually restart from; the reborrow boundary does the
+      // same check against old.harness before stopping anything.
+      const runtimeSelector = s.profile && !s.profile.includes(":") && s.harness
+        ? `${s.profile}:${s.harness}` : (s.profile || "");
+      doc = await readBorrowOptions(runtimeSelector);
     } catch (e) {
-      say(`cannot read the profiles: ${e.message || e}`, "wf-warning");
-      return;
+      readError = `cannot validate borrow candidates: ${e.message || e}`;
+      say(readError, "wf-warning");
     }
     if (sessReborrowBox !== form) return; // the panel moved on mid-flight
     dest.innerHTML = "";
     const choices = [
-      ["own", `its own token (${s.profile})`],
-      ...(s.harness === "claude" ? [["null", "no token (--null)"]] : []),
-      ...profiles.map((p) => [`b:${p}`, `borrow: ${p}`]),
+      { value: "own", label: `its own token (${s.profile})`, selectable: true },
+      ...(s.harness === "claude"
+        ? [{ value: "null", label: "no token (--null)", selectable: true }]
+        : []),
+      ...(doc.options || []).map((item) => ({
+        value: `b:${item.name}`,
+        label: `borrow: ${item.label || item.name}`,
+        selectable: !!item.selectable,
+        message: item.message || "",
+      })),
     ];
-    for (const [value, label] of choices) {
+    if (s.borrow && !choices.some((item) => item.value === currentChoice)) {
+      choices.push({
+        value: currentChoice,
+        label: `borrow: ${s.borrow} — ${readError || "not available for this harness"}`,
+        selectable: false,
+        message: readError || "the current lender is not available for this harness",
+      });
+    }
+    for (const item of choices) {
       const opt = document.createElement("option");
-      opt.value = value;
-      opt.textContent = label;
+      opt.value = item.value;
+      opt.textContent = item.label;
+      opt.disabled = !item.selectable;
+      opt.title = item.message || "";
       dest.appendChild(opt);
     }
     dest.value = currentChoice;
-    const sync = () => { goBtn.disabled = dest.value === currentChoice; };
+    const sync = () => {
+      const selected = [...dest.options].find((o) => o.value === dest.value);
+      goBtn.disabled = dest.value === currentChoice || !!(selected && selected.disabled);
+    };
     dest.addEventListener("change", sync);
     dest.disabled = false;
     sync();
@@ -11688,7 +11783,10 @@ function syncSpawnGates(ui) {
   } else {
     lock(ui.nullTok, ui.nullNote, "");
   }
-  if (!borrowCap.allowed) {
+  if (ui._borrowValidationError) {
+    ui.borrow.value = "";
+    lock(ui.borrow, ui.borrowNote, ui._borrowValidationError);
+  } else if (!borrowCap.allowed) {
     ui.borrow.value = "";
     lock(ui.borrow, ui.borrowNote,
       `harness ${childHarness || "?"} keeps auth in its own profile storage`);
@@ -12350,6 +12448,42 @@ function spawnModalClose() {
   document.removeEventListener("keydown", spawnModalKey);
 }
 
+/* Borrow candidates depend on the effective Profile : Harness selection.
+   The daemon validates each base profile against both sides' allow-lists and
+   current credential state. Rebuild the list whenever that execution
+   selector changes; a remembered lender is retained only when the fresh
+   verdict still marks it selectable. */
+async function refreshSpawnBorrowOptions(st, force = false) {
+  const ui = st.ui;
+  const selector = ui.profile.value || (ui.parentSess || {}).profile || "";
+  const ownLabel = `(as ${st.parent} authenticates)`;
+  const key = `${selector}|${ownLabel}`;
+  if (!force && ui._borrowFor === key) return;
+  ui._borrowFor = key;
+  const seq = (ui._borrowSeq || 0) + 1;
+  ui._borrowSeq = seq;
+  const current = ui._borrowPreset || ui.borrow.value || "";
+
+  // Do not leave a lender from the previous harness selectable while the
+  // matching policy verdict is in flight.
+  fillValidatedBorrow(ui.borrow, { options: [] }, ownLabel, "");
+  ui.borrow.disabled = true;
+  ui._borrowValidationError = "";
+  try {
+    const doc = await readBorrowOptions(selector);
+    if (spawnModal !== st || ui._borrowSeq !== seq || ui._borrowFor !== key) return;
+    fillValidatedBorrow(ui.borrow, doc, ownLabel, current);
+  } catch (e) {
+    if (spawnModal !== st || ui._borrowSeq !== seq || ui._borrowFor !== key) return;
+    ui._borrowValidationError =
+      `borrow validation unavailable: ${e.message || e}`;
+    fillValidatedBorrow(ui.borrow, { options: [] }, ownLabel, "");
+    ui.borrow.title = ui._borrowValidationError;
+  }
+  ui._borrowPreset = "";
+  syncSpawnGates(ui);
+}
+
 async function openSpawnModal(parentName, opts = {}) {
   if (!parentName) return;
   const { box, ui, noteShow } = buildSpawnForm(parentName, opts.seed || null);
@@ -12430,10 +12564,11 @@ async function spawnModalLoad(st) {
   ui.git = gitDoc || { repo: false, worktrees: [] };
   ui._wfs = (wfDoc && wfDoc.workflows) || [];
   const roleNames = ((roles && roles.roles) || []).map((r) => r.name).filter(Boolean);
-  const profileNames = (ui.report.profile_selectors) ||
-    (profDoc && (profDoc.profile_selectors || profDoc.profiles)) || [];
-  const borrowProfileNames = (ui.report.profiles) ||
-    (profDoc && profDoc.profiles) || [];
+  const profileOptions = ui.report.profile_options ||
+    (profDoc && profDoc.profile_options) ||
+    ((ui.report.profile_selectors) ||
+      (profDoc && (profDoc.profile_selectors || profDoc.profiles)) || [])
+      .map((value) => ({ value, label: value }));
   const meshNames = (meshDoc && meshDoc.meshes || []).map((m) => (m && m.name) || "");
   const seed = st.seed || {};
   const re = spawnRecall();
@@ -12442,12 +12577,17 @@ async function spawnModalLoad(st) {
   for (const item of (profDoc && profDoc.profile_details) || []) {
     if (item && item.name) ui.profileDetails[item.name] = item;
   }
-  fillSpawnSelect(ui.profile, profileNames.map((n) => [n, n]), "(inherit the parent's profile)",
+  fillSpawnSelect(ui.profile, profileOptions.map((item) => [
+    item.value, item.label || item.value, item.harness_available === false,
+  ]), "(inherit the parent's profile)",
     (seed.profile !== undefined && seed.profile !== null) ? seed.profile :
       (re.profile || ""));
-  fillSpawnSelect(ui.borrow, borrowProfileNames.map((n) => [n, n]), "(runs its own token)",
+  ui._borrowPreset =
     (seed.borrow !== undefined && seed.borrow !== null) ? seed.borrow :
-      (re.borrow || ""));
+      (re.borrow || "");
+  fillValidatedBorrow(
+    ui.borrow, { options: [] }, `(as ${parent} authenticates)`, ""
+  );
   fillSpawnSelect(ui.role, roleNames.map((r) => [r, r]), "(no role)",
     (seed.role !== undefined && seed.role !== null) ? seed.role :
       (re.role || ""));
@@ -12455,7 +12595,7 @@ async function spawnModalLoad(st) {
     [].concat(meshNames.map((n) => [n, n]), [["-", "(none) — no mesh"]]),
     "(inherit the parent's mesh)",
     // Inherit is the DEFAULT, not merely an option: the row now opens the way
-    // Harness, Profile and Directory do. Naming the parent's mesh outright is
+    // Profile and Directory do. Naming the parent's mesh outright is
     // the same answer only while the parent is in one mesh, and it spells that
     // answer into the payload — which takes the choice away from
     // daemon/onboard.py inherit_mesh, the one place that knows the rule.
@@ -12538,6 +12678,8 @@ async function spawnModalLoad(st) {
   syncSpawnGates(ui);
   st.lastWfAuto = refillSpawnWorkflows(ui, seed.role || re.role || ui.role.value, "").auto;
   syncSpawnGates(ui);
+  await refreshSpawnBorrowOptions(st, true);
+  if (spawnModal !== st) return;
   // The child cap no longer shuts the button, so the tick no longer opens
   // it: what is left in `capped` is spawning switched off and the depth
   // ceiling, and neither of those is a thing a checkbox waives. The button
@@ -12554,7 +12696,7 @@ async function spawnModalLoad(st) {
   });
 
   // The choices that re-gate their neighbours:
-  ui.profile.addEventListener("change", () => syncSpawnGates(ui));
+  ui.profile.addEventListener("change", () => refreshSpawnBorrowOptions(st, true));
   ui.nullTok.addEventListener("change", () => syncSpawnGates(ui));
   ui.wtMode.listen(() => syncSpawnGates(ui));
   ui.wtPick.addEventListener("change", () => syncSpawnGates(ui));
