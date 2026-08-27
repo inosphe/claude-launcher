@@ -1323,14 +1323,31 @@ def test_the_indirect_list_is_whole_rather_than_capped(repo, capsys):
     assert f"NOTE: {len(named)} test module(s)" in out
 
 
-def test_nothing_is_claimed_when_no_module_is_one_hop_out(repo, capsys):
-    """The note must be absent, not empty: a block that always prints teaches
-    people to scroll past it."""
+def test_both_caveats_are_stated_even_when_they_are_empty(repo, capsys):
+    """A clean run says both caveats in words rather than by printing nothing.
+
+    An absent block cannot be quoted, and it carries two readings a landing
+    request has to keep apart: "swept, found nothing" and "this build of the
+    tool has no such check". Removing that ambiguity is the whole reason the
+    two caveats exist, so they must not reintroduce it in the common case.
+    This session hit it from the reader's side -- asked for the two lines, it
+    paraphrased the absent blocks to merger-r5 as if they were tool output
+    (2026-08-27).
+
+    The earlier rule here, that the note is absent rather than empty, is
+    reversed on purpose. What it was protecting -- a block people learn to
+    scroll past -- is answered by keeping the empty form to one line while the
+    loud form stays a multi-line block with a filename in it.
+    """
     _write(repo, "src/pkg/mesh.py", "x = 2\n")
     _git(repo, "commit", "-qam", "edit a module with a twin and no facade")
 
     assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
-    assert "were NOT selected" not in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "map to at least one test module." in out
+    assert "no test module sits one import hop outside this selection." in out
+    assert "WARNING" not in out
+    assert "were NOT selected" not in out
 
 
 # ------------------------------------------------------------------ streams
@@ -1355,6 +1372,11 @@ def test_the_caveats_go_where_the_verdict_goes(repo, capsys):
     assert "were NOT selected" in captured.out
     assert "map to no test module" not in captured.err
     assert "were NOT selected" not in captured.err
+    # One form per caveat per run. The positive line stands in for the
+    # block, so printing both would put a claim next to the
+    # counterexample that contradicts it.
+    assert "map to at least one test module" not in captured.out
+    assert "no test module sits one import hop outside" not in captured.out
 
 
 # ------------------------------------------- the runner's own scratch (62yg)

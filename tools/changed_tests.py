@@ -155,6 +155,13 @@ either side hashes to something else and abstains. That is the right answer,
 not a limitation -- a reviewer looking at a different tree than the one that
 was judged has no verdict, and should say so.
 
+**Both caveats are stated either way.** "Nothing went unmapped" and "nothing
+sits one hop out" are printed as lines rather than left as absent blocks,
+because an absent block also means "this build has no such check" -- and the
+two readings are the difference between a swept axis and one nobody ran. The
+gate exists to keep exactly that pair apart, so it should not reproduce it in
+its own output.
+
 **stdout carries the verdict and its caveats; stderr carries only this
 tool's own trouble.** See :data:`STREAMS`, which ``--help`` prints. The two
 caveats -- paths no rule could map, and modules one hop past rule 2b -- are
@@ -1266,6 +1273,15 @@ def main(argv: Optional[list] = None) -> int:
             "guards them, add it to EXPLICIT_GUARDS in this file. If the "
             "change is broad, ask the leader for a full sweep."
         )
+    else:
+        # Said out loud, because the alternative is saying it by staying
+        # silent -- and silence here is indistinguishable from a build of
+        # this tool that had no such check. A landing request has to carry
+        # this line either way; it should be able to quote it rather than
+        # infer it from an absent block (merger-r5, 2026-08-27).
+        print(
+            f"all {len(paths)} changed path(s) map to at least one test module."
+        )
 
     hops = reached_indirectly(repo, paths, files)
     if hops:
@@ -1285,6 +1301,8 @@ def main(argv: Optional[list] = None) -> int:
             "cannot hide the module that actually guards the change "
             "(claunch-a9t). Judge it, or run one of them by hand."
         )
+    else:
+        print("no test module sits one import hop outside this selection.")
 
     if not files:
         print(
