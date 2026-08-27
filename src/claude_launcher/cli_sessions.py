@@ -567,6 +567,41 @@ def _print_onboarding(result: dict) -> None:
         print("  opening task will be typed in once it settles")
 
 
+def _rebrief_unavailable(name: str, exc: Exception) -> str:
+    """What a session hears when its re-briefing could not be fetched.
+
+    Same shape as the block it replaces, and deliberately so: the agent has
+    just lost the conversation-carried half of what it knew, and a bare error
+    line does not tell it that. This says which half is missing, that the
+    daemon -- not the session -- is what failed, and the one command that
+    fixes it once the daemon answers again.
+
+    It does not restate parent/mesh/run/task: every one of those is read from
+    the daemon, and the daemon is what could not be reached. Guessing them
+    from the environment would put stale answers in front of an agent that
+    cannot tell them from fresh ones.
+    """
+    return "\n".join(
+        [
+            "---",
+            "# claunch rebrief: unavailable -- machine-generated",
+            f"session: {name}",
+            "what happened: your context was compacted or cleared, and the "
+            "re-briefing that restores the derived half of it could not be "
+            f"fetched -- the daemon did not answer ({exc}).",
+            "what is missing: who is reachable on your mesh, which replies "
+            "you owe, where your cflow run stands, your parent and children, "
+            "and your opening task. None of it is in this conversation any "
+            "more.",
+            "protocol: do not carry on as if the summary above were complete. "
+            "Run `claunch rebrief` again -- it is the same command and it "
+            "will answer once the daemon is back. If it keeps failing, say so "
+            "rather than guessing at the missing state.",
+            "---",
+        ]
+    )
+
+
 def _cmd_rebrief(args: argparse.Namespace) -> int:
     """Print a session's re-briefing — the SessionStart hook's whole job.
 
@@ -576,6 +611,11 @@ def _cmd_rebrief(args: argparse.Namespace) -> int:
     with nothing to be told prints nothing there. The aside goes to stderr,
     for the human running it by hand: silence would read as the command
     failing, when it is the answer.
+
+    An unreachable daemon is the one failure answered on stdout rather than
+    raised (:func:`_rebrief_unavailable`): a hook that fires once, at the
+    moment the context was lost, has no second chance, and an error the agent
+    never sees leaves it working from a summary it believes is complete.
     """
     name = args.session or os.environ.get("CLAUNCH_SESSION")
     if not name:
@@ -585,8 +625,26 @@ def _cmd_rebrief(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
-    client = daemon_client.ensure_running()
-    block = client.get(f"/api/sessions/{name}/rebrief").get("block") or ""
+    try:
+        client = daemon_client.ensure_running()
+        block = client.get(f"/api/sessions/{name}/rebrief").get("block") or ""
+    except DaemonClientError as exc:
+        # The one failure that costs something. This command is a hook, it
+        # fires exactly once, and the moment it fires is the moment the
+        # session's derived context has just been squeezed or thrown away --
+        # so a daemon that cannot be reached here is not a retry away, it is
+        # a re-briefing the session never gets. Observed: s167, 2026-08-26
+        # 13:19:27Z, 'daemon did not come up within 15s', 21 seconds after
+        # its compaction, and nothing told it.
+        #
+        # The answer goes to STDOUT, because stdout is the half claude reads
+        # back into context and stderr is not: an error the agent cannot see
+        # is the same as no error at all. Exit 0 for the same reason a hook
+        # is declared non-blocking -- failing the hook does not un-compact
+        # anything, and a session that at least knows what it is missing can
+        # ask for it again.
+        print(_rebrief_unavailable(name, exc))
+        return 0
     if not block:
         print(
             f"(nothing to re-brief for {name!r}: no mesh membership, no cflow "
