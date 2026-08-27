@@ -117,7 +117,12 @@ option:disabled { color: #6b7280; }
 .dot.busy { background: #d29922; }
 .dot.starting { background: #58a6ff; }
 .dot.exited { background: #6e7681; }
-#session-list .meta { color: #7d8590; font-size: 11px; margin-left: auto; flex: none; }
+#session-list .meta { color: #7d8590; font-size: 11px; margin-left: auto; flex: none;
+  max-width: 42%; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* The meta line grew: an exited row's identity now stays on the line instead
+   of being replaced by "exit N", a borrow names the lender, and the two read
+   "identity · state". 42% of the rail row is the same budget the name gets
+   from the other side, and the full text rides the element's title (railMetaText). */
 /* The name and the two tags that qualify it, as one group.
 
    The row (`li`) wraps, because the cflow line and the briefing card below it

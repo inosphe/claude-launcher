@@ -146,7 +146,7 @@ new Function(
   + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags")
   + slice("shortenPath") + slice("cwdSplit") + slice("cwdShort")
   + slice("cwdLine") + slice("railCwdLine")
-  + slice("profileHarnessLabel") + slice("refreshSessions")
+  + slice("profileHarnessLabel") + slice("railMetaText") + slice("refreshSessions")
   + slice("sessHead")
   + `
 Object.assign(exports, {

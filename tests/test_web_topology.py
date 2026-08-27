@@ -139,7 +139,13 @@ whole path stays a hover away, the line is a full-width child of the row
 placed under the name and before the gauge, and the detail panel's head
 carries the same line under its name in every arrangement (the Details
 list's ``directory`` row is seven rows down and absent from the Workflow
-tab) — and ``detailsplit_check`` on the docked detail rail's width: the drag bar
+tab) — ``railprofile_check`` on the row's meta line, WHO the session runs
+as: the profile (harness fallback, ``PROFILE/HARNESS`` canonical form) plus
+a borrow's lender when one is borrowed, with the state — "exit N", or
+"winding down" — joined to the identity instead of replacing it (an exited
+row used to say only its exit code), the stylesheet cap that keeps the
+longer line off the name, and the full text recoverable from the element's
+title — and ``detailsplit_check`` on the docked detail rail's width: the drag bar
 opposite the session list's, which resizes the ``#sess-view`` column once it
 docks and is carried with it and hidden on a phone, and ``railhome_check``
 on the rail's own wordmark, which doubles as the link back to the root
@@ -307,6 +313,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "reports_check.js",
         "sesscommits_check.js",
         "sesstask_check.js",
+        "railprofile_check.js",
     ],
 )
 def test_topology_diagram_logic(script):

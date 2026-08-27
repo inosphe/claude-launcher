@@ -428,6 +428,25 @@ function releaseRail() {
   if (railRedrawPending) setTimeout(refreshSessions, 0);
 }
 
+/* What a rail row's meta line says: the identity, then the state.
+
+   The line used to draw either — an exited row said "exit 1" and kept the
+   profile that had run there to itself, and a borrowed token was never
+   named on the rail at all. State is a sentence about the same session, so
+   it joins the identity instead of replacing it, in the order the rest of
+   the UI reads one (status · identity, the pair the header uses at
+   app.js:6022): first who it is, then what became of it. The stylesheet
+   caps the line and the full text rides the element's title. */
+function railMetaText(s) {
+  const identity = s.borrow
+    ? `${profileHarnessLabel(s.profile, s.harness)} → ${s.borrow}`
+    : profileHarnessLabel(s.profile, s.harness);
+  const state = s.status === "exited"
+    ? `exit ${s.exit_code ?? "?"}`
+    : s.winddown ? "winding down" : "";
+  return [identity, state].filter(Boolean).join(" · ");
+}
+
 async function refreshSessions() {
   let data;
   try {
@@ -505,10 +524,10 @@ async function refreshSessions() {
     }
     const meta = document.createElement("span");
     meta.className = "meta";
-    meta.textContent = s.status === "exited"
-      ? `exit ${s.exit_code ?? "?"}`
-      : s.winddown ? "winding down"
-      : profileHarnessLabel(s.profile, s.harness);
+    meta.textContent = railMetaText(s);
+    // The cap clips the line when the identity runs long against the rail;
+    // the whole of it stays one hover away, the same recovery the name has.
+    meta.title = meta.textContent;
     if (s.winddown) {
       li.title = [li.title, "being ended — settling its board issues first; " +
         "kill again to stop now"].filter(Boolean).join(" · ");

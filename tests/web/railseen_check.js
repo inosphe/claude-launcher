@@ -136,7 +136,7 @@ new Function(
   + slice("shortenPath") + slice("cwdSplit") + slice("cwdShort")
   + slice("cwdLine") + slice("railCwdLine") + slice("ctxRailLine")
   + slice("seenAgo") + slice("seenPair") + slice("railSeenLine")
-  + slice("profileHarnessLabel") + slice("refreshSessions")
+  + slice("profileHarnessLabel") + slice("railMetaText") + slice("refreshSessions")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,

@@ -163,7 +163,8 @@ new Function(
   "exports", "document", "el", "api", "list", "meshCache",
   stubs + capLine[0] + "\n"
   + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags")
-  + slice("profileHarnessLabel") + slice("refreshSessions")
+  + slice("profileHarnessLabel") + slice("railMetaText")
+  + slice("refreshSessions")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,
