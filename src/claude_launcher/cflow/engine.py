@@ -575,7 +575,12 @@ def _open_ask(
     group = from_group
     while group < len(candidates):
         candidate = candidates[group]
-        found, reason = reach.match(candidate)
+        # The one call that passes `autowire`. This is the moment a question
+        # is actually being put to somebody, so it is the moment a candidate's
+        # `connect: true` is allowed to have the effect it declares; the
+        # preview (`_delegation_preview`) reads the same pool and must not
+        # change it.
+        found, reason = reach.match(candidate, autowire=True)
         if found:
             asked = [r.to_dict() for r in found]
             break
@@ -606,7 +611,20 @@ def _open_ask(
         "skipped": skipped,
         "opened_at": state_mod.utcnow(),
         "deadline": _deadline(delegate.timeout) if asked else None,
+        # Edges this ask made for itself, because a candidate declared
+        # `connect: true`. Recorded on the ask rather than left to the mesh:
+        # the member graph stores an edge, not who decided it, and a leader
+        # who wires reviewers apart on purpose needs to be able to tell an
+        # edge a workflow produced from one they chose.
+        **({"wired": list(reach.wired)} if reach.wired else {}),
     }
+    if reach.wired:
+        state_mod.journal(
+            "ask_wired",
+            {"run": state["run_id"], "ask": ask["id"], "step": step.id,
+             "mesh": reach.mesh, "to": list(reach.wired)},
+            cwd,
+        )
     if found:
         # Announcing it is the last thing, and the least load-bearing: the
         # question is already recorded and answerable without the message.
@@ -1494,6 +1512,9 @@ def delegation_check(
         }
         reasons = []
         for candidate in delegate.candidates:
+            # No `autowire`: this reports what the run resolves to, and a
+            # report that rewired the mesh to make itself come out better
+            # would be a different thing than a report.
             found, reason = reach.match(candidate)
             if found:
                 entry["resolves"] = [r.handle for r in found]

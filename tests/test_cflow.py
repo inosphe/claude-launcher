@@ -140,6 +140,19 @@ steps:
     instructions: ship it
 """
 
+#: What the default arrangement needs: `cut` is not an accident here, it is
+#: how a spawned worker starts (wired to its parent alone), so without the
+#: declaration this group is empty every round.
+ASK_CONNECT = """
+steps:
+  ship:
+    ask:
+      prompt: ship it?
+      from: [{role: reviewer, connect: true}, {role: leader}]
+      otherwise: self
+    instructions: ship it
+"""
+
 ASK_SELF = """
 steps:
   ship:
@@ -217,7 +230,7 @@ def _driving_session(monkeypatch, name="driver"):
     monkeypatch.setenv(state_mod.SESSION_ENV, name)
 
 
-def _mesh(monkeypatch, *members, parent=None, cut=(), local=True):
+def _mesh(monkeypatch, *members, parent=None, cut=(), local=True, patched=None):
     """Stand in for the daemon roster read. ``members`` are (role, session).
 
     The driving session is handle ``dev1``; each member becomes the handle
@@ -252,6 +265,7 @@ def _mesh(monkeypatch, *members, parent=None, cut=(), local=True):
                 for m in roster[1:]
             ],
         },
+        patched=patched,
     )
     monkeypatch.setattr(responders, "deliver", lambda ask, **kw: None)
 
@@ -1291,8 +1305,13 @@ def _member(handle, session, role, parent=None, local=True):
     }
 
 
-def _roster(monkeypatch, *meshes, fail=None):
-    """Answer `GET /api/mesh` with these mesh_info documents."""
+def _roster(monkeypatch, *meshes, fail=None, patched=None, patch_fail=None):
+    """Answer `GET /api/mesh` with these mesh_info documents.
+
+    ``patched`` collects any PATCH — the wiring a candidate's ``connect: true``
+    does — so a test can assert on the edges a match made as well as on the
+    ones it did not.
+    """
 
     class FakeClient:
         def get(self, path, **kw):
@@ -1308,6 +1327,13 @@ def _roster(monkeypatch, *meshes, fail=None):
 
         def post(self, path, body, **kw):
             return {}
+
+        def patch(self, path, body=None, **kw):
+            if patched is not None:
+                patched.append((path, body))
+            if patch_fail:
+                raise daemon_client.DaemonClientError(patch_fail)
+            return {"enabled": True}
 
     _stub_connect(monkeypatch, daemon_client, FakeClient)
 
@@ -1493,6 +1519,188 @@ def test_a_remote_match_is_skipped_with_that_reason(monkeypatch):
     assert "another daemon has no access to this run's state" in reason
 
 
+# --------------------------------------------------------------------------- #
+# responders: a candidate that wires the edge it is missing
+#
+# The default arrangement is what this covers: a spawned session is wired to
+# its parent and to nobody else, so a worker cannot reach a sibling reviewer
+# and its peer-review group is empty every round unless a person wires it by
+# hand. `connect: true` is the declaration that makes that edge instead of
+# skipping the group.
+# --------------------------------------------------------------------------- #
+#: dev1 is spawned by lead1; rev1 holds `reviewer` and is NOT wired to dev1.
+UNWIRED = {
+    "name": "team",
+    "members": [
+        _member("dev1", "dev1", "worker", parent="lead1"),
+        _member("rev1", "rev1", "reviewer", parent="lead1"),
+        _member("lead1", "lead1", "leader"),
+    ],
+    "member_links": _links(("dev1", "lead1", True)),
+}
+
+
+def _connector(role, **kw):
+    return model.Candidate(role=role, connect=True, **kw)
+
+
+def test_a_declared_candidate_wires_the_edge_and_then_matches(monkeypatch):
+    """The whole point: the role is held, the edge is missing, and the group
+    resolves anyway — with the handle recorded as one the run wired."""
+    patched = []
+    _roster(monkeypatch, UNWIRED, patched=patched)
+    found = responders.pool(session="dev1")
+    assert "rev1" not in found.reachable  # the state every round starts in
+
+    hit, reason = found.match(_connector("reviewer"), autowire=True)
+    assert reason is None and [r.handle for r in hit] == ["rev1"]
+    assert patched == [("/api/mesh/team/members/dev1/links/rev1", {"enabled": True})]
+    # No `actor`: naming one would apply the session-tree check (a worker may
+    # only wire what it spawned) that this path exists to stand outside of.
+    assert "actor" not in patched[0][1]
+    # ...and the run knows which edges it made, because the mesh's own table
+    # stores an edge without storing who decided it.
+    assert found.wired == ["rev1"]
+
+
+def test_without_the_declaration_the_missing_edge_is_still_a_skip(monkeypatch):
+    """Nothing changes for a candidate that did not ask for this. The skip and
+    its hand-wiring advice are what a workflow gets by default."""
+    patched = []
+    _roster(monkeypatch, UNWIRED, patched=patched)
+    hit, reason = responders.pool(session="dev1").match(
+        _candidate("reviewer"), autowire=True
+    )
+    assert hit == [] and patched == []
+    assert "rev1 holds it but dev1 is not wired to them" in reason
+    assert "claunch mesh connect dev1 rev1" in reason
+
+
+def test_a_preview_says_the_edge_is_coming_without_making_it(monkeypatch):
+    """Reading who *would* answer must stay a read.
+
+    `_delegation_preview` runs at start time, possibly an hour before the
+    step, and reports the resolution to a person standing there. A report that
+    rewired the mesh to make itself come out better is a different thing than
+    a report — so the note tells the reader the edge is coming rather than
+    sending them to add it by hand.
+    """
+    patched = []
+    _roster(monkeypatch, UNWIRED, patched=patched)
+    hit, reason = responders.pool(session="dev1").match(_connector("reviewer"))
+    assert hit == [] and patched == []
+    assert "the edge is made when the question is actually opened" in reason
+
+
+def test_wiring_cannot_invent_a_responder(monkeypatch):
+    """No member holds the role, so there is nothing to wire to and the
+    reason is the one it always was. `connect` closes a gap in reachability,
+    never one in the roster."""
+    patched = []
+    _roster(monkeypatch, UNWIRED, patched=patched)
+    hit, reason = responders.pool(session="dev1").match(
+        _connector("auditor"), autowire=True
+    )
+    assert hit == [] and patched == []
+    assert "no member of mesh 'team' holds that role" in reason
+
+
+def test_wiring_never_reaches_a_session_this_run_spawned(monkeypatch):
+    """The property the module rests on survives the new key.
+
+    A run can spawn a child and can wire itself to one, so its descendants are
+    excluded from the pool before anything here runs. `connect` operates on
+    what `eligible` returned, so a candidate whose only holder is the run's own
+    child still matches nobody — a run cannot manufacture its approver.
+    """
+    patched = []
+    _roster(
+        monkeypatch,
+        {
+            "name": "team",
+            "members": [
+                _member("dev1", "dev1", "worker", parent="lead1"),
+                _member("kid1", "kid1", "reviewer", parent="dev1"),
+                _member("lead1", "lead1", "leader"),
+            ],
+            "member_links": _links(("dev1", "lead1", True)),
+        },
+        patched=patched,
+    )
+    hit, reason = responders.pool(session="dev1").match(
+        _connector("reviewer"), autowire=True
+    )
+    assert hit == [] and patched == []
+    assert "sessions this run spawned itself are never candidates" in reason
+
+
+@pytest.mark.parametrize("overrides", [{"reachability": "exited"}, {"local": False}])
+def test_an_unanswerable_holder_is_not_wired_to(monkeypatch, overrides):
+    """An edge to a member that cannot answer buys nothing and outlives the
+    run that made it, so only the answerable are wired."""
+    patched = []
+    _roster(
+        monkeypatch,
+        {
+            **UNWIRED,
+            "members": [
+                _member("dev1", "dev1", "worker", parent="lead1"),
+                {**_member("rev1", "rev1", "reviewer", parent="lead1"), **overrides},
+                _member("lead1", "lead1", "leader"),
+            ],
+        },
+        patched=patched,
+    )
+    hit, reason = responders.pool(session="dev1").match(
+        _connector("reviewer"), autowire=True
+    )
+    assert hit == [] and patched == []
+    assert "is not wired to them" in reason
+
+
+def test_a_wiring_that_did_not_take_says_so_in_the_reason(monkeypatch):
+    """The failure is the useful half for whoever reads the skip: "add the
+    edge by hand" is the wrong instruction when the attempt was made."""
+    patched = []
+    _roster(monkeypatch, UNWIRED, patched=patched, patch_fail="mesh is read-only")
+    hit, reason = responders.pool(session="dev1").match(
+        _connector("reviewer"), autowire=True
+    )
+    assert hit == [] and len(patched) == 1
+    assert "the edge could not be made: rev1: mesh is read-only" in reason
+
+
+def test_the_wiring_is_attempted_once_and_does_not_re_adjudicate(monkeypatch):
+    """Bounded by construction: one daemon call per matched member, and no
+    path back into `match` from its own result.
+
+    A second group naming the same role finds the member reachable in the
+    pool's own updated snapshot rather than calling the daemon again — which
+    is also why an ask with two reviewer groups cannot fan out into a loop.
+    """
+    patched = []
+    _roster(monkeypatch, UNWIRED, patched=patched)
+    found = responders.pool(session="dev1")
+    for _ in range(3):
+        hit, reason = found.match(_connector("reviewer"), autowire=True)
+        assert reason is None and [r.handle for r in hit] == ["rev1"]
+    assert len(patched) == 1
+    assert found.wired == ["rev1"]  # recorded once, not once per look
+
+
+def test_scope_still_decides_who_is_eligible_before_any_wiring(monkeypatch):
+    """`scope: ancestor` and `connect` compose without contradicting: the
+    scope decides who is eligible, and only then is reachability considered.
+    A non-ancestor holder is still nobody, edge or no edge."""
+    patched = []
+    _roster(monkeypatch, UNWIRED, patched=patched)
+    hit, reason = responders.pool(session="dev1").match(
+        _connector("reviewer", scope=model.SCOPE_ANCESTOR), autowire=True
+    )
+    assert hit == [] and patched == []
+    assert "no session above dev1" in reason
+
+
 def test_an_exited_match_is_skipped_as_exited(monkeypatch):
     gone = {
         "name": "team",
@@ -1540,6 +1748,10 @@ steps:
         ("{role: leader, up: 1}", "unknown key"),    # so is the hop range
         ("{role: leader, scope: sideways}", "scope"),
         ("{role: '', scope: any}", "needs a 'role'"),
+        # Not coerced: 'connect: no' read as a truthy string would turn the
+        # opt-in inside out, and this key adds a mesh edge when it is on.
+        ("{role: leader, connect: 'no'}", "'connect' must be true or false"),
+        ("{role: leader, connect: 1}", "'connect' must be true or false"),
     ],
 )
 def test_bad_candidates_are_rejected(entry, match):
@@ -1553,6 +1765,38 @@ steps:
 """
     with pytest.raises(WorkflowError, match=match):
         model.parse(bad)
+
+
+def test_a_candidate_declares_its_own_wiring():
+    """`connect` is per candidate, and off unless the file says otherwise.
+
+    Per candidate because the answer differs per candidate: a peer review
+    wants the reviewer reached however the tree happens to be wired, while a
+    decision reserved for the chain of command must not manufacture a path to
+    somebody it cannot already reach. One key beside `otherwise` could not say
+    both.
+    """
+    text = """
+steps:
+  ship:
+    ask:
+      prompt: ok?
+      from:
+        - {role: reviewer, connect: true}
+        - {role: leader, scope: ancestor}
+    instructions: ship
+"""
+    wants, chain = model.parse(text).steps["ship"].ask.delegate.candidates
+    assert (wants.role, wants.connect) == ("reviewer", True)
+    assert (chain.role, chain.scope, chain.connect) == ("leader", "ancestor", False)
+    # `describe` feeds payloads, skip reasons and the dashboard's delegation
+    # column, so the declaration has to be visible in the one line they read.
+    assert wants.describe() == "reviewer (connect)"
+    assert chain.describe() == "leader (ancestor)"
+    assert model.Candidate(
+        role="leader", scope="ancestor", connect=True
+    ).describe() == "leader (ancestor, connect)"
+    assert model.Candidate(role="reviewer").describe() == "reviewer"
 
 
 def test_the_two_axes_are_independent():
@@ -1686,6 +1930,100 @@ def test_ask_withholds_the_step_until_a_responder_answers(flow_dir, monkeypatch)
     payload = engine.next_step()
     assert payload["status"] == "step"
     assert payload["instructions"].strip() == "ship it"
+
+
+def test_an_ask_wires_itself_to_the_reviewer_it_could_not_reach(
+    flow_dir, monkeypatch
+):
+    """End to end, on the arrangement this exists for.
+
+    A reviewer holds the role and is not wired to the driver — the state a
+    spawned worker is in every round unless a person wires it by hand. Without
+    the declaration the first group is skipped and the question falls to the
+    next one; with it, the edge is made and the reviewer is asked.
+    """
+    patched = []
+    _driving_session(monkeypatch)
+    _mesh(
+        monkeypatch,
+        ("reviewer", "rev"),
+        ("leader", "boss"),
+        cut=("reviewer-rev",),
+        patched=patched,
+    )
+    _write(flow_dir, "askflow", ASK_CONNECT)
+    engine.start("askflow")
+
+    payload = engine.status()
+    assert payload["status"] == "waiting_answer"
+    ask = payload["ask"]
+    assert [e["handle"] for e in ask["asked"]] == ["reviewer-rev"]
+    assert not ask["skipped"], "the first group resolved, so nothing was skipped"
+    assert ask["group"] == 0, "the leader was never reached for"
+    assert patched == [
+        ("/api/mesh/team/members/dev1/links/reviewer-rev", {"enabled": True})
+    ]
+
+    # The edge is attributed to the run that made it. The mesh's own table
+    # stores an edge without storing who decided it, and a leader who wires
+    # reviewers apart on purpose has to be able to tell the two apart.
+    assert ask["wired"] == ["reviewer-rev"]
+    wired = [e for e in state_mod.read_journal() if e["event"] == "ask_wired"]
+    assert len(wired) == 1
+    assert wired[0]["to"] == ["reviewer-rev"] and wired[0]["mesh"] == "team"
+    assert wired[0]["step"] == "ship" and wired[0]["ask"] == ask["id"]
+
+    # ...and it is a real ask, answerable by the session it reached.
+    engine.answer(ask["id"], "approve", "read the diff", by_session="rev")
+    assert engine.next_step()["status"] == "step"
+
+
+def test_the_same_flow_without_the_declaration_falls_to_the_next_group(
+    flow_dir, monkeypatch
+):
+    """The control. Same roster, same cut, `connect` off — the reviewer group
+    is skipped for want of an edge and the leader takes the decision, which is
+    how the peer-review door came to be answered by the session that also
+    receives the landing request."""
+    patched = []
+    _driving_session(monkeypatch)
+    _mesh(
+        monkeypatch,
+        ("reviewer", "rev"),
+        ("leader", "boss"),
+        cut=("reviewer-rev",),
+        patched=patched,
+    )
+    _write(flow_dir, "askflow", ASK_TWO_GROUPS)
+    engine.start("askflow")
+
+    ask = engine.status()["ask"]
+    assert [e["handle"] for e in ask["asked"]] == ["leader-boss"]
+    assert ask["group"] == 1
+    assert "is not wired to them" in ask["skipped"][0]["reason"]
+    assert patched == [] and "wired" not in ask
+
+
+def test_an_ask_that_could_not_wire_reports_the_failure_it_hit(
+    flow_dir, monkeypatch
+):
+    """A wiring that did not take must not read as "nobody holds the role" or
+    as "go and add the edge by hand" — both send the reader somewhere else."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("reviewer", "rev"), ("leader", "boss"), cut=("reviewer-rev",))
+    monkeypatch.setattr(
+        responders, "wire", lambda mesh, me, other: "mesh is read-only"
+    )
+    _write(flow_dir, "askflow", ASK_CONNECT)
+    engine.start("askflow")
+
+    ask = engine.status()["ask"]
+    assert [e["handle"] for e in ask["asked"]] == ["leader-boss"]
+    assert "wired" not in ask
+    assert (
+        "the edge could not be made: reviewer-rev: mesh is read-only"
+        in ask["skipped"][0]["reason"]
+    )
 
 
 def test_a_run_cannot_answer_its_own_ask(flow_dir, monkeypatch):

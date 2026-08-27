@@ -414,14 +414,28 @@ class Candidate:
     minus itself and everything below it in the spawn tree. ``scope`` narrows
     that pool to the session's own ancestors when only the chain of command
     will do.
+
+    ``connect`` says what to do when the role is held by somebody this run is
+    not wired to. Off (the default), the group is skipped with that as its
+    reason — the wiring is a human's to add. On, the edge is made for the run
+    and the candidate is matched again. It is declared per candidate because
+    the answer differs per candidate: a peer review wants the reviewer reached
+    however the tree happens to be wired, while a decision reserved for the
+    chain of command should not manufacture a path to somebody it cannot
+    already reach.
     """
 
     role: str
     scope: str = SCOPE_ANY
+    connect: bool = False
 
     def describe(self) -> str:
         """One line for a payload, a message or an error — never parsed."""
-        return self.role if self.scope == SCOPE_ANY else f"{self.role} ({self.scope})"
+        notes = [n for n in (
+            "" if self.scope == SCOPE_ANY else self.scope,
+            "connect" if self.connect else "",
+        ) if n]
+        return f"{self.role} ({', '.join(notes)})" if notes else self.role
 
 
 @dataclass(frozen=True)
@@ -1180,10 +1194,11 @@ def _parse_candidate(raw, where: str) -> Candidate:
             f"{where} must be a mapping naming a role, like {{role: reviewer}} "
             f"or {{role: leader, scope: ancestor}}, got {raw!r}"
         )
-    unknown = sorted(set(raw) - {"role", "scope"})
+    unknown = sorted(set(raw) - {"role", "scope", "connect"})
     if unknown:
         raise WorkflowError(
-            f"{where} has unknown key(s): {', '.join(unknown)} (allowed: role, scope)"
+            f"{where} has unknown key(s): {', '.join(unknown)} "
+            f"(allowed: role, scope, connect)"
         )
     role = str(raw.get("role") or "").strip().lower()
     if not role:
@@ -1205,7 +1220,16 @@ def _parse_candidate(raw, where: str) -> Candidate:
             f"({SCOPE_ANY} = anyone reachable that this run did not spawn, "
             f"{SCOPE_ANCESTOR} = its own chain of command only)"
         )
-    return Candidate(role=role, scope=scope)
+    connect = raw.get("connect", False)
+    if not isinstance(connect, bool):
+        # Not coerced: 'connect: no' read as a truthy string would turn the
+        # opt-in inside out, and this key adds a mesh edge when it is on.
+        raise WorkflowError(
+            f"{where}: 'connect' must be true or false, got {connect!r} "
+            f"(true = wire this run to a session that holds the role but is "
+            f"not reachable, instead of skipping the candidate)"
+        )
+    return Candidate(role=role, scope=scope, connect=connect)
 
 
 def _parse_delegate(raw, where: str) -> Delegate:

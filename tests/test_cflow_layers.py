@@ -255,6 +255,46 @@ def test_the_worker_rebases_onto_the_target_before_a_request():
         )
 
 
+def _peer_review_candidates(path_or_text):
+    return model.load(path_or_text).steps["peer-review"].select.delegate.candidates
+
+
+def test_peer_review_wires_itself_to_the_reviewer_it_cannot_reach():
+    """The reviewer group must not be empty by default.
+
+    A spawned session is wired to its parent and to nobody else, so a worker
+    cannot reach a sibling reviewer: the first group is skipped for want of an
+    edge and the decision falls to the leader — the same session that receives
+    the landing request, which is what this door exists to happen before. The
+    declaration makes the edge rather than skipping the group.
+
+    The second group must NOT carry it. Landing is an authority decision and
+    is held to `scope: ancestor`; building a path out of the run's own chain
+    of command is the thing that scope refuses.
+    """
+    bundled = dict(state_mod.bundled_workflows())
+    reviewer, leader = _peer_review_candidates(bundled["improv-worker"])
+
+    assert (reviewer.role, reviewer.connect) == ("reviewer", True)
+    assert (leader.role, leader.scope) == ("leader", "ancestor")
+    assert leader.connect is False, (
+        "a decision reserved for the chain of command must not manufacture a "
+        "path to somebody outside it"
+    )
+
+    prose = model.load(bundled["improv-worker"]).steps["peer-review"].select.prompt
+    assert prose, "the peer-review prompt is what the responder reads"
+
+
+def test_the_project_override_carries_the_peer_review_wiring():
+    """This repository's override shadows the bundled worker, so a run here
+    follows the project file — the declaration has to survive the layer or the
+    fix is only true for repositories that have no override."""
+    reviewer, leader = _peer_review_candidates(PROJECT_OVERRIDES / "improv-worker.yaml")
+    assert (reviewer.role, reviewer.connect) == ("reviewer", True)
+    assert leader.connect is False
+
+
 def test_the_project_override_worker_requests_through_a_rebase():
     """This repository's override must carry the rebase-before-request
     routing of the bundled worker it shadows — a run here that follows the
