@@ -106,6 +106,7 @@ function sessMigrate() { return el("div", "sess-migrate"); }
 function rolePanels() { return []; }
 function sessBeads() { return el("div", "sess-beads"); }
 function sessCommits() { return el("div", "sess-commits"); }
+function sessTask() { return el("div", "sess-task"); }
 function go() {}
 `;
 

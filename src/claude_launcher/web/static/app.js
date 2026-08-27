@@ -10466,6 +10466,75 @@ function sessRailTabs(name) {
   return bar;
 }
 
+/* What this session was asked to do, in the words it was asked in.
+
+   The record was always there — `SessionDef.task`, kept so a re-briefing can
+   restate the job after a compaction (daemon/harness.py) — and it rides every
+   session payload the daemon serves. One place read it: the rail row's
+   one-liner, and only as the fallback for when no LLM briefing exists, cut to
+   a single line. The whole of it was drawn nowhere, and "what was this
+   session started for" is the question this panel gets opened with more often
+   than any single fact in the list above it.
+
+   Drawn as typed, not as markdown: an opening task is instructions, usually a
+   list, and the renderer would eat the characters that carry them.
+
+   A long one is clipped rather than dropped — the briefing, the send box and
+   the board all sit under this, and a twenty-line brief would push them off
+   the rail — with a toggle for the whole of it. That toggle's state is held
+   in a set outside the panel, like the rail's briefing cards, because the 2s
+   poll rebuilds every node in here: state kept on the node itself would fold
+   shut under the reader's hand two seconds after they opened it.
+
+   Empty is drawn rather than hidden. A session a person opened by hand has no
+   task and that is the ordinary case, so a section that appeared only
+   sometimes would read as one that failed to load. */
+const sessTaskOpen = new Set();   // session names whose task is unfolded
+
+/* Long enough to be worth folding. Lines first, characters as the backstop
+   for a task typed as one unbroken paragraph — either way the question is how
+   much of the rail the section takes, not what the task says. */
+function taskIsLong(text) {
+  return text.split("\n").length > 8 || text.length > 480;
+}
+
+function sessTask(s) {
+  const box = el("div", "sess-task");
+  const head = el("h3", null, "Opening task");
+  head.title =
+    "what this session was opened with, recorded at creation — the live " +
+    "copy was typed in once, on its first spawn, and is never replayed";
+  box.appendChild(head);
+  const text = String(s.task || "");
+  if (!text.trim()) {
+    box.appendChild(el(
+      "p", "wf-note",
+      "no opening task recorded — a session opened by hand often has none"
+    ));
+    return box;
+  }
+  const name = s.name || "";
+  const open = sessTaskOpen.has(name);
+  const long = taskIsLong(text);
+  box.appendChild(el(
+    "pre", "sess-task-text" + (long && !open ? " clipped" : ""), text
+  ));
+  if (long) {
+    const more = el("button", "wf-btn option sess-task-more",
+                    open ? "Show less" : "Show all");
+    more.title = open
+      ? "fold it back to its first lines"
+      : `the whole task — ${text.split("\n").length} lines`;
+    more.addEventListener("click", () => {
+      if (open) sessTaskOpen.delete(name);
+      else sessTaskOpen.add(name);
+      refreshSession();   // redraw now, not at the poll's leisure
+    });
+    box.appendChild(more);
+  }
+  return box;
+}
+
 function renderSession(data) {
   const view = $("sess-view");
   const s = data.session || {};
@@ -10563,6 +10632,12 @@ function renderSession(data) {
     metaRow(dl, "exited", `${(s.exited_at || "").replace("T", " ")} (code ${s.exit_code ?? "?"})`);
   }
   view.appendChild(dl);
+
+  // What it was asked to do, in the words it was asked in. Above the
+  // briefing because the briefing is a reading OF this — the summary says
+  // what the session has made of the job, and comparing the two is only
+  // possible with the original in front of you.
+  view.appendChild(sessTask(s));
 
   // What this session is DOING, next to the facts above: the llm summary,
   // fetched on first open and repainted by the 2s poll, with the card's own
