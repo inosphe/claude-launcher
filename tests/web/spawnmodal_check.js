@@ -165,7 +165,7 @@ new Function(
   + slice("spawnMeshNow") + slice("spawnWtFragment")
   + slice("spawnAutoWorktree") + slice("spawnAutoWorktreeHint")
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
-  + slice("profileBorrowCapability") + slice("readBorrowOptions")
+  + slice("baseProfileName") + slice("profileBorrowCapability") + slice("readBorrowOptions")
   + slice("fillValidatedBorrow") + slice("syncSpawnGates") + slice("syncSpawnBeads")
   + slice("spawnPayload")
   + slice("spawnReport") + slice("spawnPreflightNote")
