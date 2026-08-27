@@ -36,6 +36,7 @@ from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
 from . import mesh_roles
+from . import restart_gate
 from . import restart_notice
 from .harness import CLAUDE_HARNESS, HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
@@ -104,12 +105,14 @@ async def error_middleware(request: web.Request, handler):
         if exc.retry_after:
             resp.headers["Retry-After"] = str(int(exc.retry_after))
         return resp
-    except (SessionGone, MeshConflict, LockBusy, KeyboardHeld) as exc:
+    except (SessionGone, MeshConflict, LockBusy, KeyboardHeld, restart_gate.GateBusy) as exc:
         # LockBusy is transient by construction (the other writer is mid-
         # transition), so it gets a retryable status, not a flat 400.
         # KeyboardHeld is transient in the same way, and for the most human
         # reason there is: somebody is typing there and the keys were not
-        # sent. Both want the caller to come back, not to give up.
+        # sent. Both want the caller to come back, not to give up. GateBusy
+        # is the same shape: one restart gate, and a second asker must wait
+        # for the first request to be settled before it may ask.
         return json_error(409, str(exc))
     except (
         ManagerError,
@@ -156,6 +159,7 @@ def build_app(
     relay_state=None,
     shell: "clipty.ShellPty | None" = None,
     beads: "beads_mod.Board | None" = None,
+    gate_timeout: float = restart_gate.GATE_TIMEOUT,
 ) -> web.Application:
     cookie_sessions: set = set()
     # Identifies this daemon *process*, and is handed out by /api/health (which
@@ -191,6 +195,8 @@ def build_app(
     #: Whether the shutdown now in progress should spawn a successor. Read by
     #: ``__main__`` after the loop drains — the handler only marks intent.
     app["restart_requested"] = False
+    #: The approval gate the agent path waits behind; see restart_gate.
+    app["restart_gate"] = restart_gate.RestartGate(app, timeout=gate_timeout)
     app["websockets"] = set()
     # Open terminal sockets never close on their own; without this, runner
     # cleanup waits its shutdown timeout for every browser tab left open.
@@ -211,6 +217,12 @@ def build_app(
     r.add_get("/api/daemon", h_daemon_info)
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
     r.add_post("/api/daemon/restart", h_daemon_restart)
+    # The approval gate for agent-requested restarts (see
+    # :mod:`restart_gate`): one request, its state, and the two settlements.
+    r.add_get("/api/daemon/restart-request", h_restart_request_get)
+    r.add_post("/api/daemon/restart-request", h_restart_request_submit)
+    r.add_post("/api/daemon/restart-request/approve", h_restart_request_approve)
+    r.add_post("/api/daemon/restart-request/reject", h_restart_request_reject)
     r.add_get("/api/profiles", h_profiles)
     r.add_get("/api/borrow-options", h_borrow_options)
     r.add_get("/api/roles", h_roles)
@@ -484,6 +496,51 @@ async def h_daemon_restart(request: web.Request) -> web.Response:
     loop = asyncio.get_running_loop()
     loop.call_later(0.1, request.app["shutdown_event"].set)
     return web.json_response({"ok": True, "restarting": True})
+
+
+async def h_restart_request_get(request: web.Request) -> web.Response:
+    """The gate's current state: the pending request, the last settled one,
+    or nothing. Polled by the web UI's notification card and by the asking
+    CLI, whose two readers are exactly the two parties of the gate."""
+    return web.json_response({"request": request.app["restart_gate"].get()})
+
+
+async def h_restart_request_submit(request: web.Request) -> web.Response:
+    """Open the gate on behalf of one session.
+
+    Called by the CLI when it has recognized its shell as a managed session
+    (``CLAUNCH_SESSION``) — the daemon cannot see the caller's environment,
+    so the session travels in the body and the CLI is the one that decided it
+    was an agent asking. ``GateBusy`` (a request already pending) escapes to
+    the middleware and comes back as 409.
+    """
+    body = await _json_body(request)
+    session = str(body.get("session") or "").strip()
+    if not session:
+        return json_error(400, "session is required")
+    record = request.app["restart_gate"].submit(session=session)
+    return web.json_response({"ok": True, "request": record})
+
+
+async def h_restart_request_approve(request: web.Request) -> web.Response:
+    """The web UI's Approve: settle the gate and restart — the same intent
+    and event as ``/api/daemon/restart``, minus one difference the gate owns:
+    the request is recorded with the asking session's name, so the successor
+    daemon owes that session the account of the boot."""
+    record = request.app["restart_gate"].approve(decided_by="web")
+    if record is None:
+        return json_error(409, "no pending restart request")
+    return web.json_response({"ok": True, "restarting": True, "request": record})
+
+
+async def h_restart_request_reject(request: web.Request) -> web.Response:
+    """The web UI's Reject: settle the gate and restart nothing. The asking
+    session's turn is alive (nothing died), and its CLI poll reads the
+    settled record from here."""
+    record = request.app["restart_gate"].reject(decided_by="web")
+    if record is None:
+        return json_error(409, "no pending restart request")
+    return web.json_response({"ok": True, "rejected": True, "request": record})
 
 
 async def h_profiles(request: web.Request) -> web.Response:

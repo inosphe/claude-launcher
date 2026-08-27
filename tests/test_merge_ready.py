@@ -161,8 +161,58 @@ def repo(tmp_path_factory):
         _write(path, f"more{n}.py", f"z = {n}\n")
         _commit(path, f"far: target moved {n}")
 
+    # The tree the merge would run in. Three files with three fates: the
+    # merge rewrites `written.py`, creates `made.py`, and never touches
+    # `untouched.py` -- which is what makes the negative controls below
+    # possible at all.
+    _git(path, "checkout", "-q", "--orphan", "tree-target")
+    _git(path, "rm", "-rqf", "--ignore-unmatch", ".")
+    _write(path, "written.py", "x = 1\n")
+    _write(path, "untouched.py", "y = 1\n")
+    _commit(path, "tree: root")
+    # Behind the target, clean merge: this one gets the "re-measure" verdict,
+    # and it is there so the tree check can be watched on a branch the gate
+    # is NOT passing. It has to fork from the same root as the target -- two
+    # orphan histories have no merge base, and the tree check would answer
+    # "cannot tell" for a reason that has nothing to do with what is dirty.
+    _git(path, "checkout", "-q", "-b", "tree-branch")
+    _write(path, "written.py", "x = 2\n")
+    _write(path, "made.py", "z = 1\n")
+    _commit(path, "tree: branch work")
+    _git(path, "checkout", "-q", "tree-target")
+    _write(path, "theirs.py", "t = 1\n")
+    _commit(path, "tree: target moved")
+    # Forked from the same root and colliding with the target's move: this
+    # one gets the "rebase" verdict, the other not-ready code the leader
+    # reads. Both sides add `theirs.py` with different contents.
+    _git(path, "branch", "-q", "tree-conflict", "tree-branch")
+    _git(path, "checkout", "-q", "tree-conflict")
+    _write(path, "theirs.py", "t = 'mine'\n")
+    _commit(path, "tree: conflicting work")
+    _git(path, "checkout", "-q", "tree-target")
+
+    # Ready on every check above the tree one: this is the branch the old
+    # gate answered 0 for while the merge could not start.
+    _git(path, "checkout", "-q", "-b", "tree-aligned")
+    _write(path, "written.py", "x = 2\n")
+    _write(path, "made.py", "z = 1\n")
+    _commit(path, "tree: aligned work")
+
     _git(path, "checkout", "-q", "master")
+
+    # A second checkout, sitting on the target -- the shape this repository is
+    # actually in: one tree with master checked out, many sessions sharing it.
+    _git(path, "worktree", "add", "-q", str(path.parent / "tree-checkout"), "tree-target")
     return path
+
+
+@pytest.fixture
+def checkout_tree(repo):
+    """The worktree on ``tree-target``, handed back clean after each test."""
+    where = repo.parent / "tree-checkout"
+    yield where
+    _git(where, "checkout", "-q", "--", ".")
+    _git(where, "clean", "-qfd")
 
 
 def _run(repo, *argv) -> int:
@@ -521,3 +571,500 @@ def test_an_explicit_repo_survives_the_lookup_failing(
     monkeypatch.setattr(checkout, "own_checkout", boom)
     code, out = _verdict(wt, capsys)
     assert code == merge_ready.READY, out
+
+
+# --------------------------------------------------------------------------- #
+# the tree the merge runs in
+#
+# Everything above asks about two commits. A merge happens in a working tree,
+# and git refuses to start one whose result would write a file that tree is
+# dirty on -- no conflict, nothing the branch's owner can fix, and the gate
+# used to answer 0 straight through it. It bit two consecutive integration
+# rounds in this repository (board
+# ``claunch-merge-ready-dirty-checkout-7w7g``), found by hand both times.
+#
+# The refusal rule these pin was measured, not assumed (git 2.48.1): a merge
+# that updates ``a.py`` is refused when ``a.py`` is locally modified, runs
+# when an untouched ``b.py`` is modified, is refused when an untracked file
+# sits where the merge would create one, and is refused even when the local
+# edit is byte-identical to what the merge would write. So the predicate is a
+# path-set intersection and nothing else.
+# --------------------------------------------------------------------------- #
+def test_a_dirty_file_the_merge_writes_stops_a_branch_that_is_otherwise_ready(
+    repo, checkout_tree, capsys
+):
+    """The positive control, and the whole reason this option exists.
+
+    ``tree-branch`` is aligned -- the target never moved, so every check above
+    this one passes and the old gate answered ``0``. The merge cannot start.
+    """
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert code == merge_ready.DIRTY_CHECKOUT, out
+    assert "written.py" in out
+    # the branch side really was ready: this is not a rebase or a re-measure
+    assert "ready: aligned" in out
+
+
+def test_an_untracked_file_in_the_way_stops_it_too(repo, checkout_tree, capsys):
+    """git refuses on untracked files as well, with a different message.
+
+    Reading only tracked modifications would pass this, and the merge would
+    still be refused -- ``The following untracked working tree files would be
+    overwritten by merge``.
+    """
+    _write(checkout_tree, "made.py", "something else\n")
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert code == merge_ready.DIRTY_CHECKOUT, out
+    assert "made.py" in out
+
+
+def test_a_dirty_file_the_merge_never_touches_is_not_in_the_way(
+    repo, checkout_tree, capsys
+):
+    """First negative control: dirty is not the question, *which files* is.
+
+    A gate that answered ``4`` for any dirty tree would be useless here --
+    this repository's shared checkout is almost never completely clean.
+    """
+    _write(checkout_tree, "untouched.py", "y = LOCAL\n")
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert code == merge_ready.READY, out
+    assert "untouched.py" not in out
+    # rule 1 of claunch-peyn: the empty answer carries its denominator, so
+    # "nothing blocked" cannot be confused with "nothing was looked at"
+    assert "0 of 2 blocked" in out
+    assert "1 dirty entry" in out
+
+
+def test_the_workers_own_dirty_worktree_does_not_change_the_verdict(
+    repo, checkout_tree, capsys
+):
+    """Second negative control, and the one that decides the default.
+
+    This same script is the worker's alignment gate, run from the worker's
+    own worktree -- which is dirty *because the worker is working*. If the
+    tree check were on by default, every worker in the mesh would be answered
+    ``4`` for doing its job and the step this gate exists to open would never
+    open. The same tree, the same dirt, the same branch: the only difference
+    is the flag.
+    """
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+
+    without = _verdict(
+        checkout_tree, capsys, "--branch", "tree-aligned", "--target", "tree-target"
+    )
+    assert without[0] == merge_ready.READY, without[1]
+    assert "dirty" not in without[1]
+
+    with_flag = _verdict(
+        checkout_tree,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert with_flag[0] == merge_ready.DIRTY_CHECKOUT, with_flag[1]
+
+
+def test_the_live_shape_only_the_overlapping_files_are_named(
+    repo, checkout_tree, capsys
+):
+    """Third negative control: the condition that was actually standing.
+
+    The round this was filed in had another session holding 19 uncommitted
+    entries in the checkout master sits in, of which four were files the
+    pending merge writes. What the gate has to do there is name those four
+    and not the other fifteen -- a verdict that dumped the whole dirty list
+    would send the reader after files nobody has to touch.
+    """
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+    _write(checkout_tree, "made.py", "in the way\n")
+    _write(checkout_tree, "untouched.py", "y = LOCAL\n")
+    _write(checkout_tree, "unrelated.py", "nobody cares\n")
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert code == merge_ready.DIRTY_CHECKOUT, out
+    assert "2 of 2" in out
+    assert "4 dirty entry" in out
+    assert "written.py" in out and "made.py" in out
+    assert "untouched.py" not in out and "unrelated.py" not in out
+
+
+def test_the_tree_is_found_from_the_target_when_no_path_is_given(
+    repo, checkout_tree, capsys
+):
+    """``--checkout`` bare: git knows which worktree holds the target.
+
+    Passing a path means the caller is remembering where the target lives,
+    and that memory is the thing that goes stale -- master moves between
+    checkouts and an integration branch is often checked out nowhere at all.
+    """
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        merge_ready.DERIVE_FROM_TARGET,
+    )
+    assert code == merge_ready.DIRTY_CHECKOUT, out
+    assert "written.py" in out
+
+
+def test_a_target_no_checkout_holds_is_not_measured_and_does_not_pass(repo, capsys):
+    """No worktree on the target: the check did not run, so it is not green.
+
+    This answered ``READY`` first, with "no working tree can refuse this
+    merge", and that sentence claims more than was measured -- a tree that
+    does not hold the target *now* can be switched onto it later and refuse
+    then. Rule 3 of ``claunch-peyn`` is the one that settles it: a check that
+    did not run does not count towards a green, and the count of what did not
+    run belongs in the output.
+
+    The denominator survives the change (rule 1): "none of N worktree(s)"
+    says how many were examined to reach the empty answer.
+    """
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "aligned-branch",
+        "--target",
+        "aligned-target",
+        "--checkout",
+        merge_ready.DERIVE_FROM_TARGET,
+    )
+    assert code == merge_ready.CANNOT_TELL, out
+    assert "worktree(s) has aligned-target checked out" in out
+    assert "none of 2" in out
+    # and it says what would answer it, rather than only what it could not do
+    assert "--checkout <path>" in out
+
+
+def test_a_merge_that_writes_nothing_needs_no_tree(repo, capsys):
+    """The one case where a missing checkout really is a pass, measured.
+
+    ``landed-branch`` is already inside its target, so the merge writes no
+    files at all -- and a merge that writes nothing cannot be refused by any
+    working tree, whether or not one is standing on the target. Separating
+    this from the case above keeps the honest ``2`` from firing on every
+    already-landed branch, which is common enough that folding the two would
+    make the verdict noise.
+    """
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "landed-branch",
+        "--target",
+        "landed-target",
+        "--checkout",
+        merge_ready.DERIVE_FROM_TARGET,
+    )
+    assert code == merge_ready.READY, out
+    assert "writes 0 files" in out
+
+
+def test_removing_the_worktree_changes_the_answer_on_the_same_commits(
+    repo, checkout_tree, capsys
+):
+    """This verdict is a function of live trees, not of commits.
+
+    Every other answer this gate gives is decided by two commits, so quoting
+    one later is quoting something that is either still true or visibly stale
+    from the hashes. This one is decided by who is standing where and what
+    they have not committed, so the same code and the same two commits give
+    different answers minutes apart. Measured in the real repository during
+    the round this was written: ``4``, then ``0``, because a worktree was
+    removed in between.
+
+    The test pins the property rather than a remedy, because there is no
+    remedy -- what it demands is that a ``checkout:`` line be cited with the
+    time it was printed.
+    """
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+    blocked, blocked_out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert blocked == merge_ready.DIRTY_CHECKOUT, blocked_out
+
+    _git(checkout_tree, "checkout", "-q", "--", ".")
+    cleared, cleared_out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert cleared == merge_ready.READY, cleared_out
+
+
+def test_a_checkout_that_is_not_one_is_refused_rather_than_passed(
+    repo, tmp_path, capsys
+):
+    """Rule 2 of ``claunch-peyn``: an input it cannot read is not a pass.
+
+    The cheap failure here would be an unreadable path producing an empty
+    dirty set and therefore an empty intersection -- exit ``0``, output
+    indistinguishable from a clean tree.
+    """
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(tmp_path / "no-such-tree"),
+    )
+    assert code == merge_ready.CANNOT_TELL, out
+    assert "not a git checkout" in out
+
+
+def test_a_not_ready_verdict_keeps_its_code_and_still_reports_the_tree(
+    repo, checkout_tree, capsys
+):
+    """A conflict is still a conflict, and the dirty tree still gets said.
+
+    The two are independent problems with different owners: the branch's
+    owner fixes the conflict, and only the session holding the uncommitted
+    work can clear the tree. Holding the tree finding back until the branch
+    side happens to be ready would rebuild the delay this whole option exists
+    to remove -- both times the gap bit, the cost was the hours between the
+    gate answering and somebody running ``git status`` on a hunch.
+    """
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-branch",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert code == merge_ready.REMEASURE, out
+    assert "also, the working tree this merge would run in" in out
+    assert "written.py" in out
+    assert "second, independent problem" in out
+
+
+def test_the_note_beside_a_not_ready_verdict_is_never_an_empty_heading(
+    repo, checkout_tree, capsys
+):
+    """A clean tree and an unexamined tree must not print the same thing.
+
+    The note prints a heading and then what it found, and the heading is on
+    stdout. So a body that went to stderr -- or that was empty because there
+    was nothing to say -- would leave a reader with a heading and nothing
+    under it, which reads as a tree that was examined and found clean. That
+    is rule 1 of ``claunch-peyn`` (an empty answer carries its denominator)
+    landing one step away from where it was first fixed.
+
+    Three states, three outputs: not asked -> no heading at all; asked and
+    clean -> the heading and a count out of a total; asked and blocked ->
+    the heading and the files.
+    """
+    not_asked = _verdict(
+        repo, capsys, "--branch", "tree-branch", "--target", "tree-target"
+    )
+    assert not_asked[0] == merge_ready.REMEASURE, not_asked[1]
+    assert "also, the working tree" not in not_asked[1]
+
+    # asked, and the tree is clean: still says so, with the denominator
+    clean = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-branch",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert clean[0] == merge_ready.REMEASURE, clean[1]
+    assert "also, the working tree" in clean[1]
+    assert "blocked" in clean[1]
+    assert "0 dirty entry" in clean[1]
+
+
+def test_every_answer_the_tree_check_can_give_says_something(repo, checkout_tree):
+    """No route through the tree check returns without a line to print.
+
+    The property the test above pins for one route, held for all of them:
+    the pair of line lists is never both empty, so the heading can never be
+    the whole output.
+    """
+    tip = _git(repo, "rev-parse", "tree-aligned").strip()
+    cases = [
+        (str(checkout_tree), "tree-target"),  # a real tree
+        (merge_ready.DERIVE_FROM_TARGET, "tree-target"),  # found from the target
+        (merge_ready.DERIVE_FROM_TARGET, "aligned-target"),  # held by no tree
+        (str(repo / "not-a-tree"), "tree-target"),  # unreadable
+    ]
+    for where, target in cases:
+        _code, out, err = merge_ready._checkout_check(
+            repo, where, "tree-aligned", target, tip
+        )
+        assert out or err, f"{where} / {target} answered with nothing"
+
+
+def test_a_conflict_keeps_exit_three_and_the_tree_check_says_it_cannot_answer(
+    repo, checkout_tree, capsys
+):
+    """The other not-ready code: ``3`` stays ``3``, and the tree check says why
+    it has nothing.
+
+    Measured, and not what was expected when this test was written. A
+    conflicting merge has no result tree, so "which files would this merge
+    write" has no answer for it -- the check cannot be run here at all,
+    however dirty the tree is. What matters is that it says so instead of
+    printing nothing: a silent note under its own heading would read as a
+    tree that was examined and found clean, which is the exact defect this
+    whole option was written against.
+    """
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-conflict",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert code == merge_ready.REBASE, out
+    assert "also, the working tree this merge would run in" in out
+    assert "could not work out which files the merge writes" in out
+    assert "reports the merge conflicts" in out
+
+
+def test_the_five_checkout_answers_are_all_distinguishable_in_the_record(
+    repo, checkout_tree
+):
+    """Every state this check can reach leaves a different record.
+
+    The exit code is not enough on its own: two of these five are ``0`` and
+    two are ``2``, and that is correct -- ``0`` means the merge can start and
+    ``2`` means this gate did not measure it, whatever the reason. What must
+    not collapse is the *record*, because that is what somebody reads back
+    later when they are asking why a green was green.
+
+    The shape of the question comes from ``claunch-64hs`` (worker-64hs, this
+    round): a red-because-the-write-failed receipt and a red-because-it-was-
+    always-red receipt came out byte-identical, so the gate answered both the
+    same way and the only trace of the difference was a warning on stderr --
+    which the gate does not read and which dies with the terminal. Checking
+    "does it go green" would not have found that; checking "do the two
+    records differ" is what found it.
+
+    Limit, stated rather than papered over: this gate writes no file, so its
+    whole record is the exit code and the printed lines. There is no
+    persisted artifact to compare byte-for-byte the way 64hs could, and
+    nothing here pins what a *reader* does with the lines.
+    """
+    tip = _git(repo, "rev-parse", "tree-aligned").strip()
+    seen = {}
+
+    def record(label, where, target):
+        code, out, err = merge_ready._checkout_check(
+            repo, where, "tree-aligned", target, tip
+        )
+        seen[label] = (code, "\n".join(out + err))
+
+    # 1. a tree holds the target and is dirty on a file the merge writes
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+    record("found-dirty", str(checkout_tree), "tree-target")
+
+    # 2. the same tree, clean
+    _git(checkout_tree, "checkout", "-q", "--", ".")
+    record("found-clean", str(checkout_tree), "tree-target")
+
+    # 3. no tree holds the target, and the merge does write files
+    record("absent-writes", merge_ready.DERIVE_FROM_TARGET, "aligned-target")
+
+    # 4. no tree holds the target, and the merge writes nothing
+    landed = _git(repo, "rev-parse", "landed-branch").strip()
+    code, out, err = merge_ready._checkout_check(
+        repo, merge_ready.DERIVE_FROM_TARGET, "landed-branch", "landed-target", landed
+    )
+    seen["absent-empty"] = (code, "\n".join(out + err))
+
+    # 5. a path was named and it is not a checkout at all
+    record("not-a-checkout", str(repo / "nowhere"), "tree-target")
+
+    assert seen["found-dirty"][0] == merge_ready.DIRTY_CHECKOUT, seen["found-dirty"]
+    assert seen["found-clean"][0] == merge_ready.READY, seen["found-clean"]
+    assert seen["absent-writes"][0] == merge_ready.CANNOT_TELL, seen["absent-writes"]
+    assert seen["absent-empty"][0] == merge_ready.READY, seen["absent-empty"]
+    assert seen["not-a-checkout"][0] == merge_ready.CANNOT_TELL, seen["not-a-checkout"]
+
+    texts = {label: text for label, (_code, text) in seen.items()}
+    for label, text in texts.items():
+        assert text.strip(), f"{label} left no record at all"
+    assert len(set(texts.values())) == len(texts), (
+        "two states left the same record: "
+        + repr({k: v[:80] for k, v in texts.items()})
+    )
+
+    # and the two pairs that share an exit code say which is which in words,
+    # since the code alone cannot carry it
+    assert "blocked" in texts["found-clean"]
+    assert "writes 0 files" in texts["absent-empty"]
+    assert "none of" in texts["absent-writes"]
+    assert "not a git checkout" in texts["not-a-checkout"]

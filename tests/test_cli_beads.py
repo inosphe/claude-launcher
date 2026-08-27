@@ -215,3 +215,145 @@ def test_the_cli_registers_the_subcommand():
     ns = cli.build_parser().parse_args(["beads", "ready", "--json"])
     assert ns.args == ["ready", "--json"]
     assert ns.func is cli_beads._cmd
+
+
+# --------------------------------------------------------------------------- #
+# --status: the one value the passthrough checks
+#
+# ``br`` matches a ``--status`` value literally without comparing it to any
+# vocabulary, so an unknown one is not an error: the filter answers
+# ``total: 0`` with exit 0, and a write stores it and drops the issue out
+# of every status filter and out of ``ready``. "I could not read your
+# question" and "there is nothing" arrive identical (claunch-6s1h).
+# --------------------------------------------------------------------------- #
+STATUS_ARG_FORMS = [
+    (["list", "--status", "in_review"], ["in_review"]),
+    (["list", "--status=in_review"], ["in_review"]),
+    (["list", "-s", "in_review"], ["in_review"]),
+    (["list", "-sin_review"], ["in_review"]),
+    (["list", "-s=in_review"], ["in_review"]),
+    (["list", "--status", "open", "--status", "blocked"], ["open", "blocked"]),
+    (["list", "--json"], []),
+    # after a bare ``--`` everything is a positional, not a flag
+    (["search", "--", "--status", "open"], []),
+    # a value that merely contains the word is not a flag
+    (["list", "--desc-contains", "--status open"], []),
+]
+
+
+@pytest.mark.parametrize("args,expected", STATUS_ARG_FORMS)
+def test_the_status_values_are_read_out_of_every_spelling(args, expected):
+    assert cli_beads.status_values(args) == expected
+
+
+def test_a_comma_list_is_refused_and_the_message_names_the_working_form():
+    """The shape the workflows kept writing. ``br`` reads it as one status
+    nothing is in, so the board's own orphan check answered 'no orphans'
+    when it had 2 (claunch-6s1h)."""
+    with pytest.raises(cli_beads.BeadsError) as exc:
+        cli_beads.check_statuses(["list", "--status", "in_progress,in_review"])
+    message = str(exc.value)
+    assert "in_progress,in_review" in message
+    assert "repeated flag" in message
+    assert "--status open --status in_progress" in message
+
+
+def test_a_space_separated_list_is_refused_the_same_way():
+    with pytest.raises(cli_beads.BeadsError, match="repeated flag"):
+        cli_beads.check_statuses(["list", "--status", "in_progress in_review"])
+
+
+def test_an_unknown_status_is_refused_and_the_valid_ones_are_named():
+    """The control that established the mechanism: a name that is not a
+    status at all, with no comma to blame."""
+    with pytest.raises(cli_beads.BeadsError) as exc:
+        cli_beads.check_statuses(["list", "--status", "bogus_status"])
+    message = str(exc.value)
+    assert "bogus_status" in message
+    for status in cli_beads.STATUSES:
+        assert status in message
+
+
+def test_the_repeated_flag_form_is_what_passes(tmp_path):
+    """The only multi-status spelling ``br`` actually implements."""
+    root = tmp_path / "r"
+    (cmd,) = cli_beads.plan(
+        ["list", "--status", "in_progress", "--status", "in_review", "--json"],
+        root, actor=None, db_exists=True, jsonl_exists=True,
+    )
+    assert cmd[3:] == [
+        "list", "--status", "in_progress", "--status", "in_review", "--json"
+    ]
+
+
+def test_a_typo_on_the_write_path_never_reaches_br(tmp_path):
+    """The expensive half: ``br update --status in_reviw`` returns 0 and
+    stores the typo, after which the issue is in no status filter and in
+    no ``ready`` list. The refusal happens in ``plan``, so nothing runs."""
+    with pytest.raises(cli_beads.BeadsError, match="in_reviw"):
+        cli_beads.plan(
+            ["update", "claunch-1", "--status", "in_reviw"],
+            tmp_path / "r", "s1", db_exists=True, jsonl_exists=True,
+        )
+
+
+def test_the_refusal_is_exit_2_with_the_message_on_stderr(monkeypatch, capsys):
+    monkeypatch.setattr(cli_beads.shutil, "which", lambda name: r"C:\bin\br.exe")
+    ns = type("NS", (), {"args": ["list", "--status", "in_progress,in_review"]})()
+    assert cli_beads._cmd(ns) == 2
+    err = capsys.readouterr().err
+    assert "unknown status" in err and "repeated flag" in err
+
+
+# --------------------------------------------------------------------------- #
+# the vocabulary's two sources — a hardcoded list that goes stale silently
+# would be the same defect this check exists to stop
+# --------------------------------------------------------------------------- #
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
+def test_every_status_on_the_tracked_board_is_in_the_vocabulary():
+    """Source one: the board itself. ``.beads/issues.jsonl`` is tracked, so
+    a status somebody wrote onto the board is visible here."""
+    import json
+
+    jsonl = _repo_root() / ".beads" / "issues.jsonl"
+    if not jsonl.is_file():
+        pytest.skip("no tracked board in this checkout")
+    seen = set()
+    for line in jsonl.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            status = json.loads(line).get("status")
+        except ValueError:
+            continue
+        if status:
+            seen.add(status)
+    assert seen <= set(cli_beads.STATUSES), (
+        f"the board holds statuses the wrapper would refuse: "
+        f"{sorted(seen - set(cli_beads.STATUSES))}"
+    )
+
+
+def test_every_status_the_canon_workflows_name_is_in_the_vocabulary():
+    """Source two: the transition rules. A workflow that prescribes a
+    ``--status`` the wrapper refuses would make the prescription fail at
+    exit 2 — the loud half of the same defect, but still a defect."""
+    import re
+
+    canon = _repo_root() / "src" / "claude_launcher" / "workflows"
+    if not canon.is_dir():
+        pytest.skip("no packaged workflows in this checkout")
+    pattern = re.compile(r"--status[ =]([A-Za-z_,]+)")
+    seen = set()
+    for path in sorted(canon.glob("*.yaml")):
+        for value in pattern.findall(path.read_text(encoding="utf-8")):
+            seen.add(value)
+    unknown = sorted(v for v in seen if v not in cli_beads.STATUSES)
+    assert not unknown, (
+        f"the canon workflows prescribe --status values the wrapper "
+        f"refuses: {unknown}"
+    )

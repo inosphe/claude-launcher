@@ -247,17 +247,22 @@ def test_a_path_no_rule_can_map_is_reported_not_silently_skipped(repo, capsys):
 
     A gate that answers "nothing guards this" and "I could not work out what
     guards this" with the same green exit teaches people that green means
-    checked. So unmappable paths are named on stderr, with what to do next.
+    checked. So unmappable paths are named, with what to do next.
+
+    On **stdout**, with the selection: a landing procedure that split the
+    streams was reading stdout alone, which put this list where nobody looked
+    -- and unread spells the same as absent, which is the thing this case
+    exists to prevent. See :data:`changed_tests.STREAMS`.
     """
     _write(repo, "assets/logo.bin", "\x00\x01\n")
     _git(repo, "add", "-A")
     _git(repo, "commit", "-qam", "add an asset nothing guards")
 
     assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
-    err = capsys.readouterr().err
-    assert "assets/logo.bin" in err
-    assert "not that they are fine" in err
-    assert "EXPLICIT_GUARDS" in err  # says how to fix it, not just that
+    out = capsys.readouterr().out
+    assert "assets/logo.bin" in out
+    assert "not that they are fine" in out
+    assert "EXPLICIT_GUARDS" in out  # says how to fix it, not just that
 
 
 def test_the_search_term_is_a_filename_not_an_english_word():
@@ -294,12 +299,173 @@ def test_a_very_short_stem_does_not_drag_in_the_whole_directory(repo):
 
 
 def test_a_source_module_with_no_test_selects_nothing_rather_than_guessing(repo):
-    """The convention holds for 31 of 79 modules here, so it has to be allowed
+    """The convention holds for 47 of 107 modules here, so it has to be allowed
     to miss. Widening is the only thing it may do; inventing a filename that
-    does not exist would make the gate fail on its own guess."""
+    does not exist would make the gate fail on its own guess.
+
+    Nothing imports ``lonely`` and nothing names it, so rules 2b and 2c are
+    silent too -- which is the point: they widen where there is a written
+    relationship to read, and stay quiet where there is none.
+    """
     _write(repo, "src/pkg/lonely.py", "x = 2\n")
     _git(repo, "commit", "-qam", "edit a module with no twin")
     assert _select(repo) == []
+
+
+# ---------------------------------------------------------------- rule 2b/2c
+#
+# Rule 2 alone maps a source file to its same-named test and stops there.
+# Four rounds measured what that misses -- :func:`changed_tests.importers`
+# carries the table -- and these pin the shape of each one.
+
+
+def test_a_module_with_no_twin_is_still_reached_by_whoever_imports_it(repo):
+    """The ``cflow_clock`` case: no ``tests/test_cflow_clock.py`` exists, so
+    rule 2 selected nothing, the gate ran nothing, and it exited 0. Ten test
+    modules import that file."""
+    _seed_on_base(repo, {"tests/test_lonely_guard.py": "from pkg.lonely import thing\n"})
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with no twin")
+    assert _select(repo) == ["tests/test_lonely_guard.py"]
+
+
+def test_a_module_with_a_twin_also_pulls_in_its_other_importers(repo):
+    """The ``daemon/mesh`` case, and the only one of the four that cost
+    something: the twin was selected and passed, while ``test_mesh_wire.py``
+    -- which imports the same module and pins the strings it writes -- was
+    not selected and held three real failures."""
+    _seed_on_base(repo, {"tests/test_mesh_wire.py": "from pkg.mesh import send\n"})
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit the source")
+    assert _select(repo) == ["tests/test_mesh.py", "tests/test_mesh_wire.py"]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from pkg.lonely import thing",
+        "from pkg import lonely",
+        "import pkg.lonely",
+        "import pkg.lonely as short",
+    ],
+)
+def test_every_spelling_of_the_import_reaches_the_module(repo, statement):
+    """A test reaches a module by any of these and the dependency is the same.
+    Recording only one spelling would make the selection depend on the
+    author's habit, which is the naming convention's mistake again."""
+    _seed_on_base(repo, {"tests/test_importer.py": statement + "\n"})
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with no twin")
+    assert "tests/test_importer.py" in _select(repo)
+
+
+def test_importing_a_sibling_is_not_importing_this_one(repo):
+    """The negative half of 2b. A rule that selected every test importing
+    anything from the package would pass every test above and be worthless."""
+    _seed_on_base(repo, {"tests/test_sibling.py": "from pkg.mesh import send\n"})
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with no twin")
+    assert "tests/test_sibling.py" not in _select(repo)
+
+
+def test_the_import_graph_is_not_followed_past_the_test(repo):
+    """2b reads what a test imports, not what those imports reach.
+
+    The transitive closure was measured on this suite before the bound was
+    chosen: it selects a median of 1054 of 2489 tests -- 42% of the suite for
+    the median source module, and 25% or more for 92 of the 107 of them. That
+    is the leader's full sweep wearing the worker's name, and it would end the
+    only thing this gate is for. The cost of the bound is this test's subject:
+    a test that reaches the changed module only through another module is
+    genuinely missed, and that is a documented limit rather than an oversight.
+    """
+    _seed_on_base(
+        repo,
+        {
+            "src/pkg/middle.py": "from pkg.lonely import thing\n",
+            "tests/test_middle.py": "from pkg.middle import thing\n",
+        },
+    )
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with no twin")
+    assert _select(repo) == []
+
+
+def test_a_guard_that_names_the_file_without_importing_it_is_reached(repo):
+    """Rule 2c. ``test_delivery_contract`` keys a table on
+    ``("cli_sessions.py", "_cmd_send_keys")`` and imports nothing from it --
+    an import graph alone cannot see that, and it is a real guard."""
+    _seed_on_base(
+        repo,
+        {"tests/test_contract.py": 'PINS = {("cli_sessions.py", "_cmd_send"): "x"}\n'},
+    )
+    _write(repo, "src/pkg/cli_sessions.py", "x = 2\n")
+    assert "tests/test_contract.py" in _select(repo)
+
+
+def test_a_tools_script_is_reached_by_name_since_it_has_no_module_path(repo):
+    """``tools/`` is not importable under a package name -- its tests load it
+    with ``spec_from_file_location`` -- so 2b returns nothing for it by
+    construction and 2c is what speaks."""
+    _seed_on_base(repo, {"tests/test_runs_the_script.py": 'SCRIPT = "tools/merge_ready.py"\n'})
+    _write(repo, "tools/merge_ready.py", "x = 2\n")
+    assert "tests/test_runs_the_script.py" in _select(repo)
+
+
+def test_a_package_init_is_reached_by_whoever_imports_the_package(repo):
+    """``src/pkg/__init__.py`` is named by its *package*, which is what a test
+    writes when it imports from it."""
+    _seed_on_base(
+        repo,
+        {"src/pkg/__init__.py": "", "tests/test_pkg_user.py": "from pkg import mesh\n"},
+    )
+    _write(repo, "src/pkg/__init__.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit the package init")
+    assert "tests/test_pkg_user.py" in _select(repo)
+
+
+def test_a_package_init_does_not_drag_in_every_test_that_defines_a_class(repo):
+    """Why :func:`changed_tests._is_dunder` exists. 2c's search term for
+    ``__init__.py`` is the stem ``__init__``, which is not a reference to
+    anything -- in this repository it appears in 35 of 118 test modules, none
+    of them about a three-line package init. 2b already holds that file's real
+    dependents."""
+    _seed_on_base(
+        repo,
+        {
+            "src/pkg/__init__.py": "",
+            "tests/test_says_init.py": "class C:\n    def __init__(self):\n        pass\n",
+        },
+    )
+    _write(repo, "src/pkg/__init__.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit the package init")
+    assert "tests/test_says_init.py" not in _select(repo)
+
+
+def test_a_test_module_that_will_not_parse_does_not_break_the_gate(repo):
+    """This gate runs on working trees, so a half-typed file is a normal state
+    for one. A parser that raised here would turn "somebody is mid-edit" into
+    a gate that cannot run at all."""
+    _seed_on_base(repo, {"tests/test_half_typed.py": "def broken(:\n"})
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with no twin")
+    assert _select(repo) == []
+
+
+def test_this_repository_reaches_the_clock_tests_that_have_no_twin():
+    """The case the rule was written for, pinned against the real tree.
+
+    ``ReminderClock`` lives in ``daemon/cflow_clock.py`` and its canonical
+    test is ``tests/test_reminder_clock.py`` -- a name the convention cannot
+    reach, because the clocks in that file are tested one class per module.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    assert not (repo / "tests" / "test_cflow_clock.py").exists(), (
+        "the twin now exists, so this case no longer proves what it was "
+        "written to prove -- pick another module with no same-named test"
+    )
+    picked = changed_tests.select(repo, ["src/claude_launcher/daemon/cflow_clock.py"])
+    assert "tests/test_reminder_clock.py" in picked
 
 
 def test_uncommitted_and_untracked_changes_count(repo):
@@ -706,7 +872,82 @@ def test_check_abstains_when_no_receipt_answers(repo, gate, capsys):
     _write(repo, "src/pkg/mesh.py", "x = 2\n")
     assert gate("--check") == changed_tests.CANNOT_TELL
     assert gate.runs() == 0
-    assert "abstain" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "abstain" in captured.out
+    # On stdout, with the selection it is abstaining about, and with its own
+    # green twin ("green receipt for tree ..."), which was always there. Split
+    # by outcome, a procedure reading stdout alone saw a healthy-looking
+    # selection line and exit 2 with no reason attached (merger-r5).
+    assert "abstain" not in captured.err
+
+
+def test_the_selection_only_grows_as_changed_paths_are_added(repo):
+    """Adding a changed path can never remove a test module from the selection.
+
+    This is not decoration -- a session used it to decide what NOT to run.
+    Asked whether a wide ``--base master`` selection would contain a module it
+    had found in its own narrower one, worker-deploy answered from the
+    structure instead of spending 220 seconds measuring: the changed-path set
+    of the wider base is a superset, and the selection only ever unions, so
+    the answer follows. That reasoning is now load-bearing, so the property it
+    rests on is pinned here.
+
+    The property lives in :func:`changed_tests.map_one` being *pure* -- one
+    path in, a set out, no accumulator. Keep it that way: if it were ever
+    given the running set to add into, :func:`changed_tests.select` would read
+    exactly as it does today, four lines that look like a union, and this
+    guarantee would be gone with nothing at the call site to show it. That is
+    what this case is watching, and it is why the assertion is about subsets
+    rather than about any particular module (observed by worker-deploy,
+    2026-08-27).
+    """
+    _seed_on_base(
+        repo,
+        {
+            "src/pkg/facade.py": "from . import deep\n",
+            "src/pkg/deep.py": "x = 1\n",
+            "tests/test_deep.py": "x = 1\n",
+            "tests/test_facade_user.py": "from pkg import facade\n",
+        },
+    )
+    # Two of these select tests/test_mesh.py -- the module by rule 2, the test
+    # itself by rule 1. The overlap is the point: a union and a symmetric
+    # difference are the same function until some module arrives twice, so a
+    # case built only from disjoint paths cannot tell them apart. (Measured:
+    # without this pair, a symmetric-difference mutant passed here.)
+    every = [
+        "src/pkg/mesh.py",
+        "tests/test_mesh.py",
+        "src/pkg/deep.py",
+        "tools/deploy_check.py",
+        "tests/test_unrelated.py",
+        "assets/logo.bin",
+    ]
+    assert "tests/test_mesh.py" in changed_tests.map_one(repo, "src/pkg/mesh.py")
+    assert "tests/test_mesh.py" in changed_tests.map_one(repo, "tests/test_mesh.py")
+    whole = set(changed_tests.select(repo, every))
+    for i in range(len(every)):
+        fewer = every[:i] + every[i + 1:]
+        assert set(changed_tests.select(repo, fewer)) <= whole, (
+            f"dropping {every[i]} grew the selection"
+        )
+    for rel in every:
+        assert set(changed_tests.select(repo, [rel])) <= whole
+
+
+def test_a_base_it_cannot_resolve_says_so_on_stdout(repo, capsys):
+    """The other exit-2 path, and the same rule.
+
+    Here stdout would otherwise be *empty* -- the run stops before there is a
+    selection to print -- so a reader keeping only stdout gets exit 2 and not
+    one word about why.
+    """
+    assert changed_tests.main(
+        ["--repo", str(repo), "--base", "no-such-ref-zzz", "--list"]
+    ) == changed_tests.CANNOT_TELL
+    captured = capsys.readouterr()
+    assert "cannot tell" in captured.out
+    assert "cannot tell" not in captured.err
 
 
 def test_check_reads_a_green_receipt_without_running(repo, gate, capsys):
@@ -922,3 +1163,329 @@ def test_a_repository_that_cannot_be_hashed_still_runs(repo, gate, monkeypatch):
     assert gate.runs() == 1
     assert gate() == 0
     assert gate.runs() == 2
+
+
+# ------------------------------------------------- reported, never silent (a9t)
+#
+# ``unmapped`` used to skip every ``.py`` on the grounds that rules 1 and 2
+# owned python. Rule 2 is a naming convention that holds for 48 of this
+# repository's 102 source modules, so where it was absent the path was
+# selected by nothing *and* reported by nothing. These pin the half that was
+# missing: a path either names test modules, or it is named.
+
+
+def test_a_source_module_no_rule_can_map_is_reported_too(repo, capsys):
+    """The gap ``claunch-uf7m`` landed a red batch through.
+
+    ``src/pkg/lonely.py`` has no same-named test, nothing imports it and
+    nothing names it -- so the selection is empty, which the gate is allowed
+    to call a pass. What it is not allowed to do is stay quiet about which
+    path it could not place.
+    """
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module nothing guards")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "src/pkg/lonely.py" in out
+    assert "not that they are fine" in out
+
+
+def test_a_source_module_something_does_guard_is_not_reported(repo, capsys):
+    """The other direction, or the report is noise and stops being read."""
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with a twin")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "tests/test_mesh.py" in out
+    assert "map to no test module" not in out
+
+
+def test_a_tools_script_nothing_guards_is_reported(repo, capsys):
+    """``tools/*.py`` has no importable module name, so rule 2b is silent for
+    it by construction and 2c is all it has. That makes it the likeliest
+    shape to go unplaced, not the least."""
+    _write(repo, "tools/orphan_tool.py", "x = 1\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "add a tools script nothing guards")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    assert "tools/orphan_tool.py" in capsys.readouterr().out
+
+
+def test_a_deleted_test_module_is_not_reported_as_unplaced(repo, capsys):
+    """Rule 1 answered for it; the file is simply gone. "Grep for what guards
+    it" is not advice about a file the round deleted on purpose."""
+    (repo / "tests" / "test_mesh.py").unlink()
+    _git(repo, "commit", "-qam", "drop the test")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    assert "map to no test module" not in capsys.readouterr().out
+
+
+def test_the_report_says_which_relations_it_searched_for(repo, capsys):
+    """"Nothing maps to it" is not a size until you know what was swept for.
+
+    A path no *import* reaches is a different statement from one no test
+    *names*, and the fix differs. Required of the landing request as of this
+    round (``claunch-uf7m``, raised by s181).
+    """
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module nothing guards")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "searched:" in out
+    assert "same-named test (tests/test_lonely.py)" in out
+    assert "direct import by a test" in out
+
+
+# ------------------------------------------- a healthy-looking selection (a9t)
+#
+# Every device above asks whether the selection came back EMPTY. The failure
+# that actually landed a red batch is the other one: nine modules selected,
+# and the module that guards the changed behaviour is not among them because
+# it reaches the file one import hop away. ``reached_indirectly`` names those
+# without running them.
+
+
+def _named_as_missed(out: str) -> list:
+    """The ``<test> <- <changed path> via <module>`` lines, and only those.
+
+    The note is printed before the selection, so "everything after the header"
+    also swallows the selected modules -- which would make a test of "this one
+    is NOT in the note" pass on a note that never mentioned it and fail on one
+    that did not either.
+    """
+    return [line for line in out.splitlines() if "<-" in line and " via " in line]
+
+
+def _facade(repo: Path, extra: dict = None) -> None:
+    """``deep`` <- ``facade`` <- a test. The shape of ``cli_sessions``.
+
+    ``tests/test_deep.py`` exists so the selection is *not* empty when
+    ``deep.py`` changes -- which is the whole point: this failure hides
+    behind a selection that looks like it worked.
+    """
+    files = {
+        "src/pkg/deep.py": "x = 1\n",
+        "src/pkg/facade.py": "from . import deep\n",
+        "tests/test_deep.py": "x = 1\n",
+        "tests/test_facade_user.py": "from pkg import facade\n",
+    }
+    files.update(extra or {})
+    _seed_on_base(repo, files)
+    _write(repo, "src/pkg/deep.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "change the module behind the facade")
+
+
+def test_a_guard_one_hop_out_is_named_when_the_selection_looks_healthy(repo, capsys):
+    """``bd87fdc`` in miniature.
+
+    ``test_daemon_wedge`` writes ``from claude_launcher import cli`` and
+    ``cli.py`` is what imports ``cli_sessions``; the round that changed
+    ``cli_sessions`` selected nine modules, none of them that one, and shipped
+    three red modules two batches deep before a bisect found them.
+    """
+    _facade(repo)
+
+    assert _select(repo) == ["tests/test_deep.py"]      # not empty: looks fine
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "tests/test_facade_user.py" in out
+    assert "were NOT selected" in out
+    assert "via pkg.facade" in out                      # the relation, checkable
+
+
+def test_a_module_the_selection_already_has_is_not_listed_as_a_miss(repo, capsys):
+    """A test that imports the changed module directly is rule 2b's, and
+    naming it again as "not selected" would be false."""
+    _facade(repo, {"tests/test_direct.py": "from pkg import deep\n"})
+
+    assert "tests/test_direct.py" in _select(repo)
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    named = _named_as_missed(capsys.readouterr().out)
+    assert not any("test_direct.py" in line for line in named)
+    assert any("test_facade_user.py" in line for line in named)
+
+
+def test_the_indirect_list_is_whole_rather_than_capped(repo, capsys):
+    """A truncated list reads as a complete one. If the number is large that
+    is the finding -- so the count and the lines have to agree."""
+    extra = {f"tests/test_reader{i}.py": "from pkg import facade\n" for i in range(12)}
+    _facade(repo, extra)
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    out = capsys.readouterr().out
+    named = _named_as_missed(out)
+    assert len(named) == 13                            # 12 readers + the original
+    assert f"NOTE: {len(named)} test module(s)" in out
+
+
+def test_both_caveats_are_stated_even_when_they_are_empty(repo, capsys):
+    """A clean run says both caveats in words rather than by printing nothing.
+
+    An absent block cannot be quoted, and it carries two readings a landing
+    request has to keep apart: "swept, found nothing" and "this build of the
+    tool has no such check". Removing that ambiguity is the whole reason the
+    two caveats exist, so they must not reintroduce it in the common case.
+    This session hit it from the reader's side -- asked for the two lines, it
+    paraphrased the absent blocks to merger-r5 as if they were tool output
+    (2026-08-27).
+
+    The earlier rule here, that the note is absent rather than empty, is
+    reversed on purpose. What it was protecting -- a block people learn to
+    scroll past -- is answered by keeping the empty form to one line while the
+    loud form stays a multi-line block with a filename in it.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with a twin and no facade")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "map to at least one test module." in out
+    assert "no test module sits one import hop outside this selection." in out
+    assert "WARNING" not in out
+    assert "were NOT selected" not in out
+
+
+# ------------------------------------------------------------------ streams
+#
+# A landing procedure split the streams to avoid a pipe, read ``out.txt``
+# alone, and treated ``err.txt`` as discardable -- reasonably, since the only
+# thing that had ever been in it was uv's VIRTUAL_ENV line. Both of this
+# gate's caveats were on the discarded side. Unread and absent spell the same.
+
+
+def test_the_caveats_go_where_the_verdict_goes(repo, capsys):
+    """Both blocks on stdout, because a reader who keeps only stdout must not
+    read their contents as "none" (merger-r5, 2026-08-27)."""
+    _facade(repo)
+    _write(repo, "assets/logo.bin", "\x00\x01\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "and an asset nothing guards")
+
+    assert changed_tests.main(["--repo", str(repo), "--list"]) == 0
+    captured = capsys.readouterr()
+    assert "map to no test module" in captured.out
+    assert "were NOT selected" in captured.out
+    assert "map to no test module" not in captured.err
+    assert "were NOT selected" not in captured.err
+    # One form per caveat per run. The positive line stands in for the
+    # block, so printing both would put a claim next to the
+    # counterexample that contradicts it.
+    assert "map to at least one test module" not in captured.out
+    assert "no test module sits one import hop outside" not in captured.out
+
+
+# ------------------------------------------- the runner's own scratch (62yg)
+
+
+def test_the_runners_own_lock_file_is_not_a_changed_path(repo):
+    """``uv run`` is how every gate here is invoked and it writes a zero-byte
+    ``uv-<hash>.lock`` into the project root. Counting it made the gate warn
+    about a file its own launcher had just created, on a checkout ``git
+    status`` calls clean. Measured by worker-64hs: 4 changed paths under ``uv
+    run`` against 3 under the interpreter directly."""
+    _write(repo, "uv-ae5a39a361c97824.lock", "")
+    assert changed_tests.changed_paths(repo, "master") == []
+
+
+def test_an_untracked_file_that_is_not_the_lock_still_counts(repo):
+    """The exclusion is one shape at the root and nothing more. A test module
+    written this round is untracked until it is added, and running it is the
+    reason untracked files are in the change set at all."""
+    _write(repo, "tests/test_brand_new.py", "x = 1\n")
+    _write(repo, "uv-ae5a39a361c97824.lock", "")
+    _write(repo, "src/pkg/uv-notahash.lock", "")
+    _write(repo, "uv-metadata.txt", "")
+
+    paths = changed_paths_sorted = changed_tests.changed_paths(repo, "master")
+    assert "tests/test_brand_new.py" in paths
+    assert "src/pkg/uv-notahash.lock" in paths          # not at the root
+    assert "uv-metadata.txt" in paths                   # not a .lock
+    assert "uv-ae5a39a361c97824.lock" not in changed_paths_sorted
+
+
+# ------------------------------------------------ the base a worker is on (eghh)
+
+
+@pytest.fixture
+def stacked(repo) -> Path:
+    """A worker branch on an integration branch on master -- this formation.
+
+    ``master`` -> ``integration`` (two other workers' landed batch) ->
+    ``worker`` (one file). Measured against master the worker's change reads
+    as the whole batch, which is what three sessions measured at 78%, 80% and
+    1945 tests in 221s on one day.
+    """
+    _git(repo, "checkout", "-q", "master")
+    _git(repo, "checkout", "-q", "-b", "integration")
+    _write(repo, "src/pkg/batch_one.py")
+    _write(repo, "tests/test_batch_one.py")
+    _write(repo, "src/pkg/batch_two.py")
+    _write(repo, "tests/test_batch_two.py")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "two other workers, already landed")
+    _git(repo, "checkout", "-q", "-b", "worker")
+    _write(repo, "src/pkg/mesh.py", "mine = 1\n")
+    _git(repo, "commit", "-qam", "my one file")
+    return repo
+
+
+def test_base_auto_measures_against_the_branch_this_one_integrates_into(stacked):
+    """Both numbers, side by side -- the control's true value is not zero.
+
+    Against master the selection is the batch; against the upstream it is this
+    round. Git already records which branch that is, under the name
+    ``tools/merge_ready.py`` reads for the same question.
+    """
+    against_master = changed_tests.select(
+        stacked, changed_tests.changed_paths(stacked, "master")
+    )
+    assert against_master == [
+        "tests/test_batch_one.py",
+        "tests/test_batch_two.py",
+        "tests/test_mesh.py",
+    ]
+
+    _git(stacked, "branch", "--set-upstream-to=integration", "worker")
+    base, how = changed_tests.resolve_base(stacked, changed_tests.BASE_AUTO)
+    assert (base, how) == ("integration", "upstream")
+    assert changed_tests.changed_paths(stacked, base) == ["src/pkg/mesh.py"]
+    assert changed_tests.select(stacked, changed_tests.changed_paths(stacked, base)) == [
+        "tests/test_mesh.py"
+    ]
+
+
+def test_base_auto_with_no_upstream_falls_back_and_names_the_axis(stacked, capsys):
+    """Falling back to master is right for a branch cut from master and is the
+    original defect for a stacked one, and nothing here can tell those apart.
+    So it falls back, says which axis it used, and names the one command that
+    settles it -- without changing the exit code, because a missing upstream
+    is a thing to fix and not a reason to refuse a verdict."""
+    assert changed_tests.resolve_base(stacked, changed_tests.BASE_AUTO) == (
+        "master",
+        "no-upstream",
+    )
+    assert changed_tests.main(["--repo", str(stacked), "--base", "auto", "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "no upstream" in out
+    assert "--set-upstream-to" in out
+
+
+def test_the_output_names_the_axis_it_measured_on(stacked, capsys):
+    """A number is only readable next to its axis, and this tool's axis moved."""
+    _git(stacked, "branch", "--set-upstream-to=integration", "worker")
+    assert changed_tests.main(["--repo", str(stacked), "--base", "auto", "--list"]) == 0
+    assert "vs integration (upstream)" in capsys.readouterr().out
+
+
+def test_an_explicit_base_is_left_exactly_as_given(stacked):
+    """``auto`` is opt-in. Every other caller keeps the ref it passed."""
+    assert changed_tests.resolve_base(stacked, "master") == ("master", "given")
+    assert changed_tests.resolve_base(stacked, "integration") == (
+        "integration",
+        "given",
+    )

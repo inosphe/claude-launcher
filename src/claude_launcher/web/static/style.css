@@ -2905,6 +2905,12 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .notice.bad { border-left-color: #ff7b72; }
 .notice-title { font-size: 12.5px; color: #e6edf3; }
 .notice-sub { font-size: 11px; color: #9da5b0; margin-top: 3px; line-height: 1.4; }
+/* The restart-gate card decides with buttons, not with a click-anywhere
+   dismiss: the notice's default pointer/cursor belongs to toasts that can
+   just be swatted away, and a stray click on a decision is a restart. */
+.notice.gate { cursor: default; }
+.gate-actions { display: flex; gap: 8px; margin-top: 8px; }
+.gate-actions .wf-btn { margin: 0; padding: 3px 10px; font-size: 11px; }
 /* A phone has no corner to spare: the strip spans the width under the
    mobile bar instead of floating over the session it is reporting on. */
 @media (max-width: 700px) {

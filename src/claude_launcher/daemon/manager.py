@@ -869,24 +869,26 @@ class SessionManager:
         """Restart a session with permission prompts off — or back on.
 
         The third answer :meth:`redefine` restarts for, after migrate's
-        where and reborrow's whose-token: whether claude asks before it
-        acts. The flag lives in the definition's args, so the toggle is an
+        where and reborrow's whose-token: whether the harness asks before it
+        acts. The harness declaration supplies the argv, so the toggle is an
         args edit — appended once, or taken out — and everything else about
         the session (conversation, directory, auth) is untouched.
 
-        Refused while nothing has been stopped: a non-claude session (the
-        flag is claude's own), and a no-op. Only the one flag is ever
+        Refused while nothing has been stopped: a harness without this
+        capability, and a no-op. Only the declared argv group is ever
         touched — a session started with its own extra args keeps them.
         """
         session = self.get(name)
         old = session.sdef
-        if old.harness != harness_mod.CLAUDE_HARNESS:
+        entry = harness_mod.harness_registry.get(old.harness)
+        flags = tuple(entry.skip_permissions_args) if entry else ()
+        if not flags:
             raise ManagerError(
-                "--dangerously-skip-permissions only applies to the claude "
-                f"harness, not {old.harness!r}"
+                f"harness {old.harness!r} does not declare a skip-permissions mode"
             )
-        flag = "--dangerously-skip-permissions"
-        has = flag in old.args
+        width = len(flags)
+        has = any(tuple(old.args[i:i + width]) == flags
+                  for i in range(len(old.args) - width + 1))
         if has == skip:
             raise ManagerError(
                 f"session {name!r} already skips permission prompts"
@@ -894,11 +896,15 @@ class SessionManager:
                 else f"session {name!r} is not skipping permission prompts "
                      "— nothing to turn back on"
             )
-        args = (
-            tuple(a for a in old.args if a != flag)
-            if has
-            else (*old.args, flag)
-        )
+        if has:
+            args_list = list(old.args)
+            for i in range(len(args_list) - width + 1):
+                if tuple(args_list[i:i + width]) == flags:
+                    del args_list[i:i + width]
+                    break
+            args = tuple(args_list)
+        else:
+            args = (*old.args, *flags)
         return await self.redefine(name, args=args)
 
     async def migrate(self, name: str, new_cwd: str) -> Tuple[Session, bool]:

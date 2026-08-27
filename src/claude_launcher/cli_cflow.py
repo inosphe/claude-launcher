@@ -851,6 +851,17 @@ def register(sub) -> None:
     q.set_defaults(func=_cmd_journal)
 
     q = csub.add_parser(
+        "checkout",
+        help="who else is standing in the directory this run works in; "
+        "prints and never blocks (always exits 0)",
+    )
+    q.add_argument(
+        "--session",
+        help="whose neighbours to look for (default: $CLAUNCH_SESSION)",
+    )
+    q.set_defaults(func=_cmd_checkout)
+
+    q = csub.add_parser(
         "install",
         help="alias for 'claunch install' (one MCP server + every skill)",
     )

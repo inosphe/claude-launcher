@@ -25,6 +25,7 @@ import os
 import sys
 import time
 import webbrowser
+from datetime import datetime, timezone
 from typing import List, Optional
 from urllib.parse import quote
 
@@ -1245,6 +1246,15 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
                 _print_wedged(report, confirm)
                 return 1
             report = confirm  # it moved between looks — busy, not wedged
+        # An agent session's restart goes through the web UI's approval gate
+        # instead of this immediate path: the person every restart cuts off
+        # gets to approve or reject first (five minutes unanswered counts as
+        # approved). The distinction is the environment this CLI runs in —
+        # the same one record_request uses to decide who a restart is owed
+        # to below — and the daemon cannot see it, so only the CLI can draw
+        # it (see restart_gate's module docstring).
+        if os.environ.get("CLAUNCH_SESSION"):
+            return _gated_restart()
         # Written first, and this order is the whole fix. Everything below
         # this line runs in a turn that is about to die: the daemon takes
         # every terminal attached to it down, so the print at the end reaches
@@ -1294,6 +1304,126 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         print(cli_mesh.relay_line(info.get("relay")))
         return 0
     raise AssertionError(f"unknown daemon action {action!r}")
+
+
+def _gated_restart() -> int:
+    """A managed session's restart request, waited out to its outcome.
+
+    The ordinary path above stops the daemon on the spot — and with it the
+    turn that asked, which is the whole thing the approval gate exists to
+    stop. This path asks the daemon to open the gate instead, then waits:
+
+    - the **user** (not the asker) approves or rejects in the web UI;
+    - an unanswered gate counts as approved after its deadline and the
+      daemon restarts itself;
+    - either way the request is attributed to this session, so when the
+      restart does go out the successor daemon hands the outcome back as a
+      restart notice — this turn dies with the daemon and the notice is what
+      it reads afterwards.
+
+    When nothing dies (a rejection, a daemon that went away, an absent
+    daemon at request time) this command reports it and the caller's turn
+    carries on.
+
+    ``--all`` does not pass through here — its per-instance iteration wants
+    the immediate path — and neither does ``--force`` when the daemon cannot
+    be asked at all: a wedged daemon has no gate to wait behind, so the
+    wedge branch stays immediate. ``--force`` against a daemon that IS
+    answering falls through to this same gate, because then there is
+    nothing to force: a session's restart waits here whatever spelling
+    asked for it.
+    """
+    report = daemon_client.diagnose()
+    state = report["state"]
+    if state in (daemon_client.NOT_RUNNING, daemon_client.STALE_RECORD):
+        # A restart with nothing running is a start, exactly as on the
+        # immediate path — there is no daemon to host a gate.
+        client = daemon_client.ensure_running()
+        print(f"daemon started at {client.base_url}")
+        return 0
+    if state != daemon_client.SERVING:
+        # Announced but not answering: the gate lives in the daemon, so the
+        # ordinary choices are this or --force, like the immediate path.
+        print(daemon_client.unreachable_reason(report), file=sys.stderr)
+        return 1
+    session = os.environ.get("CLAUNCH_SESSION") or "?"
+    client = daemon_client.connect()
+    if client is None:
+        # Gone between the diagnosis and the ask — start nothing behind its
+        # back; the caller re-runs the command.
+        print("daemon went away before the request could be filed", file=sys.stderr)
+        return 1
+    try:
+        resp = client.post("/api/daemon/restart-request", {"session": session})
+    except DaemonClientError as exc:
+        print(f"could not request the restart: {exc}", file=sys.stderr)
+        return 1
+    record = (resp or {}).get("request") or {}
+    deadline_at = None
+    try:
+        deadline_at = datetime.fromisoformat(record.get("deadline") or "")
+    except (KeyError, TypeError, ValueError):
+        deadline_at = None
+    # The waiting announcement goes to stderr, the scripted-console channel
+    # (the file's own convention: stdout stays parseable).
+    print(
+        f"restart requested by session {session} — the web UI decides: "
+        "approve or reject it there, and an unanswered request counts as "
+        "approved after its timeout and restarts on its own",
+        file=sys.stderr,
+    )
+    if deadline_at is not None:
+        print(
+            f"  counts as approved at {deadline_at.isoformat(timespec='minutes')} "
+            "(this command waits for the outcome)",
+            file=sys.stderr,
+        )
+    poll_secs = 2.0
+    try:
+        while True:
+            if deadline_at is not None and datetime.now(timezone.utc) >= deadline_at:
+                print("no answer before the deadline — counting as approved", file=sys.stderr)
+                return 0
+            time.sleep(poll_secs)
+            try:
+                resp = client.get("/api/daemon/restart-request")
+            except DaemonClientError as exc:
+                # The daemon is gone or stopped answering while the request
+                # was pending. If a restart is what took it down, this turn
+                # is already dead and never reaches this line; reaching it
+                # means the request died unanswered.
+                print(
+                    f"cannot reach the daemon while the request was pending: "
+                    f"{exc} — nothing will restart unless it comes back",
+                    file=sys.stderr,
+                )
+                return 1
+            record = (resp or {}).get("request")
+            if not record:
+                print(
+                    "the restart request is gone without a decision — the "
+                    "daemon may have restarted through another door",
+                    file=sys.stderr,
+                )
+                return 1
+            status = record.get("status")
+            if status == "rejected":
+                print(
+                    "the restart request was rejected — nothing was restarted",
+                    file=sys.stderr,
+                )
+                return 1
+            if status == "approved":
+                # The daemon is going down; the outcome travels as a restart
+                # notice if this turn survives the trip at all.
+                return 0
+    except KeyboardInterrupt:
+        print(
+            "interrupted — the request stays open in the web UI until its "
+            "deadline",
+            file=sys.stderr,
+        )
+        return 1
 
 
 def _print_unanswered(report: dict) -> None:
@@ -1410,6 +1540,12 @@ def _force_replace() -> int:
             "restarting it the ordinary way",
             file=sys.stderr,
         )
+        # "The ordinary way" includes the gate for a session's shell: --force
+        # only exists to reach a daemon that cannot be asked, and this one
+        # can. The wedged branch below has no daemon to host a gate and stays
+        # immediate.
+        if os.environ.get("CLAUNCH_SESSION"):
+            return _gated_restart()
         restart_notice.record_request_from_env(via="cli-force")
         daemon_client.stop()
         time.sleep(0.3)

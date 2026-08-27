@@ -118,6 +118,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         started_at=time.monotonic(),
         mesh=mesh_manager,
         relay_state=_relay_state,
+        gate_timeout=float(cfg["restart_approval_timeout"]),
     )
 
     runner = web.AppRunner(app, access_log=None)
@@ -137,7 +138,13 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     server = getattr(site, "_server", None)
     if server is not None and server.sockets:
         actual_port = server.sockets[0].getsockname()[1]
-    runtime_state.write_daemon_json(host, actual_port)
+    # The snapshot is taken here because here is the boot: what this process
+    # serves is the content of its source directory at import, and that stops
+    # being readable as soon as anyone edits or checks out anything.
+    # tools/deploy_check.py is the reader.
+    runtime_state.write_daemon_json(
+        host, actual_port, code=runtime_state.code_snapshot()
+    )
     if bound is not None:
         bound["port"] = actual_port
     log.info("listening on http://%s:%s", host, actual_port)

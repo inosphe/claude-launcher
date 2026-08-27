@@ -33,6 +33,23 @@ def test_packaged_set_declares_supported_harnesses(home):
     assert harnesses.names()[0] == "claude"
 
 
+def test_packaged_runtime_capabilities_are_harness_native(home):
+    reg = harnesses.registry()
+    assert reg["claude"].skip_permissions_args == [
+        "--dangerously-skip-permissions"
+    ]
+    assert reg["codex"].skip_permissions_args == [
+        "--approval-mode", "full-auto"
+    ]
+    assert reg["codex"].full_access_args == [
+        "--sandbox", "danger-full-access"
+    ]
+    assert reg["codex"].full_access_off_args == ["--sandbox", "workspace-write"]
+    assert reg["codex"].mode_conflict_args == [
+        "--dangerously-bypass-approvals-and-sandbox"
+    ]
+
+
 def test_claude_is_builtin_and_its_command_is_not_declared_here(home):
     """claude's executable is CLAUDE_LAUNCHER_BIN and its argv comes from the
     profile, so a 'command:' on it would be a setting that does nothing."""

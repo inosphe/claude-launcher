@@ -101,7 +101,8 @@ check("the form's controls read in the new order", named(form.text), [
   // what it joins, and what it drives
   "mesh", "handle", "role", "workflow", "context",
   // how it runs — folded
-  "borrow", "null_token", "cwd", "resume", "fork", "args",
+  "borrow", "null_token", "cwd", "resume", "fork", "skip_permissions",
+  "full_access", "args",
   // what it is told first
   "task",
   // where that job is written down — three radios sharing one name, then

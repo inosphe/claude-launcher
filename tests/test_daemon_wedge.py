@@ -31,6 +31,33 @@ from claude_launcher import cli, daemon_client
 from claude_launcher.daemon import runtime_state
 
 
+@pytest.fixture(autouse=True)
+def immediate_path(monkeypatch):
+    """This module drives ``daemon restart``'s immediate path, so say so.
+
+    ``cli_sessions._cmd_daemon`` branches on ``CLAUNCH_SESSION``: a restart
+    asked for inside a managed session goes to ``_gated_restart`` and waits on
+    the web UI's approval instead of stopping the daemon on the spot, and
+    ``_force_replace`` hands over to the same function when force stands down
+    against a daemon that answers. Both are deliberate (see
+    ``daemon/restart_gate.py``) and ``tests/test_restart_gate.py`` is where
+    they are pinned.
+
+    Nothing here declared which of the two paths it meant. The variable is set
+    in every claunch-managed session and unset on a developer's machine, so
+    the same tree answered differently depending on who ran it -- 22 passed
+    outside a session, 3 failed inside one, from ``_gated_restart``'s own
+    ``diagnose()`` call exhausting a two-answer iterator the test had canned
+    (``claunch-uf7m``, first red ``fe0eb1a``). A suite that cannot be read the
+    same way twice is worse than one that is red, because the disagreement
+    looks like somebody's mistake rather than a missing declaration.
+
+    Autouse rather than three ``delenv`` lines: the trap is the module's, not
+    those three tests', and the next test written here would walk into it.
+    """
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+
+
 # --------------------------------------------------------------------------- #
 # liveness, without the probe that kills what it asks about
 # --------------------------------------------------------------------------- #
