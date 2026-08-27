@@ -2853,8 +2853,16 @@ async def h_session_meta(request: web.Request) -> web.Response:
         # :mod:`claude_launcher.session_commits`). It belongs beside the
         # round report for the same reason the report exists: the terminal
         # closes, and then the commits are the only thing left that says what
-        # the round did. Filled in below, where the directory is known.
-        "commits": session_commits.summary([]),
+        # the round did.
+        #
+        # ``None`` until a directory is known, and it stays ``None`` for a
+        # session that has none — deliberately, because the alternative is a
+        # lie. An empty summary here would reach the panel as "this session
+        # committed nothing", which is a claim about the SESSION; what is
+        # actually true is that there was no repository to look in. The panel
+        # draws nothing for ``None`` and says so for ``[]``, and those are the
+        # two different facts.
+        "commits": None,
     }
     if cwd:
         body["cflow"] = _cflow_entry(manager, cwd, name)

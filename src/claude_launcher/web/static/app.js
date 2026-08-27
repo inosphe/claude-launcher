@@ -7574,15 +7574,25 @@ function sessBeadsCreate(name) {
    commit it managed to make, and a commit someone rewrites away stops being
    listed the moment it stops existing.
 
-   Empty is a real answer and is drawn, not hidden — "this session has
-   committed nothing yet" is exactly what a reader watching a round wants to
-   know, and a block that appears only on success reads as one that failed to
-   load the rest of the time. The one case that is not drawn is a session with
-   no directory to read, which the daemon reports as a null block. */
+   Empty is a real answer and is drawn, not hidden — a block that appears only
+   on success reads as one that failed to load the rest of the time. But it is
+   said as a fact about the READING, not about the session: "no stamped commit
+   found" rather than "this session committed nothing". The difference is not
+   pedantry. `for_session` returns the same empty list for a repository it
+   could not read as for one it read and found nothing in — a pruned worktree,
+   no git on PATH, a walk that timed out — so the strong sentence would be a
+   claim this page has no way to check. Telling those two apart is
+   claunch-j5kp; until it lands, the weaker sentence is the true one.
+
+   Nothing at all is drawn when the daemon serves no `commits` — an older
+   daemon, or a session with no directory to read, which api.py reports as
+   null for exactly the reason above. */
 function sessCommits(data) {
   const c = data.commits;
   const box = el("div", "sess-commits");
-  if (!c) return box;   // an old daemon: say nothing rather than say "none"
+  // No answer is not an answer of "none": an old daemon, or a session whose
+  // directory the daemon has none of, and neither is evidence about commits.
+  if (!c) return box;
   const rows = c.commits || [];
   box.appendChild(el("h3", null, `Commits (${c.count || rows.length || 0})`));
   box.appendChild(el("p", "wf-note",
@@ -7590,7 +7600,7 @@ function sessCommits(data) {
     "Claunch-Session trailer on each commit — `claunch commits` prints the " +
     "same list."));
   if (!rows.length) {
-    box.appendChild(el("p", "wf-note", "no stamped commit from this session yet"));
+    box.appendChild(el("p", "wf-note", "no stamped commit found"));
     return box;
   }
   for (const r of rows) {

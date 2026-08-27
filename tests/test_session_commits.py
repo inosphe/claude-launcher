@@ -152,6 +152,15 @@ def test_no_session_name_is_an_empty_list_not_every_commit(repo, session):
 def test_a_directory_that_is_no_repository_answers_empty_rather_than_raising(
     tmp_path, monkeypatch
 ):
+    """What this pins is the *contract*: describing a session must not be able
+    to raise, because a pruned directory would then take out the whole detail
+    panel.
+
+    What it does NOT pin, and must not be read as blessing, is that an empty
+    list is a good ANSWER here. It is the same value a readable empty
+    repository gives, so callers may only say no commit was found -- see
+    ``for_session``'s docstring, the two callers' wording, and
+    ``claunch-j5kp`` for making the two tellable apart."""
     monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
     plain = tmp_path / "plain"
     plain.mkdir()
@@ -199,9 +208,26 @@ def test_the_cli_json_is_the_object_the_api_serves(home, repo, capsys):
     assert doc == session_commits.summary(session_commits.for_session(repo, "s1"))
 
 
-def test_nothing_committed_yet_is_a_sentence_not_an_error(home, repo, capsys):
+def test_nothing_found_is_said_about_the_search_not_about_the_session(home, repo, capsys):
+    """Not an error, and not a claim either. An unreadable repository comes
+    back from ``for_session`` exactly the way a readable empty one does, so
+    "this session committed nothing" would be a sentence this command has no
+    way to check. "found" is the word that keeps it about the reading."""
     assert run_cli("commits", "--session", "s1", "--repo", str(repo)) == 0
-    assert "no stamped commits" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "no stamped commit found" in out
+    assert "this session" not in out
+
+
+def test_the_unreadable_case_gets_the_same_careful_sentence(home, tmp_path, monkeypatch, capsys):
+    """The case the wording exists for: a directory that is not a checkout
+    (a pruned worktree reaches the same branch). A session that committed
+    twenty times would print this, so the sentence must not deny them."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    assert run_cli("commits", "--session", "s1", "--repo", str(plain)) == 0
+    assert "no stamped commit found" in capsys.readouterr().out
 
 
 def test_the_session_comes_from_the_environment_when_unnamed(home, repo, monkeypatch, capsys):
@@ -269,6 +295,53 @@ def test_the_meta_call_carries_the_sessions_commits(home, repo, monkeypatch):
             assert block["count"] == 1
             assert block["latest"] == mine
             assert block["worktrees"] == ["s191-thing"]
+        finally:
+            await client.close()
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_a_session_with_no_directory_gets_null_rather_than_an_empty_summary(
+    home, repo, monkeypatch
+):
+    """The difference between "committed nothing" and "there was nowhere to
+    look", at the one place the daemon can tell them apart for free.
+
+    An empty summary here reaches the panel as a fact about the SESSION, and
+    for a session with no directory that fact was never established. ``None``
+    is the honest answer, and it is what keeps ``sessCommits``'s early return
+    reachable at all -- the block was written for a null the daemon did not
+    actually send (found in review: s181 on ``claunch-t65p``).
+
+    ``_session_cwd`` is stubbed rather than a session created with an empty
+    ``cwd``: :class:`SessionManager` fills a missing directory in with the
+    daemon's own, so the empty case cannot be reached from the outside here.
+    What is under test is the handler's branch on it, which is where the
+    decision lives."""
+    from claude_launcher import store
+    from claude_launcher.daemon import api as api_mod
+    from claude_launcher.daemon.manager import SessionManager
+    from claude_launcher.daemon.session import SessionDef
+
+    store.update(
+        lambda doc: doc.update(
+            {"harnesses": {"py": {"command": [sys.executable, "-u", "-c", CHILD]}}}
+        )
+    )
+    monkeypatch.setattr(api_mod, "_session_cwd", lambda s: "")
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=50, restore_default=False)
+        client = await _serve(mgr)
+        try:
+            mgr.create(SessionDef(name="nowhere", harness="py", cwd=str(repo),
+                                  conversation_id=CID))
+            resp = await client.get("/api/sessions/nowhere/meta", headers=BEARER)
+            assert resp.status == 200
+            body = await resp.json()
+            assert "commits" in body        # the key is served, so the panel can read it
+            assert body["commits"] is None  # and it is not an empty summary
         finally:
             await client.close()
             await mgr.shutdown_all()

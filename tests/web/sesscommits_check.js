@@ -3,15 +3,18 @@
    Three answers this block has to tell apart, and the wrong pairing of any
    two of them is what the checks below are for:
 
-     nothing yet   -- the daemon read the repository and found no stamped
-                      commit. Drawn, and said, because "this round has not
-                      committed anything" is exactly what a reader watching a
-                      round wants to know.
-     no answer     -- an older daemon serves no `commits` at all. Nothing is
-                      drawn: claiming "none" for a daemon that was never asked
-                      would be a fact this page does not have.
      some commits  -- rows, newest first, each carrying the short sha a reader
                       copies out and the full one in its title.
+     nothing found -- the daemon answered with an empty list. Drawn, because a
+                      block that appears only on success reads as broken the
+                      rest of the time -- but said as a fact about the SEARCH.
+                      `for_session` cannot tell a repository it failed to read
+                      from one it read and found nothing in (claunch-j5kp), so
+                      "this session committed nothing" would be unfounded.
+     no answer     -- the daemon served no `commits` at all: too old to have
+                      the field, or a session with no directory, which api.py
+                      reports as null rather than as an empty summary. Nothing
+                      is drawn; neither case is evidence about commits.
 
    Slice the real function out of app.js and drive it against a stub DOM. */
 const fs = require("fs");
@@ -114,18 +117,33 @@ check("a worktree is named when the commit was stamped with one",
 check("and nothing stands in for one that was not",
       box.find("sess-commit-bits")[1].text, "2026-08-27 13:06:11");
 
-/* ---- nothing committed yet --------------------------------------------- */
+/* ---- nothing found ------------------------------------------------------ */
 box = ctx.commits({ commits: { commits: [], count: 0, latest: null, worktrees: [] } });
 check("an empty round still draws its card", box.classes.has("sess-commits"), true);
 check("and says so in words rather than showing an empty card",
-      box.words().includes("no stamped commit"), true);
+      box.words().includes("no stamped commit found"), true);
 check("with no rows", box.find("sess-commit").length, 0);
+/* The word that carries the whole check. `for_session` answers empty for a
+   repository it could NOT read (pruned worktree, no git, timeout) exactly as
+   it does for one it read and found nothing in -- so a session that committed
+   twenty times can land here. "found" is about the search; "this session
+   committed nothing" would be a claim the page cannot check. */
+const empty = box.kids[box.kids.length - 1].text;
+check("the empty sentence is about the search, never about the session",
+      /this session|committed nothing/.test(empty), false);
 
-/* ---- a daemon that was never asked ------------------------------------- */
-box = ctx.commits({});
-check("an older daemon draws nothing at all", box.kids.length, 0);
-check("-- in particular it does not claim the session committed nothing",
-      box.words().includes("no stamped commit"), false);
+/* ---- no answer at all --------------------------------------------------- */
+/* Two callers reach this: a daemon too old to serve `commits`, and (since the
+   review that found the block claiming a null nobody sent) a session with no
+   directory, which api.py now really does report as null. Neither is evidence
+   about commits, so neither may be drawn as "none". */
+for (const [what, data] of [["an older daemon", {}],
+                            ["a session with no directory", { commits: null }]]) {
+  box = ctx.commits(data);
+  check(`${what} draws nothing at all`, box.kids.length, 0);
+  check(`-- in particular ${what} does not read as "committed nothing"`,
+        box.words().includes("no stamped commit"), false);
+}
 
 if (failures) process.exit(1);
 console.log("sesscommits_check ok");

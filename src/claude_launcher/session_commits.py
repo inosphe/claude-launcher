@@ -114,9 +114,21 @@ def for_session(
     """The commits ``session`` made in the repository at ``cwd``, newest first.
 
     Returns ``[]`` — never raises — when there is no directory, no git, no
-    repository, or nothing stamped: every caller here is describing a session
-    rather than gating on it, and a detail panel that 500s because a session's
-    directory was pruned is worse than one that shows no commits.
+    repository, when the walk timed out, or when nothing was stamped: every
+    caller here is describing a session rather than gating on it, and a detail
+    panel that 500s because a session's directory was pruned is worse than one
+    that shows no commits.
+
+    **The consequence, which every caller has to carry:** those are five
+    different facts arriving as one value, and only the last of them is "this
+    session made no commits". A pruned worktree answers empty for a session
+    that committed twenty times. So nothing built on this may say the SESSION
+    committed nothing — only that no stamped commit was *found*, which is a
+    statement about the reading. Both callers here are worded that way on
+    purpose, and :func:`claude_launcher.daemon.api.h_session_meta` reports
+    ``None`` rather than an empty summary for a session with no directory, so
+    that one of the five stops making any claim at all. Making the rest of the
+    distinction available instead of merely avoided is ``claunch-j5kp``.
     """
     session = (session or "").strip()
     if not session or not cwd:

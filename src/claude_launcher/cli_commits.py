@@ -35,9 +35,14 @@ def _cmd(args: argparse.Namespace) -> int:
         print(json.dumps(session_commits.summary(found), indent=2, ensure_ascii=False))
         return 0
     if not found:
-        # Not an error: a round that has not committed yet is the normal
-        # state of this command for most of a round's life.
-        print(f"{name}: no stamped commits in {cwd}")
+        # Not an error: a round that has not committed yet is the normal state
+        # of this command for most of a round's life. Said as a fact about the
+        # search rather than about the session, because an unreadable
+        # repository comes back the same way a readable empty one does (see
+        # session_commits.for_session, and claunch-j5kp for telling them
+        # apart) -- "this session committed nothing" would be a claim this
+        # command cannot check.
+        print(f"{name}: no stamped commit found in {cwd}")
         return 0
     for c in found:
         where = f"  [{c['worktree']}]" if c.get("worktree") else ""
