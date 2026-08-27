@@ -795,7 +795,7 @@ def run_install(
                 "note: the global workflow layer is empty; "
                 "'claunch install --global' seeds the bundled workflows"
             )
-    print("note: restart claude for the MCP server to be picked up")
+    print("note: restart active agent sessions for the MCP server and skills to be picked up")
     return 0
 
 

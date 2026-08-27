@@ -58,7 +58,16 @@ import sys
 from pathlib import Path
 from typing import List
 
-from . import commit_stamp, config, defender, mesh_install, mesh_topology, settings
+from . import (
+    commit_stamp,
+    config,
+    defender,
+    harnesses,
+    lineage,
+    mesh_install,
+    mesh_topology,
+    settings,
+)
 from .cflow import authoring as cflow_authoring, install as cflow_install
 from .cflow import state as cflow_state
 from .profile import Profile
@@ -124,6 +133,40 @@ def _skill_lines(skills_dir: Path) -> List[str]:
         *(f"skill -> {p}" for p in mesh_topology.write_skills(skills_dir)),
         f"skill -> {commit_stamp.write_skill(skills_dir)}",
     ]
+
+
+def _codex_mcp_lines(home: Path) -> List[str]:
+    """Register the merged server in a Codex harness home.
+
+    Codex reads MCP servers from ``$CODEX_HOME/config.toml``.  Keep the rest
+    of that user-owned file byte-for-byte and replace only tables owned by
+    this installer (including the two superseded server names).
+    """
+    import re
+
+    path = home / "config.toml"
+    try:
+        text = path.read_text(encoding="utf-8") if path.is_file() else ""
+    except OSError:
+        text = ""
+    for name in (*LEGACY_MCP_NAMES, MCP_NAME):
+        table = re.escape(name)
+        text = re.sub(
+            rf"(?ms)^\[mcp_servers\.{table}(?:\.[^\]]+)?\]\s*.*?"
+            rf"(?=^\[(?!mcp_servers\.{table}(?:\.|\]))|\Z)",
+            "",
+            text,
+        )
+    server = mcp_server_def()
+    block = (
+        f"[mcp_servers.{MCP_NAME}]\n"
+        f"command = {json.dumps(server['command'])}\n"
+        f"args = {json.dumps(server.get('args', []))}\n"
+    )
+    text = text.rstrip()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{text}\n\n{block}" if text else block, encoding="utf-8")
+    return [f"mcp server {MCP_NAME!r} -> {path}"]
 
 
 def _workflow_lines() -> List[str]:
@@ -207,14 +250,32 @@ def install_into_user() -> List[str]:
 
 
 def _profile_lines(profile: Profile) -> List[str]:
-    """The profile-scoped writes: MCP registration + skills, nothing global."""
-    settings.merge_mcp_servers(
-        profile, {MCP_NAME: mcp_server_def()}, remove=LEGACY_MCP_NAMES
-    )
+    """The profile-scoped writes, routed to the selected harness's home."""
+    harness_name = lineage.effective_harness(profile)
+    harness = harnesses.get(harness_name)
+    assert harness is not None  # effective_harness validates the registry
+    home = harness.profile_home(profile.config_dir)
+    if harness_name == "codex":
+        mcp_lines = _codex_mcp_lines(home)
+        guard_lines: List[str] = []
+    else:
+        # Claude Code is the native installer target. Other declared
+        # harnesses retain its historical profile-root configuration until
+        # they declare their own MCP and permission formats.
+        settings.merge_mcp_servers(
+            profile, {MCP_NAME: mcp_server_def()}, remove=LEGACY_MCP_NAMES
+        )
+        mcp_lines = [
+            f"mcp server {MCP_NAME!r} -> "
+            f"{profile.config_dir / settings.CLAUDE_JSON}"
+        ]
+        guard_lines = _gate_guard_lines(
+            profile.config_dir / settings.SETTINGS_FILENAME
+        )
     return (
-        [f"mcp server {MCP_NAME!r} -> {profile.config_dir / settings.CLAUDE_JSON}"]
-        + _skill_lines(profile.config_dir / "skills")
-        + _gate_guard_lines(profile.config_dir / settings.SETTINGS_FILENAME)
+        mcp_lines
+        + _skill_lines(home / "skills")
+        + guard_lines
     )
 
 

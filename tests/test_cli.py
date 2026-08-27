@@ -76,6 +76,33 @@ def test_install_all_profile_covers_every_profile_but_not_global(home, capsys, t
     assert not (cfg / "skills" / "cflow" / "SKILL.md").exists()
 
 
+def test_install_codex_profile_targets_codex_home(home, capsys):
+    run("create", "work", "--no-seed", "--harness", "codex")
+    capsys.readouterr()
+    assert run("install", "--profile", "work") == 0
+    out = capsys.readouterr().out
+    pdir = config.profiles_dir() / "work"
+    codex_home = pdir / "codex"
+    assert (codex_home / "skills" / "cflow" / "SKILL.md").is_file()
+    assert not (pdir / "skills").exists()
+    config_text = (codex_home / "config.toml").read_text(encoding="utf-8")
+    assert "[mcp_servers.claunch]" in config_text
+    assert "restart active agent sessions" in out
+
+
+def test_install_all_routes_each_profile_to_its_harness_home(home, capsys):
+    run("create", "claude-work", "--no-seed")
+    run("create", "codex-work", "--no-seed", "--harness", "codex")
+    capsys.readouterr()
+    assert run("install", "--all") == 0
+    root = config.profiles_dir()
+    assert (root / "claude-work" / "skills" / "mesh" / "SKILL.md").is_file()
+    assert (
+        root / "codex-work" / "codex" / "skills" / "mesh" / "SKILL.md"
+    ).is_file()
+    assert (root / "codex-work" / "codex" / "config.toml").is_file()
+
+
 def test_install_all_is_an_alias_of_all_profile(home, capsys, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     run("create", "work", "--no-seed")
