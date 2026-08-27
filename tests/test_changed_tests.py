@@ -294,12 +294,173 @@ def test_a_very_short_stem_does_not_drag_in_the_whole_directory(repo):
 
 
 def test_a_source_module_with_no_test_selects_nothing_rather_than_guessing(repo):
-    """The convention holds for 31 of 79 modules here, so it has to be allowed
+    """The convention holds for 47 of 107 modules here, so it has to be allowed
     to miss. Widening is the only thing it may do; inventing a filename that
-    does not exist would make the gate fail on its own guess."""
+    does not exist would make the gate fail on its own guess.
+
+    Nothing imports ``lonely`` and nothing names it, so rules 2b and 2c are
+    silent too -- which is the point: they widen where there is a written
+    relationship to read, and stay quiet where there is none.
+    """
     _write(repo, "src/pkg/lonely.py", "x = 2\n")
     _git(repo, "commit", "-qam", "edit a module with no twin")
     assert _select(repo) == []
+
+
+# ---------------------------------------------------------------- rule 2b/2c
+#
+# Rule 2 alone maps a source file to its same-named test and stops there.
+# Four rounds measured what that misses -- :func:`changed_tests.importers`
+# carries the table -- and these pin the shape of each one.
+
+
+def test_a_module_with_no_twin_is_still_reached_by_whoever_imports_it(repo):
+    """The ``cflow_clock`` case: no ``tests/test_cflow_clock.py`` exists, so
+    rule 2 selected nothing, the gate ran nothing, and it exited 0. Ten test
+    modules import that file."""
+    _seed_on_base(repo, {"tests/test_lonely_guard.py": "from pkg.lonely import thing\n"})
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with no twin")
+    assert _select(repo) == ["tests/test_lonely_guard.py"]
+
+
+def test_a_module_with_a_twin_also_pulls_in_its_other_importers(repo):
+    """The ``daemon/mesh`` case, and the only one of the four that cost
+    something: the twin was selected and passed, while ``test_mesh_wire.py``
+    -- which imports the same module and pins the strings it writes -- was
+    not selected and held three real failures."""
+    _seed_on_base(repo, {"tests/test_mesh_wire.py": "from pkg.mesh import send\n"})
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit the source")
+    assert _select(repo) == ["tests/test_mesh.py", "tests/test_mesh_wire.py"]
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        "from pkg.lonely import thing",
+        "from pkg import lonely",
+        "import pkg.lonely",
+        "import pkg.lonely as short",
+    ],
+)
+def test_every_spelling_of_the_import_reaches_the_module(repo, statement):
+    """A test reaches a module by any of these and the dependency is the same.
+    Recording only one spelling would make the selection depend on the
+    author's habit, which is the naming convention's mistake again."""
+    _seed_on_base(repo, {"tests/test_importer.py": statement + "\n"})
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with no twin")
+    assert "tests/test_importer.py" in _select(repo)
+
+
+def test_importing_a_sibling_is_not_importing_this_one(repo):
+    """The negative half of 2b. A rule that selected every test importing
+    anything from the package would pass every test above and be worthless."""
+    _seed_on_base(repo, {"tests/test_sibling.py": "from pkg.mesh import send\n"})
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with no twin")
+    assert "tests/test_sibling.py" not in _select(repo)
+
+
+def test_the_import_graph_is_not_followed_past_the_test(repo):
+    """2b reads what a test imports, not what those imports reach.
+
+    The transitive closure was measured on this suite before the bound was
+    chosen: it selects a median of 1054 of 2489 tests -- 42% of the suite for
+    the median source module, and 25% or more for 92 of the 107 of them. That
+    is the leader's full sweep wearing the worker's name, and it would end the
+    only thing this gate is for. The cost of the bound is this test's subject:
+    a test that reaches the changed module only through another module is
+    genuinely missed, and that is a documented limit rather than an oversight.
+    """
+    _seed_on_base(
+        repo,
+        {
+            "src/pkg/middle.py": "from pkg.lonely import thing\n",
+            "tests/test_middle.py": "from pkg.middle import thing\n",
+        },
+    )
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with no twin")
+    assert _select(repo) == []
+
+
+def test_a_guard_that_names_the_file_without_importing_it_is_reached(repo):
+    """Rule 2c. ``test_delivery_contract`` keys a table on
+    ``("cli_sessions.py", "_cmd_send_keys")`` and imports nothing from it --
+    an import graph alone cannot see that, and it is a real guard."""
+    _seed_on_base(
+        repo,
+        {"tests/test_contract.py": 'PINS = {("cli_sessions.py", "_cmd_send"): "x"}\n'},
+    )
+    _write(repo, "src/pkg/cli_sessions.py", "x = 2\n")
+    assert "tests/test_contract.py" in _select(repo)
+
+
+def test_a_tools_script_is_reached_by_name_since_it_has_no_module_path(repo):
+    """``tools/`` is not importable under a package name -- its tests load it
+    with ``spec_from_file_location`` -- so 2b returns nothing for it by
+    construction and 2c is what speaks."""
+    _seed_on_base(repo, {"tests/test_runs_the_script.py": 'SCRIPT = "tools/merge_ready.py"\n'})
+    _write(repo, "tools/merge_ready.py", "x = 2\n")
+    assert "tests/test_runs_the_script.py" in _select(repo)
+
+
+def test_a_package_init_is_reached_by_whoever_imports_the_package(repo):
+    """``src/pkg/__init__.py`` is named by its *package*, which is what a test
+    writes when it imports from it."""
+    _seed_on_base(
+        repo,
+        {"src/pkg/__init__.py": "", "tests/test_pkg_user.py": "from pkg import mesh\n"},
+    )
+    _write(repo, "src/pkg/__init__.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit the package init")
+    assert "tests/test_pkg_user.py" in _select(repo)
+
+
+def test_a_package_init_does_not_drag_in_every_test_that_defines_a_class(repo):
+    """Why :func:`changed_tests._is_dunder` exists. 2c's search term for
+    ``__init__.py`` is the stem ``__init__``, which is not a reference to
+    anything -- in this repository it appears in 35 of 118 test modules, none
+    of them about a three-line package init. 2b already holds that file's real
+    dependents."""
+    _seed_on_base(
+        repo,
+        {
+            "src/pkg/__init__.py": "",
+            "tests/test_says_init.py": "class C:\n    def __init__(self):\n        pass\n",
+        },
+    )
+    _write(repo, "src/pkg/__init__.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit the package init")
+    assert "tests/test_says_init.py" not in _select(repo)
+
+
+def test_a_test_module_that_will_not_parse_does_not_break_the_gate(repo):
+    """This gate runs on working trees, so a half-typed file is a normal state
+    for one. A parser that raised here would turn "somebody is mid-edit" into
+    a gate that cannot run at all."""
+    _seed_on_base(repo, {"tests/test_half_typed.py": "def broken(:\n"})
+    _write(repo, "src/pkg/lonely.py", "x = 2\n")
+    _git(repo, "commit", "-qam", "edit a module with no twin")
+    assert _select(repo) == []
+
+
+def test_this_repository_reaches_the_clock_tests_that_have_no_twin():
+    """The case the rule was written for, pinned against the real tree.
+
+    ``ReminderClock`` lives in ``daemon/cflow_clock.py`` and its canonical
+    test is ``tests/test_reminder_clock.py`` -- a name the convention cannot
+    reach, because the clocks in that file are tested one class per module.
+    """
+    repo = Path(__file__).resolve().parents[1]
+    assert not (repo / "tests" / "test_cflow_clock.py").exists(), (
+        "the twin now exists, so this case no longer proves what it was "
+        "written to prove -- pick another module with no same-named test"
+    )
+    picked = changed_tests.select(repo, ["src/claude_launcher/daemon/cflow_clock.py"])
+    assert "tests/test_reminder_clock.py" in picked
 
 
 def test_uncommitted_and_untracked_changes_count(repo):
