@@ -7,7 +7,7 @@ import os
 import pytest
 import yaml
 
-from claude_launcher import store
+from claude_launcher import atomic, store
 
 
 def test_load_defaults_when_absent(config_file):
@@ -110,7 +110,9 @@ def test_save_never_shows_a_reader_a_half_written_document(config_file, monkeypa
         seen.append(store.load())
         real_replace(src, dst)
 
-    monkeypatch.setattr(store.os, "replace", spy)
+    # the rename lives in claude_launcher.atomic now: patching store.os would
+    # hook a module store no longer calls, and this test would pass blind.
+    monkeypatch.setattr(atomic.os, "replace", spy)
     store.save({"llm": {"endpoint": "e2", "model": "m", "api_key": "k"}})
 
     assert len(seen) == 1
@@ -134,7 +136,7 @@ def test_a_save_that_cannot_land_keeps_the_old_document_and_cleans_up(
     def boom(src, dst):
         raise OSError("rename refused")
 
-    monkeypatch.setattr(store.os, "replace", boom)
+    monkeypatch.setattr(atomic.os, "replace", boom)
     with pytest.raises(OSError):
         store.save({"llm": {"endpoint": "e2"}})
 

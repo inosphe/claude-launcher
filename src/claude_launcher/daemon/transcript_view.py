@@ -79,10 +79,9 @@ def _load_index(name: str) -> Dict[str, Any]:
 def _save_index(name: str, doc: Dict[str, Any]) -> None:
     path = index_path(name)
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = path.with_suffix(".index.tmp")
-        tmp.write_text(json.dumps(doc), encoding="utf-8")
-        atomic.replace(tmp, path)
+        with atomic.scratch(path) as tmp:
+            tmp.write_text(json.dumps(doc), encoding="utf-8")
+            atomic.replace(tmp, path)
     except OSError:  # an index we cannot persist is rebuilt next time, not fatal
         log.debug("could not write transcript index for %s", name, exc_info=True)
 

@@ -190,6 +190,6 @@ class DocStore:
 
 
 def _atomic_write(path: Path, text: str) -> None:
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    atomic.replace(tmp, path)
+    with atomic.scratch(path) as tmp:
+        tmp.write_text(text, encoding="utf-8")
+        atomic.replace(tmp, path)
