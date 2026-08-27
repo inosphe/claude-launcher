@@ -81,9 +81,15 @@ function node(tag) {
 
 const chip = node("button");
 chip.className = "term-btn timer-chip hidden";
+/* The skip that sits against it. A second node and not a child, because a
+   button cannot live inside a button — which is the one structural fact the
+   feature had to be built around, so the stub states it too. */
+const skipBtn = node("button");
+skipBtn.className = "term-btn timer-skip hidden";
+const boxes = { "term-timer": chip, "term-timer-skip": skipBtn };
 const $ = (id) => {
-  if (id !== "term-timer") throw new Error("unexpected $: " + id);
-  return chip;
+  if (!(id in boxes)) throw new Error("unexpected $: " + id);
+  return boxes[id];
 };
 function el(tag, cls, text) {
   const n = node(tag);
@@ -113,13 +119,17 @@ new Function(
    slice("railTimerLine"), slice("sessCflowRun"),
    slice("termTimerRun"), table("TERM_TIMER_HOLD_GLYPH"),
    slice("renderTermTimer"), slice("termTimerHold"), slice("termTimerTitle"),
+   table("TERM_TIMER_SKIPPABLE"), slice("termTimerSkip"),
+   slice("termTimerSkipTitle"), slice("paintTermTimerSkip"),
    slice("paintTermTimer"),
    // slice() cuts from the `function` keyword, so the modifier in front of
    // it has to be put back — and asserting it was there is the point: the
    // click writes to the daemon, and a synchronous version of it could not.
-   "async " + slice("termTimerClick")].join("\n") + `
-let termTimerRead = null, termTimerBusy = false;
+   "async " + slice("termTimerClick"),
+   "async " + slice("termTimerSkipClick")].join("\n") + `
+let termTimerRead = null, termTimerBusy = false, termTimerSkipBusy = false;
 exports.termRun = termTimerRun;
+exports.skip = termTimerSkip;
 exports.render = renderTermTimer;
 exports.paint = paintTermTimer;
 exports.hold = termTimerHold;
@@ -201,6 +211,111 @@ check("the hover text still answers for the clock it is NOT reporting",
        "step reminder · counting · every 10:00",
        "stall ping · off · switched off"]);
 
+/* ---- the skip beside the switch -------------------------------------- */
+/* The switch pauses the clock; this lets ONE reminder go by and keeps it.
+   The two are one row apart, so the thing that has to be pinned first is
+   that the skip is decided from the REMINDER's own standing and not from the
+   line — the chip reports whichever clock is loudest, and a skip offered off
+   that reading would be offered for a clock this button cannot touch. */
+ctx.setWorld("s19", [mine]);
+ctx.render();
+check("a counting reminder has something to skip, and names the run",
+      ctx.skip(),
+      { state: "counting", cwd: "F:/repo", scope: "s19", interval: 600 });
+check("...so the button is up, icon only, wearing the clock's state",
+      [skipBtn.classList.contains("hidden"), skipBtn.textContent,
+       skipBtn.classList.contains("counting")],
+      [false, "⏭", true]);
+
+/* Held is the state it is worth the most in: a held reminder is due and
+   retried EVERY poll, so it lands the instant the agent starts its next
+   turn — which is exactly the turn somebody is trying to keep clear. */
+const heldRun = run("s19", { timers: {
+  reminder: { running: true, enabled: true, interval: 600, due_in: -42,
+              fired_ago: null, state: "held" },
+  ping: { running: true, enabled: false, interval: 900, due_in: null,
+          fired_ago: null, state: "off" },
+} });
+ctx.setWorld("s19", [heldRun]);
+ctx.render();
+check("a reminder held for a stopped session is skippable, and says so",
+      [ctx.skip().state, skipBtn.classList.contains("held")], ["held", true]);
+
+/* And the silences are not "not yet", they are nothing to skip. Offering the
+   button on them would be a promise the daemon cannot keep: on `arming` the
+   clock has no timer for this run at all, on `watching` it repeats nothing,
+   and on the other three it is already quiet. */
+for (const state of ["off", "blocked", "stopped", "arming", "watching"]) {
+  ctx.setWorld("s19", [run("s19", { timers: {
+    reminder: { running: true, enabled: true, interval: 600, due_in: null,
+                fired_ago: null, state },
+    ping: { running: true, enabled: false, interval: 900, due_in: null,
+            fired_ago: null, state: "off" },
+  } })]);
+  ctx.render();
+  check("nothing is coming in '" + state + "', so nothing to skip",
+        [ctx.skip(), skipBtn.classList.contains("hidden"),
+         skipBtn.textContent],
+        [null, true, ""]);
+}
+
+/* And the skip is decided from the REMINDER, never from the line — which the
+   five cases above cannot show, because a silent ping leaves the chip
+   speaking for the reminder anyway. The one arrangement that separates them
+   is a quiet reminder under a LOUD ping: the ranking hands the line to the
+   ping, so a skip read off the line would be offered here — for a clock this
+   button cannot touch (the stall ping is machine-wide) and with no reminder
+   coming to skip at all.
+
+   What it settles is narrower than it looks, and the narrowing is the
+   point. Against a SILENT ping this is the only arrangement that separates
+   the two readings: a skippable reminder (due 0, counting 1, held 2)
+   outranks every silence a ping can be in (waiting 3 … off 8), so a quiet
+   ping can never take the line from a reminder that has something to skip.
+
+   It settles nothing about a LOUD ping, and an earlier version of this
+   comment claimed it did (caught in review). A ping is `due` or `counting`
+   often enough, and then it does take the line — ping due(0) over reminder
+   counting(1) or held(2), ping counting(1) over reminder held(2). There
+   BOTH readings are skippable, so the button is up either way and hiding
+   cannot tell them apart. The case below is where that half is settled. */
+ctx.setWorld("s19", [run("s19", { timers: {
+  reminder: { running: true, enabled: false, interval: 600, due_in: null,
+              fired_ago: null, state: "off" },
+  ping: { running: true, enabled: true, interval: 900, due_in: 120,
+          fired_ago: null, state: "counting" },
+} })]);
+ctx.render();
+check("the line is the ping's, because the ping is the loud one",
+      chip.kids.map((k) => k.text)[1], "stall ping in 2:00");
+check("...but the skip speaks for the reminder, which has nothing to skip",
+      [ctx.skip(), skipBtn.classList.contains("hidden")], [null, true]);
+
+/* The half hiding cannot catch: a loud ping over a reminder that HAS
+   something to skip. Both readings are skippable, so the button is up
+   whichever one is read — what diverges is the state it wears and the
+   sentence it says, because those come from the same target the press does.
+   Read off the line instead and this press dresses in the ping's clothes
+   while still sending the reminder's interval: a held reminder — a debt
+   retried every poll — described as a countdown to the next one. */
+ctx.setWorld("s19", [run("s19", { timers: {
+  reminder: { running: true, enabled: true, interval: 600, due_in: -42,
+              fired_ago: null, state: "held" },
+  ping: { running: true, enabled: true, interval: 900, due_in: 300,
+          fired_ago: null, state: "counting" },
+} })]);
+ctx.render();
+check("a loud ping takes the line even from a skippable reminder",
+      chip.kids.map((k) => k.text)[1], "stall ping in 5:00");
+check("...and the skip is offered, because the reminder is the one it reads",
+      [ctx.skip().state, skipBtn.classList.contains("hidden")],
+      ["held", false]);
+check("...wearing the reminder's state, not the line's",
+      [skipBtn.classList.contains("held"),
+       skipBtn.classList.contains("counting")], [true, false]);
+check("...and saying the debt rather than a countdown",
+      /retried every poll/.test(skipBtn.title), true);
+
 /* ---- the countdown ages, and cannot run past zero -------------------- */
 ctx.setWorld("s19", [run("s19", { timers: {
   reminder: { running: true, enabled: true, interval: 600, due_in: 65,
@@ -231,6 +346,11 @@ ctx.paint();
 check("a stale reading is not repainted onto the new session",
       chip.classList.contains("hidden"), true);
 check("...and its title goes with it", chip.title, undefined);
+/* The skip goes down with it. A live button that would skip the PREVIOUS
+   session's reminder, sitting on this session's name, is the same mistake
+   as the countdown — and worse, because it writes. */
+check("...and so does the skip beside it",
+      [skipBtn.classList.contains("hidden"), skipBtn.title], [true, undefined]);
 /* The poll (or the attach) re-reads, and the new session's own clock shows. */
 ctx.render();
 check("the new session's own clock takes its place",
@@ -242,6 +362,8 @@ ctx.setWorld("s19", [untimed]);
 ctx.render();
 check("a run the daemon published no timers for draws nothing, not a zero",
       [chip.classList.contains("hidden"), chip.textContent], [true, ""]);
+check("...and no skip either — there is no clock to skip a beat of",
+      [ctx.skip(), skipBtn.classList.contains("hidden")], [null, true]);
 
 /* Everything from here on turns on a click, and the click is async: it
    writes to the daemon and repaints on the answer. A CommonJS check file has
@@ -328,6 +450,87 @@ await settle();
 check("...and the chip takes presses again once the write lands",
       chip.disabled, false);
 
+/* ---- the click: the skip --------------------------------------------- */
+/* The narrow verb. Everything about this press is defined against the one
+   beside it: it must reach a different door, it must not send a setting,
+   and the switch must be exactly where it was afterwards. A skip that
+   quietly paused would look identical for one interval and then be a run
+   nobody gets reminded about. */
+posts.length = 0;
+holdPost = null;
+ctx.setWorld("s19", [mine]);
+ctx.render();
+ctx.paint();
+ctx.paint();
+check("the skip's listener is wired once too, not once per repaint",
+      (skipBtn.handlers.click || []).length, 1);
+
+skipBtn.fire("click");
+check("pressing it asks the daemon to skip ONE of this run's reminders",
+      posts, [{ path: "/api/cflow/reminder/skip",
+                body: { cwd: "F:/repo", scope: "s19" } }]);
+check("...and it is not the switch's door, nor carries a setting",
+      [posts[0].path === "/api/cflow/reminder",
+       Object.keys(posts[0].body).sort()],
+      [false, ["cwd", "scope"]]);
+await settle();
+/* `mine` was counting down from 6:00 of a 10:00 interval. The daemon has
+   just re-armed it where it stood, so the honest local reading is a full
+   interval — and the 2s poll is too far away to wait for it. */
+check("...the countdown restarts at a full interval at once, not in two seconds",
+      chip.kids.map((k) => k.text)[1], "step reminder in 10:00");
+check("...with the clock still on: the switch is untouched",
+      [chip.kids.map((k) => k.text)[0],
+       chip.classList.contains("timer-paused"), ctx.hold().on],
+      ["⏸", false, true]);
+check("...and the skip is still on offer, because the next one is still coming",
+      ctx.skip().state, "counting");
+
+/* One press at a time, for the switch's reason: two presses on a slow daemon
+   are two writes, and the second is a skip nobody asked for. */
+posts.length = 0;
+holdPost = true;
+ctx.setWorld("s19", [mine]);
+ctx.render();
+skipBtn.fire("click");
+check("the skip is disabled while the press is in flight", skipBtn.disabled, true);
+skipBtn.fire("click");
+check("...so a double-click skips one reminder, not two", posts.length, 1);
+if (typeof holdPost === "function") holdPost();
+holdPost = null;
+await settle();
+check("...and it takes presses again once the write lands",
+      skipBtn.disabled, false);
+
+/* A press with nothing to skip writes nothing. The button is down in those
+   states, so this is the guard behind it rather than the visible path — but
+   the node keeps its listener across repaints, and a hidden button that
+   still writes is a hidden button that writes. */
+posts.length = 0;
+ctx.setWorld("s19", [paused]);
+ctx.render();
+check("a paused reminder offers no skip", ctx.skip(), null);
+skipBtn.fire("click");
+await settle();
+check("...and pressing it anyway writes nothing", posts.length, 0);
+
+/* ---- the skip's hover text ------------------------------------------- */
+/* The one thing a reader cannot get from the icon: what it does NOT do.
+   Two controls one row apart, one of which leaves a state behind. */
+ctx.setWorld("s19", [mine]);
+ctx.render();
+check("it says it skips this one",
+      /SKIP this one step reminder/.test(skipBtn.title), true);
+check("...that the clock survives it, and when the next one is due",
+      /clock stays on, and the next one is due in 10:00/.test(skipBtn.title),
+      true);
+check("...and that nothing is stored — the difference from the switch",
+      /Nothing is stored/.test(skipBtn.title), true);
+ctx.setWorld("s19", [heldRun]);
+ctx.render();
+check("a held reminder is described as the debt it is, not as a countdown",
+      /retried every poll/.test(skipBtn.title), true);
+
 /* ---- the click: where there is no switch ----------------------------- */
 /* A daemon old enough to publish timers without the reminder's standing.
    There is nothing to flip, so the chip keeps the strip's glyph and the
@@ -393,6 +596,20 @@ check("...beside the badge it qualifies, before the actions",
       statusAt < chipAt && chipAt < actionsAt, true);
 check("it starts hidden — an empty chip must not sit in the row",
       /id="term-timer"[^>]*class="[^"]*hidden"/.test(html), true);
+const skipAt = html.indexOf('id="term-timer-skip"');
+check("the skip ships with it", skipAt >= 0, true);
+check("...as its own button, because one cannot nest inside the other",
+      skipAt > chipAt, true);
+check("...still inside the header, before the actions",
+      skipAt > headerAt && skipAt < actionsAt, true);
+check("...and it starts hidden too: there is usually nothing to skip",
+      /id="term-timer-skip"[^>]*class="[^"]*hidden"/.test(html), true);
+/* One repaint paints both, which is what puts the skip on the same 1s
+   interval as the countdown it sits against. A skip painted only by the 2s
+   poll would linger for two seconds on a run that has just gone quiet. */
+check("the chip's own repaint paints it",
+      /paintTermTimerSkip\(line \? termTimerSkip\(\) : null\)/
+        .test(slice("paintTermTimer")), true);
 
 /* ---- the stylesheet -------------------------------------------------- */
 const rules = css.replace(/\/\*[\s\S]*?\*\//g, "");
@@ -413,6 +630,23 @@ check("it clips rather than shoving the header's buttons along",
       /\.timer-chip \{[^}]*white-space:\s*nowrap/.test(rules) &&
       /\.timer-chip \{[^}]*overflow:\s*hidden/.test(rules) &&
       /\.timer-chip \{[^}]*flex:\s*0 1 auto/.test(rules), true);
+/* The skip is the one thing on this row that must NOT give way when the
+   header is tight: the chip clips because its words degrade gracefully, and
+   an icon has nothing to clip to. */
+check("the skip keeps its width while the chip clips",
+      /\.timer-skip \{[^}]*flex:\s*none/.test(rules), true);
+check("it borrows the chip's two loud states so it is findable at a glance",
+      ["due", "held"].every(
+        (st) => new RegExp(`\.timer-skip\.${st} \{[^}]*color:`).test(rules)),
+      true);
+check("...and not the common one, for the chip's reason",
+      /\.timer-skip\.counting/.test(rules), false);
+/* It borrows neither paused dress, and that is the point of the pairing:
+   this button leaves nothing behind for a dress to report. */
+check("nothing dresses a skip as a state somebody left behind",
+      /\.timer-skip\.timer-paused/.test(rules), false);
+check("...and it says when a press is in flight, like both chips beside it",
+      /\.timer-skip:disabled \{[^}]*cursor:\s*wait/.test(rules), true);
 
 if (failures) {
   console.error(`${failures} check(s) failed`);

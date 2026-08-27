@@ -132,6 +132,18 @@
            the control, not a second copy of the state: ⏸ while the reminder
            is on, ▶ once it is paused. -->
       <button id="term-timer" class="term-btn timer-chip hidden" type="button"></button>
+      <!-- The narrow verb beside that switch: let THIS reminder go by and
+           keep the clock. Pausing is the wrong size for what a person
+           usually wants here — they are watching one session do one long
+           thing and want the next paste not to land in the middle of it —
+           and a pause is a state they have to remember to undo, set at the
+           moment they are least likely to. So this writes nothing: the
+           timer is re-armed where it stands, and the countdown starts over
+           at a full interval. Up only when there is a reminder coming to
+           skip (counting, due, or held for a session that stopped);
+           rendered by paintTermTimerSkip(). -->
+      <button id="term-timer-skip" class="term-btn timer-skip hidden"
+              type="button"></button>
       <!-- What would happen to a message arriving RIGHT NOW: typed straight
            in, queued — and by what — or REFUSED outright, once this
            session's backlog has hit the mesh's cap and the daemon has

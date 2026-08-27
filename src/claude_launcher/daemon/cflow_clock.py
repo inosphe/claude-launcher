@@ -425,6 +425,47 @@ class ReminderClock:
                 entry["held_at"] = None
             log.info("cflow %s delivered to %r (%s)", kind, scope, cwd)
 
+    def skip(self, cwd: str, scope: str) -> bool:
+        """Let ONE of a run's reminders go by, without switching the clock off.
+
+        Re-arms this run's timer where it stands and drops any reminder
+        already held for a session that had stopped, leaving `enabled` and
+        `interval` — the run's override and the machine defaults alike —
+        untouched. The next reminder is then due a full interval from now.
+
+        It exists because pausing is the wrong size for the thing people
+        actually want here. A pause (:func:`cflow.engine.set_reminder`) is a
+        state somebody has to remember to undo, and it is set at exactly the
+        moment they are least likely to: they are watching one session do one
+        long thing, and they want *this* reminder not to land in the middle
+        of it. Turning the clock off for that is how a run ends up with no
+        reminder for the rest of the afternoon, for a reason nobody can see
+        two hours later. This changes nothing that outlives the interval.
+
+        Returns whether there was a timer to re-arm. ``False`` means this
+        clock is keeping none for that run — switched off there, a position
+        that is not the agent's to move, or a run that only just arrived —
+        and in each of those cases no reminder was coming for a skip to stop,
+        so there is nothing to report but the fact.
+
+        Racing the tick is possible and deliberately not locked out: a skip
+        landing after :meth:`scan` has already put this run in its due list
+        loses, and one more reminder is typed. Guarding that would put a lock
+        between this call and the poll's whole worker thread, to win a race
+        whose entire prize is one repetition of a message whose contract is
+        already "again every interval until it moves".
+        """
+        entry = self._seen.get((cwd, scope))
+        if entry is None:
+            return False
+        entry["at"] = time.monotonic()
+        # The held debt goes with it. A held reminder is *due and retried
+        # every poll*, so leaving the stamp would land the very reminder this
+        # call just said to skip, the moment the session reads busy again.
+        entry["held_at"] = None
+        log.info("cflow reminder skipped once for %r (%s)", scope, cwd)
+        return True
+
     @property
     def running(self) -> bool:
         """Whether the tick is actually alive.

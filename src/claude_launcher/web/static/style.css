@@ -830,6 +830,20 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    glyph beside it (▶) is what says the quiet is undoable, and where. */
 .timer-chip.timer-paused { color: #6e7681; border-color: #30363d; }
 .timer-chip:disabled { opacity: 0.6; cursor: wait; }
+/* The one-press skip beside the countdown. Icon only and narrow: the chip it
+   sits against is already a whole sentence about this clock, and the header
+   is one row that clips. It borrows the chip's two loud states rather than
+   inventing its own — on due and held this is the button being reached for,
+   and it should be findable from the glance that made somebody reach. It
+   deliberately borrows NEITHER of the paused dresses: this button leaves
+   nothing behind to be dressed as. */
+.timer-skip {
+  flex: none; padding: 2px 7px; font-size: 12px; line-height: 1.6;
+}
+.timer-skip:hover:not(:disabled) { color: #c6cdd5; border-color: #3c444d; }
+.timer-skip.due { color: #d29922; border-color: #4d3800; }
+.timer-skip.held { color: #a371f7; border-color: #3c2e5c; }
+.timer-skip:disabled { opacity: 0.6; cursor: wait; }
 /* The briefing card's strip, between the header and the terminal: padding
    and a rule like the queued strip's, in the panel's own grey so a summary
    reads as something to read, not as a wait the reader caused. The card
