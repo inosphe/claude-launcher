@@ -1448,7 +1448,7 @@ class Wizard(Form):
     # promise a default the form never applies.
     recall_fields = (
         "profile", "borrow", "null_token", "role", "args",
-        "mesh", "restore", "attach",
+        "mesh", "restore", "attach", "skip_permissions", "full_access",
     )
 
     # -- construction ---------------------------------------------------- #
@@ -1565,6 +1565,21 @@ class Wizard(Form):
             text=" ".join(x for x in extra if x != "--"),
         )
 
+        skip_permissions = ChoiceField(
+            key="skip_permissions", label="Approval mode",
+            hint="use this harness's non-interactive approval mode",
+            options=[Option("ask before acting", False),
+                     Option("full auto - do not ask", True)],
+        )
+        skip_permissions.select(bool(get("skip_permissions")))
+        full_access = ChoiceField(
+            key="full_access", label="Sandbox",
+            hint="Codex sandbox policy (danger-full-access is the launch default here)",
+            options=[Option("workspace-write", False),
+                     Option("danger-full-access", True)],
+        )
+        full_access.select(get("full_access", True) is not False)
+
         meshes = self.sources.meshes() or []
         mesh = ChoiceField(
             key="mesh", label="Mesh", section="START IT WORKING",
@@ -1634,7 +1649,7 @@ class Wizard(Form):
         return [
             name, profile, borrow, null, directory,
             *worktree_fields(""), role,
-            resume, fork,
+            resume, fork, skip_permissions, full_access,
             args_field, mesh, handle, connect, workflow, context, task,
             # After the task, because the default answer is read from it and
             # the other two are only worth asking once the reader has seen
@@ -1719,6 +1734,10 @@ class Wizard(Form):
             "(this profile's own token)",
         )
         claude = harness_name == "claude"
+        capabilities = next(
+            (h for h in self.sources.harnesses()
+             if h.get("name") == harness_name), {}
+        )
         for key in ("role", "resume", "null_token"):
             f = self.field(key)
             f.disabled = not claude
@@ -1742,6 +1761,14 @@ class Wizard(Form):
         fork.disabled_note = "needs a conversation to fork"
         if fork.disabled:
             fork.select(False)
+        permissions = self.field("skip_permissions")
+        permissions.hidden = not bool(capabilities.get("skip_permissions_args"))
+        if permissions.hidden:
+            permissions.select(False)
+        full_access = self.field("full_access")
+        full_access.hidden = not bool(capabilities.get("full_access_args"))
+        if full_access.hidden:
+            full_access.select(False)
 
         cwd = self.value("cwd") or self.cwd
         sync_worktree(self, cwd)
@@ -1820,6 +1847,18 @@ class Wizard(Form):
             args.args = shlex.split(text, posix=os.name != "nt") if text else []
         except ValueError:
             args.args = text.split()
+        capabilities = next(
+            (h for h in self.sources.harnesses()
+             if h.get("name") == detail.get("harness")), {}
+        )
+        if self.value("skip_permissions"):
+            args.args.extend(capabilities.get("skip_permissions_args") or [])
+        args.args.extend(
+            capabilities.get(
+                "full_access_args" if self.value("full_access")
+                else "full_access_off_args"
+            ) or []
+        )
 
         args.mesh = self.value("mesh") or None
         args.handle = (self.value("handle") or None) if args.mesh else None

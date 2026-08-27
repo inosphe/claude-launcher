@@ -570,7 +570,23 @@ def build_command(
         entry = harness_registry.get(sdef.harness)
         if entry is None:  # normalize() refuses these; belt and braces
             raise HarnessError(f"unknown harness {sdef.harness!r}")
-        argv = [*entry.launch_command(), *entry.args, *sdef.args]
+        managed_groups = (
+            entry.skip_permissions_args,
+            entry.full_access_args,
+            entry.full_access_off_args,
+        )
+        manages_mode = any(
+            group and any(
+                tuple(sdef.args[i:i + len(group)]) == tuple(group)
+                for i in range(len(sdef.args) - len(group) + 1)
+            )
+            for group in managed_groups
+        )
+        base_args = [
+            arg for arg in entry.args
+            if not (manages_mode and arg in entry.mode_conflict_args)
+        ]
+        argv = [*entry.launch_command(), *base_args, *sdef.args]
         if restoring:
             if sdef.harness == "codex" and sdef.conversation_id:
                 argv.extend(["resume", sdef.conversation_id])

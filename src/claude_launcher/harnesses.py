@@ -104,6 +104,17 @@ class Harness:
     #: Non-interactive argv placed before the health-check prompt. Empty
     #: means this custom harness cannot be checked safely by ``validate``.
     heartbeat_args: List[str] = field(default_factory=list)
+    #: Harness-native argv for the two runtime choices exposed by the
+    #: launchers.  Keeping these on the declaration prevents UI/manager code
+    #: from growing another harness-name switch every time one is added.
+    skip_permissions_args: List[str] = field(default_factory=list)
+    full_access_args: List[str] = field(default_factory=list)
+    #: The explicit opposite of ``full_access_args``.  Forms emit one group
+    #: or the other so an unticked choice is not lost as "no argv".
+    full_access_off_args: List[str] = field(default_factory=list)
+    #: Packaged defaults superseded whenever either managed permission or
+    #: sandbox group is present in the session's own args.
+    mode_conflict_args: List[str] = field(default_factory=list)
     usage: str = ""
     #: One-time opening message: positional prompt (``argv``) or terminal
     #: delivery after launch (``pty``).
@@ -178,6 +189,10 @@ class Harness:
             "empty_env": list(self.empty_env),
             "login_args": list(self.login_args),
             "heartbeat_args": list(self.heartbeat_args),
+            "skip_permissions_args": list(self.skip_permissions_args),
+            "full_access_args": list(self.full_access_args),
+            "full_access_off_args": list(self.full_access_off_args),
+            "mode_conflict_args": list(self.mode_conflict_args),
             "usage": self.usage,
             "opening_transport": self.opening_transport,
             "input_readiness": self.input_readiness,
@@ -311,6 +326,21 @@ def _parse_entry(name: str, body) -> Harness:
         login_args=_as_list(body.get("login_args"), f"harness {name!r} login_args"),
         heartbeat_args=_as_list(
             body.get("heartbeat_args"), f"harness {name!r} heartbeat_args"
+        ),
+        skip_permissions_args=_as_list(
+            body.get("skip_permissions_args"),
+            f"harness {name!r} skip_permissions_args",
+        ),
+        full_access_args=_as_list(
+            body.get("full_access_args"), f"harness {name!r} full_access_args",
+        ),
+        full_access_off_args=_as_list(
+            body.get("full_access_off_args"),
+            f"harness {name!r} full_access_off_args",
+        ),
+        mode_conflict_args=_as_list(
+            body.get("mode_conflict_args"),
+            f"harness {name!r} mode_conflict_args",
         ),
         usage=str(body.get("usage") or "").strip(),
         opening_transport=strategies["opening_transport"][0],
