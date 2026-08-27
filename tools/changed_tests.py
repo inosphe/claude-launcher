@@ -437,36 +437,58 @@ def worktree_tree(repo: Path) -> str:
     reason -- so a key that ignored the working tree would hand one edit's
     verdict to the next one, which is worse than running twice.
 
-    Built in a scratch index so the real one is untouched: the repository's
-    index is copied (keeping its stat cache, or every file would be re-hashed
-    on a machine where a git spawn already costs 1.2-2.9s -- claunch-fej8),
-    ``add -A`` stages tracked and untracked-but-not-ignored content into it,
-    and ``write-tree`` names the result. That is the same content pytest
-    collects, minus what ``.gitignore`` already excludes from both.
+    Built in a scratch index so the real one is untouched: ``add -A`` stages
+    tracked and untracked-but-not-ignored content into it, and ``write-tree``
+    names the result. That is the same content pytest collects, minus what
+    ``.gitignore`` already excludes from both.
 
-    **The copy carries the original's mtime, and that is load-bearing.**
-    Keeping the stat cache is keeping git's licence to answer "unchanged"
-    from ``lstat`` alone -- and that comparison is weaker than it looks:
-    here it is size plus mtime at one-second granularity (``st_ino`` is 0
-    and ``st_ctime`` is the *creation* time, so neither discriminates). An
-    edit that keeps a file's size and leaves its mtime inside the same
-    second is invisible to it. Git's one guard is the racy-clean rule: an
+    The scratch index starts EMPTY -- this used to copy the repository's
+    index for its stat cache (claunch-fej8), and that cache is exactly what
+    must not be trusted here. Git calls a file clean without reading it when
+    the cached mtime second and size both match, so a rewrite inside the
+    cached stat's second, at the same size, is invisible and the tree
+    carries the PRE-edit blob (claunch-vuta: a green verdict filed under the
+    tree of the edit *before* the one being judged; the two writes landed
+    0.46s apart, ``x = 1`` and ``x = 2`` both seven bytes with CRLF, and the
+    gate's own ``git status`` had refreshed the real index past the second
+    boundary, lifting the racy guard that would otherwise have caught it).
+    Nudging the copied index's mtime to force every entry racy did not hold
+    up under test -- git's behaviour there did not match the model -- so the
+    stat cache is not distrusted, it is absent: with no entries at all,
+    ``add`` hashes every file from disk. Measured on this repository:
+    0.21s against 0.12s with the copy -- the files are warm, because pytest
+    is about to read exactly these.
+
+    Why not keep the copy and preserve its mtime (claunch-vuta vs
+    claunch-gate-receipt-key-mismatch-t6zp): that half-measure is real and
+    it is not enough. Keeping the stat cache is keeping git's licence to
+    answer "unchanged" from ``lstat`` alone -- and that comparison is
+    weaker than it looks: here it is size plus mtime at one-second
+    granularity (``st_ino`` is 0 and ``st_ctime`` is the *creation* time,
+    so neither discriminates). Git's one guard is the racy-clean rule: an
     entry whose cached mtime is not older than the index file's own mtime
     may not be trusted on stat and has its content re-read
     (``read-cache.c``, ``is_racy_timestamp``). The guard is dated relative
-    to *the index*, so copying the index without its mtime stamps the copy
-    with ``now``, drops every entry safely into the copy's past, and
-    switches the guard off wholesale. ``write-tree`` then names the tree
-    the edit was made *on top of*.
+    to *the index*, so a copy stamped with ``now`` drops every entry into
+    the copy's past and switches the guard off wholesale -- measured, git
+    2.48.1.windows.1, 24 runs across four timings: ``copyfile`` alone wrong
+    23/24 and wrong by returning exactly ``HEAD^{tree}``, mtime-preserving
+    copy right 24/24 against a from-empty-index tree.
 
-    Measured (claunch-gate-receipt-key-mismatch-t6zp, git 2.48.1.windows.1):
-    24 runs across four timings, mtime-preserving copy right 24/24 against a
-    from-empty-index tree; ``copyfile`` wrong 23/24, and wrong by returning
-    exactly ``HEAD^{tree}`` -- the one key this function's first paragraph
-    says it must never return. Sharpest reading of the same run: with the
-    guard off, ``git status`` in that repository reports the file modified
-    while this function's scratch index does not. The gate's key disagreed
-    with the gate's own ``changed_paths`` about the same working tree.
+    But the guard it re-arms only fires while the entry is racy, and an
+    entry can be stale without being racy. Git protects the common path
+    itself -- writing the index smudges a racily-clean entry's cached size
+    to 0, so it is re-read forever after -- and that protection is bypassed
+    by any restore that preserves mtime (``cp -p``, ``tar -x``, ``rsync
+    -t``, ``unzip``). Measured on this repository with the mtime-preserving
+    copy in place: after ``add``/``commit``, a one-second wait, and a plain
+    ``git status`` (which rehashes the entry and rewrites the index a
+    second later, so nothing is racy any more), restoring different content
+    of the same size under the old mtime leaves ``git status --porcelain``
+    empty and this function returning ``HEAD^{tree}`` -- the value the
+    first paragraph forbids. From an empty index, the same scenario returns
+    the working tree's real hash. The stat cache is therefore not
+    distrusted here, it is absent.
 
     That is not a test artefact. A same-size edit landing in the wrong
     second is handed the previous tree's key, and the previous tree's green
@@ -475,25 +497,12 @@ def worktree_tree(repo: Path) -> str:
     failure than the mismatched lookup that led here: a wrong key costs one
     extra run, this costs the run itself.
 
-    ``copyfile`` + explicit ``utime`` rather than ``copy2``: the timestamps
-    are the whole point of the copy and are worth naming at the call site,
-    and the mode bits ``copy2`` would also carry are not wanted on a file
-    git has to rewrite.
-
     Side effect worth knowing: ``add -A`` writes blobs for uncommitted files
     into the object database, the way ``git stash create`` does. They are
     loose objects nothing references, and gc collects them.
     """
-    git_dir = Path(_git(repo, "rev-parse", "--absolute-git-dir"))
     with tempfile.TemporaryDirectory() as tmp:
-        index = Path(tmp) / "index"
-        real = git_dir / "index"
-        if real.is_file():
-            shutil.copyfile(real, index)
-            stat = real.stat()
-            # Not cosmetic: this is what keeps git's racy-clean rule armed
-            # on the copy. See the docstring.
-            os.utime(index, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+        index = Path(tmp) / "index"      # absent on purpose: see above
         env = dict(os.environ, GIT_INDEX_FILE=str(index))
         _git(repo, "add", "-A", env=env)
         return _git(repo, "write-tree", env=env)
