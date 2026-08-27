@@ -872,7 +872,28 @@ def test_check_abstains_when_no_receipt_answers(repo, gate, capsys):
     _write(repo, "src/pkg/mesh.py", "x = 2\n")
     assert gate("--check") == changed_tests.CANNOT_TELL
     assert gate.runs() == 0
-    assert "abstain" in capsys.readouterr().err
+    captured = capsys.readouterr()
+    assert "abstain" in captured.out
+    # On stdout, with the selection it is abstaining about, and with its own
+    # green twin ("green receipt for tree ..."), which was always there. Split
+    # by outcome, a procedure reading stdout alone saw a healthy-looking
+    # selection line and exit 2 with no reason attached (merger-r5).
+    assert "abstain" not in captured.err
+
+
+def test_a_base_it_cannot_resolve_says_so_on_stdout(repo, capsys):
+    """The other exit-2 path, and the same rule.
+
+    Here stdout would otherwise be *empty* -- the run stops before there is a
+    selection to print -- so a reader keeping only stdout gets exit 2 and not
+    one word about why.
+    """
+    assert changed_tests.main(
+        ["--repo", str(repo), "--base", "no-such-ref-zzz", "--list"]
+    ) == changed_tests.CANNOT_TELL
+    captured = capsys.readouterr()
+    assert "cannot tell" in captured.out
+    assert "cannot tell" not in captured.err
 
 
 def test_check_reads_a_green_receipt_without_running(repo, gate, capsys):

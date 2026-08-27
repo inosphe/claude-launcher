@@ -160,6 +160,14 @@ tool's own trouble.** See :data:`STREAMS`, which ``--help`` prints. The two
 caveats -- paths no rule could map, and modules one hop past rule 2b -- are
 the part a landing request has to quote, so they go where the answer goes.
 
+That holds for every exit code, and the rule was written wrong the first time:
+both of ``CANNOT_TELL``'s paths were on stderr, so an abstaining ``--check``
+put its *selection* on stdout and its reason for abstaining on the other
+stream -- and its own green twin, ``green receipt for tree ...``, was already
+on stdout. One verdict split across two streams by outcome. A procedure
+reading stdout alone saw a healthy-looking selection line and exit 2 with
+nothing to say why (merger-r5, 2026-08-27, measured on ``54f537b``).
+
 Exit codes match ``tools/deploy_check.py``: 0 = the selected tests passed (or
 there were none), 1 = they failed, 2 = could not tell -- which is what
 ``--check`` returns when no receipt answers, because "nobody has run this"
@@ -224,12 +232,14 @@ CANNOT_TELL = 2
 #: one of them. Unread and absent spell the same, which is this file's whole
 #: subject (worker-select / merger-r5, 2026-08-27, ``claunch-a9t``).
 STREAMS = """\
-streams: stdout carries the verdict and every caveat on it -- the selection,
-the paths no rule could map, the modules one hop out that were not selected,
-and the pytest command. stderr carries only this tool's own trouble: a tree it
-could not hash, a receipt it could not read or write, a base it could not
-resolve. Read stdout to learn what the gate did and did not cover; a procedure
-that keeps only stdout loses nothing it needs.
+streams: stdout carries the verdict and every caveat on it -- for all three
+exit codes. That is the selection, the pytest command, the paths no rule could
+map, the modules one hop out that were not selected, and both halves of what
+--check answers (a green receipt, or why it is abstaining). stderr carries only
+this tool's own trouble, which never decides the exit code: a receipt it could
+not read or write, a working tree it could not hash, an old basetemp it pruned.
+Read stdout to learn what the gate did and did not cover; a procedure that
+keeps only stdout loses nothing it needs.
 """
 
 #: What ``--base`` falls back to when nothing better is known.
@@ -1236,7 +1246,7 @@ def main(argv: Optional[list] = None) -> int:
     try:
         paths = changed_paths(repo, base)
     except LookupError as exc:
-        print(f"cannot tell: {exc}", file=sys.stderr)
+        print(f"cannot tell: {exc}")
         return CANNOT_TELL
 
     files = select(repo, paths)
@@ -1322,8 +1332,7 @@ def main(argv: Optional[list] = None) -> int:
                 f"{len(files)}-module selection -- abstain, or ask the author "
                 f"to run 'python tools/changed_tests.py --base {args.base}'. "
                 f"Do not run the selection yourself: it is load nobody's scan "
-                f"counted.",
-                file=sys.stderr,
+                f"counted."
             )
             return CANNOT_TELL
         print(f"green receipt for tree {tree[:12]}: {describe(found)}")
