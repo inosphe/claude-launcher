@@ -7604,7 +7604,7 @@ function beadsCard(row) {
     rel.appendChild(el("span", "beads-rel-kids",
       row.kids === 1 ? "1 child" : `${row.kids} children`));
   }
-  if (rel.kids.length) card.appendChild(rel);
+  if (rel.children.length) card.appendChild(rel);
 
   /* The badge row. Anything a later round wants to flag on a card without
      re-cutting the layout goes here (claunch-3dgs wants "has reports"), which
@@ -7619,7 +7619,7 @@ function beadsCard(row) {
   if (issue.assignee) {
     badges.appendChild(el("span", "beads-badge who", "→ " + issue.assignee));
   }
-  if (badges.kids.length) card.appendChild(badges);
+  if (badges.children.length) card.appendChild(badges);
 
   const who = el("div", "beads-sessions");
   for (const s of issue.sessions || []) {
@@ -7628,7 +7628,7 @@ function beadsCard(row) {
     tag.title = `${s.name} (${s.status || "?"}) — ${(s.via || []).join(", ")}`;
     who.appendChild(tag);
   }
-  if (who.kids.length) card.appendChild(who);
+  if (who.children.length) card.appendChild(who);
   return card;
 }
 
