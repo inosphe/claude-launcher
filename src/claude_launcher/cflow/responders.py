@@ -26,6 +26,15 @@ spawn a sibling and cannot wire itself to one, so siblings, uncles and roots
 are as safe as ancestors. ``scope: ancestor`` narrows to the chain of command
 for the workflows that want it; it is not what makes this sound.
 
+**An edge may be made, never widened past the roster.** A candidate that
+declares ``connect: true`` turns "holds the role but is not wired to this run"
+from a skip into an edge — see :func:`wire`. That is the one thing here the
+run could not do for itself, so it is done with the daemon's own authority and
+bounded to exactly that miss: the candidate must already name a member of this
+mesh that holds the declared role and can answer. Nothing about who is *in* the
+pool changes, which is what keeps the paragraph above true — a session the run
+spawned is still excluded, and wiring cannot reach one.
+
 **A responder must be local.** Answering means writing the asking run's state,
 and those files live on the asking machine; a member on another daemon cannot
 touch them. Remote matches are therefore skipped *with that reason* rather than
@@ -110,6 +119,12 @@ class Pool:
     #: Handles above it, nearest first.
     ancestors: List[str] = field(default_factory=list)
     problem: str = ""
+    #: Handles this run wired itself to, because a candidate declared
+    #: ``connect: true``. Read by the engine so the ask records that the edge
+    #: was made by a workflow's declaration rather than by a person — the
+    #: mesh's own edge table stores no such attribution, and an edge nobody
+    #: can tell from a deliberate one erases the judgement that made it.
+    wired: List[str] = field(default_factory=list)
 
     def eligible(self, candidate: model.Candidate) -> List[Responder]:
         """Members this candidate's role and scope name, reachable or not."""
@@ -121,7 +136,9 @@ class Pool:
             self.members[h] for h in handles if self.members[h].role == candidate.role
         ]
 
-    def match(self, candidate: model.Candidate) -> Tuple[List[Responder], Optional[str]]:
+    def match(
+        self, candidate: model.Candidate, *, autowire: bool = False
+    ) -> Tuple[List[Responder], Optional[str]]:
         """Members this candidate names, or ``([], reason)``.
 
         The reason is what a human reads when the question lands in front of
@@ -129,6 +146,11 @@ class Pool:
         exited — rather than reporting them all as "nobody". Each check is
         stated in the order that makes the next fix obvious: is there such a
         role at all, then can this run reach it, then can it answer.
+
+        ``autowire`` is the caller's permission to have side effects, and is
+        off by default so that reading who *would* answer stays a read. Only
+        the one caller that is actually opening a question passes it; the
+        preview reports the missing edge and says it will be made.
         """
         where = candidate.describe()
         if self.problem:
@@ -137,6 +159,27 @@ class Pool:
         if not matched:
             return [], f"{where}: {self._nobody_holds(candidate)}"
         reachable = [m for m in matched if m.handle in self.reachable]
+        # The note is built here, where both facts are known: whether wiring
+        # was allowed to run at all, and what it did. Two readers need
+        # different halves. Where nothing was attempted — the preview, which
+        # reports who *would* answer — the missing edge should not read as
+        # something to go and add by hand, because it is about to be made.
+        # Where the attempt was made and did not take, the failure itself is
+        # the useful half, and "add it by hand" is the wrong instruction.
+        note = ""
+        if not reachable and candidate.connect:
+            if not autowire:
+                note = (
+                    " — this candidate declares 'connect: true', so the edge "
+                    "is made when the question is actually opened"
+                )
+            else:
+                reachable, failures = self._wire_to(matched)
+                if failures:
+                    note = (
+                        " — this candidate declares 'connect: true' and the "
+                        f"edge could not be made: {'; '.join(failures)}"
+                    )
         if not reachable:
             names = ", ".join(m.handle for m in matched)
             first = matched[0].handle
@@ -144,6 +187,7 @@ class Pool:
                 f"{where}: {names} holds it but {self.me or 'this run'} is not "
                 f"wired to them in mesh {self.mesh!r} — a session above them, "
                 f"or a person, can run 'claunch mesh connect {self.me} {first}'"
+                + note
             )
         answerable = [m for m in reachable if m.answerable]
         if not answerable:
@@ -157,6 +201,45 @@ class Pool:
             names = ", ".join(m.handle for m in reachable)
             return [], f"{where}: {names} matched but the session has exited"
         return answerable, None
+
+    def _wire_to(
+        self, matched: List[Responder]
+    ) -> Tuple[List[Responder], List[str]]:
+        """Make the missing edges this candidate declared. Returns who became
+        reachable, and the attempts that failed.
+
+        **Bounded, and not a loop.** One attempt per member, made here and
+        never re-entered: ``match`` calls this once, uses whatever came back,
+        and falls through to its ordinary reasons. So the work is at most one
+        daemon call per member the candidate matched, and every outcome —
+        every edge made, none made, some made — lands on one of the same
+        reason lines a run without ``connect`` would have produced. There is
+        no path back to this method from its own result.
+
+        Only members that could actually answer are wired. A candidate's
+        matches include the remote and the exited, and an edge to one of those
+        buys nothing while leaving a link behind in the roster that outlives
+        the run — so the miss reported for them stays the specific one
+        (``remote``/``exited``), which is a different fix from "not wired".
+
+        The pool's ``reachable`` set is updated in place on success, so a later
+        group naming the same member does not make the edge twice. Failures
+        are returned rather than raised: a wiring that did not take is one more
+        thing the reader of the skip needs, and not a reason to take a run down.
+        """
+        if not self.me or not self.mesh:
+            return [], []
+        wired: List[Responder] = []
+        failures: List[str] = []
+        for member in [m for m in matched if m.answerable]:
+            failure = wire(self.mesh, self.me, member.handle)
+            if failure:
+                failures.append(f"{member.handle}: {failure}")
+                continue
+            self.reachable.add(member.handle)
+            self.wired.append(member.handle)
+            wired.append(member)
+        return wired, failures
 
     def _nobody_holds(self, candidate: model.Candidate) -> str:
         if candidate.scope == model.SCOPE_ANCESTOR:
@@ -335,6 +418,57 @@ def _descendants(members: Dict[str, dict], me: str) -> Set[str]:
         if me in _ancestors(members, handle):
             out.add(handle)
     return out
+
+
+def wire(mesh: str, me: str, other: str) -> Optional[str]:
+    """Connect ``me`` to ``other`` with the daemon's own authority. Returns a
+    failure reason.
+
+    **Why this bypasses the mesh's ordinary rule.** A member may only edit an
+    edge touching a session it commands — its own children and their
+    descendants (``MeshManager.set_member_link``, guarded by
+    ``_require_member_authority`` when an ``actor`` is named). That rule is
+    what stops a spawned session from wiring its way out of the supervision it
+    was spawned under, and it is exactly why a worker cannot reach a sibling
+    reviewer: the reviewer is not below it. So the ask posts **without**
+    ``actor``, which is the same authority a person at the CLI holds.
+
+    **What bounds it.** The bypass is not "a run may wire itself to anyone".
+    Four things have to be true at once before this is called, and each one is
+    checked somewhere the run does not control:
+
+    1. The step's own workflow declares ``connect: true`` on that candidate —
+       a file, not a runtime choice, and one a person reviews.
+    2. The candidate names a role, and a member of this mesh already holds it.
+       Wiring never adds a member, and cannot invent a responder.
+    3. That member is not one this run spawned (``Pool.eligible`` removes its
+       descendants before anything here runs), so a run still cannot
+       manufacture its own approver — the property this module rests on.
+    4. The member is local and alive, so the edge is one a question can
+       actually travel down.
+
+    **What it does not decide.** It wires the asking run to a responder, and
+    nothing else to anything: two reviewers that were deliberately left apart
+    stay apart, because neither is an endpoint of the edge this makes. The
+    handle is recorded on the pool (``Pool.wired``) and journaled by the
+    engine, so an edge that appeared without a person's judgement behind it
+    can be told from one that had it.
+    """
+    client, why = daemon_client.connect_with_diagnosis()
+    if client is None:
+        return f"the claunch {daemon_client.unreachable_reason(why)}"
+    try:
+        client.patch(
+            f"/api/mesh/{mesh}/members/{me}/links/{other}",
+            # No `actor`: see the docstring. Naming one would apply the
+            # session-tree check that this path exists to stand outside of,
+            # and would refuse every edge worth making here.
+            {"enabled": True},
+            timeout=CALL_TIMEOUT,
+        )
+    except daemon_client.DaemonClientError as exc:
+        return str(exc)
+    return None
 
 
 def deliver(
