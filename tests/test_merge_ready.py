@@ -753,13 +753,18 @@ def test_the_tree_is_found_from_the_target_when_no_path_is_given(
     assert "written.py" in out
 
 
-def test_a_target_no_checkout_holds_passes_and_says_out_of_how_many(repo, capsys):
-    """No worktree on the target: nothing can refuse the merge, and why.
+def test_a_target_no_checkout_holds_is_not_measured_and_does_not_pass(repo, capsys):
+    """No worktree on the target: the check did not run, so it is not green.
 
-    A real pass rather than a shrug -- the leader's own merge worktree is
-    made fresh and is clean by construction. But it is an *empty* answer, so
-    rule 1 of ``claunch-peyn`` applies: it carries how many checkouts were
-    examined to reach it.
+    This answered ``READY`` first, with "no working tree can refuse this
+    merge", and that sentence claims more than was measured -- a tree that
+    does not hold the target *now* can be switched onto it later and refuse
+    then. Rule 3 of ``claunch-peyn`` is the one that settles it: a check that
+    did not run does not count towards a green, and the count of what did not
+    run belongs in the output.
+
+    The denominator survives the change (rule 1): "none of N worktree(s)"
+    says how many were examined to reach the empty answer.
     """
     code, out = _verdict(
         repo,
@@ -771,9 +776,79 @@ def test_a_target_no_checkout_holds_passes_and_says_out_of_how_many(repo, capsys
         "--checkout",
         merge_ready.DERIVE_FROM_TARGET,
     )
-    assert code == merge_ready.READY, out
+    assert code == merge_ready.CANNOT_TELL, out
     assert "worktree(s) has aligned-target checked out" in out
     assert "none of 2" in out
+    # and it says what would answer it, rather than only what it could not do
+    assert "--checkout <path>" in out
+
+
+def test_a_merge_that_writes_nothing_needs_no_tree(repo, capsys):
+    """The one case where a missing checkout really is a pass, measured.
+
+    ``landed-branch`` is already inside its target, so the merge writes no
+    files at all -- and a merge that writes nothing cannot be refused by any
+    working tree, whether or not one is standing on the target. Separating
+    this from the case above keeps the honest ``2`` from firing on every
+    already-landed branch, which is common enough that folding the two would
+    make the verdict noise.
+    """
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "landed-branch",
+        "--target",
+        "landed-target",
+        "--checkout",
+        merge_ready.DERIVE_FROM_TARGET,
+    )
+    assert code == merge_ready.READY, out
+    assert "writes 0 files" in out
+
+
+def test_removing_the_worktree_changes_the_answer_on_the_same_commits(
+    repo, checkout_tree, capsys
+):
+    """This verdict is a function of live trees, not of commits.
+
+    Every other answer this gate gives is decided by two commits, so quoting
+    one later is quoting something that is either still true or visibly stale
+    from the hashes. This one is decided by who is standing where and what
+    they have not committed, so the same code and the same two commits give
+    different answers minutes apart. Measured in the real repository during
+    the round this was written: ``4``, then ``0``, because a worktree was
+    removed in between.
+
+    The test pins the property rather than a remedy, because there is no
+    remedy -- what it demands is that a ``checkout:`` line be cited with the
+    time it was printed.
+    """
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+    blocked, blocked_out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert blocked == merge_ready.DIRTY_CHECKOUT, blocked_out
+
+    _git(checkout_tree, "checkout", "-q", "--", ".")
+    cleared, cleared_out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert cleared == merge_ready.READY, cleared_out
 
 
 def test_a_checkout_that_is_not_one_is_refused_rather_than_passed(
@@ -917,3 +992,79 @@ def test_a_conflict_keeps_exit_three_and_the_tree_check_says_it_cannot_answer(
     assert "also, the working tree this merge would run in" in out
     assert "could not work out which files the merge writes" in out
     assert "reports the merge conflicts" in out
+
+
+def test_the_five_checkout_answers_are_all_distinguishable_in_the_record(
+    repo, checkout_tree
+):
+    """Every state this check can reach leaves a different record.
+
+    The exit code is not enough on its own: two of these five are ``0`` and
+    two are ``2``, and that is correct -- ``0`` means the merge can start and
+    ``2`` means this gate did not measure it, whatever the reason. What must
+    not collapse is the *record*, because that is what somebody reads back
+    later when they are asking why a green was green.
+
+    The shape of the question comes from ``claunch-64hs`` (worker-64hs, this
+    round): a red-because-the-write-failed receipt and a red-because-it-was-
+    always-red receipt came out byte-identical, so the gate answered both the
+    same way and the only trace of the difference was a warning on stderr --
+    which the gate does not read and which dies with the terminal. Checking
+    "does it go green" would not have found that; checking "do the two
+    records differ" is what found it.
+
+    Limit, stated rather than papered over: this gate writes no file, so its
+    whole record is the exit code and the printed lines. There is no
+    persisted artifact to compare byte-for-byte the way 64hs could, and
+    nothing here pins what a *reader* does with the lines.
+    """
+    tip = _git(repo, "rev-parse", "tree-aligned").strip()
+    seen = {}
+
+    def record(label, where, target):
+        code, out, err = merge_ready._checkout_check(
+            repo, where, "tree-aligned", target, tip
+        )
+        seen[label] = (code, "\n".join(out + err))
+
+    # 1. a tree holds the target and is dirty on a file the merge writes
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+    record("found-dirty", str(checkout_tree), "tree-target")
+
+    # 2. the same tree, clean
+    _git(checkout_tree, "checkout", "-q", "--", ".")
+    record("found-clean", str(checkout_tree), "tree-target")
+
+    # 3. no tree holds the target, and the merge does write files
+    record("absent-writes", merge_ready.DERIVE_FROM_TARGET, "aligned-target")
+
+    # 4. no tree holds the target, and the merge writes nothing
+    landed = _git(repo, "rev-parse", "landed-branch").strip()
+    code, out, err = merge_ready._checkout_check(
+        repo, merge_ready.DERIVE_FROM_TARGET, "landed-branch", "landed-target", landed
+    )
+    seen["absent-empty"] = (code, "\n".join(out + err))
+
+    # 5. a path was named and it is not a checkout at all
+    record("not-a-checkout", str(repo / "nowhere"), "tree-target")
+
+    assert seen["found-dirty"][0] == merge_ready.DIRTY_CHECKOUT, seen["found-dirty"]
+    assert seen["found-clean"][0] == merge_ready.READY, seen["found-clean"]
+    assert seen["absent-writes"][0] == merge_ready.CANNOT_TELL, seen["absent-writes"]
+    assert seen["absent-empty"][0] == merge_ready.READY, seen["absent-empty"]
+    assert seen["not-a-checkout"][0] == merge_ready.CANNOT_TELL, seen["not-a-checkout"]
+
+    texts = {label: text for label, (_code, text) in seen.items()}
+    for label, text in texts.items():
+        assert text.strip(), f"{label} left no record at all"
+    assert len(set(texts.values())) == len(texts), (
+        "two states left the same record: "
+        + repr({k: v[:80] for k, v in texts.items()})
+    )
+
+    # and the two pairs that share an exit code say which is which in words,
+    # since the code alone cannot carry it
+    assert "blocked" in texts["found-clean"]
+    assert "writes 0 files" in texts["absent-empty"]
+    assert "none of" in texts["absent-writes"]
+    assert "not a git checkout" in texts["not-a-checkout"]

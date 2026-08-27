@@ -445,15 +445,44 @@ def _checkout_check(
             return CANNOT_TELL, out, err
         holding = [t for t in trees if t[1] and _same_branch(t[1], target)]
         if not holding:
-            # An empty answer carrying its denominator: rule 1 of
-            # claunch-peyn. And a real pass, not a shrug -- a branch that is
-            # checked out nowhere has no working tree that could refuse the
-            # merge, and a merge worktree made fresh is clean by construction.
-            out.append(
-                f"checkout: none of {len(trees)} worktree(s) has {target} "
-                f"checked out -- no working tree can refuse this merge"
+            # No checkout holds the target, so this gate has not found the
+            # tree the merge will run in. The first version of this answered
+            # READY with "no working tree can refuse this merge", and that
+            # sentence claims more than was measured: a tree that does not
+            # hold the target *now* can be switched onto it later and still
+            # refuse. Rule 3 of ``claunch-peyn`` settles it -- a check that
+            # did not run does not count towards a green.
+            #
+            # One case is a real pass rather than a shrug, and it is worth
+            # separating because it is common: if the merge writes no files
+            # at all (an already-landed branch, a branch with nothing on it),
+            # then no tree anywhere can refuse it and the missing checkout
+            # costs nothing.
+            target_tip = _resolve(repo, target)
+            if target_tip is None:
+                err.append(
+                    f"cannot tell: none of {len(trees)} worktree(s) has "
+                    f"{target} checked out, and {target} does not resolve to "
+                    f"a commit either"
+                )
+                return CANNOT_TELL, out, err
+            updates, how = _merge_updates(repo, target_tip, tip)
+            if updates is not None and not updates:
+                out.append(
+                    f"checkout: this merge writes 0 files, so no working "
+                    f"tree can refuse it -- and none of {len(trees)} "
+                    f"worktree(s) has {target} checked out [{how}]"
+                )
+                return READY, out, err
+            writes = "an unknown number of" if updates is None else str(len(updates))
+            err.append(
+                f"cannot tell: none of {len(trees)} worktree(s) has {target} "
+                f"checked out, so there is no tree to measure the {writes} "
+                f"file(s) this merge writes against. Name the tree the merge "
+                f"will run in with --checkout <path>, or check {target} out "
+                f"first [{how}]"
             )
-            return READY, out, err
+            return CANNOT_TELL, out, err
         where = holding[0][0]
     else:
         where = Path(checkout)
@@ -548,6 +577,15 @@ def _ready(
     worker doing its job and wall off the step it exists to open. Only the
     side about to run the merge knows where the merge runs, so only that side
     asks.
+
+    **This answer perishes in a way the others do not.** Every other verdict
+    here is a function of commits, so quoting one later is quoting something
+    that either still holds or is visibly stale from the hashes. This one is
+    a function of live working trees -- who is standing where, and what they
+    have not committed yet. Measured: the same code and the same two commits
+    answered ``4``, then ``0``, because a worktree was removed in between.
+    So a ``checkout:`` line is only true of the moment it was printed, and
+    citing one as evidence means citing its timestamp with it.
     """
     if checkout is None:
         return READY
