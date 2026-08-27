@@ -9,7 +9,6 @@ quiet about it: these tests pin the detection and the two places it surfaces.
 
 from __future__ import annotations
 
-import argparse
 import sys
 
 import pytest
@@ -189,12 +188,20 @@ def test_an_isolated_run_carries_no_such_note(flow_dir, monkeypatch):
 # --------------------------------------------------------------------------- #
 # the CLI surface the leader workflow calls
 # --------------------------------------------------------------------------- #
-def _run_cli(monkeypatch, capsys, *, session="kid"):
-    from claude_launcher import cli_cflow
+def _run_cli(monkeypatch, capsys, *argv, session="kid"):
+    """Through the real argument parser, not the handler.
+
+    Calling ``_cmd_checkout`` with a hand-built ``Namespace`` is what these
+    tests used to do, and it measured nothing about the command: the handler
+    landed in ``220627a`` without the ``add_parser`` line that reaches it, so
+    for a week ``claunch cflow checkout`` answered "invalid choice" while
+    every test here was green. ``cli.main`` is the surface the leader
+    workflow's ``integrate-preflight`` actually calls.
+    """
+    from claude_launcher import cli
 
     monkeypatch.setenv(state_mod.SESSION_ENV, session)
-    args = argparse.Namespace(session=None)
-    code = cli_cflow._cmd_checkout(args)
+    code = cli.main(["cflow", "checkout", *argv])
     return code, capsys.readouterr().out
 
 
@@ -236,6 +243,33 @@ def test_the_command_says_it_could_not_ask_rather_than_reporting_all_clear(
     assert code == 0
     assert "unknown" in out
     assert "(none)" not in out
+
+
+def test_the_subcommand_is_reachable_from_the_parser(monkeypatch):
+    """The registration itself, pinned apart from what the handler prints.
+
+    ``improv-leader``'s ``integrate-preflight`` names this command in its
+    instructions and requires its output in ``done_when``, so an unregistered
+    handler makes that step impossible to complete honestly.
+    """
+    from claude_launcher import cli, cli_cflow
+
+    args = cli.build_parser().parse_args(["cflow", "checkout"])
+    assert args.func is cli_cflow._cmd_checkout
+    assert args.session is None
+
+
+def test_the_command_can_be_asked_about_a_session_other_than_this_one(
+    flow_dir, monkeypatch, capsys
+):
+    """``--session`` is what the handler reads; without it registered the
+    flag is a parser error rather than an override."""
+    _sessions(monkeypatch, _row("kid", flow_dir), _row("parent", flow_dir))
+    code, out = _run_cli(monkeypatch, capsys, "--session", "parent", session="kid")
+    assert code == 0
+    # Asked as 'parent', the neighbour standing in this tree is 'kid'.
+    assert "kid" in out
+    assert "warning" in out
 
 
 # --------------------------------------------------------------------------- #
