@@ -82,6 +82,32 @@ def _sgr(char) -> str:
 #: chunks is still recognised.
 _TAIL = 16
 
+#: The CSI parameter bytes that pyte does not merely ignore but MIS-READS.
+#: Its parser drops ``>`` mid-sequence outright (``SP_OR_GT`` in
+#: pyte/streams.py, commented "Secondary DA is not supported atm.") and reads
+#: what is left as an ordinary CSI, so ``CSI > 4 ; 2 m`` -- the XTMODKEYS
+#: modifyOtherKeys=2 that claude asserts on every start -- arrives at
+#: ``select_graphic_rendition(4, 2)`` and turns underline on for every cell
+#: drawn afterwards, until something happens to turn it off again. ``<`` and
+#: ``=`` are in neither that set nor the ``?`` branch, so they fall through to
+#: the parameter default and end the sequence early: ``CSI < u``, the kitty
+#: keyboard pop claude pairs with ``CSI > 5 u``, leaves a literal ``u`` on the
+#: grid.
+#:
+#: None of these sequences draw. They are keyboard and capability negotiation
+#: addressed to the terminal on the other end, which reads them from the raw
+#: stream it is sent either way -- viewers and the on-disk log get the chunk
+#: untouched (Session._on_output), and only the emulator feed is filtered. So
+#: the grid is right without them and wrong with them.
+_CSI_UNPARSEABLE = b"<=>"
+
+#: How far past an ``ESC [`` :meth:`ScreenState._strip_unparseable_csi` looks
+#: for the final byte before giving up and handing the bytes to pyte
+#: unfiltered. A real CSI is short -- the longest this project's harnesses
+#: emit is a two-colour SGR at about 34 bytes -- and past this the stream is
+#: something else, where holding bytes back would only delay the grid.
+_CSI_SCAN_LIMIT = 128
+
 #: How many scrolled-off lines an attaching viewer is seeded with, so its own
 #: terminal can serve the wheel natively. Matched to the browser's xterm
 #: ``scrollback`` — seeding more would only be dropped on arrival. Measured on
@@ -99,6 +125,10 @@ class ScreenState:
         self._screen = pyte.HistoryScreen(cols, rows, history=history, ratio=0.5)
         self._stream = pyte.ByteStream(self._screen)
         self._mode_tail = b""
+        #: An unfinished CSI held back from the emulator until the chunk that
+        #: completes it arrives -- see :meth:`_strip_unparseable_csi`, which
+        #: has to see a sequence whole to know whether to drop it.
+        self._csi_carry = b""
         self._mouse_modes: Set[bytes] = set()
         # Bumped by the two calls that can move the grid (feed_render and
         # resize), so a reader can tell "nothing has happened here" apart
@@ -169,9 +199,58 @@ class ScreenState:
         Roughly 530 KiB/s on this project's screens (pyte draws a cell at a
         time, rebuilding a namedtuple per character), so a 64 KiB PTY chunk
         is ~144 ms of solid CPU.
+
+        What reaches pyte is filtered first: see
+        :meth:`_strip_unparseable_csi` for the sequences it cannot be given.
         """
-        self._stream.feed(data)
+        self._stream.feed(self._strip_unparseable_csi(data))
         self._revision += 1
+
+    def _strip_unparseable_csi(self, data: bytes) -> bytes:
+        """``data`` minus the CSI sequences pyte mis-reads (:data:`_CSI_UNPARSEABLE`).
+
+        Stateful, because a sequence arrives split as often as not: the PTY
+        hands over whatever one read returned, and :class:`ScreenFeeder` cuts
+        that again every :data:`SLICE` bytes. A sequence whose final byte has
+        not arrived is held in ``_csi_carry`` and rejoined with the next call,
+        because the marker byte alone does not say where the sequence ends --
+        letting half through would put the rest of it on the grid as text.
+        """
+        buf = self._csi_carry + data if self._csi_carry else data
+        self._csi_carry = b""
+        if b"\x1b" not in buf:
+            return buf
+        out = bytearray()
+        i = 0
+        n = len(buf)
+        while i < n:
+            j = buf.find(b"\x1b", i)
+            if j < 0:
+                out += buf[i:]
+                break
+            out += buf[i:j]
+            if j + 1 >= n:
+                self._csi_carry = buf[j:]
+                break
+            if buf[j + 1] != 0x5B:  # an ESC starting something else: pyte's
+                out += buf[j : j + 1]
+                i = j + 1
+                continue
+            k = j + 2
+            while k < n and 0x30 <= buf[k] <= 0x3F:  # parameter bytes
+                k += 1
+            while k < n and 0x20 <= buf[k] <= 0x2F:  # intermediate bytes
+                k += 1
+            if k >= n:  # the final byte is in the next chunk, or never comes
+                if n - j > _CSI_SCAN_LIMIT:
+                    out += buf[j:]
+                    break
+                self._csi_carry = buf[j:]
+                break
+            if buf[j + 2] not in _CSI_UNPARSEABLE:
+                out += buf[j : k + 1]
+            i = k + 1
+        return bytes(out)
 
     def _track_modes(self, data: bytes) -> None:
         window = self._mode_tail + data
