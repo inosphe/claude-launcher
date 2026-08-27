@@ -598,6 +598,9 @@ async function refreshSessions() {
   // paints the cflow badges over the rows that exist now.
   applyCflowBadges();
   applyBriefingCards();
+  // A rebuild throws away the class the goto press wrote onto its row; this
+  // puts it back, so the mark outlives the poll that lands mid-scroll.
+  applyGotoFlash();
 }
 
 /* The meshes a rail row speaks for — the rooms that session is in.
@@ -3160,6 +3163,11 @@ $("new-session").addEventListener("submit", async (e) => {
 
 $("term-details").addEventListener("click", () => openDetail(currentName));
 
+/* Navigation, not an action on the session: it scrolls the rail to the card
+   for the terminal you are in and marks it for a moment (see
+   gotoSessionCard). */
+$("term-goto").addEventListener("click", () => { gotoSessionCard(); });
+
 /* Kill ends, remove forgets, and the two buttons never share a meaning:
    kill posts to the kill route (which leaves an exited session alone), and
    remove is the only thing on the page that makes a session unresumable.
@@ -5660,6 +5668,71 @@ function markDetailRow() {
   chip.title = closes
     ? "close this session's details"
     : "this session's metadata and workflow";
+}
+
+/* ---- back to the rail's card for the session you are in ----
+
+   The rail is a monitor of every session at once, in a 260px column that
+   scrolls: the row for the one you are actually typing in is as likely to be
+   out of sight as not, and once it is, the page had no way to say where it
+   went. The header's `⇱ card` is that way — the only control here that moves
+   the reader rather than the session.
+
+   A wide-screen control by construction: on a phone the whole header is
+   display:none (the mobile top bar stands in for it) and the rail is a mode
+   instead of a column, so there is no case where this button is on screen
+   and the rail is not a scrollable box beside it. */
+
+/* How long the row it lands on stays marked. Long enough to be seen after a
+   smooth scroll, short enough that a rail left alone is not still shouting
+   about a press from a minute ago. */
+const GOTO_FLASH_MS = 1600;
+
+/* Which row is marked, if any. Held here and not on the node because the rail
+   is rebuilt whole on every 2s poll — a class written straight onto the row
+   would be thrown away by the next tick, which is well inside the time the
+   scroll itself takes. refreshSessions repaints it from this instead. */
+let gotoFlashName = null;
+let gotoFlashTimer = null;
+
+/* Paint the mark onto the rows that exist now. Idempotent, and safe on a rail
+   that has since lost the row (the session exited and was cleared). */
+function applyGotoFlash() {
+  document.querySelectorAll("#session-list li").forEach((li) =>
+    li.classList.toggle(
+      "goto-flash", !!gotoFlashName && li.dataset.name === gotoFlashName
+    )
+  );
+}
+
+/* Scroll the rail to `name`'s row and mark it. Answers whether there was a
+   row at all: the rail is a poll behind the terminal, so a session attached a
+   second ago can legitimately have none yet, and that is a no-op rather than
+   an error — the next poll builds it and the reader can press again. */
+function revealSessionCard(name) {
+  let row = null;
+  document.querySelectorAll("#session-list li").forEach((li) => {
+    if (li.dataset.name === name) row = li;
+  });
+  if (!row) return false;
+  // Centred, not merely "into view": a row brought to the very edge of the
+  // rail is on screen and still reads as not found.
+  if (row.scrollIntoView) row.scrollIntoView({ block: "center", behavior: "smooth" });
+  gotoFlashName = name;
+  if (gotoFlashTimer) clearTimeout(gotoFlashTimer);
+  gotoFlashTimer = setTimeout(() => {
+    gotoFlashTimer = null;
+    gotoFlashName = null;
+    applyGotoFlash();
+  }, GOTO_FLASH_MS);
+  applyGotoFlash();
+  return true;
+}
+
+/* The header button's whole job: the attached session's card, on screen. */
+function gotoSessionCard() {
+  if (!currentName) return false;
+  return revealSessionCard(currentName);
 }
 
 /* What the top bar calls the thing on screen. Pages live in the same slot as

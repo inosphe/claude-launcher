@@ -144,7 +144,13 @@ opposite the session list's, which resizes the ``#sess-view`` column once it
 docks and is carried with it and hidden on a phone, and ``railhome_check``
 on the rail's own wordmark, which doubles as the link back to the root
 route ("#/") and so has to look like a title and not like a browser's
-default link.
+default link, and ``gotocard_check`` on the header's ``⇱ card`` — the one
+control up there that moves the READER rather than the session, back to the
+rail row for the terminal they are sitting in. Both of its failures are
+invisible in a screenshot: scrolling to the wrong row (the lit row and the
+attached name are different questions) and the mark being wiped half a
+second later by the 2s poll that rebuilds the rail whole — which is why the
+mark is held outside the DOM and repainted after every rebuild.
 
 ``railseen_check`` on the fourth line a rail row spends, and the only one
 about the reader rather than the session: WHO HAS BEEN NEAR IT — last looked
@@ -282,6 +288,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "wfscroll_check.js",
         "wfhead_check.js",
         "railhome_check.js",
+        "gotocard_check.js",
         "typing_check.js",
         "leak_check.js",
         "pingbox_check.js",
