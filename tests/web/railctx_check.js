@@ -151,6 +151,7 @@ new Function(
   + slice("seenAgo") + slice("seenPair")
   + slice("railSeenLine")
   + slice("ctxRailLine") + slice("profileHarnessLabel")
+  + slice("railMetaText")
   + slice("refreshSessions")
   + `
 Object.assign(exports, {

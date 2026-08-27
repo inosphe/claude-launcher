@@ -133,6 +133,7 @@ new Function(
   + holdMs[0] + "\n" + heldUntil[0] + "\n" + pending[0] + "\n"
   + slice("railHeld") + slice("holdRail") + slice("releaseRail")
   + slice("byLineage") + slice("profileHarnessLabel")
+  + slice("railMetaText")
   + slice("refreshSessions")
   + `
 Object.assign(exports, {
