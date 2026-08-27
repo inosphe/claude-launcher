@@ -578,8 +578,7 @@ def test_the_step_is_restated_once_then_pointed_at(proj):
     second = clock.scan(time.monotonic() + 601)[0][2]
     assert "implement the thing carefully" not in second   # not said twice
     assert "short form" in second
-    assert "'rebrief' tool" in second                # the pull is offered here
-    assert "'status' tool" in second
+    assert "'recall' tool with id" in second         # the pull is offered here
     assert "done when: the diff is committed" in second    # the test survives
     assert len(second) < len(first)
 
@@ -675,18 +674,33 @@ def test_a_decision_that_reached_nobody_never_shrinks(proj):
     assert "short form" not in repeat
 
 
-def test_repeat_block_keeps_the_completion_test_and_offers_both_pulls():
+def test_repeat_block_keeps_the_completion_test_and_names_the_pull():
     payload = {
         "status": "step", "workflow": "linear", "step_id": "impl", "visit": 2,
         "instructions": "implement it", "done_when": "the diff is committed",
+        "digest": "abc123abc123",
     }
     block = cflow_clock.repeat_block(payload, 300, 1500.0)
     assert "implement it" not in block              # the point of the form
     assert "done when: the diff is committed" in block
     assert "step 'impl' (visit 2), unmoved for ~25 min" in block
-    assert "'status' tool restates this step in full" in block
-    assert "'rebrief' tool restates the whole session" in block
+    assert "step text id: abc123abc123" in block
+    assert "Look for abc123abc123 in this conversation" in block
+    assert "'recall' tool with id abc123abc123" in block
     assert "'report' then 'next'" in block
+
+
+def test_repeat_block_without_an_id_falls_back_to_status():
+    """A position with no instructional content to name (a bare ask) has no
+    id, and then there is no predicate to offer -- so the block says the one
+    thing that is still true instead of quoting an id it does not have."""
+    block = cflow_clock.repeat_block(
+        {"status": "step", "workflow": "linear", "step_id": "impl", "visit": 1},
+        300, 900.0,
+    )
+    assert "step text id" not in block
+    assert "recall" not in block
+    assert "'status' tool restates this step in full" in block
 
 
 def test_repeat_block_for_a_branch_choice_points_at_select():
@@ -720,3 +734,101 @@ def test_timers_report_which_form_comes_next(proj):
     assert clock.timers()[(cwd, "w1")]["restated"] is False
     asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
     assert clock.timers()[(cwd, "w1")]["restated"] is True
+
+
+# --------------------------------------------------------------------------- #
+# the content id: quoted instead of pasted, and pulled back by 'recall'
+# --------------------------------------------------------------------------- #
+def test_the_digest_names_content_and_ignores_framing():
+    """It must survive the things that move on every fire, and only those."""
+    base = {"status": "step", "instructions": "do it", "done_when": "it is done",
+            "verify": "make test"}
+    d = cflow_engine.step_digest(base)
+    assert d and len(d) == cflow_engine.DIGEST_CHARS
+    # framing moves, the id does not
+    assert cflow_engine.step_digest(
+        {**base, "visit": 9, "workflow": "other", "step_id": "elsewhere"}
+    ) == d
+    # content moves, the id does
+    for key in ("instructions", "done_when", "verify"):
+        assert cflow_engine.step_digest({**base, key: base[key] + "!"}) != d
+    # a chooser is named by what the chooser reads
+    sel = {"status": "select", "prompt": "pick", "options": [{"name": "a",
+                                                             "description": "A"}]}
+    assert cflow_engine.step_digest(sel)
+    assert cflow_engine.step_digest(
+        {**sel, "options": [{"name": "a", "description": "B"}]}
+    ) != cflow_engine.step_digest(sel)
+    # nothing instructional to name
+    assert cflow_engine.step_digest({"status": "waiting_approval"}) == ""
+
+
+def test_every_door_that_hands_over_a_position_carries_its_id(proj):
+    """``next`` and ``status`` must agree, or the agent cannot match the id it
+    was reminded of against the text it was originally given."""
+    cwd = str(proj)
+    first = cflow_engine.start("linear", cwd=cwd, scope="w1")
+    assert first["digest"]
+    assert cflow_engine.status(cwd, scope="w1")["digest"] == first["digest"]
+    cflow_engine.report("did one", cwd=cwd, scope="w1")
+    second = cflow_engine.next_step(cwd=cwd, scope="w1")
+    assert second["digest"] and second["digest"] != first["digest"]
+
+
+def test_the_first_fire_carries_the_id_with_the_text_and_repeats_quote_it(proj):
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "wordy.yaml").write_text(WORDY, encoding="utf-8")
+    cflow_engine.start("wordy", cwd=cwd, scope="w1")
+    payload = cflow_engine.status(cwd, scope="w1")
+    d = payload["digest"]
+    full = cflow_clock.reminder_block(payload, 300.0)
+    short = cflow_clock.repeat_block(payload, 300.0, 1500.0)
+    # the id arrives ATTACHED to what it names -- otherwise there is nothing
+    # for the agent to have matched it against later
+    assert f"step text id: {d}" in full
+    assert "implement the thing carefully" in full
+    # ...and the repeat quotes the id in place of the body
+    assert f"step text id: {d}" in short
+    assert "implement the thing carefully" not in short
+    assert f"'recall' tool with id {d}" in short
+    assert f"Look for {d} in this conversation" in short
+
+
+def test_recall_hands_the_text_back_and_refuses_a_stale_id(proj):
+    """The middle answer is the one that makes this more than 'status'."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    d = cflow_engine.status(cwd, scope="w1")["digest"]
+
+    got = cflow_engine.recall(d, cwd=cwd, scope="w1")
+    assert got["status"] == "recalled"
+    assert got["id"] == d and got["step_id"] == "one"
+    assert got["instructions"] == "do one"
+
+    stale = cflow_engine.recall("0" * 12, cwd=cwd, scope="w1")
+    assert stale["status"] == "stale_id"
+    assert stale["current_id"] == d
+    assert "instructions" not in stale          # never serve the wrong step
+
+    # the run moves: the id the agent still holds is now the wrong one, and
+    # answering it with text would put the agent back on a step it has left
+    cflow_engine.report("did one", cwd=cwd, scope="w1")
+    cflow_engine.next_step(cwd=cwd, scope="w1")
+    after = cflow_engine.recall(d, cwd=cwd, scope="w1")
+    assert after["status"] == "stale_id"
+    assert after["step_id"] == "two"
+    assert "instructions" not in after
+
+
+def test_recall_is_read_only_about_an_idle_slot_and_needs_an_id(proj):
+    cwd = str(proj)
+    assert cflow_engine.recall("abc", cwd=cwd, scope="w1")["status"] == "idle"
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    with pytest.raises(CflowError):
+        cflow_engine.recall("", cwd=cwd, scope="w1")
+    # and it does not deliver the step or open anything: the position is
+    # untouched by having been recalled
+    before = cflow_engine.status(cwd, scope="w1")
+    cflow_engine.recall(before["digest"], cwd=cwd, scope="w1")
+    after = cflow_engine.status(cwd, scope="w1")
+    assert (before["status"], before["visit"]) == (after["status"], after["visit"])

@@ -627,6 +627,12 @@ def reminder_block(payload: dict, interval: float) -> str:
         f"{interval:.0f}s while you keep working without this step moving",
         f"workflow: {payload.get('workflow')}",
     ]
+    if payload.get("digest"):
+        # The id of the text below, said WITH the text and not instead of it.
+        # This is the copy the agent keeps; every repeat quotes this id rather
+        # than pasting the body again, so the id has to arrive attached to
+        # what it names or there is nothing for the agent to match it to.
+        lines.append(f"step text id: {payload['digest']}")
     step = payload.get("step_id")
     visit = payload.get("visit")
     position = f"step '{step}'" + (f" (visit {visit})" if visit and visit > 1 else "")
@@ -721,6 +727,9 @@ def repeat_block(payload: dict, interval: float, stalled_for: float) -> str:
         f"workflow: {payload.get('workflow')}",
         f"position: {position}, unmoved for ~{minutes} min",
     ]
+    digest = payload.get("digest") or ""
+    if digest:
+        lines.append(f"step text id: {digest}")
     done_when = str(payload.get("done_when") or "").strip()
     if done_when and not chooser:
         lines.append(f"done when: {done_when}")
@@ -728,19 +737,30 @@ def repeat_block(payload: dict, interval: float, stalled_for: float) -> str:
         "'select' is what moves it" if chooser
         else "'report' then 'next' is what advances it"
     )
-    restates = (
-        "restates this choice and its options in full" if chooser
-        else "restates this step in full"
-    )
-    lines.append(
-        "protocol: same position, still yours to move, and nothing here is "
-        "new. If you are mid-work, keep going -- do not spend the turn "
-        "re-reading. If you have lost the thread, pull it rather than wait to "
-        f"be handed it: the cflow 'status' tool {restates}, and the 'rebrief' "
-        "tool restates the whole session -- parent, mesh, replies you owe, "
-        "run, opening task -- which is what you want if your context was "
-        f"compacted or cleared. {advance}."
-    )
+    what = "this choice and its options" if chooser else "this step"
+    if digest:
+        # The predicate is the whole design. "Do you remember the step" is
+        # not a question an agent can answer, so it guesses, and a guess
+        # resolves to "keep going" every time. "Is this id above you in this
+        # conversation" is a question it CAN answer by looking, and the two
+        # answers lead to different actions. So the block asks that one.
+        lines.append(
+            f"protocol: same position, still yours to move, and nothing here "
+            "is new. You were given this position's text in full, once, under "
+            f"the id above. Look for {digest} in this conversation: if it is "
+            f"there, you still have {what} -- keep working and do not spend "
+            "the turn re-reading. If it is NOT there, your context no longer "
+            f"holds it: call the cflow 'recall' tool with id {digest} and it "
+            "will hand the text back. Do not reconstruct it from memory, and "
+            f"do not treat this line as the text. {advance}."
+        )
+    else:
+        lines.append(
+            f"protocol: same position, still yours to move, and nothing here "
+            "is new. If you are mid-work, keep going -- do not spend the turn "
+            "re-reading. If you have lost the thread, the cflow 'status' tool "
+            f"restates {what} in full. {advance}."
+        )
     lines.append("---")
     return "\n".join(lines)
 

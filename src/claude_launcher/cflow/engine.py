@@ -63,6 +63,7 @@ the run it drives and the run on disk can never be two different things.
 from __future__ import annotations
 
 import functools
+import hashlib
 import os
 import secrets
 import signal
@@ -1108,7 +1109,80 @@ def _done_payload(state: dict, cwd: Optional[str]) -> dict:
     return payload
 
 
+#: How much of the sha256 rides in a block header. Twelve hex characters is
+#: 48 bits: collision-free across anything one machine will ever hold, and
+#: short enough that an agent can compare it by eye against the id it was
+#: given with the text.
+DIGEST_CHARS = 12
+
+
+def step_digest(payload: dict) -> str:
+    """A stable id for the *instructional content* of one position.
+
+    The id a reminder quotes instead of re-pasting the step, and the id the
+    ``recall`` tool takes. Two rules make it work, and both are constraints
+    rather than choices:
+
+    **Content only, never framing.** The rendered block carries an interval
+    ("every 300s") and a staleness ("unmoved for ~25 min"), and both move on
+    every fire. Hashing the rendered text would hand out a different id each
+    time, which is precisely the opposite of the point. So this hashes what
+    the position *says* and nothing about when it was said.
+
+    **Whatever the agent was actually given.** A step's text is its
+    instructions, its completion test and its verify; a branch choice's text
+    is the prompt and the options, because that is what the chooser reads.
+    Hashing a step's absent instructions for a select would give every
+    select at a workflow the same id.
+
+    Returns ``""`` for a position with no instructional content to name — a
+    gate, a done run — where there is nothing for an agent to have lost.
+
+    Note that this is stable for the life of a position but NOT a global
+    name for a step: the workflow is snapshotted into run state at start, so
+    editing the file cannot change a running position's text, and a revisit
+    bumps ``visit``, which the reminder treats as a new position anyway.
+    """
+    parts: List[str] = []
+    if payload.get("status") == "select":
+        parts.append(str(payload.get("prompt") or ""))
+        for opt in payload.get("options") or []:
+            parts.append(f"{opt.get('name')}\x1f{opt.get('description')}")
+    else:
+        parts.append(str(payload.get("instructions") or ""))
+        parts.append(str(payload.get("done_when") or ""))
+        parts.append(str(payload.get("verify") or ""))
+        if not any(p.strip() for p in parts):
+            # No instructions of its own: an ask whose step body is withheld
+            # behind an approval still has a question, and that question is
+            # the thing an agent can lose.
+            parts = [str(payload.get("prompt") or "")]
+    if not any(p.strip() for p in parts):
+        return ""
+    body = "\x1e".join(parts).encode("utf-8")
+    return hashlib.sha256(body).hexdigest()[:DIGEST_CHARS]
+
+
 def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: bool) -> dict:
+    """Describe the current position, with the content id every reader needs.
+
+    The id is stamped here rather than at the callers because *every* door
+    that hands an agent a position has to carry it: the agent that receives
+    a step from ``next`` and the one that is reminded of it later must be
+    able to see that they are the same text. A door that served the body
+    without the id would give the agent no way to answer the one question
+    the whole scheme rests on — "do I already have this?"
+    """
+    payload = _position_payload(workflow, state, cwd, mutate=mutate)
+    digest = step_digest(payload)
+    if digest:
+        payload["digest"] = digest
+    return payload
+
+
+def _position_payload(
+    workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: bool
+) -> dict:
     """Describe the current position; with ``mutate`` also mark delivery."""
     if state["status"] in ("done", "aborted"):
         return _done_payload(state, cwd)
@@ -2967,6 +3041,77 @@ def status(cwd: Optional[str] = None) -> dict:
         # (store.daemon_config) and are reported by its API, not by a run.
         payload["reminder"] = dict(state["reminder"])
     return payload
+
+
+@_scoped_op
+def recall(digest: str = "", cwd: Optional[str] = None) -> dict:
+    """The instructional text behind a content id, for an agent that lost it.
+
+    The pull half of the reminder's push. A repeat reminder names the id of
+    the text it is NOT re-pasting; an agent that cannot find that id in its
+    own context calls this, and gets the text back.
+
+    Read-only, and deliberately so: this is called by an agent that has just
+    discovered it lost something, which is the worst moment to also advance
+    a run as a side effect. It does not mark delivery and it does not open a
+    delegated ask — ``status`` at least reports a position, and this reports
+    only text.
+
+    Three answers, and the middle one is the reason this is not just
+    ``status``:
+
+    * the id names this run's current position — its text, with the id, so
+      the agent can see it matched.
+    * the id names something else — said plainly. An id from a step the run
+      has since left is not an error on the agent's part (it was told that
+      id once, truthfully), and the honest answer is that the position moved
+      and ``status`` holds what is true now. Serving the old text here would
+      be worse than the silence: the agent would work from a step it is no
+      longer on.
+    * there is no run here at all — the ordinary idle answer.
+    """
+    digest = (digest or "").strip().lower()
+    if not digest:
+        raise CflowError("'id' is required -- pass the id from the block header")
+    if not state_mod.has_run(cwd):
+        return {"status": "idle", "note": "no active cflow run in this directory"}
+    # Loaded here rather than through `status`: this needs the position and
+    # nothing status wraps around it (pending starts, the reminder override,
+    # loop bookkeeping), and reading the slot once is the point of a tool an
+    # agent calls when it is already behind.
+    workflow, state = _load(cwd)
+    payload = _payload(workflow, state, cwd, mutate=False)
+    current = payload.get("digest") or ""
+    if current and current == digest:
+        out = {
+            "status": "recalled",
+            "id": digest,
+            "run": payload.get("run"),
+            "workflow": payload.get("workflow"),
+            "step_id": payload.get("step_id"),
+            "visit": payload.get("visit"),
+            "note": (
+                "this is the text you were given under this id, unchanged. "
+                "The position has not moved; carry on with it."
+            ),
+        }
+        for key in ("instructions", "done_when", "verify", "prompt", "options"):
+            if payload.get(key):
+                out[key] = payload[key]
+        return out
+    return {
+        "status": "stale_id",
+        "id": digest,
+        "current_id": current,
+        "run": payload.get("run"),
+        "step_id": payload.get("step_id"),
+        "note": (
+            f"id {digest} is not this run's current position -- the run moved "
+            "on after you were given it. Nothing here can hand you that text, "
+            "and the text you want is the position you are on now: call "
+            "'status'. Do not act on whatever you remember of the old step."
+        ),
+    }
 
 
 #: The floor for a per-run reminder interval. Below this a reminder is not a
