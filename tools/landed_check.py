@@ -54,7 +54,7 @@ import argparse
 import subprocess
 import sys
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 # Every gate script under tools/ puts this checkout first, and this one
 # keeps the rule even though it imports nothing from the package: it asks
@@ -65,6 +65,34 @@ from typing import List, Optional
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 CANNOT_TELL = 2
+
+
+#: The integration target assumed when ``--target`` is not named. Used for one
+#: purpose only: recognising a checkout standing ON the target, where the
+#: question this gate asks has no answer. ``merge_ready.py`` spells the same
+#: default for the same reason.
+DEFAULT_TARGET = "master"
+
+
+def _resolve_repo(explicit: Optional[str]) -> Tuple[Path, str]:
+    """Which checkout to ask about, and how we came to think so.
+
+    ``--repo`` wins outright, so tests and hand-runs are never at the mercy of
+    a daemon. With it omitted the run's directory is no longer assumed to be
+    this session's own tree: :func:`claude_launcher.cflow.checkout.own_checkout`
+    asks the daemon where the session stands. Any failure -- no package, no
+    daemon, an unmanaged session -- falls back to the working directory, which
+    is what this always did, so nothing that worked stops.
+    """
+    if explicit is not None:
+        return Path(explicit).resolve(), "named"
+    try:
+        from claude_launcher.cflow import checkout
+
+        where, how = checkout.own_checkout()
+        return Path(where), how
+    except Exception:
+        return Path(".").resolve(), "run cwd"
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
@@ -120,7 +148,12 @@ def _merged_by(repo: Path, tip: str, branch: str) -> bool:
 def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--repo", default=".", help="repository to ask about (default: cwd)"
+        "--repo",
+        default=None,
+        help=(
+            "repository to ask about. Omitted: this session's own checkout as "
+            "the daemon records it, falling back to the working directory"
+        ),
     )
     parser.add_argument(
         "--target",
@@ -132,7 +165,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         ),
     )
     args = parser.parse_args(argv)
-    repo = Path(args.repo).resolve()
+    repo, how = _resolve_repo(args.repo)
 
     tip_proc = _git(repo, "rev-parse", "HEAD")
     if tip_proc.returncode != 0:
@@ -144,6 +177,26 @@ def main(argv: Optional[List[str]] = None) -> int:
         return CANNOT_TELL
     tip = tip_proc.stdout.strip()
     mine = _own_branch(repo)
+
+    # The question has no answer when this checkout IS the integration target:
+    # nothing merges master into anything, so the merge-parent scan below finds
+    # no holder and says "not yet", and the --target path says "landed" because
+    # a branch trivially contains itself. Both are confident and both are
+    # wrong, and the cost of that is measured -- a worker whose branch had in
+    # fact landed (774c964, ^2 b847cb7) read "not yet" and spent a round
+    # looking for the fault in its own branch. Naming the real cause is worth
+    # more here than either verdict.
+    target_name = args.target or DEFAULT_TARGET
+    if mine is not None and mine == target_name:
+        print(
+            f"cannot tell: this checkout ({repo}, {how}) is on {mine}, which "
+            f"is the integration target itself -- 'did it land' has no answer "
+            f"for the branch everything lands INTO. Ask about the candidate "
+            f"branch: run this in that branch's worktree, or pass --repo "
+            f"<that worktree>.",
+            file=sys.stderr,
+        )
+        return CANNOT_TELL
 
     if args.target:
         probe = _git(
