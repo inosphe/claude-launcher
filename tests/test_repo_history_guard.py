@@ -192,33 +192,64 @@ def test_the_guard_comes_back_off(tmp_path):
 # --------------------------------------------------------------------------- #
 # the one exemption, and the fact that it is on the caller
 # --------------------------------------------------------------------------- #
+#: Every row this table is allowed to hold, and what each one has to carry.
+#: Written out here rather than derived from ``EXEMPT_CALLERS`` itself: a test
+#: that read the table to check the table would pass over anything the table
+#: says, which is the one thing it must not do.
+EXPECTED_EXEMPTIONS = (
+    (
+        ("claude_launcher/worktree.py", "current_branch"),
+        ("rev-parse", "--abbrev-ref", "HEAD"),
+        "claunch-l8lh",
+    ),
+    (
+        ("claude_launcher/daemon/runtime_state.py", "code_snapshot"),
+        ("rev-parse", "HEAD"),
+        "claunch-p865",
+    ),
+)
+
+
 def test_the_exemption_table_is_short_and_says_why():
     """An exception you can count is not one that is absent because nobody looked.
 
     The size assertion is the point: a table that grows without anybody
     noticing is how the premise stops being watched while still looking
-    watched. If a second entry is genuinely needed, this line is where the
-    person adding it has to say so out loud.
+    watched. Each entry is a place somebody had to say out loud that it was
+    needed, and the record of having said so is worth more than the size.
+
+    The second row was added on 2026-08-27 for ``code_snapshot`` (the daemon
+    recording which commit it booted on), under a ruling that named five
+    conditions -- one of which is this test: checking only
+    ``EXEMPT_CALLERS[0]``, as it used to, would have let the new row through
+    unexamined, so it now runs over every row.
     """
     from _repo_history_guard import EXEMPT_CALLERS
 
-    assert len(EXEMPT_CALLERS) == 1, EXEMPT_CALLERS
-    module, func, command, why = EXEMPT_CALLERS[0]
-    assert (module, func) == ("claude_launcher/worktree.py", "current_branch")
-    assert command == ("rev-parse", "--abbrev-ref", "HEAD")
-    assert "claunch-l8lh" in why, "an exemption has to point at its own follow-up"
+    assert len(EXEMPT_CALLERS) == len(EXPECTED_EXEMPTIONS), EXEMPT_CALLERS
+    for entry, expected in zip(EXEMPT_CALLERS, EXPECTED_EXEMPTIONS):
+        module, func, command, why = entry
+        who, allowed, follow_up = expected
+        assert (module, func) == who
+        assert command == allowed, f"{func} may make one command, not {command}"
+        assert follow_up in why, "an exemption has to point at its own follow-up"
 
 
-def test_the_same_command_from_a_test_is_still_refused():
+@pytest.mark.parametrize(
+    "command", [allowed for _, allowed, _ in EXPECTED_EXEMPTIONS]
+)
+def test_the_same_command_from_a_test_is_still_refused(command):
     """The exemption is on the caller, not on the command.
 
-    Without this, adding ``current_branch`` to the table would quietly bless
-    ``rev-parse --abbrev-ref HEAD`` everywhere, and the next test that asserts
-    on this repository's branch name would sail through.
+    Without this, adding a caller to the table would quietly bless its command
+    everywhere, and the next test that asserts on this repository's branch or
+    HEAD would sail through. Parametrised over the table so that growing it
+    cannot skip this: each new row's command has to be refused here too, from
+    a test frame, before the row means anything narrower than "allowed".
     """
     with pytest.raises(RepoHistoryRead):
         subprocess.run(
-            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            ["git", *command],
             cwd=str(ROOT),
             capture_output=True,
         )

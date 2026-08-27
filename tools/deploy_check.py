@@ -31,8 +31,10 @@ So the axis moves from time to content, and the left-hand side is recorded at
 the only moment it is knowable. Python loads modules once, at import, so what a
 daemon serves is the content of its source directory *at boot*;
 ``daemon/runtime_state.py`` now writes that under ``code`` in ``daemon.json``
-(the package directory in use, its repository, its HEAD, and its ``git
-status``). This file is the reader.
+(the package directory in use, its repository, the commit it was standing on,
+and everything in the checkout that was not that commit's content). This file
+is the reader, and it asks the same module for the *current* state of that
+checkout rather than spelling the question a second way.
 
 The right-hand side is ``tools/sweep.py``'s ``code_tree`` -- the branch tip's
 tree with ``NON_CODE_ENTRIES`` subtracted -- imported rather than reimplemented.
@@ -115,18 +117,8 @@ def _say(message: str, code: int) -> int:
     return code
 
 
-def _git(repo: Path, *args: str, strip: bool = True) -> str:
-    """``git -C repo args...``. Raises LookupError on failure.
-
-    ``strip=False`` for output whose leading whitespace carries meaning.
-    ``git status --porcelain`` is that case and it is not obvious: every line
-    begins with a two-character status field, so a clean ``.strip()`` eats the
-    space in front of the *first* entry only, shifts that one path by a
-    character, and leaves the other nineteen correct. Measured here as
-    ``.beads/issues.jsonl`` arriving as ``beads/issues.jsonl``, which then
-    missed ``NON_CODE_ENTRIES`` and counted as a code change. One wrong path,
-    no error, and a verdict on top of it.
-    """
+def _git(repo: Path, *args: str) -> str:
+    """``git -C repo args...``, stripped. Raises LookupError on failure."""
     proc = subprocess.run(
         ["git", "-C", str(repo), *args],
         capture_output=True,
@@ -139,7 +131,7 @@ def _git(repo: Path, *args: str, strip: bool = True) -> str:
             f"git {' '.join(args)} failed in {repo}: "
             f"{proc.stderr.strip() or 'no output'}"
         )
-    return proc.stdout.strip() if strip else proc.stdout
+    return proc.stdout.strip()
 
 
 def _daemon_doc(explicit: Optional[Path]) -> tuple:
@@ -175,7 +167,7 @@ def _alive(pid: object) -> Optional[bool]:
 
 
 def code_paths(paths) -> list:
-    """The paths from a ``git status`` listing that count as code.
+    """The paths from a dirty-set listing that count as code.
 
     ``sweep.NON_CODE_ENTRIES`` holds top-level tree entries, so a path is
     excluded when its first component is one of them. Subtraction, not
@@ -202,30 +194,27 @@ def dirty_digest(paths) -> str:
     return "sha1:" + hashlib.sha1(joined.encode("utf-8")).hexdigest()
 
 
-def _porcelain(repo: Path) -> Optional[list]:
-    """``git status`` in the served checkout now, or None if it cannot be read.
+def _dirty_now(repo: Path) -> Optional[list]:
+    """The served checkout's dirty set as it stands now, or None if unreadable.
 
     The boot snapshot says what was imported; this says what a file the daemon
     reads at *runtime* (``harnesses.yaml``, the workflow YAMLs) would give it
     today. Both have to be clean for the served content to be a commit's.
+
+    It is asked of the repository root rather than of ``code.root``: the
+    package directory is where the *daemon* stood, and it may not exist in this
+    checkout at all. Any directory inside the repository gives the same answer.
+
+    It calls the writer's own function rather than spelling the question again.
+    The first version asked ``git status`` here while the daemon asked
+    ``diff-index``/``ls-files`` there, and the two disagree about how to name
+    the same dirt -- ``status`` collapses an untracked directory to ``src/``
+    where ``ls-files`` lists the files inside it. Two spellings of one set means
+    the union counts the same dirt twice and no declaration can match it.
     """
-    try:
-        out = _git(repo, "status", "--porcelain", "-z", strip=False)
-    except LookupError:
-        return None
-    fields = [f for f in out.split("\x00") if f]
-    paths, i = [], 0
-    while i < len(fields):
-        entry = fields[i]
-        i += 1
-        if len(entry) < 4:
-            continue
-        paths.append(entry[3:])
-        if entry[0] in "RC" or entry[1] in "RC":
-            if i < len(fields):
-                paths.append(fields[i])
-                i += 1
-    return paths
+    from claude_launcher.daemon import runtime_state
+
+    return runtime_state.code_snapshot(root=repo).get("dirty")
 
 
 def _short(sha: str) -> str:
@@ -341,7 +330,7 @@ def main(argv: Optional[list] = None) -> int:
             f"{_short(head)} or something edited on top of it is unknown",
             CANNOT_TELL,
         )
-    now_dirty = _porcelain(served_repo)
+    now_dirty = _dirty_now(served_repo)
     if now_dirty is None:
         return _say(
             f"cannot tell: git cannot read the state of {served_repo} now, so "

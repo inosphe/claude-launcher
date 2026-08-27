@@ -61,14 +61,25 @@ the shape a new one would be written in.
 And one thing it sees and lets through
 --------------------------------------
 :data:`EXEMPT_CALLERS` is a short table of places that may make an otherwise
-refused read, each with its reason written beside it. There is one entry, and
-a full sweep is what put it there: six tests reach ``git rev-parse
---abbrev-ref HEAD`` through ``worktree.current_branch`` because the product
-code under them builds a display label. The read is real; the *dependency* is
-not. Shown rather than argued: with ``current_branch`` replaced by one that
-returns a fixed sentinel for this repository, those three modules are
-``83 passed in 35.25s``. A branch name they depended on could not survive
-being replaced.
+refused read, each with its reason written beside it. There are two entries,
+and what put each one there is a measurement rather than an argument: replace
+the value the product code reads with a sentinel, and if the tests under it
+stay green, the read is real but the *dependency* is not.
+
+The first is ``worktree.current_branch``. Six tests reach ``git rev-parse
+--abbrev-ref HEAD`` through it because the product code under them builds a
+display label; with ``current_branch`` replaced by one that returns a fixed
+sentinel for this repository, those three modules are ``83 passed in 35.25s``.
+A branch name they depended on could not survive being replaced.
+
+The second is ``daemon/runtime_state.code_snapshot``, which reads ``rev-parse
+HEAD`` at boot so ``daemon.json`` can say which commit the daemon loaded --
+the only moment that is knowable, since an edit or a checkout afterwards
+erases it. Same measurement: with the boot path passing no snapshot,
+``test_restart_gate`` goes green (``34 passed``, the remaining three failures
+being ``test_daemon_wedge``, red on the untouched base as well). Both rows are
+the same shape -- product code reading its own checkout while a test happens
+to be driving it -- and neither is a test asking for the value.
 
 An entry names a caller **and** the one command that caller may make. Both
 halves are load-bearing. Without the caller, the command is blanket-allowed
@@ -371,6 +382,45 @@ EXEMPT_CALLERS = (
         # Left on the board rather than closed: claunch-l8lh.
         "product code reading the branch for a display label; no assertion "
         "in this suite turns on it -- see claunch-l8lh",
+    ),
+    (
+        "claude_launcher/daemon/runtime_state.py",
+        "code_snapshot",
+        # The one command, for the same reason the row above names one. The
+        # caller makes four git calls at boot and this is the only one that
+        # reaches the guard: ``rev-parse --show-toplevel`` names no revision,
+        # and the dirty set is read with ``diff-index`` against the sha this
+        # call returned plus ``ls-files --others`` -- which is the idiom this
+        # module recommends (name the object by hash) rather than a second
+        # exemption. Written with ``git status`` instead, that would have been
+        # a second refused command and a second row.
+        ("rev-parse", "HEAD"),
+        # A daemon serves the content its source directory had at import, and
+        # boot is the only moment that is readable -- an edit or a checkout
+        # afterwards erases it. So the daemon records its HEAD in daemon.json
+        # and tools/deploy_check.py reads it there. Before that field existed
+        # the gate compared two timestamps and was measured wrong in both
+        # directions on 2026-08-27 (claunch-tig1: green over a checkout that
+        # matched no commit; claunch-33id: red over a commit that changed only
+        # .beads). Five test modules write daemon.json in-process while
+        # exercising restart, instances or delegation, and the boot path is
+        # driven in-process by two of them.
+        #
+        # The read is real and the guard is right to see it. What is missing
+        # is a dependency, and it was measured rather than argued: with
+        # daemon/__main__.py changed to pass no snapshot, the affected module
+        # goes green -- 3 failed, 34 passed over test_daemon_wedge.py and
+        # test_restart_gate.py, where those 3 are test_daemon_wedge failures
+        # that are red on the untouched base too (claunch-uf7m, reproduced on
+        # a94c39a and 063ca672). Every test_restart_gate failure disappears.
+        # Nothing asserts on the recorded value; what the tests depend on is
+        # the call not happening, which is not a dependency this table exists
+        # to protect.
+        #
+        # Left on the board rather than closed: claunch-p865.
+        "product code recording, at boot, which commit it loaded; no "
+        "assertion in this suite turns on the value -- sentinel run 34 "
+        "passed with it removed -- see claunch-p865",
     ),
 )
 

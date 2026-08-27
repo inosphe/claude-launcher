@@ -54,16 +54,26 @@ _DIRTY_CAP = 500
 
 
 def _git(cwd: Path, *args: str) -> Optional[str]:
-    """``git -C cwd args...``, or ``None`` if it could not be run at all.
+    """``git args...`` run in ``cwd``, or ``None`` if it could not be run.
 
     ``None`` and ``""`` are different answers and stay different: an empty
     string is git's answer for a clean tree, and ``None`` is "there was no
     answer". Collapsing them is the failure this whole snapshot is written to
     avoid one level up.
+
+    The directory is passed as the child's working directory rather than as
+    ``git -C``. Both reach the same repository, and the difference is only
+    visible to ``tests/_repo_history_guard.py``: its exemption table names a
+    caller together with **the one command that caller may make**, compared
+    against the argv after ``git``. Spelled with ``-C``, that argv carries the
+    path too, so the pair could only be written as something that changes with
+    where the package is installed -- which is not a command, and would have to
+    be widened until it stopped naming one.
     """
     try:
         proc = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            ["git", *args],
+            cwd=str(cwd),
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -77,28 +87,44 @@ def _git(cwd: Path, *args: str) -> Optional[str]:
     return proc.stdout
 
 
-def _dirty_paths(out: str) -> list:
-    """Paths from ``git status --porcelain -z``.
+def _dirty_paths(root: Path, head: str) -> Optional[list]:
+    """Everything in ``root``'s checkout that is not ``head``'s content.
 
-    ``-z`` rather than the plain form because the plain form quotes and escapes
-    any path that is not printable ASCII, and this repository's own board and
-    docs carry Korean filenames' worth of that risk. A rename entry spends two
-    NUL-separated fields (new path, then the original); both are recorded --
-    over-listing costs a longer message and cannot turn a dirty tree clean.
+    Two reads, and ``git status`` is deliberately not one of them even though
+    it answers this in a single call. ``status`` reports against ``HEAD``, a
+    symbolic revision, and ``tests/_repo_history_guard.py`` refuses that: two
+    commits with the same tree differ only in their refs, and a sweep receipt
+    is shared across such a pair. Naming the commit by its hash is the idiom
+    that file points at, and it is what these two calls do -- ``diff-index``
+    against a sha nobody has to resolve, and ``ls-files --others``, which names
+    no revision at all. The exemption this module holds is for one command,
+    and this is how it stays one.
+
+    ``diff-index`` compares content, not timestamps: a file whose mtime moved
+    but whose bytes did not is hashed and reported clean (measured). ``-z``
+    rather than the plain form because the plain form quotes and escapes any
+    path that is not printable ASCII, which this repository's own tree carries.
+
+    ``git status`` has a second problem besides the refused read, and it was
+    measured here before this shape replaced it: every line begins with a
+    two-character status field, so stripping the output eats the space in front
+    of the *first* entry only and shifts that one path by a character.
+    ``.beads/issues.jsonl`` arrived as ``beads/issues.jsonl``, stopped matching
+    the name it was meant to match, and was counted as a code change. One wrong
+    path out of twenty, no error. ``--name-only`` output has no such field.
+
+    ``root`` here is the repository root, not the package directory:
+    ``ls-files`` lists relative to the working directory *and* limits itself to
+    it, so run anywhere below the root it would both rename and hide paths.
+
+    ``None`` if either read failed -- "not read", which the reader keeps apart
+    from an empty list.
     """
-    fields = [f for f in out.split("\x00") if f]
-    paths, i = [], 0
-    while i < len(fields):
-        entry = fields[i]
-        i += 1
-        if len(entry) < 4:
-            continue
-        paths.append(entry[3:])
-        if entry[0] in "RC" or entry[1] in "RC":
-            if i < len(fields):
-                paths.append(fields[i])
-                i += 1
-    return paths
+    changed = _git(root, "diff-index", "--name-only", "-z", head, "--")
+    others = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
+    if changed is None or others is None:
+        return None
+    return sorted({p for p in (changed + others).split("\x00") if p})
 
 
 def code_snapshot(root: Optional[Path] = None) -> dict:
@@ -132,13 +158,14 @@ def code_snapshot(root: Optional[Path] = None) -> dict:
     top = _git(root, "rev-parse", "--show-toplevel")
     if top is None or not top.strip():
         return snap
-    snap["repo"] = str(Path(top.strip()))
-    head = _git(root, "rev-parse", "HEAD")
-    if head is not None and head.strip():
-        snap["head"] = head.strip()
-    status = _git(root, "status", "--porcelain", "-z")
-    if status is not None:
-        found = _dirty_paths(status)
+    repo = Path(top.strip())
+    snap["repo"] = str(repo)
+    head = _git(repo, "rev-parse", "HEAD")
+    if head is None or not head.strip():
+        return snap
+    snap["head"] = head.strip()
+    found = _dirty_paths(repo, snap["head"])
+    if found is not None:
         snap["dirty"] = found[:_DIRTY_CAP]
         snap["dirty_more"] = max(0, len(found) - _DIRTY_CAP)
     return snap

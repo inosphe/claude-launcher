@@ -330,23 +330,6 @@ def test_the_board_file_is_not_dirt_that_blocks_a_deploy(repo, shas, tmp_path, c
     capsys.readouterr()
 
 
-def test_a_leading_status_field_is_not_eaten_from_the_first_path(repo, tmp_path):
-    """A path shifted by one character silently changed a verdict.
-
-    ``git status --porcelain`` puts a two-character status field in front of
-    every path, so stripping the output eats the space before the *first*
-    entry only: nineteen paths arrive intact and one arrives as
-    ``beads/issues.jsonl``, which no longer matches ``.beads`` and counts as a
-    code change. No error, one wrong path, a verdict on top of it. Measured
-    against this repository's own checkout before it was fixed.
-    """
-    (repo / ".beads" / "issues.jsonl").write_text("{}\n{}\n", encoding="utf-8")
-    try:
-        assert deploy_check._porcelain(repo) == [".beads/issues.jsonl"]
-    finally:
-        _git(repo, "checkout", "--", ".beads/issues.jsonl")
-
-
 # ------------------------------------------------------------ cannot tell (2)
 
 
@@ -434,7 +417,7 @@ def test_a_tree_that_cannot_be_read_now_is_cannot_tell(
     repo, shas, tmp_path, capsys, monkeypatch
 ):
     """The same distinction on the other side: git failing here is not clean."""
-    monkeypatch.setattr(deploy_check, "_porcelain", lambda repo: None)
+    monkeypatch.setattr(deploy_check, "_dirty_now", lambda repo: None)
     code = _check(repo, _doc(tmp_path, repo, shas["tip"]))
     message = _answer(capsys, code)
     assert code == 2 and "cannot read the state" in message
@@ -466,7 +449,7 @@ def test_the_daemon_writes_the_shape_this_gate_reads(repo, tmp_path, capsys):
         snap = runtime_state.code_snapshot(root=package)
         assert set(snap) == {"root", "repo", "head", "dirty", "dirty_more"}
         assert Path(snap["repo"]) == repo.resolve()
-        assert snap["dirty"], "an untracked package is dirt, not an empty list"
+        assert snap["dirty"] == ["src/claude_launcher/__init__.py"], snap
 
         doc = tmp_path / "written.json"
         doc.write_text(
