@@ -185,11 +185,20 @@ _COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|skipped|error|errors|xfailed|xpa
 #:   (1759/1/0 three times over trees ``dc534d0``/``cc3dc69``/``9a76122``);
 #: * *not consumed* -- no test reads the repository's own copy. Every
 #:   ``.beads`` path under ``tests/`` is built under a ``tmp_path`` fixture
-#:   and written by the test itself, which is checkable rather than taken on
-#:   faith: ``grep -rn '[.]beads' tests/`` and look for one that is not
-#:   rooted in a fixture. (Do not count *this* file's own cases while
-#:   checking -- ``tests/test_sweep.py`` commits a board into a throwaway
-#:   repository to test exactly this rung.)
+#:   and written by the test itself. What to count, if you are checking:
+#:   ``.beads`` paths under ``tests/*.py`` that are **not** rooted in a
+#:   fixture. What to leave out, because none of it is a path -- ``.js``
+#:   property access (``body.beads``), the ``daemon.beads`` module, prose,
+#:   and this file's own cases (``tests/test_sweep.py`` commits a board into
+#:   a throwaway repository to test exactly this rung).
+#:
+#:   A bare ``grep -rn '[.]beads' tests/`` is *not* that count, and is worth
+#:   one sentence because the difference bit its author: it matches all of
+#:   the above, and it also matches ``tests/__pycache__/*.pyc``, so its line
+#:   total depends on whether this tree has ever run the suite. Two readers
+#:   at the same revision get different numbers from it -- which is the one
+#:   failure a revision stamp cannot fix, since what varies is not the
+#:   commit but the working tree's history.
 #: * *not shipped* -- nothing under it is run or installed by anyone outside
 #:   the suite. The board is a record this workflow writes and reads back;
 #:   ``stubs/claunch.bat`` is a shim a user's PATH executes, which is why it
@@ -222,12 +231,16 @@ _COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|skipped|error|errors|xfailed|xpa
 #: **The bill for keeping it to one name is measured, not assumed.** Five
 #: other top-level entries are non-code in the same way the board is --
 #: ``docs/``, ``docs4users/``, ``README.md``, ``AGENTS.md``, ``.gitignore``
-#: -- and this history holds 15 commits that touched nothing but those,
-#: every one of which moves the digest and costs a sweep it did not need.
-#: (Against 21 that touched nothing but ``.beads/``, which is what this rung
-#: now reuses a receipt for. Count with ``git rev-list --no-merges``: a
-#: merge's combined diff can list only doc files, which inflates the first
-#: figure to 16.) Those 15 are the price of the paragraph above, paid on
+#: -- and **as of f76aa08** this history holds 15 commits that touched
+#: nothing but those, every one of which moves the digest and costs a sweep
+#: it did not need. (Against 21 that touched nothing but ``.beads/``, which
+#: is what this rung now reuses a receipt for. Count with ``git rev-list
+#: --no-merges``: a merge's combined diff can list only doc files, which
+#: inflates the first figure to 16.) Both numbers are derived from history
+#: rather than observed once, so they move as master grows -- and they
+#: already differ off master: one live branch, four commits behind, read 20
+#: for the second -- which four commits is what decides that, so treat this
+#: as an instance and not a rule. Recount at your own revision. Those 15 are the price of the paragraph above, paid on
 #: purpose, and the number is here so that whoever weighs an extension
 #: starts from it instead of from an impression. What argues against
 #: extending is not the size of that bill but the paragraph below: each
