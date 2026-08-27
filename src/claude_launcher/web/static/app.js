@@ -2536,14 +2536,31 @@ async function readBorrowOptions(selector) {
   return doc;
 }
 
-function fillValidatedBorrow(select, doc, ownLabel, current, omitName = "") {
+function fillValidatedBorrow(select, doc, ownLabel, current, omitName = "", ownName = "") {
   select.innerHTML = "";
   const own = document.createElement("option");
   own.textContent = ownLabel;
   own.value = "";
   select.appendChild(own);
-  for (const item of (doc && doc.options) || []) {
-    if (item.name === omitName) continue;
+  const lenders = (doc && doc.options) || [];
+  if (ownName) {
+    // "The selected profile's own token" is an answer of its own on a form
+    // that names a parent, where the empty head option means "authenticate
+    // as the parent does" -- including a parent's own borrow. Its payload
+    // is the profile's own name, an explicit lender replacing inherited
+    // auth, which is why the API docstring lists the base profile among
+    // the lenders; the lender row that used to ask for that same name is
+    // folded into this head option, with the verdict and reason intact.
+    const base = lenders.find((item) => item.name === ownName);
+    const opt = document.createElement("option");
+    opt.textContent = `${ownName}'s own token`;
+    opt.value = ownName;
+    opt.disabled = !!(base && !base.selectable);
+    opt.title = (base && base.message) || "";
+    select.appendChild(opt);
+  }
+  for (const item of lenders) {
+    if (item.name === omitName || (ownName && item.name === ownName)) continue;
     const opt = document.createElement("option");
     opt.textContent = item.label || item.name;
     opt.value = item.name;
@@ -2564,6 +2581,11 @@ async function syncNewBorrowOptions(force = false) {
   const ownLabel = parent
     ? `(as ${parent.name} authenticates)`
     : "(this profile's own token)";
+  // A parented form's empty answer means "as the parent authenticates", so
+  // the selected profile's OWN token needs a head option of its own there;
+  // on a standalone form the empty answer already means that and the base
+  // lender stays folded away (omitName).
+  const ownName = parent ? baseProfileName(selector) : "";
   const omitName = parent ? "" : baseProfileName(selector);
   const key = `${selector}|${ownLabel}`;
   if (!force && key === newBorrowFor) return;
@@ -2574,15 +2596,15 @@ async function syncNewBorrowOptions(force = false) {
   f.borrow._validationError = "";
   // Clear the previous harness's lenders before waiting for the new policy
   // answer. A quick submit during the request can then only mean own auth.
-  fillValidatedBorrow(f.borrow, { options: [] }, ownLabel, "", omitName);
+  fillValidatedBorrow(f.borrow, { options: [] }, ownLabel, "", omitName, ownName);
   f.borrow.disabled = true;
   try {
     const doc = await readBorrowOptions(selector);
     if (seq !== newBorrowSeq || key !== newBorrowFor) return;
-    fillValidatedBorrow(f.borrow, doc, ownLabel, current, omitName);
+    fillValidatedBorrow(f.borrow, doc, ownLabel, current, omitName, ownName);
   } catch (e) {
     if (seq !== newBorrowSeq || key !== newBorrowFor) return;
-    fillValidatedBorrow(f.borrow, { options: [] }, ownLabel, "", omitName);
+    fillValidatedBorrow(f.borrow, { options: [] }, ownLabel, "", omitName, ownName);
     f.borrow._validationError =
       `borrow validation unavailable: ${e.message || e}`;
     f.borrow.title = f.borrow._validationError;
@@ -12778,6 +12800,10 @@ async function refreshSpawnBorrowOptions(st, force = false) {
   const ui = st.ui;
   const selector = ui.profile.value || (ui.parentSess || {}).profile || "";
   const ownLabel = `(as ${st.parent} authenticates)`;
+  // The empty answer inherits the parent's auth, so the selected profile's
+  // OWN token rides as a head option (fillValidatedBorrow) instead of asking
+  // the operator to pick the profile's own name out of the lender list.
+  const ownName = baseProfileName(selector);
   const key = `${selector}|${ownLabel}`;
   if (!force && ui._borrowFor === key) return;
   ui._borrowFor = key;
@@ -12787,18 +12813,18 @@ async function refreshSpawnBorrowOptions(st, force = false) {
 
   // Do not leave a lender from the previous harness selectable while the
   // matching policy verdict is in flight.
-  fillValidatedBorrow(ui.borrow, { options: [] }, ownLabel, "");
+  fillValidatedBorrow(ui.borrow, { options: [] }, ownLabel, "", "", ownName);
   ui.borrow.disabled = true;
   ui._borrowValidationError = "";
   try {
     const doc = await readBorrowOptions(selector);
     if (spawnModal !== st || ui._borrowSeq !== seq || ui._borrowFor !== key) return;
-    fillValidatedBorrow(ui.borrow, doc, ownLabel, current);
+    fillValidatedBorrow(ui.borrow, doc, ownLabel, current, "", ownName);
   } catch (e) {
     if (spawnModal !== st || ui._borrowSeq !== seq || ui._borrowFor !== key) return;
     ui._borrowValidationError =
       `borrow validation unavailable: ${e.message || e}`;
-    fillValidatedBorrow(ui.borrow, { options: [] }, ownLabel, "");
+    fillValidatedBorrow(ui.borrow, { options: [] }, ownLabel, "", "", ownName);
     ui.borrow.title = ui._borrowValidationError;
   }
   ui._borrowPreset = "";
@@ -12907,7 +12933,8 @@ async function spawnModalLoad(st) {
     (seed.borrow !== undefined && seed.borrow !== null) ? seed.borrow :
       (re.borrow || "");
   fillValidatedBorrow(
-    ui.borrow, { options: [] }, `(as ${parent} authenticates)`, ""
+    ui.borrow, { options: [] }, `(as ${parent} authenticates)`, "", "",
+    baseProfileName(ui.profile.value || (sess.profile || ""))
   );
   fillSpawnSelect(ui.role, roleNames.map((r) => [r, r]), "(no role)",
     (seed.role !== undefined && seed.role !== null) ? seed.role :
