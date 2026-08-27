@@ -86,6 +86,11 @@ const gone = [];
 function go(h) { gone.push(h); }
 async function api() { return { ok: true, json: async () => ({}) }; }
 function refreshSession() {}
+/* The page's base path. Real in app.js (derived from location.pathname);
+   settable here because the whole point of the report link is that it must
+   survive being served under a relay tunnel's "/t/<backend>/" prefix. */
+let BASE = "/";
+function setBase(b) { BASE = b; }
 `;
 
 const ctx = {};
@@ -97,6 +102,7 @@ new Function(
   + slice("beadsFilterIssues") + slice("beadsSortIssues")
   + slice("beadsStatusBadge") + slice("beadsIssueRow")
   + slice("sessBeads") + slice("sessBeadsCreate")
+  + slice("url")
   + slice("sessReports") + slice("sessReportRow")
   + slice("fmtReportSize") + slice("reportWhen")
   + slice("beadsHierarchy") + slice("beadsRelationBlock")
@@ -105,7 +111,7 @@ new Function(
 Object.assign(exports, {
   filter: beadsFilterIssues, sort: beadsSortIssues, row: beadsIssueRow,
   rail: sessBeads, reports: sessReports, pane: beadsDetailPane,
-  setDetail, setFocus, setBoards, gone,
+  setDetail, setFocus, setBoards, gone, setBase,
 });`)(ctx, document, el);
 
 let failures = 0;
@@ -270,6 +276,26 @@ check("labelled by the session, not by the issue the page already names",
 check("each link opens the served page in its own tab",
       [links[0].href, links[0].target, links[0].rel],
       [ROWS[0].url, "_blank", "noopener"]);
+
+/* And it opens where the page is actually being served from. The daemon hands
+   back its own absolute path ("/api/sessions/<s>/reports/<f>"), which is the
+   right answer for a daemon that cannot know how it was reached -- resolving
+   it is the browser's half, and this link skipped it. (Of the 23 `.href =`
+   assignments in app.js these two were the only ones handed a daemon path;
+   that is not the same claim as "the only such link on the page" --
+   setAttribute("href", ...) is outside that sweep's shape and mdLink() is
+   exactly that, which is claunch-xntk.) Through a relay tunnel the dashboard
+   sits under "/t/<backend>/",
+   so an unresolved href walks out of the tunnel and lands on the relay's own
+   404: measured at 404 for the bare path against 302-to-login for the same
+   path under the prefix (claunch-krw1). Hence the same row, drawn twice. */
+check("served from the daemon's own root, the link is the path it gave",
+      links[0].href, ROWS[0].url);
+ctx.setBase("/t/box/");
+check("served through a relay tunnel, the link keeps the tunnel prefix",
+      ctx.pane().find("sess-report-link")[0].href,
+      "/t/box/api/sessions/s121/reports/20260826T051322Z-claunch-j31.html");
+ctx.setBase("/");
 
 /* The row IS the link. It used to be a div holding a four-character anchor,
    which is a small thing to hit and an easy one to miss in a pane that goes
