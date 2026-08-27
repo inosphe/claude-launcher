@@ -2504,6 +2504,7 @@ function profileHarnessLabel(profile, harness) {
 function baseProfileName(selector) {
   return String(selector || "").split(":", 1)[0];
 }
+let harnessDetails = {};
 
 /* Borrow is a property of the selected harness's auth contract, not of its
    name. Old daemons did not publish borrow_allowed, so Claude remains the
@@ -2662,6 +2663,14 @@ let cflowCache = [];
    changes when someone edits config or installs a program, neither of which
    happens mid-session — a reload is the honest way to pick those up. */
 async function refreshHarnesses() {
+  try {
+    const resp = await api("/api/harnesses");
+    const data = await resp.json();
+    harnessDetails = {};
+    for (const item of data.harnesses || []) {
+      if (item && item.name) harnessDetails[item.name] = item;
+    }
+  } catch { /* an older daemon leaves the capability rows hidden */ }
   syncForkAvailability();  // role/resume/fork only apply to the claude harness
   syncSpawnMode();
 }
@@ -2799,6 +2808,8 @@ function syncForkAvailability() {
   const selector = f.profile.value || (parent && parent.profile) || "";
   const harnessName = profileHarnessName(selector, parent) || "claude";
   const claude = harnessName === "claude";
+  const capabilities = (typeof harnessDetails !== "undefined"
+    ? harnessDetails[harnessName] : null) || {};
   const borrowCap = profileBorrowCapability(
     profileDetails[selector], harnessName
   );
@@ -2806,6 +2817,21 @@ function syncForkAvailability() {
   if (f.fork.disabled) f.fork.checked = false;
   f.role.disabled = !claude;
   f.resume.disabled = !claude;
+  const permissionsRow = $("new-permissions-row");
+  const permissionArgs = capabilities.skip_permissions_args || [];
+  if (permissionsRow) {
+    permissionsRow.classList.toggle("hidden", !permissionArgs.length);
+    if (!permissionArgs.length) f.skip_permissions.checked = false;
+    $("new-permissions-text").textContent = permissionArgs.length
+      ? `Run without approval prompts (${permissionArgs.join(" ")})`
+      : "Run without approval prompts";
+  }
+  const fullAccessArgs = capabilities.full_access_args || [];
+  const fullAccessRow = $("new-full-access-row");
+  if (fullAccessRow) {
+    fullAccessRow.classList.toggle("hidden", !fullAccessArgs.length);
+    if (!fullAccessArgs.length) f.full_access.checked = false;
+  }
   // Claude and declared API-key harnesses consume the shared profile token.
   // OAuth harnesses keep auth in their own profile home. --null remains a
   // Claude-only answer and cannot coexist with a borrow.
@@ -2881,6 +2907,8 @@ function renderRuntimeSummary() {
     bits.push(f.resume.value === PICKER ? "resume (picker)" : `resume ${f.resume.value}`);
   }
   if (speaks("args") && f.args.value.trim()) bits.push("+args");
+  if (f.skip_permissions && f.skip_permissions.checked) bits.push("full auto");
+  if (f.full_access && f.full_access.checked) bits.push("full access");
   if (parent) {
     out.textContent = bits.length
       ? `— ${parent.name}'s setup · ${bits.join(" · ")}`
@@ -2992,7 +3020,8 @@ $("new-session").addEventListener("input", () => {
    wrong; one that withholds what the policy opened teaches it just as
    wrong, and lies to the person who set 'allow_profile: true'. */
 const SPAWN_INHERITS = ["profile", "borrow", "null_token", "cwd",
-                        "args", "resume", "fork"];
+                        "args", "resume", "fork", "skip_permissions",
+                        "full_access"];
 
 /* Of those, the one that no longer lives in the fold. It is still
    inherited — the spawn policy still governs them exactly as before, and
@@ -3038,6 +3067,8 @@ function spawnUnlocked(report) {
     // omits the list rather than emptying it when that is shut.
     cwd: !!(report && report.workspaces),
     args: may.includes("args"),
+    skip_permissions: may.includes("args"),
+    full_access: may.includes("args"),
     // Not the policy's: a spawn has no --resume of its own, and the one
     // conversation a child can start from is its parent's — the fork row,
     // which is where that question is actually asked.
@@ -3151,6 +3182,20 @@ function syncSpawnMode() {
       profileDetails[selector], childHarness
     );
     const claude = !childHarness || childHarness === "claude";
+    const childCapabilities = (typeof harnessDetails !== "undefined"
+      ? harnessDetails[childHarness] : null) || {};
+    if (fresh) {
+      const parentArgs = parent.args || [];
+      const hasGroup = (group) => group.length && parentArgs.some((_, i) =>
+        group.every((arg, j) => parentArgs[i + j] === arg));
+      if (f.skip_permissions) {
+        f.skip_permissions.checked = hasGroup(
+          childCapabilities.skip_permissions_args || []);
+      }
+      if (f.full_access) {
+        f.full_access.checked = hasGroup(childCapabilities.full_access_args || []);
+      }
+    }
     f.role.disabled = !claude;
     if (!claude) {
       f.null_token.checked = false;
@@ -3282,6 +3327,21 @@ function spawnChildFields(f, body) {
   if (!f.args.disabled && f.args.value.trim()) {
     body.args = f.args.value.trim().split(/\s+/);
   }
+  const selector = f.profile.value || (spawnParent() || {}).profile || "";
+  const harnessName = profileHarnessName(selector, spawnParent());
+  const capabilities = (typeof harnessDetails !== "undefined"
+    ? harnessDetails[harnessName] : null) || {};
+  body.args = body.args || [];
+  if (f.skip_permissions && !f.skip_permissions.disabled &&
+      f.skip_permissions.checked) {
+    body.args.push(...(capabilities.skip_permissions_args || []));
+  }
+  if (f.full_access && !f.full_access.disabled && f.full_access.checked) {
+    body.args.push(...(capabilities.full_access_args || []));
+  } else if (f.full_access && !f.full_access.disabled) {
+    body.args.push(...(capabilities.full_access_off_args || []));
+  }
+  if (!body.args.length) delete body.args;
   if (!f.cwd.disabled && f.cwd.value) {
     const name = spawnWorkspaceName(f.cwd.value);
     // No entry for the path (a registry edited under the form): send it as
@@ -3342,6 +3402,16 @@ $("new-session").addEventListener("submit", async (e) => {
     cwd: f.cwd.value,  // a registered workspace path, or "" = the daemon's cwd
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
+  if (!parent) {
+    const harnessName = profileHarnessName(f.profile.value, null) || "claude";
+    const capabilities = harnessDetails[harnessName] || {};
+    if (f.skip_permissions.checked) {
+      body.args.push(...(capabilities.skip_permissions_args || []));
+    }
+    body.args.push(...(f.full_access.checked
+      ? (capabilities.full_access_args || [])
+      : (capabilities.full_access_off_args || [])));
+  }
   // A child sends what the spawn policy left open, and nothing else: a value
   // standing on a greyed row is not an answer anybody gave, and sending it
   // provokes a 403 naming a field nobody in this form could still choose.
@@ -11046,19 +11116,23 @@ function sessPerms(data) {
   const box = el("div", "sess-perms");
   box.appendChild(el("h3", null, "Permissions"));
 
-  if (s.harness !== "claude") {
+  const capabilities = harnessDetails[s.harness] || {};
+  const permissionArgs = capabilities.skip_permissions_args || [];
+  if (!permissionArgs.length) {
     sessPermsBox = null;
     box.appendChild(el(
       "p", "wf-note",
-      "--dangerously-skip-permissions is a claude-harness flag — " +
-      `this session runs ${s.harness || "?"}`
+      `the ${s.harness || "?"} harness declares no approval-mode toggle`
     ));
     return box;
   }
 
   // Rebuilt only when the toggle's state changes — same keep-the-node rule
   // as the other restart pickers; a successful restart flips the key.
-  const skipping = (s.args || []).includes("--dangerously-skip-permissions");
+  const currentArgs = s.args || [];
+  const skipping = currentArgs.some((_, i) =>
+    permissionArgs.every((arg, j) => currentArgs[i + j] === arg));
+  const flag = permissionArgs.join(" ");
   const key = `${s.name}|${skipping ? 1 : 0}`;
   if (sessPermsBox && sessPermsBox.dataset.slot === key) {
     box.appendChild(sessPermsBox);   // appending moves the live node here
@@ -11072,19 +11146,19 @@ function sessPerms(data) {
   form.appendChild(el(
     "p", "wf-note",
     skipping
-      ? "never asks before it acts (--dangerously-skip-permissions). " +
+      ? `never asks before it acts (${flag}). ` +
         "Turning the asks back on stops the session and relaunches it — " +
         "same name, same conversation"
       : "asks before it acts. Skipping the asks " +
-        "(--dangerously-skip-permissions) stops the session and relaunches " +
+        `(${flag}) stops the session and relaunches ` +
         "it — same name, same conversation"
   ));
   const btn = el(
     "button", "wf-btn option", skipping ? "Ask again" : "Skip permissions"
   );
   btn.title = skipping
-    ? "restart with the flag removed — claude asks before it acts"
-    : "restart with --dangerously-skip-permissions — claude stops asking";
+    ? `restart with ${flag} removed — the harness asks before it acts`
+    : `restart with ${flag} — the harness stops asking`;
   const status = el("p", "wf-note hidden");
   form.append(btn, status);
 
@@ -11121,7 +11195,8 @@ function sessPerms(data) {
       return;
     }
     say(
-      (doc.args || []).includes("--dangerously-skip-permissions")
+      (doc.args || []).some((_, i, args) =>
+        permissionArgs.every((arg, j) => args[i + j] === arg))
         ? "restarted — now acting without asking"
         : "restarted — asking before it acts again"
     );

@@ -372,6 +372,14 @@
               <input type="checkbox" name="fork" disabled>
               <span><code>--fork-session</code> (leave the original untouched)</span>
             </label>
+            <label class="check hidden" id="new-permissions-row">
+              <input type="checkbox" name="skip_permissions">
+              <span id="new-permissions-text">Run without approval prompts</span>
+            </label>
+            <label class="check hidden" id="new-full-access-row">
+              <input type="checkbox" name="full_access" checked>
+              <span><code>--sandbox danger-full-access</code></span>
+            </label>
             <label>Args <input name="args" placeholder="extra harness flags"></label>
           </div>
         </details>

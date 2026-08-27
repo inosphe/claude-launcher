@@ -9,6 +9,7 @@ harnesses:
     empty_env: [ANTHROPIC_API_KEY]
     opening_transport: argv
     input_readiness: bracketed-paste
+    skip_permissions_args: [--dangerously-skip-permissions]
     description: >-
       Claude Code, run under a claunch profile (isolated config dir, provider
       and token). Needs --profile; the executable is CLAUDE_LAUNCHER_BIN.
@@ -22,6 +23,10 @@ harnesses:
     clear_env: [OPENAI_API_KEY, CODEX_API_KEY, CODEX_ACCESS_TOKEN]
     login_args: [login]
     heartbeat_args: [exec, --skip-git-repo-check]
+    skip_permissions_args: [--approval-mode, full-auto]
+    full_access_args: [--sandbox, danger-full-access]
+    full_access_off_args: [--sandbox, workspace-write]
+    mode_conflict_args: [--dangerously-bypass-approvals-and-sandbox]
     usage: codex-app-server
     opening_transport: argv
     input_readiness: bracketed-paste

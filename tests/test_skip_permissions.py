@@ -106,6 +106,28 @@ def test_skip_permissions_keeps_the_sessions_other_args(home, tmp_path, monkeypa
     asyncio.run(run())
 
 
+def test_codex_skip_permissions_toggles_declared_arg_group(home, tmp_path, monkeypatch):
+    from claude_launcher import lineage
+
+    p = profile_mod.create("cx")
+    lineage.set_harness(p, "codex")
+    monkeypatch.setattr(harness_mod, "build_command", _fake_claude_build_command)
+
+    async def run():
+        mgr = _manager()
+        mgr.create(SessionDef(name="cx1", profile="cx", cwd=str(tmp_path),
+                              args=("--sandbox", "danger-full-access")))
+        skipping = await mgr.skip_permissions("cx1", True)
+        assert skipping.sdef.args == (
+            "--sandbox", "danger-full-access", "--approval-mode", "full-auto"
+        )
+        asking = await mgr.skip_permissions("cx1", False)
+        assert asking.sdef.args == ("--sandbox", "danger-full-access")
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_skip_permissions_refusals_touch_nothing(home, tmp_path, monkeypatch):
     _register_py_harness()
     profile_mod.create("p1")
@@ -113,11 +135,11 @@ def test_skip_permissions_refusals_touch_nothing(home, tmp_path, monkeypatch):
 
     async def run():
         mgr = _manager()
-        session = mgr.create(
+        mgr.create(
             SessionDef(name="s1", harness="claude", profile="p1", cwd=str(tmp_path))
         )
         other = mgr.create(SessionDef(name="s2", harness="py", cwd=str(tmp_path)))
-        with pytest.raises(ManagerError, match="only applies to the claude"):
+        with pytest.raises(ManagerError, match="does not declare"):
             await mgr.skip_permissions("s2", True)
         with pytest.raises(ManagerError, match="not skipping"):
             await mgr.skip_permissions("s1", False)  # already asking
@@ -164,7 +186,7 @@ def test_api_skip_permissions(home, tmp_path, monkeypatch):
         mgr = _manager()
         client = await _serve(mgr, tmp_path)
         try:
-            session = mgr.create(
+            mgr.create(
                 SessionDef(
                     name="s1", harness="claude", profile="p1", cwd=str(tmp_path)
                 )

@@ -501,6 +501,27 @@ def test_generic_harness_from_config(home, tmp_path):
     assert env["K"] == "V"
 
 
+def test_declared_runtime_mode_replaces_conflicting_harness_default(
+    home, tmp_path
+):
+    _declare_harness(
+        "codex",
+        args=["--dangerously-bypass-approvals-and-sandbox"],
+        full_access_args=["--sandbox", "danger-full-access"],
+        full_access_off_args=["--sandbox", "workspace-write"],
+        mode_conflict_args=["--dangerously-bypass-approvals-and-sandbox"],
+    )
+    _profile_for("custom", "codex")
+    for mode in ("danger-full-access", "workspace-write"):
+        sdef = harness.normalize(SessionDef(
+            name="x", profile="custom", cwd=str(tmp_path),
+            args=("--sandbox", mode),
+        ))
+        argv, _, _ = harness.build_command(sdef)
+        assert "--dangerously-bypass-approvals-and-sandbox" not in argv
+        assert argv[-2:] == ["--sandbox", mode]
+
+
 def test_codex_restore_resumes_its_pinned_conversation_id(
     home, tmp_path
 ):
