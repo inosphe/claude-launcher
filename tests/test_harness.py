@@ -100,6 +100,22 @@ def test_qualified_profile_pins_harness_across_restore(home, tmp_path):
     assert env["OTHER_HOME"] == str(base.config_dir / "other")
 
 
+def test_bare_profile_pins_its_validated_default_across_restore(home, tmp_path):
+    _declare_harness("other", home_env="OTHER_HOME")
+    base = profile.create("work")  # historical/default Claude
+
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work", cwd=str(tmp_path))
+    )
+    assert sdef.profile == "work:claude"
+    assert sdef.harness == "claude"
+
+    lineage.set_harness(base, "other")
+    restored = harness.normalize(sdef, restoring=True)
+    assert restored.profile == "work:claude"
+    assert restored.harness == "claude"
+
+
 def test_claude_command_uses_profile_env(home, monkeypatch, tmp_path):
     p = profile.create("work")
     from claude_launcher import settings
@@ -108,6 +124,7 @@ def test_claude_command_uses_profile_env(home, monkeypatch, tmp_path):
     sdef = harness.normalize(
         SessionDef(name="x", profile="work", cwd=str(tmp_path))
     )
+    assert sdef.profile == "work:claude"
     argv, env, cwd = harness.build_command(sdef)
     assert argv[0] == "claude"
     assert env["CLAUDE_CONFIG_DIR"] == str(p.config_dir)

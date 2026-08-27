@@ -84,7 +84,8 @@ function attach() {}
 const ctx = {};
 new Function(
   "exports", "document", "el", "api",
-  stubs + slice("readBorrowOptions") + slice("sessReborrow") + `
+  stubs + slice("baseProfileName") + slice("readBorrowOptions")
+  + slice("sessReborrow") + `
 Object.assign(exports, {
   render: sessReborrow,
   drop: () => { sessReborrowBox = null; },

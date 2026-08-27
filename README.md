@@ -1072,7 +1072,7 @@ claunch new -s api --wizard           # flags typed alongside pre-fill the form
 claunch new-session
 
    Name            api
- > Profile : Harness  work (default: claude)
+ > Profile : Harness  work/claude
    Borrow          (this profile's own token)
    Null token      no - inject the profile's token
    Directory       this directory  F:\works\claude-launcher
@@ -1701,7 +1701,8 @@ selector is the only source of its harness. A bare profile uses the
 `harness:` default stored under `profiles.<name>` in `~/.claunch.yaml`
 (or inherits it, then defaults to Claude). An explicit
 `PROFILE:HARNESS` selects a harness for that execution without changing the
-YAML:
+YAML. Managed sessions resolve either form once and persist the canonical
+`PROFILE:HARNESS`, so later default changes do not reinterpret a restore:
 
 ```bash
 claunch create ds4 --no-seed
@@ -1746,12 +1747,13 @@ selector lists omit denied combinations; `profile_details[].harness_policy`
 retains the denial reason for diagnostics.
 
 The Web create form, Spawn modal, `new --wizard` and `spawn --wizard` show one
-`Profile : Harness` picker. A bare entry is labelled with its effective
-default, such as `ds4 (default: pi)`; allowed non-default alternatives use
-the explicit form, such as `ds4:claude`. Denied combinations are omitted, so
-a `codex` profile restricted to `[codex]` does not show `codex:claude`.
-Sending a separate `harness` field/flag is rejected. A session saves the
-selector, so
+`Profile : Harness` picker. Display labels use `PROFILE/HARNESS`, such as
+`ds4/pi`; submitted values use canonical `PROFILE:HARNESS`, such as
+`ds4:pi`. The effective default and every non-default alternative go through
+the same profile/provider `allowed_harnesses` intersection. Denied
+combinations are omitted, so a `codex` profile restricted to `[codex]` shows
+`codex/codex` and does not show `codex/claude`. Sending a separate `harness`
+field/flag is rejected. A session saves the canonical selector, so
 `ds4:pi` restores as Pi even if `profiles.ds4.harness` later changes.
 The colon is logical only and never becomes part of a Windows path.
 

@@ -669,11 +669,12 @@ def capabilities(
             default_name = None
             try:
                 default_name = lineage.effective_harness(p)
-                selectors.append(p.name)
+                default_selector = f"{p.name}:{default_name}"
+                selectors.append(default_selector)
                 options.append(
                     {
-                        "value": p.name,
-                        "label": f"{p.name} (default: {default_name})",
+                        "value": default_selector,
+                        "label": f"{p.name}/{default_name}",
                         "profile": p.name,
                         "harness": default_name,
                         "default": True,
@@ -696,7 +697,7 @@ def capabilities(
                 options.append(
                     {
                         "value": selector,
-                        "label": selector,
+                        "label": f"{p.name}/{name}",
                         "profile": p.name,
                         "harness": name,
                         "default": False,

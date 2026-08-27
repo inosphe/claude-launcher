@@ -512,18 +512,19 @@ async def h_profiles(request: web.Request) -> web.Response:
     profile_options = []
     for p in profiles:
         default_name = None
-        bare_allowed = False
+        default_offered = False
         try:
             name = lineage.effective_harness(p, doc)
             default_name = name
-            bare_allowed = True
+            default_offered = True
+            default_selector = f"{p.name}:{name}"
             borrow_cap = borrowing.capability(registry.get(name))
             policy_doc = harness_policy.evaluate(p, name, doc=doc).to_dict()
-            selectors.append(p.name)
+            selectors.append(default_selector)
             profile_options.append(
                 {
-                    "value": p.name,
-                    "label": f"{p.name} (default: {name})",
+                    "value": default_selector,
+                    "label": f"{p.name}/{name}",
                     "profile": p.name,
                     "harness": name,
                     "default": True,
@@ -576,18 +577,17 @@ async def h_profiles(request: web.Request) -> web.Response:
                     "reason": str(exc),
                 }
             allowed = bool(policy and policy.allowed)
-            # The bare option already represents the effective default. A
-            # second ``p:default`` entry repeats the same choice and hides the
-            # fact that the bare profile follows future default changes.
+            # The canonical default option was already added above. Do not
+            # add the same ``p:default`` selector a second time here.
             offered = allowed and not (
-                bare_allowed and harness_name == default_name
+                default_offered and harness_name == default_name
             )
             if offered:
                 selectors.append(selector)
                 profile_options.append(
                     {
                         "value": selector,
-                        "label": selector,
+                        "label": f"{p.name}/{harness_name}",
                         "profile": p.name,
                         "harness": harness_name,
                         "default": False,

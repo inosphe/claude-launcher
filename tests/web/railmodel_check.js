@@ -118,7 +118,7 @@ new Function(
   + slice("ctxKnowable") + slice("modelShort") + slice("modelSentence")
   + slice("ctxSentence") + slice("ctxBreakdown") + slice("ctxTooltip")
   + domLine[0] + "\n" + slice("ctxRailLine")
-  + slice("metaRow") + slice("renderSession")
+  + slice("profileHarnessLabel") + slice("metaRow") + slice("renderSession")
   + `
 Object.assign(exports, {
   short: modelShort,
@@ -161,7 +161,7 @@ const READING = {
   output: 210, model: "claude-haiku-4-5-20251001", at: AT,
   compact_window: 200_000,
 };
-const FULL = { name: "full", status: "busy", harness: "claude", profile: "nc",
+const FULL = { name: "full", status: "busy", harness: "claude", profile: "nc:claude",
                cwd: "/w", cols: 80, rows: 24, context: READING };
 const QUIET = { name: "quiet", status: "idle", harness: "claude",
                 profile: "nc", cwd: "/w", cols: 80, rows: 24 };
@@ -223,6 +223,11 @@ function rowsOf(s, data) {
   return out;
 }
 const full = rowsOf(FULL);
+check("the panel displays a canonical profile and harness once",
+      full["profile / harness"] && full["profile / harness"].text,
+      "nc/claude");
+check("the panel has no duplicate profile or harness rows",
+      ["profile" in full, "harness" in full], [false, false]);
 check("the panel has a model row", !!full.model, true);
 check("...saying the full id", full.model && full.model.text,
       "claude-haiku-4-5-20251001 (as of its turn 3m ago)");

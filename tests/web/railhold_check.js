@@ -132,7 +132,8 @@ new Function(
   stubs
   + holdMs[0] + "\n" + heldUntil[0] + "\n" + pending[0] + "\n"
   + slice("railHeld") + slice("holdRail") + slice("releaseRail")
-  + slice("byLineage") + slice("refreshSessions")
+  + slice("byLineage") + slice("profileHarnessLabel")
+  + slice("refreshSessions")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,

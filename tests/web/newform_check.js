@@ -546,6 +546,7 @@ const details = {};
 let hintParent = null;
 const hintCtx = {};
 new Function("exports", "$", "spawnParent", "profileDetails",
+  sliceFrom("function profileHarnessLabel(") +
   sliceFrom("function renderProfileHint()") +
   "\nexports.hint = renderProfileHint;\n")(
   hintCtx,
@@ -575,7 +576,7 @@ check("...and stops being said once it is there", shown(), "");
 h.borrow.value = "work";
 hintCtx.hint();
 check("borrowing names both halves — whose token, whose config",
-      [/work's token/.test(shown()), /stay nc's/.test(shown())],
+      [/work's token/.test(shown()), /stay nc\/claude's/.test(shown())],
       [true, true]);
 
 h.null_token.checked = true;
@@ -615,6 +616,7 @@ check("a broken profile reports its own error, not a guess at the harness",
 /* Served against a page that predates the row, like every other rule here. */
 const bareHint = {};
 new Function("exports", "$", "spawnParent", "profileDetails",
+  sliceFrom("function profileHarnessLabel(") +
   sliceFrom("function renderProfileHint()") +
   "\nexports.hint = renderProfileHint;\n")(
   bareHint, () => null, () => null, {});
