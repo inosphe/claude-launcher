@@ -1018,6 +1018,45 @@ async function main() {
     session: { name: "job-1" }, mesh: { ok: true, mesh: "m0" },
   } };
 
+  /* ---- the two surfaces in one press ------------------------------------
+     The borrow row is filled by a policy fetch (Profile change -> validated
+     options) and the landing hop is read off the spawn answer. Each has its
+     own checks above, and neither draws the press that uses BOTH: a child
+     spawned on a validated lender still has to land on its terminal. Drive
+     the real pickers, then hold the one payload and the one hop against
+     each other. */
+  sent = [];
+  await ctx.openSpawnModal("lead1", { seed: {
+    quick: true, role: "worker", workflow: "improv-worker", worktree: true,
+    task: "fix the tab",
+  } });
+  await settle();
+  await settle();
+  const bothSel = nodeSel(modalEls["modal-body"], "select") || [];
+  const bothProfile = bothSel.find((x) => (x.options || [])
+    .some((o) => o.value === "p2:pi"));
+  bothProfile.value = "p2:pi";
+  await bothProfile.fire("change");     // -> refreshSpawnBorrowOptions
+  await settle();
+  const bothBorrow = bothSel.find((x) => (x.options || [])
+    .some((o) => o.value === "p2") && x !== bothProfile);
+  check("the validated lender is on offer after the profile change",
+    bothBorrow && (bothBorrow.options || []).some((o) => o.value === "p2"),
+    bothBorrow && (bothBorrow.options || []).map((o) => o.value));
+  bothBorrow.value = "p2";
+  const bothBtn = buttons(modalEls["modal-actions"])
+    .find((b) => b.text.startsWith("Spawn"));
+  await bothBtn.fire("click");
+  await settle();
+  const bothPost = sent.find((x) => x.method === "POST");
+  check("the validated pair travels in the payload",
+    bothPost && bothPost.body.profile === "p2:pi" && bothPost.body.borrow === "p2",
+    bothPost && [bothPost.body.profile, bothPost.body.borrow]);
+  check("...and that spawn still lands on the child",
+    ctx.counters().goto === "#/s/job-1", ctx.counters().goto);
+  ctx.resetGo();
+  sent = [];
+
   /* ---- a picker emptied by a failed fetch says so ------------------------
      The bug this pins: every option source degrades to null, so a daemon
      that answers /children but not /roles leaves the Role picker holding
