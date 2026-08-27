@@ -53,6 +53,15 @@ class SessionManager:
         #: (:mod:`claude_launcher.daemon.resume`). Written once per process,
         #: at restore; empty on a daemon that restored nothing.
         self.resumed_busy: List[str] = []
+        #: Names :meth:`restore_all` relaunched whose conversation was *not*
+        #: on disk yet, so the restore opened an empty one
+        #: (:func:`harness.restores_blank`). Kept apart from
+        #: :attr:`resumed_busy` because the two ask different questions: that
+        #: one is "was a turn cut off", this one is "did the session come back
+        #: knowing anything at all". A session can be on both lists, on either,
+        #: or on neither, and an *idle* blank restore still lost everything it
+        #: knew — so this list is not filtered by what the session was doing.
+        self.resumed_blank: List[str] = []
         #: Called with a session once its child is gone for good — whatever
         #: ended it. Registered by whoever has a stake in an ending (the
         #: board sweep, :mod:`claude_launcher.daemon.beads`); not called for
@@ -976,6 +985,11 @@ class SessionManager:
         are recorded in :attr:`resumed_busy`: a restored session is alive but
         nothing is driving it, and that list is who should be told to carry
         on (:mod:`claude_launcher.daemon.resume`).
+
+        The ones whose conversation was not on disk to reopen are recorded in
+        :attr:`resumed_blank`. They came back alive and empty — no scrollback,
+        and no opening task, which a restore does not replay — so "carry on"
+        is not what they need and not what they are sent.
         """
         path = paths.sessions_json()
         if not path.is_file():
@@ -993,6 +1007,10 @@ class SessionManager:
             if sdef.name in self._sessions:
                 continue  # a duplicated record must not clobber a live session
             if sdef.restore and entry.get("was_running"):
+                # Asked before the relaunch, not after: the answer is about
+                # the transcript the *previous* daemon left behind, and the
+                # session we are about to start writes one of its own.
+                blank = harness_mod.restores_blank(sdef)
                 try:
                     # Its own creation time, not this restart's: the listings
                     # are ordered by it, and a restart that restamped every
@@ -1007,6 +1025,8 @@ class SessionManager:
                     )
                     if entry.get("was_busy"):
                         self.resumed_busy.append(sdef.name)
+                    if blank:
+                        self.resumed_blank.append(sdef.name)
                     continue
                 except Exception:
                     failed.append(sdef.name)

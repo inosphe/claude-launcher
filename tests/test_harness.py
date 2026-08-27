@@ -7,6 +7,7 @@ import re
 import sys
 
 import pytest
+from dataclasses import replace
 
 from claude_launcher import credentials, lineage, profile, store, transcripts
 from claude_launcher.daemon import harness
@@ -601,3 +602,64 @@ def test_non_claude_harness_gets_no_settings_flag(home, tmp_path):
     )
     argv, _, _ = harness.build_command(sdef)
     assert "--settings" not in argv
+
+
+# --------------------------------------------------------------------------- #
+# restores_blank: the one restore that comes back empty, named once
+# --------------------------------------------------------------------------- #
+def test_restores_blank_is_true_exactly_for_the_missing_transcript(home, tmp_path):
+    """The predicate and the argv branch are the same rule, not two.
+
+    ``build_command`` asks it, and so does the daemon on the way up (to decide
+    who is owed the blank-restore block). Two spellings of "is the transcript
+    there" would drift, and the drift is silent: the session comes back empty
+    and is told its history is intact.
+    """
+    profile.create("work")
+    sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+
+    assert harness.restores_blank(sdef) is True
+    argv, _, _ = harness.build_command(sdef, restoring=True)
+    assert argv[argv.index("--session-id") + 1] == sdef.conversation_id
+
+    _write_transcript(sdef)
+    assert harness.restores_blank(sdef) is False
+    argv, _, _ = harness.build_command(sdef, restoring=True)
+    assert argv[argv.index("--resume") + 1] == sdef.conversation_id
+
+
+def test_a_transcript_under_another_slug_is_not_a_blank_restore(home, tmp_path):
+    """Generous in the same direction ``transcripts.exists`` is: a conversation
+    found anywhere in the config dir is resumed, so it is not blank either."""
+    profile.create("work")
+    sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+    stray = profile.require("work").config_dir / "projects" / "somewhere-else"
+    stray.mkdir(parents=True)
+    (stray / f"{sdef.conversation_id}.jsonl").write_text("{}", encoding="utf-8")
+    assert harness.restores_blank(sdef) is False
+
+
+def test_only_a_pinned_claude_conversation_can_restore_blank(home, tmp_path):
+    """The other restore branches are not this one.
+
+    An id-less definition falls back to ``--continue`` (some conversation, not
+    an empty one), a caller steering the conversation owns the outcome, and a
+    non-claude harness has no transcript to be missing. A definition whose
+    profile cannot be resolved is not blank either: that restore fails on its
+    own terms, loudly, and calling it blank would send a re-briefing to a
+    session that never came back.
+    """
+    profile.create("work")
+    pinned = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+
+    legacy = replace(pinned, conversation_id=None)
+    assert harness.restores_blank(legacy) is False
+
+    steered = replace(pinned, args=("--resume", "abc"))
+    assert harness.restores_blank(steered) is False
+
+    other = replace(pinned, harness="py")
+    assert harness.restores_blank(other) is False
+
+    unknown = replace(pinned, profile="no-such-profile")
+    assert harness.restores_blank(unknown) is False

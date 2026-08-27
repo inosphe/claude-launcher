@@ -190,7 +190,15 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # Last, and only now: the sessions restore brought back are alive but
     # nothing is driving them. Started after the server is up because a nudge
     # can send an agent straight back to the API it was using.
-    resume_nudge = resume.ResumeNudge(manager, manager.resumed_busy)
+    resume_nudge = resume.ResumeNudge(
+        manager,
+        manager.resumed_busy,
+        # The sessions whose conversation was not there to reopen. They get a
+        # different message and the re-briefing, which is why the mesh manager
+        # comes along — it is half of what a re-briefing is made of.
+        blank=manager.resumed_blank,
+        mesh_mgr=mesh_manager,
+    )
     resume_nudge.start()
     # Started alongside it, and deliberately not merged into it: the nudge is
     # allowed to give up on a session that is working again, and this is not
