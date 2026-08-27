@@ -72,6 +72,7 @@ class SessionManager:
         created_at: Optional[str] = None,
         last_visited_at: Optional[str] = None,
         last_input_at: Optional[str] = None,
+        delivery_hold: bool = False,
     ) -> Session:
         """Register a session without starting it.
 
@@ -95,6 +96,10 @@ class SessionManager:
         and last typed into it are facts about the session, not about the
         process, and a relaunch that dropped them would tell the rail that
         nobody has ever been near a session somebody was reading a minute ago.
+        ``delivery_hold`` rides in on the same terms and for the same reason:
+        a person pinned this session shut, and the relaunch is that session
+        continuing, so the pin continues with it (see
+        :attr:`Session._delivery_hold`).
         """
         name = (sdef.name or "").strip() or self._auto_name()
         self._check_name(name)
@@ -108,6 +113,7 @@ class SessionManager:
             created_at=created_at,
             last_visited_at=last_visited_at,
             last_input_at=last_input_at,
+            delivery_hold=delivery_hold,
         )
         session.on_exit = self._session_exited
         self._sessions[name] = session
@@ -172,6 +178,7 @@ class SessionManager:
         created_at: Optional[str] = None,
         last_visited_at: Optional[str] = None,
         last_input_at: Optional[str] = None,
+        delivery_hold: bool = False,
     ) -> Session:
         """Build and start a session.
 
@@ -187,6 +194,7 @@ class SessionManager:
             created_at=created_at,
             last_visited_at=last_visited_at,
             last_input_at=last_input_at,
+            delivery_hold=delivery_hold,
         )
         try:
             return self.launch(session, restoring=restoring, opening=opening)
@@ -689,6 +697,7 @@ class SessionManager:
                 created_at=session.created_at,
                 last_visited_at=session.last_visited_at,
                 last_input_at=session.last_input_at,
+                delivery_hold=session.delivery_held(),
             )
         except Exception:
             self._sessions[name] = session  # keep the exited record on failure
@@ -739,6 +748,7 @@ class SessionManager:
                 created_at=session.created_at,
                 last_visited_at=session.last_visited_at,
                 last_input_at=session.last_input_at,
+                delivery_hold=session.delivery_held(),
             )
         except Exception:
             self._sessions[name] = session  # keep the record, as it was
@@ -953,6 +963,13 @@ class SessionManager:
                     "last_visited_at": session.last_visited_at,
                     "last_input_at": session.last_input_at,
                     "exited_at": session.exited_at,
+                    # A person's standing "type nothing in here". Written
+                    # here so it survives the restart that has nothing to do
+                    # with them; an exited record always reports False (see
+                    # DeadSession.set_delivery_hold), so retiring a held
+                    # session does drop the pin — the record has no terminal
+                    # left to hold mail out of.
+                    "delivery_hold": session.delivery_held(),
                 }
             )
         path = paths.sessions_json()
@@ -1004,6 +1021,7 @@ class SessionManager:
                         created_at=entry.get("created_at"),
                         last_visited_at=entry.get("last_visited_at"),
                         last_input_at=entry.get("last_input_at"),
+                        delivery_hold=bool(entry.get("delivery_hold")),
                     )
                     if entry.get("was_busy"):
                         self.resumed_busy.append(sdef.name)

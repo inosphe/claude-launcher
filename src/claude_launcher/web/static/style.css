@@ -214,6 +214,31 @@ option:disabled { color: #6b7280; }
    plainly inert — the tooltip carries the how-to-enable */
 #session-list .sess-brief-toggle:disabled { color: #3d434d; cursor: default; }
 #session-list .sess-cflow { order: 3; }
+/* The "the daemon will not type here" line: delivery held, step reminder off.
+   Its own full-width line rather than pills loose on the name row — see the
+   invariant on .rail-head; anything at order 0 that does not shrink pushes
+   the ⓘ onto a line of its own. Ordered just above the cflow badge, because
+   one of the two flags is about that very run and reads as a qualifier on
+   the line under it. */
+#session-list .rail-quiet {
+  flex-basis: 100%; display: flex; align-items: center; gap: 4px;
+  min-width: 0; padding-left: 16px; order: 2; flex-wrap: wrap;
+}
+/* Grey, not amber. Amber on this rail means the run wants the reader's
+   keyboard (.sess-cflow.gated) — a state that is waiting on them. These two
+   are the opposite: settings that are already decided and want nothing. */
+#session-list .rail-quiet-pill {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 11px; padding: 1px 5px; border-radius: 9px;
+  background: #191d24; color: #6e7681; border: 1px solid #2a2e36;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 0;
+}
+#session-list .rail-quiet-pill .quiet-glyph { font-size: 9px; line-height: 1; }
+/* The held one is the sharper of the two: it stops other people's messages
+   reaching a person, where the reminder only stops the daemon repeating
+   itself. */
+#session-list .quiet-hold { color: #8b949e; border-color: #3d434d; }
 /* The card itself, wherever it is drawn — the row's fold, the pane under
    the header, the detail panel's section. Box and type are common; only the
    rail's flex-placement below is specific to the list it lives in. */
