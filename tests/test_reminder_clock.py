@@ -832,3 +832,130 @@ def test_recall_is_read_only_about_an_idle_slot_and_needs_an_id(proj):
     cflow_engine.recall(before["digest"], cwd=cwd, scope="w1")
     after = cflow_engine.status(cwd, scope="w1")
     assert (before["status"], before["visit"]) == (after["status"], after["visit"])
+
+
+# --------------------------------------------------------------------------- #
+# the volatile half: pushed in full, because no id could stay true for it
+# --------------------------------------------------------------------------- #
+class _KinManager(_FakeManager):
+    """A manager that also answers the kin questions the situation asks."""
+
+    def __init__(self, sessions: dict, *, children=(), parent_exited=None) -> None:
+        super().__init__(sessions)
+        self._children = list(children)
+        self._parent_exited = parent_exited
+
+    def live_children(self, name: str):
+        return list(self._children)
+
+    def get(self, name: str):
+        if self._parent_exited is not None and name == self._parent_exited:
+            gone = _FakeSession(name, "")
+            gone.exited = True
+            return gone
+        return super().get(name)
+
+
+class _FakeMesh:
+    def __init__(self, name, owed):
+        self.name = name
+        self._owed = owed
+
+    def owed(self, handle):
+        return self._owed
+
+
+class _FakeMeshMgr:
+    def __init__(self, mesh, handle="w1"):
+        self._mesh = mesh
+        self._handle = handle
+
+    def meshes_for_session(self, name):
+        return [{"mesh": self._mesh.name}]
+
+    def get(self, name):
+        return self._mesh
+
+    def member_for_session(self, mesh, name):
+        return type("M", (), {"handle": self._handle})()
+
+
+def test_splice_puts_lines_inside_the_fence():
+    block = "---\n# head\nbody\n---"
+    out = cflow_clock.splice(block, ["extra: one"])
+    assert out.splitlines()[-1] == "---"        # still fenced
+    assert out.splitlines()[-2] == "extra: one"  # and inside it
+    assert cflow_clock.splice(block, []) == block
+
+
+def test_a_quiet_session_adds_nothing(proj):
+    """The ordinary case, and the one the measured size depends on."""
+    sess = _FakeSession("w1", str(proj))
+    mgr = _KinManager({"w1": sess})
+    assert cflow_clock.situation_lines("w1", mgr, None, 0) == []
+
+
+def test_the_situation_states_owed_asks_children_and_a_dead_parent(proj):
+    sess = _FakeSession("w1", str(proj))
+    sess.sdef = SessionDef(name="w1", cwd=str(proj), parent="lead")
+    mgr = _KinManager({"w1": sess}, children=["c1", "c2"], parent_exited="lead")
+    mm = _FakeMeshMgr(_FakeMesh("m0", [{"id": "a"}, {"id": "b"}]))
+    lines = cflow_clock.situation_lines("w1", mgr, mm, 3)
+    joined = "\n".join(lines)
+    assert "there is no id that could stay true for it" in lines[0]
+    assert "asks: 3 delegated decision(s)" in joined
+    assert "owed: 2 delivered message(s) on mesh m0" in joined
+    assert "children: c1, c2 still running" in joined
+    assert "parent: lead has exited" in joined
+
+
+def test_a_broken_roster_never_sinks_the_reminder(proj):
+    """Decoration must not cost a delivery."""
+    class _Exploding:
+        def meshes_for_session(self, name):
+            raise RuntimeError("mesh registry mid-write")
+
+    sess = _FakeSession("w1", str(proj))
+    mgr = _KinManager({"w1": sess}, children=["c1"])
+    lines = cflow_clock.situation_lines("w1", mgr, _Exploding(), 0)
+    assert any("children: c1" in ln for ln in lines)   # the rest still stands
+
+
+def test_the_reminder_carries_the_situation_when_delivered(proj):
+    """It rides the block that actually lands, composed on the loop."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    mgr = _KinManager({"w1": sess}, children=["c1"])
+    clock = cflow_clock.ReminderClock(mgr, _FakeMeshMgr(_FakeMesh("m0", [{"id": "a"}])))
+    t = time.monotonic()
+    clock.scan(t)
+    due = clock.scan(t + 601)
+    assert "children:" not in due[0][2]          # not composed in the thread
+    asyncio.run(clock._deliver(*due[0]))
+    landed = sess.delivered[0]
+    assert "children: c1 still running" in landed
+    assert "owed: 1 delivered message(s) on mesh m0" in landed
+    assert landed.splitlines()[-1] == "---"      # and it is still one block
+
+
+def test_recall_is_journalled_so_the_pull_rate_can_be_measured(proj):
+    """The design is priced on how often this is called; until it is recorded
+    that number is a guess."""
+    import json
+    from claude_launcher.cflow import state as cflow_state
+
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    d = cflow_engine.status(cwd, scope="w1")["digest"]
+    cflow_engine.recall(d, cwd=cwd, scope="w1")
+    cflow_engine.recall("0" * 12, cwd=cwd, scope="w1")
+    entries = [
+        json.loads(ln)
+        for ln in cflow_state.journal_path(cwd, "w1").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    recalls = [e for e in entries if e["event"] == "recall"]
+    assert [e["hit"] for e in recalls] == [True, False]
+    assert recalls[0]["id"] == d and recalls[0]["step"] == "one"

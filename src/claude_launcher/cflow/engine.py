@@ -3082,6 +3082,17 @@ def recall(digest: str = "", cwd: Optional[str] = None) -> dict:
     workflow, state = _load(cwd)
     payload = _payload(workflow, state, cwd, mutate=False)
     current = payload.get("digest") or ""
+    # Journalled, though this is otherwise read-only, and the exception is
+    # deliberate: the whole push-to-pull design is priced on how often agents
+    # actually make this call, and until it is recorded that number can only
+    # be guessed at. `journal` is a lock-free append and touches no run state,
+    # so recording the question does not answer it differently.
+    state_mod.journal(
+        "recall",
+        {"run": state.get("run_id"), "id": digest, "step": payload.get("step_id"),
+         "hit": bool(current and current == digest)},
+        cwd,
+    )
     if current and current == digest:
         out = {
             "status": "recalled",

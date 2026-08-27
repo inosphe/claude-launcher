@@ -235,8 +235,12 @@ class ReminderClock:
     both in its own state (:func:`cflow.engine.set_reminder`).
     """
 
-    def __init__(self, manager, *, poll: float = REMINDER_POLL) -> None:
+    def __init__(self, manager, mesh=None, *, poll: float = REMINDER_POLL) -> None:
         self.manager = manager
+        #: The mesh registry, for the situation lines (:func:`situation_lines`).
+        #: Optional the way :class:`RunEventClock` takes it: a daemon without
+        #: meshes still reminds, it just has one fewer thing to say.
+        self.mesh = mesh
         self.poll = poll
         self._task: Optional[asyncio.Task] = None
         #: (cwd, scope) -> {"pos": position key, "at": monotonic seconds} —
@@ -470,6 +474,23 @@ class ReminderClock:
                 # reading a countdown, unless the hold itself is reported.
                 entry["held_at"] = time.monotonic()
             return
+        if kind == "reminder":
+            # Composed HERE and not in `scan`, and the reason is threading,
+            # not taste: `scan` runs in a worker thread (see this module's
+            # docstring) and ``MeshManager`` is event-loop only. The one
+            # source that is neither — the open-ask scan — is a filesystem
+            # walk, so it goes back to a thread rather than blocking the loop
+            # this method runs on. Deliveries are rare enough (four figures
+            # across this machine's entire history) that the hop costs nothing.
+            try:
+                open_asks = len(
+                    await asyncio.to_thread(cflow_engine.open_asks, scope)
+                )
+            except Exception:  # noqa: BLE001 — decoration must not sink a send
+                open_asks = 0
+            block = splice(
+                block, situation_lines(scope, self.manager, self.mesh, open_asks)
+            )
         try:
             delivered = await session.deliver(block)
         except Exception:
@@ -763,6 +784,99 @@ def repeat_block(payload: dict, interval: float, stalled_for: float) -> str:
         )
     lines.append("---")
     return "\n".join(lines)
+
+
+def splice(block: str, lines: List[str]) -> str:
+    """Put ``lines`` inside a block's fence, just before it closes.
+
+    The blocks here are fenced so an agent can tell where machine-generated
+    text starts and stops; anything appended after the closing ``---`` reads
+    as a separate paste, and anything that replaces the fence stops reading
+    as machine-generated at all. So additions go inside, at the end, where a
+    reader has already taken in the position they belong to.
+    """
+    if not lines:
+        return block
+    rows = block.splitlines()
+    if rows and rows[-1] == "---":
+        return "\n".join(rows[:-1] + list(lines) + ["---"])
+    return "\n".join(rows + list(lines))
+
+
+def situation_lines(name: str, manager, mesh_mgr, open_asks: int = 0) -> List[str]:
+    """What is true around this session right now, said in full every time.
+
+    The counterpart to the content id, and the reason both exist. A step's
+    text is immutable for the life of a position, so it can be named by a
+    hash and pulled back on demand. None of *this* is: replies come due, a
+    child exits, a decision lands. An id for it would be a promise the
+    daemon cannot keep — quote ``7c1e`` for a roster and the agent that calls
+    for it later gets either a stale snapshot or a different roster, and both
+    are worse than the two lines it would have replaced. So the volatile half
+    is pushed, in full, and stays small enough to be worth pushing.
+
+    Only what has something to say. A session with no mail owing, no
+    decisions on it, no children and a live parent adds nothing here — which
+    is the ordinary case, and why the repeat stays at its measured size.
+
+    Never raises: this decorates a reminder, and a reminder that failed to
+    send because the roster was mid-write would be a bad trade.
+    """
+    lines: List[str] = []
+    try:
+        sdef = manager.get(name).sdef
+    except Exception:  # noqa: BLE001 — raced an exit; the rest still stands
+        return lines
+    if open_asks:
+        lines.append(
+            f"asks: {open_asks} delegated decision(s) from other runs await "
+            "your answer -- their workflows are stopped on it. The cflow "
+            "'asks' tool serves them, 'answer' closes them."
+        )
+    if mesh_mgr is not None:
+        try:
+            for row in mesh_mgr.meshes_for_session(name):
+                mesh = mesh_mgr.get(row["mesh"])
+                member = mesh_mgr.member_for_session(mesh, name)
+                if member is None:
+                    continue
+                owed = mesh.owed(member.handle)
+                if owed:
+                    lines.append(
+                        f"owed: {len(owed)} delivered message(s) on mesh "
+                        f"{mesh.name} still await your reply -- to the "
+                        "senders, silence is silence. 'claunch mesh history "
+                        f"{mesh.name} -n 30' shows them."
+                    )
+        except Exception:  # noqa: BLE001 — a mesh deleted under us says nothing
+            pass
+    try:
+        live = manager.live_children(name)
+    except Exception:  # noqa: BLE001
+        live = []
+    if live:
+        lines.append(
+            f"children: {', '.join(live)} still running and still reporting "
+            "to you -- a child holding a finished result keeps holding it "
+            "until you ask."
+        )
+    if sdef.parent:
+        try:
+            if manager.get(sdef.parent).exited:
+                lines.append(
+                    f"parent: {sdef.parent} has exited -- whatever you were "
+                    "going to report to it has nowhere to go. Say so in this "
+                    "run's next report rather than reporting into the void."
+                )
+        except Exception:  # noqa: BLE001 — no record is not "exited"
+            pass
+    if lines:
+        lines.insert(
+            0,
+            "-- around you right now (this part changes; it is stated in "
+            "full because there is no id that could stay true for it) --",
+        )
+    return lines
 
 
 def signal_block(payload: dict, before: dict, after: dict) -> str:
