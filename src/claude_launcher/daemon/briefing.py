@@ -41,16 +41,24 @@ from ..profile import ProfileError
 #: Defaults for the ``llm`` config block. ``max_tokens`` bounds the *whole*
 #: completion, and on a reasoning model the reasoning tokens are billed to it
 #: too — so the budget is not "how long is the answer" but "how long is the
-#: thinking plus the answer". Measured against the configured endpoint
-#: (fireworks / deepseek-v4-flash) at 1024: 8 of 10 calls came back
-#: ``finish_reason="length"`` with ``completion_tokens=1024`` and an EMPTY
-#: ``content`` — the reasoning had eaten the lot. 4096 leaves room for both;
-#: the answer itself is far smaller, in both sets measured: the 25
-#: briefings that parsed in the 30-session end-to-end run rendered
-#: 149-633 characters of fields (p50 273), and the 43 that parsed in
-#: the 48-call budget sweep carried 244-686 characters of content
-#: (p50 385). Quote whichever set you mean — they do not agree, and
-#: neither one bounds the other.
+#: thinking plus the answer". Measured once, against the endpoint configured
+#: that day — ``accounts/fireworks/models/deepseek-v4-flash-0731`` — at 1024:
+#: 8 of 10 calls came back ``finish_reason="length"`` with
+#: ``completion_tokens=1024`` and an EMPTY ``content``; the reasoning had
+#: eaten the lot. The model, the budget and the N are that run's conditions,
+#: not standing facts about the feature.
+#:
+#: 4096 leaves room for both, because the answer itself is far smaller. Three
+#: medians were taken, and they are three UNITS rather than three samples —
+#: name the unit or they read as disagreement:
+#:
+#:   p50 273 (149-633)  fields as rendered, the 25 that parsed of 30 sessions
+#:   p50 357 (233-717)  those SAME 25, serialized back to JSON
+#:   p50 385 (244-686)  raw ``content``, the 43 that parsed of 48 sweep calls
+#:
+#: 273 to 385 is a gap of 112, of which 84 is the change of unit and 28 the
+#: change of sample. Only the last two are counted the same way, so only
+#: those two compare.
 DEFAULT_MAX_TOKENS = 4096
 
 #: How much transcript feeds the prompt. ``TAIL_BYTES`` bounds the file read
@@ -450,9 +458,12 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
 
     ``raw`` now means one thing only: the model wrote a WHOLE answer in the
     wrong shape. A cut-off one raises :class:`BriefingError` instead, because
-    the two used to be indistinguishable here and the truncated case is far
-    the commoner of them — it was 5 of 30 live sessions on one sweep, every
-    one served as a silent 200.
+    the two used to be indistinguishable here and both went out as a silent
+    200. On the 30-session run behind this: 5 briefings did not parse, 4 of
+    them empty and 1 cut off mid-string at 68 bytes. Only that last one
+    reaches this function — :func:`call_llm` raises on an empty answer before
+    :func:`parse_briefing` ever sees it — so the case this branch exists for
+    was 1 of 30 there. Which of the two is commoner was not measured.
     """
     sdef = session.sdef
     name = sdef.name
