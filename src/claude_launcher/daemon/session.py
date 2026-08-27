@@ -995,10 +995,22 @@ class Session:
         """
         if self.exited:
             raise SessionGone(f"session {self.sdef.name!r} has exited")
+        has_text = keys_mod.has_text(args, literal=literal)
+        if has_text:
+            # A text-bearing send-keys call is a message even though it uses
+            # the raw keyboard path. During a restore, Codex can paint a quiet
+            # frame before its composer is mounted; encoding and writing in
+            # that interval observes bracketed-paste as disabled and sends
+            # the text plus Enter as one premature write. Use the same
+            # harness-declared readiness gate as deliver(), then encode with
+            # the terminal modes that are current after startup completes.
+            await self._await_readable()
+            if self.exited:
+                raise SessionGone(f"session {self.sdef.name!r} has exited")
         data = keys_mod.encode_keys(
             args, literal=literal, app_cursor=self.screen.app_cursor_keys
         )
-        if keys_mod.has_text(args, literal=literal):
+        if has_text:
             quiet = await self.await_keyboard_quiet(terminal_only=True)
             if not quiet and self.draft_open():
                 raise KeyboardHeld(

@@ -231,6 +231,44 @@ def test_send_keys_splits_a_trailing_enter_for_a_paste_aware_tui(monkeypatch):
     assert writes == [b"hello", b"\r"]
 
 
+def test_send_keys_waits_for_a_resuming_codex_to_take_the_keyboard(
+    home, monkeypatch
+):
+    """A text-bearing raw send observes the same Codex readiness contract.
+
+    Before DECSET 2004, send_keys would encode ``hello`` plus Enter as one
+    write and race ``codex resume``. Once the TUI is ready, the current screen
+    mode also makes the Enter a separate write.
+    """
+    monkeypatch.setattr(session_mod, "INPUT_SETTLE", 0.0)
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, writes = _fake_session(bracketed=False, ready=False)
+    s.sdef = SessionDef(name="s", harness="codex")
+
+    async def run():
+        sending = asyncio.create_task(s.send_keys(["hello", "Enter"]))
+        await asyncio.sleep(0.1)
+        assert writes == [], "wrote text while codex resume was still loading"
+        s.screen.feed(b"\x1b[?2004h")
+        await asyncio.wait_for(sending, timeout=5)
+
+    asyncio.run(run())
+    assert writes == [b"hello", b"\r"]
+
+
+def test_send_keys_keeps_a_bare_control_key_immediate_during_codex_resume(
+    home, monkeypatch
+):
+    """Interrupts and submits remain raw controls without a readiness wait."""
+    s, writes = _fake_session(bracketed=False, ready=False)
+    s.sdef = SessionDef(name="s", harness="codex")
+
+    asyncio.run(asyncio.wait_for(s.send_keys(["C-c"]), timeout=1))
+
+    assert writes == [b"\x03"]
+    assert s._input_ready is False
+
+
 def test_send_keys_leaves_a_plain_program_alone(monkeypatch):
     """A program that never asked for bracketed paste (a shell, a REPL) reads
     line-buffered input and does not care -- don't add latency for it."""
