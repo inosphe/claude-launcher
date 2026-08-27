@@ -577,3 +577,78 @@ def test_render_screen_survives_a_wide_character():
     lines = s.render_screen()
     assert "한글" in lines[0]
     assert len(s.line_hashes()) == 3
+
+
+# --------------------------------------------------------------------------- #
+# CSI sequences pyte mis-reads
+# --------------------------------------------------------------------------- #
+def test_xtmodkeys_does_not_underline_the_grid():
+    """``CSI > 4 ; 2 m`` is keyboard negotiation, not an SGR.
+
+    pyte's parser drops the ``>`` and reads the rest as an ordinary CSI, so
+    XTMODKEYS modifyOtherKeys=2 — which claude asserts on every start — used
+    to arrive at ``select_graphic_rendition(4, 2)`` and set underline on the
+    cursor's attributes. Every cell drawn afterwards carried it, and
+    ``repaint_sequence`` rebuilt each one with an SGR 4: the browser's xterm
+    then underlined the whole screen, while the terminal reading the raw
+    bytes showed nothing of the sort.
+    """
+    s = ScreenState(20, 3)
+    s.feed(b"\x1b[>4;2m")
+    s.feed(b"hello")
+    assert s.render_screen()[0] == "hello"
+    assert not s._screen.buffer[0][0].underscore
+    assert b";4m" not in s.repaint_sequence()
+
+
+def test_xtmodkeys_is_dropped_however_the_chunks_fall():
+    """The PTY splits where the read ended, and ScreenFeeder splits again.
+
+    Half a sequence is worse than none: the marker byte says to drop it, and
+    the bytes after the cut would land on the grid as text.
+    """
+    seq = b"\x1b[>4;2m"
+    for cut in range(len(seq) + 1):
+        s = ScreenState(20, 3)
+        s.feed_render(seq[:cut])
+        s.feed_render(seq[cut:])
+        s.feed_render(b"hi")
+        assert s.render_screen()[0] == "hi", cut
+        assert not s._screen.buffer[0][0].underscore, cut
+
+
+def test_kitty_keyboard_pop_leaves_no_text_on_the_grid():
+    """``CSI < u`` — the pop claude pairs with ``CSI > 5 u``.
+
+    ``<`` is in neither pyte's ``>`` branch nor its ``?`` one, so it fell
+    through to the parameter default and ended the sequence early, leaving
+    the final byte to be drawn as a letter.
+    """
+    s = ScreenState(20, 3)
+    s.feed(b"\x1b[<u")
+    s.feed(b"X")
+    assert s.render_screen()[0] == "X"
+
+    s = ScreenState(20, 3)
+    s.feed(b"\x1b[>5u")
+    s.feed(b"X")
+    assert s.render_screen()[0] == "X"
+
+
+def test_the_filter_leaves_ordinary_sequences_alone():
+    """Guard against over-filtering: only ``<``, ``=`` and ``>`` go."""
+    s = ScreenState(20, 3)
+    s.feed(b"\x1b[1;4munder\x1b[0m plain")
+    assert s.render_screen()[0] == "under plain"
+    assert s._screen.buffer[0][0].underscore
+    assert not s._screen.buffer[0][6].underscore
+
+    s = ScreenState(20, 3)
+    s.feed(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?1h")
+    assert s.alt_screen and s.mouse_tracking
+    assert s.mouse_encoding == "sgr"
+    assert s.app_cursor_keys
+
+    s = ScreenState(20, 3)
+    s.feed(b"\x1b]8;id=1;file:///tmp/x\x07link\x1b]8;;\x07 after")
+    assert s.render_screen()[0] == "link after"
