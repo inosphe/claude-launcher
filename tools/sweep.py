@@ -240,7 +240,9 @@ _COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|skipped|error|errors|xfailed|xpa
 #: rather than observed once, so they move as master grows -- and they
 #: already differ off master: one live branch, four commits behind, read 20
 #: for the second -- which four commits is what decides that, so treat this
-#: as an instance and not a rule. Recount at your own revision. Those 15 are the price of the paragraph above, paid on
+#: as an instance and not a rule. Recount at your own revision.
+#:
+#: Those 15 are the price of the paragraph above, paid on
 #: purpose, and the number is here so that whoever weighs an extension
 #: starts from it instead of from an impression. What argues against
 #: extending is not the size of that bill but the paragraph below: each
