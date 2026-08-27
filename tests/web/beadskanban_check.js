@@ -51,9 +51,9 @@ function slice(name) {
 /* ---- stub DOM ---------------------------------------------------------- */
 function node(tag) {
   const n = {
-    tag, kids: [], text: "", classes: new Set(), handlers: {},
+    tag, children: [], text: "", classes: new Set(), handlers: {},
     title: "", href: "", type: "",
-    appendChild(c) { this.kids.push(c); return c; },
+    appendChild(c) { this.children.push(c); return c; },
     addEventListener(k, fn) { (this.handlers[k] ||= []).push(fn); },
     get textContent() { return this.text; },
     set textContent(v) { this.text = String(v); },
@@ -69,7 +69,7 @@ function node(tag) {
     },
     all() {
       const out = [this];
-      for (const k of this.kids) out.push(...k.all());
+      for (const k of this.children) out.push(...k.all());
       return out;
     },
     find(cls) { return this.all().filter((n) => n.classes.has(cls)); },
@@ -227,7 +227,7 @@ check("a parent in another lane is named and links up",
 check("and children are counted, since they may be in any lane",
       card.find("beads-rel-kids")[0].text, "3 children");
 check("the badge row carries type, labels and assignee",
-      card.find("beads-card-badges")[0].kids.map((b) => b.text),
+      card.find("beads-card-badges")[0].children.map((b) => b.text),
       ["bug", "#found", "→ s9"]);
 const tag = card.find("beads-sess")[0];
 check("the session tag still links to the terminal, with why it matched",
@@ -246,6 +246,22 @@ check("a card whose parent is right above it spends no row saying so",
       card.find("beads-card-rel").length, 0);
 check("and an issue with no type, labels or assignee grows no empty badge row",
       card.find("beads-card-badges").length, 0);
+
+/* The board once drew nothing at all, and this is the check that would have
+   caught it. `beadsCard` decided whether an optional row had anything in it
+   by reading `.kids.length` off a node `el()` had just made -- a name this
+   stub happened to use for its child array, and one the DOM does not have.
+   In a browser `rel.kids` is `undefined`, the read threw on the first card,
+   and every board rendered empty. The stub was the only reader that made it
+   work, so 63 green checks said nothing about the page.
+
+   The stub now calls that array by its DOM name, which is what actually
+   holds the line: any reintroduction of a stub-only property throws right
+   here. This check states the rule so the next reader knows why. */
+for (const name of ["beadsCard", "beadsLane", "beadsBoardSection"]) {
+  check(`${name} reads no property the DOM does not have`,
+        (slice(name).match(/\.(kids|classes|handlers)/g) || []), []);
+}
 
 /* The indent is capped: a chain deeper than four would walk a card off the
    right edge of a 210px lane. */
