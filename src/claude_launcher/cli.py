@@ -20,6 +20,7 @@ from . import (
     bootstrap,
     borrowing,
     cli_beads,
+    cli_commits,
     cli_cflow,
     cli_mesh,
     cli_report,
@@ -1290,6 +1291,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_workspace.register(sub)
     cli_beads.register(sub)
     cli_report.register(sub)
+    cli_commits.register(sub)
 
     return parser
 

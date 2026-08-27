@@ -7566,6 +7566,46 @@ function sessBeadsCreate(name) {
   return form;
 }
 
+/* ---- the rail's block: what this session committed ---- */
+/* The commits carrying this session's `Claunch-Session` trailer, newest
+   first, read straight out of the repository under the session's directory
+   (see session_commits.py). Nothing is recorded for this block to read, so
+   there is no state to go stale: a session killed mid-round still shows every
+   commit it managed to make, and a commit someone rewrites away stops being
+   listed the moment it stops existing.
+
+   Empty is a real answer and is drawn, not hidden — "this session has
+   committed nothing yet" is exactly what a reader watching a round wants to
+   know, and a block that appears only on success reads as one that failed to
+   load the rest of the time. The one case that is not drawn is a session with
+   no directory to read, which the daemon reports as a null block. */
+function sessCommits(data) {
+  const c = data.commits;
+  const box = el("div", "sess-commits");
+  if (!c) return box;   // an old daemon: say nothing rather than say "none"
+  const rows = c.commits || [];
+  box.appendChild(el("h3", null, `Commits (${c.count || rows.length || 0})`));
+  box.appendChild(el("p", "wf-note",
+    "what this session committed in its directory, read from the " +
+    "Claunch-Session trailer on each commit — `claunch commits` prints the " +
+    "same list."));
+  if (!rows.length) {
+    box.appendChild(el("p", "wf-note", "no stamped commit from this session yet"));
+    return box;
+  }
+  for (const r of rows) {
+    const row = el("div", "sess-commit");
+    row.appendChild(el("span", "sess-commit-sha", r.short || ""));
+    row.appendChild(el("span", "sess-commit-subject", r.subject || ""));
+    const bits = [String(r.committed_at || "").replace("T", " ").slice(0, 19)];
+    if (r.worktree) bits.push(r.worktree);
+    row.appendChild(el("span", "sess-commit-bits", bits.join("  ·  ")));
+    row.title = r.sha || "";
+    box.appendChild(row);
+  }
+  return box;
+}
+
 /* ------------------------------------------------------------------ */
 /* the Reports page: every round report on this machine               */
 /* ------------------------------------------------------------------ */
@@ -10162,6 +10202,10 @@ function renderSession(data) {
   // answer the same question from two registries — where it belongs, and
   // what it is on.
   view.appendChild(sessBeads(data));
+  // And what it actually left in the repository. Beside the board and the
+  // round reports because the three are one answer read from three places:
+  // what it was asked to do, what it wrote up, what it committed.
+  view.appendChild(sessCommits(data));
 
   // What this session is FOR, by role: a leader gets its dispatch and reaping
   // panels here, other roles whatever ROLE_PANELS declares for them. Between
