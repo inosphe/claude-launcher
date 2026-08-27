@@ -257,6 +257,14 @@ def test_the_block_sends_the_record_to_the_board_and_keeps_the_message_a_nudge()
     assert "nudge" in flat
     # a shared convention is not a work item, but is still read back
     assert "--type doc" in flat
+    # ...and because it is read back, its current value is the body. Comments
+    # carry the history of how that ruling stood and was corrected. A doc
+    # whose conventions live only in comments goes stale in the body with no
+    # warning and no exit code (claunch-qj03), so pin both halves of the fork.
+    assert "규범 내용(규약·정의·판정식)은 본문에 두고, 고칠 때 본문을 고친다" in flat
+    assert "그 판정이 어떻게 서고 어떻게 정정됐는지의 이력을 쌓는다" in flat
+    # the clause that sent the rule itself into the comments is gone
+    assert "갱신은 그 코멘트로 쌓는다" not in flat
     # the one place the split does not stand up
     assert "다른 머신의 멤버는 이 저장소의 보드에 닿지 않는다" in flat
     # the clause that used to force the evidence into the message is gone
