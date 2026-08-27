@@ -202,8 +202,22 @@ class ReminderClock:
 
     *No progress* is the trigger, not the calendar: the position key
     (run, status, step, visit) resets the timer whenever it changes, so an
-    agent that is advancing hears nothing, and one that has stalled hears the
-    same instruction again every interval until it moves.
+    agent that is advancing hears nothing, and one that has stalled hears
+    from this clock every interval until it moves.
+
+    It does not hear the same thing every time. The FIRST reminder at a
+    position restates the step in full (:func:`reminder_block`), because an
+    agent that has genuinely lost the thread cannot act on a pointer. Every
+    repeat at that same position is the short form
+    (:func:`repeat_block`) — the position, how long it has not moved, the
+    completion test, and the two calls that fetch the long version on
+    demand: ``status`` for the step, ``rebrief`` for the whole session. The
+    split is measured, not aesthetic: across this machine's history 68% of
+    reminders delivered were repeats at an already-reminded position (one
+    stretch ran to 26), and a restatement that failed to move the run does
+    not move it by being pasted again. What it does do is cost the agent the
+    context the step is competing for. The full block is worth its size
+    once; after that the agent is told where to pull it from instead.
 
     And *only while the agent is working*: the drift this clock corrects is
     an agent mid-turn, burying the step instructions under everything else
@@ -309,6 +323,17 @@ class ReminderClock:
                 # step arrives in is not news about it.
                 entry = {
                     "pos": pos, "at": now, "probed_at": None, "probe": None,
+                    # When this position was reached, as opposed to when the
+                    # clock was last armed on it. ``at`` is re-armed by every
+                    # delivery, so it answers "how long since I last spoke";
+                    # only this answers "how long has the run been here",
+                    # which is the number a repeat has to state.
+                    "arrived_at": now,
+                    # Dropped by the arming, unlike the three below: whether
+                    # the step has been restated is a fact about THIS
+                    # position, and carrying it forward would hand a fresh
+                    # step the short form on its very first reminder.
+                    "restated": False,
                     # Kept across the arming: "when did this run last hear
                     # from me" is a fact about the run, not about this
                     # stretch of it, and it is the one thing a reader has to
@@ -343,7 +368,43 @@ class ReminderClock:
             if arrived:
                 continue
             if interval > 0 and now - entry["at"] >= interval:
-                due.append((cwd, scope, reminder_block(payload, interval), "reminder"))
+                # First time at this position, the step is restated in full;
+                # after that it is not. The full block is what an agent that
+                # has genuinely lost the step needs, and it is worth its size
+                # exactly once — a restatement that did not move the run does
+                # not move it by arriving again, and the fleet log says so:
+                # 68% of all reminders ever delivered were a repeat at a
+                # position already reminded, with one stretch reaching 26.
+                # So the repeat says the short thing instead and hands the
+                # agent the two pulls that carry the long one, 'status' for
+                # the step and 'rebrief' for the session.
+                #
+                # One position is exempt, and it is the one whose block is
+                # not a restatement at all: a delegated decision that reached
+                # nobody. There the agent believes it is waiting on somebody
+                # else and the block's whole content is the news that nobody
+                # has it. That is not something the agent already has, so it
+                # is not something a pointer can replace — and at ~480
+                # characters it is already the short form.
+                short = entry.get("restated") and not _ask_reached_nobody(payload)
+                # ``or entry["at"]`` rather than a bare lookup: the arming is
+                # not the only writer of this table any more, and a staleness
+                # figure that falls back to the arming is off by at most one
+                # interval, where a KeyError here would silence the clock.
+                since = now - (entry.get("arrived_at") or entry["at"])
+                block = reminder_block(payload, interval)
+                if short:
+                    pointer = repeat_block(payload, interval, since)
+                    # Take the short form only when it IS shorter. Its own
+                    # protocol paragraph is a fixed cost, so against a step
+                    # whose instructions are a line long the "short" block is
+                    # the bigger one — and then the whole argument for it has
+                    # inverted: the agent would pay more to be told less.
+                    # Comparing is cheaper than a threshold nobody maintains,
+                    # and it cannot drift away from the reason for the rule.
+                    if len(pointer) < len(block):
+                        block = pointer
+                due.append((cwd, scope, block, "reminder"))
         for key in list(self._seen):
             if key not in live:
                 del self._seen[key]
@@ -423,6 +484,14 @@ class ReminderClock:
                 entry["fired_at"] = entry["at"]
                 entry["fired_kind"] = kind
                 entry["held_at"] = None
+                if kind == "reminder":
+                    # Stamped on DELIVERY, never on composition. A block held
+                    # for a session that stopped is composed again next poll,
+                    # and flipping this in `scan` would let the full
+                    # restatement be replaced by the short form having never
+                    # actually landed. A signal is not a restatement and
+                    # leaves this alone.
+                    entry["restated"] = True
             log.info("cflow %s delivered to %r (%s)", kind, scope, cwd)
 
     def skip(self, cwd: str, scope: str) -> bool:
@@ -507,6 +576,12 @@ class ReminderClock:
                 "held_ago": ago(entry.get("held_at")),
                 "probed_ago": ago(entry.get("probed_at")),
                 "probe_code": probe.get("code"),
+                # Which block the NEXT reminder here will be. A countdown
+                # that cannot say this is only half an answer: the reader
+                # watching it is deciding whether to let the clock speak,
+                # and "in 40s" means a different thing at 1.5k characters
+                # than at 0.6k.
+                "restated": bool(entry.get("restated")),
             }
         return out
 
@@ -605,6 +680,67 @@ def reminder_block(payload: dict, interval: float) -> str:
             "'report' and advance with 'next'; if you have lost the thread, "
             "call 'status' first -- it is the current truth."
         )
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def repeat_block(payload: dict, interval: float, stalled_for: float) -> str:
+    """The text a run hears on every reminder after the first at a position.
+
+    :func:`reminder_block` has already said the step here, in full, and the
+    run did not move. Saying it again is the one thing this block refuses to
+    do — not to be terse, but because the repeat is where the push model runs
+    out: a paste that failed to reach the agent's attention does not reach it
+    by being longer the second time, and each retry is charged to the very
+    context the step is competing for.
+
+    So it says only what the first block could NOT have said — how long the
+    run has now been here — keeps the completion test, which is the one line
+    that tells a working agent whether it is nearly done, and converts the
+    rest into two pulls. ``status`` restates the step; ``rebrief`` restates
+    the session. That is the same content, moved from the daemon's push to
+    the agent's own call, and it is offered rather than demanded: an agent
+    that is mid-work and knows exactly where it is should spend the turn on
+    the work, not on re-reading what it already has.
+
+    The framing repeats :func:`reminder_block`'s promise for the same reason
+    — this is the same instruction, not a new one — and says which form it
+    is, so a shorter block never reads as a step that quietly shrank.
+    """
+    step = payload.get("step_id")
+    visit = payload.get("visit")
+    position = f"step '{step}'" + (f" (visit {visit})" if visit and visit > 1 else "")
+    chooser = payload.get("status") == "select"
+    if chooser:
+        position = f"branch choice at {position}"
+    minutes = max(1, int(stalled_for // 60))
+    lines = [
+        "---",
+        "# claunch cflow: reminder -- machine-generated; the step was already "
+        f"restated here once, so this is the short form (every {interval:.0f}s)",
+        f"workflow: {payload.get('workflow')}",
+        f"position: {position}, unmoved for ~{minutes} min",
+    ]
+    done_when = str(payload.get("done_when") or "").strip()
+    if done_when and not chooser:
+        lines.append(f"done when: {done_when}")
+    advance = (
+        "'select' is what moves it" if chooser
+        else "'report' then 'next' is what advances it"
+    )
+    restates = (
+        "restates this choice and its options in full" if chooser
+        else "restates this step in full"
+    )
+    lines.append(
+        "protocol: same position, still yours to move, and nothing here is "
+        "new. If you are mid-work, keep going -- do not spend the turn "
+        "re-reading. If you have lost the thread, pull it rather than wait to "
+        f"be handed it: the cflow 'status' tool {restates}, and the 'rebrief' "
+        "tool restates the whole session -- parent, mesh, replies you owe, "
+        "run, opening task -- which is what you want if your context was "
+        f"compacted or cleared. {advance}."
+    )
     lines.append("---")
     return "\n".join(lines)
 

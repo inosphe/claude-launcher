@@ -266,6 +266,13 @@ def test_the_readout_names_every_way_a_clock_can_be_quiet(proj):
     # exactly the stretch somebody looking at a held clock wants to see.
     assert read(manager=idle, snaps=snaps)["reminder"]["due_in"] == -300.0
 
+    # Which block that due fire will be. The reminder pastes the step once at
+    # a position and points at it after, so "due now" is two very different
+    # sizes and the readout has to say which one is coming.
+    assert read(snaps=snaps)["reminder"]["form"] == "full"
+    snaps["reminder"]["timers"][(cwd, "w1")]["restated"] = True
+    assert read(snaps=snaps)["reminder"]["form"] == "short"
+
     # Switched off is not the same as not running, and both are said plainly.
     off = read(config={"cflow_reminder": False, "cflow_reminder_interval": 600.0})
     assert (off["reminder"]["state"], off["reminder"]["running"]) == ("off", True)
@@ -385,6 +392,9 @@ def test_the_api_publishes_the_timers_on_both_cflow_doors(proj):
                 assert timers["reminder"] == {
                     "running": True, "enabled": True, "interval": 600.0,
                     "due_in": None, "fired_ago": None, "state": "arming",
+                    # nothing restated here yet, so the next fire is the
+                    # step in full — the size a reader has to know about
+                    "form": "full",
                 }
                 # The ping is running too and still says off — the two facts
                 # are independent, which is the distinction the strip draws.

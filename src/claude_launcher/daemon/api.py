@@ -997,6 +997,11 @@ def _cflow_timers(
         rem["state"] = "counting"
     else:
         rem["state"] = "held" if not busy else "due"
+    # Which block is coming, not just when. The reminder restates the step in
+    # full the first time it speaks at a position and says the short form
+    # after that (:class:`cflow_clock.ReminderClock`), and a countdown that
+    # cannot tell the two apart understates the next fire by more than half.
+    rem["form"] = "short" if (timer or {}).get("restated") else "full"
     if awaits.get("probe"):
         rem["awaits"] = awaits.get("describe") or awaits.get("probe")
         rem["probe_code"] = (timer or {}).get("probe_code")

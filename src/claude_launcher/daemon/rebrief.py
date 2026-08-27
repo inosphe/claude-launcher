@@ -56,6 +56,13 @@ BLOCK_LIMIT = 9500
 #: that cannot be looked up anywhere else.
 TASK_LIMIT = 2000
 
+#: A completion test is a sentence or two by design, so this cap is a guard
+#: against a workflow that wrote a page into ``done_when``, not a budget the
+#: ordinary case spends. Well under the reminder's own instructions cap
+#: (:data:`daemon.cflow_clock._INSTRUCTIONS_LIMIT`): this block carries the
+#: test, never the step body, and the difference should stay visible.
+DONE_WHEN_LIMIT = 400
+
 
 def compose(name: str, *, manager, mesh_mgr) -> str:
     """The whole re-briefing for one session, from current daemon state.
@@ -210,7 +217,7 @@ def _mesh_sections(name: str, mesh_mgr, *, inline_stance: bool = True) -> list:
 
 
 def _cflow_section(sdef) -> str:
-    """The run this session drives: its position, and the one rule for resuming.
+    """The run this session drives: its position, its test, and how to resume.
 
     Pointer style like the assignment block it echoes (:func:`onboard.arrange`):
     workflow, scope and position orient, and everything else is fetched by the
@@ -218,6 +225,15 @@ def _cflow_section(sdef) -> str:
     this cannot open a delegated ask as a side effect. An idle slot with no
     pending start says nothing at all: most sessions never drive a run, and a
     section that usually read "no run" would teach agents to skim.
+
+    ``done_when`` is the one line that does NOT stay behind the pointer, and
+    the asymmetry it fixes is worth naming. The step reminder
+    (:func:`daemon.cflow_clock.reminder_block`) carries it to an agent that
+    has merely drifted; this block goes to one whose context was just
+    compacted or cleared — which has provably lost more, and until now was
+    told less. A completion test is a few dozen characters and it is the one
+    thing that tells a resuming agent whether the step it is being handed
+    back is nearly done or barely begun.
     """
     if not sdef.cwd:
         return ""
@@ -241,6 +257,11 @@ def _cflow_section(sdef) -> str:
     ]
     if payload.get("pending_start"):
         lines.append("pending_start: a start request is filed for this slot")
+    done_when = str(payload.get("done_when") or "").strip()
+    if done_when:
+        if len(done_when) > DONE_WHEN_LIMIT:
+            done_when = done_when[:DONE_WHEN_LIMIT] + " [... 'status' has it whole]"
+        lines.append(f"done when: {done_when}")
     lines.extend(
         [
             "protocol: this run is yours to drive. Call the cflow 'status' "

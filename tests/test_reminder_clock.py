@@ -532,3 +532,185 @@ def test_the_skip_door_re_arms_the_clock_and_writes_nothing(proj):
             await client.close()
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# the two forms: full once, short after
+# --------------------------------------------------------------------------- #
+#: A step whose instructions are the length real workflows write — the case
+#: the short form exists for. The toy ``linear`` steps above are a line each,
+#: and against those the pointer is the bigger block (see the inversion test).
+WORDY = """
+name: wordy
+steps:
+  one:
+    instructions: >
+      {body}
+    done_when: the diff is committed
+    next: two
+  two:
+    instructions: do two
+""".format(body="implement the thing carefully and completely. " * 20)
+
+
+def test_the_step_is_restated_once_then_pointed_at(proj):
+    """The load-bearing half of the push/pull split.
+
+    The first reminder at a position pastes the step; every repeat there says
+    the short thing and names the two pulls instead. Progress puts the full
+    form back, because a new step has never been restated.
+    """
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "wordy.yaml").write_text(
+        WORDY, encoding="utf-8"
+    )
+    cflow_engine.start("wordy", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+
+    first = clock.scan(t + 601)[0][2]
+    assert "implement the thing carefully" in first   # the step itself
+    assert "rebrief" not in first
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+
+    second = clock.scan(time.monotonic() + 601)[0][2]
+    assert "implement the thing carefully" not in second   # not said twice
+    assert "short form" in second
+    assert "'rebrief' tool" in second                # the pull is offered here
+    assert "'status' tool" in second
+    assert "done when: the diff is committed" in second    # the test survives
+    assert len(second) < len(first)
+
+    # progress re-arms AND re-earns the full restatement
+    cflow_engine.report("did one", cwd=cwd, scope="w1")
+    cflow_engine.next_step(cwd=cwd, scope="w1")
+    t2 = time.monotonic()
+    clock.scan(t2)
+    assert "do two" in clock.scan(t2 + 601)[0][2]
+
+
+def test_a_step_too_small_to_shrink_keeps_its_restatement(proj):
+    """The short form is taken only when it is actually shorter.
+
+    Its protocol paragraph is a fixed cost, so against a one-line step the
+    pointer is the bigger block — and paying more to be told less is the
+    opposite of the point. The clock compares and keeps the full one.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")   # 'do one', one line
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    repeat = clock.scan(time.monotonic() + 601)[0][2]
+    assert "do one" in repeat                       # still the restatement
+    assert "short form" not in repeat
+
+
+def test_a_reminder_that_was_never_typed_does_not_spend_the_restatement(proj):
+    """The flag is stamped on delivery, not on composition.
+
+    A reminder held for a stopped session (:func:`ReminderClock._deliver`) is
+    one the agent never saw. Counting it would hand that agent the short form
+    first, pointing it at a restatement it was never given.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    sess.status_value = "idle"
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    assert sess.delivered == []                     # held, never typed
+
+    sess.status_value = "busy"
+    due = clock.scan(time.monotonic() + 700)
+    asyncio.run(clock._deliver(*due[0]))
+    assert "do one" in sess.delivered[0]            # still the full form
+
+
+#: An ask on a later step, so a run has somewhere to be forced FROM.
+ORPHAN = """
+name: orphan
+steps:
+  one:
+    instructions: do one
+    next: two
+  two:
+    instructions: do two
+    ask:
+      prompt: may it land?
+      from: [{role: leader}]
+"""
+
+
+def test_a_decision_that_reached_nobody_never_shrinks(proj):
+    """The one position whose block is news, not a restatement.
+
+    A run forced onto a delegated ask with ``goto`` reports waiting_answer
+    while nobody holds the question. The block's whole content is that fact —
+    nothing the agent already has, so nothing a pointer can stand in for.
+    """
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "orphan.yaml").write_text(
+        ORPHAN, encoding="utf-8"
+    )
+    cflow_engine.start("orphan", cwd=cwd, scope="w1")
+    cflow_engine.goto("two", cwd=cwd, scope="w1")
+    assert cflow_clock._ask_reached_nobody(
+        cflow_engine.status(cwd, scope="w1")
+    )
+
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    repeat = clock.scan(time.monotonic() + 601)[0][2]
+    assert "never actually put to anyone" in repeat  # the diagnosis, again
+    assert "short form" not in repeat
+
+
+def test_repeat_block_keeps_the_completion_test_and_offers_both_pulls():
+    payload = {
+        "status": "step", "workflow": "linear", "step_id": "impl", "visit": 2,
+        "instructions": "implement it", "done_when": "the diff is committed",
+    }
+    block = cflow_clock.repeat_block(payload, 300, 1500.0)
+    assert "implement it" not in block              # the point of the form
+    assert "done when: the diff is committed" in block
+    assert "step 'impl' (visit 2), unmoved for ~25 min" in block
+    assert "'status' tool restates this step in full" in block
+    assert "'rebrief' tool restates the whole session" in block
+    assert "'report' then 'next'" in block
+
+
+def test_repeat_block_for_a_branch_choice_points_at_select():
+    block = cflow_clock.repeat_block(
+        {
+            "status": "select", "workflow": "linear", "step_id": "triage",
+            "visit": 1, "prompt": "pick a path",
+            "options": [{"name": "a", "description": "path a"}],
+        },
+        300, 900.0,
+    )
+    assert "branch choice at step 'triage', unmoved for ~15 min" in block
+    assert "pick a path" not in block               # 'status' serves it
+    assert "restates this choice and its options" in block
+    assert "'select' is what moves it" in block
+
+
+def test_timers_report_which_form_comes_next(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+    assert clock.timers()[(cwd, "w1")]["restated"] is False
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    assert clock.timers()[(cwd, "w1")]["restated"] is True

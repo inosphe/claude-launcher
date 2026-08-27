@@ -38,6 +38,7 @@ name: linear
 steps:
   one:
     instructions: do one
+    done_when: the diff is committed
     next: two
   two:
     instructions: do two
@@ -151,6 +152,11 @@ def test_compose_names_the_run_this_session_drives(home, tmp_path, monkeypatch):
     assert "scope: w1" in block
     # the protocol pointer, not the state: status is fetched at read time
     assert "cflow 'status' tool" in block
+    # ...with one exception, and it is the line a resuming agent needs
+    # most: whether the step it is being handed back is nearly done.
+    # The step BODY still stays behind the pointer.
+    assert "done when: the diff is committed" in block
+    assert "do one" not in block
 
 
 def test_a_long_task_is_cut_not_dumped(home, tmp_path):
@@ -270,3 +276,27 @@ def test_the_unavailable_block_states_what_is_missing_without_guessing_it(home):
     for missing in ("mesh", "cflow run", "parent", "opening task"):
         assert missing in block
     assert block.startswith("---") and block.rstrip().endswith("---")
+
+
+def test_a_page_long_completion_test_is_capped(home, tmp_path, monkeypatch):
+    """``done_when`` is a sentence by design; the cap is for the one that
+    isn't, so a runaway workflow cannot crowd out the sections nothing else
+    can serve."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    proj = tmp_path / "proj"
+    (proj / ".claunch" / "workflows").mkdir(parents=True)
+    (proj / ".claunch" / "workflows" / "wordy.yaml").write_text(
+        "name: wordy\nsteps:\n  one:\n    instructions: do one\n"
+        "    done_when: >\n      " + ("every last box is ticked. " * 60) + "\n",
+        encoding="utf-8",
+    )
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+    cflow_engine.start("wordy", cwd=str(proj), scope="w1")
+    block = _staged_compose(
+        mgr, mm, SessionDef(name="w1", harness="py", cwd=str(proj))
+    )
+    assert "'status' has it whole" in block
+    line = [ln for ln in block.splitlines() if ln.startswith("done when: ")][0]
+    assert len(line) < rebrief.DONE_WHEN_LIMIT + 80

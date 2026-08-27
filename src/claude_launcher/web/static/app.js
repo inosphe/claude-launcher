@@ -963,6 +963,12 @@ function railTimerTitle(pick, state) {
     if (c.fired_ago !== null && c.fired_ago !== undefined) {
       bits.push(`last fired ${fmtCountdown(c.fired_ago)} ago`);
     }
+    /* The reminder pastes the whole step the first time it speaks at a
+       position and a short pointer after that, so "next fire" is two very
+       different sizes and the reader deciding whether to let it speak wants
+       to know which. The ping has one form and says nothing here. */
+    if (c.form === "short") bits.push("next: short form");
+    else if (c.form === "full") bits.push("next: full restatement");
     return bits.join(" · ");
   };
   const lines = [`${pick.workflow || "cflow"} · ${pick.scope || "default"}`];
