@@ -805,13 +805,15 @@ async function main() {
     "GET /api/roles": { doc: { roles: [{ name: "leader" }, { name: "worker" }] } },
     "GET /api/profiles": { doc: {
       profiles: ["codex", "p1", "p2"],
-      profile_selectors: ["codex", "p1", "p1:pi", "p2", "p2:pi"],
+      profile_selectors: [
+        "codex:codex", "p1:claude", "p1:pi", "p2:claude", "p2:pi",
+      ],
       profile_options: [
-        { value: "codex", label: "codex (default: codex)", harness: "codex" },
-        { value: "p1", label: "p1 (default: claude)", harness: "claude" },
-        { value: "p1:pi", label: "p1:pi", harness: "pi" },
-        { value: "p2", label: "p2 (default: claude)", harness: "claude" },
-        { value: "p2:pi", label: "p2:pi", harness: "pi" },
+        { value: "codex:codex", label: "codex/codex", harness: "codex" },
+        { value: "p1:claude", label: "p1/claude", harness: "claude" },
+        { value: "p1:pi", label: "p1/pi", harness: "pi" },
+        { value: "p2:claude", label: "p2/claude", harness: "claude" },
+        { value: "p2:pi", label: "p2/pi", harness: "pi" },
       ],
       profile_details: [
         { name: "codex", harness: "codex", harness_available: true,
@@ -886,8 +888,11 @@ async function main() {
       .some((o) => o.value === "blocked"));
   check("profile choices are qualified execution selectors",
     profileSel && (profileSel.options || []).some((o) => o.value === "p2:pi"));
+  check("profile choices display PROFILE/HARNESS without a duplicate suffix",
+    profileSel && (profileSel.options || []).some((o) =>
+      o.value === "p1:claude" && o.text === "p1/claude"));
   check("the child picker omits codex:claude",
-    profileSel && (profileSel.options || []).some((o) => o.value === "codex") &&
+    profileSel && (profileSel.options || []).some((o) => o.value === "codex:codex") &&
       !(profileSel.options || []).some((o) => o.value === "codex:claude"));
   check("borrow choices remain base profiles sharing the one token",
     borrowSel && (borrowSel.options || []).some((o) => o.value === "p2"));

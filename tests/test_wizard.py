@@ -200,26 +200,26 @@ def test_profile_picker_labels_the_default_and_omits_denied_selectors():
     class PolicySources(FakeSources):
         def profile_options(self):
             return [
-                {"value": "codex", "label": "codex (default: codex)",
+                {"value": "codex:codex", "label": "codex/codex",
                  "harness": "codex"},
-                {"value": "work", "label": "work (default: claude)",
+                {"value": "work:claude", "label": "work/claude",
                  "harness": "claude"},
             ]
 
         def profile_details(self):
             return [
-                {"name": "codex", "harness": "codex",
+                {"name": "codex:codex", "harness": "codex",
                  "harness_available": True, "borrow_allowed": False},
                 {"name": "codex:claude", "harness": "claude",
                  "harness_available": True, "harness_allowed": False},
-                {"name": "work", "harness": "claude",
+                {"name": "work:claude", "harness": "claude",
                  "harness_available": True, "borrow_allowed": True},
             ]
 
     wiz = form(sources=PolicySources())
     options = wiz.field("profile").options
     assert any(
-        option.value == "codex" and option.label == "codex (default: codex)"
+        option.value == "codex:codex" and option.label == "codex/codex"
         for option in options
     )
     assert "codex:claude" not in [option.value for option in options]
@@ -1205,15 +1205,15 @@ def test_the_policy_decides_which_rows_are_open():
 
 def test_spawn_profile_picker_uses_policy_filtered_labelled_options():
     report = _open_report(profile_options=[
-        {"value": "codex", "label": "codex (default: codex)",
+        {"value": "codex:codex", "label": "codex/codex",
          "harness": "codex"},
-        {"value": "work", "label": "work (default: claude)",
+        {"value": "work:claude", "label": "work/claude",
          "harness": "claude"},
     ])
     wiz = spawn_form(report=report)
     options = wiz.field("profile").options
     assert any(
-        option.value == "codex" and option.label == "codex (default: codex)"
+        option.value == "codex:codex" and option.label == "codex/codex"
         for option in options
     )
     assert "codex:claude" not in [option.value for option in options]

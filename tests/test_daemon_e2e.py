@@ -1681,20 +1681,19 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             assert profile_doc["profiles"] == [
                 "codex-only", "pi-profile", "restricted"
             ]
-            assert "codex-only" in profile_doc["profile_selectors"]
+            assert "codex-only:codex" in profile_doc["profile_selectors"]
             assert "codex-only:claude" not in profile_doc["profile_selectors"]
             assert "pi-profile:claude" in profile_doc["profile_selectors"]
-            assert "pi-profile" in profile_doc["profile_selectors"]
-            assert "pi-profile:pi" not in profile_doc["profile_selectors"]
-            assert "restricted" in profile_doc["profile_selectors"]
-            assert "restricted:claude" not in profile_doc["profile_selectors"]
+            assert "pi-profile:pi" in profile_doc["profile_selectors"]
+            assert "restricted:claude" in profile_doc["profile_selectors"]
             assert "restricted:pi" not in profile_doc["profile_selectors"]
             options = {
                 item["value"]: item for item in profile_doc["profile_options"]
             }
-            assert options["pi-profile"]["label"] == "pi-profile (default: pi)"
-            assert options["restricted"]["label"] == "restricted (default: claude)"
-            assert options["codex-only"]["label"] == "codex-only (default: codex)"
+            assert options["pi-profile:pi"]["label"] == "pi-profile/pi"
+            assert options["restricted:claude"]["label"] == "restricted/claude"
+            assert options["codex-only:codex"]["label"] == "codex-only/codex"
+            assert options["pi-profile:pi"]["default"] is True
 
             resp = await client.get(
                 "/api/borrow-options?profile=pi-profile", headers=bearer

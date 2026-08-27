@@ -150,7 +150,8 @@ new Function(
   + coldLine[0] + "\n" + staleLine[0] + "\n"
   + slice("seenAgo") + slice("seenPair")
   + slice("railSeenLine")
-  + slice("ctxRailLine") + slice("refreshSessions")
+  + slice("ctxRailLine") + slice("profileHarnessLabel")
+  + slice("refreshSessions")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,

@@ -39,9 +39,11 @@ function renderRoleStance() {}
 function syncSpawnMode() {}
 function renderRuntimeSummary() {}
 function renderProfileHint() {}
-` + slice("profileBorrowCapability") + slice("profileHarnessName") +
+` + slice("profileHarnessLabel") + slice("profileBorrowCapability") +
+slice("profileHarnessName") +
 slice("syncForkAvailability") + `
-exports.sync = syncForkAvailability;`
+exports.sync = syncForkAvailability;
+exports.label = profileHarnessLabel;`
 )(ctx, (id) => id === "new-session" ? form : null, details);
 
 let failures = 0;
@@ -70,6 +72,12 @@ form.null_token.checked = true;
 ctx.sync();
 check("Claude --null locks Borrow", form.borrow.disabled === true);
 check("and clears the contradictory lender", form.borrow.value === "");
+check("a canonical selector is displayed once",
+  ctx.label("ds4:claude", "claude") === "ds4/claude");
+check("a bare legacy selector gets the same display",
+  ctx.label("ds4", "claude") === "ds4/claude");
+check("a mismatched stored pair remains visible",
+  ctx.label("ds4:pi", "claude") === "ds4:pi/claude");
 
 /* The main Web create form consumes the labelled, policy-filtered option
    objects. Keep a denied compatibility selector in profile_selectors to
@@ -89,10 +97,10 @@ async function checkProfilePicker() {
   const pickerApi = async () => ({
     ok: true, status: 200,
     json: async () => ({
-      profile_selectors: ["codex", "codex:claude", "work"],
+      profile_selectors: ["codex:codex", "codex:claude", "work:claude"],
       profile_options: [
-        { value: "codex", label: "codex (default: codex)", harness: "codex" },
-        { value: "work", label: "work (default: claude)", harness: "claude" },
+        { value: "codex:codex", label: "codex/codex", harness: "codex" },
+        { value: "work:claude", label: "work/claude", harness: "claude" },
       ],
       profile_details: [
         { name: "codex", harness: "codex" },
@@ -110,9 +118,9 @@ exports.details = () => profileDetails;`
     picker, pickerApi, pickerDoc, async () => {}, () => {}
   );
   await picker.refresh();
-  check("the create picker labels the bare default",
+  check("the create picker displays the canonical default once",
     profileSelect.options.some((o) =>
-      o.value === "codex" && o.textContent === "codex (default: codex)"));
+      o.value === "codex:codex" && o.textContent === "codex/codex"));
   check("the create picker omits codex:claude",
     !profileSelect.options.some((o) => o.value === "codex:claude"),
     profileSelect.options.map((o) => o.value));

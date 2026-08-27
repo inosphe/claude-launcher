@@ -326,10 +326,11 @@ def test_capabilities_lists_the_profiles_only_when_the_field_is_unlocked():
     assert "profile" in report["may_choose"]
     assert "borrow" in report["may_choose"]  # the same unlock covers both
     assert report["profiles"] == ["other", "talk", "work"]
-    assert "other" in report["profile_selectors"]
-    assert "other:claude" not in report["profile_selectors"]
+    assert "other:claude" in report["profile_selectors"]
     assert "other:pi" in report["profile_selectors"]
-    assert report["profile_options"][0]["label"].endswith("(default: claude)")
+    assert report["profile_options"][0]["label"] == "other/claude"
+    assert report["profile_options"][0]["value"] == "other:claude"
+    assert report["profile_options"][0]["default"] is True
 
 
 def test_capabilities_only_lists_policy_allowed_profile_selectors():
@@ -348,8 +349,7 @@ def test_capabilities_only_lists_policy_allowed_profile_selectors():
 
     assert "other:pi" in report["profile_selectors"]
     assert "other:claude" not in report["profile_selectors"]
-    assert "talk" in report["profile_selectors"]
-    assert "talk:claude" not in report["profile_selectors"]
+    assert "talk:claude" in report["profile_selectors"]
     assert "talk:pi" not in report["profile_selectors"]
 
 

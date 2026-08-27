@@ -75,8 +75,8 @@ class SessionDef:
 
     name: str
     harness: str = CLAUDE_HARNESS
-    # Persist the selector, including an explicit ``:harness`` suffix.  This
-    # makes restores deterministic even if the profile's YAML default changes.
+    # Normalized definitions always persist an explicit ``:harness`` suffix.
+    # This makes restores deterministic even if the YAML default changes.
     profile: Optional[str] = None
     cwd: str = ""
     args: Tuple[str, ...] = ()
@@ -259,7 +259,14 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
             selected = lineage.effective_harness(prof)
         except lineage.LineageError as exc:
             raise HarnessError(str(exc)) from exc
-        sdef = replace(sdef, profile=prof.selector, harness=selected)
+        # Persist one canonical execution selector even when the caller used
+        # a bare profile. The default is resolved and policy-checked above;
+        # pinning that answer keeps restore deterministic if the profile's
+        # default harness changes later. The base profile still owns storage.
+        canonical_profile = f"{prof.name}:{selected}"
+        sdef = replace(
+            sdef, profile=canonical_profile, harness=selected
+        )
     entry = harness_registry.get(sdef.harness)
     if entry is None:
         known = ", ".join(harness_registry.names())

@@ -508,7 +508,7 @@ async function refreshSessions() {
     meta.textContent = s.status === "exited"
       ? `exit ${s.exit_code ?? "?"}`
       : s.winddown ? "winding down"
-      : (s.profile || s.harness);
+      : profileHarnessLabel(s.profile, s.harness);
     if (s.winddown) {
       li.title = [li.title, "being ended — settling its board issues first; " +
         "kill again to stop now"].filter(Boolean).join(" · ");
@@ -2462,6 +2462,24 @@ let profileDetails = {};
 let newBorrowFor = null;
 let newBorrowSeq = 0;
 
+/* A managed session stores PROFILE:HARNESS so restore does not reinterpret a
+   later default change. The UI presents the same pair once, as PROFILE/HARNESS.
+   A mismatch is kept visible instead of silently discarding either value. */
+function profileHarnessLabel(profile, harness) {
+  const selector = String(profile || "").trim();
+  const running = String(harness || "").trim();
+  if (!selector) return running;
+  const parts = selector.split(":");
+  if (parts.length === 2 && (!running || parts[1] === running)) {
+    return `${parts[0]}/${parts[1]}`;
+  }
+  return running ? `${selector}/${running}` : selector;
+}
+
+function baseProfileName(selector) {
+  return String(selector || "").split(":", 1)[0];
+}
+
 /* Borrow is a property of the selected harness's auth contract, not of its
    name. Old daemons did not publish borrow_allowed, so Claude remains the
    compatibility fallback while a new daemon also opens API-key harnesses. */
@@ -2877,7 +2895,10 @@ function renderProfileHint() {
   const picked = f.profile.value || "";
   const details = typeof profileDetails === "object" ? profileDetails : {};
   const detail = picked ? details[picked] : null;
-  const whose = picked || (parent ? `${parent.name}'s profile` : "this profile");
+  const shown = detail && !detail.error
+    ? profileHarnessLabel(detail.profile || picked, detail.harness)
+    : profileHarnessLabel(picked, "");
+  const whose = shown || (parent ? `${parent.name}'s profile` : "this profile");
   let text = "";
   if (speaks("null_token") && f.null_token && f.null_token.checked) {
     text = `--null: it boots with no token at all — ${whose}'s config and ` +
@@ -2887,10 +2908,10 @@ function renderProfileHint() {
            `and provider — only the credential is theirs, the config and ` +
            `skills stay ${whose}'s.`;
   } else if (detail && detail.error) {
-    text = `${picked}: ${detail.error}`;
+    text = `${shown}: ${detail.error}`;
   } else if (detail && detail.harness_available === false) {
     text = `${detail.harness || "its harness"} is not installed on this ` +
-           `machine — a session on ${picked} will not start until it is.`;
+           `machine — a session on ${shown} will not start until it is.`;
   }
   box.textContent = text;
   box.classList.toggle("hidden", !text);
@@ -5998,7 +6019,8 @@ function syncMobileBars() {
   bDot.classList.toggle("hidden", !has);
   $("mb-name").textContent = has ? currentName : "no session open";
   $("mb-meta").textContent = has
-    ? [status, sess && (sess.profile || sess.harness)].filter(Boolean).join(" · ")
+    ? [status, sess && profileHarnessLabel(sess.profile, sess.harness)]
+        .filter(Boolean).join(" · ")
     : "pick one from the list";
   $("mobile-bottom").classList.toggle("empty", !has);
 }
@@ -7123,7 +7145,9 @@ function renderHome() {
     row.href = "#/s/" + encodeURIComponent(s.name);
     row.appendChild(el("span", `dot ${s.status}`));
     row.appendChild(el("span", "home-row-name", s.name));
-    row.appendChild(el("span", "meta", s.profile || s.harness || ""));
+    row.appendChild(el(
+      "span", "meta", profileHarnessLabel(s.profile, s.harness)
+    ));
     rows.appendChild(row);
   }
   if (live.length > 6) {
@@ -10635,8 +10659,10 @@ function renderSession(data) {
   sessRunFold = null;
 
   const dl = el("dl", "sess-meta");
-  metaRow(dl, "harness", s.harness, (data.harness || {}).description);
-  metaRow(dl, "profile", s.profile);
+  metaRow(
+    dl, "profile / harness", profileHarnessLabel(s.profile, s.harness),
+    (data.harness || {}).description
+  );
   // Whose token it actually runs on, when that is not the profile's own —
   // invisible from the terminal, and reapplied on every restore.
   metaRow(dl, "borrow", s.borrow, "another profile's token; the config stays this profile's");
@@ -10833,12 +10859,13 @@ function sessReborrow(data) {
   // Whose token it runs on now — one accurate sentence for each of the
   // three modes — plus the warning that changing it costs a restart.
   const providerBorrow = (harness.borrow_mode || "provider-token") === "provider-token";
+  const baseProfile = baseProfileName(s.profile);
   const current = s.borrow
     ? `borrowing ${s.borrow}'s token${providerBorrow ? " and provider/backend" : ""}` +
-      ` — the config and skills stay ${s.profile}'s`
+      ` — the config and skills stay ${baseProfile}'s`
     : s.null_token
       ? "started --null — no token is injected at all"
-      : `running on ${s.profile}'s own token`;
+      : `running on ${baseProfile}'s own token`;
   form.appendChild(el(
     "p", "wf-note",
     `${current}. Changing it stops the session and relaunches it — same name, same conversation`
@@ -10892,7 +10919,7 @@ function sessReborrow(data) {
     if (sessReborrowBox !== form) return; // the panel moved on mid-flight
     dest.innerHTML = "";
     const choices = [
-      { value: "own", label: `its own token (${s.profile})`, selectable: true },
+      { value: "own", label: `its own token (${baseProfile})`, selectable: true },
       ...(s.harness === "claude"
         ? [{ value: "null", label: "no token (--null)", selectable: true }]
         : []),
@@ -10963,7 +10990,7 @@ function sessReborrow(data) {
         ? `restarted — now borrowing ${doc.borrow}`
         : doc.null_token
           ? "restarted — now running with no token (--null)"
-          : `restarted — back on ${doc.profile}'s own token`
+          : `restarted — back on ${baseProfileName(doc.profile)}'s own token`
     );
     // The restart relaunched a fresh PTY under the same name; a terminal
     // attached to the old one is watching a socket that just died.
