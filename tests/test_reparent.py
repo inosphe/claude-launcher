@@ -55,6 +55,12 @@ class _Fake:
         # restart interrupted a turn here (see daemon/resume.py).
         return "exited" if self.exited else "idle"
 
+    def delivery_held(self) -> bool:
+        # ...and whether a person had pinned it shut, which persist() records
+        # for the same reason: the setting is theirs, and a restart is not a
+        # decision to undo it.
+        return False
+
 
 def _tree() -> SessionManager:
     """lead -> (w1 -> w1a, w2), plus a root ``solo``."""

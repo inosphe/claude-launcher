@@ -3157,13 +3157,22 @@ async def h_session_hold(request: web.Request) -> web.Response:
     recipient's cursor where it was, and resuming types in the backlog that
     built up. Nothing is *promised* either — resume returns the session to
     the ordinary gate, so a message still waits out a running turn.
+
+    The new state is written to the session records here rather than left for
+    the next shutdown to save. A daemon that is killed, crashes, or is
+    restarted by an installer never reaches its orderly ``persist()``, and
+    those are exactly the restarts a person did not schedule — the ones after
+    which a silently released hold is discovered by a message landing in a
+    terminal that was supposed to be shut.
     """
+    manager: SessionManager = request.app["manager"]
     session = _session(request)
     body = await _json_body(request)
     want = body.get("hold")
     held = session.set_delivery_hold(
         not session.delivery_held() if want is None else bool(want)
     )
+    manager.persist()
     return web.json_response(
         {"hold": held, "queued": _session_queued(request, session)}
     )

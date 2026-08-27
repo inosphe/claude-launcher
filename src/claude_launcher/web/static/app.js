@@ -597,6 +597,7 @@ async function refreshSessions() {
   // The rows and the runs arrive on separate polls; whichever lands last
   // paints the cflow badges over the rows that exist now.
   applyCflowBadges();
+  applyRailQuiet();
   applyBriefingCards();
   // A rebuild throws away the class the goto press wrote onto its row; this
   // puts it back, so the mark outlives the poll that lands mid-scroll.
@@ -735,6 +736,90 @@ function applyCflowBadges() {
         (r.options ? ` — options: ${r.options.join(", ")}` : "")
       : (r.title || r.step_id || "");
     line.append(mark, txt);
+  }
+}
+
+/* The two settings that stop the daemon typing into a session, drawn on that
+   session's own row.
+
+   They are separate mechanisms — one is the mesh delivery gate
+   (Session.delivery_held), the other is the step reminder clock
+   (cflow_clock.ReminderClock) — and they are shown together because from the
+   rail they are one question: which of these terminals is the daemon not
+   going to speak into. Both are silences somebody chose, and a silence
+   nobody remembers choosing is indistinguishable from a broken daemon; that
+   is the whole reason these have a row at all rather than living only in the
+   pages that own them.
+
+   Only drawn when a flag is actually set. An "everything is normal" pill on
+   twenty rows is a row of noise, and the state worth finding is the odd one.
+
+   Two polls feed it — /api/sessions carries the hold, /api/cflow carries the
+   reminder — so it is repainted from both, idempotently, the same shape as
+   the cflow badge above. */
+function railQuietFlags(name) {
+  const out = [];
+  const s = (sessionsCache || []).find((x) => x.name === name);
+  // Exited rows are left out: a record with no terminal holds nothing back
+  // (DeadSession.delivery_held), so a pill there would name a hold that is
+  // not being applied.
+  if (s && s.delivery_hold && s.status !== "exited") {
+    out.push({
+      cls: "quiet-hold",
+      text: "held",
+      title:
+        "delivery held: somebody pinned this session shut, so no mesh " +
+        "message is typed in here until it is released.\n" +
+        "Nothing is dropped — the backlog goes in on release, or on " +
+        "'deliver now'.\n" +
+        "Release: `claunch delivery-hold " + name + " --off`, or the " +
+        "terminal header's own control.",
+    });
+  }
+  const r = sessCflowRun(name);
+  const rem = r && r.timers && r.timers.reminder;
+  if (rem && rem.enabled === false) {
+    // Whose decision it was. The run's own override and the machine default
+    // read identically on the row — the clock is silent either way — but
+    // they are undone in different places, so the tooltip has to separate
+    // them or it sends the reader to the wrong switch.
+    const own = r.reminder && r.reminder.enabled === false;
+    out.push({
+      cls: "quiet-remind",
+      text: "reminder off",
+      title:
+        "step reminder off: the daemon will not re-type this run's current " +
+        "step into this session, however long it sits.\n" +
+        (own
+          ? "Set for this run (its own override, kept in the run's state " +
+            "and so still off after a daemon restart). Turn it back on " +
+            "from the run page, or the terminal header's chip."
+          : "Not this run's doing — step reminders are off machine-wide " +
+            "(daemon config `cflow_reminder`). Every run reads this way " +
+            "until that is changed."),
+    });
+  }
+  return out;
+}
+
+function applyRailQuiet() {
+  const list = $("session-list");
+  if (!list) return;
+  for (const li of list.querySelectorAll("li[data-name]")) {
+    const old = li.querySelector(".rail-quiet");
+    const flags = railQuietFlags(li.dataset.name);
+    if (!flags.length) { if (old) old.remove(); continue; }
+    const line = old || el("span", "rail-quiet");
+    line.textContent = "";
+    for (const f of flags) {
+      const pill = el("span", `rail-quiet-pill ${f.cls}`);
+      // The glyph is the pause the header chip uses for the same fact, so
+      // "stopped on purpose" reads the same in both places.
+      pill.append(el("span", "quiet-glyph", "⏸"), el("span", null, f.text));
+      pill.title = f.title;
+      line.appendChild(pill);
+    }
+    if (!old) li.appendChild(line);
   }
 }
 
@@ -2171,6 +2256,7 @@ async function refreshCflow() {
   const runs = data.runs || [];
   cflowCache = runs;
   applyCflowBadges();  // the rail rows may have painted before this cache filled
+  applyRailQuiet();    // one of its two flags is read off this very cache
   renderTermTimer();   // the attached session's own header chip
   if (currentPage === "home") renderHome();
   // Everything above is what feeds the rail and the header: badges on rows,

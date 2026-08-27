@@ -106,6 +106,7 @@ function syncBulkActions() {}
 function syncMobileBars() {}
 function applyCflowBadges() {}
 function applyGotoFlash() {}
+function applyRailQuiet() {}
 function applyBriefingCards() {}
 function decorateBriefingRow(li, s) {}
 function terminalOnScreen() { return false; }

@@ -235,6 +235,7 @@ class Session:
         created_at: Optional[str] = None,
         last_visited_at: Optional[str] = None,
         last_input_at: Optional[str] = None,
+        delivery_hold: bool = False,
     ) -> None:
         self.sdef = sdef
         self.argv: List[str] = []
@@ -308,9 +309,18 @@ class Session:
         #: (:meth:`MeshManager._deliver_to`) and reported by the queued view;
         #: cleared by :meth:`set_delivery_hold` and by nothing else.
         #:
-        #: In memory only, and deliberately: it says "I am at this keyboard
-        #: right now", which a daemon restart has already ended.
-        self._delivery_hold = False
+        #: Persisted with the session record (:meth:`SessionManager.persist`)
+        #: and handed back in here on every relaunch that keeps the name — a
+        #: daemon restart's restore, a respawn, a redefine. It used to be kept
+        #: in memory on the reading that it means "I am at this keyboard right
+        #: now"; that reading is wrong for the case it is actually set in. A
+        #: person pins a session shut and walks away, the daemon restarts for
+        #: reasons that have nothing to do with them, and the session they had
+        #: shut is taking mail again with nothing on screen to say the setting
+        #: they made is gone. The automatic holds above still expire on their
+        #: own — a guess should lapse; this one is a decision, and a decision
+        #: that a restart silently reverses is the failure this fixes.
+        self._delivery_hold = bool(delivery_hold)
         #: Called once, with this session, when the child is gone for good —
         #: whatever ended it (see :meth:`_finish`). Set by the manager, which
         #: fans it out to whoever asked (the board sweep in
@@ -1183,6 +1193,12 @@ class Session:
             "last_activity_at": self.last_activity_at(),
             "viewers": self.viewers(),
             "exited_at": self.exited_at,
+            # A person's standing "type nothing in here" (:meth:`delivery_held`).
+            # On the list poll rather than only on the per-session queued
+            # endpoint, because the rail draws one row per session and the
+            # question it answers — which of these did I pin shut — is asked
+            # of the whole fleet at once.
+            "delivery_hold": self.delivery_held(),
         }
 
 
@@ -1372,4 +1388,5 @@ class DeadSession:
             "last_activity_at": self.last_activity_at(),
             "viewers": self.viewers(),
             "exited_at": self.exited_at,
+            "delivery_hold": self.delivery_held(),  # always False; see above
         }
