@@ -34,6 +34,7 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .. import atomic
 from . import paths
 from .briefing import locate_transcript
 
@@ -81,7 +82,7 @@ def _save_index(name: str, doc: Dict[str, Any]) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(".index.tmp")
         tmp.write_text(json.dumps(doc), encoding="utf-8")
-        tmp.replace(path)
+        atomic.replace(tmp, path)
     except OSError:  # an index we cannot persist is rebuilt next time, not fatal
         log.debug("could not write transcript index for %s", name, exc_info=True)
 

@@ -21,6 +21,7 @@ from typing import Dict, List, Optional
 
 import yaml
 
+from .. import atomic
 from .docs import SyncServerError, validate_namespace
 
 _NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -107,7 +108,7 @@ class UserStore:
         tmp = self.path.with_name(self.path.name + ".tmp")
         tmp.write_text(text, encoding="utf-8")
         _restrict(tmp)
-        os.replace(tmp, self.path)
+        atomic.replace(tmp, self.path)
 
     # ------------------------------------------------------------------ #
     # queries

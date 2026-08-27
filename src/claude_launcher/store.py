@@ -42,7 +42,7 @@ from typing import Callable, Dict, Optional
 
 import yaml
 
-from . import config
+from . import atomic, config
 
 VERSION = 1
 
@@ -110,7 +110,7 @@ def save(doc: dict) -> None:
     tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
     try:
         tmp.write_text(text, encoding="utf-8")
-        os.replace(tmp, p)
+        atomic.replace(tmp, p)
     except OSError:
         try:
             tmp.unlink()
