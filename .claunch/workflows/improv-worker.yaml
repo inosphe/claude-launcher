@@ -297,10 +297,39 @@ steps:
         앞에 얹을 뿐 메인 것을 걷어내지 않으므로, 워크트리 venv가 비어
         있으면 죽지 않고 조용히 메인 패키지로 돈다. 「내 소스를 남의
         패키지로」 검증한 상태가 아무 신호 없이 지나간다.
-      · 확인은 존재가 아니라 임포트로 한다 — `.venv`가 있다와 패키지가
-        있다는 다른 사실이다:
-        `uv run --no-sync python -c "import pytest, xdist; print(pytest.__file__, xdist.__version__)"`
-        경로가 자기 워크트리면 트리·환경 두 축이 한 번에 답해진다.
+      · 어느 트리를 쟀는가는 스위트 안에서 답한다 — 표적 선택에
+        `tests/test_tree_isolation.py`를 넣고, 그 모듈이 선택에 있었다는
+        것을 보고에 적는다. 그 모듈은 지금 돌고 있는 pytest가 임포트한
+        `claude_launcher.__file__`이 이 rootdir의 `src`인지 검사하고
+        (`test_the_suite_imports_the_tree_it_is_run_from`), 자식 프로세스에
+        같은 트리를 넘기는 PYTHONPATH 관용구도 검사한다
+        (`test_a_child_process_is_handed_the_tree_the_suite_is_reading`).
+        스위트 안에서 도는 검사라 스위트와 갈릴 수 없다는 것이 이 형태의
+        값이다. 표적 선택은 바뀐 파일에서 만들어지므로 이 모듈이 저절로
+        들어오지는 않는다 — 넣지 않으면 이 축은 안 잰 것이다.
+        **이 모듈이 답하는 것은 트리 축 하나다.** 패키지 축(인터프리터·
+        플러그인이 자기 워크트리 것인가)은 바로 앞 항목의
+        `uv sync --extra test` 1회가 답한다. 두 축은 따로 답해진다.
+      · 여기 있던 것은 맨 인터프리터를 띄워 `pytest.__file__`과
+        `xdist.__version__`을 찍던 프로브였고 철회됐다(claunch-v5yp).
+        명령을 여기 다시 적지 않는다 — 이 산문에 박혀 있었다는 것이
+        그것이 매 회차 재배포된 경로다. 틀린 자리가 셋이다:
+        1. venv의 editable 설치가 맨 인터프리터에 메인 체크아웃 src를
+           올리는데, pytest는 `pyproject.toml`의 `pythonpath=["src"]`를 ini
+           파일이 있는 디렉터리 기준으로 풀어 `sys.path` 맨 앞에 꽂는다
+           (`_pytest/config` `_decode_value`: `dp = self.inipath.parent` →
+           `_configure_python_path`: `sys.path.insert(0, ...)`). 앞쪽
+           삽입이라 pytest가 이긴다. 워크트리 `.venv`가 비어 있어도 스위트는
+           워크트리를 읽는데 프로브만 메인을 가리킨다 = 위양성이다.
+        2. `pytest.__file__`은 질문이 아니다. 질문은 어느 소스 트리를
+           쟀는가 하나이고, 메인 venv의 pytest가 워크트리 src를 재는 것은
+           정상이다.
+        3. `uv run --no-sync`로 부르므로 빈 `.venv`에서는 명령 자체가
+           ModuleNotFoundError로 죽는다 — 확인이 정작 필요한 상황에서
+           실행되지 않는다.
+        이 위양성은 실제로 두 세션에게 필요 없는 venv 재동기화를 시켰고
+        멀쩡한 초록 하나를 잠깐 무효화했다. 그 기록은
+        `tests/test_tree_isolation.py` 도크스트링에 있다.
       · 보고 규약은 순서가 있다. 뒤엣것은 앞엣것이 정해져야 뜻을 갖는다:
         1순위 **시작 시각과 소요 시간** — 구간이 정해진다. 잊었으면
               basetemp 디렉터리의 CreationTime이 시작 시각을 초 단위로
