@@ -705,6 +705,12 @@ def test_repeat_block_for_a_branch_choice_points_at_select():
 
 
 def test_timers_report_which_form_comes_next(proj):
+    """The readout says which block the next fire is, not only when.
+
+    A reader watching this countdown is deciding whether to let the clock
+    speak, and "due in 40s" means a different thing at 1.5k characters than
+    at 0.6k.
+    """
     cwd = str(proj)
     cflow_engine.start("linear", cwd=cwd, scope="w1")
     sess = _FakeSession("w1", cwd)
