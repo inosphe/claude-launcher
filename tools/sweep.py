@@ -194,10 +194,11 @@ _COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|skipped|error|errors|xfailed|xpa
 #:   the suite. The board is a record this workflow writes and reads back;
 #:   ``stubs/claunch.bat`` is a shim a user's PATH executes, which is why it
 #:   fails here *after passing both bullets above* -- nothing under
-#:   ``tests/``, ``src/`` or ``tools/`` references it except this sentence,
-#:   so the two tests that admitted ``.beads`` admit it too. (Grep and you
-#:   get one hit, this line. It said "zero" until the sentence became the
-#:   counterexample to itself.) This bullet is the one
+#:   ``tests/``, ``src/`` or ``tools/`` references it except the example two
+#:   lines above, which this bullet needed in order to be legible, so the two
+#:   tests that admitted ``.beads`` admit it too. (Grep and you get exactly
+#:   one hit -- that example, not this claim. It said "zero" until the
+#:   paragraph supplied its own counterexample.) This bullet is the one
 #:   doing that work, and it was argued in review before it was written
 #:   here, which is the same gap in miniature.
 #:
