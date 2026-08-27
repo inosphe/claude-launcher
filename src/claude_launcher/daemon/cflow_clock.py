@@ -54,6 +54,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
+from . import rebrief
 from .session import STATUS_BUSY, STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.cflow")
@@ -202,8 +203,22 @@ class ReminderClock:
 
     *No progress* is the trigger, not the calendar: the position key
     (run, status, step, visit) resets the timer whenever it changes, so an
-    agent that is advancing hears nothing, and one that has stalled hears the
-    same instruction again every interval until it moves.
+    agent that is advancing hears nothing, and one that has stalled hears
+    from this clock every interval until it moves.
+
+    It does not hear the same thing every time. The FIRST reminder at a
+    position restates the step in full (:func:`reminder_block`), because an
+    agent that has genuinely lost the thread cannot act on a pointer. Every
+    repeat at that same position is the short form
+    (:func:`repeat_block`) — the position, how long it has not moved, the
+    completion test, and the two calls that fetch the long version on
+    demand: ``status`` for the step, ``rebrief`` for the whole session. The
+    split is measured, not aesthetic: across this machine's history 68% of
+    reminders delivered were repeats at an already-reminded position (one
+    stretch ran to 26), and a restatement that failed to move the run does
+    not move it by being pasted again. What it does do is cost the agent the
+    context the step is competing for. The full block is worth its size
+    once; after that the agent is told where to pull it from instead.
 
     And *only while the agent is working*: the drift this clock corrects is
     an agent mid-turn, burying the step instructions under everything else
@@ -221,8 +236,12 @@ class ReminderClock:
     both in its own state (:func:`cflow.engine.set_reminder`).
     """
 
-    def __init__(self, manager, *, poll: float = REMINDER_POLL) -> None:
+    def __init__(self, manager, mesh=None, *, poll: float = REMINDER_POLL) -> None:
         self.manager = manager
+        #: The mesh registry, for the situation lines (:func:`situation_lines`).
+        #: Optional the way :class:`RunEventClock` takes it: a daemon without
+        #: meshes still reminds, it just has one fewer thing to say.
+        self.mesh = mesh
         self.poll = poll
         self._task: Optional[asyncio.Task] = None
         #: (cwd, scope) -> {"pos": position key, "at": monotonic seconds} —
@@ -309,6 +328,17 @@ class ReminderClock:
                 # step arrives in is not news about it.
                 entry = {
                     "pos": pos, "at": now, "probed_at": None, "probe": None,
+                    # When this position was reached, as opposed to when the
+                    # clock was last armed on it. ``at`` is re-armed by every
+                    # delivery, so it answers "how long since I last spoke";
+                    # only this answers "how long has the run been here",
+                    # which is the number a repeat has to state.
+                    "arrived_at": now,
+                    # Dropped by the arming, unlike the three below: whether
+                    # the step has been restated is a fact about THIS
+                    # position, and carrying it forward would hand a fresh
+                    # step the short form on its very first reminder.
+                    "restated": False,
                     # Kept across the arming: "when did this run last hear
                     # from me" is a fact about the run, not about this
                     # stretch of it, and it is the one thing a reader has to
@@ -343,7 +373,43 @@ class ReminderClock:
             if arrived:
                 continue
             if interval > 0 and now - entry["at"] >= interval:
-                due.append((cwd, scope, reminder_block(payload, interval), "reminder"))
+                # First time at this position, the step is restated in full;
+                # after that it is not. The full block is what an agent that
+                # has genuinely lost the step needs, and it is worth its size
+                # exactly once — a restatement that did not move the run does
+                # not move it by arriving again, and the fleet log says so:
+                # 68% of all reminders ever delivered were a repeat at a
+                # position already reminded, with one stretch reaching 26.
+                # So the repeat says the short thing instead and hands the
+                # agent the two pulls that carry the long one, 'status' for
+                # the step and 'rebrief' for the session.
+                #
+                # One position is exempt, and it is the one whose block is
+                # not a restatement at all: a delegated decision that reached
+                # nobody. There the agent believes it is waiting on somebody
+                # else and the block's whole content is the news that nobody
+                # has it. That is not something the agent already has, so it
+                # is not something a pointer can replace — and at ~480
+                # characters it is already the short form.
+                short = entry.get("restated") and not _ask_reached_nobody(payload)
+                # ``or entry["at"]`` rather than a bare lookup: the arming is
+                # not the only writer of this table any more, and a staleness
+                # figure that falls back to the arming is off by at most one
+                # interval, where a KeyError here would silence the clock.
+                since = now - (entry.get("arrived_at") or entry["at"])
+                block = reminder_block(payload, interval)
+                if short:
+                    pointer = repeat_block(payload, interval, since)
+                    # Take the short form only when it IS shorter. Its own
+                    # protocol paragraph is a fixed cost, so against a step
+                    # whose instructions are a line long the "short" block is
+                    # the bigger one — and then the whole argument for it has
+                    # inverted: the agent would pay more to be told less.
+                    # Comparing is cheaper than a threshold nobody maintains,
+                    # and it cannot drift away from the reason for the rule.
+                    if len(pointer) < len(block):
+                        block = pointer
+                due.append((cwd, scope, block, "reminder"))
         for key in list(self._seen):
             if key not in live:
                 del self._seen[key]
@@ -409,6 +475,29 @@ class ReminderClock:
                 # reading a countdown, unless the hold itself is reported.
                 entry["held_at"] = time.monotonic()
             return
+        if kind == "reminder":
+            # Composed HERE and not in `scan`, and the reason is threading,
+            # not taste: `scan` runs in a worker thread (see this module's
+            # docstring) and ``MeshManager`` is event-loop only. The one
+            # source that is neither — the open-ask scan — is a filesystem
+            # walk, so it goes back to a thread rather than blocking the loop
+            # this method runs on. Deliveries are rare enough (four figures
+            # across this machine's entire history) that the hop costs nothing.
+            try:
+                open_asks = len(
+                    await asyncio.to_thread(cflow_engine.open_asks, scope)
+                )
+            except Exception:  # noqa: BLE001 — decoration must not sink a send
+                open_asks = 0
+            extra = situation_lines(scope, self.manager, self.mesh, open_asks)
+            # ``restated`` is written after a successful send, so it is still
+            # False here on the fire that carries the full restatement —
+            # which is the one fire the session-level ids ride on.
+            if not (self._seen.get((cwd, scope)) or {}).get("restated"):
+                extra = extra + carried_id_lines(
+                    scope, self.manager, self.mesh
+                )
+            block = splice(block, extra)
         try:
             delivered = await session.deliver(block)
         except Exception:
@@ -423,6 +512,14 @@ class ReminderClock:
                 entry["fired_at"] = entry["at"]
                 entry["fired_kind"] = kind
                 entry["held_at"] = None
+                if kind == "reminder":
+                    # Stamped on DELIVERY, never on composition. A block held
+                    # for a session that stopped is composed again next poll,
+                    # and flipping this in `scan` would let the full
+                    # restatement be replaced by the short form having never
+                    # actually landed. A signal is not a restatement and
+                    # leaves this alone.
+                    entry["restated"] = True
             log.info("cflow %s delivered to %r (%s)", kind, scope, cwd)
 
     def skip(self, cwd: str, scope: str) -> bool:
@@ -507,6 +604,12 @@ class ReminderClock:
                 "held_ago": ago(entry.get("held_at")),
                 "probed_ago": ago(entry.get("probed_at")),
                 "probe_code": probe.get("code"),
+                # Which block the NEXT reminder here will be. A countdown
+                # that cannot say this is only half an answer: the reader
+                # watching it is deciding whether to let the clock speak,
+                # and "in 40s" means a different thing at 1.5k characters
+                # than at 0.6k.
+                "restated": bool(entry.get("restated")),
             }
         return out
 
@@ -552,6 +655,12 @@ def reminder_block(payload: dict, interval: float) -> str:
         f"{interval:.0f}s while you keep working without this step moving",
         f"workflow: {payload.get('workflow')}",
     ]
+    if payload.get("digest"):
+        # The id of the text below, said WITH the text and not instead of it.
+        # This is the copy the agent keeps; every repeat quotes this id rather
+        # than pasting the body again, so the id has to arrive attached to
+        # what it names or there is nothing for the agent to match it to.
+        lines.append(f"step text id: {payload['digest']}")
     step = payload.get("step_id")
     visit = payload.get("visit")
     position = f"step '{step}'" + (f" (visit {visit})" if visit and visit > 1 else "")
@@ -607,6 +716,215 @@ def reminder_block(payload: dict, interval: float) -> str:
         )
     lines.append("---")
     return "\n".join(lines)
+
+
+def repeat_block(payload: dict, interval: float, stalled_for: float) -> str:
+    """The text a run hears on every reminder after the first at a position.
+
+    :func:`reminder_block` has already said the step here, in full, and the
+    run did not move. Saying it again is the one thing this block refuses to
+    do — not to be terse, but because the repeat is where the push model runs
+    out: a paste that failed to reach the agent's attention does not reach it
+    by being longer the second time, and each retry is charged to the very
+    context the step is competing for.
+
+    So it says only what the first block could NOT have said — how long the
+    run has now been here — keeps the completion test, which is the one line
+    that tells a working agent whether it is nearly done, and converts the
+    rest into two pulls. ``status`` restates the step; ``rebrief`` restates
+    the session. That is the same content, moved from the daemon's push to
+    the agent's own call, and it is offered rather than demanded: an agent
+    that is mid-work and knows exactly where it is should spend the turn on
+    the work, not on re-reading what it already has.
+
+    The framing repeats :func:`reminder_block`'s promise for the same reason
+    — this is the same instruction, not a new one — and says which form it
+    is, so a shorter block never reads as a step that quietly shrank.
+    """
+    step = payload.get("step_id")
+    visit = payload.get("visit")
+    position = f"step '{step}'" + (f" (visit {visit})" if visit and visit > 1 else "")
+    chooser = payload.get("status") == "select"
+    if chooser:
+        position = f"branch choice at {position}"
+    minutes = max(1, int(stalled_for // 60))
+    lines = [
+        "---",
+        "# claunch cflow: reminder -- machine-generated; the step was already "
+        f"restated here once, so this is the short form (every {interval:.0f}s)",
+        f"workflow: {payload.get('workflow')}",
+        f"position: {position}, unmoved for ~{minutes} min",
+    ]
+    digest = payload.get("digest") or ""
+    if digest:
+        lines.append(f"step text id: {digest}")
+    done_when = str(payload.get("done_when") or "").strip()
+    if done_when and not chooser:
+        lines.append(f"done when: {done_when}")
+    advance = (
+        "'select' is what moves it" if chooser
+        else "'report' then 'next' is what advances it"
+    )
+    what = "this choice and its options" if chooser else "this step"
+    if digest:
+        # The predicate is the whole design. "Do you remember the step" is
+        # not a question an agent can answer, so it guesses, and a guess
+        # resolves to "keep going" every time. "Is this id above you in this
+        # conversation" is a question it CAN answer by looking, and the two
+        # answers lead to different actions. So the block asks that one.
+        lines.append(
+            f"protocol: same position, still yours to move, and nothing here "
+            "is new. You were given this position's text in full, once, under "
+            f"the id above. Look for {digest} in this conversation: if it is "
+            f"there, you still have {what} -- keep working and do not spend "
+            "the turn re-reading. If it is NOT there, your context no longer "
+            f"holds it: call the cflow 'recall' tool with id {digest} and it "
+            "will hand the text back. Do not reconstruct it from memory, and "
+            f"do not treat this line as the text. {advance}."
+        )
+    else:
+        lines.append(
+            f"protocol: same position, still yours to move, and nothing here "
+            "is new. If you are mid-work, keep going -- do not spend the turn "
+            "re-reading. If you have lost the thread, the cflow 'status' tool "
+            f"restates {what} in full. {advance}."
+        )
+    lines.append("---")
+    return "\n".join(lines)
+
+
+def splice(block: str, lines: List[str]) -> str:
+    """Put ``lines`` inside a block's fence, just before it closes.
+
+    The blocks here are fenced so an agent can tell where machine-generated
+    text starts and stops; anything appended after the closing ``---`` reads
+    as a separate paste, and anything that replaces the fence stops reading
+    as machine-generated at all. So additions go inside, at the end, where a
+    reader has already taken in the position they belong to.
+    """
+    if not lines:
+        return block
+    rows = block.splitlines()
+    if rows and rows[-1] == "---":
+        return "\n".join(rows[:-1] + list(lines) + ["---"])
+    return "\n".join(rows + list(lines))
+
+
+def situation_lines(name: str, manager, mesh_mgr, open_asks: int = 0) -> List[str]:
+    """What is true around this session right now, said in full every time.
+
+    The counterpart to the content id, and the reason both exist. A step's
+    text is immutable for the life of a position, so it can be named by a
+    hash and pulled back on demand. None of *this* is: replies come due, a
+    child exits, a decision lands. An id for it would be a promise the
+    daemon cannot keep — quote ``7c1e`` for a roster and the agent that calls
+    for it later gets either a stale snapshot or a different roster, and both
+    are worse than the two lines it would have replaced. So the volatile half
+    is pushed, in full, and stays small enough to be worth pushing.
+
+    Only what has something to say. A session with no mail owing, no
+    decisions on it, no children and a live parent adds nothing here — which
+    is the ordinary case, and why the repeat stays at its measured size.
+
+    Never raises: this decorates a reminder, and a reminder that failed to
+    send because the roster was mid-write would be a bad trade.
+    """
+    lines: List[str] = []
+    try:
+        sdef = manager.get(name).sdef
+    except Exception:  # noqa: BLE001 — raced an exit; the rest still stands
+        return lines
+    if open_asks:
+        lines.append(
+            f"asks: {open_asks} delegated decision(s) from other runs await "
+            "your answer -- their workflows are stopped on it. The cflow "
+            "'asks' tool serves them, 'answer' closes them."
+        )
+    if mesh_mgr is not None:
+        try:
+            for row in mesh_mgr.meshes_for_session(name):
+                mesh = mesh_mgr.get(row["mesh"])
+                member = mesh_mgr.member_for_session(mesh, name)
+                if member is None:
+                    continue
+                owed = mesh.owed(member.handle)
+                if owed:
+                    lines.append(
+                        f"owed: {len(owed)} delivered message(s) on mesh "
+                        f"{mesh.name} still await your reply -- to the "
+                        "senders, silence is silence. 'claunch mesh history "
+                        f"{mesh.name} -n 30' shows them."
+                    )
+        except Exception:  # noqa: BLE001 — a mesh deleted under us says nothing
+            pass
+    try:
+        live = manager.live_children(name)
+    except Exception:  # noqa: BLE001
+        live = []
+    if live:
+        lines.append(
+            f"children: {', '.join(live)} still running and still reporting "
+            "to you -- a child holding a finished result keeps holding it "
+            "until you ask."
+        )
+    if sdef.parent:
+        try:
+            if manager.get(sdef.parent).exited:
+                lines.append(
+                    f"parent: {sdef.parent} has exited -- whatever you were "
+                    "going to report to it has nowhere to go. Say so in this "
+                    "run's next report rather than reporting into the void."
+                )
+        except Exception:  # noqa: BLE001 — no record is not "exited"
+            pass
+    if lines:
+        lines.insert(
+            0,
+            "-- around you right now (this part changes; it is stated in "
+            "full because there is no id that could stay true for it) --",
+        )
+    return lines
+
+
+def carried_id_lines(name: str, manager, mesh_mgr) -> List[str]:
+    """The ids of the session-level text this agent was handed, named not sent.
+
+    The same trade the step's own id makes (:func:`repeat_block`), applied to
+    the two blocks that outlive any one position: the opening task and the
+    binding stance. Both are immutable, both are re-derivable, and both are
+    exactly the kind of thing an agent quietly stops having after a summary
+    without noticing it stopped.
+
+    Named ONLY on the full form, once per position, and the reason is a
+    measurement rather than taste: the repeat is 777 characters against the
+    full block's 1545, and that gap is the whole product. A reference line on
+    every repeat would spend a third of the saving on a question that is
+    almost never the one being asked — an agent whose context was compacted
+    has already had the hook re-deliver these blocks, with their ids, before
+    its next turn.
+
+    Only ids the session was *given next to their text*
+    (:func:`rebrief.given_ids`). An id it has never seen attached to prose
+    would fail the check by construction, and buy a recall of text it may
+    well already hold.
+
+    Never raises, for :func:`situation_lines`' reason: this decorates a
+    reminder, and a reminder lost to a mid-write roster is a bad trade.
+    """
+    try:
+        ids = rebrief.given_ids(name, manager=manager, mesh_mgr=mesh_mgr)
+    except Exception:  # noqa: BLE001 — no ids is not a reason to send nothing
+        return []
+    if not ids:
+        return []
+    named = "; ".join(f"{ident} ({kind})" for ident, kind in ids)
+    return [
+        f"session text ids: {named}. These name text you were GIVEN, printed "
+        "next to it — not text in this reminder, and not this line. If you "
+        "cannot find one of them attached to its text in this conversation, "
+        "your context no longer holds that block: call the mesh 'rebrief' "
+        "tool with that id and it hands the text back."
+    ]
 
 
 def signal_block(payload: dict, before: dict, after: dict) -> str:

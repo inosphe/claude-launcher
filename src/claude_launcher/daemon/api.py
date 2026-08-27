@@ -997,6 +997,11 @@ def _cflow_timers(
         rem["state"] = "counting"
     else:
         rem["state"] = "held" if not busy else "due"
+    # Which block is coming, not just when. The reminder restates the step in
+    # full the first time it speaks at a position and says the short form
+    # after that (:class:`cflow_clock.ReminderClock`), and a countdown that
+    # cannot tell the two apart understates the next fire by more than half.
+    rem["form"] = "short" if (timer or {}).get("restated") else "full"
     if awaits.get("probe"):
         rem["awaits"] = awaits.get("describe") or awaits.get("probe")
         rem["probe_code"] = (timer or {}).get("probe_code")
@@ -3592,9 +3597,26 @@ async def h_session_rebrief(request: web.Request) -> web.Response:
     the session's own terminal instead, best-effort like every delivery; an
     empty composition is reported rather than typed, so pressing the button on
     a bare session does not paste an empty message into it.
+
+    ``GET ?id=`` is the narrow door onto the same state: one addressed block
+    by its content id (:func:`rebrief.recall`), for an agent that a reminder
+    told the id of and that cannot find the text in its own context. It is
+    deliberately not a POST — a pull is the agent's own turn, and nothing
+    about it belongs in someone else's terminal.
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
+    ident = (request.query.get("id") or "").strip()
+    if request.method == "GET" and ident:
+        manager.get(name)  # unknown session refused here, as compose does
+        return web.json_response(
+            {
+                "session": name,
+                **rebrief.recall(
+                    name, ident, manager=manager, mesh_mgr=_mesh_mgr(request)
+                ),
+            }
+        )
     block = rebrief.compose(name, manager=manager, mesh_mgr=_mesh_mgr(request))
     if request.method == "GET":
         return web.json_response({"session": name, "block": block})

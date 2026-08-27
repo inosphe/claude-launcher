@@ -18,7 +18,7 @@ import pytest
 from claude_launcher import store
 from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.cflow.engine import CflowError
-from claude_launcher.daemon import cflow_clock
+from claude_launcher.daemon import cflow_clock, rebrief
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -532,3 +532,480 @@ def test_the_skip_door_re_arms_the_clock_and_writes_nothing(proj):
             await client.close()
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# the two forms: full once, short after
+# --------------------------------------------------------------------------- #
+#: A step whose instructions are the length real workflows write — the case
+#: the short form exists for. The toy ``linear`` steps above are a line each,
+#: and against those the pointer is the bigger block (see the inversion test).
+WORDY = """
+name: wordy
+steps:
+  one:
+    instructions: >
+      {body}
+    done_when: the diff is committed
+    next: two
+  two:
+    instructions: do two
+""".format(body="implement the thing carefully and completely. " * 20)
+
+
+def test_the_step_is_restated_once_then_pointed_at(proj):
+    """The load-bearing half of the push/pull split.
+
+    The first reminder at a position pastes the step; every repeat there says
+    the short thing and names the two pulls instead. Progress puts the full
+    form back, because a new step has never been restated.
+    """
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "wordy.yaml").write_text(
+        WORDY, encoding="utf-8"
+    )
+    cflow_engine.start("wordy", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+
+    first = clock.scan(t + 601)[0][2]
+    assert "implement the thing carefully" in first   # the step itself
+    assert "rebrief" not in first
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+
+    second = clock.scan(time.monotonic() + 601)[0][2]
+    assert "implement the thing carefully" not in second   # not said twice
+    assert "short form" in second
+    assert "'recall' tool with id" in second         # the pull is offered here
+    assert "done when: the diff is committed" in second    # the test survives
+    assert len(second) < len(first)
+
+    # progress re-arms AND re-earns the full restatement
+    cflow_engine.report("did one", cwd=cwd, scope="w1")
+    cflow_engine.next_step(cwd=cwd, scope="w1")
+    t2 = time.monotonic()
+    clock.scan(t2)
+    assert "do two" in clock.scan(t2 + 601)[0][2]
+
+
+def test_a_step_too_small_to_shrink_keeps_its_restatement(proj):
+    """The short form is taken only when it is actually shorter.
+
+    Its protocol paragraph is a fixed cost, so against a one-line step the
+    pointer is the bigger block — and paying more to be told less is the
+    opposite of the point. The clock compares and keeps the full one.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")   # 'do one', one line
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    repeat = clock.scan(time.monotonic() + 601)[0][2]
+    assert "do one" in repeat                       # still the restatement
+    assert "short form" not in repeat
+
+
+def test_a_reminder_that_was_never_typed_does_not_spend_the_restatement(proj):
+    """The flag is stamped on delivery, not on composition.
+
+    A reminder held for a stopped session (:func:`ReminderClock._deliver`) is
+    one the agent never saw. Counting it would hand that agent the short form
+    first, pointing it at a restatement it was never given.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    sess.status_value = "idle"
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    assert sess.delivered == []                     # held, never typed
+
+    sess.status_value = "busy"
+    due = clock.scan(time.monotonic() + 700)
+    asyncio.run(clock._deliver(*due[0]))
+    assert "do one" in sess.delivered[0]            # still the full form
+
+
+#: An ask on a later step, so a run has somewhere to be forced FROM.
+ORPHAN = """
+name: orphan
+steps:
+  one:
+    instructions: do one
+    next: two
+  two:
+    instructions: do two
+    ask:
+      prompt: may it land?
+      from: [{role: leader}]
+"""
+
+
+def test_a_decision_that_reached_nobody_never_shrinks(proj):
+    """The one position whose block is news, not a restatement.
+
+    A run forced onto a delegated ask with ``goto`` reports waiting_answer
+    while nobody holds the question. The block's whole content is that fact —
+    nothing the agent already has, so nothing a pointer can stand in for.
+    """
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "orphan.yaml").write_text(
+        ORPHAN, encoding="utf-8"
+    )
+    cflow_engine.start("orphan", cwd=cwd, scope="w1")
+    cflow_engine.goto("two", cwd=cwd, scope="w1")
+    assert cflow_clock._ask_reached_nobody(
+        cflow_engine.status(cwd, scope="w1")
+    )
+
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    repeat = clock.scan(time.monotonic() + 601)[0][2]
+    assert "never actually put to anyone" in repeat  # the diagnosis, again
+    assert "short form" not in repeat
+
+
+def test_repeat_block_keeps_the_completion_test_and_names_the_pull():
+    payload = {
+        "status": "step", "workflow": "linear", "step_id": "impl", "visit": 2,
+        "instructions": "implement it", "done_when": "the diff is committed",
+        "digest": "abc123abc123",
+    }
+    block = cflow_clock.repeat_block(payload, 300, 1500.0)
+    assert "implement it" not in block              # the point of the form
+    assert "done when: the diff is committed" in block
+    assert "step 'impl' (visit 2), unmoved for ~25 min" in block
+    assert "step text id: abc123abc123" in block
+    assert "Look for abc123abc123 in this conversation" in block
+    assert "'recall' tool with id abc123abc123" in block
+    assert "'report' then 'next'" in block
+
+
+def test_repeat_block_without_an_id_falls_back_to_status():
+    """A position with no instructional content to name (a bare ask) has no
+    id, and then there is no predicate to offer -- so the block says the one
+    thing that is still true instead of quoting an id it does not have."""
+    block = cflow_clock.repeat_block(
+        {"status": "step", "workflow": "linear", "step_id": "impl", "visit": 1},
+        300, 900.0,
+    )
+    assert "step text id" not in block
+    assert "recall" not in block
+    assert "'status' tool restates this step in full" in block
+
+
+def test_repeat_block_for_a_branch_choice_points_at_select():
+    block = cflow_clock.repeat_block(
+        {
+            "status": "select", "workflow": "linear", "step_id": "triage",
+            "visit": 1, "prompt": "pick a path",
+            "options": [{"name": "a", "description": "path a"}],
+        },
+        300, 900.0,
+    )
+    assert "branch choice at step 'triage', unmoved for ~15 min" in block
+    assert "pick a path" not in block               # 'status' serves it
+    assert "restates this choice and its options" in block
+    assert "'select' is what moves it" in block
+
+
+def test_timers_report_which_form_comes_next(proj):
+    """The readout says which block the next fire is, not only when.
+
+    A reader watching this countdown is deciding whether to let the clock
+    speak, and "due in 40s" means a different thing at 1.5k characters than
+    at 0.6k.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
+    clock.scan(t)
+    assert clock.timers()[(cwd, "w1")]["restated"] is False
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    assert clock.timers()[(cwd, "w1")]["restated"] is True
+
+
+# --------------------------------------------------------------------------- #
+# the content id: quoted instead of pasted, and pulled back by 'recall'
+# --------------------------------------------------------------------------- #
+def test_the_digest_names_content_and_ignores_framing():
+    """It must survive the things that move on every fire, and only those."""
+    base = {"status": "step", "instructions": "do it", "done_when": "it is done",
+            "verify": "make test"}
+    d = cflow_engine.step_digest(base)
+    assert d and len(d) == cflow_engine.DIGEST_CHARS
+    # framing moves, the id does not
+    assert cflow_engine.step_digest(
+        {**base, "visit": 9, "workflow": "other", "step_id": "elsewhere"}
+    ) == d
+    # content moves, the id does
+    for key in ("instructions", "done_when", "verify"):
+        assert cflow_engine.step_digest({**base, key: base[key] + "!"}) != d
+    # a chooser is named by what the chooser reads
+    sel = {"status": "select", "prompt": "pick", "options": [{"name": "a",
+                                                             "description": "A"}]}
+    assert cflow_engine.step_digest(sel)
+    assert cflow_engine.step_digest(
+        {**sel, "options": [{"name": "a", "description": "B"}]}
+    ) != cflow_engine.step_digest(sel)
+    # nothing instructional to name
+    assert cflow_engine.step_digest({"status": "waiting_approval"}) == ""
+
+
+def test_every_door_that_hands_over_a_position_carries_its_id(proj):
+    """``next`` and ``status`` must agree, or the agent cannot match the id it
+    was reminded of against the text it was originally given."""
+    cwd = str(proj)
+    first = cflow_engine.start("linear", cwd=cwd, scope="w1")
+    assert first["digest"]
+    assert cflow_engine.status(cwd, scope="w1")["digest"] == first["digest"]
+    cflow_engine.report("did one", cwd=cwd, scope="w1")
+    second = cflow_engine.next_step(cwd=cwd, scope="w1")
+    assert second["digest"] and second["digest"] != first["digest"]
+
+
+def test_the_first_fire_carries_the_id_with_the_text_and_repeats_quote_it(proj):
+    cwd = str(proj)
+    (proj / ".claunch" / "workflows" / "wordy.yaml").write_text(WORDY, encoding="utf-8")
+    cflow_engine.start("wordy", cwd=cwd, scope="w1")
+    payload = cflow_engine.status(cwd, scope="w1")
+    d = payload["digest"]
+    full = cflow_clock.reminder_block(payload, 300.0)
+    short = cflow_clock.repeat_block(payload, 300.0, 1500.0)
+    # the id arrives ATTACHED to what it names -- otherwise there is nothing
+    # for the agent to have matched it against later
+    assert f"step text id: {d}" in full
+    assert "implement the thing carefully" in full
+    # ...and the repeat quotes the id in place of the body
+    assert f"step text id: {d}" in short
+    assert "implement the thing carefully" not in short
+    assert f"'recall' tool with id {d}" in short
+    assert f"Look for {d} in this conversation" in short
+
+
+def test_recall_hands_the_text_back_and_refuses_a_stale_id(proj):
+    """The middle answer is the one that makes this more than 'status'."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    d = cflow_engine.status(cwd, scope="w1")["digest"]
+
+    got = cflow_engine.recall(d, cwd=cwd, scope="w1")
+    assert got["status"] == "recalled"
+    assert got["id"] == d and got["step_id"] == "one"
+    assert got["instructions"] == "do one"
+
+    stale = cflow_engine.recall("0" * 12, cwd=cwd, scope="w1")
+    assert stale["status"] == "stale_id"
+    assert stale["current_id"] == d
+    assert "instructions" not in stale          # never serve the wrong step
+
+    # the run moves: the id the agent still holds is now the wrong one, and
+    # answering it with text would put the agent back on a step it has left
+    cflow_engine.report("did one", cwd=cwd, scope="w1")
+    cflow_engine.next_step(cwd=cwd, scope="w1")
+    after = cflow_engine.recall(d, cwd=cwd, scope="w1")
+    assert after["status"] == "stale_id"
+    assert after["step_id"] == "two"
+    assert "instructions" not in after
+
+
+def test_recall_is_read_only_about_an_idle_slot_and_needs_an_id(proj):
+    cwd = str(proj)
+    assert cflow_engine.recall("abc", cwd=cwd, scope="w1")["status"] == "idle"
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    with pytest.raises(CflowError):
+        cflow_engine.recall("", cwd=cwd, scope="w1")
+    # and it does not deliver the step or open anything: the position is
+    # untouched by having been recalled
+    before = cflow_engine.status(cwd, scope="w1")
+    cflow_engine.recall(before["digest"], cwd=cwd, scope="w1")
+    after = cflow_engine.status(cwd, scope="w1")
+    assert (before["status"], before["visit"]) == (after["status"], after["visit"])
+
+
+# --------------------------------------------------------------------------- #
+# the volatile half: pushed in full, because no id could stay true for it
+# --------------------------------------------------------------------------- #
+class _KinManager(_FakeManager):
+    """A manager that also answers the kin questions the situation asks."""
+
+    def __init__(self, sessions: dict, *, children=(), parent_exited=None) -> None:
+        super().__init__(sessions)
+        self._children = list(children)
+        self._parent_exited = parent_exited
+
+    def live_children(self, name: str):
+        return list(self._children)
+
+    def get(self, name: str):
+        if self._parent_exited is not None and name == self._parent_exited:
+            gone = _FakeSession(name, "")
+            gone.exited = True
+            return gone
+        return super().get(name)
+
+
+class _FakeMesh:
+    def __init__(self, name, owed):
+        self.name = name
+        self._owed = owed
+
+    def owed(self, handle):
+        return self._owed
+
+
+class _FakeMeshMgr:
+    def __init__(self, mesh, handle="w1"):
+        self._mesh = mesh
+        self._handle = handle
+
+    def meshes_for_session(self, name):
+        return [{"mesh": self._mesh.name}]
+
+    def get(self, name):
+        return self._mesh
+
+    def member_for_session(self, mesh, name):
+        return type("M", (), {"handle": self._handle})()
+
+
+def test_splice_puts_lines_inside_the_fence():
+    block = "---\n# head\nbody\n---"
+    out = cflow_clock.splice(block, ["extra: one"])
+    assert out.splitlines()[-1] == "---"        # still fenced
+    assert out.splitlines()[-2] == "extra: one"  # and inside it
+    assert cflow_clock.splice(block, []) == block
+
+
+def test_a_quiet_session_adds_nothing(proj):
+    """The ordinary case, and the one the measured size depends on."""
+    sess = _FakeSession("w1", str(proj))
+    mgr = _KinManager({"w1": sess})
+    assert cflow_clock.situation_lines("w1", mgr, None, 0) == []
+
+
+def test_the_situation_states_owed_asks_children_and_a_dead_parent(proj):
+    sess = _FakeSession("w1", str(proj))
+    sess.sdef = SessionDef(name="w1", cwd=str(proj), parent="lead")
+    mgr = _KinManager({"w1": sess}, children=["c1", "c2"], parent_exited="lead")
+    mm = _FakeMeshMgr(_FakeMesh("m0", [{"id": "a"}, {"id": "b"}]))
+    lines = cflow_clock.situation_lines("w1", mgr, mm, 3)
+    joined = "\n".join(lines)
+    assert "there is no id that could stay true for it" in lines[0]
+    assert "asks: 3 delegated decision(s)" in joined
+    assert "owed: 2 delivered message(s) on mesh m0" in joined
+    assert "children: c1, c2 still running" in joined
+    assert "parent: lead has exited" in joined
+
+
+def test_a_broken_roster_never_sinks_the_reminder(proj):
+    """Decoration must not cost a delivery."""
+    class _Exploding:
+        def meshes_for_session(self, name):
+            raise RuntimeError("mesh registry mid-write")
+
+    sess = _FakeSession("w1", str(proj))
+    mgr = _KinManager({"w1": sess}, children=["c1"])
+    lines = cflow_clock.situation_lines("w1", mgr, _Exploding(), 0)
+    assert any("children: c1" in ln for ln in lines)   # the rest still stands
+
+
+def test_the_reminder_carries_the_situation_when_delivered(proj):
+    """It rides the block that actually lands, composed on the loop."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    mgr = _KinManager({"w1": sess}, children=["c1"])
+    clock = cflow_clock.ReminderClock(mgr, _FakeMeshMgr(_FakeMesh("m0", [{"id": "a"}])))
+    t = time.monotonic()
+    clock.scan(t)
+    due = clock.scan(t + 601)
+    assert "children:" not in due[0][2]          # not composed in the thread
+    asyncio.run(clock._deliver(*due[0]))
+    landed = sess.delivered[0]
+    assert "children: c1 still running" in landed
+    assert "owed: 1 delivered message(s) on mesh m0" in landed
+    assert landed.splitlines()[-1] == "---"      # and it is still one block
+
+
+def test_the_session_ids_ride_the_full_form_and_not_the_repeat(proj):
+    """Where the session-level ids are named, and why only there.
+
+    The full form is the fire that hands over text; naming the other blocks
+    the agent was handed belongs beside it. The repeat is 777 characters
+    against the full block's 1545, and that gap is the product -- a
+    reference line on every repeat would spend a third of it on a question
+    the hook has usually just answered by re-delivering those blocks.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    sess.sdef = SessionDef(name="w1", cwd=cwd, task="count the beans")
+    clock = cflow_clock.ReminderClock(_KinManager({"w1": sess}))
+    ident = rebrief.block_digest("count the beans")
+
+    t = time.monotonic()
+    clock.scan(t)
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    first = sess.delivered[0]
+    assert f"session text ids: {ident} (task)" in first
+    assert "not this line" in first          # the bare mention does not count
+    assert first.splitlines()[-1] == "---"   # spliced inside the fence
+
+    asyncio.run(clock._deliver(*clock.scan(time.monotonic() + 601)[0]))
+    repeat = sess.delivered[1]
+    assert "session text ids:" not in repeat
+    assert ident not in repeat
+
+
+def test_a_session_with_nothing_addressable_says_nothing(proj):
+    """A task-less, mesh-less session has no ids, so the line is absent
+    rather than empty -- the reminder's size is the reason."""
+    sess = _FakeSession("w1", str(proj))
+    assert cflow_clock.carried_id_lines("w1", _KinManager({"w1": sess}), None) == []
+
+
+def test_a_broken_roster_never_costs_the_ids_a_delivery(proj):
+    """Same trade as the situation lines: decoration must not sink a send."""
+    class _Exploding:
+        def meshes_for_session(self, name):
+            raise RuntimeError("mesh registry mid-write")
+
+    sess = _FakeSession("w1", str(proj))
+    sess.sdef = SessionDef(name="w1", cwd=str(proj), task="count the beans")
+    mgr = _KinManager({"w1": sess})
+    lines = cflow_clock.carried_id_lines("w1", mgr, _Exploding())
+    assert lines and "(task)" in lines[0]     # the task id still stands
+
+
+def test_recall_is_journalled_so_the_pull_rate_can_be_measured(proj):
+    """The design is priced on how often this is called; until it is recorded
+    that number is a guess."""
+    import json
+    from claude_launcher.cflow import state as cflow_state
+
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    d = cflow_engine.status(cwd, scope="w1")["digest"]
+    cflow_engine.recall(d, cwd=cwd, scope="w1")
+    cflow_engine.recall("0" * 12, cwd=cwd, scope="w1")
+    entries = [
+        json.loads(ln)
+        for ln in cflow_state.journal_path(cwd, "w1").read_text(
+            encoding="utf-8"
+        ).splitlines()
+    ]
+    recalls = [e for e in entries if e["event"] == "recall"]
+    assert [e["hit"] for e in recalls] == [True, False]
+    assert recalls[0]["id"] == d and recalls[0]["step"] == "one"

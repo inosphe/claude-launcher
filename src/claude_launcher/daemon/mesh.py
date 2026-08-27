@@ -41,6 +41,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Union
 
 import yaml
 
+from .. import digests
 from . import mesh_policy, mesh_roles, paths, wire
 from .manager import ManagerError, SessionManager
 from .session import STATUS_IDLE
@@ -1966,6 +1967,15 @@ class MeshManager:
         (:mod:`rebrief`); the pointer rides along either way, because the
         capped copy is a starting position and ``mesh stance`` is still the
         current text.
+
+        The pasted prose is NAMED: a content id printed beside it, digested
+        from the whole stance rather than the capped copy. That is what lets
+        a step reminder ask later whether the agent still has this text
+        without pasting it again to ask, and what a recall by that id serves
+        (:func:`rebrief.recall`). It rides here and nowhere else, because an
+        id an agent has only ever seen alone would answer "is it in my
+        context?" yes for prose that never arrived — which is why the
+        pointer-only returns above carry no id at all.
         """
         role = mesh.roleset.get(member.role)
         if not (role and role.stance.strip()):
@@ -1981,13 +1991,11 @@ class MeshManager:
             # one command away — the owed ledger and the opening task have
             # none. See :func:`rebrief.compose`.
             return pointer
-        carried = self._stance_in_system_prompt(mesh, member)
-        if carried is None:
-            return pointer  # unanswerable here: assume carried, paste nothing
-        spawned_as, prompt_stance = carried
-        if prompt_stance.strip() == role.stance.strip():
+        if self.stance_carried(mesh, member):
             return pointer
-        body = role.stance.strip()
+        spawned_as, prompt_stance = self._stance_in_system_prompt(mesh, member)
+        whole = role.stance.strip()
+        body = whole
         if len(body) > _INLINE_STANCE:
             body = body[:_INLINE_STANCE].rstrip() + " [...]"
         clash = ""
@@ -1998,7 +2006,48 @@ class MeshManager:
                 f"{member.role} and the text below is what binds — a role is "
                 "per mesh, and an appended prompt cannot be re-written.\n"
             )
-        return f"{pointer}{clash}stance ({member.role}), binding:\n{body}\n"
+        # The id names the WHOLE stance, not the copy below it, which may
+        # have been cut at :data:`_INLINE_STANCE`. That is the point rather
+        # than a discrepancy: an agent that finds the id here knows it still
+        # has a starting position, and one that wants the part the cap took
+        # pulls it by the same id (:func:`rebrief.recall`). It rides here and
+        # only here, next to the prose, because an id delivered on its own
+        # would let "is this id in my context?" answer yes for text that
+        # never arrived.
+        ident = digests.text_digest(whole)
+        marker = f" [text id: {ident}]" if ident else ""
+        return (
+            f"{pointer}{clash}stance ({member.role}), binding{marker}:\n"
+            f"{body}\n"
+        )
+
+    def stance_carried(self, mesh: Mesh, member: Member) -> bool:
+        """Whether this member already holds its stance without being told.
+
+        The decision :meth:`_stance_lines` pastes on, named so callers
+        outside this class can ask it. ``True`` means the session's own
+        system prompt carries the same text the mesh's role does — the
+        common case, and one an appended prompt keeps through every
+        ``/compact`` — so a briefing gives a pointer and nothing more.
+
+        Unanswerable counts as carried, exactly as the paste path treats
+        it: a member hosted on another daemon is briefed by that daemon,
+        and guessing on its behalf would push a second copy of a stance
+        into a terminal that already has one.
+
+        :mod:`rebrief` needs this apart from the text, to decide whether
+        this session was ever *given* an id for its stance. Naming an id
+        at an agent that only ever saw a pointer would buy a recall it
+        does not need, on every reminder, forever.
+        """
+        role = mesh.roleset.get(member.role)
+        if not (role and role.stance.strip()):
+            return True  # nothing to hold
+        carried = self._stance_in_system_prompt(mesh, member)
+        if carried is None:
+            return True
+        _, prompt_stance = carried
+        return prompt_stance.strip() == role.stance.strip()
 
     def _stance_in_system_prompt(self, mesh: Mesh, member: Member):
         """``(spawned_as, stance)`` for this member's session, or ``None``.

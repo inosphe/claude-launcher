@@ -1302,7 +1302,10 @@ def test_join_briefing_lands_in_terminal(home, tmp_path):
         # nothing carries this session's stance but the briefing, so it is in
         # the briefing — pointer AND prose
         assert "claunch mesh stance brief" in text
-        assert "stance (worker), binding:" in text
+        # ...and the prose arrives NAMED: an id printed beside it is what
+        # lets a later reminder ask "is this still in your context?" without
+        # pasting the stance again to ask.
+        assert "stance (worker), binding [text id: " in text
         assert "You are a PRODUCER" in text
         await mgr.shutdown_all()
 

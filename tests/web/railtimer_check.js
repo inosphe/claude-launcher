@@ -189,6 +189,24 @@ check("...the clock it is reporting, with its cadence and last firing",
 check("...and the other clock, so 'why not the ping' is answerable here",
       title.split("\n")[2], "stall ping · waiting · every 15:00");
 
+/* ---- which size the next fire will be -------------------------------- */
+/* The reminder pastes the whole step the first time it speaks at a position
+   and a short pointer after that, so the reader deciding whether to let it
+   speak is choosing between two sizes, not just a moment. The block above
+   builds its title without a `form`, and every check in it passes whether or
+   not the size is reported -- so the two branches need a case each. That gap
+   is the point: this harness already sliced railTimerTitle, which says it
+   watches the function and not that it watches the change. */
+const formLine = (form) => ctx.line(ctx.pick(timers(
+  REM({ state: "counting", due_in: 360, fired_ago: 240, form }),
+  PING({ enabled: true, state: "waiting", due_in: 900 })))).title.split("\n")[1];
+check("a reminder that has not spoken at this position says the next fire is the whole step",
+      formLine("full"),
+      "step reminder · counting · every 10:00 · last fired 4:00 ago · next: full restatement");
+check("...and one that already has says the next is the short form",
+      formLine("short"),
+      "step reminder · counting · every 10:00 · last fired 4:00 ago · next: short form");
+
 /* ---- no timers, no countdown ------------------------------------------ */
 /* An older daemon publishes no `timers` at all. Drawing a zero there would
    be inventing a countdown; nothing must be drawn instead. */

@@ -165,6 +165,33 @@ TOOLS = [
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
+        "name": "recall",
+        "description": (
+            "Hand back the full text behind a content id (read-only). A "
+            "reminder that has already given you this position's text once "
+            "quotes its id instead of pasting it again; call this with that "
+            "id when the id is NOT in your context any more, which means the "
+            "text is gone with it. Do not call it when you can still see the "
+            "text — you already have what this returns. If the id names "
+            "something other than this run's current position the call says "
+            "so rather than guessing, and 'status' is what re-reads the "
+            "position itself."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": (
+                        "the content id from a block header, e.g. the 'step "
+                        "text id' line of a cflow reminder"
+                    ),
+                }
+            },
+            "required": ["id"],
+        },
+    },
+    {
         "name": "asks",
         "description": (
             "Decisions OTHER sessions' runs are waiting on YOU for (read-only, "
@@ -281,6 +308,8 @@ def call_tool(name: str, args: dict) -> dict:
         )
     elif name == "status":
         payload = engine.status()
+    elif name == "recall":
+        payload = engine.recall(str(args.get("id") or ""))
     elif name == "asks":
         waiting = engine.open_asks(_session())
         payload = {

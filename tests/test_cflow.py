@@ -1224,6 +1224,9 @@ def test_mcp_initialize_and_tools():
     assert names == {
         # this session's own run
         "start", "report", "next", "select", "status",
+        # the pull behind a reminder that names the step by id instead of
+        # restating it
+        "recall",
         # decisions other sessions' runs are waiting on it for
         "asks", "answer",
     }
@@ -2893,3 +2896,57 @@ def test_the_authoring_skill_states_the_rule_it_exists_for():
     assert "descendants are never candidates" in text
     assert "never as an approval" in text  # what `otherwise: self` records
     assert "never receives the asking step's instructions" in text
+
+
+# --------------------------------------------------------------------------- #
+# The combined payload: this round's `digest` beside s198's `ask["wired"]`
+# --------------------------------------------------------------------------- #
+# Two rounds added a key to the same position payload, landed apart, and each
+# was green on its own. Nothing drew them together -- the shape both changes
+# write into is the shared surface, and a shared surface is not covered by two
+# harnesses that each stub the other side away (claunch-1nqu).
+def test_an_asks_own_keys_cannot_rename_the_step():
+    """Adding a key to the payload must not change the step's id.
+
+    The id names the *instructional content* of a position, and an agent
+    answers one question with it: "do I already have this text?" If anything
+    else in the payload fed the hash, then an ask that wired an edge would
+    hand the same step a second id, and a session holding the first would
+    conclude its copy was stale and pull text it already had.
+
+    `step_digest` reads a named few keys rather than the payload it is handed,
+    so this holds by construction. That is exactly why it is worth pinning:
+    the cheap way to write that function is to hash the whole dict, it would
+    have passed every test in this round, and it would break the moment any
+    other round added a key.
+    """
+    payload = {
+        "status": "step",
+        "instructions": "do the thing",
+        "done_when": "the thing is done",
+        "verify": "run the checker",
+    }
+    alone = engine.step_digest(payload)
+    assert alone  # a position with instructions has an id at all
+
+    # ...now the same position, with an ask that wired an edge for itself.
+    payload["ask"] = {
+        "id": "ask-1",
+        "kind": "branch",
+        "asked": [{"handle": "rev1", "role": "reviewer"}],
+        "wired": ["rev1"],
+    }
+    assert engine.step_digest(payload) == alone
+
+    # The two keys are not siblings, so neither can shadow the other however
+    # either round evolves: the id names the position, the wiring belongs to
+    # the question opened at it.
+    payload["digest"] = alone
+    assert "wired" not in payload
+    assert "digest" not in payload["ask"]
+
+    # Both consumers -- the dashboard and `cflow status` -- read this over
+    # JSON, so the combined shape has to survive the trip with both keys.
+    round_tripped = json.loads(json.dumps(payload))
+    assert round_tripped["digest"] == alone
+    assert round_tripped["ask"]["wired"] == ["rev1"]

@@ -13,6 +13,7 @@ import argparse
 import asyncio
 import sys
 import time
+from dataclasses import replace
 
 import pytest
 
@@ -38,6 +39,7 @@ name: linear
 steps:
   one:
     instructions: do one
+    done_when: the diff is committed
     next: two
   two:
     instructions: do two
@@ -151,6 +153,11 @@ def test_compose_names_the_run_this_session_drives(home, tmp_path, monkeypatch):
     assert "scope: w1" in block
     # the protocol pointer, not the state: status is fetched at read time
     assert "cflow 'status' tool" in block
+    # ...with one exception, and it is the line a resuming agent needs
+    # most: whether the step it is being handed back is nearly done.
+    # The step BODY still stays behind the pointer.
+    assert "done when: the diff is committed" in block
+    assert "do one" not in block
 
 
 def test_a_long_task_is_cut_not_dumped(home, tmp_path):
@@ -166,6 +173,147 @@ def test_a_long_task_is_cut_not_dumped(home, tmp_path):
     )
     assert "task cut for the re-briefing" in block
     assert len(block) < rebrief.TASK_LIMIT + 1000
+
+
+# --------------------------------------------------------------------------- #
+# content ids: what is addressable, what is merely recallable, and the pull
+# --------------------------------------------------------------------------- #
+def test_the_task_rides_with_its_id_and_the_id_names_the_uncut_text(
+    home, tmp_path
+):
+    """The id is printed next to the prose, never on its own, because the
+    check it exists for is "is this id attached to text in my context?".
+    And it digests the WHOLE task, so the block's own cut does not change
+    it -- which is exactly what makes recalling it worth a turn."""
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+    task = "count the beans. " * 200          # comfortably past TASK_LIMIT
+    block = _staged_compose(
+        mgr, mm,
+        SessionDef(name="w1", harness="py", cwd=str(tmp_path), task=task),
+    )
+    ident = rebrief.block_digest(task)
+    assert f"text id: {ident}" in block
+    assert "task cut for the re-briefing" in block       # the copy IS cut
+    # ...and the id survived the cut: it is the uncut task's digest, not the
+    # printed excerpt's.
+    assert ident != rebrief.block_digest(block.split("text id: ")[1])
+
+    found = rebrief.recall("w1", ident, manager=mgr, mesh_mgr=mm)
+    assert found["status"] == "recalled"
+    assert found["kind"] == "task"
+    assert found["text"] == task.strip()                 # whole, not excerpt
+
+
+def test_a_stale_id_is_told_so_and_never_served_the_nearest_thing(
+    home, tmp_path
+):
+    """The one answer a recall must not give is a plausible substitute: a
+    stance the mesh has replaced is precisely what an agent must stop acting
+    from."""
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+
+    async def scenario():
+        mgr.stage(
+            SessionDef(name="w1", harness="py", cwd=str(tmp_path), task="dig")
+        )
+        return rebrief.recall("w1", "ffffffffffff", manager=mgr, mesh_mgr=mm)
+
+    found = asyncio.run(scenario())
+    assert found["status"] == "stale_id"
+    assert "text" not in found
+    assert [row["kind"] for row in found["current"]] == ["task"]
+    assert "do not go on acting from what you remember" in found["note"]
+
+
+def test_a_recall_needs_an_id_at_all(home, tmp_path):
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+    found = rebrief.recall("w1", "  ", manager=mgr, mesh_mgr=mm)
+    assert found["status"] == "error"
+
+
+def test_a_stance_the_session_already_carries_is_addressable_but_not_named(
+    home, tmp_path
+):
+    """The split ``given`` draws, and the whole reason it exists.
+
+    A session spawned INTO its role carries the stance in its own system
+    prompt, so a briefing pastes a pointer and no id ever arrives next to
+    prose. Naming that id at a reminder would guarantee a miss and buy a
+    recall of text the agent already holds -- so ``given_ids`` withholds it,
+    while ``recall`` still serves it to anyone who asks by name."""
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+
+    async def joins():
+        mm.create("team")
+        with mm.defer_briefing("w1"):
+            # The SAME role the session was spawned as: a clash between the
+            # two is the third pasted shape, and not what this test is about.
+            await mm.join("team", "w1", handle="w1", role="worker")
+
+    async def scenario():
+        mgr.stage(SessionDef(name="w1", harness="py", cwd=str(tmp_path), task="dig"))
+        # A role is a claude-harness flag, so it cannot be staged onto the
+        # stub harness these tests run on -- but the state it produces can
+        # be, and that state is all `stance_carried` reads.
+        sess = mgr.get("w1")
+        sess.sdef = replace(sess.sdef, role="worker")
+        await joins()
+        return (
+            rebrief.addressable("w1", manager=mgr, mesh_mgr=mm),
+            rebrief.given_ids("w1", manager=mgr, mesh_mgr=mm),
+            rebrief.compose("w1", manager=mgr, mesh_mgr=mm),
+        )
+
+    known, named, block = asyncio.run(scenario())
+    stance = [d for d, e in known.items() if e["kind"].startswith("stance")]
+    assert stance, known
+    ident = stance[0]
+    # Addressable: a pull by that id still works.
+    assert rebrief.recall(
+        "w1", ident, manager=mgr, mesh_mgr=mm
+    )["status"] == "recalled"
+    # Not named, and not pasted -- the two go together.
+    assert ident not in [d for d, _ in named]
+    assert ident not in block
+    assert [k for _, k in named] == ["task"]
+
+
+def test_a_stance_the_session_does_not_carry_is_pasted_with_its_id(
+    home, tmp_path
+):
+    """The mirror case: no role on the session, so the briefing's paste is
+    the only copy the agent will ever get -- and the id rides on it."""
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+
+    async def scenario():
+        mgr.stage(SessionDef(name="w1", harness="py", cwd=str(tmp_path)))
+        mm.create("team")
+        with mm.defer_briefing("w1"):
+            await mm.join("team", "w1", handle="w1", role="worker")
+        return (
+            rebrief.given_ids("w1", manager=mgr, mesh_mgr=mm),
+            rebrief.compose("w1", manager=mgr, mesh_mgr=mm),
+        )
+
+    named, block = asyncio.run(scenario())
+    assert [k for _, k in named] == ["stance (team)"]
+    ident = named[0][0]
+    assert f"[text id: {ident}]" in block
+    # And it is the canonical stance's id, so a recall answers with the whole
+    # text even where _INLINE_STANCE cut the pasted copy.
+    found = rebrief.recall("w1", ident, manager=mgr, mesh_mgr=mm)
+    assert found["status"] == "recalled"
+    assert found["kind"] == "stance (team)"
 
 
 # --------------------------------------------------------------------------- #
@@ -208,6 +356,29 @@ def test_the_api_composes_and_delivers(home, tmp_path):
             body = await resp.json()
             assert body["ok"] is True
             assert body["empty"] is False
+            # ?id= is the narrow door: one addressed block, by the id the
+            # briefing printed beside it. GET only -- a pull is the asking
+            # agent's own turn, not something to type at somebody.
+            ident = rebrief.block_digest("carry the beans")
+            resp = await client.get(
+                f"/api/sessions/kid/rebrief?id={ident}", headers=BEARER
+            )
+            body = await resp.json()
+            assert body["status"] == "recalled"
+            assert body["kind"] == "task"
+            assert body["text"] == "carry the beans"
+            assert "block" not in body          # the block is the other door
+            resp = await client.get(
+                "/api/sessions/kid/rebrief?id=ffffffffffff", headers=BEARER
+            )
+            assert (await resp.json())["status"] == "stale_id"
+            # and an unknown session is refused, exactly as the whole-block
+            # door refuses it -- the narrow door does not become a way to
+            # ask about sessions that are not there.
+            resp = await client.get(
+                f"/api/sessions/ghost/rebrief?id={ident}", headers=BEARER
+            )
+            assert resp.status == 400
         finally:
             for name in ("kid", "root"):
                 try:
@@ -270,3 +441,27 @@ def test_the_unavailable_block_states_what_is_missing_without_guessing_it(home):
     for missing in ("mesh", "cflow run", "parent", "opening task"):
         assert missing in block
     assert block.startswith("---") and block.rstrip().endswith("---")
+
+
+def test_a_page_long_completion_test_is_capped(home, tmp_path, monkeypatch):
+    """``done_when`` is a sentence by design; the cap is for the one that
+    isn't, so a runaway workflow cannot crowd out the sections nothing else
+    can serve."""
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    proj = tmp_path / "proj"
+    (proj / ".claunch" / "workflows").mkdir(parents=True)
+    (proj / ".claunch" / "workflows" / "wordy.yaml").write_text(
+        "name: wordy\nsteps:\n  one:\n    instructions: do one\n"
+        "    done_when: >\n      " + ("every last box is ticked. " * 60) + "\n",
+        encoding="utf-8",
+    )
+    _register_py_harness()
+    mgr = _manager()
+    mm = MeshManager(mgr)
+    cflow_engine.start("wordy", cwd=str(proj), scope="w1")
+    block = _staged_compose(
+        mgr, mm, SessionDef(name="w1", harness="py", cwd=str(proj))
+    )
+    assert "'status' has it whole" in block
+    line = [ln for ln in block.splitlines() if ln.startswith("done when: ")][0]
+    assert len(line) < rebrief.DONE_WHEN_LIMIT + 80
