@@ -2,8 +2,9 @@
 
 Sessions die with the daemon (the tmux model), but their *definitions* are
 persisted to ``sessions.json`` so a restarting daemon can relaunch the ones
-marked ``restore`` — the claude harness comes back with ``--resume`` of the
-conversation id pinned at creation, recovering its own conversation.
+marked ``restore``. Claude pins an id at creation; Codex reports its chosen id
+through its rollout metadata immediately after spawn. Both are stored in the
+definition so a relaunch recovers that session's own conversation.
 
 Everything it does *not* relaunch is kept as a :class:`DeadSession` record
 rather than forgotten, so a session that exited (or opted out of restore) can
@@ -25,7 +26,7 @@ from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
-from . import harness as harness_mod
+from . import codex_sessions, harness as harness_mod
 from . import mesh_roles
 from . import paths
 from .harness import SessionDef
@@ -130,6 +131,23 @@ class SessionManager:
         """Start a staged session. ``opening`` is a first user message for the
         harnesses that take one on their command line (see
         :func:`harness.takes_opening_argv`)."""
+        codex_home = None
+        known_codex_sessions = None
+        if session.sdef.harness == "codex":
+            prof = profile_mod.require_selector(session.sdef.profile or "")
+            entry = harness_registry.get("codex")
+            if entry is not None:
+                codex_home = entry.profile_home(prof.config_dir)
+                if restoring and not session.sdef.conversation_id:
+                    conversation_id = codex_sessions.latest(
+                        codex_home, session.sdef.cwd
+                    )
+                    if conversation_id:
+                        session.sdef = replace(
+                            session.sdef, conversation_id=conversation_id
+                        )
+                if not session.sdef.conversation_id:
+                    known_codex_sessions = codex_sessions.snapshot(codex_home)
         argv, env, cwd = harness_mod.build_command(
             session.sdef, restoring=restoring, opening=opening
         )
@@ -140,6 +158,20 @@ class SessionManager:
             # byte, or the restart silently costs every viewer their wheel.
             session.seed_screen_from_log()
         session.start(argv, env, cwd)
+        if codex_home is not None and known_codex_sessions is not None:
+            conversation_id = codex_sessions.claim_new(
+                codex_home, cwd, known_codex_sessions
+            )
+            if conversation_id:
+                session.sdef = replace(
+                    session.sdef, conversation_id=conversation_id
+                )
+            else:
+                log.warning(
+                    "could not discover Codex conversation id for session %r; "
+                    "restore will fall back to cwd-relative --last",
+                    session.sdef.name,
+                )
         self.persist()
         return session
 
@@ -670,11 +702,11 @@ class SessionManager:
     def respawn(self, name: str) -> Session:
         """Relaunch an exited session under its original definition.
 
-        Restore semantics apply: the claude harness comes back with
-        ``--resume`` of the conversation id pinned at creation, so quitting
-        the program by accident (double ``Ctrl+C``) is recoverable — same
-        conversation, same session name. Works just as well on a record that
-        outlived the daemon that spawned it.
+        Restore semantics apply: conversation-aware harnesses come back with
+        the conversation id pinned at creation (Claude) or discovered just
+        after it (Codex), so quitting the program by accident is recoverable
+        — same conversation, same session name. Works just as well on a record
+        that outlived the daemon that spawned it.
         """
         session = self.get(name)
         if not session.exited:

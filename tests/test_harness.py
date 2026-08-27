@@ -483,6 +483,22 @@ def test_generic_harness_from_config(home, tmp_path):
     assert env["K"] == "V"
 
 
+def test_codex_restore_resumes_its_pinned_conversation_id(
+    home, tmp_path
+):
+    _profile_for("work", "codex")
+    _declare_harness("codex", restore_args=["resume", "--last"])
+    sdef = harness.normalize(SessionDef(
+        name="x", profile="work", cwd=str(tmp_path), conversation_id="thread-1"
+    ))
+
+    fresh, _, _ = harness.build_command(sdef)
+    restored, _, _ = harness.build_command(sdef, restoring=True)
+
+    assert fresh[-2:] != ["resume", "--last"]
+    assert restored[-2:] == ["resume", "thread-1"]
+
+
 def test_session_env_overrides_harness_env(home, tmp_path):
     _declare_harness("h", env={"K": "harness"})
     _profile_for("custom", "h")

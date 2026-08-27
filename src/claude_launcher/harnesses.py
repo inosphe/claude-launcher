@@ -13,6 +13,7 @@ override or extend it::
       codex:
         command: codex          # string or argv list
         args: ["--yolo"]        # optional, before the session's own args
+        restore_args: [resume, --last]  # optional, only on relaunch
         env: {KEY: VALUE}       # optional overrides
         home_env: CODEX_HOME     # optional isolated per-profile home
         auth: oauth              # claude, oauth, api-key, or none
@@ -74,6 +75,8 @@ class Harness:
     command: List[str] = field(default_factory=list)
     #: Flags inserted before the session's own args.
     args: List[str] = field(default_factory=list)
+    #: Arguments appended only when claunch restores an existing session.
+    restore_args: List[str] = field(default_factory=list)
     #: Environment overrides layered under the session's own ``--env``.
     env: Dict[str, str] = field(default_factory=dict)
     description: str = ""
@@ -157,6 +160,7 @@ class Harness:
             "name": self.name,
             "command": list(self.command),
             "args": list(self.args),
+            "restore_args": list(self.restore_args),
             "description": self.description,
             "builtin": self.builtin,
             "home_env": self.home_env,
@@ -239,6 +243,9 @@ def _parse_entry(name: str, body) -> Harness:
         name=name,
         command=command,
         args=_as_list(body.get("args"), f"harness {name!r} args"),
+        restore_args=_as_list(
+            body.get("restore_args"), f"harness {name!r} restore_args"
+        ),
         env=(
             {str(k): str(v) for k, v in env.items()} if isinstance(env, dict) else {}
         ),
