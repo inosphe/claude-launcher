@@ -138,17 +138,21 @@ const localStorage = {
 const stubs = `
 let sessName = null;
 let railRefreshed = 0, kidsRefreshed = 0, gotoHash = "";
+/* Which of the two ran first. The hop must land on a rail that already holds
+   the child, so the order is part of the contract, not an accident of how the
+   lines happen to sit. */
+let afterSpawn = [];
 let sessionsCache = [];
 let spawnModal = null;
 let BASE = "/";
-function refreshSessions() { railRefreshed++; }
+function refreshSessions() { railRefreshed++; afterSpawn.push("rail"); }
 /* The box's remembered size is a contract of its own — spawnsize_check drives
    the real pair. Here they are stubs: this harness is about the form's RULES,
    and a stub DOM has no box to measure. */
 function spawnSizeApply() {}
 function spawnSizeRemember() {}
 function refreshSessKids() { kidsRefreshed++; }
-function go(h) { gotoHash = h; }
+function go(h) { gotoHash = h; afterSpawn.push("go"); }
 `;
 
 const ctx = {};
@@ -188,7 +192,9 @@ Object.assign(exports, {
   setSess: (n) => { sessName = n; },
   isOpen: () => spawnModal !== null,
   spawnUi: () => (spawnModal ? spawnModal.ui : null),
-  counters: () => ({ rail: railRefreshed, kids: kidsRefreshed, goto: gotoHash }),
+  counters: () => ({ rail: railRefreshed, kids: kidsRefreshed, goto: gotoHash,
+                     order: afterSpawn.slice() }),
+  resetGo: () => { gotoHash = ""; afterSpawn = []; },
 });`
 )(ctx, document, el, api, localStorage, $);
 
@@ -948,6 +954,69 @@ async function main() {
   const counted = ctx.counters();
   check("success refreshes the roster and the rail",
     counted.kids >= 1 && counted.rail >= 1, counted);
+
+  /* ---- the spawn lands on the child ------------------------------------
+     The press was for a session, so the page goes to that session. It used
+     to close onto whatever was behind the modal, leaving the new terminal
+     to be found in a rail of `sN` names by hand. The create form has always
+     done this (`#/s/<name>` right after its POST); the wizard — which is
+     every other way a spawn starts — did not. */
+  check("success routes to the spawned session",
+    counted.goto === "#/s/job-1", counted.goto);
+  // Order, not just presence: the terminal route paints its header from
+  // sessionsCache, so a hop taken before the rail refresh paints an empty one.
+  check("...after the rail already holds it",
+    counted.order.indexOf("rail") >= 0 &&
+      counted.order.indexOf("rail") < counted.order.indexOf("go"),
+    counted.order);
+
+  /* A daemon that answers 201 without naming the child: the spawn happened,
+     so the rail refresh stands and only the hop is skipped. Navigating to
+     "#/s/" — the shape a bare `made.name` would build — would attach a
+     terminal to no session at all. */
+  ctx.resetGo();
+  routes["POST /api/sessions/lead1/children"] = { status: 201, doc: { ok: true } };
+  await ctx.openSpawnModal("lead1", { seed: {
+    quick: true, role: "worker", workflow: "improv-worker", worktree: true,
+    task: "fix the tab",
+  } });
+  await settle();
+  await settle();
+  const spawnNameless = buttons(modalEls["modal-actions"])
+    .find((b) => b.text.startsWith("Spawn"));
+  await spawnNameless.fire("click");
+  await settle();
+  const nameless = ctx.counters();
+  check("a nameless answer navigates nowhere", nameless.goto === "", nameless.goto);
+  check("...but the rail is still refreshed",
+    nameless.order.includes("rail"), nameless.order);
+
+  /* A refusal must not move the page either — the modal stays open with the
+     daemon's reason on it, which is the whole point of showing it there. */
+  ctx.resetGo();
+  routes["POST /api/sessions/lead1/children"] =
+    { ok: false, status: 403, doc: { error: "spawn.depth: too deep" } };
+  await ctx.openSpawnModal("lead1", { seed: {
+    quick: true, role: "worker", workflow: "improv-worker", worktree: true,
+    task: "fix the tab",
+  } });
+  await settle();
+  await settle();
+  const spawnRefused = buttons(modalEls["modal-actions"])
+    .find((b) => b.text.startsWith("Spawn"));
+  await spawnRefused.fire("click");
+  await settle();
+  check("a refused spawn navigates nowhere", ctx.counters().goto === "",
+    ctx.counters().goto);
+  check("...and leaves the modal up with the reason",
+    ctx.isOpen() === true &&
+      texts(modalEls["modal-body"]).includes("spawn.depth: too deep"),
+    texts(modalEls["modal-body"]).slice(-160));
+  ctx.spawnModalClose();
+  ctx.resetGo();
+  routes["POST /api/sessions/lead1/children"] = { status: 201, doc: {
+    session: { name: "job-1" }, mesh: { ok: true, mesh: "m0" },
+  } };
 
   /* ---- a picker emptied by a failed fetch says so ------------------------
      The bug this pins: every option source degrades to null, so a daemon

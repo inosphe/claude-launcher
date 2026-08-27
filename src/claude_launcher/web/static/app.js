@@ -12855,8 +12855,23 @@ async function spawnModalGo(st) {
     null_token: !!body.null_token, role: body.role,
   });
   spawnModalClose();
-  refreshSessions();
+  // The spawned session is what the press was for, so the page goes there —
+  // the same landing the create form gives (`#/s/<name>` right after its
+  // POST). Without it the wizard closed onto whatever was behind it and the
+  // new terminal had to be found in the rail by hand, which on a busy rail
+  // is a scroll and a guess at which `sN` is the new one.
+  //
+  // The rail is refreshed FIRST and awaited: the terminal route repoints the
+  // detail panel and paints the header from `sessionsCache`, and a route
+  // entered before the child is in that cache paints an empty one.
+  await refreshSessions();
   if (sessName === st.parent) refreshSessKids();
+  // The spawn endpoint wraps the child ("session"), and the same shape is
+  // read in the create form. A daemon that answered without a name is not a
+  // reason to navigate nowhere — the spawn still happened, so the rail
+  // refresh above stands and only the hop is skipped.
+  const made = (res.doc && res.doc.session) || res.doc || {};
+  if (made.name) go("#/s/" + encodeURIComponent(made.name));
 }
 
 /* ---- quick job: one form, one worker ----
