@@ -386,10 +386,10 @@ option:disabled { color: #6b7280; }
 
    The key is dimmer than the value and not monospaced; the value is, so the
    three numbers line up against each other down the rail, which is the
-   comparison the line exists for. Three states on the value and no more:
+   comparison the line exists for. Four states on the value and no more:
    green while somebody is actually looking (that one is not a duration and
-   must not be read as one), amber past an hour, and a greyed dash where
-   there is no reading at all. */
+   must not be read as one), amber past an hour, red past half an hour on
+   `typed` alone, and a greyed dash where there is no reading at all. */
 #session-list .rail-seen {
   flex-basis: 100%; order: 2; display: flex; align-items: center; gap: 8px;
   min-width: 0; padding-left: 16px; margin-top: 2px;
@@ -405,6 +405,14 @@ option:disabled { color: #6b7280; }
 #session-list .rail-seen-val.live { color: #3fb950; font-weight: 600; }
 /* nobody, and nothing, for an hour: the row this line is scanned for */
 #session-list .rail-seen-val.cold { color: #d29922; }
+/* half an hour since a person typed, which only the `typed` pair asks for.
+   Louder than the amber because it is the earlier reading of the two and
+   would otherwise be the quieter one: this is the session somebody handed a
+   task to and then walked away from, and the point of the colour is that it
+   is found without reading the numbers. Deliberately NOT the global `.error`
+   class, whose font-size and margin-top would push this value off the
+   baseline its two neighbours sit on. */
+#session-list .rail-seen-val.stale { color: #f85149; font-weight: 600; }
 /* no reading at all — the dash is a fact, so it is not dressed as a number */
 #session-list .rail-seen-val.unknown { color: #484f58; font-family: inherit; }
 .sess-brief-refresh {

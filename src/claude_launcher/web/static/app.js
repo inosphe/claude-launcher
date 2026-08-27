@@ -1503,24 +1503,54 @@ function seenAgo(iso) {
 }
 
 /* How stale a reading has to be before the row says so in colour. One step
-   only: this line is a glance, and a three-colour gradient on three pairs
-   would be nine states to learn for a row that is trying to say one thing. */
+   for the two pairs that only age: this line is a glance, and a colour
+   gradient on three pairs would be states to learn for a row that is trying
+   to say one thing. */
 const SEEN_COLD = 3600;  // an hour without the reader, or without the agent
+
+/* A second step, which one pair asks for and the other two do not. Half an
+   hour since a person last typed here is drawn red rather than amber: the
+   row an operator scans this rail for is the session they handed something
+   to and then walked away from, and that one is legible at half an hour —
+   well before the hour at which "nobody has looked" and "nothing has moved"
+   become worth a colour. A pair gets this step only if it is asked for
+   (`staleAfter`), so `seen` and `moved` keep the single amber one.
+
+   Both steps read the same field, so they are ordered rather than combined:
+   past 30 minutes the typed value is red and stays red, and the hour mark
+   passes without changing anything. */
+const TYPED_STALE = 1800;
 
 function seenPair(label, iso, title, opts) {
   const pair = el("span", "rail-seen-pair");
   pair.appendChild(el("span", "rail-seen-key", label));
   const live = opts && opts.live;
   const ago = seenAgo(iso);
+  // Only where a threshold was asked for, and only against a real reading: a
+  // dash means nobody has EVER typed here, which is the ordinary state of
+  // every session an agent spawned. Colouring absence red would paint most
+  // of the rail and bury the rows this step exists to pick out.
+  const after = (opts && opts.staleAfter) || 0;
+  const stale = !live && !!ago && !!after && ago.secs >= after;
   const val = el(
     "span",
-    "rail-seen-val" + (live ? " live" : ago ? (ago.secs >= SEEN_COLD ? " cold" : "") : " unknown"),
+    "rail-seen-val" + (
+      live ? " live"
+      : !ago ? " unknown"
+      : stale ? " stale"
+      : ago.secs >= SEEN_COLD ? " cold"
+      : ""),
     live ? "now" : ago ? ago.text : "\u2013"
   );
   pair.appendChild(val);
-  pair.title = ago || live
+  pair.title = (ago || live
     ? `${title}\n${live ? "right now" : new Date(Date.parse(iso)).toLocaleString()}`
-    : `${title}\nnot recorded — see the line's own note`;
+    : `${title}\nnot recorded — see the line's own note`)
+    // Why it is red, on the pair carrying the colour. The line's own note
+    // says what the three readings are, which is the wrong place to explain
+    // one row's colour: a reader hovering a red number is asking about that
+    // number.
+    + (stale ? `\nover ${Math.round(after / 60)}m since anyone typed here` : "");
   return pair;
 }
 
@@ -1545,7 +1575,8 @@ function railSeenLine(s) {
     // and one the row's own busy/idle dot already gestures at.
     seenPair("typed", s && s.last_input_at,
              "when a person last typed here — deliveries and `send-keys` " +
-             "do not count"),
+             "do not count",
+             { staleAfter: TYPED_STALE }),
     // Moved. Not raw output: claude animates a spinner and a clock while it
     // waits for you, so bytes never stop arriving; this is the last time a
     // row that is NOT an animation changed.
@@ -1558,7 +1589,9 @@ function railSeenLine(s) {
     "its own.\n" +
     "A dash means no reading: nobody has visited or typed since this " +
     "session started, and 'moved' is read off the running screen, so a " +
-    "daemon restart leaves it blank until the session paints again.";
+    "daemon restart leaves it blank until the session paints again.\n" +
+    "Amber is an hour without the reader or without the agent; red is " +
+    "half an hour since anyone typed, and only 'typed' is drawn that way.";
   return line;
 }
 
