@@ -119,6 +119,16 @@
          socket and 5000 lines of scrollback, so pages are laid over it. -->
     <div id="term-header" class="hidden">
       <span id="term-title"></span>
+      <!-- The name, and beside it the way back to that name in the rail. The
+           list is a monitor of twenty-odd sessions in a 260px column: the row
+           for the one you are typing in is as likely to be scrolled out of
+           sight as not, and until now nothing on the page could put it back
+           on screen — you hunted for it, or you gave up and read the header.
+           Sits with the title rather than in `.term-actions` because it
+           changes nothing about the session; it only moves the reader's eye
+           to the card that stands for it. Owned by gotoSessionCard(). -->
+      <button id="term-goto" class="term-btn goto-chip" type="button"
+              title="scroll the session list to this session's card">⇱ card</button>
       <span id="term-status" class="badge"></span>
       <!-- When the daemon will next type into THIS session by itself, and how
            long is left of it. On a session's own header a countdown belonging

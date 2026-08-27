@@ -112,6 +112,7 @@ function renderHome() {}
 function syncBulkActions() {}
 function syncMobileBars() {}
 function applyCflowBadges() {}
+function applyGotoFlash() {}
 function applyBriefingCards() {}
 /* The briefing's per-row decoration (the one-line and the collapsed ⟳) is
    its own harness (briefrow_check); here, like applyBriefingCards, it is a

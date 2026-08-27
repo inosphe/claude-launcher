@@ -104,6 +104,7 @@ function renderHome() {}
 function syncBulkActions() {}
 function syncMobileBars() {}
 function applyCflowBadges() {}
+function applyGotoFlash() {}
 function applyBriefingCards() {}
 function decorateBriefingRow(li, s) {
   li.appendChild(el("button", "sess-brief-rowref", "R"));

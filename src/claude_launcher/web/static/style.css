@@ -96,6 +96,16 @@ option:disabled { color: #6b7280; }
 }
 #session-list li:hover { background: #22262d; }
 #session-list li.active { background: #2b313b; }
+/* Where the header's `⇱ card` just landed. The scroll alone puts the row
+   somewhere in the middle of twenty near-identical ones; this says which of
+   them was asked for. Kept for a moment and then dropped (GOTO_FLASH_MS) —
+   a permanent mark would compete with `active`, which is a different claim
+   (that row is the terminal on screen; this one is where you just looked).
+   An inset ring rather than a border so the row does not move by a pixel
+   when it lights. */
+#session-list li.goto-flash {
+  background: #1b2a44; box-shadow: inset 0 0 0 1px #1f6feb;
+}
 /* A spawned session sits under the one that spawned it. The indent is set
    per row in JS (it depends on depth); this is the tick that says the indent
    is lineage and not decoration. */
@@ -704,6 +714,12 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-details[aria-pressed="true"]:hover {
   background: #16294a; border-color: #388bfd;
 }
+/* The one control up here that acts on the reader instead of the session:
+   quiet at rest — it sits right beside the name all day and has nothing to
+   announce — and blue on hover, the colour this bar already uses for the
+   buttons that open something rather than destroy it. */
+.goto-chip { flex: none; }
+.goto-chip:hover { color: #9ecbff; border-color: #1f6feb; background: #10203a; }
 /* the buttons that change the session, held together beside its name */
 .term-actions { display: flex; align-items: center; gap: 8px; }
 /* The top briefing toggle: quiet blue like resume (it opens a panel, it does

@@ -116,6 +116,7 @@ function renderHome() {}
 function syncBulkActions() {}
 function syncMobileBars() {}
 function applyCflowBadges() {}
+function applyGotoFlash() {}
 function applyBriefingCards() {}
 function terminalOnScreen() { return false; }
 function attach() {}
