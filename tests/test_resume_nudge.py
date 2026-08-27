@@ -515,3 +515,150 @@ def test_a_restarted_daemon_nudges_the_session_that_was_working(home, tmp_path):
             await mgr2.shutdown_all()
 
     asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
+# the blank restore: a session that came back with nothing in it
+# --------------------------------------------------------------------------- #
+def _blank_entry(name: str, *, cwd: str, cid: str, busy: bool = False) -> dict:
+    """A record whose pinned conversation is not on disk anywhere."""
+    sdef = SessionDef(
+        name=name, profile="work", cwd=cwd, conversation_id=cid, restore=True
+    )
+    return {"def": sdef.to_dict(), "was_running": True, "was_busy": busy}
+
+
+def test_restore_collects_the_sessions_that_came_back_empty(home, tmp_path):
+    """``resumed_blank`` answers a different question than ``resumed_busy``.
+
+    ``was_busy`` is "was a turn cut off". This is "did the session come back
+    knowing anything at all" — and an idle session whose conversation was never
+    written lost every bit as much as a working one, so it is on the list too.
+    """
+    from claude_launcher import profile, transcripts
+
+    profile.create("work")
+    cwd = str(tmp_path)
+    written = "11111111-1111-1111-1111-111111111111"
+    d = transcripts.project_dir(profile.require("work").config_dir, cwd)
+    d.mkdir(parents=True, exist_ok=True)
+    (d / f"{written}.jsonl").write_text("{}", encoding="utf-8")
+
+    _write_sessions_json([
+        _blank_entry("newborn", cwd=cwd, cid="22222222-2222-2222-2222-222222222222"),
+        _blank_entry(
+            "newborn-busy", cwd=cwd,
+            cid="33333333-3333-3333-3333-333333333333", busy=True,
+        ),
+        _blank_entry("veteran", cwd=cwd, cid=written, busy=True),
+    ])
+    mgr = _NoSpawnManager(idle_threshold=0.5, scrollback=100, restore_default=True)
+    assert mgr.restore_all() == []
+
+    assert sorted(mgr.resumed_blank) == ["newborn", "newborn-busy"]
+    assert mgr.resumed_busy == ["newborn-busy", "veteran"]
+
+
+def test_a_fresh_manager_owes_nobody_a_blank_notice(home):
+    mgr = SessionManager(idle_threshold=0.5, scrollback=100, restore_default=True)
+    assert mgr.resumed_blank == []
+
+
+def test_a_blank_session_is_told_its_scrollback_is_not_its_own(
+    home, tmp_path, monkeypatch, instant
+):
+    """The standing nudge is false for this branch, so it is not what is sent.
+
+    Saying "the conversation above is intact -- re-read the last messages" to a
+    terminal that came back empty sends the agent to read nothing, or worse,
+    whatever the screen still shows. What it hears instead names the loss and
+    carries the task the restore did not replay.
+    """
+    monkeypatch.setattr(resume, "gate", lambda cwd, scope: True)
+    monkeypatch.setattr(
+        resume.rebrief, "compose", lambda name, **kw: f"BRIEFING for {name}"
+    )
+    session = _Session("w1", str(tmp_path))
+    nudge = resume.ResumeNudge(
+        _Manager({"w1": session}), [], blank=["w1"],
+        mesh_mgr=object(), poll=0.01, window=5.0,
+    )
+    asyncio.run(_drain(nudge))
+
+    assert nudge.delivered == ["w1"]
+    assert len(session.delivered) == 1
+    block = session.delivered[0]
+    assert "session resume (empty)" in block
+    assert "nothing above this line is your history" in block
+    assert "BRIEFING for w1" in block
+    # the two blocks must not be confusable: this one never claims the
+    # conversation survived
+    assert "the conversation above is intact" not in block
+
+
+def test_a_blank_session_on_both_lists_hears_the_blank_block_once(
+    home, tmp_path, monkeypatch, instant
+):
+    """A session can be both mid-turn and empty. It gets one message, and it is
+    the one that does not lie about the scrollback."""
+    monkeypatch.setattr(resume, "gate", lambda cwd, scope: True)
+    monkeypatch.setattr(resume.rebrief, "compose", lambda name, **kw: "B")
+    session = _Session("w1", str(tmp_path))
+    nudge = resume.ResumeNudge(
+        _Manager({"w1": session}), ["w1"], blank=["w1"],
+        mesh_mgr=object(), poll=0.01, window=5.0,
+    )
+    asyncio.run(_drain(nudge))
+
+    assert len(session.delivered) == 1
+    assert "session resume (empty)" in session.delivered[0]
+    assert nudge.pending == []
+
+
+def test_a_parked_run_does_not_hold_the_blank_notice(
+    home, tmp_path, monkeypatch, instant
+):
+    """The cflow gate stops the daemon telling an agent to walk through a
+    guardrail. This message does not tell it to do anything of the sort — it
+    says who the session is — and a session parked on a human gate with an
+    empty terminal is exactly the one that cannot work that out alone."""
+    monkeypatch.setattr(resume, "gate", lambda cwd, scope: False)
+    monkeypatch.setattr(resume.rebrief, "compose", lambda name, **kw: "B")
+    session = _Session("w1", str(tmp_path))
+    nudge = resume.ResumeNudge(
+        _Manager({"w1": session}), [], blank=["w1"],
+        mesh_mgr=object(), poll=0.01, window=5.0,
+    )
+    asyncio.run(_drain(nudge))
+
+    assert nudge.delivered == ["w1"]
+    assert "session resume (empty)" in session.delivered[0]
+
+
+def test_a_briefing_that_cannot_be_composed_still_leaves_the_warning(
+    home, tmp_path, monkeypatch, instant
+):
+    """Told half is better than told nothing: the sentence that matters most is
+    that the scrollback is not this session's history, and it does not depend
+    on the re-briefing being composable."""
+    monkeypatch.setattr(resume, "gate", lambda cwd, scope: True)
+
+    def boom(name, **kw):
+        raise RuntimeError("no mesh here")
+
+    monkeypatch.setattr(resume.rebrief, "compose", boom)
+    session = _Session("w1", str(tmp_path))
+    nudge = resume.ResumeNudge(
+        _Manager({"w1": session}), [], blank=["w1"],
+        mesh_mgr=object(), poll=0.01, window=5.0,
+    )
+    asyncio.run(_drain(nudge))
+
+    assert nudge.delivered == ["w1"]
+    assert "nothing above this line is your history" in session.delivered[0]
+
+
+def test_blank_block_without_a_briefing_says_only_what_it_knows(home):
+    block = resume.blank_block("w1")
+    assert "session: w1" in block
+    assert block.rstrip().endswith("---")

@@ -46,6 +46,22 @@ deciding:
 One shot per daemon start. The list is fixed at restore, each name leaves it
 delivered or dropped, and when it empties (or the window expires) the task
 ends: this is a restart's opening move, not a clock.
+
+**A second audience, and a different message.** One restore branch does not
+reopen a conversation at all: a session created in the seconds before the
+restart has no transcript yet, so it is relaunched on ``--session-id`` and
+comes back empty (:func:`harness.restores_blank`). Every sentence the nudge
+above says is then false — there is no conversation above, re-reading the last
+messages reaches someone else's screen or nothing, and the opening task went in
+as argv on the first spawn and is not replayed. Those sessions are carried in
+:attr:`SessionManager.resumed_blank` and hear :func:`blank_block` instead: what
+was lost, that the scrollback is not theirs, and the re-briefing that carries
+their task. Two differences from the nudge follow from that. It goes to blank
+sessions whether or not they were working — an idle one lost just as much —
+and it is not held by the cflow gate, because telling an agent who it is does
+not walk it through any guardrail. It does answer to the same ``resume_nudge``
+switch, though: one knob decides whether a restart types into anything here,
+and a second one for this message would be a setting nobody knows they have.
 """
 
 from __future__ import annotations
@@ -59,7 +75,7 @@ from typing import Dict, Iterable, List, Optional
 from .. import store
 from ..cflow import engine as cflow_engine, state as cflow_state
 from ..harnesses import CLAUDE_HARNESS
-from . import cflow_clock
+from . import cflow_clock, rebrief
 from .session import INPUT_SETTLE, STATUS_BUSY, STATUS_IDLE, STATUS_STARTING
 
 log = logging.getLogger("claunch.daemon.resume")
@@ -106,11 +122,14 @@ class ResumeNudge:
         manager,
         names: Iterable[str],
         *,
+        blank: Iterable[str] = (),
+        mesh_mgr=None,
         poll: float = POLL,
         window: float = WINDOW,
         enabled: Optional[bool] = None,
     ) -> None:
         self.manager = manager
+        self.mesh_mgr = mesh_mgr
         self.poll = poll
         self.window = window
         #: Read once, here: the switch decides whether this restart nudges at
@@ -122,7 +141,15 @@ class ResumeNudge:
             except Exception:  # noqa: BLE001 — an unreadable config is not fatal
                 enabled = True
         self.enabled = enabled
+        #: Who came back empty (:attr:`SessionManager.resumed_blank`). These
+        #: hear :func:`blank_block` instead of :func:`nudge_block`, and they
+        #: are on the pending list whether or not they were working: a blank
+        #: restore loses what an idle session knew exactly as completely.
+        self._blank = set(blank)
         self.pending: List[str] = list(names)
+        for name in self._blank:
+            if name not in self.pending:
+                self.pending.append(name)
         #: name -> monotonic time the session first read "ready". A session
         #: seen ready and then working again is being driven by somebody, and
         #: is dropped rather than nudged.
@@ -198,17 +225,54 @@ class ResumeNudge:
             log.info("resume nudge for %r dropped: it is working again", name)
             return True
 
-        verdict = await asyncio.to_thread(gate, session.sdef.cwd or "", name)
-        if verdict is None:
-            return False  # unreadable run state: look again next poll
-        if not verdict:
-            log.info("resume nudge for %r held: its cflow run is parked", name)
-            return True
+        if name in self._blank:
+            # Not gated on the run's position. The gate exists to stop the
+            # daemon telling an agent to walk through a guardrail it cannot
+            # open; this message tells it nothing of the sort — it says the
+            # scrollback it is looking at is not its own history, and restates
+            # who it is. A session parked on a human gate needs that as much as
+            # one mid-step, and it will read the gate for itself the moment it
+            # calls 'status'.
+            block = blank_block(name, briefing=await self._briefing(name))
+        else:
+            verdict = await asyncio.to_thread(gate, session.sdef.cwd or "", name)
+            if verdict is None:
+                return False  # unreadable run state: look again next poll
+            if not verdict:
+                log.info(
+                    "resume nudge for %r held: its cflow run is parked", name
+                )
+                return True
+            block = nudge_block(name)
 
-        if not await session.deliver(nudge_block(name)):
+        if not await session.deliver(block):
             return False  # readiness/keyboard holds refused it; try again
         self.delivered.append(name)
         return True
+
+    async def _briefing(self, name: str) -> str:
+        """The re-briefing to carry to a blank session, or ``""``.
+
+        The same composition ``/compact`` and ``/clear`` already get
+        (:mod:`claude_launcher.daemon.rebrief`) — parent, mesh, run, asks,
+        children and the recorded opening task. A blank restore is the third
+        way a session loses that half of what it knows, so it is answered with
+        the same text rather than a second one written for this path.
+
+        Never fatal: a session told only that its terminal is empty is worse
+        off than one told that plus its task, and better off than one told
+        nothing because composing the briefing raised.
+        """
+        if self.mesh_mgr is None:
+            return ""
+        try:
+            return await asyncio.to_thread(
+                rebrief.compose, name, manager=self.manager,
+                mesh_mgr=self.mesh_mgr,
+            )
+        except Exception:  # noqa: BLE001 — ManagerError, MeshError, OSError
+            log.exception("resume nudge: re-briefing for %r failed", name)
+            return ""
 
     def _readiness(self, session, name: str) -> str:
         """``"wait"`` / ``"ready"`` / ``"driven"`` for one session.
@@ -272,3 +336,45 @@ def nudge_block(name: str) -> str:
             "---",
         ]
     )
+
+
+def blank_block(name: str, *, briefing: str = "") -> str:
+    """What a session restored into an *empty* conversation hears.
+
+    :func:`nudge_block` cannot serve here. It says the conversation above is
+    intact and to re-read the last messages to pick the thread back up, and on
+    this branch there is no conversation above: the restore found no transcript
+    for the pinned id and opened a fresh one on it
+    (:func:`harness.restores_blank`). An agent that follows those instructions
+    reads someone else's screen or an empty one, and reports back on nothing.
+
+    So this says the two things that are actually true — the work that terminal
+    was doing is gone and is not coming back, and what the session is *for* is
+    below — and then carries the re-briefing, because the opening task went in
+    as argv on the first spawn and a restore does not replay it.
+
+    ``briefing`` is :func:`rebrief.compose`'s block. Empty is allowed and
+    honest: a bare session with no mesh, no run and no recorded task has
+    nothing to restate, and saying so beats implying something was withheld.
+    """
+    lines = [
+        "---",
+        "# claunch: session resume (empty) -- machine-generated, not typed by "
+        "the user",
+        f"session: {name}",
+        "what happened: the daemon restarted. This session's conversation had "
+        "not been written to disk yet -- it was created within seconds of the "
+        "restart -- so there was nothing to reopen and this terminal came back "
+        "empty, on the same session id.",
+        "what this costs: whatever the previous terminal had done is gone and "
+        "cannot be recovered; nothing above this line is your history. Do not "
+        "report that work as done, and do not re-read the scrollback for it.",
+        "protocol: start from the re-briefing below, which carries your "
+        "opening task. If you are driving a cflow run, call its 'status' tool "
+        "first -- it is the current truth and it has not been reset. This is "
+        "not a new task and nobody typed it.",
+        "---",
+    ]
+    if briefing:
+        lines.extend(["", briefing])
+    return "\n".join(lines)

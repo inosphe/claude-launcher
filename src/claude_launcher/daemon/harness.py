@@ -392,6 +392,44 @@ def takes_opening_argv(harness: str) -> bool:
     return harness == CLAUDE_HARNESS
 
 
+def restores_blank(sdef: SessionDef) -> bool:
+    """Whether restoring ``sdef`` opens an *empty* conversation.
+
+    True for exactly one branch of :func:`build_command`'s restore: a pinned
+    conversation id with no transcript behind it, which is relaunched on
+    ``--session-id`` because ``--resume`` of a jsonl claude never wrote is
+    fatal. The session comes back alive and with nothing in it.
+
+    That branch is a deliberate trade — an empty terminal beats one that exits
+    on startup — but it is invisible from the outside, and two things downstream
+    are wrong without it. The opening task is not replayed on a restore
+    (:func:`build_command`'s ``opening``), so the session no longer knows what
+    it was for; and the resume nudge's standing text says the conversation
+    above is intact, which for this branch is false. Both callers need the same
+    answer, so the rule is stated once, here, rather than re-derived from the
+    argv or asked of the filesystem a second time.
+
+    Measured window: a spawned claude writes its first transcript line 7-28
+    seconds after the daemon records the session (37 sessions, this machine,
+    2026-08-27), and a restart inside that window lands on this branch.
+
+    False for everything else, including definitions this process cannot
+    resolve (an unknown profile, an unreadable config): a restore that is going
+    to fail is not a blank restore, and it fails loudly on its own.
+    """
+    if sdef.harness != CLAUDE_HARNESS:
+        return False
+    if steers_conversation(sdef.args) or not sdef.conversation_id:
+        return False
+    try:
+        prof = profile_mod.require_selector(sdef.profile) if sdef.profile else None
+    except Exception:  # noqa: BLE001 — ProfileError and anything below it
+        return False
+    if prof is None:
+        return False
+    return not transcripts.exists(prof.config_dir, sdef.conversation_id, sdef.cwd)
+
+
 def build_command(
     sdef: SessionDef, *, restoring: bool = False, opening: str = ""
 ) -> Tuple[List[str], Dict[str, str], str]:
@@ -459,9 +497,7 @@ def build_command(
             if restoring:
                 if not sdef.conversation_id:
                     argv.append("--continue")
-                elif transcripts.exists(
-                    prof.config_dir, sdef.conversation_id, sdef.cwd
-                ):
+                elif not restores_blank(sdef):
                     argv.extend(["--resume", sdef.conversation_id])
                 else:
                     # Pinned, but claude never wrote the conversation: the
@@ -471,6 +507,10 @@ def build_command(
                     # session that dies on restore is worse than one that
                     # comes back empty -- so come back empty, on the same
                     # pinned id, which is what a first spawn does anyway.
+                    # What "empty" then costs is paid on the way up: the same
+                    # predicate puts this session on the resume nudge's blank
+                    # list, which re-states the task this restore does not
+                    # replay (see resume.blank_block).
                     log.info(
                         "session %r has no transcript for %s yet; restoring it "
                         "as a fresh conversation on that id rather than "

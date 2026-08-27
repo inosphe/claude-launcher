@@ -9,6 +9,7 @@ which is the wiring a client cannot get right on its own.
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import sys
 import time
@@ -216,3 +217,56 @@ def test_the_api_composes_and_delivers(home, tmp_path):
             await client.close()
 
     asyncio.run(scenario())
+
+
+# --------------------------------------------------------------------------- #
+# the hook's own failure: an unreachable daemon must not cost the block
+# --------------------------------------------------------------------------- #
+def test_an_unreachable_daemon_answers_on_stdout_not_stderr(
+    home, monkeypatch, capsys
+):
+    """The hook fires once, at the moment the context was lost.
+
+    Before: ``ensure_running`` raised, the CLI printed ``error: ...`` on
+    stderr and exited 1, and stdout — the half claude reads back into context
+    — was empty. The session came out of its compaction with no re-briefing
+    and no idea that it was missing one. Observed once in the wild: s167,
+    2026-08-26T13:19:27Z, "daemon did not come up within 15s", 21s after its
+    compaction (daemon.log agrees at 22:19:27 KST, a spawned daemon losing the
+    singleton lock).
+    """
+    from claude_launcher import cli_sessions
+    from claude_launcher.daemon_client import DaemonClientError
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+
+    def down(*a, **kw):
+        raise DaemonClientError("daemon did not come up within 15s")
+
+    monkeypatch.setattr(cli_sessions.daemon_client, "ensure_running", down)
+    rc = cli_sessions._cmd_rebrief(argparse.Namespace(session=None))
+    out, err = capsys.readouterr()
+
+    assert rc == 0  # a non-blocking hook; failing it un-compacts nothing
+    assert "claunch rebrief: unavailable" in out
+    assert "daemon did not come up within 15s" in out
+    assert "claunch rebrief" in out  # the command that recovers it
+    assert out.strip()  # the part that matters is never on stderr alone
+    assert "unavailable" not in err
+
+
+def test_the_unavailable_block_states_what_is_missing_without_guessing_it(home):
+    """It names the sections it could not fetch and stops there.
+
+    Every one of them is read from the daemon, and the daemon is what failed.
+    A block that filled them in from the environment would hand the agent
+    stale answers it cannot tell from fresh ones — which is worse than the
+    gap, because the gap is visible.
+    """
+    from claude_launcher import cli_sessions
+
+    block = cli_sessions._rebrief_unavailable("s9", Exception("no daemon"))
+    assert "session: s9" in block
+    for missing in ("mesh", "cflow run", "parent", "opening task"):
+        assert missing in block
+    assert block.startswith("---") and block.rstrip().endswith("---")
