@@ -201,6 +201,11 @@ DAEMON_DEFAULTS = {
     "idle_threshold": 2.0,
     "scrollback_lines": 5000,
     "restore": True,
+    # How long an agent-requested daemon restart may wait on the web UI's
+    # approval before it counts as approved and goes out (see
+    # daemon/restart_gate.py). Seconds. Read when the daemon constructs its
+    # gate, i.e. at daemon start, like 'shell' below.
+    "restart_approval_timeout": 300.0,
     # The cflow reminder clock's machine defaults: whether runs get their
     # current step's instructions re-typed into the driving session, and
     # after how many seconds without progress. Per-run overrides live in run
