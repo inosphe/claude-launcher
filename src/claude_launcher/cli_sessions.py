@@ -568,7 +568,7 @@ def _print_onboarding(result: dict) -> None:
         print("  opening task will be typed in once it settles")
 
 
-def _rebrief_unavailable(name: str, exc: Exception) -> str:
+def _rebrief_unavailable(name: str, exc: Exception, ident: str = "") -> str:
     """What a session hears when its re-briefing could not be fetched.
 
     Same shape as the block it replaces, and deliberately so: the agent has
@@ -581,23 +581,57 @@ def _rebrief_unavailable(name: str, exc: Exception) -> str:
     the daemon, and the daemon is what could not be reached. Guessing them
     from the environment would put stale answers in front of an agent that
     cannot tell them from fresh ones.
+
+    ``ident`` is the id the caller asked for, when it asked for one. It is
+    not decoration: the two callers are missing different things and recover
+    by different commands. Naming the whole briefing at a caller that wanted
+    one block is wrong on both counts, and the protocol line is the half that
+    costs something -- "run the same command again" is only true if the
+    command it prints is the one that was run. An agent that follows it
+    literally after ``--id`` would fetch the whole briefing and still not
+    hold the text it came for.
     """
+    if ident:
+        missing = (
+            f"what is missing: the one block you asked for by id ({ident}) "
+            "-- not the whole re-briefing, which is a separate call. Whether "
+            "that id is still held is unknown from here: the daemon is what "
+            "stores the text and it is what did not answer."
+        )
+        protocol = (
+            "protocol: do not read this as 'no such id' -- that is a "
+            "different answer and it arrives on stderr with exit 1. Run "
+            f"`claunch rebrief --id {ident}` again; it will answer once the "
+            "daemon is back. If it keeps failing, say that the text is "
+            "unrecoverable for now rather than reconstructing it from memory "
+            "-- reconstructing it is the thing the id exists to avoid."
+        )
+    else:
+        missing = (
+            "what is missing: who is reachable on your mesh, which replies "
+            "you owe, where your cflow run stands, your parent and children, "
+            "and your opening task. None of it is in this conversation any "
+            "more."
+        )
+        protocol = (
+            "protocol: do not carry on as if the summary above were "
+            "complete. Run `claunch rebrief` again -- it is the same command "
+            "and it will answer once the daemon is back. If it keeps "
+            "failing, say so rather than guessing at the missing state."
+        )
+    head = "# claunch rebrief: unavailable"
+    if ident:
+        head += f" [text id: {ident}]"
     return "\n".join(
         [
             "---",
-            "# claunch rebrief: unavailable -- machine-generated",
+            head + " -- machine-generated",
             f"session: {name}",
             "what happened: your context was compacted or cleared, and the "
             "re-briefing that restores the derived half of it could not be "
             f"fetched -- the daemon did not answer ({exc}).",
-            "what is missing: who is reachable on your mesh, which replies "
-            "you owe, where your cflow run stands, your parent and children, "
-            "and your opening task. None of it is in this conversation any "
-            "more.",
-            "protocol: do not carry on as if the summary above were complete. "
-            "Run `claunch rebrief` again -- it is the same command and it "
-            "will answer once the daemon is back. If it keeps failing, say so "
-            "rather than guessing at the missing state.",
+            missing,
+            protocol,
             "---",
         ]
     )
@@ -626,9 +660,13 @@ def _cmd_rebrief(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 2
+    # Read before the try, not inside it. This comes from the argv the caller
+    # typed and needs no daemon, and the except branch below has to know which
+    # of the two calls it is answering -- computed inside, it would be unbound
+    # exactly when ensure_running() is what raised.
+    ident = (getattr(args, "id", "") or "").strip()
     try:
         client = daemon_client.ensure_running()
-        ident = (getattr(args, "id", "") or "").strip()
         if ident:
             # One addressed block instead of the whole briefing. Printed as
             # plain text on stdout like the block is, because the caller is an
@@ -666,7 +704,7 @@ def _cmd_rebrief(args: argparse.Namespace) -> int:
         # is declared non-blocking -- failing the hook does not un-compact
         # anything, and a session that at least knows what it is missing can
         # ask for it again.
-        print(_rebrief_unavailable(name, exc))
+        print(_rebrief_unavailable(name, exc, ident))
         return 0
     if not block:
         print(
