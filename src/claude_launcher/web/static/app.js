@@ -207,11 +207,12 @@ function syncBulkActions(sessions) {
    row still names, force it off the roster or keep it — needs a third
    button. Resolves to the pressed action's `value`; Escape, the backdrop
    and Cancel are all null, so every caller's "did not answer" is one shape. */
-function showModal({ title, body, actions }) {
+function showModal({ title, body, actions, checkbox = null }) {
   return new Promise((resolve) => {
     const overlay = $("modal-overlay");
     $("modal-title").textContent = title;
-    $("modal-body").textContent = body;
+    const bodyEl = $("modal-body");
+    bodyEl.textContent = body;
     const row = $("modal-actions");
     row.innerHTML = "";
     const done = (value) => {
@@ -220,14 +221,31 @@ function showModal({ title, body, actions }) {
       resolve(value);
     };
     const onKey = (e) => { if (e.key === "Escape") done(null); };
+    let check = null;
+    if (checkbox) {
+      const label = document.createElement("label");
+      label.classList.add("modal-check");
+      check = document.createElement("input");
+      check.type = "checkbox";
+      label.append(check, document.createTextNode(checkbox.label));
+      bodyEl.appendChild(label);
+    }
+    const buttons = [];
     for (const a of actions) {
       const btn = document.createElement("button");
       btn.type = "button";
       btn.textContent = a.label;
       if (a.danger) btn.classList.add("danger");
+      if (a.requiresCheck) btn.disabled = !check || !check.checked;
       btn.addEventListener("click", () => done(a.value));
       row.appendChild(btn);
+      buttons.push({ action: a, button: btn });
     }
+    if (check) check.addEventListener("change", () => {
+      for (const { action, button } of buttons) {
+        if (action.requiresCheck) button.disabled = !check.checked;
+      }
+    });
     // Assigned, not addEventListener'd: each asking replaces the last one's
     // backdrop handler instead of stacking a resolved promise's behind it.
     overlay.onclick = (e) => { if (e.target === overlay) done(null); };
@@ -3058,49 +3076,53 @@ $("term-kill").addEventListener("click", async () => {
   refreshSessions();
 });
 
-$("term-remove").addEventListener("click", async () => {
-  if (!currentName) return;
-  const name = currentName;
+async function removeExitedSession(name) {
+  const memberships = sessMeshes(name);
+  const inMesh = memberships.length > 0;
+  const meshNames = memberships.map((m) => m.mesh).join(", ");
   // This is the one path that makes the session unresumable, so it asks
   // first. Only ever shown on an exited session; the DELETE route refuses
-  // a running one outright.
-  if (!(await modalConfirm(
-    `Remove exited session '${name}'?`,
-    "The daemon forgets it, so it can no longer be resumed from here.",
-    "Remove"
-  ))) return;
-  let resp = await api(`/api/sessions/${encodeURIComponent(name)}`,
-                       { method: "DELETE" });
-  // The one refusal this route has: a mesh row still names the record. The
-  // same choice the bulk buttons get (offerForce), asked for one session.
-  if (resp.status === 409) {
-    const doc = await resp.json().catch(() => ({}));
-    const go = await showModal({
-      title: `'${name}' is still a mesh member`,
-      body:
-        (doc.error || "A mesh roster still names this record.") +
-        "\n\nForce remove takes it off its rosters first, then drops the " +
-        "record.",
-      actions: [
-        { label: "Keep it", value: null },
-        { label: "Force remove", value: true, danger: true },
-      ],
-    });
-    if (!go) return;
-    resp = await api(`/api/sessions/${encodeURIComponent(name)}?force=1`,
-                     { method: "DELETE" });
-  }
+  // a running one outright. A mesh membership changes this same question,
+  // rather than causing a 409 and a second question after the first DELETE.
+  const choice = await showModal({
+    title: `Remove exited session '${name}'?`,
+    body: inMesh
+      ? `This session is still a member of: ${meshNames}.\n\n` +
+        "Force remove takes it off those rosters first, then forgets the " +
+        "record so it can no longer be resumed."
+      : "The daemon forgets it, so it can no longer be resumed from here.",
+    checkbox: inMesh ? {
+      label: "I understand it is still in a mesh and want to force remove it.",
+    } : null,
+    actions: [
+      { label: "Cancel", value: null },
+      {
+        label: "Remove", value: { force: inMesh }, danger: true,
+        requiresCheck: inMesh,
+      },
+    ],
+  });
+  if (!choice) return false;
+  const force = choice.force ? "?force=1" : "";
+  const resp = await api(`/api/sessions/${encodeURIComponent(name)}${force}`,
+                         { method: "DELETE" });
   if (!resp.ok) {
     const doc = await resp.json().catch(() => ({}));
     await modalInfo(`Could not remove '${name}'`,
                     doc.error || `HTTP ${resp.status}`);
     refreshSessions();
-    return;
+    return false;
   }
   detach();
   currentName = null;
   location.hash = "#/";
   refreshSessions();
+  return true;
+}
+
+$("term-remove").addEventListener("click", async () => {
+  if (!currentName) return;
+  await removeExitedSession(currentName);
 });
 
 /* Stop everything. The records stay and every one of them is resumable after,
