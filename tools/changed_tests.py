@@ -28,12 +28,31 @@ Selection, in two rules, both checkable by eye:
 2. **A changed module pulls in its same-named test module.** If you touched
    ``src/.../mesh.py`` and ``tests/test_mesh.py`` exists, it runs; likewise
    ``tools/deploy_check.py`` and ``tests/test_deploy_check.py``. This is a
-   convention, not a guarantee -- 31 of 79 source modules have a same-named
+   convention, not a guarantee -- 47 of 107 source modules have a same-named
    test -- so it only ever *widens* the selection and never narrows it.
-3. **A changed file that is not python pulls in whatever guards it.** Rule 2
-   can only follow a naming convention between ``.py`` files, so without this
-   a round that edits only workflow yaml selects nothing -- even though
-   several test modules exist for exactly those files. Two halves:
+
+   The convention standing alone was the second hole this file grew, and it
+   was measured four times before it was closed. ``daemon/cflow_clock.py`` has
+   no ``tests/test_cflow_clock.py``, so a round that rewrote it selected
+   **nothing** and exited 0; ten test modules import it. Three more rounds
+   found the same shape on ``daemon/mesh.py`` (1 selected, 31 import it -- and
+   ``test_mesh_wire.py``, which was not selected, held three real failures),
+   ``daemon/screen.py`` (1 against 6) and ``cli_sessions.py`` (1 against 7).
+   So rule 2 has two more halves, and both derive rather than remember:
+
+   a. **2b -- whoever imports it.** :func:`importers` parses the test modules
+      and selects the ones whose imports name the changed module. Direct
+      imports only; :func:`importers` carries the measurement for why the
+      transitive closure is not an option.
+   b. **2c -- whoever names it.** :func:`mentioning`, rule 3a's text search,
+      applied to python too. It is what catches a guard that pins a file by
+      string rather than importing it -- ``test_delivery_contract`` keys a
+      table on ``("cli_sessions.py", "_cmd_send_keys")`` and imports nothing.
+      Dunder files are excluded, see :func:`_is_dunder`.
+3. **A changed file that is not python pulls in whatever guards it.** Rules 2
+   and 2b need a python module to follow, so without this a round that edits
+   only workflow yaml selects nothing -- even though several test modules
+   exist for exactly those files. Two halves:
 
    a. any test module whose source *refers to the file* (a test that pins a
       yaml names it in order to load it) -- by stem when the stem looks like
@@ -123,6 +142,7 @@ and "this is fine" are the two things a gate must never spell the same way.
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import importlib.util
 import json
@@ -252,6 +272,11 @@ def select(repo: Path, paths: List[str]) -> List[str]:
             twin = Path("tests") / f"test_{p.stem}.py"
             if (repo / twin).is_file():
                 picked.add(twin.as_posix())
+            mod = module_name(rel)                        # 2b
+            if mod:
+                picked.update(importers(repo, mod))
+            if not _is_dunder(p):                         # 2c
+                picked.update(mentioning(repo, p.name))
             continue
         posix = p.as_posix()
         picked.update(mentioning(repo, p.name))          # 3a
@@ -332,6 +357,142 @@ def mentioning(repo: Path, name: str) -> List[str]:
         except OSError:
             continue
     return hits
+
+
+def module_name(rel: str) -> Optional[str]:
+    """``src/claude_launcher/daemon/screen.py`` -> ``claude_launcher.daemon.screen``.
+
+    ``None`` for anything outside ``src`` -- ``tools/*.py`` is not importable
+    under a package name (its tests load it by path with
+    ``spec_from_file_location``), so rule 2c's text search is what speaks for
+    those, and this returns nothing rather than inventing a name.
+
+    A package's ``__init__.py`` is named by its *package*
+    (``claude_launcher.daemon``), which is what a test actually writes when it
+    imports from it.
+    """
+    p = Path(rel)
+    if p.suffix != ".py" or p.parts[:1] != ("src",):
+        return None
+    parts = list(p.with_suffix("").parts[1:])
+    if parts and parts[-1] == "__init__":
+        parts.pop()
+    return ".".join(parts) or None
+
+
+def _is_dunder(p: Path) -> bool:
+    """``__init__.py`` / ``__main__.py`` -- excluded from rule 2c, measured.
+
+    ``needle("__init__.py")`` is the compound stem ``__init__``, which is not a
+    reference to anything: it appears in 35 of this suite's 118 test modules,
+    none of which are about the package's three-line ``__init__``. Rule 2b
+    already selects that file's real dependents by import, correctly and
+    without the noise.
+    """
+    return p.stem.startswith("__") and p.stem.endswith("__")
+
+
+def _imported_names(path: Path, pkg: str = "") -> set:
+    """Every module name ``path`` imports, as written -- and their parents.
+
+    ``import a.b.c`` and ``from a.b import c`` are both recorded as
+    ``a.b.c`` (plus ``a.b``), because a test reaches a module either way and
+    the selection must not care which it chose. Relative imports are resolved
+    against ``pkg`` -- ``src`` uses them exclusively (this repository has zero
+    absolute ``claude_launcher`` imports inside ``src``), so a resolver that
+    skipped them would read the package as importing nothing.
+
+    A file that will not parse contributes nothing rather than raising: this
+    gate runs on working trees, and a half-typed module is a normal state for
+    one. The tree it cannot parse is the tree pytest is about to reject
+    anyway.
+    """
+    out = set()
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8", errors="replace"))
+    except (SyntaxError, ValueError, OSError):
+        return out
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                out.add(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.level:
+                base = pkg.split(".") if pkg else []
+                if node.level > 1:
+                    base = base[: len(base) - (node.level - 1)]
+                mod = ".".join([b for b in base if b] + ([node.module] if node.module else []))
+            else:
+                mod = node.module or ""
+            if not mod:
+                continue
+            out.add(mod)
+            for alias in node.names:
+                out.add(f"{mod}.{alias.name}")
+    return out
+
+
+#: ``repo`` -> {test module -> the module names it imports}. Parsing 118 test
+#: modules costs ~0.1s, and :func:`select` asks once per changed path.
+_TEST_IMPORTS: dict = {}
+
+
+def test_imports(repo: Path) -> dict:
+    """What each test module imports, parsed once per repository."""
+    key = str(repo.resolve())
+    cached = _TEST_IMPORTS.get(key)
+    if cached is None:
+        cached = {
+            f"tests/{path.name}": _imported_names(path)
+            for path in sorted((repo / "tests").glob("test_*.py"))
+        }
+        _TEST_IMPORTS[key] = cached
+    return cached
+
+
+def importers(repo: Path, mod: str) -> List[str]:
+    """Rule 2b: test modules that import the changed module.
+
+    Rule 2 maps a source file to its same-named test and stops there, which
+    is a naming convention standing in for a dependency. Where the two agree
+    it is right by luck; where they do not it selects nothing at all, and 60
+    of this repository's 107 source modules have no same-named test.
+
+    Four rounds measured the gap before this was written, each one the same
+    shape -- selection strictly smaller than the set of modules that actually
+    read the file:
+
+    ======================  =========  ============  ==================
+    changed                 rule 2     imports it    what it cost
+    ======================  =========  ============  ==================
+    ``daemon/cflow_clock``  0 modules  10 modules    nothing ran; exit 0
+    ``daemon/mesh``         1 module   31 modules    3 real failures in
+                                                     ``test_mesh_wire``
+    ``daemon/screen``       1 module   6 modules     no regression
+    ``cli_sessions``        1 module   7 modules     no regression
+    ======================  =========  ============  ==================
+
+    Only the ``mesh`` row was a caught regression; the others say the
+    selection was narrow without proving anything was broken. That is the
+    honest reading, and it is still the reason to widen -- a gate whose
+    coverage is decided by whether someone happened to name a file
+    ``test_<x>.py`` is not measuring what it claims to.
+
+    This is the same principle rule 3a already applies to non-python files:
+    **a relationship written down in the files is read out of the files.**
+    An import is that relationship, written in a place that cannot go stale
+    the way a hand-kept table does -- and ``EXPLICIT_GUARDS``'s own history
+    is what a hand-kept table costs.
+
+    Widening only, like rules 2 and 3a. The limit is deliberate: this reads
+    what a test *imports*, not what its imports transitively reach. The
+    transitive closure was measured on this suite and selects a median of
+    1054 of 2489 tests -- 42% of the suite, for the median source module,
+    and 25% or more for 92 of 107 of them. That is the full sweep under
+    another name, and the whole premise of this gate is that the worker's
+    run is cheap. Direct imports are a median of 88 tests.
+    """
+    return sorted(name for name, imps in test_imports(repo).items() if mod in imps)
 
 
 #: How many of this session's own past basetemps :func:`prune_basetemps`
