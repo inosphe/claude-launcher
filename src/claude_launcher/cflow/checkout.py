@@ -26,6 +26,7 @@ must never fail because a best-effort lookup did.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 from .. import daemon_client
@@ -160,7 +161,10 @@ RUN_CWD = "run cwd"
 
 
 def own_checkout(
-    *, session: Optional[str] = None, cwd: Optional[str] = None
+    explicit: Optional[str] = None,
+    *,
+    session: Optional[str] = None,
+    cwd: Optional[str] = None,
 ) -> Tuple[str, str]:
     """The checkout whose branch a gate under ``tools/`` should ask about.
 
@@ -178,10 +182,31 @@ def own_checkout(
     function. Measured in a worker session: a verify command printing
     ``CLAUNCH_SESSION`` printed that session's own name.
 
+    ``explicit`` is a directory the caller was given outright (a gate's
+    ``--repo``). It wins without consulting anything, so a test or a hand-run
+    is never at the mercy of a daemon, and it is answered here rather than in
+    each caller: the three answers are one decision, and splitting it left
+    :data:`NAMED` defined in this module and spelled as a bare string in two
+    others.
+
     Degrades in one direction only. No daemon, no managed session, or a
     session the daemon does not know all fall back to ``cwd`` -- the answer
     every caller gave before this existed, so nothing that worked stops.
+
+    What it does NOT answer, and the distinction is the whole limit of this
+    fix: *which branch this run is about*. It answers where the session
+    stands, and the two agree only when the session stands in the tree it
+    edits. A session started at the repository root that works in a worktree
+    it made by hand is invisible here -- the daemon records ``cwd`` at
+    creation and only an operator ``migrate`` (stop, relaunch) changes it, so
+    the session cannot correct the record itself. Measured on a live mesh:
+    17 of 23 live sessions stood in a worktree, and the 6 that did not
+    included the one whose round this defect blocked. For those, no machine
+    fact links the run to its branch, and the gates say "cannot tell" rather
+    than guess.
     """
+    if explicit is not None:
+        return str(Path(explicit).resolve()), NAMED
     who = session if session is not None else state_mod.current_scope()
     here = state_mod.resolve_cwd(cwd)
     occ = inspect(session=who, cwd=cwd)

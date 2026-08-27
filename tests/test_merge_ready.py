@@ -417,3 +417,107 @@ def test_master_is_the_target_when_nothing_says_otherwise(repo, capsys):
     code, out = _verdict(repo, capsys, "--branch", "clean-branch")
     assert "(default)" in out
     assert merge_ready.DEFAULT_TARGET in out
+
+
+# --------------------------------------------------------------------------- #
+# whose branch the gate asks about
+# --------------------------------------------------------------------------- #
+# The same premise ``landed_check`` carried, failing in the opposite
+# direction. Both gates read ``--repo`` default ``.`` -- the directory the
+# cflow run was keyed to -- as "my branch". When the run was keyed at the
+# repository root while the worker stood in a worktree, ``landed_check``
+# answered exit 1 and stopped the round; this one answered exit 0 about a
+# branch it had never read, and so stayed quiet. Measured at the root of a
+# live repository, by two different routes to the same wrong pass:
+#
+#     ready: nothing to land -- HEAD is master (3cf8ced92a10)
+#     ready: aligned -- target origin/master (upstream) +0 / branch +660
+#
+# The second is why the check compares branches rather than names: with the
+# upstream set, the target arrives spelled ``origin/master`` and an equality
+# test against ``master`` does not fire.
+from claude_launcher.cflow import checkout  # noqa: E402
+
+
+def _root_and_worktree(tmp_path_factory, label):
+    """A repo on ``master``; the candidate branch is in a linked worktree."""
+    root = tmp_path_factory.mktemp(label)
+    _git(root, "init", "-b", "master")
+    _write(root, "base.py", "base = 1\n")
+    _commit(root, "base")
+    wt = root.parent / (root.name + "-wt")
+    _git(root, "worktree", "add", "-b", "feature", str(wt))
+    _write(wt, "mine.py", "x = 1\n")
+    _commit(wt, "work")
+    return root, wt
+
+
+def test_standing_on_the_integration_target_is_not_a_pass(
+    tmp_path_factory, capsys
+):
+    root, _ = _root_and_worktree(tmp_path_factory, "on-target")
+    code, out = _verdict(root, capsys)
+    assert code == merge_ready.CANNOT_TELL, out
+    assert "integration target itself" in out
+
+
+def test_the_target_arriving_as_a_remote_name_still_fires(
+    tmp_path_factory, capsys
+):
+    """``master`` tracking ``origin/master`` is one branch under two names.
+
+    This spelling is what a real checkout has, and it is the one the first
+    version of the check missed -- it compared the names for equality, so the
+    gate went on to read ``behind == 0`` and print ``ready: aligned``.
+    """
+    root, _ = _root_and_worktree(tmp_path_factory, "upstream")
+    clone = root.parent / (root.name + "-clone")
+    _git(root, "clone", str(root), str(clone))
+    assert "origin/master" in _git(clone, "rev-parse", "--abbrev-ref", "master@{upstream}")
+    code, out = _verdict(clone, capsys)
+    assert code == merge_ready.CANNOT_TELL, out
+    assert "integration target itself" in out
+
+
+def test_a_branch_cut_and_not_committed_on_is_still_ready(
+    tmp_path_factory, capsys
+):
+    """The case the ``tip == target_tip`` shortcut was written for.
+
+    It must keep answering ``ready``: this checkout holds a real candidate
+    branch, it simply has nothing on it yet. Only a checkout standing on the
+    target itself is the ill-posed question.
+    """
+    root, _ = _root_and_worktree(tmp_path_factory, "fresh-cut")
+    _git(root, "checkout", "-b", "fresh")
+    code, out = _verdict(root, capsys)
+    assert code == merge_ready.READY, out
+    assert "nothing to land" in out
+
+
+def test_the_run_directory_is_not_taken_for_the_workers_tree(
+    tmp_path_factory, monkeypatch, capsys
+):
+    """Keyed at the root, standing in the worktree: read the worktree."""
+    root, wt = _root_and_worktree(tmp_path_factory, "keyed-away")
+    monkeypatch.setattr(
+        checkout, "own_checkout", lambda *a, **k: (str(wt), checkout.SESSION)
+    )
+    monkeypatch.chdir(root)
+    code = merge_ready.main([])
+    out = capsys.readouterr()
+    assert code == merge_ready.READY, out.out + out.err
+    assert "aligned" in out.out
+
+
+def test_an_explicit_repo_survives_the_lookup_failing(
+    tmp_path_factory, monkeypatch, capsys
+):
+    _, wt = _root_and_worktree(tmp_path_factory, "explicit")
+
+    def boom(*a, **k):
+        raise RuntimeError("no daemon")
+
+    monkeypatch.setattr(checkout, "own_checkout", boom)
+    code, out = _verdict(wt, capsys)
+    assert code == merge_ready.READY, out

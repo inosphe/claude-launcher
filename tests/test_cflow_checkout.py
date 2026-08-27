@@ -236,3 +236,78 @@ def test_the_command_says_it_could_not_ask_rather_than_reporting_all_clear(
     assert code == 0
     assert "unknown" in out
     assert "(none)" not in out
+
+
+# --------------------------------------------------------------------------- #
+# own_checkout: which tree a gate under tools/ should ask about
+# --------------------------------------------------------------------------- #
+# inspect() reports the mismatch; own_checkout() resolves it. The gates
+# landed_check and merge_ready took "the run's directory" for "my branch",
+# so a run keyed at the repository root asked whether *master* had landed --
+# a question with no true answer, and both answered it with confidence
+# (landed_check "not yet", exit 1; merge_ready "ready", exit 0).
+def test_an_explicit_directory_wins_without_asking_anyone(flow_dir, monkeypatch):
+    """``--repo`` must never depend on a daemon being up.
+
+    It is what tests and hand-runs pass, and it is the escape a worker is told
+    to use when the machine cannot find its tree. A daemon that is down or
+    answering nonsense may not change what an explicitly named path means.
+    """
+    _sessions(monkeypatch, fail="boom")
+    monkeypatch.setenv(state_mod.SESSION_ENV, "s1")
+    where, how = checkout.own_checkout(str(flow_dir / "named"))
+    assert how == checkout.NAMED
+    assert where == state_mod.resolve_cwd(str(flow_dir / "named"))
+
+
+def test_the_session_s_own_tree_beats_the_directory_the_run_is_keyed_to(
+    flow_dir, monkeypatch
+):
+    """The defect's exact shape: run keyed at the root, session in a worktree.
+
+    Measured on a live mesh before this test existed -- the gate read the
+    root's HEAD (``master``) and reported "not yet" about a branch that had
+    in fact landed.
+    """
+    mine = flow_dir / "worktrees" / "feature"
+    _sessions(monkeypatch, _row("s1", mine))
+    monkeypatch.setenv(state_mod.SESSION_ENV, "s1")
+    where, how = checkout.own_checkout(cwd=str(flow_dir))
+    assert how == checkout.SESSION
+    assert where == state_mod.resolve_cwd(str(mine))
+
+
+def test_a_session_the_daemon_cannot_place_falls_back_to_the_run_directory(
+    flow_dir, monkeypatch
+):
+    """Degrade to the old answer, never to an error.
+
+    A gate that failed because a best-effort lookup failed would be worse
+    than the defect it fixes: the same contract :func:`inspect` keeps.
+    """
+    _sessions(monkeypatch, _row("somebody-else", flow_dir / "x"))
+    monkeypatch.setenv(state_mod.SESSION_ENV, "s1")
+    assert checkout.own_checkout(cwd=str(flow_dir)) == (
+        state_mod.resolve_cwd(str(flow_dir)),
+        checkout.RUN_CWD,
+    )
+
+
+def test_no_daemon_falls_back_to_the_run_directory(flow_dir, monkeypatch):
+    _stub_connect(monkeypatch, daemon_client, lambda: None)
+    monkeypatch.setenv(state_mod.SESSION_ENV, "s1")
+    assert checkout.own_checkout(cwd=str(flow_dir)) == (
+        state_mod.resolve_cwd(str(flow_dir)),
+        checkout.RUN_CWD,
+    )
+
+
+def test_an_unmanaged_session_falls_back_to_the_run_directory(
+    flow_dir, monkeypatch
+):
+    """No ``CLAUNCH_SESSION``: there is no recorded home to look up."""
+    monkeypatch.delenv(state_mod.SESSION_ENV, raising=False)
+    assert checkout.own_checkout(cwd=str(flow_dir)) == (
+        state_mod.resolve_cwd(str(flow_dir)),
+        checkout.RUN_CWD,
+    )

@@ -78,21 +78,22 @@ def _resolve_repo(explicit: Optional[str]) -> Tuple[Path, str]:
     """Which checkout to ask about, and how we came to think so.
 
     ``--repo`` wins outright, so tests and hand-runs are never at the mercy of
-    a daemon. With it omitted the run's directory is no longer assumed to be
-    this session's own tree: :func:`claude_launcher.cflow.checkout.own_checkout`
+    a daemon; that precedence lives in ``own_checkout`` so all three answers
+    are decided in one place. With it omitted the run's directory is no
+    longer assumed to be this session's own tree: :func:`claude_launcher.cflow.checkout.own_checkout`
     asks the daemon where the session stands. Any failure -- no package, no
     daemon, an unmanaged session -- falls back to the working directory, which
     is what this always did, so nothing that worked stops.
     """
-    if explicit is not None:
-        return Path(explicit).resolve(), "named"
     try:
         from claude_launcher.cflow import checkout
 
-        where, how = checkout.own_checkout()
+        where, how = checkout.own_checkout(explicit)
         return Path(where), how
     except Exception:
-        return Path(".").resolve(), "run cwd"
+        # No package, no daemon, no managed session: the answer every caller
+        # gave before this existed.
+        return Path(explicit or ".").resolve(), "named" if explicit else "run cwd"
 
 
 def _git(repo: Path, *args: str) -> subprocess.CompletedProcess:
