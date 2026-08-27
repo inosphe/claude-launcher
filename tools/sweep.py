@@ -782,7 +782,20 @@ def cmd_check(args) -> int:
         # read, it was found by eye. A reader of this message should not have
         # to guess that something is lying next to the receipt.
         parked = receipt.get("output")
-        if parked:
+        if parked and not (path.parent / parked).is_file():
+            # The receipt names a file that is not there. Saying the path
+            # plainly would be this line telling a lie it invented: measured on
+            # a receipt left standing by a later run that deleted the file and
+            # then failed to file its own verdict (claunch-r103), where the
+            # gate named a path nothing was at. A pointer that cannot be
+            # followed is also the loudest evidence that this receipt is not
+            # what it looks like, so it is said rather than hidden.
+            where = (
+                f"\nfull output: {path.parent / parked} -- MISSING. This "
+                f"receipt names an output file that is not on disk, so it may "
+                f"not describe the last run of this commit."
+            )
+        elif parked:
             where = f"\nfull output: {path.parent / parked}"
         elif receipt.get("output_error"):
             # Say that the output is missing rather than absent. Otherwise this

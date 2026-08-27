@@ -914,11 +914,11 @@ def test_a_green_run_that_cannot_clear_the_old_output_still_files(
     assert "could not be removed" in capsys.readouterr().err
 
 
-def test_the_gate_tells_the_five_receipt_states_apart(repo, receipts, capsys):
+def test_the_gate_tells_the_six_receipt_states_apart(repo, receipts, capsys):
     """``output_error`` split the receipt into more states than two, and a
     reader has to land on the right one.
 
-    There are five, and the pairs that share a shape are what make it a test:
+    There are six, and the pairs that share a shape are what make it a test:
     two receipts carry *neither* key (a clean green one, and a red one filed
     before the field existed) and two carry ``output_error`` (a green run that
     could not clear the old file, and a red run that could not write its own).
@@ -930,12 +930,19 @@ def test_the_gate_tells_the_five_receipt_states_apart(repo, receipts, capsys):
     | green, nothing beside it     | none          | green, no warning        |
     | green, stale file left over  | output_error  | green + WARNING          |
     | red, output saved            | output        | red, full output: <path> |
+    | red, output named, not there | output        | red, full output: MISSING |
     | red, output lost             | output_error  | red, full output: NOT SAVED |
     | red, filed before this field | none          | red, neither line        |
 
-    (The count was four when this was first written. It missed the second row
-    -- a state the green-branch guard had just introduced -- and s181 caught
-    it in review.)
+    Note the two rows that carry the same key and differ only by what is on
+    disk. That pair is not hypothetical: a later run at the same commit
+    deletes the file and can then fail to file its own verdict, leaving this
+    receipt standing and naming a path nothing is at (claunch-r103).
+
+    (The count was four when this was first written, then five, then six --
+    each step a state a fix had just introduced and the table had not caught
+    up with. s181 found the fifth in review and the sixth by blocking the
+    receipt write itself.)
     """
     tip = _git(repo, "rev-parse", "HEAD").strip()
     tree = _git(repo, "rev-parse", "HEAD^{tree}").strip()
@@ -965,21 +972,25 @@ def test_the_gate_tells_the_five_receipt_states_apart(repo, receipts, capsys):
         return code, capsys.readouterr()
 
     green = dict(exit_code=0, counts=GREEN_COUNTS, failures=[])
-    states = {
-        "green_clean": gate(**green),
-        "green_leftover": gate(
-            **green, output_error=f"{tip}.output.txt: could not be removed"
-        ),
-        "red_saved": gate(output=f"{tip}.output.txt"),
-        "red_lost": gate(output_error=f"{tip}.output.txt: [WinError 5]"),
-        "red_old": gate(),
-    }
+    parked = sweep.output_path(repo, tip, receipts)
+    states = {}
+    states["green_clean"] = gate(**green)
+    states["green_leftover"] = gate(
+        **green, output_error=f"{tip}.output.txt: could not be removed"
+    )
+    parked.write_text("E   AssertionError\n", encoding="utf-8")
+    states["red_saved"] = gate(output=f"{tip}.output.txt")
+    parked.unlink()
+    states["red_dangling"] = gate(output=f"{tip}.output.txt")
+    states["red_lost"] = gate(output_error=f"{tip}.output.txt: [WinError 5]")
+    states["red_old"] = gate()
 
     codes = {k: v[0] for k, v in states.items()}
     assert codes == {
         "green_clean": 0,
         "green_leftover": 0,   # bookkeeping is not a verdict about the tree
         "red_saved": 1,
+        "red_dangling": 1,
         "red_lost": 1,
         "red_old": 1,
     }
@@ -990,12 +1001,16 @@ def test_the_gate_tells_the_five_receipt_states_apart(repo, receipts, capsys):
     assert "could not be removed" in said["green_leftover"]
     assert f"{tip}.output.txt" in said["red_saved"]
     assert "NOT SAVED" not in said["red_saved"]
+    assert "MISSING" not in said["red_saved"]
+    assert "MISSING" in said["red_dangling"], (
+        "the gate pointed at an output file that is not on disk"
+    )
     assert "NOT SAVED" in said["red_lost"]
     assert "full output" not in said["red_old"], (
         "a receipt from before this field reads as a loss it never had"
     )
 
-    assert len(set(said.values())) == 5, (
+    assert len(set(said.values())) == 6, (
         "two receipt states are reported identically: "
         + repr({k: v[:60] for k, v in said.items()})
     )
