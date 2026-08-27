@@ -19,6 +19,7 @@ import stat
 import time
 from typing import Optional
 
+from . import atomic
 from .profile import Profile
 
 #: The one launcher-managed profile token (setup-token or provider/API token).
@@ -66,7 +67,7 @@ def migrate_legacy_api_key(profile: Profile) -> bool:
     legacy = profile.config_dir / LEGACY_API_KEY_FILENAME
     if target.exists() or not legacy.is_file():
         return False
-    legacy.replace(target)
+    atomic.replace(legacy, target)
     return True
 
 

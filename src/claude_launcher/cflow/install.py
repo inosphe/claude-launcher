@@ -19,11 +19,11 @@ from __future__ import annotations
 import filecmp
 import hashlib
 import json
-import os
 import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple
 
+from .. import atomic
 from . import state
 
 SKILL_MD = """\
@@ -392,7 +392,7 @@ def write_seed_record(workflows_dir: Path, record: Dict[str, str]) -> None:
     tmp.write_text(
         json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    os.replace(tmp, path)
+    atomic.replace(tmp, path)
 
 
 def worktree_state(src: Path, dest: Path, record: Dict[str, str]) -> str:

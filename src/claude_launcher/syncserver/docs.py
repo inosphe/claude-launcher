@@ -13,7 +13,6 @@ silently overwriting whatever arrived in between.
 from __future__ import annotations
 
 import json
-import os
 import re
 import time
 from dataclasses import dataclass
@@ -21,6 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import yaml
+
+from .. import atomic
 
 #: Namespaces name a file on disk, so keep them boring and path-traversal-proof.
 _NAMESPACE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
@@ -191,4 +192,4 @@ class DocStore:
 def _atomic_write(path: Path, text: str) -> None:
     tmp = path.with_name(path.name + ".tmp")
     tmp.write_text(text, encoding="utf-8")
-    os.replace(tmp, path)
+    atomic.replace(tmp, path)

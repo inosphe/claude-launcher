@@ -24,6 +24,8 @@ import re
 from pathlib import Path
 from typing import Optional
 
+from . import atomic
+
 #: Everything a slug keeps; the rest becomes ``-``. This is claude's own rule,
 #: read off the directories it makes — change it only against evidence.
 _SLUG_RE = re.compile(r"[^A-Za-z0-9]")
@@ -107,5 +109,5 @@ def relocate(
     if src == dest:
         return dest
     dest.parent.mkdir(parents=True, exist_ok=True)
-    os.replace(src, dest)
+    atomic.replace(src, dest)
     return dest
