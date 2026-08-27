@@ -9645,6 +9645,30 @@ function wfDiagramSvg(wf, run, selected) {
     straight.set(r.from, n + 1);
   }
 
+  /* Where paths come back together, and where they split. A fork is already
+     visible — the arcs leave the box in front of the reader — but a MERGE is
+     not: an arc arriving from four rows up looks exactly the same whether it
+     is the only way in or the second of two, so finding them meant tracing
+     every arc to its far end. improv-worker has two (`rebase`, from landing
+     and landing-review; `wrapup`, from landing-review and landed) and neither
+     was drawn as anything.
+
+     Only arrivals from ABOVE count. A loop back is a retry, not a
+     convergence: it is one path returning to itself, it already reads as one
+     on the left rail, and counting it would call every retry target a merge.
+
+     Forks count DESTINATIONS, not options — which is the fact a reader cannot
+     get from `select:agent`. improv-worker's await-landing offers three
+     options that lead to two places, because `rebase` and `remeasure` both go
+     back to rebase. Three choices, two outcomes. */
+  const mergeIn = new Map();
+  const forkOut = new Map();
+  for (const r of routes) {
+    if (rowOf(r.to) > rowOf(r.from)) mergeIn.set(r.to, (mergeIn.get(r.to) || 0) + 1);
+    forkOut.set(r.from, (forkOut.get(r.from) || 0) + 1);
+  }
+  const isMerge = (id) => (mergeIn.get(id) || 0) > 1;
+
   const parts = [];
   // width/height attrs pin the drawing at its natural size (one SVG unit =
   // one CSS pixel): the column growing must not blow the graph up with it.
@@ -9654,9 +9678,16 @@ function wfDiagramSvg(wf, run, selected) {
     `<svg viewBox="0 0 ${W} ${H}" width="${W}" height="${H}" ` +
     `xmlns="http://www.w3.org/2000/svg" class="wfd">`
   );
+  // The merge head is the same shape and the same ink, just bigger. Size,
+  // not colour: every colour in this picture already means a run state
+  // (amber a second visit, blue the current step, green a visited one), and
+  // a merge is a fact about the workflow that is true before any run exists.
   parts.push(
     '<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" ' +
     'markerWidth="7" markerHeight="7" orient="auto-start-reverse">' +
+    '<path d="M 0 0 L 10 5 L 0 10 z" fill="#4d5566"/></marker>' +
+    '<marker id="arrow-merge" viewBox="0 0 10 10" refX="9" refY="5" ' +
+    'markerWidth="11" markerHeight="11" orient="auto-start-reverse">' +
     '<path d="M 0 0 L 10 5 L 0 10 z" fill="#4d5566"/></marker></defs>'
   );
 
@@ -9707,7 +9738,8 @@ function wfDiagramSvg(wf, run, selected) {
     // this branch runs at most once per interval is a fact about the
     // workflow, and a reader planning a run needs it before anything is held.
     const ecls = `wfd-edge${pace ? " paced" : ""}${hold ? " held" : ""}`;
-    parts.push(`<path class="${ecls}" d="${d}" marker-end="url(#arrow)"/>`);
+    const head = isMerge(e.to) && rowOf(e.to) > rowOf(e.from) ? "arrow-merge" : "arrow";
+    parts.push(`<path class="${ecls}" d="${d}" marker-end="url(#${head})"/>`);
     for (const o of e.opts) {
       if (o.label) {
         parts.push(
@@ -9754,6 +9786,12 @@ function wfDiagramSvg(wf, run, selected) {
     if (s.select && (s.select.options || []).some((o) => o.interval)) {
       flags.push("paced");
     }
+    // Shape last, after the properties: `fork:2` counts where this step can
+    // send the run, `merge:2` counts how many places send the run here. The
+    // arrowheads say the second one too — this says it in a number, and says
+    // it on the box the reader is already looking at.
+    if ((forkOut.get(id) || 0) > 1) flags.push(`fork:${forkOut.get(id)}`);
+    if (isMerge(id)) flags.push(`merge:${mergeIn.get(id)}`);
     const title = s.title && s.title !== s.id ? `${s.id} — ${s.title}` : s.id;
     // 12px of padding each side, and the visit counter takes the right end of
     // the line when a step has been stood on twice.
@@ -9769,9 +9807,20 @@ function wfDiagramSvg(wf, run, selected) {
       `${escXml(shown)}</text>`
     );
     if (flags.length) {
+      /* This line was never cut to the box, and adding `fork:`/`merge:` to it
+         is what makes that matter: `gate · verify · select:agent · paced ·
+         fork:3 · merge:2` is 54 characters in a box that holds about 34 at
+         10px. No workflow shipped today reaches that, which is the same
+         "green by accident" the titles were in before they were cut. The full
+         line stays reachable as this text's own tooltip, so nothing a cut
+         drops is lost — and the node's <title> keeps carrying the title
+         alone, which is what a reader hovering the box asks for. */
+      const flagStr = flags.join(" · ");
+      const shownFlags = wfdFit(flagStr, 10, NW - 24);
       parts.push(
         `<text class="wfd-flags" x="${NX + 12}" y="${y + 35}">` +
-        `${escXml(flags.join(" · "))}</text>`
+        (shownFlags === flagStr ? "" : `<title>${escXml(flagStr)}</title>`) +
+        `${escXml(shownFlags)}</text>`
       );
     }
     if (visits[id] > 1) {

@@ -436,6 +436,66 @@ const WORKER_FULL = {
   check("a cut string never draws wider than the budget it was given",
         wfdTextW(wfdFit("상위 통합 요청 (머지는 상위 세션 전권)", 13, 80), 13) <= 80,
         wfdFit("상위 통합 요청 (머지는 상위 세션 전권)", 13, 80));
+
+  /* Where paths come back together. Two forward arcs land on `rebase` (from
+     landing and landing-review) and two on `wrapup` (from landing-review and
+     landed); nothing else in this graph is arrived at twice. Before this,
+     every arc ended in the same head and the reader had to trace all sixteen
+     to find that out. */
+  const heads = [...svg.matchAll(
+    /<path class="wfd-edge[^"]*" d="([^"]+)" marker-end="url\(#([^)]+)\)"/g)]
+    .map((m) => {
+      const n = m[1].match(/-?[\d.]+/g).map(Number);
+      return { y1: n[1], y2: n[n.length - 1], head: m[2] };
+    });
+  check("an arc arriving where two paths meet gets the merge head",
+        heads.filter((h) => h.head === "arrow-merge").length === 4,
+        heads.map((h) => `${h.y1}->${h.y2} ${h.head}`));
+  check("...and every other arc keeps the plain one",
+        heads.filter((h) => h.head === "arrow").length === heads.length - 4,
+        heads.length);
+  /* A loop back is a retry, not a convergence — one path returning to itself.
+     Counting it would make every retry target a merge, and `rebase` would
+     claim three ways in when a reader can only arrive from two. */
+  check("a loop back is never drawn as a merge",
+        heads.every((h) => !(h.head === "arrow-merge" && h.y2 < h.y1)),
+        heads.filter((h) => h.y2 < h.y1).map((h) => h.head));
+
+  /* The same two facts as numbers, on the box the reader is already on. */
+  const flagLines = [...svg.matchAll(
+    /<text class="wfd-flags"[^>]*>(?:<title>([^<]*)<\/title>)?([^<]*)</g)]
+    .map((m) => ({ full: m[1], shown: m[2] }));
+  const flagText = flagLines.map((f) => f.shown);
+  check("the two steps two paths meet at say so, and no others do",
+        flagText.filter((t) => t.includes("merge:")).length === 2
+          && flagText.filter((t) => t.includes("merge:2")).length === 2,
+        flagText);
+  /* Forks count DESTINATIONS, not options: await-landing offers three
+     (landed / rebase / remeasure) that lead to two places, so `select:agent`
+     alone tells the reader the wrong number. */
+  check("a fork counts where the run can go, not how many options say it",
+        flagText.filter((t) => t.includes("fork:2")).length === 4
+          && !flagText.some((t) => t.includes("fork:3")),
+        flagText);
+
+  /* This line was never cut to the box before `fork:`/`merge:` were added to
+     it. No shipped workflow overflows it today — which is exactly the state
+     the titles were in right before one did. */
+  check("no flags line draws wider than its box",
+        flagText.every((t) => wfdTextW(t, 10) <= BOX),
+        flagText.map((t) => [t, Math.round(wfdTextW(t, 10))]));
+  check("a flags line that has to be cut keeps its whole text on a hover",
+        flagLines.every((f) => (f.shown.endsWith("…")) === (f.full != null)),
+        flagLines);
+  const LONG = "gate · verify · select:agent · paced · fork:3 · merge:2";
+  check("...and that budget actually bites on a line long enough to need it",
+        wfdTextW(LONG, 10) > BOX && wfdTextW(wfdFit(LONG, 10, BOX), 10) <= BOX,
+        [Math.round(wfdTextW(LONG, 10)), wfdFit(LONG, 10, BOX)]);
+
+  /* The picture must not have grown a lane or an arc to say any of this. */
+  check("marking merges costs no arcs and no upward arcs",
+        heads.length === 16 && heads.filter((h) => h.y2 < h.y1).length === 2,
+        [heads.length, heads.filter((h) => h.y2 < h.y1).length]);
 }
 
 if (failures) {
