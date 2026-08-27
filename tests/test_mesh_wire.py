@@ -494,7 +494,7 @@ def test_a_session_with_no_role_is_given_the_prose(home):
     """
     block = _brief(_Manager(), session_role=None, member_role="worker")
     assert "You are a PRODUCER" in block
-    assert "stance (worker), binding:" in block
+    assert "stance (worker), binding [text id: " in block
     assert "claunch mesh stance m" in block, "the pointer still rides along"
 
 
@@ -515,7 +515,7 @@ def test_a_replaced_vocabulary_is_pasted_because_no_prompt_can_carry_it(home):
         _Manager(), session_role=None, member_role="surveyor", roles_doc=doc
     )
     assert "You measure and you do not guess." in block
-    assert "stance (surveyor), binding:" in block
+    assert "stance (surveyor), binding [text id: " in block
 
 
 def test_a_role_that_disagrees_with_the_prompt_says_which_one_binds(home):
@@ -529,8 +529,27 @@ def test_a_role_that_disagrees_with_the_prompt_says_which_one_binds(home):
     block = _brief(_Manager(), session_role="worker", member_role="leader")
     assert "was spawned as a 'worker'" in block
     assert "On this mesh you are a leader and the text below is what binds" in block
-    assert "stance (leader), binding:" in block
+    assert "stance (leader), binding [text id: " in block
     assert "You set direction and OWN the decisions" in block
+
+
+def test_only_the_pasted_stance_is_named_by_an_id(home):
+    """The id goes where the prose goes, and nowhere else.
+
+    An agent checks an id by looking for it NEXT TO its text. An id printed
+    on a pointer-only briefing would sit in the context with nothing behind
+    it, and the check would answer "yes, I still have it" about a stance the
+    agent has never read. So the pointer carries none, and the id the paste
+    carries is the WHOLE stance's -- the cap below it does not move it.
+    """
+    from claude_launcher import digests
+    from claude_launcher.daemon import mesh_roles
+
+    pasted = _brief(_Manager(), session_role=None, member_role="worker")
+    pointed = _brief(_Manager(), session_role="worker", member_role="worker")
+    assert "text id: " not in pointed
+    ident = digests.text_digest(mesh_roles.resolve().get("worker").stance.strip())
+    assert f"[text id: {ident}]" in pasted
 
 
 def test_a_remote_member_is_left_to_its_own_daemon(home):

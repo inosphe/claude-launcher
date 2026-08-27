@@ -28,6 +28,7 @@ session's children inherit — exactly like the CLI.
 from __future__ import annotations
 
 import os
+from urllib.parse import quote
 
 from . import daemon_client, mcp_rpc
 
@@ -308,9 +309,26 @@ TOOLS = [
             "recorded opening task. Call it whenever your context was "
             "compacted or cleared and the state of your session is no longer "
             "in it — the result is the current truth, not a summary of what "
-            "you used to know."
+            "you used to know. Pass 'id' to pull back ONE block by the content "
+            "id it was given with (your opening task, your binding stance): a "
+            "step reminder names those ids, and an id you cannot find attached "
+            "to its text anywhere in this conversation is the signal that your "
+            "context no longer holds it."
         ),
-        "inputSchema": {"type": "object", "properties": {}, "required": []},
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "id": {
+                    "type": "string",
+                    "description": (
+                        "content id of one block to recall, as printed next "
+                        "to the text when you were given it. Omit for the "
+                        "whole briefing."
+                    ),
+                }
+            },
+            "required": [],
+        },
     },
     {
         "name": "kill",
@@ -514,7 +532,11 @@ def call_tool(name: str, args: dict) -> dict:
     if name == "children":
         return _client().get(f"/api/sessions/{_session()}/children")
     if name == "rebrief":
-        return _client().get(f"/api/sessions/{_session()}/rebrief")
+        ident = str(args.get("id") or "").strip()
+        path = f"/api/sessions/{_session()}/rebrief"
+        if ident:
+            path += f"?id={quote(ident, safe='')}"
+        return _client().get(path)
     if name == "spawn":
         return _spawn(args)
     if name == "kill":

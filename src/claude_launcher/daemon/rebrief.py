@@ -33,13 +33,29 @@ the opening task, which used to be true once and gone — it is now recorded on
 the definition (:attr:`SessionDef.task`) precisely so this module can restate
 it. Restated, not replayed: the record feeds this text and nothing else, and
 the first-spawn ``opening`` argv path is untouched.
+
+A fourth, narrow door reads the same state one block at a time. The parts of
+a briefing that do not change — the opening task, the binding stance — are
+printed with a content id beside them (:func:`block_digest`), and
+:func:`recall` hands one back by its id. That turns a question an agent
+cannot answer, "do I still remember my task?", into one it can: "is this id,
+next to its text, anywhere in this conversation?". A step reminder names
+those ids without repeating the prose
+(:func:`daemon.cflow_clock.carried_id_lines`), which is the whole point —
+the recurring channel gets to cost a line instead of a page.
+
+The split is deliberate, and not a matter of budget: only immutable text is
+addressable. Roster, owed mail, children and run position all move under the
+agent's feet, so they are pushed in full every time, and an id for them
+would name something different by the time it was called in.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Dict, List, Optional, Tuple
 
+from .. import digests
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
 from .mesh import MeshError
@@ -62,6 +78,133 @@ TASK_LIMIT = 2000
 #: (:data:`daemon.cflow_clock._INSTRUCTIONS_LIMIT`): this block carries the
 #: test, never the step body, and the difference should stay visible.
 DONE_WHEN_LIMIT = 400
+
+
+def block_digest(text: str) -> str:
+    """The content id for one addressable session block.
+
+    Same construction as :func:`cflow.engine.step_digest` and deliberately so
+    — an agent handed ``8f2a1c`` should not have to know which subsystem
+    minted it, and one id space is what makes a single "I do not have this"
+    reflex work everywhere.
+    """
+    return digests.text_digest((text or "").strip())
+
+
+def addressable(name: str, *, manager, mesh_mgr) -> Dict[str, dict]:
+    """This session's id-addressable blocks, keyed by content id.
+
+    Each value is ``{"kind", "text", "given"}``. Only the parts of a
+    re-briefing that are *stable*: the opening task, recorded once at
+    creation and never rewritten, and the stance, which changes only when a
+    mesh's role vocabulary does. Everything else a re-briefing says —
+    roster, owed, children, position — moves under the agent's feet, and an
+    id for it would be a promise this module cannot keep (see
+    :func:`daemon.cflow_clock.situation_lines`, which pushes that half in
+    full for exactly that reason).
+
+    ``given`` says whether this session was ever handed the text *next to*
+    this id. It is the difference between an id an agent can check itself
+    against and one it can only fail: a stance that lives in the session's
+    own system prompt is never pasted by a briefing (:meth:`MeshManager.
+    stance_carried`), so the id was never delivered with prose, and naming
+    it at the agent would buy a recall of text it already holds. The recall
+    door serves either kind; only the reminder cares about the difference.
+
+    Re-derived on every call rather than stored, which is what makes an id
+    self-validating: the digest of the text as it is *now* either matches
+    the id an agent was given or it does not, and a mismatch is the true
+    answer rather than a stale snapshot dressed as a current one. It is also
+    why this needs no storage at all.
+    """
+    out: Dict[str, dict] = {}
+    try:
+        sdef = manager.get(name).sdef
+    except Exception:  # noqa: BLE001 — an unknown session addresses nothing
+        return out
+    task = (sdef.task or "").strip()
+    if task:
+        # Always given: the opening task is typed into the terminal at spawn
+        # and restated by this module at every reset.
+        out[block_digest(task)] = {"kind": "task", "text": task, "given": True}
+    if mesh_mgr is not None:
+        try:
+            rows = mesh_mgr.meshes_for_session(name)
+        except Exception:  # noqa: BLE001
+            rows = []
+        for row in rows:
+            try:
+                mesh = mesh_mgr.get(row["mesh"])
+                member = mesh_mgr.member_for_session(mesh, name)
+                if member is None:
+                    continue
+                # The roleset is the canon `claunch mesh stance` prints from
+                # (``cli._cmd_stance`` reads the same field through the roles
+                # door), so an id minted here names the text the agent would
+                # get by asking — not this module's rendering of it.
+                role = mesh.roleset.get(member.role)
+                stance = (getattr(role, "stance", "") or "").strip()
+                if not stance:
+                    continue
+                out[block_digest(stance)] = {
+                    "kind": f"stance ({mesh.name})",
+                    "text": stance,
+                    "given": not mesh_mgr.stance_carried(mesh, member),
+                }
+            except Exception:  # noqa: BLE001 — one broken mesh, not all of them
+                continue
+    return out
+
+
+def given_ids(name: str, *, manager, mesh_mgr) -> List[Tuple[str, str]]:
+    """``[(id, kind)]`` for the blocks this session was handed with their ids.
+
+    What a step reminder may name (:func:`daemon.cflow_clock.situation_lines`).
+    The filter is the whole point: an id is checkable only because the agent
+    can look for it *attached to prose* in its own conversation, so naming
+    one that was never delivered that way turns a cheap self-check into a
+    guaranteed miss.
+    """
+    known = addressable(name, manager=manager, mesh_mgr=mesh_mgr)
+    return sorted(
+        (d, e["kind"]) for d, e in known.items() if e.get("given")
+    )
+
+
+def recall(name: str, digest: str, *, manager, mesh_mgr) -> dict:
+    """The text behind one of this session's block ids, or why there is none.
+
+    The pull half of :func:`addressable`, and the session-level twin of the
+    cflow ``recall`` tool. Answers in the same three shapes and for the same
+    reasons — in particular, an id that no longer names anything gets told
+    so instead of being served the nearest thing, because a stance the mesh
+    has since replaced is exactly what an agent must not go on acting from.
+    """
+    digest = (digest or "").strip().lower()
+    if not digest:
+        return {"status": "error", "note": "'id' is required"}
+    known = addressable(name, manager=manager, mesh_mgr=mesh_mgr)
+    found = known.get(digest)
+    if found:
+        return {
+            "status": "recalled",
+            "id": digest,
+            "kind": found["kind"],
+            "text": found["text"],
+        }
+    return {
+        "status": "stale_id",
+        "id": digest,
+        "current": [
+            {"id": d, "kind": e["kind"]} for d, e in sorted(known.items())
+        ],
+        "note": (
+            f"id {digest} does not name anything this session holds now. If "
+            "it was a stance, the mesh has replaced its role vocabulary since "
+            "you were given it -- do not go on acting from what you remember "
+            "of it. Call 'rebrief' with no id for the current state."
+        ),
+    }
 
 
 def compose(name: str, *, manager, mesh_mgr) -> str:
@@ -89,7 +232,11 @@ def compose(name: str, *, manager, mesh_mgr) -> str:
                 _cflow_section(sdef),
                 _asks_section(name),
                 _children_section(name, manager),
-                _task_section(sdef.task or "", issue=sdef.issue),
+                _task_section(
+                    sdef.task or "",
+                    issue=sdef.issue,
+                    digest=block_digest(sdef.task or ""),
+                ),
             )
             if s
         ]
@@ -314,7 +461,9 @@ def _children_section(name: str, manager) -> str:
     )
 
 
-def _task_section(task: str, *, issue: Optional[str] = None) -> str:
+def _task_section(
+    task: str, *, issue: Optional[str] = None, digest: str = ""
+) -> str:
     """The opening instruction, as recorded at creation.
 
     Restated last so it sits closest to the agent's next turn. The note draws
@@ -328,19 +477,27 @@ def _task_section(task: str, *, issue: Optional[str] = None) -> str:
     if not task and not issue:
         return ""
     if len(task) > TASK_LIMIT:
-        task = task[:TASK_LIMIT] + (
-            "\n[... task cut for the re-briefing; the full text is in the "
-            "session record]"
+        cut = (
+            f"; call 'rebrief' with id {digest} for it whole"
+            if digest else "; the full text is in the session record"
         )
+        task = task[:TASK_LIMIT] + f"\n[... task cut for the re-briefing{cut}]"
     issue_line = (
         f"issue: {issue} -- your board record; `claunch beads show {issue} "
         "--json` for its state and comments\n"
         if issue else ""
     )
+    # The id rides WITH the text, the way a step's does: an id delivered
+    # apart from what it names gives the agent nothing to match it against,
+    # and would answer "is this in my context?" yes for text that never
+    # arrived. The caller digests the task UNCUT, so the id is stable across
+    # the cut above — which is what makes recalling it worth a turn.
+    id_line = f"text id: {digest}\n" if digest else ""
     return (
         "---\n"
         "# claunch: your opening task, as recorded at creation -- "
         "machine-generated\n"
+        f"{id_line}"
         f"{issue_line}"
         + (f"{task}\n" if task else "")
         + "note: this is the instruction as first given. What has been done "

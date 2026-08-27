@@ -26,6 +26,7 @@ import sys
 import time
 import webbrowser
 from typing import List, Optional
+from urllib.parse import quote
 
 from . import (
     cli_mesh,
@@ -627,6 +628,28 @@ def _cmd_rebrief(args: argparse.Namespace) -> int:
         return 2
     try:
         client = daemon_client.ensure_running()
+        ident = (getattr(args, "id", "") or "").strip()
+        if ident:
+            # One addressed block instead of the whole briefing. Printed as
+            # plain text on stdout like the block is, because the caller is an
+            # agent reading it back into context, not a program parsing it.
+            #
+            # Inside the same try as the whole-briefing fetch, and for a
+            # sharper version of the same reason: a session calling with an id
+            # has already worked out that the text is gone from its context.
+            # An error it cannot see would leave it believing the id it holds
+            # is unrecoverable rather than momentarily unreachable.
+            found = client.get(
+                f"/api/sessions/{name}/rebrief?id={quote(ident, safe='')}"
+            )
+            if found.get("status") == "recalled":
+                print(f"# claunch rebrief: {found.get('kind')} [text id: {ident}]")
+                print(found.get("text") or "")
+                return 0
+            # The daemon answered and has no such id -- a different fact from
+            # not reaching it, and the caller must be able to tell them apart.
+            print(found.get("note") or f"no block with id {ident!r}", file=sys.stderr)
+            return 1
         block = client.get(f"/api/sessions/{name}/rebrief").get("block") or ""
     except DaemonClientError as exc:
         # The one failure that costs something. This command is a hook, it
@@ -1954,6 +1977,11 @@ def register(sub) -> None:
     )
     p_rebrief.add_argument(
         "--session", help="session to brief (default: $CLAUNCH_SESSION)"
+    )
+    p_rebrief.add_argument(
+        "--id",
+        help="print only the block with this content id (as printed next to "
+             "the text when it was given), instead of the whole briefing",
     )
     p_rebrief.set_defaults(func=_cmd_rebrief)
 

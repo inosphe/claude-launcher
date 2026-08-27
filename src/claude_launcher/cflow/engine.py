@@ -63,7 +63,6 @@ the run it drives and the run on disk can never be two different things.
 from __future__ import annotations
 
 import functools
-import hashlib
 import os
 import secrets
 import signal
@@ -71,6 +70,7 @@ import subprocess
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
+from .. import digests
 from . import checkout, model, responders, state as state_mod
 from .model import Delegate, Step, Workflow
 
@@ -1109,11 +1109,9 @@ def _done_payload(state: dict, cwd: Optional[str]) -> dict:
     return payload
 
 
-#: How much of the sha256 rides in a block header. Twelve hex characters is
-#: 48 bits: collision-free across anything one machine will ever hold, and
-#: short enough that an agent can compare it by eye against the id it was
-#: given with the text.
-DIGEST_CHARS = 12
+#: Re-exported so a cflow caller need not reach past its own package for the
+#: id space it shares with every other block of prompt text (:mod:`digests`).
+DIGEST_CHARS = digests.DIGEST_CHARS
 
 
 def step_digest(payload: dict) -> str:
@@ -1159,8 +1157,7 @@ def step_digest(payload: dict) -> str:
             parts = [str(payload.get("prompt") or "")]
     if not any(p.strip() for p in parts):
         return ""
-    body = "\x1e".join(parts).encode("utf-8")
-    return hashlib.sha256(body).hexdigest()[:DIGEST_CHARS]
+    return digests.text_digest("\x1e".join(parts))
 
 
 def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: bool) -> dict:

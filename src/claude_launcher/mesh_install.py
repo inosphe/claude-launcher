@@ -270,6 +270,16 @@ current state. Managed claude sessions also run it automatically — a
 SessionStart hook fires it on /compact and /clear — so if a rebrief block is
 already on screen, act on that instead of asking again.
 
+Blocks that never change carry a `text id:` printed next to them — your
+opening task, your stance, the cflow step you are on. A step reminder names
+those ids without repeating the text. Use them as a check you can actually
+perform: search this conversation for the id ATTACHED TO ITS TEXT. A bare
+mention (the reminder's own line) does not count. If it is not there, that
+block is gone from your context — `rebrief` with `id` hands it back
+(`claunch rebrief --id ID`), and the cflow `recall` tool does the same for a
+step. Do not reconstruct any of them from memory, and do not spend a turn
+re-reading one you can see you still have.
+
 The pieces, if you need one alone:
 
 1. SESSION = `CLAUNCH_SESSION` env var.

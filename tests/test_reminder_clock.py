@@ -18,7 +18,7 @@ import pytest
 from claude_launcher import store
 from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.cflow.engine import CflowError
-from claude_launcher.daemon import cflow_clock
+from claude_launcher.daemon import cflow_clock, rebrief
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -937,6 +937,56 @@ def test_the_reminder_carries_the_situation_when_delivered(proj):
     assert "children: c1 still running" in landed
     assert "owed: 1 delivered message(s) on mesh m0" in landed
     assert landed.splitlines()[-1] == "---"      # and it is still one block
+
+
+def test_the_session_ids_ride_the_full_form_and_not_the_repeat(proj):
+    """Where the session-level ids are named, and why only there.
+
+    The full form is the fire that hands over text; naming the other blocks
+    the agent was handed belongs beside it. The repeat is 777 characters
+    against the full block's 1545, and that gap is the product -- a
+    reference line on every repeat would spend a third of it on a question
+    the hook has usually just answered by re-delivering those blocks.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    sess.sdef = SessionDef(name="w1", cwd=cwd, task="count the beans")
+    clock = cflow_clock.ReminderClock(_KinManager({"w1": sess}))
+    ident = rebrief.block_digest("count the beans")
+
+    t = time.monotonic()
+    clock.scan(t)
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    first = sess.delivered[0]
+    assert f"session text ids: {ident} (task)" in first
+    assert "not this line" in first          # the bare mention does not count
+    assert first.splitlines()[-1] == "---"   # spliced inside the fence
+
+    asyncio.run(clock._deliver(*clock.scan(time.monotonic() + 601)[0]))
+    repeat = sess.delivered[1]
+    assert "session text ids:" not in repeat
+    assert ident not in repeat
+
+
+def test_a_session_with_nothing_addressable_says_nothing(proj):
+    """A task-less, mesh-less session has no ids, so the line is absent
+    rather than empty -- the reminder's size is the reason."""
+    sess = _FakeSession("w1", str(proj))
+    assert cflow_clock.carried_id_lines("w1", _KinManager({"w1": sess}), None) == []
+
+
+def test_a_broken_roster_never_costs_the_ids_a_delivery(proj):
+    """Same trade as the situation lines: decoration must not sink a send."""
+    class _Exploding:
+        def meshes_for_session(self, name):
+            raise RuntimeError("mesh registry mid-write")
+
+    sess = _FakeSession("w1", str(proj))
+    sess.sdef = SessionDef(name="w1", cwd=str(proj), task="count the beans")
+    mgr = _KinManager({"w1": sess})
+    lines = cflow_clock.carried_id_lines("w1", mgr, _Exploding())
+    assert lines and "(task)" in lines[0]     # the task id still stands
 
 
 def test_recall_is_journalled_so_the_pull_rate_can_be_measured(proj):

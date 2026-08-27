@@ -145,7 +145,14 @@ workflow to be started here), that is the answer; otherwise list candidates
 4. Resuming after a stop: when nudged (any user message), call `status`
    first to see whether the gate/selection was granted, then continue with
    `next`.
-5. `pending_start` in a `status` payload = a request for a workflow to be
+5. A step reminder that names a `step text id` instead of restating the step
+   is not asking you to re-read anything. Search this conversation for that
+   id ATTACHED TO THE STEP TEXT it was printed with; a bare mention (the
+   reminder line itself) does not count. Found it: you still have the step —
+   keep working, do not spend the turn on `status`. Not there: your context
+   no longer holds it — call `recall {id}` and it hands the text back. Never
+   reconstruct a step from memory, and never treat the id line as the step.
+6. `pending_start` in a `status` payload = a request for a workflow to be
    started in this session — filed by a human (from the dashboard or
    `claunch cflow request`), or `by: "recur"` when a recurring workflow's
    previous round finished. You perform the start: check it makes sense for

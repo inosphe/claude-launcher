@@ -54,6 +54,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
+from . import rebrief
 from .session import STATUS_BUSY, STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.cflow")
@@ -488,9 +489,15 @@ class ReminderClock:
                 )
             except Exception:  # noqa: BLE001 — decoration must not sink a send
                 open_asks = 0
-            block = splice(
-                block, situation_lines(scope, self.manager, self.mesh, open_asks)
-            )
+            extra = situation_lines(scope, self.manager, self.mesh, open_asks)
+            # ``restated`` is written after a successful send, so it is still
+            # False here on the fire that carries the full restatement —
+            # which is the one fire the session-level ids ride on.
+            if not (self._seen.get((cwd, scope)) or {}).get("restated"):
+                extra = extra + carried_id_lines(
+                    scope, self.manager, self.mesh
+                )
+            block = splice(block, extra)
         try:
             delivered = await session.deliver(block)
         except Exception:
@@ -877,6 +884,47 @@ def situation_lines(name: str, manager, mesh_mgr, open_asks: int = 0) -> List[st
             "full because there is no id that could stay true for it) --",
         )
     return lines
+
+
+def carried_id_lines(name: str, manager, mesh_mgr) -> List[str]:
+    """The ids of the session-level text this agent was handed, named not sent.
+
+    The same trade the step's own id makes (:func:`repeat_block`), applied to
+    the two blocks that outlive any one position: the opening task and the
+    binding stance. Both are immutable, both are re-derivable, and both are
+    exactly the kind of thing an agent quietly stops having after a summary
+    without noticing it stopped.
+
+    Named ONLY on the full form, once per position, and the reason is a
+    measurement rather than taste: the repeat is 777 characters against the
+    full block's 1545, and that gap is the whole product. A reference line on
+    every repeat would spend a third of the saving on a question that is
+    almost never the one being asked — an agent whose context was compacted
+    has already had the hook re-deliver these blocks, with their ids, before
+    its next turn.
+
+    Only ids the session was *given next to their text*
+    (:func:`rebrief.given_ids`). An id it has never seen attached to prose
+    would fail the check by construction, and buy a recall of text it may
+    well already hold.
+
+    Never raises, for :func:`situation_lines`' reason: this decorates a
+    reminder, and a reminder lost to a mid-write roster is a bad trade.
+    """
+    try:
+        ids = rebrief.given_ids(name, manager=manager, mesh_mgr=mesh_mgr)
+    except Exception:  # noqa: BLE001 — no ids is not a reason to send nothing
+        return []
+    if not ids:
+        return []
+    named = "; ".join(f"{ident} ({kind})" for ident, kind in ids)
+    return [
+        f"session text ids: {named}. These name text you were GIVEN, printed "
+        "next to it — not text in this reminder, and not this line. If you "
+        "cannot find one of them attached to its text in this conversation, "
+        "your context no longer holds that block: call the mesh 'rebrief' "
+        "tool with that id and it hands the text back."
+    ]
 
 
 def signal_block(payload: dict, before: dict, after: dict) -> str:

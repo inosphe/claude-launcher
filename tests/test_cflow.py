@@ -1224,6 +1224,9 @@ def test_mcp_initialize_and_tools():
     assert names == {
         # this session's own run
         "start", "report", "next", "select", "status",
+        # the pull behind a reminder that names the step by id instead of
+        # restating it
+        "recall",
         # decisions other sessions' runs are waiting on it for
         "asks", "answer",
     }
