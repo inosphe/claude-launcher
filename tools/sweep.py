@@ -190,6 +190,20 @@ _COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|skipped|error|errors|xfailed|xpa
 #:   rooted in a fixture. (Do not count *this* file's own cases while
 #:   checking -- ``tests/test_sweep.py`` commits a board into a throwaway
 #:   repository to test exactly this rung.)
+#: * *not shipped* -- nothing under it is run or installed by anyone outside
+#:   the suite. The board is a record this workflow writes and reads back;
+#:   ``stubs/claunch.bat`` is a shim a user's PATH executes, which is why it
+#:   fails here *after passing both bullets above* -- there are zero
+#:   references to it under ``tests/``, ``src/`` and ``tools/``, so the two
+#:   tests that admitted ``.beads`` admit it too. This bullet is the one
+#:   doing that work, and it was argued in review before it was written
+#:   here, which is the same gap in miniature.
+#:
+#:   The narrowness of "run or installed" is load-bearing. Shipped code reads
+#:   this repository's own ``.beads/`` at runtime -- one constant and four
+#:   call sites across ``cli_beads.py`` and ``daemon/beads.py`` -- so a
+#:   broader "used by" or "read by" would disqualify the single entry this
+#:   list holds. Widen the wording and the rule deletes itself.
 #:
 #: **This is a deny list, and that is the whole safety argument.** The digest
 #: below is the *whole* tree minus these names, so a path that appears
