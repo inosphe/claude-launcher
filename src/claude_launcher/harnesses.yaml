@@ -15,6 +15,7 @@ harnesses:
 
   codex:
     command: codex
+    args: [--dangerously-bypass-approvals-and-sandbox]
     restore_args: [resume, --last]
     home_env: CODEX_HOME
     auth: oauth
