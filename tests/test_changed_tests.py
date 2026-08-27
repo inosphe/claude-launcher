@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -91,6 +92,25 @@ def repo(tmp_path) -> Path:
     _git(repo, "branch", "-M", "master")
     _git(repo, "checkout", "-q", "-b", "feature")
     return repo
+
+
+def _tree_from_empty_index(repo: Path) -> str:
+    """``worktree_tree``'s answer with no stat cache to trust at all.
+
+    Every file is re-hashed, so this cannot be wrong for the reason
+    ``worktree_tree`` can be wrong -- which is what makes it usable as the
+    ground truth the fast path is checked against.
+    """
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as tmp:
+        env = dict(os.environ, GIT_INDEX_FILE=str(Path(tmp) / "index"))
+        subprocess.run(["git", "add", "-A"], cwd=str(repo), env=env, check=True)
+        proc = subprocess.run(
+            ["git", "write-tree"], cwd=str(repo), env=env,
+            capture_output=True, text=True, check=True,
+        )
+        return proc.stdout.strip()
 
 
 def _select(repo: Path) -> list:
@@ -686,6 +706,93 @@ def test_an_untracked_file_is_in_the_tree_key(repo):
     before = changed_tests.worktree_tree(repo)
     _write(repo, "tests/test_brand_new.py")
     assert changed_tests.worktree_tree(repo) != before
+
+
+def _edit_git_cannot_see_by_stat(repo: Path, rel: str, text: str) -> None:
+    """Edit ``rel`` so that git's stat cache says nothing happened.
+
+    Three things have to line up, and every one of them happens by itself in
+    the field. What is forged is only the *timing*, so that the case is a
+    fact rather than a one-second window a test may or may not land inside:
+
+    * same size -- ``x = 2`` for ``x = 3`` is the ordinary shape of a fix,
+      and it is what makes size useless as a discriminator;
+    * same mtime -- restored after the write, standing in for an edit that
+      landed in the second the index last recorded the file in;
+    * an index whose own mtime is that same instant -- an editor save
+      followed by any git command produces exactly this.
+
+    Git then compares size and whole-second mtime (``st_ino`` is 0 here and
+    ``st_ctime`` is the creation time, so neither discriminates), finds both
+    equal, and is entitled to skip reading the file. Its one guard is the
+    racy-clean rule -- ``ce_mtime >= index_mtime`` forces a content re-read
+    -- and the third bullet is what arms it. Everything sits 60 seconds in
+    the past so that a copy stamped with ``now`` is unambiguously outside
+    that window; the wall clock does not get a vote.
+
+    ``add -A`` is here, and no ``git status``: the point is to make git
+    *cache* this stat for the pre-edit content. ``status`` would be actively
+    wrong -- it rewrites the index, smudging the racily-clean entry, and the
+    case evaporates.
+
+    Where git compares ctime or nanoseconds the edit is simply visible and
+    the cases below pass on the direct path. They do not go flaky there;
+    they go quiet.
+    """
+    path = repo / rel
+    size = path.stat().st_size
+    past = path.stat().st_mtime_ns - 60 * 10**9
+    os.utime(path, ns=(past, past))
+    _git(repo, "add", "-A")
+    index = Path(_git(repo, "rev-parse", "--absolute-git-dir").strip()) / "index"
+    os.utime(index, ns=(past, past))
+
+    path.write_text(text, encoding="utf-8")
+    assert path.stat().st_size == size, "the case needs the size to stay put"
+    os.utime(path, ns=(past, past))
+
+
+def test_an_edit_the_stat_cache_cannot_see_is_still_in_the_key(repo):
+    """The key names content, not what the index remembers about content.
+
+    ``worktree_tree`` copies the real index to keep its stat cache, and a
+    stat cache is a licence to answer from ``lstat`` alone. Copied without
+    its mtime, that licence has no expiry: git reads the cached blob and
+    ``write-tree`` returns the tree the edit was made *on top of* -- which
+    is ``HEAD^{tree}``, the one value the docstring says this function must
+    never be. Measured that way 23 times in 24
+    (``claunch-gate-receipt-key-mismatch-t6zp``).
+
+    Pinned against a tree built from an *empty* index rather than only
+    against ``HEAD^{tree}``: "not the stale answer" would also be satisfied
+    by a different wrong answer.
+    """
+    head = _git(repo, "rev-parse", "HEAD^{tree}").strip()
+    _edit_git_cannot_see_by_stat(repo, "src/pkg/mesh.py", "x = 2\n")
+
+    truth = _tree_from_empty_index(repo)
+    assert truth != head, "the fixture no longer models an edit at all"
+    assert changed_tests.worktree_tree(repo) == truth
+
+
+def test_an_edit_the_stat_cache_cannot_see_does_not_reuse_the_green(repo, gate):
+    """The consequence, stated where it bites: a green for a run nobody made.
+
+    The tree key is the whole of the receipt's identity. If an edit can slip
+    out of the key, the previous content's green receipt answers for content
+    that was never run -- silently, and the gate reports 0. That is the
+    false green the receipt scheme exists to make impossible, and it is
+    worse than the failing lookup that led here: a mismatched key costs a
+    second run, this costs the run itself.
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate.runs() == 1
+
+    _edit_git_cannot_see_by_stat(repo, "src/pkg/mesh.py", "x = 3\n")
+
+    assert gate() == 0
+    assert gate.runs() == 2, "the previous content's receipt answered for this one"
 
 
 def test_the_scratch_index_leaves_the_real_one_alone(repo):

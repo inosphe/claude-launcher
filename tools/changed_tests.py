@@ -444,6 +444,42 @@ def worktree_tree(repo: Path) -> str:
     and ``write-tree`` names the result. That is the same content pytest
     collects, minus what ``.gitignore`` already excludes from both.
 
+    **The copy carries the original's mtime, and that is load-bearing.**
+    Keeping the stat cache is keeping git's licence to answer "unchanged"
+    from ``lstat`` alone -- and that comparison is weaker than it looks:
+    here it is size plus mtime at one-second granularity (``st_ino`` is 0
+    and ``st_ctime`` is the *creation* time, so neither discriminates). An
+    edit that keeps a file's size and leaves its mtime inside the same
+    second is invisible to it. Git's one guard is the racy-clean rule: an
+    entry whose cached mtime is not older than the index file's own mtime
+    may not be trusted on stat and has its content re-read
+    (``read-cache.c``, ``is_racy_timestamp``). The guard is dated relative
+    to *the index*, so copying the index without its mtime stamps the copy
+    with ``now``, drops every entry safely into the copy's past, and
+    switches the guard off wholesale. ``write-tree`` then names the tree
+    the edit was made *on top of*.
+
+    Measured (claunch-gate-receipt-key-mismatch-t6zp, git 2.48.1.windows.1):
+    24 runs across four timings, mtime-preserving copy right 24/24 against a
+    from-empty-index tree; ``copyfile`` wrong 23/24, and wrong by returning
+    exactly ``HEAD^{tree}`` -- the one key this function's first paragraph
+    says it must never return. Sharpest reading of the same run: with the
+    guard off, ``git status`` in that repository reports the file modified
+    while this function's scratch index does not. The gate's key disagreed
+    with the gate's own ``changed_paths`` about the same working tree.
+
+    That is not a test artefact. A same-size edit landing in the wrong
+    second is handed the previous tree's key, and the previous tree's green
+    receipt is then reused for content nobody ran -- the false green the
+    whole filing scheme exists to make impossible, and a strictly worse
+    failure than the mismatched lookup that led here: a wrong key costs one
+    extra run, this costs the run itself.
+
+    ``copyfile`` + explicit ``utime`` rather than ``copy2``: the timestamps
+    are the whole point of the copy and are worth naming at the call site,
+    and the mode bits ``copy2`` would also carry are not wanted on a file
+    git has to rewrite.
+
     Side effect worth knowing: ``add -A`` writes blobs for uncommitted files
     into the object database, the way ``git stash create`` does. They are
     loose objects nothing references, and gc collects them.
@@ -451,8 +487,13 @@ def worktree_tree(repo: Path) -> str:
     git_dir = Path(_git(repo, "rev-parse", "--absolute-git-dir"))
     with tempfile.TemporaryDirectory() as tmp:
         index = Path(tmp) / "index"
-        if (git_dir / "index").is_file():
-            shutil.copyfile(git_dir / "index", index)
+        real = git_dir / "index"
+        if real.is_file():
+            shutil.copyfile(real, index)
+            stat = real.stat()
+            # Not cosmetic: this is what keeps git's racy-clean rule armed
+            # on the copy. See the docstring.
+            os.utime(index, ns=(stat.st_atime_ns, stat.st_mtime_ns))
         env = dict(os.environ, GIT_INDEX_FILE=str(index))
         _git(repo, "add", "-A", env=env)
         return _git(repo, "write-tree", env=env)
