@@ -548,14 +548,30 @@ def find_receipt(
     exists because a sweep is keyed by commit, so uncommitted files are
     outside its key; here they are inside it, hashed into ``tree``. So the
     field is recorded for the reader and left out of the verdict.
+
+    A receipt at the exact path that cannot be *read* is warned to stderr and
+    treated as absent -- the changed_tests echo of ``sweep``'s rule on the
+    same shape, see ``sweep._newest_green``. A silent skip here is a round
+    re-measuring what it had already measured.
     """
     path = receipt_path(repo, tree, files, override)
     if not path.is_file():
         return None
     try:
         receipt = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None                       # a fallback, not a source of truth
+    except (OSError, ValueError) as exc:
+        # The exact receipt that would answer for this tree and selection
+        # exists but cannot be read. That used to be a silent None -- the same
+        # defect ``sweep._newest_green`` had, in the same shape: a verdict
+        # quietly thrown away, forcing a round to re-measure what it had
+        # already measured, with no way to see why.
+        print(
+            f"WARNING: {path} cannot be read as a receipt ({exc}); the exact "
+            f"receipt that would answer for this tree and selection is "
+            f"unusable. Treating this tree as unswept.",
+            file=sys.stderr,
+        )
+        return None
     if receipt.get("tree") != tree or sorted(receipt.get("selection") or []) != sorted(
         files
     ):

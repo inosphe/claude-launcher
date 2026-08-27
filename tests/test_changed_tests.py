@@ -632,6 +632,32 @@ def test_a_red_receipt_is_not_reused(repo, gate):
     assert json.loads(path.read_text(encoding="utf-8"))["exit_code"] == 1
 
 
+def test_a_corrupt_targeted_receipt_warns_instead_of_disappearing(repo, gate, capsys):
+    """The changed_tests echo of the sweep defect.
+
+    ``sweep``'s ``_newest_green`` used to swallow an unparseable receipt
+    without a word, and this exact-path read did the same: a green verdict
+    filed and then unreadable re-measured what had already been measured,
+    with no way to see why. Now the read names the file, and the selection
+    still runs (a receipt is evidence, not a promise).
+    """
+    _write(repo, "src/pkg/mesh.py", "x = 2\n")
+    assert gate() == 0
+    assert gate.runs() == 1
+
+    tree = changed_tests.worktree_tree(repo)
+    files = changed_tests.select(repo, changed_tests.changed_paths(repo, "master"))
+    changed_tests.receipt_path(repo, tree, files, gate.receipts).write_text(
+        "{trunc", encoding="utf-8"
+    )
+
+    assert gate() == 0
+    assert gate.runs() == 2, "the unreadable receipt must not be reused"
+    err = capsys.readouterr().err
+    assert "cannot be read" in err
+    assert "tree" in err and "receipt" in err
+
+
 def test_a_narrower_selection_does_not_answer_for_a_wider_one(repo, gate):
     """Same tree, fewer modules, is a different verdict (``claunch-p5n``).
 
