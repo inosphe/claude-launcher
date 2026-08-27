@@ -272,8 +272,13 @@ async def _start_llm(handler):
     return server
 
 
-def _llm_answer(content: str) -> dict:
-    return {"choices": [{"message": {"role": "assistant", "content": content}}]}
+def _llm_answer(content: str, finish: str = "stop", spent: int = 42) -> dict:
+    return {
+        "choices": [
+            {"message": {"role": "assistant", "content": content}, "finish_reason": finish}
+        ],
+        "usage": {"completion_tokens": spent},
+    }
 
 
 def test_call_llm_sends_the_openai_shape_and_reads_the_answer(home):
@@ -297,7 +302,9 @@ def test_call_llm_sends_the_openai_shape_and_reads_the_answer(home):
                 "params": {"top_k": 7},
             }
             got = await briefing.call_llm(cfg, "summarize this")
-            assert got == "the answer"
+            assert got.text == "the answer"
+            assert got.finish_reason == "stop"
+            assert got.completion_tokens == 42
         finally:
             await server.close()
 
@@ -338,6 +345,114 @@ def test_call_llm_http_error_and_bad_shape_raise(home):
                 await server.close()
 
     asyncio.run(run())
+
+
+def test_call_llm_empty_content_is_an_error_not_an_answer(home):
+    """A reasoning model that spent max_tokens thinking returns 200 + "".
+
+    Measured against the configured endpoint at ``max_tokens=1024``: 8 of 10
+    calls came back exactly like this. Passing "" on made the daemon cache a
+    blank briefing and answer 200, which is why the feature looked flaky
+    rather than broken.
+    """
+    from aiohttp import web as aioweb
+
+    async def run():
+        for content in ("", "   "):
+            async def handler(request, _c=content):
+                return aioweb.json_response(_llm_answer(_c, finish="length", spent=1024))
+
+            server = await _start_llm(handler)
+            try:
+                cfg = {
+                    "endpoint": str(server.make_url("/v1/chat/completions")),
+                    "model": "m",
+                    "api_key": "sk-not-in-the-message",
+                    "max_tokens": 1024,
+                    "params": {},
+                }
+                with pytest.raises(briefing.BriefingError) as err:
+                    await briefing.call_llm(cfg, "hi")
+                msg = str(err.value)
+                assert "empty content" in msg
+                # the message must name the budget, or nobody can act on it
+                assert "1024" in msg and "max_tokens" in msg
+                assert cfg["api_key"] not in msg
+            finally:
+                await server.close()
+
+    asyncio.run(run())
+
+
+def test_call_llm_blames_the_provider_not_the_budget_when_it_just_stops(home):
+    """An empty answer that was NOT cut off is a different fault.
+
+    Measured live while re-checking the budget fix: one session's call came
+    back ``finish_reason="stop"`` with ``completion_tokens=1`` and no content.
+    Raising ``max_tokens`` cannot touch that, so the error must not send the
+    reader to that knob — the two empties look identical without this field.
+    """
+    from aiohttp import web as aioweb
+
+    async def handler(request):
+        return aioweb.json_response(_llm_answer("", finish="stop", spent=1))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "m",
+                "api_key": "sk-quiet",
+                "max_tokens": 4096,
+                "params": {},
+            }
+            with pytest.raises(briefing.BriefingError) as err:
+                await briefing.call_llm(cfg, "hi")
+            msg = str(err.value)
+            assert "provider-side empty completion" in msg
+            assert "raise llm.max_tokens" not in msg  # the wrong knob
+            assert "finish_reason='stop'" in msg and "completion_tokens=1" in msg
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_call_llm_keeps_a_whole_answer_whatever_the_finish_reason(home):
+    """``finish_reason`` is read, not obeyed: real text still comes back."""
+    from aiohttp import web as aioweb
+
+    async def handler(request):
+        return aioweb.json_response(_llm_answer("plenty of words", finish="length"))
+
+    async def run():
+        server = await _start_llm(handler)
+        try:
+            cfg = {
+                "endpoint": str(server.make_url("/v1/chat/completions")),
+                "model": "m",
+                "api_key": "k",
+                "max_tokens": 8,
+                "params": {},
+            }
+            got = await briefing.call_llm(cfg, "hi")
+            assert got.text == "plenty of words"
+            assert got.finish_reason == "length"
+        finally:
+            await server.close()
+
+    asyncio.run(run())
+
+
+def test_default_max_tokens_budgets_for_reasoning_not_just_the_answer():
+    """The briefing runs a few hundred characters; the budget is not sized
+    for the briefing.
+
+    Pinned because the old 1024 was sized for the answer alone and the
+    reasoning tokens are billed to the same allowance — the measured failure.
+    """
+    assert briefing.DEFAULT_MAX_TOKENS >= 4096
 
 
 # --------------------------------------------------------------------------- #
@@ -480,6 +595,56 @@ def test_briefing_endpoint_unconfigured_unknown_and_raw(home, tmp_path):
             finally:
                 await llm.close()
 
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_briefing_endpoint_502s_on_a_truncated_answer(home, tmp_path):
+    """Cut off at the budget is a failure, not a ``raw`` briefing.
+
+    The live symptom this pins: one of 30 sessions came back with 68 bytes of
+    a JSON object that stops mid-string, and the endpoint served it 200 with
+    ``raw`` set — indistinguishable, to the UI and to the cache, from a model
+    that simply answered in prose. ``finish_reason`` tells them apart, and
+    so does ``completion_tokens``: over the 48-call budget sweep it equalled
+    ``max_tokens`` in 5 of 5 cut-off calls and in 0 of 43 that finished (the
+    largest of those spent 1855). This test pins the first because that is
+    the field the contract defines for the purpose; the second is a
+    corroborator, not a substitute.
+    """
+    from aiohttp import web as aioweb
+
+    async def cut_off(request):
+        return aioweb.json_response(
+            _llm_answer('{"goal": "half a sen', finish="length", spent=1024)
+        )
+
+    async def empty(request):
+        return aioweb.json_response(_llm_answer("", finish="length", spent=1024))
+
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
+            for handler, fragment in ((cut_off, "truncated"), (empty, "empty content")):
+                llm = await _start_llm(handler)
+                try:
+                    _set_llm(str(llm.make_url("/v1/chat/completions")))
+                    resp = await client.get(
+                        "/api/sessions/s1/briefing?refresh=1", headers=BEARER
+                    )
+                    assert resp.status == 502
+                    assert fragment in (await resp.json())["error"]
+                finally:
+                    await llm.close()
+            # nothing was cached on the way out: the next good answer serves
+            assert briefing.digest("s1") is None
             await mgr.shutdown_all()
         finally:
             await client.close()

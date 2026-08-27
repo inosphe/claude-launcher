@@ -27,7 +27,7 @@ import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import aiohttp
 
@@ -38,9 +38,28 @@ from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
 
-#: Defaults for the ``llm`` config block. ``max_tokens`` bounds the answer
-#: (the briefing is 3-4 sentences; 1024 is headroom, not a target).
-DEFAULT_MAX_TOKENS = 1024
+#: Defaults for the ``llm`` config block. ``max_tokens`` bounds the *whole*
+#: completion, and on a reasoning model the reasoning tokens are billed to it
+#: too — so the budget is not "how long is the answer" but "how long is the
+#: thinking plus the answer". Measured once, against the endpoint configured
+#: that day — ``accounts/fireworks/models/deepseek-v4-flash-0731`` — at 1024:
+#: 8 of 10 calls came back ``finish_reason="length"`` with
+#: ``completion_tokens=1024`` and an EMPTY ``content``; the reasoning had
+#: eaten the lot. The model, the budget and the N are that run's conditions,
+#: not standing facts about the feature.
+#:
+#: 4096 leaves room for both, because the answer itself is far smaller. Three
+#: medians were taken, and they are three UNITS rather than three samples —
+#: name the unit or they read as disagreement:
+#:
+#:   p50 273 (149-633)  fields as rendered, the 25 that parsed of 30 sessions
+#:   p50 357 (233-717)  those SAME 25, serialized back to JSON
+#:   p50 385 (244-686)  raw ``content``, the 43 that parsed of 48 sweep calls
+#:
+#: 273 to 385 is a gap of 112, of which 84 is the change of unit and 28 the
+#: change of sample. Only the last two are counted the same way, so only
+#: those two compare.
+DEFAULT_MAX_TOKENS = 4096
 
 #: How much transcript feeds the prompt. ``TAIL_BYTES`` bounds the file read
 #: (the tail is read from the end, never the whole file); ``EVENT_TAIL`` the
@@ -294,12 +313,32 @@ def build_prompt(sdef, cflow_info: Optional[dict], events: List[str]) -> str:
 # --------------------------------------------------------------------------- #
 # LLM call and answer parsing
 # --------------------------------------------------------------------------- #
-async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> str:
+class LlmAnswer(NamedTuple):
+    """One completion: its text plus the two fields that say if it is whole.
+
+    ``finish_reason`` is the endpoint's own verdict — ``"length"`` means the
+    text was cut off at the budget, not that the model stopped talking — and
+    ``completion_tokens`` is what it spent getting there (reasoning included).
+    Both exist so the caller can tell a *truncated* answer from a *disobedient*
+    one; only the first is worth failing the request over.
+    """
+
+    text: str
+    finish_reason: Optional[str]
+    completion_tokens: Optional[int]
+
+
+async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> LlmAnswer:
     """POST the prompt to the OpenAI-compatible endpoint, return the answer.
 
     Any transport or shape failure becomes :class:`BriefingError`; the message
     carries at most a snippet of the *response* body — never the request, so
     the api_key cannot leak through an error path.
+
+    An empty ``content`` is one of those failures. It is what a reasoning model
+    returns when ``max_tokens`` ran out mid-thought, and it arrives as a
+    perfectly ordinary HTTP 200 — so if it were passed on, the caller would
+    cache "" and the UI would render a blank card with nothing to say why.
     """
     body = {
         "model": cfg["model"],
@@ -325,10 +364,38 @@ async def call_llm(cfg: dict, prompt: str, *, timeout: float = LLM_TIMEOUT) -> s
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         raise BriefingError(f"llm call failed: {exc}") from exc
     try:
-        content = data["choices"][0]["message"]["content"]
+        choice = data["choices"][0]
+        content = choice["message"]["content"]
     except (KeyError, IndexError, TypeError):
         raise BriefingError("llm response has no choices[0].message.content") from None
-    return str(content)
+    finish = choice.get("finish_reason") if isinstance(choice, dict) else None
+    usage = data.get("usage") if isinstance(data, dict) else None
+    spent = usage.get("completion_tokens") if isinstance(usage, dict) else None
+    text = str(content or "")
+    if not text.strip():
+        # Two different things arrive here, and telling them apart is the
+        # whole point of reading finish_reason: "length" is OUR budget being
+        # too small for a reasoning model, and the operator can fix it.
+        # Anything else — measured live as finish_reason="stop" with
+        # completion_tokens=1 — is the endpoint returning a degenerate
+        # completion, which no local setting changes. Blaming the budget for
+        # that one would send whoever reads the log to the wrong knob.
+        if finish == "length":
+            why = (
+                f"the budget ran out (max_tokens={cfg['max_tokens']}); a "
+                "reasoning model spends it on its reasoning before it writes "
+                "anything, so raise llm.max_tokens in ~/.claunch.yaml"
+            )
+        else:
+            why = (
+                "the endpoint produced nothing and did not say it was cut off "
+                "— a provider-side empty completion, not a local setting"
+            )
+        raise BriefingError(
+            f"llm returned empty content (finish_reason={finish!r}, "
+            f"completion_tokens={spent}): {why}"
+        )
+    return LlmAnswer(text, str(finish) if finish is not None else None, spent)
 
 
 _FENCE_OPEN = re.compile(r"^```[A-Za-z0-9_-]*\s*")
@@ -388,6 +455,15 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
     (ISO, of the actual generation — a cache hit keeps it), ``cached``,
     ``source`` (which inputs existed), and ``briefing`` XOR ``raw`` — the
     parsed JSON when the model obeyed, its raw text when it did not.
+
+    ``raw`` now means one thing only: the model wrote a WHOLE answer in the
+    wrong shape. A cut-off one raises :class:`BriefingError` instead, because
+    the two used to be indistinguishable here and both went out as a silent
+    200. On the 30-session run behind this: 5 briefings did not parse, 4 of
+    them empty and 1 cut off mid-string at 68 bytes. Only that last one
+    reaches this function — :func:`call_llm` raises on an empty answer before
+    :func:`parse_briefing` ever sees it — so the case this branch exists for
+    was 1 of 30 there. Which of the two is commoner was not measured.
     """
     sdef = session.sdef
     name = sdef.name
@@ -407,15 +483,26 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
             return {**hit[1], "cached": True}
     events = tail_events(jsonl_path) if jsonl_path is not None else []
     prompt = build_prompt(sdef, cflow_info, events)
-    text = await call_llm(cfg, prompt)
-    parsed = parse_briefing(text)
+    answer = await call_llm(cfg, prompt)
+    parsed = parse_briefing(answer.text)
+    if parsed is None and answer.finish_reason == "length":
+        # Text arrived, but the endpoint says it was CUT at the budget — the
+        # JSON is half-written, not badly written. Serving it as ``raw`` would
+        # put a torn-off sentence on the card and cache it there, so this is
+        # the same failure as the empty answer and gets the same 502.
+        raise BriefingError(
+            f"llm answer was truncated at max_tokens={cfg['max_tokens']} "
+            f"(finish_reason='length', completion_tokens={answer.completion_tokens}, "
+            f"{len(answer.text)} chars, not parseable) — raise llm.max_tokens "
+            "in ~/.claunch.yaml"
+        )
     result = {
         "session": name,
         "generated_at": _now_iso(),
         "cached": False,
         "source": {"jsonl": jsonl_path is not None, "cflow": cflow_info is not None},
         "briefing": parsed,
-        "raw": None if parsed is not None else text,
+        "raw": None if parsed is not None else answer.text,
     }
     _cache[name] = (cache_key, result)
     return result
