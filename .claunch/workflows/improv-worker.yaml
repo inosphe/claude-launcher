@@ -601,6 +601,18 @@ steps:
     # 스폰이라 모듈 몇 개에 8을 띄우면 안 띄우느니만 못하다).
     # tests/test_changed_tests.py와 tests/test_project_layer_override.py가 못박는다.
     #
+    # --base가 master 고정이 아니라 auto인 이유(claunch-eghh). 이 편성의 워커
+    # 브랜치는 통합 브랜치 위에 얹힌다. 그 브랜치를 master에 대고 재면 자기
+    # 변경이 아니라 배치 전체를 잰다 — 한 날에 세 세션이 같은 자리에서
+    # 93/119(78%), 95/119(80%), 1945 tests / 221.75s를 쟀고 그 회차들이 실제로
+    # 바꾼 파일은 4~6개였다. 이 스텝 산문이 금지하는 전체 스위트를 같은 스텝의
+    # verify가 돌리고 있었다.
+    # auto는 그 브랜치의 upstream을 읽는다 — 정렬 게이트(tools/merge_ready.py)가
+    # 통합 대상을 알아내는 것과 같은 ref다. 그래서 선택과 정렬이 같은 것을 말한다.
+    # upstream이 없으면 master로 내려가되 조용히 내려가지 않는다: 어느 축으로
+    # 쟀는지와 그것을 정하는 한 명령(git branch --set-upstream-to=<통합 브랜치>)을
+    # stderr에 낸다. exit code는 안 바뀐다 — upstream이 없는 것은 고칠 일이지
+    # 판정을 거부할 일이 아니다.
     # timeout이 기본값(model.DEFAULT_VERIFY_TIMEOUT = 900)이면 이 게이트는
     # 이 부류의 정상 회차에서 잘린다. 워크플로 yaml을 바꾸는 회차는 그
     # 파일을 이름으로 부르는 테스트가 규칙 3a로 전부 들어와 17모듈이
@@ -615,7 +627,7 @@ steps:
     # 것이고, 없는 판정은 늦은 판정보다 나쁘기 때문이다. 이 값은 비용이
     # 내려가면 되돌릴 자리다 — claunch-bl0e가 그 비용을 재고 있다.
     verify:
-      command: 'uv run --no-sync python tools/changed_tests.py --base master'
+      command: 'uv run --no-sync python tools/changed_tests.py --base auto'
       timeout: 1800
     next: commit
 

@@ -60,10 +60,6 @@ Selection, in two rules, both checkable by eye:
    b. the few that find it by globbing its directory, or drive it across a
       language boundary, and so never name it: :data:`EXPLICIT_GUARDS`.
 
-   Anything no rule can map is **reported** rather than passed over --
-   see :func:`unmapped`. An empty selection must be able to mean "I could
-   not tell" instead of "there is nothing".
-
    Rule 3 arrived in two goes, and the second one is the lesson. It was
    first written as a hand-kept list of the guarding tests -- and that list
    was wrong on its first outing, missing ``test_cflow_window``, whose
@@ -72,9 +68,35 @@ Selection, in two rules, both checkable by eye:
    is written down in the files should be read out of the files, so 3a reads
    it, and 3b is kept as small as the cases 3a genuinely cannot see.
 
+**A selection that is not empty can still be missing the module that
+matters**, and that is the one failure none of the devices below sees: they
+all ask whether the selection came back *empty*. ``cli_sessions.py`` selects
+nine test modules and not ``test_daemon_wedge``, which is the one that guards
+it, because ``test_daemon_wedge`` imports ``claude_launcher.cli`` and ``cli``
+is what imports ``cli_sessions`` -- one hop past rule 2b. A red batch landed
+through exactly that (``claunch-uf7m``). :func:`reached_indirectly` names those
+modules without running them; widening the rule to select them was measured
+and costs a median 26 of 119 modules against the current 3.
+
+**A path no rule can map is reported, never passed over** --
+:func:`unmapped`, derived from :func:`map_one` so that it cannot answer
+differently from the selection. An empty selection must be able to mean "I
+could not tell" instead of "there is nothing", and for python it could not:
+``unmapped`` skipped every ``.py`` on the grounds that rules 1 and 2 owned
+them, while rule 2 only speaks when a same-named test happens to exist. A
+source module without one was selected by nothing and reported by nothing. A
+batch landed three red modules through that gap and two more batches shipped
+on top before a bisect found them; :func:`map_one` carries the case.
+
 Changes are read against the merge base with ``--base`` (default ``master``),
 plus anything uncommitted, so the gate covers work that is staged, committed,
-or still in the working tree.
+or still in the working tree. ``--base auto`` reads the branch's upstream
+instead of a fixed ref, which is what a worker stacked on an integration
+branch needs: measured against master such a branch counts the entire batch
+as its own change, and three sessions in one day measured that at 78-93% of
+the suite -- the sweep this gate exists not to be. See :func:`resolve_base`.
+The runner's own scratch lock is not counted as a change; see
+:data:`RUNNER_LOCK_RE`.
 
 **Selecting nothing is a pass, not a failure.** A round can legitimately
 change only prose, workflow yaml, or docs -- a real one landed on the day
@@ -133,6 +155,26 @@ either side hashes to something else and abstains. That is the right answer,
 not a limitation -- a reviewer looking at a different tree than the one that
 was judged has no verdict, and should say so.
 
+**Both caveats are stated either way.** "Nothing went unmapped" and "nothing
+sits one hop out" are printed as lines rather than left as absent blocks,
+because an absent block also means "this build has no such check" -- and the
+two readings are the difference between a swept axis and one nobody ran. The
+gate exists to keep exactly that pair apart, so it should not reproduce it in
+its own output.
+
+**stdout carries the verdict and its caveats; stderr carries only this
+tool's own trouble.** See :data:`STREAMS`, which ``--help`` prints. The two
+caveats -- paths no rule could map, and modules one hop past rule 2b -- are
+the part a landing request has to quote, so they go where the answer goes.
+
+That holds for every exit code, and the rule was written wrong the first time:
+both of ``CANNOT_TELL``'s paths were on stderr, so an abstaining ``--check``
+put its *selection* on stdout and its reason for abstaining on the other
+stream -- and its own green twin, ``green receipt for tree ...``, was already
+on stdout. One verdict split across two streams by outcome. A procedure
+reading stdout alone saw a healthy-looking selection line and exit 2 with
+nothing to say why (merger-r5, 2026-08-27, measured on ``54f537b``).
+
 Exit codes match ``tools/deploy_check.py``: 0 = the selected tests passed (or
 there were none), 1 = they failed, 2 = could not tell -- which is what
 ``--check`` returns when no receipt answers, because "nobody has run this"
@@ -147,6 +189,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -185,6 +228,34 @@ sweep = _load_sweep()
 
 CANNOT_TELL = 2
 
+#: Which stream carries what, printed by ``--help`` because a reader who
+#: keeps only one of them reads the other's contents as "none".
+#:
+#: A landing procedure that split the streams to avoid a pipe was reading
+#: ``out.txt`` alone and treating ``err.txt`` as discardable -- reasonably, on
+#: the evidence, since the only thing that had ever been in it was uv's
+#: ``VIRTUAL_ENV`` line. Both of this gate's caveats were on the discarded
+#: side, and the caveat the leader now requires a landing request to quote is
+#: one of them. Unread and absent spell the same, which is this file's whole
+#: subject (worker-select / merger-r5, 2026-08-27, ``claunch-a9t``).
+STREAMS = """\
+streams: stdout carries the verdict and every caveat on it -- for all three
+exit codes. That is the selection, the pytest command, the paths no rule could
+map, the modules one hop out that were not selected, and both halves of what
+--check answers (a green receipt, or why it is abstaining). stderr carries only
+this tool's own trouble, which never decides the exit code: a receipt it could
+not read or write, a working tree it could not hash, an old basetemp it pruned.
+Read stdout to learn what the gate did and did not cover; a procedure that
+keeps only stdout loses nothing it needs.
+"""
+
+#: What ``--base`` falls back to when nothing better is known.
+DEFAULT_BASE = "master"
+
+#: ``--base auto``: ask git for the branch this one integrates into instead of
+#: pinning one. See :func:`resolve_base`.
+BASE_AUTO = "auto"
+
 #: Parallelism is bounded by how little there is to do. Each xdist worker
 #: costs a process spawn, and spawning eight of them to run one module is
 #: slower than not spawning them: this suite's cost is processes, not CPU.
@@ -221,6 +292,31 @@ EXPLICIT_GUARDS = (
     ),
 )
 
+#: ``uv run`` is how every gate in this repository is invoked, and while it
+#: holds the project lock it writes a zero-byte ``uv-<hash>.lock`` into the
+#: project root. It is untracked, so ``ls-files --others`` counts it as a
+#: changed path and the gate then warns that a file *its own launcher* made
+#: one second ago is guarded by no test.
+#:
+#: Measured by worker-64hs (2026-08-27, ``claunch-uv-lock-counted-as-changed-
+#: path-62yg``): the same tree at the same base read **4** changed paths under
+#: ``uv run`` and **3** under ``.venv/Scripts/python.exe``, the warning present
+#: in the first and absent in the second. It reproduces on a checkout that
+#: ``git status --porcelain`` calls clean, and deleting the file does not help
+#: -- the next ``uv run`` writes another one.
+#:
+#: The cost of leaving it in is not a wrong selection (no test maps to it
+#: either way) but a warning that is always there. The warning's next line
+#: tells the reader to check the path by hand and consider asking for a full
+#: sweep, and a warning that fires every single run stops being read -- which
+#: is the state a genuinely unguarded path would arrive into.
+#:
+#: Only this one shape is dropped, and only at the root. Untracked files stay
+#: in the changed set otherwise: a test module written this round and not yet
+#: added is exactly an untracked file, and is the case :func:`changed_paths`
+#: was widened to catch.
+RUNNER_LOCK_RE = re.compile(r"^uv-[0-9a-f]+\.lock$")
+
 #: Shortest stem :func:`needle` will search for on its own. Below this a stem
 #: is not a reference, it is a substring -- ``app`` appears in most files in
 #: this repository -- so the full basename is used instead.
@@ -239,6 +335,57 @@ def _git(repo: Path, *args: str, env: Optional[dict] = None) -> str:
     return proc.stdout.strip()
 
 
+def resolve_base(repo: Path, base: str) -> tuple:
+    """The ref to measure against, and how we came to think so.
+
+    ``--base master`` is right for a branch cut from master and wrong for a
+    branch cut from an integration branch, which is the shape this formation
+    puts every worker in. Against master such a branch reads the whole batch
+    as its own change: three sessions measured the same gate on the same day
+    at 93/119 modules, 95/119 and 1945 tests in 221s, for rounds that had
+    touched four to six files (``claunch-eghh``). The gate's own step forbids
+    running the suite; with a fixed base the gate was how the suite got run.
+
+    The branch a worker integrates into is not something the workflow file can
+    write down -- it differs per worker and per round -- but it is something
+    git records, under the name the alignment gate already reads:
+    ``tools/merge_ready.py::_target`` resolves ``<branch>@{upstream}`` for
+    exactly this question. Reading the same ref means the selection and the
+    alignment check describe the same target instead of two.
+
+    Three answers, and the third is the one that has to be loud:
+
+    ``given``
+        an explicit ``--base X``. Unchanged, and still the default.
+    ``upstream``
+        ``--base auto`` and the branch has one.
+    ``no-upstream``
+        ``--base auto`` and it does not. Falling back to master is right for a
+        branch cut from master and is the original defect for a stacked one,
+        and nothing here can tell those apart -- so it falls back and says so,
+        naming the one command that settles it. Exit code is unchanged: a
+        missing upstream is a thing to fix, not a reason to refuse a verdict.
+    """
+    if base != BASE_AUTO:
+        return base, "given"
+    try:
+        branch = _git(repo, "rev-parse", "--abbrev-ref", "HEAD")
+    except LookupError:
+        return DEFAULT_BASE, "no-upstream"
+    # Not through _git: no upstream is an ordinary answer here, not a failure.
+    proc = subprocess.run(
+        [
+            "git", "-C", str(repo), "rev-parse", "--abbrev-ref",
+            "--symbolic-full-name", f"{branch}@{{upstream}}",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0 and proc.stdout.strip():
+        return proc.stdout.strip(), "upstream"
+    return DEFAULT_BASE, "no-upstream"
+
+
 def changed_paths(repo: Path, base: str) -> List[str]:
     """Every path this branch touches: committed since the merge base, or not yet.
 
@@ -253,36 +400,78 @@ def changed_paths(repo: Path, base: str) -> List[str]:
     out.update(_git(repo, "diff", "--name-only", f"{merge_base}...HEAD").splitlines())
     out.update(_git(repo, "diff", "--name-only", "HEAD").splitlines())
     out.update(
-        _git(repo, "ls-files", "--others", "--exclude-standard").splitlines()
+        rel
+        for rel in _git(repo, "ls-files", "--others", "--exclude-standard").splitlines()
+        if not RUNNER_LOCK_RE.match(rel)   # the runner's own scratch, see above
     )
     return sorted(p for p in out if p)
 
 
+def _is_test_module(p: Path) -> bool:
+    """``tests/test_x.py`` -- rule 1's shape, asked from two places."""
+    return (
+        p.parts[:1] == ("tests",)
+        and p.name.startswith("test_")
+        and p.name.endswith(".py")
+    )
+
+
+def map_one(repo: Path, rel: str) -> List[str]:
+    """The test modules **one** changed path maps to, by the rules above.
+
+    :func:`select` is the union of this over the change and :func:`unmapped`
+    is the paths for which it comes back empty. They read one mapping rather
+    than keeping two, because for four rounds they kept two and the two did
+    not agree.
+
+    ``unmapped`` answered for python by assuming: ``if p.suffix == ".py":
+    continue  # rules 1 and 2 own python``. Ownership needs rule 2 to always
+    produce something, and rule 2 is a naming convention -- 54 of this
+    repository's 102 source modules have no same-named test. Where the
+    convention was absent the selection was empty *and* the report was silent,
+    so the path appeared in neither half of the output. Nothing said the gate
+    had not looked at it.
+
+    That combination landed a red batch. ``bd87fdc`` changed
+    ``cli_sessions.py``, which has no ``tests/test_cli_sessions.py``; the gate
+    selected nothing for it and printed nothing about it; the batch carried
+    three red modules and two further batches shipped on top before a bisect
+    found them (``claunch-uf7m``). Rules 2b and 2c have since closed the
+    *selection* half for that particular file -- seven test modules import it
+    -- but they close it by convention too, and eight of this repository's
+    source modules still map to nothing at all. This is what makes those eight
+    audible.
+
+    Deriving both halves from one mapping makes the silent case unreachable:
+    a path either names test modules here, or it is reported.
+    """
+    p = Path(rel)
+    if _is_test_module(p):                                # 1
+        return [rel] if (repo / rel).is_file() else []    # deleted: not runnable
+    picked = set()
+    if p.suffix == ".py" and p.parts[:1] in (("src",), ("tools",)):
+        twin = Path("tests") / f"test_{p.stem}.py"
+        if (repo / twin).is_file():                       # 2
+            picked.add(twin.as_posix())
+        mod = module_name(rel)                            # 2b
+        if mod:
+            picked.update(importers(repo, mod))
+        if not _is_dunder(p):                             # 2c
+            picked.update(mentioning(repo, p.name))
+        return sorted(picked)
+    posix = p.as_posix()
+    picked.update(mentioning(repo, p.name))               # 3a
+    for prefixes, guards in EXPLICIT_GUARDS:              # 3b
+        if posix.startswith(prefixes):
+            picked.update(g for g in guards if (repo / g).is_file())
+    return sorted(picked)
+
+
 def select(repo: Path, paths: List[str]) -> List[str]:
-    """The test modules those paths map to, by the two rules in the docstring."""
+    """The test modules those paths map to, by the rules in the docstring."""
     picked = set()
     for rel in paths:
-        p = Path(rel)
-        name = p.name
-        if p.parts[:1] == ("tests",) and name.startswith("test_") and name.endswith(".py"):
-            if (repo / rel).is_file():  # a deleted test module is not runnable
-                picked.add(rel)
-            continue
-        if p.suffix == ".py" and p.parts[:1] in (("src",), ("tools",)):
-            twin = Path("tests") / f"test_{p.stem}.py"
-            if (repo / twin).is_file():
-                picked.add(twin.as_posix())
-            mod = module_name(rel)                        # 2b
-            if mod:
-                picked.update(importers(repo, mod))
-            if not _is_dunder(p):                         # 2c
-                picked.update(mentioning(repo, p.name))
-            continue
-        posix = p.as_posix()
-        picked.update(mentioning(repo, p.name))          # 3a
-        for prefixes, guards in EXPLICIT_GUARDS:          # 3b
-            if posix.startswith(prefixes):
-                picked.update(g for g in guards if (repo / g).is_file())
+        picked.update(map_one(repo, rel))
     return sorted(picked)
 
 
@@ -301,17 +490,20 @@ def unmapped(repo: Path, paths: List[str]) -> List[str]:
     that way. ``EXPLICIT_GUARDS`` now covers that directory, but the next
     unmapped asset is not covered by anything, and this is what makes it
     visible instead of letting it look like a clean bill of health.
+
+    **Python is in scope, and used not to be** -- see :func:`map_one` for the
+    round that cost and the eight modules it still applies to. The one python
+    path still passed over is a *deleted* test module: rule 1 answered for it,
+    there is nothing left to run, and "grep for what guards it" is not advice
+    about a file the round removed on purpose.
     """
     loose = []
     for rel in paths:
         p = Path(rel)
-        if p.suffix == ".py":
-            continue                      # rules 1 and 2 own python
-        posix = p.as_posix()
-        if any(posix.startswith(prefixes) for prefixes, _ in EXPLICIT_GUARDS):
-            continue                      # 3b speaks for it
-        if mentioning(repo, p.name):
-            continue                      # 3a found something
+        if _is_test_module(p) and not (repo / rel).is_file():
+            continue                      # rule 1 answered; the file is gone
+        if map_one(repo, rel):
+            continue                      # some rule spoke for it
         loose.append(rel)
     return loose
 
@@ -349,14 +541,7 @@ def mentioning(repo: Path, name: str) -> List[str]:
     have a limit.
     """
     term = needle(name)
-    hits = []
-    for path in sorted((repo / "tests").glob("test_*.py")):
-        try:
-            if term in path.read_text(encoding="utf-8", errors="replace"):
-                hits.append(f"tests/{path.name}")
-        except OSError:
-            continue
-    return hits
+    return [rel for rel, text in test_texts(repo).items() if term in text]
 
 
 def module_name(rel: str) -> Optional[str]:
@@ -432,6 +617,32 @@ def _imported_names(path: Path, pkg: str = "") -> set:
     return out
 
 
+#: ``repo`` -> {test module -> its source text}. :func:`mentioning` is asked
+#: once per changed path by :func:`map_one`, and :func:`map_one` is now asked
+#: by both :func:`select` and :func:`unmapped` -- so a thirty-path round would
+#: read the same ~4MB of test sources sixty times over. Read once instead. Same
+#: shape and same lifetime as :data:`_TEST_IMPORTS` below, keyed by repository
+#: because the test suite drives several within one process.
+_TEST_TEXTS: dict = {}
+
+
+def test_texts(repo: Path) -> dict:
+    """Each test module's source, read once per repository."""
+    key = str(repo.resolve())
+    cached = _TEST_TEXTS.get(key)
+    if cached is None:
+        cached = {}
+        for path in sorted((repo / "tests").glob("test_*.py")):
+            try:
+                cached[f"tests/{path.name}"] = path.read_text(
+                    encoding="utf-8", errors="replace"
+                )
+            except OSError:
+                continue
+        _TEST_TEXTS[key] = cached
+    return cached
+
+
 #: ``repo`` -> {test module -> the module names it imports}. Parsing 118 test
 #: modules costs ~0.1s, and :func:`select` asks once per changed path.
 _TEST_IMPORTS: dict = {}
@@ -448,6 +659,92 @@ def test_imports(repo: Path) -> dict:
         }
         _TEST_IMPORTS[key] = cached
     return cached
+
+
+#: ``repo`` -> {module name -> the ``src`` modules that import it directly}.
+#: The other direction from :data:`_TEST_IMPORTS`, and the input to
+#: :func:`reached_indirectly`.
+_SRC_IMPORTERS: dict = {}
+
+
+def src_importers(repo: Path) -> dict:
+    """Which ``src`` modules import which, parsed once per repository.
+
+    A module's own package is what its relative imports resolve against, and
+    for ``__init__.py`` that package is the module itself -- ``from . import
+    x`` inside ``daemon/__init__.py`` means ``daemon.x``, not
+    ``claude_launcher.x``. Getting that wrong silently loses a package's whole
+    re-export list, which is the exact edge this map exists to see.
+    """
+    key = str(repo.resolve())
+    cached = _SRC_IMPORTERS.get(key)
+    if cached is None:
+        cached = {}
+        for path in sorted((repo / "src").rglob("*.py")):
+            rel = path.relative_to(repo).as_posix()
+            mod = module_name(rel)
+            if not mod:
+                continue
+            if path.stem == "__init__":
+                pkg = mod
+            else:
+                pkg = mod.rsplit(".", 1)[0] if "." in mod else ""
+            for target in _imported_names(path, pkg):
+                cached.setdefault(target, set()).add(mod)
+        _SRC_IMPORTERS[key] = cached
+    return cached
+
+
+def reached_indirectly(repo: Path, paths: List[str], picked) -> List[tuple]:
+    """Test modules one hop further out than rule 2b reaches -- named, not run.
+
+    Rule 2b selects the tests that import the changed module. A test that
+    imports something *else* which imports it is not selected, deliberately:
+    the transitive closure was measured on this suite at a median 42% of the
+    tests per source module, which is the full sweep under another name.
+
+    That limit has a cost, and unlike the others it does not look like one.
+    ``bd87fdc`` changed ``cli_sessions.py``; the selection came back with
+    **nine** modules, which reads as a gate that worked. The module that
+    actually guards the changed behaviour --
+    ``tests/test_daemon_wedge.py`` -- was not among them, because it writes
+    ``from claude_launcher import cli`` and ``cli.py`` is what imports
+    ``cli_sessions``. One hop. The batch landed three red modules and two more
+    batches shipped on top before a bisect found them (``claunch-uf7m``).
+
+    Every device this file has for that failure asks whether the selection is
+    *empty*: :func:`unmapped` reports a path no rule could map, and the
+    landing-request rule asks the worker to name what the selection left out.
+    Neither fires here. Nine is not empty and no path went unmapped, so the
+    round reads as covered and the missing module is named nowhere.
+
+    So this names them. Two things it deliberately is not:
+
+    * **Not selected.** Running them would take the median selection from 3 of
+      119 modules to 26, ``store.py`` from 59 to 93, and this round already
+      has 78-96% measurements on record for what a gate that wide costs
+      (``claunch-eghh``). The direct-import limit is measured and stays.
+    * **Not truncated.** A capped list reads as a complete one. If the number
+      is large that is the finding, and the count is printed with it.
+
+    One hop only, and by ``src``: it is the distance a re-export or an
+    aggregator adds, which is the shape ``cli.py`` has and the shape this
+    package uses throughout. Returns ``(test module, changed path, via)``, so
+    the reader can check the claim rather than take it.
+    """
+    picked = set(picked)
+    found: dict = {}
+    graph = src_importers(repo)
+    for rel in paths:
+        mod = module_name(rel)
+        if not mod:
+            continue
+        for via in sorted(graph.get(mod, ())):
+            for name in importers(repo, via):
+                if name in picked or name in found:
+                    continue
+                found[name] = (rel, via)
+    return [(name, *found[name]) for name in sorted(found)]
 
 
 def importers(repo: Path, mod: str) -> List[str]:
@@ -851,13 +1148,58 @@ def run_and_record(
     return 0 if code == 0 else 1
 
 
+def relations_tried(rel: str) -> str:
+    """Which relationships were looked for on this path, and came back empty.
+
+    "Nothing maps to it" is not a size until the reader knows what was
+    searched for. A path that no *import* reaches is a different statement
+    from a path that no test *names*, and from one no table drives -- and the
+    fix differs in each case. Naming the relations turns a bare "none" into
+    something a reviewer can disagree with.
+
+    Required by the landing-request rule as of this round: the line that says
+    what the selection did not cover also says which relation was swept for
+    (reference, import, execution). Pointed out by s181; ``claunch-uf7m``
+    carries the ruling.
+    """
+    p = Path(rel)
+    if p.suffix == ".py" and p.parts[:1] in (("src",), ("tools",)):
+        tried = [f"same-named test (tests/test_{p.stem}.py)"]
+        if module_name(rel):
+            tried.append("direct import by a test")
+        if not _is_dunder(p):
+            tried.append(f"a test naming {needle(p.name)!r}")
+        return ", ".join(tried)
+    return f"a test naming {needle(p.name)!r}, EXPLICIT_GUARDS"
+
+
+def _base_note(how: str) -> str:
+    """How the base was arrived at, for the line that reports the selection.
+
+    A number is only readable next to the axis it was measured on, and this
+    tool's axis moved -- so the output says which one it stood on rather than
+    leaving the reader to infer it from a command line they may not have.
+    """
+    return " (upstream)" if how == "upstream" else ""
+
+
 def main(argv: Optional[list] = None) -> int:
     ap = argparse.ArgumentParser(
-        prog="changed_tests", description=__doc__.splitlines()[0]
+        prog="changed_tests",
+        description=__doc__.splitlines()[0],
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=STREAMS,
     )
     ap.add_argument("--repo", type=Path, default=Path("."))
     ap.add_argument(
-        "--base", default="master", help="ref to diff against (default: master)"
+        "--base",
+        default=DEFAULT_BASE,
+        help=(
+            f"ref to diff against (default: {DEFAULT_BASE!r}). "
+            f"{BASE_AUTO!r} reads the branch's upstream -- what a stacked "
+            f"worker branch integrates into -- and falls back to "
+            f"{DEFAULT_BASE!r}, loudly, when none is set"
+        ),
     )
     ap.add_argument(
         "--list",
@@ -894,10 +1236,24 @@ def main(argv: Optional[list] = None) -> int:
     args = ap.parse_args(argv)
 
     repo = args.repo.resolve()
+    base, how = resolve_base(repo, args.base)
+    if how == "no-upstream":
+        print(
+            f"WARNING: --base {BASE_AUTO} found no upstream for this branch; "
+            f"measuring against {DEFAULT_BASE!r}.\n"
+            f"  That is right for a branch cut from {DEFAULT_BASE}, and is the "
+            f"wrong axis for one stacked on an integration branch -- there it "
+            f"counts the whole batch as this round's change (claunch-eghh: "
+            f"93/119, 95/119 and 1945 tests in 221s, for rounds of four to six "
+            f"files).\n"
+            f"  Name the branch you integrate into, which the alignment gate "
+            f"reads from the same place:\n"
+            f"    git branch --set-upstream-to=<integration branch>"
+        )
     try:
-        paths = changed_paths(repo, args.base)
+        paths = changed_paths(repo, base)
     except LookupError as exc:
-        print(f"cannot tell: {exc}", file=sys.stderr)
+        print(f"cannot tell: {exc}")
         return CANNOT_TELL
 
     files = select(repo, paths)
@@ -908,22 +1264,50 @@ def main(argv: Optional[list] = None) -> int:
         # unmapped part easy to miss.
         print(
             f"WARNING: {len(loose)} changed path(s) map to no test module. "
-            f"This gate says nothing about them -- not that they are fine:",
-            file=sys.stderr,
+            f"This gate says nothing about them -- not that they are fine:"
         )
         for rel in loose:
-            print(f"  {rel}", file=sys.stderr)
+            print(f"  {rel}  (searched: {relations_tried(rel)})")
         print(
             "  Check by hand (grep -rl '<filename>' tests/) and, if something "
             "guards them, add it to EXPLICIT_GUARDS in this file. If the "
-            "change is broad, ask the leader for a full sweep.",
-            file=sys.stderr,
+            "change is broad, ask the leader for a full sweep."
         )
+    else:
+        # Said out loud, because the alternative is saying it by staying
+        # silent -- and silence here is indistinguishable from a build of
+        # this tool that had no such check. A landing request has to carry
+        # this line either way; it should be able to quote it rather than
+        # infer it from an absent block (merger-r5, 2026-08-27).
+        print(
+            f"all {len(paths)} changed path(s) map to at least one test module."
+        )
+
+    hops = reached_indirectly(repo, paths, files)
+    if hops:
+        # After the unmapped warning and before the selection, because it is
+        # about what the selection does NOT say. See reached_indirectly.
+        print(
+            f"NOTE: {len(hops)} test module(s) reach a changed file one import "
+            f"hop further out than rule 2b follows, and were NOT selected. This "
+            f"gate did not run them:"
+        )
+        for name, rel, via in hops:
+            print(f"  {name}  <- {rel} via {via}")
+        print(
+            "  Direct imports only is measured, not an oversight: the "
+            "transitive closure selects a median 42% of this suite per source "
+            "module. This list is here so that a selection which looks healthy "
+            "cannot hide the module that actually guards the change "
+            "(claunch-a9t). Judge it, or run one of them by hand."
+        )
+    else:
+        print("no test module sits one import hop outside this selection.")
 
     if not files:
         print(
             f"no test modules map to this change ({len(paths)} path(s) touched "
-            f"vs {args.base}) -- nothing for this gate to run. The step's "
+            f"vs {base}{_base_note(how)}) -- nothing for this gate to run. The step's "
             f"done_when still asks your report for numbers and scenarios."
         )
         return 0                          # a pass, for --check too: see below
@@ -931,7 +1315,7 @@ def main(argv: Optional[list] = None) -> int:
     cmd = build_command(files, basetemp=args.basetemp)
     print(
         f"{len(files)} test module(s) selected from {len(paths)} changed path(s) "
-        f"vs {args.base}:"
+        f"vs {base}{_base_note(how)}:"
     )
     for f in files:
         print(f"  {f}")
@@ -966,8 +1350,7 @@ def main(argv: Optional[list] = None) -> int:
                 f"{len(files)}-module selection -- abstain, or ask the author "
                 f"to run 'python tools/changed_tests.py --base {args.base}'. "
                 f"Do not run the selection yourself: it is load nobody's scan "
-                f"counted.",
-                file=sys.stderr,
+                f"counted."
             )
             return CANNOT_TELL
         print(f"green receipt for tree {tree[:12]}: {describe(found)}")

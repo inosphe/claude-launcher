@@ -195,15 +195,26 @@ def test_each_armed_step_runs_its_gate_without_touching_the_environment(
 
 
 def test_the_worker_gate_targets_the_change_rather_than_the_suite():
-    """The exact command, and the argument that makes it targeted.
+    """The exact command, and the two arguments that make it targeted.
 
     ``--base`` is what turns "run tests" into "run the tests this branch's
     change can affect": without it there is no diff to select from and the
     script has nothing to narrow to.
+
+    ``auto`` rather than ``master`` is the second half, and it is what the
+    argument is worth on this formation's branches. A worker here is cut from
+    an integration branch, and against master such a branch reads the whole
+    batch as its own change -- 93 of 119 modules, 95 of 119, and 1945 tests in
+    221s were all measured on one day, for rounds that had touched four to six
+    files. The step's own prose forbids running the suite; with the base fixed
+    at master, this line was how the suite got run (``claunch-eghh``).
+    ``auto`` reads the branch's upstream, which is the ref
+    ``tools/merge_ready.py`` already resolves to answer "what does this
+    integrate into".
     """
     verify = model.load(OVERRIDES / "improv-worker.yaml").steps["review"].verify
     assert verify.command == (
-        "uv run --no-sync python tools/changed_tests.py --base master"
+        "uv run --no-sync python tools/changed_tests.py --base auto"
     )
 
 
