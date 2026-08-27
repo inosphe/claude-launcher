@@ -105,10 +105,10 @@ class UserStore:
         text = yaml.safe_dump(
             payload, sort_keys=True, allow_unicode=True, default_flow_style=False
         )
-        tmp = self.path.with_name(self.path.name + ".tmp")
-        tmp.write_text(text, encoding="utf-8")
-        _restrict(tmp)
-        atomic.replace(tmp, self.path)
+        with atomic.scratch(self.path) as tmp:
+            tmp.write_text(text, encoding="utf-8")
+            _restrict(tmp)
+            atomic.replace(tmp, self.path)
 
     # ------------------------------------------------------------------ #
     # queries

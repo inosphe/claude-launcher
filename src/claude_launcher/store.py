@@ -36,7 +36,6 @@ nothing else stores these settings, so there is no separate "export" step.
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Callable, Dict, Optional
 
@@ -107,16 +106,9 @@ def save(doc: dict) -> None:
     text = yaml.safe_dump(
         doc, sort_keys=True, allow_unicode=True, default_flow_style=False
     )
-    tmp = p.with_name(f"{p.name}.{os.getpid()}.tmp")
-    try:
+    with atomic.scratch(p) as tmp:
         tmp.write_text(text, encoding="utf-8")
         atomic.replace(tmp, p)
-    except OSError:
-        try:
-            tmp.unlink()
-        except OSError:
-            pass
-        raise
 
 
 def update(mutator: Callable[[dict], None]) -> dict:

@@ -388,11 +388,11 @@ def write_seed_record(workflows_dir: Path, record: Dict[str, str]) -> None:
     """Write the sidecar atomically — a torn half-JSON is a trashed memory
     that turns every future file ``UNKNOWN`` for no good reason."""
     path = workflows_dir / SEED_RECORD_NAME
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(
-        json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
-    atomic.replace(tmp, path)
+    with atomic.scratch(path) as tmp:
+        tmp.write_text(
+            json.dumps(record, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        atomic.replace(tmp, path)
 
 
 def worktree_state(src: Path, dest: Path, record: Dict[str, str]) -> str:

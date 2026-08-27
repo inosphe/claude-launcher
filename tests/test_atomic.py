@@ -154,3 +154,69 @@ def test_the_ordinary_path_is_one_call(tmp_path, monkeypatch):
 
     assert len(calls) == 1
     assert dest.read_text(encoding="utf-8") == "new"
+
+
+# --------------------------------------------------------------------- #
+# scratch(): the other half of an atomic write
+# --------------------------------------------------------------------- #
+
+
+def test_two_writers_of_one_document_get_two_scratch_files(tmp_path):
+    """The defect this fixes, stated as the thing that must not happen.
+
+    Four of the five callers named the scratch after the target alone, so two
+    writers of the same document shared one path: the second overwrote the
+    first's bytes, and whichever renamed last put *its* document in place with
+    nobody's error to show for it. Two open scratches must be two files.
+    """
+    dest = tmp_path / "doc.yaml"
+
+    with atomic.scratch(dest) as first, atomic.scratch(dest) as second:
+        assert first != second
+        first.write_text("first", encoding="utf-8")
+        second.write_text("second", encoding="utf-8")
+        assert first.read_text(encoding="utf-8") == "first"
+        assert second.read_text(encoding="utf-8") == "second"
+        atomic.replace(second, dest)
+        atomic.replace(first, dest)
+
+    assert dest.read_text(encoding="utf-8") == "first"
+
+
+def test_the_scratch_sits_beside_its_target(tmp_path):
+    """Same directory, so the rename stays inside one filesystem and atomic."""
+    dest = tmp_path / "sub" / "doc.yaml"
+
+    with atomic.scratch(dest) as tmp:
+        assert tmp.parent == dest.parent
+        assert tmp.name.startswith(dest.name + ".")
+        assert tmp.name.endswith(".tmp")
+        assert tmp.exists()  # mkstemp creates it O_EXCL
+
+
+def test_a_failed_write_leaves_no_litter(tmp_path):
+    """A unique name is one nobody reuses, so it must not survive its writer."""
+    dest = tmp_path / "doc.yaml"
+    seen = {}
+
+    with pytest.raises(ValueError):
+        with atomic.scratch(dest) as tmp:
+            seen["path"] = tmp
+            tmp.write_text("half", encoding="utf-8")
+            raise ValueError("the caller gave up")
+
+    assert not seen["path"].exists()
+    # scoped to this module's litter: the repo's own fixtures seed tmp_path
+    assert list(tmp_path.glob(dest.name + ".*.tmp")) == []
+
+
+def test_a_scratch_that_was_renamed_away_is_not_an_error(tmp_path):
+    """The ordinary path: replace consumed it, so there is nothing to remove."""
+    dest = tmp_path / "doc.yaml"
+
+    with atomic.scratch(dest) as tmp:
+        tmp.write_text("new", encoding="utf-8")
+        atomic.replace(tmp, dest)
+
+    assert dest.read_text(encoding="utf-8") == "new"
+    assert list(tmp_path.glob(dest.name + ".*.tmp")) == []
