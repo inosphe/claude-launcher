@@ -352,6 +352,20 @@ def receipt_path(repo: Path, commit: str, override: Optional[Path] = None) -> Pa
     return receipts_dir(repo, override) / f"{commit}.json"
 
 
+def output_path(repo: Path, commit: str, override: Optional[Path] = None) -> Path:
+    """Where a *red* run parks the suite output the receipt summarises.
+
+    The extension is load-bearing twice over, and both layers are checked by
+    tests below. :func:`_newest_green` scans ``directory.glob("*.json")`` and
+    only then refuses names outside :data:`_RECEIPT_NAME_RE`, so
+    ``.output.txt`` is dropped at the glob, before the name check could call
+    it a hand-written receipt. Filing this under ``.json`` would make every
+    red run emit a "not a {sha}.json receipt" warning about a file the run
+    itself wrote -- the gate warning about its own evidence.
+    """
+    return receipts_dir(repo, override) / f"{commit}.output.txt"
+
+
 #: The one name a receipt may be filed under -- the full sha it judged, plus
 #: ``.json``. ``run`` constructs it via :func:`receipt_path`; ``_newest_green``
 #: refuses any other name *before* parsing, because a file here that ``run``
@@ -476,6 +490,58 @@ def _failure_lines(output: str, limit: int = 40) -> list:
     return lines[:limit]
 
 
+#: The cap on the suite output a red run parks beside its receipt, and how
+#: much is kept from each end. Both are sized against this repository's last
+#: red sweep (``1fdc7a7``: 2 failed, 2319 passed, 2085 warnings), whose
+#: captured output measured 36,072 characters in this layout:
+#:
+#: ===========  =====================================================
+#: character    section
+#: ===========  =====================================================
+#: 0            uv's banner, then xdist's progress dots
+#: 3,135        ``=== FAILURES ===`` -- the tracebacks, 9,710 long
+#: 12,845       ``=== warnings summary ===`` -- 22,758, 63% of the file
+#: 35,603       ``=== short test summary info ===`` + the counts line
+#: ===========  =====================================================
+#:
+#: That is the shape the split exploits: pytest prints the failures *before*
+#: the warnings block and the failing names *after* it, so cutting the middle
+#: keeps both things a reader needs and drops the part that is 63% of the
+#: bytes and none of the diagnosis. The head is 15x the 12,845 characters that
+#: run needed to reach the end of its tracebacks and the tail 139x its 469
+#: characters of summary, so the whole 36,072 fits seven times over under the
+#: cap -- a real sweep here is not truncated at all. The limit bounds the case
+#: this repository has not hit yet and has no other bound for: a failing test
+#: printing without limit into its own captured output.
+_OUTPUT_LIMIT = 256 * 1024
+_OUTPUT_HEAD = 192 * 1024
+
+
+def _truncated(
+    output: str, limit: int = _OUTPUT_LIMIT, head: int = _OUTPUT_HEAD
+) -> str:
+    """`output`, cut in the middle to `limit` characters, saying that it was.
+
+    The note goes in the file rather than the receipt because the file is what
+    a reader has open when the question arises. A cut that left no trace would
+    be the worse half of the failure this whole change is about: evidence that
+    looks complete and is not.
+    """
+    if len(output) <= limit:
+        return output
+    tail = limit - head
+    dropped = len(output) - limit
+    return (
+        output[:head]
+        + f"\n\n[... tools/sweep.py dropped {dropped} characters here: the "
+        f"suite printed {len(output)}, over this file's {limit} cap. The "
+        f"{head} characters above and the {tail} below are kept, which is "
+        f"where pytest puts the tracebacks and the failing names "
+        f"respectively ...]\n\n"
+        + output[-tail:]
+    )
+
+
 def cmd_run(args) -> int:
     repo = args.repo.resolve()
     try:
@@ -551,6 +617,43 @@ def cmd_run(args) -> int:
     }
     dest = receipt_path(repo, commit, args.receipts)
     dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # The suite output is already in hand and, until now, was dropped at
+    # exactly this line: the receipt kept `failures`, a list of node ids.
+    # Node ids do not carry a mechanism. Of the six red receipts this
+    # repository has filed, the one whose cause could be reconstructed was the
+    # one where somebody happened to save the output by hand beside it, and
+    # what that output showed was that two failures which read as unrelated (a
+    # PermissionError in a store, an HTTP 500 out of a sync server) had one
+    # cause, the second having been raised inside the server and come back
+    # wrapped. `failures` cannot express that; the output can, so it is kept.
+    #
+    # Only for red, and red as `not is_green(...)` rather than a test of its
+    # own, so that a later widening of green -- errors, skips -- carries here
+    # without a second definition to keep in step. A green run's output is
+    # ~29,000 characters of warnings summary and no diagnosis, once per sweep,
+    # so it is not kept; and a green run *deletes* what an earlier red run at
+    # this same sha left, because the pair is rewritten together and a stale
+    # red output beside a green receipt reads as this sweep's.
+    saved = output_path(repo, commit, args.receipts)
+    if is_green(receipt):
+        saved.unlink(missing_ok=True)
+    else:
+        try:
+            saved.write_text(_truncated(output), encoding="utf-8", errors="replace")
+        except OSError as exc:
+            # A companion file that cannot be written must not cost the
+            # verdict the suite just spent minutes earning: warn, file the
+            # receipt without the pointer, let the run report its result.
+            print(
+                f"WARNING: could not save the suite output to {saved} ({exc}); "
+                f"the receipt is filed without it, so this red run keeps only "
+                f"the failing names.",
+                file=sys.stderr,
+            )
+        else:
+            receipt["output"] = saved.name
+
     dest.write_text(json.dumps(receipt, indent=2), encoding="utf-8")
 
     summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "no counts"
@@ -637,10 +740,16 @@ def cmd_check(args) -> int:
         )
     if receipt.get("exit_code") != 0 or counts.get("failed") or counts.get("error"):
         failures = "\n  ".join(receipt.get("failures") or []) or "(none recorded)"
+        # Naming the file is the half that makes writing it worth anything: it
+        # sits in a directory nobody browses, and the one time such a file was
+        # read, it was found by eye. A reader of this message should not have
+        # to guess that something is lying next to the receipt.
+        parked = receipt.get("output")
+        where = f"\nfull output: {path.parent / parked}" if parked else ""
         print(
             f"sweep of {commit[:12]} was red: {summary}, exit "
             f"{receipt.get('exit_code')}\n  {failures}\n"
-            f"command: {receipt.get('command')}",
+            f"command: {receipt.get('command')}{where}",
             file=sys.stderr,
         )
         return 1

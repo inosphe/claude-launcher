@@ -67,6 +67,37 @@ RED = (
     'raise SystemExit(1)"'
 )
 
+#: A red run shaped like the real one: a FAILURES section with a traceback in
+#: it, then the short summary. Cut down from ``1fdc7a7``'s output, which is
+#: the run the parked-output cases below are about.
+RED_TRACEBACK = (
+    f'"{sys.executable}" -c "'
+    "print('=' * 31 + ' FAILURES ' + '=' * 31); "
+    "print('________ test_borrow_lends ________'); "
+    "print('[gw7] win32 -- Python 3.13.2'); "
+    "print('    os.replace(tmp, path)'); "
+    "print('E   PermissionError: [WinError 5] Access is denied'); "
+    "print('src/claude_launcher/store.py:113: PermissionError'); "
+    "print('FAILED tests/test_x.py::test_borrow_lends - PermissionError'); "
+    "print('1 failed, 11 passed in 3.4s'); "
+    'raise SystemExit(1)"'
+)
+
+#: The same, with 3,000 lines of warnings-summary filler wedged between the
+#: traceback and the summary, so the whole thing clears ``_OUTPUT_LIMIT``.
+#: The constants cannot be monkeypatched into place -- they are bound as
+#: default arguments at import -- so the case has to produce output that is
+#: really over the cap, which is also the only version of it worth trusting.
+BIG_RED = (
+    f'"{sys.executable}" -c "'
+    "print('=' * 31 + ' FAILURES ' + '=' * 31); "
+    "print('E   PermissionError: [WinError 5] Access is denied'); "
+    "print(('warning line ' * 8 + chr(10)) * 3000, end=''); "
+    "print('FAILED tests/test_x.py::test_borrow_lends - PermissionError'); "
+    "print('1 failed, 11 passed in 3.4s'); "
+    'raise SystemExit(1)"'
+)
+
 
 def _git(repo: Path, *args: str) -> str:
     proc = subprocess.run(
@@ -692,6 +723,202 @@ def test_run_files_the_receipt_under_the_standard_name_only(repo, receipts):
     assert [p.name for p in sweep.receipts_dir(repo, receipts).glob("*.json")] == [
         f"{tip}.json"
     ]
+
+
+# --------------------------------------------------------------------------- #
+# The suite output a red run parks beside its receipt
+# (claunch-sweep-receipt-no-output-64hs).
+#
+# `failures` records node ids. Six red receipts into this repository, exactly
+# one had its cause reconstructed, and only because somebody had saved the
+# output by hand next to it -- what it showed was that two failures reading as
+# unrelated (a PermissionError in a store, an HTTP 500 out of a sync server)
+# were one cause, the second wrapped by the server it was raised in. Node ids
+# cannot say that. So a red run now keeps the output it already had in hand,
+# and the receipt names the file.
+# --------------------------------------------------------------------------- #
+
+
+def test_a_red_run_parks_the_suite_output_and_the_receipt_names_it(repo, receipts):
+    """The mechanism survives the run that produced it, and can be found.
+
+    Two halves, and neither is worth much alone: the output is on disk *and*
+    the receipt points at it. A file with no pointer is the state the
+    ``1fdc7a7`` output was in -- it was read once, by somebody scanning the
+    directory by eye.
+    """
+    assert _run(repo, receipts, "--command", RED_TRACEBACK) == 1
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+
+    parked = sweep.output_path(repo, tip, receipts)
+    assert parked.is_file(), "a red run kept no output"
+    text = parked.read_text(encoding="utf-8")
+    assert "PermissionError: [WinError 5]" in text
+    assert "store.py:113" in text
+
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+    assert receipt["output"] == f"{tip}.output.txt"
+
+
+def test_a_green_run_parks_nothing(repo, receipts):
+    """Green output is ~29,000 characters of warnings summary per sweep and
+    carries no diagnosis. Keeping it would cost the directory and buy nothing.
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+
+    assert not sweep.output_path(repo, tip, receipts).exists()
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+    assert "output" not in receipt
+
+
+def test_a_green_run_clears_what_a_red_run_left_at_the_same_sha(repo, receipts):
+    """The receipt is overwritten in place, so its companion must be too.
+
+    Re-running a sweep at the same commit rewrites ``{sha}.json``. If the red
+    run's ``{sha}.output.txt`` outlived it, the directory would hold a green
+    verdict next to a red output under one sha -- and the way such a file gets
+    read here is by eye, with no receipt consulted. That is the failure this
+    change exists to remove, reintroduced from the other end.
+    """
+    assert _run(repo, receipts, "--command", RED_TRACEBACK) == 1
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    assert sweep.output_path(repo, tip, receipts).is_file()
+
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    assert not sweep.output_path(repo, tip, receipts).exists()
+
+
+def test_the_parked_output_is_invisible_to_the_receipt_scan(repo, receipts, capsys):
+    """``.output.txt`` must not become the noise the name check was built for.
+
+    ``_newest_green`` globs ``*.json`` and only then refuses names outside
+    ``{sha}.json``, so this file is dropped at the glob -- before the check
+    that would call it a hand-written receipt. Filing it under ``.json``
+    instead would make every red run produce a warning about a file the run
+    itself wrote, which is the case
+    ``test_a_hand_written_receipt_outside_the_protocol`` reports and would
+    then be reporting against us.
+
+    This is the case that goes red if somebody changes the extension.
+    """
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    parked = sweep.output_path(repo, tip, receipts)
+    parked.parent.mkdir(parents=True, exist_ok=True)
+    parked.write_text("E   PermissionError\n", encoding="utf-8")
+
+    assert _check(repo, receipts) == 1
+    err = capsys.readouterr().err
+    assert "no sweep receipt" in err, "the output file was read as a verdict"
+    assert "not a {sha}.json" not in err, (
+        f"{parked.name} tripped the hand-written-receipt warning; the "
+        f"extension has to stay outside the *.json glob"
+    )
+
+
+def test_output_over_the_cap_is_cut_in_the_middle_and_says_so(repo, receipts):
+    """The cut has one requirement: the tracebacks have to be on the surviving
+    side of it, and so do the names of what failed.
+
+    pytest puts them at opposite ends -- FAILURES before the warnings block,
+    the short test summary after it -- which is why the middle is what goes.
+    A cap alone would not give this: a plain head-truncation drops the failing
+    names, a plain tail-truncation drops the tracebacks.
+    """
+    assert _run(repo, receipts, "--command", BIG_RED) == 1
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+
+    text = sweep.output_path(repo, tip, receipts).read_text(encoding="utf-8")
+    assert len(text) < 3000 * 105, "nothing was cut -- the case is not testing a cut"
+    assert "PermissionError: [WinError 5]" in text, "the traceback was cut away"
+    assert "FAILED tests/test_x.py::test_borrow_lends" in text, "the names were cut"
+    assert "1 failed, 11 passed" in text
+    assert "dropped" in text and "characters" in text, "the cut left no trace"
+
+
+def test_a_receipt_filed_before_this_field_existed_still_reads(repo, receipts, capsys):
+    """``output`` is added only to red receipts, so *every* other receipt is a
+    receipt without the key -- every green one, and the five red ones this
+    repository had already filed when the field did not exist.
+
+    The gate is the only thing that reads these (``tools/changed_tests.py``
+    borrows ``is_green``/``parse_counts`` but reads its own receipts out of a
+    ``changed/`` subdirectory by exact path, and nothing under
+    ``src/claude_launcher`` opens the sweeps directory at all). It must not
+    require the key in either direction.
+    """
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    tree = _git(repo, "rev-parse", "HEAD^{tree}").strip()
+    filed = sweep.receipt_path(repo, tip, receipts)
+    filed.parent.mkdir(parents=True, exist_ok=True)
+
+    def file_receipt(**over):
+        receipt = {
+            "commit": tip,
+            "tree": tree,
+            "code_tree": sweep.code_tree(repo, tree),
+            "branch": "master",
+            "command": "pytest",
+            "exit_code": 0,
+            "counts": {"passed": 12},
+            "failures": [],
+            "dirty": False,
+            "session": "before",
+            "seconds": 3.4,
+        }
+        receipt.update(over)
+        assert "output" not in receipt
+        filed.write_text(json.dumps(receipt), encoding="utf-8")
+
+    file_receipt()
+    assert _check(repo, receipts) == 0, "a green receipt without the key was refused"
+
+    file_receipt(
+        exit_code=1,
+        counts={"failed": 1, "passed": 11},
+        failures=["FAILED tests/test_x.py::test_a - AssertionError"],
+    )
+    assert _check(repo, receipts) == 1
+    err = capsys.readouterr().err
+    assert "test_x.py::test_a" in err, "the red report lost its failing names"
+    assert "full output" not in err, "the gate named a file that was never written"
+
+
+def test_the_red_gate_names_the_parked_output(repo, receipts, capsys):
+    """The gate's red message is where a reader meets this, so the path goes
+    there. Without it the file is present and unfindable, which is how the one
+    surviving output was nearly lost.
+    """
+    assert _run(repo, receipts, "--command", RED_TRACEBACK) == 1
+    assert _check(repo, receipts) == 1
+
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    err = capsys.readouterr().err
+    assert str(sweep.output_path(repo, tip, receipts)) in err
+
+
+def test_the_receipt_is_still_filed_when_the_output_cannot_be_saved(
+    repo, receipts, capsys
+):
+    """A companion file must not be able to cost the verdict.
+
+    The sweep is 148 seconds of this machine. If parking its output threw --
+    a full disk, a locked path, the directory taken by something else -- and
+    that propagated, the run would die *after* the suite and before the
+    receipt, and the gate would report the sweep as never having happened.
+    So the write is allowed to fail, loudly, and the receipt is filed without
+    the pointer.
+    """
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    blocked = sweep.output_path(repo, tip, receipts)
+    blocked.mkdir(parents=True)  # a directory where the file wants to go
+
+    assert _run(repo, receipts, "--command", RED_TRACEBACK) == 1
+
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+    assert receipt["counts"] == {"failed": 1, "passed": 11}
+    assert "output" not in receipt
+    assert "could not save the suite output" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------------- #
