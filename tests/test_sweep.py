@@ -609,6 +609,91 @@ def test_a_corrupt_receipt_cannot_tell_rather_than_passing(repo, receipts):
     assert _check(repo, receipts) == sweep.CANNOT_TELL
 
 
+def test_a_hand_written_receipt_outside_the_protocol_is_not_a_verdict(
+    repo, receipts, capsys
+):
+    """The file this issue was filed over, given content that would pass.
+
+    ``1fdc7a7-s127sweep3-receipt.json`` was a manual receipt: a name outside
+    ``{sha}.json``, under the receipts directory. It happened to be red, so
+    nothing was lost -- but a green one would have been the useful lie, a
+    verdict nobody earned. So the scan refuses any name ``run`` does not
+    write, on the name alone, and says so: a decision that exists on disk but
+    is not recognised is a decision that may be about to be paid for again.
+    """
+    assert _check(repo, receipts) == 1          # baseline: nothing has run
+
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    tree = _git(repo, "rev-parse", "HEAD^{tree}").strip()
+    manual = sweep.receipts_dir(repo, receipts) / "1fdc7a7-s127sweep3-receipt.json"
+    manual.parent.mkdir(parents=True, exist_ok=True)
+    manual.write_text(
+        json.dumps(
+            {
+                "commit": tip,
+                "tree": tree,
+                "code_tree": "x",
+                "exit_code": 0,
+                "counts": {"passed": 1},
+                "dirty": False,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert _check(repo, receipts) == 1, (
+        "a hand-written receipt outside {sha}.json was accepted as a verdict"
+    )
+    err = capsys.readouterr().err
+    assert manual.name in err
+    assert "not a {sha}.json" in err
+
+
+def test_a_corrupt_receipt_in_the_fallback_scan_warns(repo, receipts, capsys):
+    """A standard-named receipt that cannot be parsed used to vanish.
+
+    ``cmd_check`` reads the tip's own receipt directly, and that path already
+    reported (test_a_corrupt_receipt_cannot_tell). The tree/code fallbacks
+    went through ``_newest_green``, which skipped a broken file without a
+    word -- so a green verdict that had been filed and then corrupted
+    silently cost the whole sweep again. Now the scan names the file.
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    swept = _git(repo, "rev-parse", "HEAD").strip()
+    _git(repo, "commit", "-q", "--allow-empty", "-m", "same tree, new tip")
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+
+    assert tip != swept
+    assert (
+        _git(repo, "rev-parse", "HEAD^{tree}").strip()
+        == _git(repo, "rev-parse", swept + "^{tree}").strip()
+    ), "the empty commit did not keep the tree -- the case needs the fallback"
+    sweep.receipt_path(repo, swept, receipts).write_text("{trunc", encoding="utf-8")
+
+    assert _check(repo, receipts) == 1
+    err = capsys.readouterr().err
+    assert f"{swept}.json" in err
+    assert "cannot be read" in err
+
+
+def test_run_files_the_receipt_under_the_standard_name_only(repo, receipts):
+    """``run`` is the one writer, and the one name is ``{sha}.json``.
+
+    The pin for "a receipt is only ever produced by 'python tools/sweep.py
+    run'": a run leaves exactly one file, in the receipts directory, named
+    after the full sha it judged -- nothing under a subdirectory, nothing
+    with an added label. A verdict scan would accept nothing else
+    (test_a_hand_written_receipt_outside_the_protocol).
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+
+    assert list(receipts.rglob("*.json")) == [sweep.receipt_path(repo, tip, receipts)]
+    assert [p.name for p in sweep.receipts_dir(repo, receipts).glob("*.json")] == [
+        f"{tip}.json"
+    ]
+
+
 # --------------------------------------------------------------------------- #
 # The sweep command itself. These constraints used to be pinned against the
 # workflow's verify line; they moved here with the command, because they are

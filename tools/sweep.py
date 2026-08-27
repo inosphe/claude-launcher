@@ -30,6 +30,14 @@ passes only if that sweep was green.
 Both halves live in one file on purpose. The receipt is a format shared
 between a writer and a reader, and a format split across two files drifts.
 
+A receipt is written by ``run`` and by nothing else. The one name it may be
+filed under is ``{commit}.json`` -- the full sha the run judged, nothing
+added (``claunch-sweep-receipt-single-writer-mxv0`` was filed over a manual
+receipt whose name violated exactly that). ``_newest_green`` refuses any
+other name before parsing: a hand-written receipt is a verdict nobody
+earned, and no matter how well-formed its content it is not this tool's
+decision to reuse.
+
 **Keyed by commit, not by clock.** The receipt's name is the sha it judged,
 so there is no "is this recent enough" guess: a receipt either belongs to the
 tip being gated or it does not. This is also what survives the restarts
@@ -344,6 +352,16 @@ def receipt_path(repo: Path, commit: str, override: Optional[Path] = None) -> Pa
     return receipts_dir(repo, override) / f"{commit}.json"
 
 
+#: The one name a receipt may be filed under -- the full sha it judged, plus
+#: ``.json``. ``run`` constructs it via :func:`receipt_path`; ``_newest_green``
+#: refuses any other name *before* parsing, because a file here that ``run``
+#: did not write is a hand-written receipt, a verdict nobody earned. Pinned to
+#: SHA-1's 40 hex digits, which is what ``git rev-parse`` emits here; a
+#: repository on SHA-256 would cost a sweep, never a verdict -- the denial
+#: direction this file refuses to trade (see ``NON_CODE_ENTRIES``).
+_RECEIPT_NAME_RE = re.compile(r"^[0-9a-f]{40}\.json$")
+
+
 def is_green(receipt: dict) -> bool:
     """A receipt that judged a clean tree and found nothing wrong."""
     counts = receipt.get("counts") or {}
@@ -358,17 +376,44 @@ def is_green(receipt: dict) -> bool:
 def _newest_green(repo: Path, override: Optional[Path], matches) -> Optional[tuple]:
     """The newest green receipt `matches` accepts, as ``(path, receipt)``.
 
-    Unreadable files are skipped rather than fatal: every caller is a fallback,
-    and is already on its way to a red gate without one.
+    Two kinds of file are refused *loudly* rather than skipped silently, and
+    the silence was the bug: a verdict that quietly cannot be reused costs the
+    whole sweep a second time, which is the failure
+    ``claunch-sweep-receipt-single-writer-mxv0`` filed over.
+
+    * a name outside :data:`_RECEIPT_NAME_RE` was not written by ``run``.
+      A hand-written receipt is a verdict nobody earned, and it is refused
+      on the name alone, before anything is parsed;
+    * a standard-named receipt that cannot be parsed is a filed verdict that
+      nobody can read.
+
+    Both are warned to stderr and ignored. A *valid* receipt that simply does
+    not match the caller's ``matches`` is neither -- it is a real decision
+    about a different tree, and is passed over silently.
     """
     directory = receipts_dir(repo, override)
     if not directory.is_dir():
         return None
     best = None
     for path in sorted(directory.glob("*.json")):
+        if _RECEIPT_NAME_RE.match(path.name) is None:
+            print(
+                f"WARNING: {path} is not a {{sha}}.json receipt, the one name "
+                f"'python tools/sweep.py run' files receipts under. A file "
+                f"here with any other name was hand-written, not filed -- it "
+                f"is not a verdict about any tree. Ignoring it.",
+                file=sys.stderr,
+            )
+            continue
         try:
             receipt = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        except (OSError, ValueError) as exc:
+            print(
+                f"WARNING: {path} cannot be read as a receipt ({exc}); a "
+                f"sweep outcome that was filed and then lost is not a "
+                f"verdict. Ignoring it.",
+                file=sys.stderr,
+            )
             continue
         if not is_green(receipt) or not matches(receipt):
             continue
