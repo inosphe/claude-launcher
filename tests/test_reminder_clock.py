@@ -514,8 +514,15 @@ def test_the_skip_door_re_arms_the_clock_and_writes_nothing(proj):
                 detail["run"], store.daemon_config()
             ) == (True, 600.0)
 
-            # A directory with no run is still a bad request, as it is for
-            # every other action door.
+            # A path that is not there is a bad request, refused before
+            # anything takes the slot's lock -- as it is for every other
+            # action door, the ten POSTs that share `_cflow_action_cwd`.
+            #
+            # Not to be read as "no run here". That case is a directory
+            # that exists, so it passes `is_dir()`, reaches the handler,
+            # and answers 200 with `skipped: false` -- the assertion
+            # above under "Armed but never scanned into the table yet".
+            # The 400 below is about the path, not about the run.
             resp = await client.post(
                 "/api/cflow/reminder/skip", headers=BEARER,
                 json={"cwd": str(proj / "nope"), "scope": "w1"},
