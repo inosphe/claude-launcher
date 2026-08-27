@@ -17354,7 +17354,7 @@ async function refreshRestartGate() {
   if (!host) return;
   let body;
   try {
-    body = await api("/api/daemon/restart-request");
+    body = await (await api("/api/daemon/restart-request")).json();
   } catch {
     return; // daemon down or auth up — pollOnce's own channels own both
   }
@@ -17406,7 +17406,9 @@ async function refreshRestartGate() {
     node.appendChild(sub);
     node.appendChild(actions);
     host.appendChild(node);
-    notices.set(NOTICE_GATE, { node, timer: null });
+    const entry = { node, timer: null };
+    notices.set(NOTICE_GATE, entry);
+    card = entry;   // the freshly built card carries this poll's countdown too
   }
   const sub = card.node.querySelector(".notice-sub");
   if (sub) {
