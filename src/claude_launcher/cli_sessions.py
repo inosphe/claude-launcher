@@ -1325,10 +1325,13 @@ def _gated_restart() -> int:
     daemon at request time) this command reports it and the caller's turn
     carries on.
 
-    ``--force`` and ``--all`` do not pass through here: the first exists for
-    a daemon that cannot be asked (no daemon, no gate), the second restarts
-    every instance at once and its per-instance iteration wants the
-    immediate path.
+    ``--all`` does not pass through here — its per-instance iteration wants
+    the immediate path — and neither does ``--force`` when the daemon cannot
+    be asked at all: a wedged daemon has no gate to wait behind, so the
+    wedge branch stays immediate. ``--force`` against a daemon that IS
+    answering falls through to this same gate, because then there is
+    nothing to force: a session's restart waits here whatever spelling
+    asked for it.
     """
     report = daemon_client.diagnose()
     state = report["state"]

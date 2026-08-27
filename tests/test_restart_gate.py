@@ -446,3 +446,90 @@ def test_a_human_shell_stays_on_the_immediate_path(home, monkeypatch, capsys):
     assert fake.client.posted == []
     assert fake.stop_calls == 1
     assert "daemon restarted" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------- #
+# the five minutes: the value, and the wiring that carries it
+# --------------------------------------------------------------------------- #
+def test_the_five_minute_default_is_pinned_in_both_places(home):
+    """The spec's "max timeout 5 minutes" lives in two constants that must
+    agree: the gate's own default and the machine-config default. A drift
+    between them silently changes what the gate waits for on a stock
+    install — and every behavioral test injects its own timeout, so none of
+    them can see either value. Changing one 300.0 to something else must
+    make this red."""
+    from claude_launcher import store
+    from claude_launcher.daemon import restart_gate
+
+    assert restart_gate.GATE_TIMEOUT == 300.0
+    assert store.DAEMON_DEFAULTS["restart_approval_timeout"] == 300.0
+    assert store.daemon_config()["restart_approval_timeout"] == 300.0
+
+
+def test_the_configured_timeout_reaches_the_gate_deadline(home, monkeypatch):
+    """The config value shapes the deadline through the *real* ``__main__``
+    wiring: ``_serve`` reads ``cfg["restart_approval_timeout"]`` and hands
+    it to ``build_app``, whose gate turns it into the record's deadline. The
+    ``GATE_TIMEOUT`` default must not answer for a configured value —
+    deleting the ``gate_timeout=...`` line in ``daemon/__main__.py`` makes
+    this red (the deadline would come back 300s wide while the config says
+    wait 7 seconds).
+
+    The daemon runs in-process on an ephemeral port; the relay uplink is
+    stubbed out so the test never dials a real relay.
+    """
+    import asyncio
+    from datetime import datetime
+
+    from claude_launcher.daemon import __main__ as daemon_main
+    from claude_launcher.daemon import runtime_state
+    from claude_launcher.daemon_client import DaemonClient, DaemonClientError
+
+    monkeypatch.setattr(daemon_main, "_start_uplink", lambda port: (None, None))
+
+    cfg = {
+        "host": "127.0.0.1",
+        "port": 0,  # ephemeral: never collides with a live daemon
+        "idle_threshold": 2.0,
+        "scrollback_lines": 200,
+        "restore": False,
+        "restart_approval_timeout": 7,
+    }
+    bound: dict = {}
+
+    async def run():
+        serve = asyncio.ensure_future(
+            daemon_main._serve("127.0.0.1", int(cfg["port"]), cfg, bound)
+        )
+        client = None
+        try:
+            deadline = time.monotonic() + 15.0
+            while not bound.get("port"):
+                if serve.done() or time.monotonic() > deadline:
+                    raise AssertionError("in-process daemon did not come up")
+                await asyncio.sleep(0.05)
+            client = DaemonClient(
+                f"http://127.0.0.1:{bound['port']}",
+                runtime_state.load_or_create_token(),
+            )
+            # The client is synchronous urllib and the server lives on this
+            # very loop — every call has to cross to a worker thread, or the
+            # loop blocks on a server that cannot answer it.
+            rec = (await asyncio.to_thread(
+                client.post, "/api/daemon/restart-request", {"session": "s-wire"}
+            ))["request"]
+            asked = datetime.fromisoformat(rec["requested_at"])
+            dead = datetime.fromisoformat(rec["deadline"])
+            # 7.0 exactly: the gate computes deadline = requested + timeout,
+            # and both stamps are second-precision ISO strings.
+            assert (dead - asked).total_seconds() == 7.0, rec
+            assert rec["status"] == "pending"
+        finally:
+            if client is not None:
+                try:
+                    await asyncio.to_thread(client.post, "/api/daemon/shutdown")
+                except DaemonClientError:
+                    pass
+            await asyncio.wait_for(serve, timeout=15.0)
+
+    asyncio.run(run())
