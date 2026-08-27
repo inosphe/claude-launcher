@@ -1128,7 +1128,12 @@ Claude-only; `Borrow` remains open for Claude and API-key harnesses and greys
 for OAuth/none harnesses. `Profile : Harness` is the only execution selector;
 use `claunch set-harness` to change a profile's default. `Borrow` candidates
 are base profiles validated for the selected harness and current credential
-state. `Borrow` and `Null token` are
+state. New-session and reborrow forms fold the selected base profile into
+their own-token choice. Spawn forms retain that profile as an explicit lender
+because their empty choice inherits the parent's authentication; selecting it
+lets the child use the selected profile's authentication when the parent is
+borrowing another profile or running with `--null`. `Borrow` and `Null token`
+are
 `--borrow`/`--null` as rows — and since the daemon refuses
 the pair outright, saying yes to null greys the borrow row and resets it,
 so the form can never offer a combination the flags would error on.
@@ -2465,7 +2470,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/sessions/{name}/resize`  | `{cols, rows}` |
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | base profile names, policy-filtered execution selectors, labelled default options, and diagnostic selector details |
-| GET    | `/api/borrow-options`          | `?profile=PROFILE[:HARNESS]` — secret-free lender validation; returns base-profile options with policy/credential status and `selectable` |
+| GET    | `/api/borrow-options`          | `?profile=PROFILE[:HARNESS]` — secret-free lender validation; returns every base-profile option, including the runtime base profile, with policy/credential status and `selectable` |
 | GET    | `/api/roles`                   | the roles a session can be spawned with, each with its aliases, stance and the exact system-prompt injection |
 | GET    | `/api/workspaces`              | registered directories, for the create form's picker and the manage page |
 | POST   | `/api/workspaces`              | register one — `{"path": "...", "name": "..."}`; `400` (with the reason) if the directory is not there |

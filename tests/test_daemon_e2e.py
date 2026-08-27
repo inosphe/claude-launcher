@@ -14,7 +14,7 @@ import time
 
 import pytest
 
-from claude_launcher import lineage, profile, store
+from claude_launcher import credentials, lineage, profile, store
 from claude_launcher.daemon import codex_sessions, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
@@ -1638,6 +1638,7 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             )
             pi_profile = profile.create("pi-profile")
             lineage.set_harness(pi_profile, "pi")
+            credentials.save_token(pi_profile, "pi-profile-secret")
             codex_only = profile.create("codex-only")
             lineage.set_harness(codex_only, "codex")
             store.set_profile_field(
@@ -1701,6 +1702,9 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             assert resp.status == 200
             borrow_doc = await resp.json()
             lenders = {item["name"]: item for item in borrow_doc["options"]}
+            assert lenders["pi-profile"]["status"] == "ready"
+            assert lenders["pi-profile"]["selectable"] is True
+            assert "pi-profile-secret" not in json.dumps(borrow_doc)
             assert lenders["restricted"]["status"] == "harness-policy-denied"
             assert lenders["restricted"]["selectable"] is False
             assert lenders["codex-only"]["status"] == "harness-policy-denied"

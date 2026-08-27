@@ -1005,11 +1005,9 @@ class FakeSpawnSources(FakeSources):
 
     def borrow_options(self, profile_selector):
         names = self._report.get("profiles") or self.profiles()
-        own = str(profile_selector or "").split(":", 1)[0]
         return [
             {"name": name, "label": name, "selectable": True, "valid": True}
             for name in names
-            if name != own
         ]
 
     def mesh_of(self, session):
@@ -1242,6 +1240,24 @@ def _open_report(**extra):
         "profiles": ["other", "work"],
         **extra,
     }
+
+
+def test_spawn_borrow_picker_includes_the_runtime_profile_auth():
+    sources = FakeSpawnSources(
+        report=_open_report(),
+        sessions=[
+            {"name": "lead", "status": "idle", "harness": "claude",
+             "profile": "work", "borrow": "other", "cwd": "/work/repo"},
+        ],
+    )
+    wiz = spawn_form(sources=sources)
+
+    assert "work" in [option.value for option in wiz.field("borrow").options]
+    pick(wiz, "borrow", "work")
+    args = argparse.Namespace()
+    wiz.apply(args)
+
+    assert args.borrow == "work"
 
 
 def test_a_locked_profile_row_never_travels():
