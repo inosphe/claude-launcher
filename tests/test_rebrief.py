@@ -443,6 +443,66 @@ def test_the_unavailable_block_states_what_is_missing_without_guessing_it(home):
     assert block.startswith("---") and block.rstrip().endswith("---")
 
 
+def test_an_unreachable_daemon_points_at_the_command_that_was_actually_run(
+    home, monkeypatch, capsys
+):
+    """After ``--id``, the recovery line has to name ``--id``.
+
+    The whole-briefing form tells the caller to run ``claunch rebrief`` again
+    because "it is the same command". For a session that called with an id
+    that sentence is wrong twice: it is a different command, and a caller
+    following it literally gets the whole briefing back without the one block
+    it came for. That left the ``--id`` caller with a visible error and no
+    visible way out -- half of what this branch exists to give it.
+    """
+    from claude_launcher import cli_sessions
+    from claude_launcher.daemon_client import DaemonClientError
+
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+
+    def down(*a, **kw):
+        raise DaemonClientError("daemon did not come up within 15s")
+
+    monkeypatch.setattr(cli_sessions.daemon_client, "ensure_running", down)
+    rc = cli_sessions._cmd_rebrief(
+        argparse.Namespace(session=None, id="a3f9c2b10de4")
+    )
+    out, err = capsys.readouterr()
+
+    assert rc == 0  # still a hook; failing it un-compacts nothing
+    assert "claunch rebrief --id a3f9c2b10de4" in out
+    # ...and not the sentence written for the other caller, which would send
+    # this one off to fetch the whole briefing instead of its block.
+    assert "it is the same command" not in out
+    assert "who is reachable on your mesh" not in out
+    # 'could not reach the daemon' and 'no such id' stay distinguishable, and
+    # this block says which one it is by naming where the other one arrives.
+    assert "exit 1" in out
+    assert not err  # the half claude reads back is stdout
+
+
+def test_the_two_unavailable_forms_name_different_missing_things(home):
+    """One caller lost the whole briefing, the other lost one block.
+
+    Both reach this branch through the same failure, so nothing but the
+    argument tells them apart. Naming the whole briefing at a caller that
+    asked for one id overstates what is gone.
+    """
+    from claude_launcher import cli_sessions
+
+    whole = cli_sessions._rebrief_unavailable("s9", Exception("no daemon"))
+    one = cli_sessions._rebrief_unavailable(
+        "s9", Exception("no daemon"), "c0ffee123456"
+    )
+
+    assert "opening task" in whole and "opening task" not in one
+    assert "c0ffee123456" in one and "c0ffee123456" not in whole
+    assert "[text id: c0ffee123456]" in one.splitlines()[1]
+    for block in (whole, one):
+        assert block.startswith("---") and block.rstrip().endswith("---")
+        assert "no daemon" in block  # the cause survives either way
+
+
 def test_a_page_long_completion_test_is_capped(home, tmp_path, monkeypatch):
     """``done_when`` is a sentence by design; the cap is for the one that
     isn't, so a runaway workflow cannot crowd out the sections nothing else
