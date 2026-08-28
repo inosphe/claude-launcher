@@ -26,6 +26,10 @@ Schema::
         provider: <name>        # optional; Claude Code only
         allowed_harnesses: [claude, pi]  # optional; inherited by intersection
         env: {KEY: VALUE, ...}
+    shared:                     # applied to every profile; see :mod:`plugins`
+      marketplaces: [<source>, ...]
+      plugins: [<plugin@marketplace>, ...]
+      settings: {<settings.json key>: <value>, ...}
     workspaces:                 # machine-local; see :mod:`workspaces`
       <name>: <absolute path>
 
@@ -37,7 +41,7 @@ nothing else stores these settings, so there is no separate "export" step.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, List, Optional
 
 import yaml
 
@@ -362,5 +366,64 @@ def set_template_env(env: Dict[str, str]) -> None:
             tmpl = {}
             doc["template"] = tmpl
         tmpl["env"] = {str(k): str(v) for k, v in env.items()}
+
+    update(_mutate)
+
+
+# --------------------------------------------------------------------------- #
+# shared section
+# --------------------------------------------------------------------------- #
+#: The ``shared`` block: harness-global state that a profile keeps in its own
+#: ``CLAUDE_CONFIG_DIR`` and therefore holds one copy of per profile. Declared
+#: once here, converged onto every profile by :mod:`plugins`.
+SHARED_KEYS = ("marketplaces", "plugins", "settings")
+
+
+def shared(doc: Optional[dict] = None) -> dict:
+    """The ``shared`` block (``{}`` if absent or malformed)."""
+    doc = load() if doc is None else doc
+    section = doc.get("shared")
+    return section if isinstance(section, dict) else {}
+
+
+def _shared_list(key: str, doc: Optional[dict]) -> List[str]:
+    block = shared(doc).get(key)
+    if not isinstance(block, list):
+        return []
+    return [str(item) for item in block if str(item).strip()]
+
+
+def shared_marketplaces(doc: Optional[dict] = None) -> List[str]:
+    """Marketplace sources every profile should know (URL, path or ``owner/repo``)."""
+    return _shared_list("marketplaces", doc)
+
+
+def shared_plugins(doc: Optional[dict] = None) -> List[str]:
+    """Plugin ids (``plugin@marketplace``) every profile should have installed."""
+    return _shared_list("plugins", doc)
+
+
+def shared_settings(doc: Optional[dict] = None) -> Dict[str, object]:
+    """``settings.json`` keys every profile should carry (e.g. ``outputStyle``)."""
+    block = shared(doc).get("settings")
+    return {str(k): v for k, v in block.items()} if isinstance(block, dict) else {}
+
+
+def set_shared_field(key: str, value) -> None:
+    """Set (or, when ``value`` is empty, clear) one key of the ``shared`` block."""
+    if key not in SHARED_KEYS:
+        raise StoreError(f"unknown shared key {key!r} (known: {', '.join(SHARED_KEYS)})")
+
+    def _mutate(doc: dict) -> None:
+        section = doc.get("shared")
+        if not isinstance(section, dict):
+            section = {}
+            doc["shared"] = section
+        if value in (None, "", [], {}):
+            section.pop(key, None)
+        else:
+            section[key] = value
+        if not section:
+            doc.pop("shared", None)
 
     update(_mutate)
