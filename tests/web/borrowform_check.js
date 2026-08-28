@@ -138,26 +138,44 @@ async function checkBorrowAuthModes() {
   const authDocument = {
     createElement: () => ({ value: "", textContent: "", title: "", disabled: false }),
   };
+  const authDetails = {
+    "work:claude": { harness: "claude", borrow_allowed: true,
+                       borrow_mode: "provider-token" },
+    "codex:codex": { harness: "codex", borrow_allowed: false,
+                       borrow_mode: "none" },
+  };
+  const authHarnesses = {
+    claude: { auth: "claude" }, codex: { auth: "oauth" },
+  };
   let parent = null;
-  const authApi = async () => ({
+  const authApi = async (url) => ({
     ok: true, status: 200,
-    json: async () => ({ options: [
-      { name: "work", label: "work", selectable: true, message: "ready" },
-      { name: "ds4", label: "ds4", selectable: true, message: "ready" },
-    ] }),
+    json: async () => url.includes("codex%3Acodex")
+      ? { capability: { allowed: false, mode: "none" }, options: [] }
+      : { options: [
+          { name: "work", label: "work", selectable: true, message: "ready" },
+          { name: "ds4", label: "ds4", selectable: true, message: "ready" },
+        ] },
   });
   const auth = {};
   new Function(
-    "exports", "api", "document", "form", "parentNow",
+    "exports", "api", "document", "form", "parentNow", "details", "harnesses",
     `let newBorrowFor = null, newBorrowSeq = 0;
+let profileDetails = details;
+let harnessDetails = harnesses;
 function $(id) { return id === "new-session" ? form : null; }
 function spawnParent() { return parentNow(); }
 function syncSpawnMode() {}
 function syncForkAvailability() {}
-` + slice("baseProfileName") + slice("readBorrowOptions")
+` + slice("baseProfileName") + slice("profileBorrowCapability")
+    + slice("profileOwnAuthLabel") + slice("profileHarnessName")
+    + slice("readBorrowOptions")
     + slice("fillValidatedBorrow") + slice("syncNewBorrowOptions") + `
 exports.sync = syncNewBorrowOptions;`
-  )(auth, authApi, authDocument, authForm, () => parent);
+  )(
+    auth, authApi, authDocument, authForm, () => parent,
+    authDetails, authHarnesses
+  );
 
   await auth.sync(true);
   check("new-session folds its base profile into the own-token choice",
@@ -175,6 +193,14 @@ exports.sync = syncNewBorrowOptions;`
     own && [own.textContent, own.disabled]);
   check("the duplicate lender row is folded into that head answer",
     borrow.options.filter((o) => o.value === "work").length === 1, values);
+
+  authForm.profile.value = "codex:codex";
+  await auth.sync(true);
+  check("an OAuth profile replaces the parent-auth head with its own login",
+    borrow.options.length === 1 && borrow.options[0].value === "" &&
+      borrow.options[0].textContent ===
+        "(codex/codex profile's own OAuth login)",
+    borrow.options.map((o) => [o.value, o.textContent]));
 }
 
 async function checkSpawnModalBorrowHead() {
@@ -187,7 +213,11 @@ async function checkSpawnModalBorrowHead() {
   });
   const mkUi = () => ({
     profile: { value: "" },           // inherit the parent's profile
-    parentSess: { profile: "work:claude" },
+    parentSess: { profile: "work:claude", harness: "claude" },
+    profileDetails: {
+      "work:claude": { harness: "claude", borrow_allowed: true,
+                         borrow_mode: "provider-token" },
+    },
     borrow: mkBorrow(),
   });
   let baseSelectable = true;
@@ -205,7 +235,8 @@ async function checkSpawnModalBorrowHead() {
     `let spawnModal = null;
 function syncSpawnGates() {}
 function spawnModalClose() {}
-` + slice("baseProfileName") + slice("fillValidatedBorrow")
+` + slice("baseProfileName") + slice("profileBorrowCapability")
+    + slice("profileOwnAuthLabel") + slice("fillValidatedBorrow")
     + slice("readBorrowOptions") + slice("refreshSpawnBorrowOptions") + `
 exports.refresh = refreshSpawnBorrowOptions;
 exports._setModal = (s) => { spawnModal = s; };`
