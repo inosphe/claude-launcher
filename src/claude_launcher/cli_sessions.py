@@ -75,6 +75,9 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     if not args.profile:
         print("error: --profile is required; the profile selects the harness", file=sys.stderr)
         return 1
+    if args.role and not getattr(args, "mesh", None):
+        print("error: --role requires --mesh", file=sys.stderr)
+        return 1
     # Resolve from the shared config without requiring a local directory: a
     # CLI may be pointed at a named daemon instance whose reconciled storage
     # is authoritative. The daemon still performs the existence check.
@@ -85,7 +88,6 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
     if selected != harnesses.CLAUDE_HARNESS:
         claude_only = []
         for flag, given in (
-            ("--role", args.role),
             ("--resume", args.resume is not None),
             ("--fork-session", args.fork_session),
             ("--null", args.null_token),
@@ -205,11 +207,12 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         return 1
     client = daemon_client.ensure_running()
     info = client.post("/api/sessions", body)
+    joined_role = str((info.get("mesh") or {}).get("role") or "")
     print(
         f"created session {info['name']!r} "
         f"(harness: {info['harness']}"
         + (f", profile: {info['profile']}" if info.get("profile") else "")
-        + (f", role: {info['role']}" if info.get("role") else "")
+        + (f", role: {joined_role}" if joined_role else "")
         + f", pid: {info.get('pid')})"
     )
     _warn_dropped_auth(args, info)
@@ -1869,8 +1872,8 @@ def register(sub) -> None:
     p_new.add_argument(
         "--role",
         help="run as this role — leader, operator, worker, reviewer or "
-        "specialist (aliases accepted): its stance is injected into the "
-        "session's system prompt at every spawn",
+        "specialist (aliases accepted): requires --mesh; its stance is "
+        "delivered in the session opening and recovered by reminders",
     )
     p_new.add_argument(
         "--resume", nargs="?", const="", metavar="SESSION|UUID",

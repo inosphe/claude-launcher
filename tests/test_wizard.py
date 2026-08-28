@@ -298,7 +298,7 @@ def test_profile_selector_picker_is_qualified_but_borrow_stays_base_profile():
 # --------------------------------------------------------------------------- #
 # fields that depend on other fields
 # --------------------------------------------------------------------------- #
-def test_role_resume_and_null_belong_to_claude_but_pi_can_borrow():
+def test_role_is_harness_neutral_while_resume_and_null_belong_to_claude():
     class PiSources(FakeSources):
         def profile_details(self):
             return [
@@ -309,7 +309,7 @@ def test_role_resume_and_null_belong_to_claude_but_pi_can_borrow():
     wiz = form(sources=PiSources())
     assert wiz.field("role").selectable
     pick(wiz, "profile", "ds4")
-    assert not wiz.field("role").selectable
+    assert wiz.field("role").selectable
     assert not wiz.field("resume").selectable
     assert not wiz.field("fork_session").selectable
     assert wiz.field("borrow").selectable
@@ -574,6 +574,26 @@ def test_picking_a_role_selects_its_default_workflow():
     assert wiz.value("workflow") == "audit"
     pick(wiz, "role", "(no role)")
     assert wiz.value("workflow") == ""       # and lets go with the role
+
+
+def test_role_options_follow_the_selected_mesh_vocabulary():
+    class CustomSources(FakeSources):
+        def roles_for(self, mesh):
+            if mesh == "team":
+                return [{"name": "surveyor", "aliases": ["measure"]}]
+            return super().roles_for(mesh)
+
+    wiz = wizard.Wizard(CustomSources(), cwd="/work/repo")
+    assert {o.value for o in wiz.field("role").options} >= {"worker", "leader"}
+    pick(wiz, "mesh", "team")
+    assert [o.value for o in wiz.field("role").options] == ["", "surveyor"]
+
+
+def test_a_typed_role_without_mesh_stays_visible_for_validation():
+    defaults = argparse.Namespace(role="worker", mesh=None)
+    wiz = wizard.Wizard(FakeSources(), cwd="/work/repo", defaults=defaults)
+    assert wiz.value("role") == "worker"
+    assert ("role", "a role requires a mesh membership") in wiz._check()
 
 
 def test_bundled_improv_workflows_volunteer_for_their_whitelisted_role():
@@ -1101,7 +1121,6 @@ def test_new_session_runs_the_wizard_before_it_builds_anything(monkeypatch):
         ),
     )
     monkeypatch.setattr(cli_sessions, "_run_wizard", lambda args: False)
-    parser = argparse.ArgumentParser()
     from claude_launcher import cli
 
     args = cli.build_parser().parse_args(["new-session", "--wizard"])

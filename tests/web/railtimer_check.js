@@ -5,7 +5,7 @@
    The countdown exists once, as a chip in the session's own header
    (#term-timer, rendered and wired in termtimer_check.js): the rail's strip
    was its duplicate and is gone. What stays is the machinery both faces
-   shared — the pick that ranks the two clocks (the step reminder, which
+   shared — the pick that ranks the two clocks (the cflow reminder, which
    types into a session that is WORKING, and the stall ping, which wakes one
    that STOPPED, at most one of them live at any moment), the line that
    words the countdown and each of its silences, and the formatting that
@@ -104,7 +104,7 @@ const PING = (over) => Object.assign(
 check("a counting reminder beside a switched-off ping speaks for the reminder",
       ctx.pick(timers(REM(), PING())).clock, "reminder");
 check("...and says how long is left",
-      ctx.line(ctx.pick(timers(REM(), PING()))).text, "step reminder in 6:00");
+      ctx.line(ctx.pick(timers(REM(), PING()))).text, "cflow reminder in 6:00");
 
 /* The reminder is held because the session stopped — which is exactly when
    the ping is the clock that will actually speak. Ranking by need, not by
@@ -139,29 +139,29 @@ check("an unknown deadline sorts last, not first",
    clock or a stale word. */
 const counting = ctx.pick(timers(REM({ due_in: 65 }), PING()));
 check("the reading ages between polls", ctx.line(counting, 5).text,
-      "step reminder in 1:00");
+      "cflow reminder in 1:00");
 check("...and past its deadline it becomes due, not a negative countdown",
       [ctx.line(counting, 70).state, ctx.line(counting, 70).text],
-      ["due", "step reminder due now"]);
+      ["due", "cflow reminder due now"]);
 check("a state that was already due stays due however long it ages",
       ctx.line(ctx.pick(timers(REM({ state: "due", due_in: -4 }), PING())), 30).text,
-      "step reminder due now");
+      "cflow reminder due now");
 
 /* ---- the several silences, told apart -------------------------------- */
 const say = (rem) => ctx.line(ctx.pick(timers(REM(rem), PING()))).text;
 check("switched off says so", say({ enabled: false, state: "off", due_in: null }),
-      "step reminder off");
+      "cflow reminder off");
 check("a tick that is not running is NOT the same as switched off",
       say({ running: false, state: "stopped", due_in: null }),
       "clock not running");
 check("held names the reason it is silent, which is not the configuration",
       say({ state: "held", due_in: -12 }),
-      "step reminder held — session stopped");
+      "cflow reminder held — session stopped");
 check("a gate is the protocol's silence, not the settings'",
       say({ state: "blocked", due_in: null }),
-      "step reminder paused — not this run's move");
+      "cflow reminder paused — not this run's move");
 check("armed but not yet seen by a tick", say({ state: "arming", due_in: null }),
-      "step reminder arming");
+      "cflow reminder arming");
 check("the signal-only run says what it is watching",
       say({ state: "watching", interval: 0, due_in: null,
             awaits: "the sweep to go green" }),
@@ -185,7 +185,7 @@ const title = ctx.line(ctx.pick(timers(
 check("the title names the run", title.split("\n")[0], "ship · s19");
 check("...the clock it is reporting, with its cadence and last firing",
       title.split("\n")[1],
-      "step reminder · counting · every 10:00 · last fired 4:00 ago");
+      "cflow reminder · counting · every 10:00 · last fired 4:00 ago");
 check("...and the other clock, so 'why not the ping' is answerable here",
       title.split("\n")[2], "stall ping · waiting · every 15:00");
 
@@ -202,10 +202,10 @@ const formLine = (form) => ctx.line(ctx.pick(timers(
   PING({ enabled: true, state: "waiting", due_in: 900 })))).title.split("\n")[1];
 check("a reminder that has not spoken at this position says the next fire is the whole step",
       formLine("full"),
-      "step reminder · counting · every 10:00 · last fired 4:00 ago · next: full restatement");
+      "cflow reminder · counting · every 10:00 · last fired 4:00 ago · next: full restatement");
 check("...and one that already has says the next is the short form",
       formLine("short"),
-      "step reminder · counting · every 10:00 · last fired 4:00 ago · next: short form");
+      "cflow reminder · counting · every 10:00 · last fired 4:00 ago · next: short form");
 
 /* ---- no timers, no countdown ------------------------------------------ */
 /* An older daemon publishes no `timers` at all. Drawing a zero there would

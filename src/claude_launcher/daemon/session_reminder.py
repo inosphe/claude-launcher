@@ -1,0 +1,543 @@
+"""Session-level reminders assembled from independent state sources.
+
+The daemon used to let cflow own the only reminder delivery.  A stalled
+position produced a fenced cflow block and session-level facts (role, opening
+task ids, mesh mail and children) were appended to its tail.  That made those
+facts depend on a run existing and left the role line visually subordinate to
+the step that happened to trigger it.
+
+This module owns the delivery now.  Cflow remains one source and keeps the
+position key, no-progress policy, full/repeat decision and ``awaits`` probe in
+``cflow_clock.CflowReminderSource``.  Role is another source with its own key
+and interval.  Sources that become due together are rendered as peer sections
+inside one terminal delivery, and each source advances only after that
+delivery succeeds.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import time
+from typing import Dict, List, Optional, Tuple
+
+from .. import digests, store
+from ..cflow import engine as cflow_engine
+from . import cflow_clock, mesh_roles, rebrief
+from .session import STATUS_BUSY
+
+log = logging.getLogger("claunch.daemon.session-reminder")
+
+
+def role_reminder_policy(cfg: dict) -> Tuple[bool, float]:
+    """Effective machine policy for the role source.
+
+    Role recovery is session state, so it has its own switch and interval.
+    The same lower bound as cflow reminders prevents a bad live config edit
+    from typing into every role-bearing terminal every few seconds.
+    """
+    enabled = bool(cfg.get("role_reminder", True))
+    interval = float(cfg.get("role_reminder_interval") or 0)
+    if interval > 0:
+        interval = max(interval, cflow_engine.REMINDER_MIN_INTERVAL)
+    return enabled and interval > 0, interval
+
+
+def role_entries(name: str, manager, mesh_mgr) -> List[dict]:
+    """Resolved roles currently held by one local session.
+
+    Mesh membership is the authoritative role.  ``SessionDef.role`` is read
+    only as a compatibility fallback for sessions created before role
+    delivery moved out of Claude's appended system prompt.
+    """
+    out: List[dict] = []
+    if mesh_mgr is not None:
+        try:
+            rows = mesh_mgr.meshes_for_session(name)
+        except Exception:  # noqa: BLE001 - one roster read must not stop a tick
+            rows = []
+        for row in rows:
+            try:
+                mesh = mesh_mgr.get(row["mesh"])
+                member = mesh_mgr.member_for_session(mesh, name)
+                if member is None:
+                    continue
+                role = mesh.roleset.get(member.role)
+                if role is None:
+                    continue
+                stance = (role.stance or "").strip()
+                out.append(
+                    {
+                        "mesh": mesh.name,
+                        "name": role.name,
+                        "stance": stance,
+                        "digest": digests.text_digest(stance),
+                        "cflow_reminder": (role.cflow_reminder or "").strip(),
+                    }
+                )
+            except Exception:  # noqa: BLE001 - a changing mesh is one omitted role
+                continue
+    if out:
+        return sorted(out, key=lambda e: (e["mesh"], e["name"]))
+
+    try:
+        raw = (manager.get(name).sdef.role or "").strip()
+    except Exception:  # noqa: BLE001 - an unknown session has no role
+        raw = ""
+    role = mesh_roles.resolve().get(raw) if raw else None
+    if role is not None:
+        stance = (role.stance or "").strip()
+        out.append(
+            {
+                "mesh": "",
+                "name": role.name,
+                "stance": stance,
+                "digest": digests.text_digest(stance),
+                "cflow_reminder": (role.cflow_reminder or "").strip(),
+            }
+        )
+    return out
+
+
+def role_key(entries: List[dict]) -> tuple:
+    """The role source's stable position key."""
+    return tuple((e["mesh"], e["name"], e["digest"]) for e in entries)
+
+
+def role_section(entries: List[dict], *, cflow_guidance: bool) -> List[str]:
+    """The Role section, with stance recovery and optional step guidance."""
+    lines: List[str] = []
+    for index, entry in enumerate(entries):
+        if index:
+            lines.append("")
+        where = f" on {entry['mesh']}" if entry["mesh"] else ""
+        lines.append(f"role: {entry['name']}{where}")
+        ident = entry.get("digest") or ""
+        if ident:
+            lines.extend(
+                [
+                    f"stance text id: {ident}",
+                    "recovery: find that id attached to the stance text in this "
+                    "conversation. If it is absent, call the mesh 'rebrief' tool "
+                    f"with id {ident}; this id line alone is not the stance.",
+                ]
+            )
+        if cflow_guidance and entry.get("cflow_reminder"):
+            lines.append(f"at this cflow position: {entry['cflow_reminder']}")
+    return lines
+
+
+def _cflow_section(block: str) -> List[str]:
+    """Remove a cflow block's outer fence and demote its header to metadata."""
+    rows = str(block or "").splitlines()
+    if rows and rows[0] == "---":
+        rows = rows[1:]
+    if rows and rows[-1] == "---":
+        rows = rows[:-1]
+    if rows and rows[0].startswith("# claunch cflow: reminder -- "):
+        notice = rows.pop(0).split(" -- ", 1)[1]
+        rows.insert(0, f"reminder: {notice}")
+    return rows
+
+
+def _situation_section(lines: List[str]) -> List[str]:
+    """Drop the old inline divider; the Situation heading replaces it."""
+    rows = list(lines)
+    if rows and rows[0].startswith("-- around you right now"):
+        rows.pop(0)
+    return rows
+
+
+def situation_lines(name: str, manager, mesh_mgr, open_asks: int = 0) -> List[str]:
+    """Mutable state around a session, recomputed at delivery time."""
+    lines: List[str] = []
+    try:
+        sdef = manager.get(name).sdef
+    except Exception:  # noqa: BLE001 - raced an exit; no session to describe
+        return lines
+    if open_asks:
+        lines.append(
+            f"asks: {open_asks} delegated decision(s) from other runs await "
+            "your answer -- their workflows are stopped on it. The cflow "
+            "'asks' tool serves them, 'answer' closes them."
+        )
+    if mesh_mgr is not None:
+        try:
+            for row in mesh_mgr.meshes_for_session(name):
+                mesh = mesh_mgr.get(row["mesh"])
+                member = mesh_mgr.member_for_session(mesh, name)
+                if member is None:
+                    continue
+                owed = mesh.owed(member.handle)
+                if owed:
+                    lines.append(
+                        f"owed: {len(owed)} delivered message(s) on mesh "
+                        f"{mesh.name} still await your reply -- to the "
+                        "senders, silence is silence. 'claunch mesh history "
+                        f"{mesh.name} -n 30' shows them."
+                    )
+        except Exception:  # noqa: BLE001 - one changing mesh omits that row
+            pass
+    try:
+        live = manager.live_children(name)
+    except Exception:  # noqa: BLE001
+        live = []
+    if live:
+        lines.append(
+            f"children: {', '.join(live)} still running and still reporting "
+            "to you -- a child holding a finished result keeps holding it "
+            "until you ask."
+        )
+    if sdef.parent:
+        try:
+            if manager.get(sdef.parent).exited:
+                lines.append(
+                    f"parent: {sdef.parent} has exited -- whatever you were "
+                    "going to report to it has nowhere to go. Say so in this "
+                    "run's next report rather than reporting into the void."
+                )
+        except Exception:  # noqa: BLE001 - no record is not an exited record
+            pass
+    if lines:
+        lines.insert(
+            0,
+            "-- around you right now (this part changes; it is stated in "
+            "full because there is no id that could stay true for it) --",
+        )
+    return lines
+
+
+def context_id_lines(name: str, manager, mesh_mgr) -> List[str]:
+    """IDs for stable non-role session text, currently the opening task."""
+    try:
+        ids = [
+            (ident, kind)
+            for ident, kind in rebrief.given_ids(
+                name, manager=manager, mesh_mgr=mesh_mgr
+            )
+            if not kind.startswith("stance (")
+        ]
+    except Exception:  # noqa: BLE001 - context decoration never sinks delivery
+        ids = []
+    if not ids:
+        return []
+    named = "; ".join(f"{ident} ({kind})" for ident, kind in ids)
+    return [
+        f"session text ids: {named}",
+        "recovery: an id counts only where it is attached to its full text. "
+        "If the attached text is absent from this conversation, call the "
+        "mesh 'rebrief' tool with that id.",
+    ]
+
+
+def reminder_block(
+    name: str,
+    *,
+    roles: List[dict],
+    cflow: str = "",
+    situation: Optional[List[str]] = None,
+    context: Optional[List[str]] = None,
+    cflow_guidance: bool = False,
+) -> str:
+    """Render one session reminder with peer Role and Cflow sections."""
+    sections: List[Tuple[str, List[str]]] = []
+    role_lines = role_section(roles, cflow_guidance=cflow_guidance)
+    if role_lines:
+        sections.append(("Role", role_lines))
+    cflow_lines = _cflow_section(cflow)
+    if cflow_lines:
+        sections.append(("Cflow", cflow_lines))
+    context_lines = list(context or [])
+    if context_lines:
+        sections.append(("Context", context_lines))
+    situation_lines = _situation_section(list(situation or []))
+    if situation_lines:
+        sections.append(("Situation", situation_lines))
+
+    lines = [
+        "---",
+        "# claunch session: reminder -- machine-generated",
+        f"session: {name}",
+    ]
+    for title, body in sections:
+        lines.extend(["", f"## {title}", *body])
+    lines.append("---")
+    return "\n".join(lines)
+
+
+class SessionReminderService:
+    """Coordinate cflow and role reminders into one delivery per session."""
+
+    def __init__(self, manager, mesh=None, *, poll: float = cflow_clock.REMINDER_POLL):
+        self.manager = manager
+        self.mesh = mesh
+        self.poll = poll
+        self.cflow = cflow_clock.CflowReminderSource(manager)
+        # Compatibility for callers and tests that inspect the former clock's
+        # table directly.  The table still belongs to the cflow source.
+        self._seen = self.cflow._seen
+        self._roles: Dict[str, dict] = {}
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    @property
+    def running(self) -> bool:
+        return self._task is not None and not self._task.done()
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.poll)
+                await self.tick(time.monotonic())
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("session reminder tick failed")
+
+    # Cflow-source compatibility surface ---------------------------------
+    def scan(self, now: float):
+        return self.cflow.scan(now)
+
+    def skip(self, cwd: str, scope: str) -> bool:
+        return self.cflow.skip(cwd, scope)
+
+    def timers(self, now: Optional[float] = None):
+        return self.cflow.timers(now)
+
+    def _measure(self, cwd: str, awaits: dict, entry: dict, now: float):
+        return self.cflow._measure(cwd, awaits, entry, now)
+
+    def _session_for(self, cwd: str, scope: str):
+        return self.cflow._session_for(cwd, scope)
+
+    # Role source ---------------------------------------------------------
+    def scan_roles(self, now: float, cfg: dict) -> List[Tuple[str, List[dict]]]:
+        """Arm and return due roles without reading cflow state."""
+        enabled, interval = role_reminder_policy(cfg)
+        if not enabled:
+            self._roles.clear()
+            return []
+        try:
+            sessions = list(self.manager.list())
+        except Exception:  # noqa: BLE001
+            return []
+        due: List[Tuple[str, List[dict]]] = []
+        live = set()
+        for session in sessions:
+            if getattr(session, "exited", False):
+                continue
+            name = session.sdef.name
+            entries = role_entries(name, self.manager, self.mesh)
+            if not entries:
+                self._roles.pop(name, None)
+                continue
+            live.add(name)
+            key = role_key(entries)
+            entry = self._roles.get(name)
+            if entry is None:
+                self._roles[name] = {
+                    "key": key,
+                    "at": now,
+                    "fired_at": None,
+                    "held_at": None,
+                }
+                continue
+            if entry["key"] != key:
+                # A role or stance update is current state the session has not
+                # received.  It is due now, while first sight merely arms: the
+                # initial opening already carried that first stance.
+                entry.update({"key": key, "at": now - interval, "held_at": None})
+            if now - entry["at"] >= interval:
+                due.append((name, entries))
+        for name in list(self._roles):
+            if name not in live:
+                del self._roles[name]
+        return due
+
+    def role_timers(self, now: Optional[float] = None) -> Dict[str, dict]:
+        """In-memory role-source timers as ages, for diagnostics and tests."""
+        at = time.monotonic() if now is None else now
+
+        def ago(stamp):
+            return None if stamp is None else max(0.0, at - stamp)
+
+        return {
+            name: {
+                "armed_ago": ago(entry.get("at")),
+                "fired_ago": ago(entry.get("fired_at")),
+                "held_ago": ago(entry.get("held_at")),
+                "key": entry.get("key"),
+            }
+            for name, entry in list(self._roles.items())
+        }
+
+    async def tick(self, now: float) -> None:
+        """One coordinated pass, grouping due sources by session."""
+        cflow_due, cfg = await asyncio.gather(
+            asyncio.to_thread(self.cflow.scan, now),
+            asyncio.to_thread(self._config),
+        )
+        roles_due = (
+            {name: entries for name, entries in self.scan_roles(now, cfg)}
+            if cfg is not None
+            else {}
+        )
+
+        reminders: Dict[str, tuple] = {}
+        for cwd, scope, block, kind in cflow_due:
+            if kind == "signal":
+                await self._deliver(cwd, scope, block, kind)
+            else:
+                reminders[scope] = (cwd, block)
+
+        for name in sorted(set(reminders) | set(roles_due)):
+            cflow_item = reminders.get(name)
+            if cflow_item is not None:
+                cwd, block = cflow_item
+                await self._deliver_session(
+                    name,
+                    cwd=cwd,
+                    cflow_block=block,
+                    role_due=name in roles_due,
+                )
+            else:
+                await self._deliver_session(
+                    name,
+                    roles=roles_due[name],
+                    role_due=True,
+                )
+
+    @staticmethod
+    def _config() -> Optional[dict]:
+        try:
+            return store.daemon_config()
+        except store.StoreError as exc:
+            log.warning(
+                "session reminder: config unreadable, role source skipped: %s", exc
+            )
+            return None
+
+    async def _deliver(
+        self, cwd: str, scope: str, block: str, kind: str = "reminder"
+    ) -> None:
+        """Compatibility delivery for one cflow-source result."""
+        if kind == "signal":
+            session = self.cflow._session_for(cwd, scope)
+            if session is None:
+                return
+            try:
+                delivered = await session.deliver(block)
+            except Exception:
+                log.exception("cflow signal delivery to %r failed", scope)
+                return
+            if delivered:
+                self._mark_cflow(cwd, scope, kind)
+            return
+        await self._deliver_session(scope, cwd=cwd, cflow_block=block)
+
+    async def _deliver_session(
+        self,
+        name: str,
+        *,
+        cwd: str = "",
+        cflow_block: str = "",
+        roles: Optional[List[dict]] = None,
+        role_due: bool = False,
+    ) -> None:
+        if cwd:
+            session = self.cflow._session_for(cwd, name)
+            if session is None:
+                return
+        else:
+            try:
+                session = self.manager.get(name)
+            except Exception:
+                return
+            if getattr(session, "exited", False):
+                return
+
+        cflow_entry = self._seen.get((cwd, name)) if cwd else None
+        cflow_full = bool(cflow_block) and not bool((cflow_entry or {}).get("restated"))
+        current_roles = (
+            roles if roles is not None else role_entries(name, self.manager, self.mesh)
+        )
+
+        if session.status() != STATUS_BUSY:
+            stamp = time.monotonic()
+            if cflow_entry is not None:
+                cflow_entry["held_at"] = stamp
+            if role_due and name in self._roles:
+                self._roles[name]["held_at"] = stamp
+            log.debug("session reminder held for %r: session is not working", name)
+            return
+
+        try:
+            open_asks = len(await asyncio.to_thread(cflow_engine.open_asks, name))
+        except Exception:  # noqa: BLE001 - decoration never sinks a delivery
+            open_asks = 0
+        situation = situation_lines(name, self.manager, self.mesh, open_asks)
+        context = (
+            context_id_lines(name, self.manager, self.mesh)
+            if (cflow_full or role_due)
+            else []
+        )
+        block = reminder_block(
+            name,
+            roles=current_roles,
+            cflow=cflow_block,
+            situation=situation,
+            context=context,
+            # The role-specific stalled-step correction retains its existing
+            # single-fire budget.  The role identity and stance id remain in
+            # every session reminder.
+            cflow_guidance=cflow_full,
+        )
+        try:
+            delivered = await session.deliver(block)
+        except Exception:
+            log.exception("session reminder delivery to %r failed", name)
+            return
+        if not delivered:
+            return
+        if cflow_block:
+            self._mark_cflow(cwd, name, "reminder")
+        if current_roles:
+            self._mark_role(name)
+        log.info(
+            "session reminder delivered to %r (role=%s, cflow=%s)",
+            name,
+            bool(current_roles),
+            bool(cflow_block),
+        )
+
+    def _mark_cflow(self, cwd: str, scope: str, kind: str) -> None:
+        entry = self._seen.get((cwd, scope))
+        if entry is None:
+            return
+        stamp = time.monotonic()
+        entry["at"] = stamp
+        entry["fired_at"] = stamp
+        entry["fired_kind"] = kind
+        entry["held_at"] = None
+        if kind == "reminder":
+            entry["restated"] = True
+
+    def _mark_role(self, name: str) -> None:
+        entry = self._roles.get(name)
+        if entry is None:
+            return
+        stamp = time.monotonic()
+        entry["at"] = stamp
+        entry["fired_at"] = stamp
+        entry["held_at"] = None

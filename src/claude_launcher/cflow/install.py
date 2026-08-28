@@ -168,8 +168,9 @@ workflow to be started here), that is the answer; otherwise list candidates
 4. Resuming after a stop: when nudged (any user message), call `status`
    first to see whether the gate/selection was granted, then continue with
    `next`.
-5. A step reminder that names a `step text id` instead of restating the step
-   is not asking you to re-read anything. Search this conversation for that
+5. A session reminder's Cflow section that names a `step text id` instead of
+   restating the step is not asking you to re-read anything. Search this
+   conversation for that
    id ATTACHED TO THE STEP TEXT it was printed with; a bare mention (the
    reminder line itself) does not count. Found it: you still have the step —
    keep working, do not spend the turn on `status`. Not there: your context

@@ -39,10 +39,10 @@ a briefing that do not change — the opening task, the binding stance — are
 printed with a content id beside them (:func:`block_digest`), and
 :func:`recall` hands one back by its id. That turns a question an agent
 cannot answer, "do I still remember my task?", into one it can: "is this id,
-next to its text, anywhere in this conversation?". A step reminder names
+next to its text, anywhere in this conversation?". A session reminder names
 those ids without repeating the prose
-(:func:`daemon.cflow_clock.carried_id_lines`), which is the whole point —
-the recurring channel gets to cost a line instead of a page.
+(:mod:`daemon.session_reminder`), which is the whole point — the recurring
+channel gets to cost a line instead of a page.
 
 The split is deliberate, and not a matter of budget: only immutable text is
 addressable. Roster, owed mail, children and run position all move under the
@@ -100,16 +100,13 @@ def addressable(name: str, *, manager, mesh_mgr) -> Dict[str, dict]:
     mesh's role vocabulary does. Everything else a re-briefing says —
     roster, owed, children, position — moves under the agent's feet, and an
     id for it would be a promise this module cannot keep (see
-    :func:`daemon.cflow_clock.situation_lines`, which pushes that half in
+    :func:`daemon.session_reminder.situation_lines`, which pushes that half in
     full for exactly that reason).
 
-    ``given`` says whether this session was ever handed the text *next to*
-    this id. It is the difference between an id an agent can check itself
-    against and one it can only fail: a stance that lives in the session's
-    own system prompt is never pasted by a briefing (:meth:`MeshManager.
-    stance_carried`), so the id was never delivered with prose, and naming
-    it at the agent would buy a recall of text it already holds. The recall
-    door serves either kind; only the reminder cares about the difference.
+    ``given`` says whether this daemon handed the text *next to* this id.
+    Every local mesh member receives its stance in the common opening
+    briefing, independent of harness. Remote members receive theirs from the
+    daemon hosting their terminal.
 
     Re-derived on every call rather than stored, which is what makes an id
     self-validating: the digest of the text as it is *now* either matches
@@ -127,6 +124,7 @@ def addressable(name: str, *, manager, mesh_mgr) -> Dict[str, dict]:
         # Always given: the opening task is typed into the terminal at spawn
         # and restated by this module at every reset.
         out[block_digest(task)] = {"kind": "task", "text": task, "given": True}
+    stance_found = False
     if mesh_mgr is not None:
         try:
             rows = mesh_mgr.meshes_for_session(name)
@@ -146,20 +144,36 @@ def addressable(name: str, *, manager, mesh_mgr) -> Dict[str, dict]:
                 stance = (getattr(role, "stance", "") or "").strip()
                 if not stance:
                     continue
+                stance_found = True
                 out[block_digest(stance)] = {
                     "kind": f"stance ({mesh.name})",
                     "text": stance,
-                    "given": not mesh_mgr.stance_carried(mesh, member),
+                    "given": mesh_mgr.stance_given(mesh, member),
                 }
             except Exception:  # noqa: BLE001 — one broken mesh, not all of them
                 continue
+    # Compatibility for a persisted pre-session-reminder definition that has
+    # a packaged role but no mesh membership. New role choices belong to a
+    # mesh; this lets its old stance remain recoverable while such records are
+    # still respawnable.
+    if not stance_found and sdef.role:
+        from . import mesh_roles
+
+        role = mesh_roles.resolve().get(sdef.role)
+        stance = (getattr(role, "stance", "") or "").strip()
+        if stance:
+            out[block_digest(stance)] = {
+                "kind": "stance (legacy session role)",
+                "text": stance,
+                "given": False,
+            }
     return out
 
 
 def given_ids(name: str, *, manager, mesh_mgr) -> List[Tuple[str, str]]:
     """``[(id, kind)]`` for the blocks this session was handed with their ids.
 
-    What a step reminder may name (:func:`daemon.cflow_clock.situation_lines`).
+    What a session reminder may name in its Role and Context sections.
     The filter is the whole point: an id is checkable only because the agent
     can look for it *attached to prose* in its own conversation, so naming
     one that was never delivered that way turns a cheap self-check into a
@@ -374,7 +388,7 @@ def _cflow_section(sdef) -> str:
     section that usually read "no run" would teach agents to skim.
 
     ``done_when`` is the one line that does NOT stay behind the pointer, and
-    the asymmetry it fixes is worth naming. The step reminder
+    the asymmetry it fixes is worth naming. The session reminder's cflow source
     (:func:`daemon.cflow_clock.reminder_block`) carries it to an agent that
     has merely drifted; this block goes to one whose context was just
     compacted or cleared — which has provably lost more, and until now was

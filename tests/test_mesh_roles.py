@@ -65,16 +65,15 @@ H. Exclusive roles (at most one live holder)
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 import json
-import sys
 
 import pytest
 
-from claude_launcher import store
 from claude_launcher.daemon import mesh_policy, mesh_roles
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
-from claude_launcher.daemon.mesh import MeshError, MeshManager, PeerUnreachable
+from claude_launcher.daemon.mesh import MeshManager
 
 from test_mesh_graph import _dispatch_peer, _register_py_harness, _wire
 
@@ -543,28 +542,13 @@ def test_task_poll_text_comes_from_the_role_then_the_policy_override(
     asyncio.run(run())
 
 
-def test_the_join_briefing_points_at_a_carried_stance_and_pastes_an_uncarried_one(
+def test_the_join_briefing_pastes_and_names_every_local_stance(
     home, tmp_path
 ):
-    """Point when something else holds the prose; paste when nothing does.
-
-    Pointing is right whenever the agent has the stance from somewhere else —
-    a session spawned with a role carries it in an appended system prompt,
-    re-injected on every spawn and restore, so a pointer is a reference to
-    text already in front of it and an inline copy would go stale the moment
-    the mesh uploaded a new vocabulary.
-
-    It is wrong when nothing carries it. Then the pointer is the *only*
-    appearance the stance ever makes: one command away, on a turn the agent
-    has to decide to spend, and replaced by another pointer after the next
-    compaction. A session on a harness with no system prompt — like the one
-    below — is exactly that case.
-    """
+    """Every harness receives the same text+id opening and recall path."""
     _register_py_harness()
 
     async def run():
-        from dataclasses import replace
-
         mgr = _manager()
         mm = MeshManager(mgr, settle=0.05, root=tmp_path / "mesh")
         mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
@@ -573,27 +557,20 @@ def test_the_join_briefing_points_at_a_carried_stance_and_pastes_an_uncarried_on
         await mm.join("m", "s1", handle="coder1")
         member = mesh.members["coder1"]
 
-        # This session has no role, so nothing carries the stance: the prose
-        # goes in, and the pointer to the current text rides along with it.
+        # The prose and its pointer to the current definition arrive together.
         lines = mm._stance_lines(mesh, member)
         assert "stance: run 'claunch mesh stance m' now" in lines
         assert "You are a PRODUCER" in lines
+        assert "binding [text id:" in lines
 
-        # Give the session the role a claude spawn would have given it, and
-        # the same call goes back to one line — the system prompt has it.
+        # A legacy SessionDef role no longer changes the delivery.
         held = mgr.get("s1")
         held.sdef = replace(held.sdef, role="worker")
-        lines = mm._stance_lines(mesh, member)
-        assert lines.splitlines() == [
-            "stance: run 'claunch mesh stance m' now — it prints what a "
-            "worker is on this mesh, and it is binding"
-        ]
-        assert "You are a PRODUCER" not in lines
+        legacy = mm._stance_lines(mesh, member)
+        assert legacy == lines
 
-        # An upload the packaged vocabulary cannot match is carried by no
-        # prompt either — that is what makes a replaced vocabulary the second
-        # case — and a long one is capped rather than left to push the roster
-        # out of the block it rides in.
+        # A long uploaded stance is capped in the briefing while its id and
+        # rebrief/recall route still name the whole current text.
         await mm.set_roles("m", {"roles": {"worker": {"stance": "x" * 5000}}})
         pasted = mm._stance_lines(mesh, member)
         assert "xxx" in pasted and "[...]" in pasted

@@ -455,9 +455,10 @@ def test_a_test_module_that_will_not_parse_does_not_break_the_gate(repo):
 def test_this_repository_reaches_the_clock_tests_that_have_no_twin():
     """The case the rule was written for, pinned against the real tree.
 
-    ``ReminderClock`` lives in ``daemon/cflow_clock.py`` and its canonical
-    test is ``tests/test_reminder_clock.py`` -- a name the convention cannot
-    reach, because the clocks in that file are tested one class per module.
+    ``CflowReminderSource`` lives in ``daemon/cflow_clock.py`` and its
+    canonical test is ``tests/test_reminder_clock.py`` -- a name the
+    convention cannot reach, because the clocks in that file are tested one
+    class per module.
     """
     repo = Path(__file__).resolve().parents[1]
     assert not (repo / "tests" / "test_cflow_clock.py").exists(), (
@@ -465,6 +466,11 @@ def test_this_repository_reaches_the_clock_tests_that_have_no_twin():
         "written to prove -- pick another module with no same-named test"
     )
     picked = changed_tests.select(repo, ["src/claude_launcher/daemon/cflow_clock.py"])
+    assert "tests/test_reminder_clock.py" in picked
+
+    picked = changed_tests.select(
+        repo, ["src/claude_launcher/daemon/session_reminder.py"]
+    )
     assert "tests/test_reminder_clock.py" in picked
 
 

@@ -198,7 +198,7 @@ check("...and wearing the clock's state", chip.classList.contains("counting"), t
    and "○" once somebody paused it, which is the wrong way round for
    something pressable. */
 check("the clock's words, and the switch's glyph in front of them",
-      chip.kids.map((k) => k.text), ["⏸", "step reminder in 6:00"]);
+      chip.kids.map((k) => k.text), ["⏸", "cflow reminder in 6:00"]);
 check("...and a running reminder is not dressed as a paused one",
       chip.classList.contains("timer-paused"), false);
 /* The chip drops the scope label: the session's name is at the other end
@@ -208,7 +208,7 @@ check("no scope label: the name is already on this row",
 check("the hover text still answers for the clock it is NOT reporting",
       chip.title.split("\n").slice(0, 3),
       ["ship · s19",
-       "step reminder · counting · every 10:00",
+       "cflow reminder · counting · every 10:00",
        "stall ping · off · switched off"]);
 
 /* ---- the skip beside the switch -------------------------------------- */
@@ -327,12 +327,12 @@ ctx.render();
 ctx.age(5);
 ctx.paint();
 check("the reading ages between the 2s polls",
-      chip.kids.map((k) => k.text)[1], "step reminder in 1:00");
+      chip.kids.map((k) => k.text)[1], "cflow reminder in 1:00");
 ctx.age(65);
 ctx.paint();
 check("...and past its deadline it becomes due, not negative time",
       [chip.classList.contains("due"), chip.kids.map((k) => k.text)[1]],
-      [true, "step reminder due now"]);
+      [true, "cflow reminder due now"]);
 
 /* ---- a reading belongs to the session it was taken for ---------------- */
 /* Walking to another terminal repaints long before the poll comes round.
@@ -355,7 +355,7 @@ check("...and so does the skip beside it",
 ctx.render();
 check("the new session's own clock takes its place",
       [chip.classList.contains("hidden"), chip.kids.map((k) => k.text)[1]],
-      [false, "step reminder in 0:30"]);
+      [false, "cflow reminder in 0:30"]);
 
 /* ---- no timers, no chip ---------------------------------------------- */
 ctx.setWorld("s19", [untimed]);
@@ -414,13 +414,13 @@ check("...the chip flips immediately rather than waiting for the 2s poll",
       ["▶", true]);
 
 /* And back. The daemon's own answer for a paused run: `off`, whose line the
-   strip words as "step reminder off". */
+   strip words as "cflow reminder off". */
 posts.length = 0;
 ctx.setWorld("s19", [paused]);
 ctx.render();
 check("a paused reminder shows the play glyph and says so",
       [chip.kids.map((k) => k.text), chip.classList.contains("timer-paused")],
-      [["▶", "step reminder off"], true]);
+      [["▶", "cflow reminder off"], true]);
 chip.fire("click");
 check("pressing it again resumes",
       posts, [{ path: "/api/cflow/reminder",
@@ -478,7 +478,7 @@ await settle();
    just re-armed it where it stood, so the honest local reading is a full
    interval — and the 2s poll is too far away to wait for it. */
 check("...the countdown restarts at a full interval at once, not in two seconds",
-      chip.kids.map((k) => k.text)[1], "step reminder in 10:00");
+      chip.kids.map((k) => k.text)[1], "cflow reminder in 10:00");
 check("...with the clock still on: the switch is untouched",
       [chip.kids.map((k) => k.text)[0],
        chip.classList.contains("timer-paused"), ctx.hold().on],
@@ -520,7 +520,7 @@ check("...and pressing it anyway writes nothing", posts.length, 0);
 ctx.setWorld("s19", [mine]);
 ctx.render();
 check("it says it skips this one",
-      /SKIP this one step reminder/.test(skipBtn.title), true);
+      /SKIP this one cflow reminder/.test(skipBtn.title), true);
 check("...that the clock survives it, and when the next one is due",
       /clock stays on, and the next one is due in 10:00/.test(skipBtn.title),
       true);
@@ -559,16 +559,16 @@ ctx.setWorld("s19", [mine]);
 ctx.render();
 const tip = chip.title.split("\n");
 check("the clock's own lines still lead", tip.slice(0, 2),
-      ["ship · s19", "step reminder · counting · every 10:00"]);
+      ["ship · s19", "cflow reminder · counting · every 10:00"]);
 check("...then what the press does, in the direction it would go",
-      tip.some((l) => /^Click to PAUSE this run's step reminder/.test(l)), true);
+      tip.some((l) => /^Click to PAUSE this run's cflow reminder/.test(l)), true);
 check("...and where the interval still lives",
       tip.some((l) => /run page/.test(l)), true);
 ctx.setWorld("s19", [paused]);
 ctx.render();
 check("a paused chip offers the other direction",
       chip.title.split("\n")
-        .some((l) => /^Click to RESUME this run's step reminder/.test(l)), true);
+        .some((l) => /^Click to RESUME this run's cflow reminder/.test(l)), true);
 check("...and never both at once",
       chip.title.split("\n").filter((l) => /^Click to /.test(l)).length, 1);
 

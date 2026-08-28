@@ -30,7 +30,7 @@ from . import beads as beads_mod
 from . import briefing, cflow_clock, clipty, ctxsize, onboard, rebrief
 from . import transcript_view
 from ..cli_beads import BeadsError
-from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
+from ..cflow import engine as cflow_engine, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
@@ -38,7 +38,7 @@ from ..profile import ProfileError
 from . import mesh_roles
 from . import restart_gate
 from . import restart_notice
-from .harness import CLAUDE_HARNESS, HarnessError, SessionDef
+from .harness import HarnessError, SessionDef
 from .manager import ManagerError, SessionManager
 from .mesh import MeshBusy, MeshConflict, MeshError, MeshManager
 from .session import STATUS_IDLE, KeyboardHeld, SessionGone
@@ -801,12 +801,11 @@ async def h_workspace_remove(request: web.Request) -> web.Response:
 
 
 async def h_roles(request: web.Request) -> web.Response:
-    """The roles a session can be spawned with — the packaged vocabulary.
+    """The packaged fallback vocabulary for clients with no mesh selected.
 
-    Deliberately not a mesh's role set: a session being spawned belongs to no
-    mesh yet, and a per-mesh override is scoped to that mesh's roster (see
-    :mod:`mesh_roles`). The stance travels with each entry so the picker can
-    show what a role would inject before anyone commits to it.
+    A selected mesh's ``/api/mesh/{mesh}/roles`` response is authoritative for
+    a membership. The stance travels with each entry so a picker can show the
+    common opening briefing before creation.
     """
     roleset = mesh_roles.resolve()
     return web.json_response(
@@ -816,7 +815,6 @@ async def h_roles(request: web.Request) -> web.Response:
                     "name": r.name,
                     "aliases": list(r.aliases),
                     "stance": r.stance,
-                    "prompt": mesh_roles.system_prompt(r),
                 }
                 for r in (roleset.roles[n] for n in sorted(roleset.roles))
             ]
@@ -1871,7 +1869,7 @@ async def h_cflow_reminder_run_set(request: web.Request) -> web.Response:
 
 
 async def h_cflow_reminder_skip(request: web.Request) -> web.Response:
-    """Let ONE of a run's step reminders go by, without switching it off.
+    """Let ONE of a run's cflow reminders go by, without switching it off.
 
     The narrow verb beside the switch above: it re-arms the clock's timer for
     this run and drops any reminder already held for a stopped session, and
@@ -2611,8 +2609,13 @@ async def h_sessions_create(request: web.Request) -> web.Response:
         return json_error(400, "a session needs profile; its harness comes from it")
     body.setdefault("restore", manager.restore_default)
     body.setdefault("name", "")
+    # ``role`` is onboarding state owned by the selected mesh. Keep the
+    # original request for :func:`onboard.preflight`, while the persistent
+    # session definition receives no harness-specific second copy.
+    definition = dict(body)
+    definition.pop("role", None)
     try:
-        sdef = SessionDef.from_dict(body)
+        sdef = SessionDef.from_dict(definition)
     except (KeyError, ValueError, TypeError) as exc:
         return json_error(400, f"bad session definition: {exc}")
     try:

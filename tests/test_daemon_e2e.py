@@ -1169,7 +1169,6 @@ def test_api_transcript_pages_the_conversation(home, tmp_path, monkeypatch):
     record of what it said lives only in claude's own jsonl.
     """
     _register_py_harness()
-    import aiohttp
     from aiohttp.test_utils import TestClient, TestServer
     from claude_launcher.daemon import transcript_view
 
@@ -1945,9 +1944,9 @@ def test_api_workspaces_can_be_registered_and_dropped(home, tmp_path):
     asyncio.run(run())
 
 
-def test_api_roles_offers_the_spawnable_vocabulary(home, tmp_path):
-    """The spawn form needs the stance BEFORE anyone commits to a role — it
-    is the one thing about a session you cannot read back off its terminal."""
+def test_api_roles_offers_the_packaged_preview_and_roles_are_harness_neutral(
+    home, tmp_path
+):
     from aiohttp.test_utils import TestClient, TestServer
 
     async def run():
@@ -1964,20 +1963,24 @@ def test_api_roles_offers_the_spawnable_vocabulary(home, tmp_path):
             assert {"leader", "worker", "reviewer"} <= set(by_name)
             assert "mod" in by_name["leader"]["aliases"]
             assert by_name["reviewer"]["stance"]
-            assert "reviewer" in by_name["reviewer"]["prompt"]
+            assert "prompt" not in by_name["reviewer"]
 
-            # ...and it is claude's flag, so another harness must not take it
+            # A role is a mesh membership and the non-Claude harness takes it.
             _register_py_harness()
+            app["mesh"].create("team")
             resp = await client.post(
                 "/api/sessions",
                 json={
                     "name": "roled", "profile": "py", "cwd": str(tmp_path),
-                    "role": "worker",
+                    "mesh": "team", "role": "worker",
                 },
                 headers=bearer,
             )
-            assert resp.status == 400
-            assert "claude harness" in (await resp.json())["error"]
+            assert resp.status == 201, await resp.text()
+            assert mgr.get("roled").sdef.role is None
+            assert app["mesh"].member_for_session(
+                app["mesh"].get("team"), "roled"
+            ).role == "worker"
         finally:
             await mgr.shutdown_all()
             await client.close()

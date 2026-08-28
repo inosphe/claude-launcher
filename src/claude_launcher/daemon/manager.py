@@ -28,7 +28,6 @@ from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
 from .. import transcripts
 from . import codex_sessions, harness as harness_mod
-from . import mesh_roles
 from . import paths
 from .harness import SessionDef
 from .session import STATUS_BUSY, DeadSession, Session
@@ -405,9 +404,10 @@ class SessionManager:
                     "name": name,
                     "cols": int(request.get("cols") or session.sdef.cols),
                     "rows": int(request.get("rows") or session.sdef.rows),
-                    "role": self._spawn_role(
-                        request.get("role"), child.get("harness") or ""
-                    ),
+                    # Role belongs to the mesh membership arranged from the
+                    # original request. The session definition keeps no second
+                    # copy whose vocabulary or delivery differs by harness.
+                    "role": None,
                     "parent": parent,
                     # Set explicitly: spawn.check() hands back the inherited
                     # subset and ``restore`` is not in it, so leaving it out
@@ -429,28 +429,6 @@ class SessionManager:
                 }
             )
         )
-
-    @staticmethod
-    def _spawn_role(raw, harness: str) -> Optional[str]:
-        """The requested role, but only where the *session* layer takes one.
-
-        ``role`` means two things at once on a spawn, and they answer to
-        different authorities: a session's role comes from the packaged
-        vocabulary and injects a stance into a **claude** system prompt,
-        while a member's role comes from whatever vocabulary that mesh
-        declared, applies to any harness, and is set by the mesh join.
-
-        Two cases therefore carry a legal mesh role and no session stance —
-        a mesh that replaced the vocabulary wholesale, and a child running a
-        harness with no system prompt to inject into. Both are dropped here
-        rather than raised, because the caller asked for something coherent
-        and failing the whole spawn over the half we cannot honour would
-        make custom vocabularies and non-claude harnesses un-spawnable.
-        """
-        name = str(raw or "").strip()
-        if not name or harness != harness_mod.CLAUDE_HARNESS:
-            return None
-        return name if mesh_roles.resolve().canonical(name) else None
 
     def spawn_capabilities(self, parent: str) -> dict:
         """What ``parent`` may spawn right now (policy + its current counts)."""
