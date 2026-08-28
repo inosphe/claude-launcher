@@ -23,6 +23,7 @@ refused, because nobody can disprove it.
 from __future__ import annotations
 
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -185,16 +186,44 @@ def test_without_a_tool_copy_the_relations_line_says_it_was_not_measured(tmp_pat
     assert "한 홉 규칙" not in out
 
 
-def test_the_script_runs_as_a_script(tmp_path):
-    """``tools/`` scripts are invoked by path, so the entry point is part of the contract."""
-    argv = _files(tmp_path, CLEAN_OUT, src=SRC_WITH_HOP)
-    proc = subprocess.run([sys.executable, str(TOOL), *argv], capture_output=True, text=True)
-    assert proc.returncode == 0
-    assert "(e) 읽은 곳     : stdout " in proc.stdout
-    missing = subprocess.run(
-        [sys.executable, str(TOOL), str(tmp_path / "gone.txt"), str(tmp_path / "err.txt"), TREE, TOOLREF],
+#: The five lines the script prints are Korean, so reading them back over a
+#: pipe only works if both ends agree on an encoding. Neither end agrees by
+#: default on Windows: the child picks ``PYTHONIOENCODING`` when it is set and
+#: the ANSI code page (cp949 on this machine) when it is not, while
+#: ``text=True`` on the parent always decodes with the locale encoding. The
+#: two happen to match only when ``PYTHONIOENCODING`` is unset, and this
+#: repository's sessions set it to utf-8 -- so the parent decoded utf-8 bytes
+#: as cp949, the reader thread died inside ``subprocess.run``, ``proc.stdout``
+#: came back ``None``, and the assertion below failed with
+#: ``TypeError: argument of type 'NoneType' is not iterable`` -- a message
+#: about neither the script nor its output. Measured at 5516c651c732.
+#:
+#: Both ends are pinned here rather than one: decoding as utf-8 alone would
+#: newly break every run that does NOT set ``PYTHONIOENCODING``, where the
+#: child writes cp949. Pinning them in the call is also why no environment
+#: variable has to be supplied from outside for this test to pass.
+_UTF8_CHILD = {**os.environ, "PYTHONIOENCODING": "utf-8"}
+
+
+def _script(*argv: str) -> subprocess.CompletedProcess:
+    """Run ``tools/landing_lines.py`` as a script and read its output as utf-8."""
+    return subprocess.run(
+        [sys.executable, str(TOOL), *argv],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
+        env=_UTF8_CHILD,
+    )
+
+
+def test_the_script_runs_as_a_script(tmp_path):
+    """``tools/`` scripts are invoked by path, so the entry point is part of the contract."""
+    proc = _script(*_files(tmp_path, CLEAN_OUT, src=SRC_WITH_HOP))
+    assert proc.returncode == 0
+    assert "(e) 읽은 곳     : stdout " in proc.stdout
+    missing = _script(
+        str(tmp_path / "gone.txt"), str(tmp_path / "err.txt"), TREE, TOOLREF
     )
     assert missing.returncode == 1
     assert missing.stdout == ""
