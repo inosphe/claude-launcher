@@ -686,18 +686,54 @@ the global `settings.json` keys. Seeding copies that state at **creation** time
 only, so a plugin installed afterwards reaches the one profile it was installed
 in — and the set drifts apart without anything reporting it.
 
-`claunch plugin` declares that state once, in the `shared` block of
-`~/.claunch.yaml`, and applies it to every Claude Code profile:
+One declaration fixes that: the `shared` block of `~/.claunch.yaml` says what
+every Claude Code profile should have, and `claunch apply` converges the
+profiles onto it.
+
+```yaml
+shared:
+  marketplaces: [snflkd/fluent-korean]
+  plugins: [fluent-korean@fluent-korean]
+  settings:
+    outputStyle: fluent-korean:fluent-korean
+```
+
+You do not edit that block by hand — three commands write it and apply it in the
+same call.
+
+### Commands
+
+| Command | What it does |
+| ------- | ------------ |
+| `plugin install <plugin@marketplace>` | Declare a plugin and install it in every profile (alias: `add`). |
+| `plugin uninstall <plugin@marketplace>` | Drop the declaration and uninstall it from the profiles (alias: `remove`). |
+| `plugin marketplace add <source>` | Declare a marketplace (URL, directory path or `owner/repo`) and register it everywhere. |
+| `plugin marketplace remove <source>` | Stop declaring a marketplace; the profiles keep the one they have. |
+| `plugin list [--json]` | The declaration, plus which profiles have drifted from it. |
+| `shared` | List the declared `settings.json` keys. |
+| `shared KEY=VALUE ...` | Declare settings keys and write them to every profile. |
+| `shared --unset KEY` | Stop managing a key; each profile keeps the value it has. |
+| `apply [NAME]` | Converge every profile, or just `NAME`. |
+| `apply --dry-run` | Show what applying would do, and do nothing. |
+| `apply --check` | Report drift and exit 1 if any profile is missing something. |
+
+`plugin install`, `plugin marketplace add` and `shared KEY=VALUE` apply straight
+away. `--no-apply` declares without touching the profiles, and `--profile NAME`
+narrows one call to a single profile.
+
+### A worked run
 
 ```bash
-claunch plugin install fluent-korean@fluent-korean   # declare + install everywhere
-claunch plugin marketplace add snflkd/fluent-korean  # declare a marketplace source
-claunch shared outputStyle=fluent-korean:fluent-korean   # a settings.json key
-claunch plugin list                                  # the declaration, and any drift
-claunch apply                                        # converge every profile
-claunch apply work                                   # ...or just one
-claunch apply --check                                # report drift, exit 1 if any
+claunch plugin install fluent-korean@fluent-korean      # declared + installed everywhere
+claunch shared outputStyle=fluent-korean:fluent-korean  # a settings.json key, everywhere
+claunch apply --check                                   # every profile matches, exit 0
 ```
+
+`plugin install` needs the plugin's marketplace to be known. When any existing
+profile already has it registered, the source is read back from there and
+declared for you; otherwise declare it first with `plugin marketplace add`.
+
+### What it does and does not touch
 
 Installing runs Claude Code's own `claude plugin` CLI once per profile with
 `CLAUDE_CONFIG_DIR` pointed at it — never a file copy. One install writes three
@@ -708,20 +744,26 @@ written for, so a copied index sends every other profile back to the profile it
 came from. This is why `claunch migrate --plugins` is a file copy for one-off use
 and this is the path for keeping profiles in step.
 
-`install` and `marketplace add` apply immediately; `--no-apply` declares only, and
-`--profile NAME` narrows one call to a single profile. A profile created later
-gets the declaration during `claunch create`, so it is never born drifted.
-
 Convergence is **additive**: `apply` installs what is declared and missing and
 never removes a plugin a profile has on its own. Removal is explicit —
-`claunch plugin uninstall <id>` drops the declaration and uninstalls it from the
-profiles in the same call. `claunch shared --unset KEY` stops managing a settings
-key and leaves the value each profile already has, since the value it replaced
-was never recorded and could not be restored.
+`plugin uninstall` drops the declaration and uninstalls it from the profiles in
+the same call, and `shared --unset KEY` only stops managing the key, leaving the
+value each profile already has (the value it replaced was never recorded, so it
+could not be restored).
 
-Values given to `claunch shared` parse as JSON when they can, so
-`autoCompactEnabled=false` stores a boolean and anything unparseable stays a
-string.
+Every command is idempotent, and a no-op really is one: re-declaring something
+already declared writes neither `~/.claunch.yaml` nor any profile, and runs no
+`claude` at all. That matters beyond tidiness, because rewriting the config file
+is refused outright while another process holds it open — an editor with
+`~/.claunch.yaml` loaded is enough on Windows — so a command with nothing to do
+must stay off that path.
+
+A profile created later gets the declaration during `claunch create`, so it is
+never born drifted. Profiles on another harness are skipped: `claude` never reads
+their config dir.
+
+Values given to `shared` parse as JSON when they can, so `autoCompactEnabled=false`
+stores a boolean and anything unparseable stays a string.
 
 ## Configuration source of truth
 
