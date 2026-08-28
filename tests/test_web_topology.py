@@ -19,10 +19,9 @@ at once, so the vertical room one takes is multiplied by twenty, and the check
 holds the name, its role and its rooms to a single shrinking line — pinning
 which children are allowed to break the row, and that a tag may be
 abbreviated but never shrunk to a capsule with nothing in it — ``bulk_check`` on the
-rail's bulk bar — which of stop/resume/clear/delete is offered on a given
-rail, and what each claims it would touch — ``forceclear_check`` on the modal
-that replaced the browser dialogs there, and on the forced clear/delete it
-can send past a mesh hold — ``owed_check`` on
+rail's bulk bar — which of stop/resume/archive is offered on a given rail,
+and what each claims it would touch — ``archivedsessions_check`` on the
+retained history fold and the absence of permanent removal controls — ``owed_check`` on
 the Unanswered box and the requests its nudge/dismiss buttons send,
 ``panel_check`` on where the session detail docks (the rail beside the
 terminal, or the page slot on a phone) and what closing it leaves behind,
@@ -248,14 +247,13 @@ WEB = Path(__file__).resolve().parent / "web"
         "layout_check.js",
         "render_check.js",
         "lineage_check.js",
-        "exitedsessions_check.js",
+        "archivedsessions_check.js",
         "railbadge_check.js",
         "sessmesh_check.js",
         "raillayout_check.js",
         "railsplit_check.js",
         "detailsplit_check.js",
         "bulk_check.js",
-        "forceclear_check.js",
         "owed_check.js",
         "panel_check.js",
         "sesssend_check.js",

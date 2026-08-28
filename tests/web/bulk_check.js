@@ -1,6 +1,6 @@
 /* The rail's bulk bar, run against the real syncBulkActions from app.js.
 
-   Four buttons that act on every session at once. What has to hold is that
+   Three buttons that act on the working fleet. What has to hold is that
    each one is up exactly when it would do something and carries the count of
    what that is: a bar showing "stop 3" on a rail with nothing running is a
    button that lies about the fleet, and a bar that hides `resume` while there
@@ -27,7 +27,7 @@ if (end < 0) throw new Error("unbalanced syncBulkActions");
 
 /* The stub DOM is the four buttons and nothing else — `hidden` is a class in
    this app, so that is what the check reads. */
-const IDS = ["stop-all", "resume-all", "clear-exited", "delete-all"];
+const IDS = ["stop-all", "resume-all", "archive-exited"];
 const buttons = {};
 for (const id of IDS) {
   buttons[id] = {
@@ -71,21 +71,30 @@ check(
 );
 
 check(
-  "a rail with only running sessions can be stopped or deleted, not resumed",
+  "a rail with only running sessions can be stopped",
   bar(of("idle", "busy", "starting")),
-  ["stop 3", "delete all 3"]
+  ["stop 3"]
 );
 
 check(
-  "a rail with only exited sessions offers the three that reach them",
+  "a rail with only exited sessions offers resume and archive",
   bar(of("exited", "exited")),
-  ["resume 2", "clear 2 exited", "delete all 2"]
+  ["resume 2", "archive 2 exited"]
 );
 
 check(
-  "a mixed rail counts each side separately, and delete counts both",
+  "a mixed rail counts each working state separately",
   bar(of("idle", "exited", "busy", "exited", "exited")),
-  ["stop 2", "resume 3", "clear 3 exited", "delete all 5"]
+  ["stop 2", "resume 3", "archive 3 exited"]
+);
+
+check(
+  "archived records are excluded from the working actions",
+  bar([
+    { name: "live", status: "idle" },
+    { name: "old", status: "exited", archived_at: "2026-08-28T00:00:00Z" },
+  ]),
+  ["stop 1"]
 );
 
 /* Going back to nothing has to put the bar away again: these are toggled, not
@@ -103,13 +112,13 @@ check(
   []
 );
 check(
-  "the two that make a session unresumable say so",
-  ["clear-exited", "delete-all"].filter((id) => !/no longer|forget/.test(buttons[id].title)),
-  []
-);
-check(
   "stop says the records survive it",
   /resumed/.test(buttons["stop-all"].title),
+  true
+);
+check(
+  "archive says the records and resume capability survive it",
+  /retaining.*resume/.test(buttons["archive-exited"].title),
   true
 );
 

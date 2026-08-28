@@ -325,6 +325,7 @@ def build_app(
     # routes that do take {name} there are a GET and a DELETE.
     r.add_post("/api/sessions/kill", h_sessions_kill_all)
     r.add_post("/api/sessions/respawn", h_sessions_respawn_all)
+    r.add_post("/api/sessions/archive", h_sessions_archive_all)
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
     r.add_get("/api/sessions/{name}/briefing", h_session_briefing)
@@ -336,6 +337,7 @@ def build_app(
     r.add_post("/api/sessions/{name}/children/{child}/kill", h_session_child_kill)
     r.add_post("/api/sessions/{name}/parent", h_session_reparent)
     r.add_post("/api/sessions/{name}/kill", h_session_kill)
+    r.add_post("/api/sessions/{name}/archive", h_session_archive)
     r.add_delete("/api/sessions/{name}", h_session_delete)
     r.add_post("/api/sessions/{name}/keep-alive", h_session_keep_alive)
     r.add_post("/api/sessions/{name}/respawn", h_session_respawn)
@@ -3028,10 +3030,13 @@ async def h_sessions_respawn_all(request: web.Request) -> web.Response:
     no reason to abandon the ones that would have.
     """
     manager: SessionManager = request.app["manager"]
+    include_archived = request.query.get("archived", "1") not in ("0", "false")
     respawned: List[str] = []
     failed: List[dict] = []
     for session in list(manager.list()):
         if not session.exited:
+            continue
+        if session.archived_at and not include_archived:
             continue
         name = session.sdef.name
         try:
@@ -3041,6 +3046,24 @@ async def h_sessions_respawn_all(request: web.Request) -> web.Response:
         else:
             respawned.append(name)
     return web.json_response({"respawned": respawned, "failed": failed})
+
+
+async def h_sessions_archive_all(request: web.Request) -> web.Response:
+    """Archive every exited record that is still in the working fleet."""
+    manager: SessionManager = request.app["manager"]
+    archived: List[str] = []
+    failed: List[dict] = []
+    for session in list(manager.list()):
+        if not session.exited or session.archived_at:
+            continue
+        name = session.sdef.name
+        try:
+            manager.archive(name)
+        except Exception as exc:
+            failed.append({"name": name, "error": str(exc)})
+        else:
+            archived.append(name)
+    return web.json_response({"archived": archived, "failed": failed})
 
 
 def _session(request: web.Request):
@@ -3466,6 +3489,13 @@ async def h_session_delete(request: web.Request) -> web.Response:
                 opened.extend(await mm.link_lineage(child, above))
         body["connected"] = opened
     return web.json_response(body)
+
+
+async def h_session_archive(request: web.Request) -> web.Response:
+    """Retain an exited record in the archive so it remains inspectable."""
+    manager: SessionManager = request.app["manager"]
+    session = manager.archive(request.match_info["name"])
+    return web.json_response(session.info())
 
 
 async def h_session_keep_alive(request: web.Request) -> web.Response:
