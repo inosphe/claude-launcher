@@ -311,7 +311,9 @@ class CflowReminderSource:
                 }
                 self._seen[key] = entry
             if awaits.get("probe"):
-                before, after = entry["probe"], self._measure(cwd, awaits, entry, now)
+                before, after = entry["probe"], self._measure(
+                    cwd, scope, awaits, entry, now
+                )
                 if after is not None:
                     entry["probe"] = after
                     if before is not None and before["code"] != after["code"]:
@@ -376,7 +378,9 @@ class CflowReminderSource:
                 del self._seen[key]
         return due
 
-    def _measure(self, cwd: str, awaits: dict, entry: dict, now: float) -> Optional[dict]:
+    def _measure(
+        self, cwd: str, scope: str, awaits: dict, entry: dict, now: float
+    ) -> Optional[dict]:
         """This position's standing measurement, re-taken when due.
 
         Three returns, and only one of them is a fresh subprocess:
@@ -387,6 +391,11 @@ class CflowReminderSource:
         * a fresh dict — the poll interval elapsed and the probe ran.
         * ``None`` — it ran and could not answer (see
           :func:`cflow.engine.run_probe`).
+
+        ``scope`` is threaded in for the probe's environment, not for anything
+        this method decides: the subprocess has to run as the run's own session
+        or it resolves "which checkout am I" to the daemon's
+        (:func:`cflow.engine.probe_env`).
 
         The ceilings are re-applied here, not trusted from the payload. The
         parser already refuses a probe that could hold the daemon for long,
@@ -401,7 +410,15 @@ class CflowReminderSource:
         entry["probed_at"] = now
         timeout = float(awaits.get("timeout") or cflow_model.DEFAULT_AWAITS_TIMEOUT)
         return cflow_engine.run_probe(
-            awaits["probe"], cwd, min(timeout, cflow_model.MAX_AWAITS_TIMEOUT)
+            awaits["probe"],
+            cwd,
+            min(timeout, cflow_model.MAX_AWAITS_TIMEOUT),
+            # Whose run this is, spelled out because this process cannot be
+            # asked. The daemon holds one `CLAUNCH_SESSION` -- the terminal's
+            # that started it -- and a probe inheriting it measures that
+            # session's checkout for every run on the machine
+            # (:func:`cflow.engine.probe_env`).
+            scope=scope,
         )
 
     def skip(self, cwd: str, scope: str) -> bool:

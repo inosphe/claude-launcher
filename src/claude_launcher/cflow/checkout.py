@@ -174,13 +174,27 @@ def own_checkout(
     not stand -- the shape that made ``landed_check`` ask whether ``master``
     had been merged into something, a question with no true answer.
 
-    The ambient ``CLAUNCH_SESSION`` is the session's own, not the daemon's:
-    ``_run_verify`` passes no ``env=``, so a verify subprocess inherits the
-    environment of whoever called :func:`..engine.next_step`, and the only
-    production caller is the in-session MCP server (``cflow/mcp.py``). The
-    daemon never runs a verify -- its clock runs ``run_probe``, a different
-    function. Measured in a worker session: a verify command printing
-    ``CLAUNCH_SESSION`` printed that session's own name.
+    The ambient ``CLAUNCH_SESSION`` is the session's own, and it holds for two
+    different reasons which have to be kept apart. An earlier version of this
+    paragraph gave only the first and was read as covering both, which is how
+    the defect below stood in the code with a docstring saying it could not.
+
+    * A verify INHERITS it. ``_run_verify`` passes no ``env=``, so the
+      subprocess takes the environment of whoever called
+      :func:`..engine.next_step`, and the only production caller is the
+      in-session MCP server (``cflow/mcp.py``). Measured in a worker session:
+      a verify command printing ``CLAUNCH_SESSION`` printed that session's own
+      name.
+    * A probe is GIVEN it. The daemon's clock does not run a verify; it runs
+      :func:`..engine.run_probe`, a different function in a different process
+      -- and that process holds one ``CLAUNCH_SESSION``, the terminal's that
+      started the daemon, for every run on the machine. Inheriting that is
+      precisely the reading this function exists to refuse, so ``run_probe``
+      builds the probe's environment from the run's own scope rather than
+      passing the daemon's on (:func:`..engine.probe_env`, issue
+      ``claunch-04ru``). Noting that a probe is not a verify and stopping
+      there is what this paragraph used to do: the distinction was right and
+      the conclusion drawn from it was not.
 
     ``explicit`` is a directory the caller was given outright (a gate's
     ``--repo``). It wins without consulting anything, so a test or a hand-run
