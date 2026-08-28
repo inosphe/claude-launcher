@@ -21,7 +21,8 @@ import os
 import re
 import shutil
 from dataclasses import replace
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
+from pathlib import Path
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
 from .. import borrowing, harnesses as harness_registry, profile as profile_mod
 from .. import spawn as spawn_mod
@@ -70,6 +71,13 @@ class SessionManager:
         #: all — those sessions come back with the next daemon.
         self.exit_hooks: List[Callable[[Session], None]] = []
         self.shutting_down = False
+        # Codex can create its rollout well after the initial discovery wait
+        # expires.  Keep the launch snapshot so ordinary dashboard polling can
+        # claim that exact rollout later without blocking session creation or
+        # falling back to whichever conversation happens to be newest.
+        self._pending_codex_claims: Dict[
+            str, Tuple[Session, Path, str, Set[str]]
+        ] = {}
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -182,13 +190,53 @@ class SessionManager:
                     session.sdef, conversation_id=conversation_id
                 )
             else:
+                self._pending_codex_claims[session.sdef.name] = (
+                    session,
+                    codex_home,
+                    cwd,
+                    known_codex_sessions,
+                )
                 log.warning(
                     "could not discover Codex conversation id for session %r; "
-                    "restore will fall back to cwd-relative --last",
+                    "will retry without blocking session listings",
                     session.sdef.name,
                 )
         self.persist()
         return session
+
+    def _recover_codex_claims(self) -> None:
+        """Claim rollouts that appeared after the launch-time wait expired.
+
+        Session-list and metadata requests already poll the manager, so they
+        are a reliable retry point.  Every retry is a single filesystem scan
+        (``timeout=0``); a slow Codex startup therefore does not delay the API.
+        The original pre-launch snapshot remains the ownership boundary, and
+        the session object identity prevents a stale claim from attaching to
+        a later process that reused the same name.
+        """
+        changed = False
+        for name, pending in list(self._pending_codex_claims.items()):
+            launched, codex_home, cwd, known = pending
+            session = self._sessions.get(name)
+            if session is not launched or session.sdef.conversation_id:
+                self._pending_codex_claims.pop(name, None)
+                continue
+            conversation_id = codex_sessions.claim_new(
+                codex_home, cwd, known, timeout=0
+            )
+            if not conversation_id:
+                continue
+            session.sdef = replace(
+                session.sdef, conversation_id=conversation_id
+            )
+            self._pending_codex_claims.pop(name, None)
+            changed = True
+            log.info(
+                "discovered delayed Codex conversation id for session %r",
+                name,
+            )
+        if changed:
+            self.persist()
 
     def discard(self, name: str) -> None:
         """Drop a staged session that will never start."""
@@ -430,6 +478,7 @@ class SessionManager:
         return f"s{i}"
 
     def get(self, name: str) -> AnySession:
+        self._recover_codex_claims()
         try:
             return self._sessions[name]
         except KeyError:
@@ -456,6 +505,7 @@ class SessionManager:
 
     def list(self) -> List[AnySession]:
         """Every session, live or exited, oldest first (see :meth:`_by_creation`)."""
+        self._recover_codex_claims()
         return [session for _, session in self._by_creation()]
 
     # ------------------------------------------------------------------ #

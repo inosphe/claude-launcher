@@ -151,6 +151,46 @@ def test_codex_conversation_id_is_claimed_and_persisted(
     asyncio.run(run())
 
 
+def test_codex_conversation_id_is_retried_after_a_slow_rollout(
+    home, tmp_path, monkeypatch
+):
+    store.update(lambda doc: doc.update({"harnesses": {"codex": {
+        "command": [sys.executable, "-u", "-c", CHILD],
+        "home_env": "CODEX_HOME",
+        "restore_args": ["resume", "--last"],
+    }}}))
+    lineage.set_harness(profile.create("codex"), "codex")
+    monkeypatch.setattr(codex_sessions, "snapshot", lambda _home: {"old"})
+    attempts = []
+
+    def delayed_claim(_home, cwd, known, *, timeout=2.0, poll=0.02):
+        attempts.append(timeout)
+        return None if len(attempts) == 1 else "codex-thread-late"
+
+    monkeypatch.setattr(codex_sessions, "claim_new", delayed_claim)
+
+    async def run():
+        mgr = _manager()
+        session = mgr.create(SessionDef(
+            name="cx", profile="codex", cwd=str(tmp_path)
+        ))
+        assert session.sdef.conversation_id is None
+
+        # The dashboard's next non-blocking list poll claims the rollout and
+        # makes it available to the context reader in that same response.
+        assert mgr.list()[0].sdef.conversation_id == "codex-thread-late"
+        assert attempts == [2.0, 0]
+        entries = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+        assert entries[0]["def"]["conversation_id"] == "codex-thread-late"
+
+        # Once claimed, later polls do not scan for this session again.
+        mgr.list()
+        assert attempts == [2.0, 0]
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_restore_relaunches_recorded_sessions(home, tmp_path):
     _register_py_harness()
 
