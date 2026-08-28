@@ -182,6 +182,22 @@ async def _serve(mgr, mm):
     return client
 
 
+async def _kill_and_wait(mgr, name: str) -> None:
+    """Kill a session and wait for the record to say so.
+
+    ``kill`` only asks: it calls ``pty.terminate`` and returns, and
+    ``exited`` is set later, in ``Session._finish``, once the child
+    actually reaches EOF. The DELETE route below refuses a record that
+    still reads as running (400) *before* it ever asks the mesh guard
+    (409), so a test that deletes straight after the kill is racing the
+    child's exit — invisibly at rest, and reliably under a loaded
+    ``-n 8`` run. Waiting on the state the route reads removes the race
+    without moving what ``exited`` means.
+    """
+    mgr.kill(name)
+    await mgr.get(name).wait_for("exited", timeout=10.0, threshold=0.5)
+
+
 def _edges(info: dict) -> dict:
     return {
         frozenset((e["a"], e["b"])): bool(e.get("enabled"))
@@ -210,7 +226,7 @@ def test_the_route_promotes_and_opens_the_grandparent_edge(home, tmp_path):
             assert before.get(frozenset(("kid", "mid")))
             assert not before.get(frozenset(("kid", "lead")))
 
-            mgr.kill("mid")
+            await _kill_and_wait(mgr, "mid")
             resp = await client.delete("/api/sessions/mid?force=1", headers=BEARER)
             assert resp.status == 200, await resp.text()
             body = await resp.json()
@@ -247,7 +263,7 @@ def test_the_route_cascades_only_when_asked_and_only_when_nothing_runs(
                 mgr.create(
                     SessionDef(name=name, harness="py", cwd=str(tmp_path), parent=parent)
                 )
-            mgr.kill("mid")
+            await _kill_and_wait(mgr, "mid")
 
             # kid is still running: the cascade is refused and drops nothing
             resp = await client.delete(
@@ -257,7 +273,7 @@ def test_the_route_cascades_only_when_asked_and_only_when_nothing_runs(
             assert "kid" in (await resp.json())["error"]
             assert mgr.get("mid").exited and mgr.get("kid")
 
-            mgr.kill("kid")
+            await _kill_and_wait(mgr, "kid")
             resp = await client.delete(
                 "/api/sessions/mid?children=remove", headers=BEARER
             )
@@ -291,8 +307,8 @@ def test_a_cascade_asks_the_mesh_guard_of_every_record_it_would_drop(
                     SessionDef(name=name, harness="py", cwd=str(tmp_path), parent=parent)
                 )
             await mm.join("team", "kid", handle="kid")  # only the grandchild
-            mgr.kill("mid")
-            mgr.kill("kid")
+            await _kill_and_wait(mgr, "mid")
+            await _kill_and_wait(mgr, "kid")
 
             resp = await client.delete(
                 "/api/sessions/mid?children=remove", headers=BEARER
