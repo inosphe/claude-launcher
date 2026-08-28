@@ -12680,12 +12680,27 @@ function syncSpawnGates(ui) {
   if (!overCap) ui.over.checked = false;
   if (ui.capGate) ui.capGate.hidden = !(overCap || ui.capped);
 
-  const pickedProfile = spawnProfileSelector(ui);
+  // Read the profile pair through the policy that locks it, the way
+  // `spawnPayload` already does -- it sends `profile` only when NEITHER row
+  // is disabled. A <select> keeps its value when lock() greys it (only a tick
+  // goes with its row), so a harness picked while the rows were open stayed
+  // readable here after the parent changed to one that forbids the crossing.
+  // That stale name then decided two other rows: `nonClaude` locked --null
+  // and fork, and the new lock cleared the operator's --null tick -- all on
+  // the strength of a harness the child will never run under, because the
+  // payload drops the profile the same sync. Measured on master 97c37ef with
+  // the policy forbidding `profile` and the parent on claude: harness "codex"
+  // left standing gave nullTok/fork locked and the tick gone, while the same
+  // form with the row's value empty left both open and sent null_token.
+  // (claunch-disy, the other half of claunch-409i's rule.)
+  const mayProfile = may.includes("profile");
+  const pickedProfile = mayProfile ? spawnProfileSelector(ui) : "";
   const details = ui.profileDetails || {};
   const pickedDetail = pickedProfile
     ? details[pickedProfile] || details[baseProfileName(pickedProfile)]
     : null;
-  const childHarness = String((ui.harness && ui.harness.value) || "") ||
+  const childHarness =
+    (mayProfile ? String((ui.harness && ui.harness.value) || "") : "") ||
     (pickedDetail ? pickedDetail.harness : (ui.parentSess || {}).harness || "");
   lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
     "the child runs under its parent's profile (spawn.allow_profile)");

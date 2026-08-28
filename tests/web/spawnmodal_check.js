@@ -693,8 +693,13 @@ async function main() {
     grp.value === "new" && grp.inputs[""].checked === false && heard === 1,
     [grp.value, grp.inputs[""].checked, heard]);
 
+  /* `profile` is in may_choose because these two stubs pick one: the gating
+     reads the profile pair through the policy that locks it (claunch-disy),
+     so a picked profile on a row the policy forbids names no harness. The
+     subject here is the harness the child WILL run under, which is what the
+     operator may actually choose. */
   const g3 = uiStub({
-    report: { may_choose: ["fork", "borrow"] }, git: {},
+    report: { may_choose: ["fork", "borrow", "profile"] }, git: {},
     harness: ctl({ value: "" }), profile: ctl({ value: "pi-profile" }),
     profileDetails: { "pi-profile": { harness: "pi", borrow_allowed: true,
                                        borrow_mode: "token" } },
@@ -712,7 +717,7 @@ async function main() {
     g3.handleRow.hidden === true && g3.connectRow.hidden === true);
 
   const g4 = uiStub({
-    report: { may_choose: ["borrow"] }, git: {},
+    report: { may_choose: ["borrow", "profile"] }, git: {},
     harness: ctl({ value: "" }), profile: ctl({ value: "kimi-profile" }),
     profileDetails: { "kimi-profile": { harness: "kimi", borrow_allowed: false,
                                          borrow_mode: "none" } },
@@ -909,6 +914,52 @@ async function main() {
   check("a locked text row keeps what was typed in it",
     argsKept.args.disabled === true && argsKept.args.value === "--verbose",
     [argsKept.args.disabled, argsKept.args.value]);
+
+  /* ---- claunch-disy: a value on a locked row decides nothing -------------
+     The other half of the rule above, and the direction the tick-clearing
+     alone does not cover. lock() clears a checkbox but leaves a <select>
+     holding what was picked, so a harness chosen while the policy allowed
+     the crossing stayed readable after the parent changed to one that
+     forbids it. `childHarness` read that stale name and `nonClaude` shut
+     --null and fork with it -- while `spawnPayload`, which reads the pair
+     through both disables, sent no profile at all. The form was refusing
+     options on the strength of a harness the child would never run under,
+     and the tick-clearing made the refusal silent.
+     What holds now: the gating reads the pair through the same policy the
+     payload does, so a locked row's leftovers are equivalent to an empty
+     one. Both halves are asserted, because "both closed" would also satisfy
+     a one-sided version of this. */
+  const staleHarness = (leftover) => {
+    const u = ctx.buildSpawnForm("lead1", {}).ui;
+    u.parentSess = { harness: "claude", profile: "sr" };
+    u.git = { repo: true, worktrees: [] };
+    u.wtMode.value = "";
+    u.profile.value = "sr";
+    if (u.harness) u.harness.value = leftover;
+    u.nullTok.checked = true;
+    u.report = { may_choose: ["fork", "worktree"], workspaces: [] };
+    ctx.syncSpawnGates(u);
+    return u;
+  };
+  const stale = staleHarness("codex");
+  const empty = staleHarness("");
+  check("a harness left on a locked row does not shut the claude-only rows",
+    stale.nullTok.disabled === false && stale.nullTok.checked === true &&
+      stale.fork.disabled === false,
+    [stale.nullTok.disabled, stale.nullTok.checked, stale.fork.disabled]);
+  check("...and the form reads the same as one whose locked row is empty",
+    stale.nullTok.disabled === empty.nullTok.disabled &&
+      stale.nullTok.checked === empty.nullTok.checked &&
+      stale.fork.disabled === empty.fork.disabled,
+    [[stale.nullTok.disabled, stale.nullTok.checked, stale.fork.disabled],
+     [empty.nullTok.disabled, empty.nullTok.checked, empty.fork.disabled]]);
+  /* The payload is what makes the leftover a phantom: it never rides, so the
+     child boots on its parent's harness and the claude-only rows were right
+     to stay open. Asserted here so the two halves cannot drift apart. */
+  check("...because the locked pair never reaches the body anyway",
+    ctx.spawnPayload(stale).profile === undefined &&
+      ctx.spawnPayload(stale).null_token === true,
+    ctx.spawnPayload(stale));
 
   /* ---- the route: the quick job opening lands in the same modal ---------- */
   Object.keys(store).forEach((k) => delete store[k]);
