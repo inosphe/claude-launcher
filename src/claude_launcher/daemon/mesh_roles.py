@@ -25,6 +25,18 @@ upload the entire vocabulary. Merging *within* a role was rejected on
 purpose — a half-overridden stance (new aliases, old prose) reads as a bug,
 and there is no sane way to "merge" two pieces of prose.
 
+**A document may be newer than the daemon reading it.** The role set
+federates, so it reaches daemons of other builds, and the two entrances want
+opposite strictness. An **upload** is typed by a person and stays strict: an
+unknown key there is a typo, and silently ignoring it would let the author
+believe a setting took. A **federated or persisted** document is read
+leniently (:func:`load_override`): keys this build does not know are dropped
+with a log line, and a later ``version`` is read as far as this build goes.
+The reason is the size of the alternative — refusing the document falls back
+to the packaged vocabulary, so one field a newer daemon added would turn off
+every custom role on every older daemon, including the ones it reads
+perfectly well.
+
 **Uploads are not retroactive.** A member's role is resolved once, at join,
 and stored as a plain string; changing the vocabulary never rewrites it.
 A member whose role no longer exists simply matches no rule — which needs no
@@ -58,6 +70,11 @@ SCHEMA_VERSION = 1
 #: brief that needs more than this wants to be a skill, not a role.
 MAX_STANCE = 8000
 MAX_TASK_POLL = 500
+#: Cap for ``cflow_reminder``. Same as ``task_poll`` and for the same reason:
+#: it is a per-role LINE the daemon composes into a block it did not write,
+#: not prose the role gets to restate itself in. A role wanting more than a
+#: line wants ``stance``, which the session already carries.
+MAX_CFLOW_REMINDER = 500
 MAX_ROLES = 32
 MAX_DOC = 64_000
 #: Auto-link rules are evaluated once per (joiner, existing member) pair, so
@@ -68,6 +85,15 @@ MAX_RULES = 64
 #: member is simply "deep" — no rule can name a tier this large anyway, and a
 #: bound is what makes the walk safe against a hand-edited cycle.
 MAX_TIER = 64
+
+#: The keys one role's body may carry. Named rather than inlined because two
+#: paths check it with opposite strictness (see :func:`_known_keys`), and a
+#: second copy is how the lenient path would quietly go on refusing a key the
+#: strict path had learned.
+_ROLE_KEYS = frozenset(
+    {"aliases", "stance", "task_poll", "stall_watch", "exclusive",
+     "cflow_reminder"}
+)
 
 #: A role/alias name: lower-case word characters, dashes and dots. Deliberately
 #: narrower than a handle — a role name appears in config, CLI output and the
@@ -94,6 +120,14 @@ class Role:
     #: Body for this role's task-poll nudge. The mesh's own
     #: ``policy.task_poll.bodies`` still wins when it sets one.
     task_poll: str = ""
+    #: One line for this role, carried by the cflow step reminder's FULL form
+    #: (:func:`daemon.cflow_clock.role_reminder_lines`). Not a summary of
+    #: :attr:`stance` — a session spawned with a role already carries that
+    #: text in its system prompt, re-sent on every request, so restating it
+    #: buys nothing and costs the block it rides in. What belongs here is what
+    #: the stance cannot say because it does not know where the agent is:
+    #: what THIS role stops doing when a run has been sitting on one step.
+    cflow_reminder: str = ""
     #: Whether members of this role receive stall warnings about others.
     stall_watch: bool = False
     #: At most one LIVE member of this role per mesh. Enforced at join, on
@@ -113,6 +147,8 @@ class Role:
             out["exclusive"] = True
         if self.task_poll:
             out["task_poll"] = self.task_poll
+        if self.cflow_reminder:
+            out["cflow_reminder"] = self.cflow_reminder
         if self.stance:
             out["stance"] = self.stance
         return out
@@ -348,6 +384,15 @@ roles:
     # held twice without the holders spending their time coordinating with
     # each other; a second command line becomes a nested worker instead.
     exclusive: true
+    # One line, carried only by a step reminder's full form. It says what a
+    # STALLED leader is most often doing wrong, which is the one thing the
+    # stance below cannot say: the stance does not know where the agent is.
+    cflow_reminder: >-
+      a step that has not moved is usually a decision you are holding rather
+      than work you are doing. If it is yours, make it and record it on the
+      board so whoever joins later can pull it; if it is not, it belongs to
+      your user or to whoever can defend the claim. Do not spend this
+      position producing what a member should be handing you.
     stance: |
       You set direction and OWN the decisions: scope, priority, tradeoffs,
       tie-breaks. You are this mesh's ONLY leader: integration of shared
@@ -399,6 +444,10 @@ roles:
 
   operator:
     aliases: [op, liaison, relay]
+    cflow_reminder: >-
+      a step that has not moved usually means you are deciding something that
+      is your user's or the leader's. Carry the question to whoever holds it,
+      in their own words, rather than answering it here.
     stance: |
       You relay between your user and the leader; you are not a producer.
       Carry your user's requirements, answers and authorizations to the leader
@@ -415,6 +464,12 @@ roles:
       you are idle and caught up (no unread mesh mail). If you have no task in
       flight, ask the leader to assign one -- or leave the mesh if your work
       here is done. Do NOT reply to this notice.
+    cflow_reminder: >-
+      a step that has not moved usually means the evidence is not there yet.
+      Ground what you are about to report in code, tests or docs and cite the
+      files you stand on; put the bundle on the board and send a pointer, not
+      a copy. If you are stuck on something that is not yours to decide,
+      escalate it with options rather than picking one to keep moving.
     stance: |
       You are a PRODUCER: do the real work and ground every claim in code,
       docs or tests — never prose — citing the files you stand on. Write that
@@ -430,6 +485,11 @@ roles:
 
   reviewer:
     aliases: [review, peer, critic, auditor, checker, qa]
+    cflow_reminder: >-
+      a step that has not moved usually means you are weighing the author's
+      account of the work rather than the work. Open the code, the tests and
+      the diff themselves. A real impasse is recorded and handed to the
+      leader; it is not settled by agreeing to close the thread.
     stance: |
       You are the independent ADVERSARY — the default role, so an unlabelled
       member audits rather than agrees. Pressure-test claims against the
@@ -442,6 +502,11 @@ roles:
 
   specialist:
     aliases: [service, gatekeeper]
+    cflow_reminder: >-
+      a step that has not moved may have other members' requests queued
+      behind it. Work them in order and report each outcome to whoever asked;
+      a request you are silently holding looks identical to one you never
+      received.
     stance: |
       You solely and serially own ONE resource and operate it for everyone
       else. Perform other members' requests against it rather than letting
@@ -450,6 +515,54 @@ roles:
       whoever asked. You produce rather than audit, so escalate scope and
       priority calls to the leader like any other producer.
 """
+
+
+def _known_keys(
+    body: dict, allowed: set, what: str, lenient: bool, refusal: str = ""
+) -> dict:
+    """``body`` with unknown keys refused (strict) or dropped (lenient).
+
+    The two callers of this module want opposite things from the same
+    validator, and the difference is *where the document came from*.
+
+    An **upload** is typed by a person: an unknown key there is a typo, and
+    accepting it would silently change nothing while the author believes it
+    took. That path stays strict — see :func:`parse`.
+
+    A **federated or persisted** document arrives from another daemon, which
+    may be running a newer build than this one. There, refusing the key
+    refuses the whole document (:func:`load_override` then falls back to the
+    packaged vocabulary), so one field this daemon has not learned yet costs
+    the mesh its entire custom role set — including the roles it *can* read.
+    That is the wrong trade in the wrong direction: the unknown key is the
+    only part this daemon cannot honour, and dropping just that part leaves
+    every other role working. So that path is lenient.
+
+    Dropping is logged rather than silent: an operator reading the daemon log
+    can see which key this build did not know, which is how the version skew
+    gets noticed at all.
+
+    ``refusal`` overrides the strict message where a call site already had one
+    people (and tests) read — this function changed *who* refuses, not what an
+    upload is told.
+    """
+    unknown = sorted(set(body) - allowed)
+    if not unknown:
+        return dict(body)
+    allowed_list = ", ".join(sorted(allowed))
+    if not lenient:
+        raise RoleError(
+            refusal.format(keys=", ".join(unknown), allowed=allowed_list)
+            if refusal
+            else f"{what} has unknown key(s): {', '.join(unknown)} "
+                 f"(allowed: {allowed_list})"
+        )
+    log.warning(
+        "role set: dropping unknown key(s) in %s: %s — this daemon speaks "
+        "(%s); the document was written by a newer build",
+        what, ", ".join(unknown), allowed_list,
+    )
+    return {k: v for k, v in body.items() if k not in set(unknown)}
 
 
 def _check_name(name: str, what: str) -> str:
@@ -474,17 +587,10 @@ def _text(value, cap: int, what: str) -> str:
     return text
 
 
-def _parse_role(name: str, body) -> Role:
+def _parse_role(name: str, body, lenient: bool = False) -> Role:
     if not isinstance(body, dict):
         raise RoleError(f"role {name!r} must be a mapping, got {body!r}")
-    unknown = sorted(
-        set(body) - {"aliases", "stance", "task_poll", "stall_watch", "exclusive"}
-    )
-    if unknown:
-        raise RoleError(
-            f"role {name!r} has unknown key(s): {', '.join(unknown)} "
-            "(allowed: aliases, stance, task_poll, stall_watch, exclusive)"
-        )
+    body = _known_keys(body, _ROLE_KEYS, f"role {name!r}", lenient)
     raw_aliases = body.get("aliases") or []
     if not isinstance(raw_aliases, list):
         raise RoleError(f"role {name!r}: aliases must be a list")
@@ -505,23 +611,24 @@ def _parse_role(name: str, body) -> Role:
                 f"role {name!r} task_poll",
             ).split()
         ),
+        cflow_reminder=" ".join(
+            _text(
+                body.get("cflow_reminder") or "", MAX_CFLOW_REMINDER,
+                f"role {name!r} cflow_reminder",
+            ).split()
+        ),
         stall_watch=bool(body.get("stall_watch")),
         exclusive=bool(body.get("exclusive")),
     )
 
 
-def _parse_pattern(body, where: str) -> dict:
+def _parse_pattern(body, where: str, lenient: bool = False) -> dict:
     """One end of a rule -> its document form. ``{}`` matches every member."""
     if body is None:
         body = {}
     if not isinstance(body, dict):
         raise RoleError(f"{where} must be a mapping like {{role: worker}}")
-    unknown = sorted(set(body) - {"role", "tier"})
-    if unknown:
-        raise RoleError(
-            f"{where} has unknown key(s): {', '.join(unknown)} "
-            "(allowed: role, tier)"
-        )
+    body = _known_keys(body, {"role", "tier"}, where, lenient)
     out: dict = {}
     if body.get("role") is not None:
         # Left as written; it is checked against the *resolved* vocabulary in
@@ -549,18 +656,13 @@ def _parse_pattern(body, where: str) -> dict:
     return out
 
 
-def _parse_rule(body, index: int) -> dict:
+def _parse_rule(body, index: int, lenient: bool = False) -> dict:
     where = f"auto_link rule {index + 1}"
     if not isinstance(body, dict):
         raise RoleError(
             f"{where} must be a mapping with a 'between:' pair, got {body!r}"
         )
-    unknown = sorted(set(body) - {"between", "within"})
-    if unknown:
-        raise RoleError(
-            f"{where} has unknown key(s): {', '.join(unknown)} "
-            "(allowed: between, within)"
-        )
+    body = _known_keys(body, {"between", "within"}, where, lenient)
     pair = body.get("between")
     if not isinstance(pair, list) or len(pair) != 2:
         raise RoleError(
@@ -574,8 +676,8 @@ def _parse_rule(body, index: int) -> dict:
         )
     out: dict = {
         "between": [
-            _parse_pattern(pair[0], f"{where} end 1"),
-            _parse_pattern(pair[1], f"{where} end 2"),
+            _parse_pattern(pair[0], f"{where} end 1", lenient),
+            _parse_pattern(pair[1], f"{where} end 2", lenient),
         ]
     }
     if within != "any":
@@ -583,14 +685,10 @@ def _parse_rule(body, index: int) -> dict:
     return out
 
 
-def _parse_auto_link(body) -> dict:
+def _parse_auto_link(body, lenient: bool = False) -> dict:
     if not isinstance(body, dict):
         raise RoleError("'auto_link' must be a mapping with a 'rules:' list")
-    unknown = sorted(set(body) - {"rules"})
-    if unknown:
-        raise RoleError(
-            f"auto_link has unknown key(s): {', '.join(unknown)} (allowed: rules)"
-        )
+    body = _known_keys(body, {"rules"}, "auto_link", lenient)
     rules = body.get("rules")
     if rules is None:
         rules = []
@@ -598,15 +696,24 @@ def _parse_auto_link(body) -> dict:
         raise RoleError("auto_link.rules must be a list")
     if len(rules) > MAX_RULES:
         raise RoleError(f"{len(rules)} auto_link rules, over the {MAX_RULES} limit")
-    return {"rules": [_parse_rule(r, i) for i, r in enumerate(rules)]}
+    return {"rules": [_parse_rule(r, i, lenient) for i, r in enumerate(rules)]}
 
 
-def parse(text) -> dict:
+def parse(text, lenient: bool = False) -> dict:
     """Validate a role-set document (YAML text or an already-parsed mapping).
 
     Returns the document as a plain dict, ready to persist and federate.
-    Strict on purpose — this is the *upload* path, and a typo that silently
+    Strict by default — that is the *upload* path, and a typo that silently
     changed nothing would be worse than a rejected upload.
+
+    ``lenient`` is the federation/persisted path (:func:`load_override`): keys
+    this build does not know are dropped with a log line instead of refusing
+    the document, and a document stamped with a LATER schema version is read
+    as far as this build understands it. Both are the same trade, and
+    :func:`_known_keys` states it: the alternative is not "a stricter mesh",
+    it is a mesh that silently loses its whole custom vocabulary — every role,
+    including the ones this daemon reads perfectly well — because one newer
+    daemon added one field.
     """
     if isinstance(text, str):
         if len(text) > MAX_DOC:
@@ -623,23 +730,34 @@ def parse(text) -> dict:
         raise RoleError("role set is empty")
     if not isinstance(doc, dict):
         raise RoleError(f"role set must be a mapping, got {type(doc).__name__}")
-    unknown = sorted(
-        set(doc) - {"version", "default", "roles", "replace", "auto_link"}
+    doc = _known_keys(
+        doc,
+        {"version", "default", "roles", "replace", "auto_link"},
+        "role set",
+        lenient,
+        refusal="unknown top-level key(s): {keys} (allowed: {allowed})",
     )
-    if unknown:
-        raise RoleError(
-            f"unknown top-level key(s): {', '.join(unknown)} "
-            "(allowed: version, default, roles, replace, auto_link)"
-        )
     version = doc.get("version", SCHEMA_VERSION)
     try:
         version = int(version)
     except (TypeError, ValueError):
         raise RoleError(f"version must be a number, got {version!r}") from None
     if version != SCHEMA_VERSION:
-        raise RoleError(
-            f"unsupported role-set version {version} (this daemon speaks "
-            f"version {SCHEMA_VERSION})"
+        # A LATER version, arriving over federation, is the same situation an
+        # unknown key is: a newer daemon wrote it. Read it as far as this
+        # build goes — the unknown parts have already been dropped above and
+        # in each role — rather than refuse the vocabulary whole. An EARLIER
+        # version is not that case: nothing below 1 has ever existed, so it is
+        # a corrupt or hand-mangled document and stays refused on both paths.
+        if not (lenient and version > SCHEMA_VERSION):
+            raise RoleError(
+                f"unsupported role-set version {version} (this daemon speaks "
+                f"version {SCHEMA_VERSION})"
+            )
+        log.warning(
+            "role set: reading a version %d document as version %d — it was "
+            "written by a newer build; anything this one does not know has "
+            "been dropped", version, SCHEMA_VERSION,
         )
     roles = doc.get("roles")
     if roles is None:
@@ -656,14 +774,16 @@ def parse(text) -> dict:
         # A null body is the TOMBSTONE that deletes a packaged role. It is
         # only meaningful against the default set, so it is validated here but
         # resolved in `resolve`.
-        out_roles[name] = None if body is None else _parse_role(name, body).to_dict()
+        out_roles[name] = (
+            None if body is None else _parse_role(name, body, lenient).to_dict()
+        )
     out: dict = {"version": SCHEMA_VERSION, "roles": out_roles}
     if doc.get("replace"):
         out["replace"] = True
     if doc.get("default") is not None:
         out["default"] = _check_name(doc.get("default"), "default role")
     if doc.get("auto_link") is not None:
-        out["auto_link"] = _parse_auto_link(doc.get("auto_link"))
+        out["auto_link"] = _parse_auto_link(doc.get("auto_link"), lenient)
     return out
 
 
@@ -841,15 +961,25 @@ def _merge(base: dict, patch: dict) -> dict:
 def load_override(doc) -> Optional[dict]:
     """A persisted/synced override -> a usable one, or None.
 
-    Lenient where :func:`parse` is strict: a document that arrives unreadable
-    (an older daemon, a hand-edited ``mesh.json``) must not stop the mesh from
-    loading — it falls back to the packaged vocabulary with a warning, exactly
-    as :func:`mesh_policy.load_policy` does.
+    Lenient where :func:`parse` is strict, on two levels.
+
+    *Per key*: a key this build does not know is dropped and the rest of the
+    document is kept (``lenient=True``). That is the level that matters for a
+    federating document — the role set crosses to daemons of other builds, and
+    without it the first field anyone adds turns every older daemon's copy of
+    the vocabulary off. Falling back to the packaged set is not a small
+    degradation there: custom roles stop resolving, so members holding them
+    match no rule at all.
+
+    *Whole document*: one that is unreadable even then (a hand-edited
+    ``mesh.json``, a truncated sync) must still not stop the mesh from
+    loading, so it falls back to the packaged vocabulary with a warning,
+    exactly as :func:`mesh_policy.load_policy` does.
     """
     if not doc:
         return None
     try:
-        parsed = parse(doc)
+        parsed = parse(doc, lenient=True)
         resolve(parsed)  # prove it still resolves before we adopt it
         return parsed
     except RoleError as exc:

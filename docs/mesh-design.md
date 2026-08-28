@@ -994,6 +994,8 @@ roles:
     aliases: [coder, dev, engineer]
     task_poll: >-              # this role's task-poll wording
       you are idle and caught up ...
+    cflow_reminder: >-         # one line for a cflow run that is not moving
+      a step that has not moved usually means ...
     stance: |
       You are a producer: ...
 ```
@@ -1086,8 +1088,24 @@ must not be an error nobody asked for.
 
 **What a role actually drives** today: the stance in the join briefing
 (pointed at, or pasted where nothing else carries it — above), `stall_watch`
-(who hears about a stuck member), `exclusive` (at most one live holder), and
-`task_poll` wording. Role-based **routing
+(who hears about a stuck member), `exclusive` (at most one live holder),
+`task_poll` wording, and `cflow_reminder` — one line the cflow step
+reminder's **full** form carries for a run that has stopped moving.
+
+That last one is deliberately a line and not the stance again. A session
+spawned with a role holds its stance in the system prompt, re-sent on every
+request and surviving `/compact` (13 of 14 recorded sessions on the machine
+this was measured on), so for that population the text has not gone anywhere
+and repeating it buys nothing. It would not be free either: the full reminder
+block already truncates the step's own instructions at 1200 characters of
+5782, and a worker stance would add 36% to that block, a leader stance 156%.
+So the role gets one capped line, on the single fire per position that
+already carries the session-level ids, and nothing on the repeat — the form
+that actually repeats. What the line says is what the stance structurally
+cannot: not who you are, but what someone who is you gets wrong when a run
+has been sitting on one step.
+
+Role-based **routing
 bans** (worker↔worker, the operator pipe) are still not implemented — the
 schema leaves room, but turning them on would make a `send` that works today
 start failing on an upload alone, so that stays a separate, explicit

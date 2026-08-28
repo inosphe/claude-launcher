@@ -198,11 +198,106 @@ def test_a_bad_upload_is_refused_whole():
     with pytest.raises(mesh_roles.RoleError, match="over the"):
         mesh_roles.parse({"roles": {"w": {"stance": "x" * (mesh_roles.MAX_STANCE + 1)}}})
 
-    # A document that arrives unreadable (older/newer daemon, hand-edited
-    # mesh.json) is dropped with a warning, not raised — the mesh keeps
-    # working on the packaged vocabulary.
-    assert mesh_roles.load_override({"roles": {"w": {"stanze": 1}}}) is None
+    # A document that is unreadable even leniently (this one says 'roles' is
+    # a string) is dropped with a warning, not raised — the mesh keeps working
+    # on the packaged vocabulary. An unknown KEY is no longer that case; see
+    # test_a_newer_daemons_document_keeps_the_roles_this_build_can_read.
+    assert mesh_roles.load_override({"roles": "not a mapping"}) is None
     assert mesh_roles.load_override(None) is None
+
+
+def test_a_newer_daemons_document_keeps_the_roles_this_build_can_read():
+    # claunch-7leu. The role set federates, so a document reaches daemons of
+    # other builds. Refusing it over one unknown key does not make the mesh
+    # stricter -- load_override falls back to the PACKAGED vocabulary, so
+    # every custom role stops resolving, including the ones this build reads
+    # perfectly well. The unknown key is the only part it cannot honour, so
+    # that is the only part it drops.
+    doc = {
+        "version": 1,
+        "roles": {
+            "sentry": {
+                "aliases": ["sentry2"],
+                "stance": "check things",
+                "cflow_reminder_from_the_future": "not a key this build knows",
+            },
+            "scribe": {"stance": "build things"},
+        },
+    }
+    loaded = mesh_roles.load_override(doc)
+    assert loaded is not None, "one unknown key must not cost the vocabulary"
+    rs = mesh_roles.resolve(loaded)
+    # The role survives, minus the key, and the SIBLING role is untouched --
+    # that sibling is what the old behaviour silently threw away.
+    assert rs.roles["sentry"].stance == "check things"
+    assert rs.roles["sentry"].aliases == ["sentry2"]
+    assert rs.roles["scribe"].stance == "build things"
+    assert "cflow_reminder_from_the_future" not in loaded["roles"]["sentry"]
+    # Packaged roles the document did not mention still merge in as before.
+    assert rs.canonical("lead") == "leader"
+
+    # The same leniency reaches the nested shapes, not just a role body.
+    nested = mesh_roles.load_override({
+        "roles": {"w": {"stance": "x"}},
+        "auto_link": {
+            "rules": [{"between": [{"role": "w"}, {"tier": "root"}],
+                       "unless": "a key from a newer build"}],
+            "ordering": "also newer",
+        },
+    })
+    assert nested is not None
+    assert nested["auto_link"]["rules"][0]["between"][0] == {"role": "w"}
+
+    # A LATER schema version is the same situation and is read as far as this
+    # build goes; an EARLIER one has never existed, so it stays refused.
+    assert mesh_roles.load_override(
+        {"version": mesh_roles.SCHEMA_VERSION + 1, "roles": {"w": {"stance": "x"}}}
+    ) is not None
+    assert mesh_roles.load_override(
+        {"version": 0, "roles": {"w": {"stance": "x"}}}
+    ) is None
+
+    # The UPLOAD path is untouched: a person typing 'stanze' still gets told,
+    # because there the unknown key is a typo rather than a newer build.
+    with pytest.raises(mesh_roles.RoleError, match="unknown key"):
+        mesh_roles.parse({"roles": {"w": {"stanze": "x"}}})
+    with pytest.raises(mesh_roles.RoleError, match="unknown top-level"):
+        mesh_roles.parse({"stances": {}})
+    with pytest.raises(mesh_roles.RoleError, match="unsupported"):
+        mesh_roles.parse({"version": mesh_roles.SCHEMA_VERSION + 1, "roles": {}})
+
+
+def test_cflow_reminder_is_a_capped_line_that_rides_the_document():
+    # claunch-2l3f. It is a LINE, so it is folded to one the way task_poll is
+    # — a role that wants prose wants `stance`, which the session already
+    # carries. Every packaged role that has one keeps it under the cap.
+    rs = mesh_roles.resolve()
+    for name, role in rs.roles.items():
+        assert "\n" not in role.cflow_reminder, name
+        assert len(role.cflow_reminder) <= mesh_roles.MAX_CFLOW_REMINDER, name
+    assert rs.get("worker").cflow_reminder, "the packaged worker carries one"
+
+    # An upload sets it, folds it, and it survives the document round trip.
+    doc = _yaml("""
+        roles:
+          worker:
+            stance: build it
+            cflow_reminder: >-
+              first half
+              second half
+    """)
+    assert doc["roles"]["worker"]["cflow_reminder"] == "first half second half"
+    again = mesh_roles.resolve(mesh_roles.parse(mesh_roles.to_yaml(doc)))
+    assert again.get("worker").cflow_reminder == "first half second half"
+    # A role without one says nothing rather than an empty key.
+    assert "cflow_reminder" not in mesh_roles.Role(name="w").to_dict()
+
+    with pytest.raises(mesh_roles.RoleError, match="over the"):
+        mesh_roles.parse({
+            "roles": {
+                "w": {"cflow_reminder": "x" * (mesh_roles.MAX_CFLOW_REMINDER + 1)}
+            }
+        })
 
 
 def test_the_yaml_view_round_trips_back_into_an_upload():
