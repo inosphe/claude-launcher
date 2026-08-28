@@ -1816,23 +1816,17 @@ function seenAgo(iso) {
   return { secs, text: fmtAge(secs) };
 }
 
-/* How stale a reading has to be before the row says so in colour. One step
-   for the two pairs that only age: this line is a glance, and a colour
-   gradient on three pairs would be states to learn for a row that is trying
-   to say one thing. */
+/* How stale each reading has to be before the row says so in red. Seen and
+   moved retain their one-hour threshold; typed becomes relevant earlier,
+   after half an hour. All three use one visual state once their own threshold
+   is crossed, so an old value is identifiable without reading each number. */
 const SEEN_COLD = 3600;  // an hour without the reader, or without the agent
 
-/* A second step, which one pair asks for and the other two do not. Half an
-   hour since a person last typed here is drawn red rather than amber: the
+/* Half an hour since a person last typed here is drawn red: the
    row an operator scans this rail for is the session they handed something
    to and then walked away from, and that one is legible at half an hour —
    well before the hour at which "nobody has looked" and "nothing has moved"
-   become worth a colour. A pair gets this step only if it is asked for
-   (`staleAfter`), so `seen` and `moved` keep the single amber one.
-
-   Both steps read the same field, so they are ordered rather than combined:
-   past 30 minutes the typed value is red and stays red, and the hour mark
-   passes without changing anything. */
+   become worth a colour. */
 const TYPED_STALE = 1800;
 
 function seenPair(label, iso, title, opts) {
@@ -1852,7 +1846,6 @@ function seenPair(label, iso, title, opts) {
       live ? " live"
       : !ago ? " unknown"
       : stale ? " stale"
-      : ago.secs >= SEEN_COLD ? " cold"
       : ""),
     live ? "now" : ago ? ago.text : "\u2013"
   );
@@ -1864,7 +1857,11 @@ function seenPair(label, iso, title, opts) {
     // says what the three readings are, which is the wrong place to explain
     // one row's colour: a reader hovering a red number is asking about that
     // number.
-    + (stale ? `\nover ${Math.round(after / 60)}m since anyone typed here` : "");
+    + (stale ? `\nover ${Math.round(after / 60)}m since ${
+      label === "seen" ? "anyone looked here"
+      : label === "moved" ? "the screen moved for real"
+      : "anyone typed here"
+    }` : "");
   return pair;
 }
 
@@ -1882,7 +1879,8 @@ function railSeenLine(s) {
     // that somebody is still there.
     seenPair("seen", s && s.last_visited_at,
              "when a person last had this session open — the web terminal " +
-             "or `claunch attach`", { live: watching }),
+             "or `claunch attach`",
+             { live: watching, staleAfter: SEEN_COLD }),
     // Typed into. A human at a keyboard only: `claunch send-keys` and mesh
     // deliveries type into this session too, and counting those would answer
     // "when was this session last written to", which is a different question
@@ -1896,7 +1894,8 @@ function railSeenLine(s) {
     // row that is NOT an animation changed.
     seenPair("moved", s && s.last_activity_at,
              "when the screen last changed for real — spinners and the " +
-             "elapsed-time counter do not count")
+             "elapsed-time counter do not count",
+             { staleAfter: SEEN_COLD })
   );
   line.title =
     "who has been here: last looked at / last typed into / last moved on " +
@@ -1904,8 +1903,8 @@ function railSeenLine(s) {
     "A dash means no reading: nobody has visited or typed since this " +
     "session started, and 'moved' is read off the running screen, so a " +
     "daemon restart leaves it blank until the session paints again.\n" +
-    "Amber is an hour without the reader or without the agent; red is " +
-    "half an hour since anyone typed, and only 'typed' is drawn that way.";
+    "Red is an hour without the reader or without the agent, or half an " +
+    "hour since anyone typed.";
   return line;
 }
 
