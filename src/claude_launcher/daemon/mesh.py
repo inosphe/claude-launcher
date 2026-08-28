@@ -186,6 +186,47 @@ def _separable_notice(body: str, recipients: List[str]) -> Optional[str]:
     )
 
 
+#: A one-line shared preamble at or under this many characters is a routing
+#: header ("read your own section"), not an announcement that stands on its
+#: own. Measured over the 197 batch sends in this machine's mesh logs: every
+#: preamble that reached a non-sectioned member as its entire message was one
+#: line and 91 characters or fewer, and every one-line preamble that did read
+#: as a message on its own was 208 characters or more, with a single
+#: exception at 72. So the two populations do not separate by length alone
+#: below ~200; 120 clears the observed header range with margin and keeps the
+#: advisory off the substantive one-liners.
+_THIN_PREAMBLE_CHARS = 120
+
+
+def _preamble_only_notice(
+    shared: str, sections: dict, recipients: List[str]
+) -> Optional[str]:
+    """Warn when a batch's non-sectioned recipients receive a header.
+
+    A section-bearing send still goes to every recipient in ``to``; one with
+    no section of its own is delivered the shared preamble alone. That is
+    correct when the preamble is a real announcement, and it wakes a terminal
+    for nothing when the preamble was written as a heading for the sectioned
+    members ("each of you read your own part"). The sender cannot tell the
+    two apart from its own screen, which shows the composite — so name who
+    receives only this, and how little it is.
+    """
+    uncovered = [r for r in recipients if r not in sections]
+    if not uncovered:
+        return None
+    text = shared.strip()
+    if len(text.splitlines()) > 1 or len(text) > _THIN_PREAMBLE_CHARS:
+        return None
+    return (
+        f"{len(uncovered)} recipient(s) with no section ({', '.join(uncovered)}) "
+        f"receive ONLY the {len(text)}-character shared preamble as their whole "
+        "message. If that preamble is a heading for the sectioned members "
+        "rather than an announcement, they are being woken with no content: "
+        "give them a section, drop them from 'to', or put the announcement "
+        "itself in the shared body."
+    )
+
+
 #: What ``exited`` and ``missing`` mean to a sender, and what to do about
 #: each. Split because the two need opposite actions: an exited session is
 #: waiting to be respawned, a missing one has had its record cleared and
@@ -2440,6 +2481,10 @@ class MeshManager:
             sep = _separable_notice(body, recipients)
             if sep:
                 advisories.append(sep)
+        else:
+            thin = _preamble_only_notice(body, norm_sections, recipients)
+            if thin:
+                advisories.append(thin)
         note = type_notice(intent)
         if not note and norm_sections:
             for sec in norm_sections.values():

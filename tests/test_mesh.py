@@ -748,6 +748,83 @@ def test_batch_sections_and_reply_to(home, tmp_path):
 
 
 # --------------------------------------------------------------------------- #
+# a batch's non-sectioned recipients get the shared preamble and nothing else
+# --------------------------------------------------------------------------- #
+def test_non_sectioned_recipients_get_the_preamble_and_are_flagged(home, tmp_path):
+    """The delivery rule and the advisory that guards it.
+
+    A section-bearing send still reaches every recipient in ``to``; one with
+    no section reads the shared preamble alone. That is deliberate — a
+    sprint goal announced to all with assignments for two — so the send is
+    NOT narrowed to the sectioned members. What is new is the warning when
+    the preamble is too thin to be a message on its own, which is the case
+    that woke nine terminals with a four-word heading (claunch-u8ko).
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr)
+        mm.create("b")
+        for n, h in (("s1", "leader"), ("s2", "w1"), ("s3", "w2"), ("s4", "w3")):
+            mgr.create(SessionDef(name=n, harness="py", cwd=str(tmp_path)))
+            await mm.join("b", n, handle=h)
+
+        # ---- the rule: no section means the preamble, delivered ---------- #
+        goal = (
+            "sprint goal: finish auth before Friday. Everyone rebases onto "
+            "master first; the two names below also have a slice of their own."
+        )
+        sent = await mm.send(
+            "b", "leader", "*", goal,
+            sections={"w1": "you take the login API.",
+                      "w2": "you take token refresh."},
+        )
+        assert sorted(sent["recipients"]) == ["w1", "w2", "w3"]
+        msg = mm.get("b").messages[-1]
+        block_w3 = format_delivery("b", "w3", [msg])
+        assert "sprint goal" in block_w3
+        assert "login API" not in block_w3 and "token refresh" not in block_w3
+        # a substantive preamble is the intended use: no advisory
+        assert sent["notice"] is None
+
+        # ---- the guard: a heading, not a message ------------------------ #
+        thin = await mm.send(
+            "b", "leader", "*", "s127(leader): landing notice.",
+            sections={"w1": "your branch 92a7106 is in.",
+                      "w2": "yours is next in the queue."},
+        )
+        note = thin["notice"] or ""
+        assert "w3" in note and "ONLY" in note
+        assert "1 recipient(s) with no section" in note
+        # the delivery itself is unchanged — the advisory does not narrow it
+        assert sorted(thin["recipients"]) == ["w1", "w2", "w3"]
+
+        # ---- no uncovered recipient: nothing to warn about -------------- #
+        covered = await mm.send(
+            "b", "leader", ["w1", "w2"], "short heading.",
+            sections={"w1": "a", "w2": "b"},
+        )
+        assert covered["notice"] is None
+
+        # ---- a long one-line preamble still stands on its own ----------- #
+        long_line = "landing notice: " + "x" * 200
+        ok = await mm.send(
+            "b", "leader", "*", long_line, sections={"w1": "yours is in."},
+        )
+        assert ok["notice"] is None
+
+        # ---- and the pre-existing floor still holds: no body, no section - #
+        with pytest.raises(MeshError):
+            await mm.send("b", "leader", "*", "", sections={"w1": "solo"})
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+# --------------------------------------------------------------------------- #
 # federation v2 (primary/mirror) lives in tests/test_mesh_v2.py; only the
 # relay-identity precondition stays here
 # --------------------------------------------------------------------------- #
