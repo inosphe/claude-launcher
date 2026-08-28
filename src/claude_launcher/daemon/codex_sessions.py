@@ -29,7 +29,12 @@ def _records(config_dir: Path):
             session_id = payload.get("id") or payload.get("session_id")
             cwd = payload.get("cwd")
             if record.get("type") == "session_meta" and session_id and cwd:
-                yield str(session_id), os.path.abspath(str(cwd)), path.stat().st_mtime
+                yield (
+                    str(session_id),
+                    os.path.abspath(str(cwd)),
+                    path.stat().st_mtime,
+                    path,
+                )
         except (OSError, ValueError, TypeError):
             # Codex may still be writing the first line; the polling caller
             # will see it on the next pass.
@@ -38,7 +43,25 @@ def _records(config_dir: Path):
 
 def snapshot(config_dir: Path) -> Set[str]:
     """Return all conversation UUIDs already present in a Codex profile."""
-    return {session_id for session_id, _cwd, _mtime in (_records(config_dir) or ())}
+    return {
+        session_id for session_id, _cwd, _mtime, _path in (_records(config_dir) or ())
+    }
+
+
+def find(config_dir: Path, session_id: str) -> Optional[Path]:
+    """Return the active rollout for ``session_id``, if it is present.
+
+    The id is read from the rollout's ``session_meta`` record instead of
+    inferred from its filename.  Codex currently includes the id in both,
+    but the persisted record is the same identity :func:`snapshot`,
+    :func:`latest`, and :func:`claim_new` already trust.
+    """
+    matches = [
+        (mtime, path)
+        for found, _cwd, mtime, path in (_records(config_dir) or ())
+        if found == str(session_id)
+    ]
+    return max(matches, key=lambda item: item[0])[1] if matches else None
 
 
 def latest(config_dir: Path, cwd: str) -> Optional[str]:
@@ -51,7 +74,7 @@ def latest(config_dir: Path, cwd: str) -> Optional[str]:
     target = os.path.normcase(os.path.abspath(cwd))
     matches = [
         (mtime, session_id)
-        for session_id, record_cwd, mtime in (_records(config_dir) or ())
+        for session_id, record_cwd, mtime, _path in (_records(config_dir) or ())
         if os.path.normcase(record_cwd) == target
     ]
     return max(matches)[1] if matches else None
@@ -71,7 +94,7 @@ def claim_new(
     while True:
         matches = [
             session_id
-            for session_id, record_cwd, _mtime in (_records(config_dir) or ())
+            for session_id, record_cwd, _mtime, _path in (_records(config_dir) or ())
             if session_id not in known and os.path.normcase(record_cwd) == target
         ]
         if len(matches) == 1:

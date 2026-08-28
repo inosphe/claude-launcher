@@ -1105,6 +1105,112 @@ def test_a_lost_output_does_not_read_like_a_receipt_that_never_had_one(
 
 
 # --------------------------------------------------------------------------- #
+# Reading the suite back. The judge decodes two streams it did not write, and
+# both cases below are about what happens when that decoding goes wrong: the
+# receipt has to keep saying WHICH of "the suite printed no summary" and "the
+# summary never reached me" it is looking at.
+# --------------------------------------------------------------------------- #
+
+#: A red run whose output carries bytes that are not valid in utf-8 *or* in
+#: cp949, wrapped around an ordinary ASCII summary line. ``0xff`` is a lead
+#: byte in neither encoding, so this stand-in fails a strict decode on any
+#: machine rather than only on a Korean-locale one.
+#:
+#: This is the shape that took the judge's eyes out at 5516c651c732: a Korean
+#: failure dump reached ``subprocess.run`` with no ``encoding=``, the reader
+#: thread raised UnicodeDecodeError, ``proc.stdout`` came back ``None``, and a
+#: receipt was filed with ``counts {}``, ``failures []`` and a 0-byte output
+#: file -- red, but unable to say what was red.
+UNDECODABLE = (
+    f'"{sys.executable}" -c "'
+    "import sys; "
+    "sys.stdout.buffer.write(bytes([0xff, 0xfe, 0x81])); "
+    "sys.stdout.buffer.flush(); "
+    "print(); "
+    "print('FAILED tests/test_x.py::test_a - AssertionError'); "
+    "print('1 failed, 11 passed in 3.4s'); "
+    'raise SystemExit(1)"'
+)
+
+
+def test_output_that_cannot_be_decoded_still_yields_counts(repo, receipts):
+    """Undecodable bytes cost the bytes, not the verdict.
+
+    The summary line and the ``FAILED`` line are ASCII and sit right beside
+    the garbage. Reading the stream with ``errors="replace"`` keeps them; a
+    strict decode loses the whole stream and files an empty receipt, which is
+    the difference between "one test failed, here it is" and "something was
+    red".
+    """
+    assert _run(repo, receipts, "--command", UNDECODABLE) == 1
+
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+
+    assert receipt["counts"] == {"failed": 1, "passed": 11}
+    assert receipt["failures"] == ["FAILED tests/test_x.py::test_a - AssertionError"]
+    assert "stream_error" not in receipt, "nothing was lost, so nothing is claimed"
+
+    parked = sweep.output_path(repo, tip, receipts)
+    assert parked.name == receipt["output"]
+    assert "1 failed, 11 passed" in parked.read_text(encoding="utf-8")
+
+
+def test_a_lost_stream_is_said_rather_than_left_as_an_empty_summary(
+    repo, receipts, capsys, monkeypatch
+):
+    """``counts {}`` has two causes and the receipt must name which one.
+
+    A suite that printed no summary and a stream that never arrived both
+    parse to nothing. The gate calls both red -- correctly -- but only one of
+    them has a failing test to go and look at, and a reader who cannot tell
+    them apart spends the search on the wrong half. ``errors="replace"``
+    removes the cause measured at 5516c651c732; this case covers the state
+    itself, whatever else ever produces it.
+    """
+    real = sweep.subprocess.run
+
+    def lose_the_streams(command, *args, **kwargs):
+        # Only the suite call. cmd_run's own git calls have to keep working,
+        # or the run never reaches the line under test.
+        if kwargs.get("shell"):
+            return subprocess.CompletedProcess(command, 1, None, None)
+        return real(command, *args, **kwargs)
+
+    monkeypatch.setattr(sweep.subprocess, "run", lose_the_streams)
+    assert _run(repo, receipts, "--command", RED) == 1
+    monkeypatch.undo()
+
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+    assert receipt["counts"] == {}
+    assert "stdout and stderr" in receipt["stream_error"]
+
+    capsys.readouterr()
+    assert _check(repo, receipts) == 1
+    err = capsys.readouterr().err
+    assert "no counts" in err
+    assert "streams: " in err and "could not be read back" in err
+
+
+def test_git_output_is_read_as_utf8_not_as_the_locale(repo, receipts):
+    """``_git`` decodes git, and git writes utf-8.
+
+    Every commit this repository's sweep judges has a subject, and this
+    repository writes them in Korean. With ``text=True`` alone the subject is
+    decoded with the process locale -- cp949 on the machine this was measured
+    on -- and the round trip either raises inside the reader thread or comes
+    back as mojibake. Both answers arrive at the same place: a helper that
+    every path through the gate calls, returning something that is not what
+    git said.
+    """
+    subject = "다섯 줄을 도구로 낸다"
+    _git(repo, "commit", "-q", "--allow-empty", "-m", subject)
+
+    assert sweep._git(repo, "log", "-1", "--pretty=%s") == subject
+
+
+# --------------------------------------------------------------------------- #
 # The sweep command itself. These constraints used to be pinned against the
 # workflow's verify line; they moved here with the command, because they are
 # properties of running this suite and that is now the only place it is run.

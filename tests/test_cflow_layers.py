@@ -813,7 +813,8 @@ def test_the_worker_review_says_what_a_number_is_a_verdict_about():
     for anchor in (
         "--directory",                     # which tree
         "uv sync --extra test",            # ...and which packages
-        "import pytest, xdist",            # verify by import, not by existence
+        "tests/test_tree_isolation.py",    # the tree axis, checked from inside the suite
+        "claunch-v5yp",                    # ...and the retired bare probe, named so it stays retired
         "트리 해시",                        # numbers carry their tree
         "--collect-only",                  # baselines cost nothing
         "Get-CimInstance",                 # the literal probe, not a description
@@ -824,6 +825,43 @@ def test_the_worker_review_says_what_a_number_is_a_verdict_about():
         "verify` 필드가 있으면",            # ...and leaving such a step is a sweep
     ):
         assert anchor in review.instructions, f"review lost its {anchor!r} rule"
+
+
+def test_the_worker_review_does_not_ship_the_retired_bare_probe():
+    """The retired probe is kept out of the prose by a check, not by memory.
+
+    ``claunch-v5yp`` retired a one-line environment probe --
+    ``uv run --no-sync python -c "import pytest, xdist; print(...)"`` -- because
+    it answers a different question than the suite does: the editable install
+    puts the MAIN checkout on a bare interpreter's ``sys.path`` while pytest
+    front-inserts ``pythonpath = ["src"]`` from this rootdir, so the probe says
+    "contaminated" about a clean run. ``tests/test_tree_isolation.py`` carries
+    the whole account, and the cost: two sessions re-synced venvs they did not
+    need to, and one green measurement was briefly thrown away.
+
+    The retraction was recorded in prose and the prose kept shipping it -- this
+    step's instructions are handed to a new worker every round, so a wrong rule
+    written here is re-issued rather than forgotten. That is what this test is
+    for: the removal is a rule now, and a rule that costs nothing to re-type is
+    a rule nothing enforces.
+
+    Both layers, because the project layer is a whole-file override.
+    """
+    for label, wf in (
+        ("bundled", _bundled("improv-worker")),
+        ("project", model.load(PROJECT_OVERRIDES / "improv-worker.yaml")),
+    ):
+        prose = _prose(wf.steps["review"].instructions)
+        assert "import pytest, xdist" not in prose, (
+            f"{label}: the retired bare probe is back in the review prose. "
+            f"It reports the main checkout for a run pytest is reading out of "
+            f"this worktree -- see tests/test_tree_isolation.py."
+        )
+        assert "tests/test_tree_isolation.py" in prose, (
+            f"{label}: the review prose no longer names the check that "
+            f"replaced the probe, so nothing tells a worker how the tree axis "
+            f"is answered."
+        )
 
 
 def test_the_worker_review_admits_what_the_scan_cannot_see():

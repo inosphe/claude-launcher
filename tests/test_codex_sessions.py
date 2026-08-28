@@ -38,3 +38,13 @@ def test_latest_supports_legacy_unpinned_definitions(tmp_path):
     # Write time, not directory/filename ordering, is Codex's definition of
     # the conversation most recently active in this cwd.
     assert codex_sessions.latest(profile_home, str(cwd)) == "older"
+
+
+def test_find_returns_the_rollout_whose_metadata_owns_the_id(tmp_path):
+    profile_home = tmp_path / "codex"
+    cwd = tmp_path / "work"
+    _rollout(profile_home, "2026/08/27", "wanted", cwd)
+    expected = next((profile_home / "sessions").glob("**/*wanted.jsonl"))
+
+    assert codex_sessions.find(profile_home, "wanted") == expected
+    assert codex_sessions.find(profile_home, "missing") is None

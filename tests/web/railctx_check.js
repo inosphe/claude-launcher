@@ -178,16 +178,22 @@ const FULL = {
 };
 const QUIET = { name: "quiet", status: "idle", harness: "claude",
                 profile: "nc", parent: null };
-const OTHER = { name: "pi", status: "idle", harness: "codex",
+const CODEX = {
+  name: "codex", status: "idle", harness: "codex", profile: "nc", parent: null,
+  context: { tokens: 187281, input: 1169, cache_read: 186112, cache_write: 0,
+             output: 59, model: "gpt-5.6-sol", at: AT,
+             model_context_window: 258_400 },
+};
+const OTHER = { name: "pi", status: "idle", harness: "pi",
                 profile: "nc", parent: null };
-served = { sessions: [FULL, QUIET, OTHER] };
+served = { sessions: [FULL, QUIET, CODEX, OTHER] };
 
 (async () => {
   await ctx.refresh();
 
   const rows = list.kids;
   check("every session still gets a row",
-        rows.map((r) => r.dataset.name), ["full", "quiet", "pi"]);
+        rows.map((r) => r.dataset.name), ["full", "quiet", "codex", "pi"]);
 
   const row = (name) => rows.find((r) => r.dataset.name === name);
   /* Found by what it says, not by where it sits or what it is called: this
@@ -211,6 +217,11 @@ served = { sessions: [FULL, QUIET, OTHER] };
         carries(row("quiet"), unknown), true);
   check("...and on its name", carries(nameEl(QUIET), unknown), true);
 
+  const codexNote = ctx.tooltip(CODEX);
+  check("a Codex row carries its rollout reading",
+        [carries(row("codex"), codexNote), carries(nameEl(CODEX), codexNote)],
+        [true, true]);
+
   check("a harness that keeps no transcript is told nothing about context",
         [row("pi").title, (nameEl(OTHER) || {}).title || ""]
           .some((t) => t.includes("context")), false);
@@ -233,6 +244,15 @@ served = { sessions: [FULL, QUIET, OTHER] };
         ["rail-ctx-fill warm", "15.5%"]);
   check("...and a tick where this session's auto-compact window sits",
         ((under("full", "rail-ctx-tick") || {}).style || {}).left, "20.0%");
+  check("a Codex row shows the rollout count against the fixed domain",
+        [numText("codex"),
+         (under("codex", "rail-ctx-fill") || {}).className,
+         ((under("codex", "rail-ctx-fill") || {}).style || {}).width],
+        ["187k", "rail-ctx-fill warm", "18.7%"]);
+  check("Codex marks its reported model context window",
+        [((under("codex", "rail-ctx-tick") || {}).style || {}).left,
+         (under("codex", "rail-ctx-tick") || {}).title],
+        ["25.8%", "model context window: 258k tokens"]);
   check("a session that has not answered shows a greyed ?, not a count",
         numText("quiet"), "?");
   check("and its line is marked, so it reads as absence, not a small count",
@@ -243,6 +263,8 @@ served = { sessions: [FULL, QUIET, OTHER] };
         under("quiet", "rail-ctx-fill"), undefined);
   check("a harness that keeps no transcript grows no line",
         lineOf("pi"), undefined);
+  check("a Codex session awaiting its first reading still gets an unknown line",
+        ctx.railLine({ harness: "codex" }).className, "rail-ctx-line unknown");
 
   /* The line is the glance; the reading stays one hover away on it. */
   const rail = ctx.railLine(FULL);
@@ -252,6 +274,11 @@ served = { sessions: [FULL, QUIET, OTHER] };
         [rail.title.includes("bar spans 0–1M tokens"),
          rail.title.includes("auto-compact window at 200k")],
         [true, true]);
+  const codexRail = ctx.railLine(CODEX);
+  check("the Codex tooltip names the model window threshold",
+        [codexRail.title.includes("model context window at 258k"),
+         codexRail.title.includes("auto-compact")],
+        [true, false]);
 
   /* The colour is judged against the compact window (compaction fires at the
      tick, not at 1M), the fill against the domain — two different questions

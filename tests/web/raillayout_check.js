@@ -131,7 +131,7 @@ function refreshParentChoices() {}
    reads s.context) because the shape is the part that matters: a title may
    grow lines, and the name has to stay the first of them. */
 function ctxNoteOnRow(row, name, s) {
-  const note = "context not known yet — no completed turn to read";
+  const note = "context not known yet — no reading recorded";
   const join = (had) => [had, note].filter(Boolean).join("\\n");
   if (row) row.title = join(row.title);
   if (name) name.title = join(name.title);

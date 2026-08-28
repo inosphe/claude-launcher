@@ -165,7 +165,15 @@ const FULL = { name: "full", status: "busy", harness: "claude", profile: "nc:cla
                cwd: "/w", cols: 80, rows: 24, context: READING };
 const QUIET = { name: "quiet", status: "idle", harness: "claude",
                 profile: "nc", cwd: "/w", cols: 80, rows: 24 };
-const OTHER = { name: "pi", status: "idle", harness: "codex", profile: "nc",
+const CODEX_READING = {
+  tokens: 187281, input: 1169, cache_read: 186112, cache_write: 0,
+  output: 59, model: "gpt-5.6-sol", at: AT,
+  model_context_window: 258_400,
+};
+const CODEX = { name: "codex", status: "idle", harness: "codex",
+                profile: "nc:codex", cwd: "/w", cols: 80, rows: 24,
+                context: CODEX_READING };
+const OTHER = { name: "pi", status: "idle", harness: "pi", profile: "nc",
                 cwd: "/w", cols: 80, rows: 24 };
 
 /* The full id, never the short one: the panel has the width, and this is
@@ -176,7 +184,9 @@ const OTHER = { name: "pi", status: "idle", harness: "codex", profile: "nc",
 check("the panel says the full id and how old the reading is",
       ctx.sentence(FULL), "claude-haiku-4-5-20251001 (as of its turn 3m ago)");
 check("a session that has not answered yet says so, and does not say a model",
-      ctx.sentence(QUIET), "not known yet — no completed turn to read");
+      ctx.sentence(QUIET), "not known yet — no context reading recorded");
+check("a Codex rollout names its model with the reading's age",
+      ctx.sentence(CODEX), "gpt-5.6-sol (as of its turn 3m ago)");
 check("a harness that keeps no transcript is not asked",
       ctx.sentence(OTHER), "");
 /* A reading with the model missing is a reading, not a model: it must fall
@@ -184,7 +194,7 @@ check("a harness that keeps no transcript is not asked",
    parenthesis after nothing. */
 check("a reading with no model in it is still not a model",
       ctx.sentence({ ...FULL, context: { ...READING, model: null } }),
-      "not known yet — no completed turn to read");
+      "not known yet — no context reading recorded");
 
 /* ---- the rail row's chip ----------------------------------------------- */
 const chipOf = (s) => {
@@ -208,6 +218,9 @@ check("a session with no reading gets no chip", chipOf(QUIET), undefined);
 check("...and still gets its line", !!ctx.railLine(QUIET), true);
 check("a harness with no transcript gets no line at all",
       ctx.railLine(OTHER), null);
+check("a Codex row shows the model recorded in its rollout",
+      [chipOf(CODEX).text, chipOf(CODEX).title],
+      ["gpt 5.6 sol", "gpt-5.6-sol"]);
 
 /* ---- the panel actually appends it ------------------------------------- */
 /* The point of driving the real renderSession: the sentence being right is
@@ -232,7 +245,7 @@ check("the panel has a model row", !!full.model, true);
 check("...saying the full id", full.model && full.model.text,
       "claude-haiku-4-5-20251001 (as of its turn 3m ago)");
 check("...and explaining which turn it is from on hover",
-      !!(full.model && full.model.title.includes("last completed turn")), true);
+      !!(full.model && full.model.title.includes("latest context reading")), true);
 /* Above the count, which is the reason it is a row of its own: the count is
    read against the model, so the model has to be read first. */
 const order = Object.keys(full);
@@ -240,7 +253,13 @@ check("it sits above the context row",
       order.indexOf("model") < order.indexOf("context"), true);
 check("a session that has not answered still gets the row, saying so",
       (rowsOf(QUIET).model || {}).text,
-      "not known yet — no completed turn to read");
+      "not known yet — no context reading recorded");
+const codex = rowsOf(CODEX);
+check("a Codex detail panel has the full model id",
+      codex.model && codex.model.text,
+      "gpt-5.6-sol (as of its turn 3m ago)");
+check("a Codex detail panel has its context reading",
+      codex.context && codex.context.text.includes("187,281 tokens"), true);
 /* metaRow drops an empty value, so the other harness gets no row rather than
    an empty one — the same silence the gauge line keeps. */
 check("another harness gets no model row at all",

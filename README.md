@@ -112,7 +112,7 @@ claunch run work:claude                  # explicit Claude selector
 | `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claunch.yaml`. |
 | `sync [--mode ...]`    | Reconcile `~/.claunch.yaml` with the sync server (`merge`/`up`/`down`). |
 | `validate [name[:harness]]` | Run the selected harness's declared non-interactive heartbeat (all bare profile defaults if no name). |
-| `usage <name[:harness]>` | Query Claude or Codex subscription usage (`--json` for the raw response). |
+| `usage <name[:harness]>` | Query Claude, Codex, or managed Kimi subscription usage (`--json` for the raw response). |
 | `set-provider [p] <provider>` | Pin a provider globally or per profile (`--clear` to inherit). |
 | `providers`            | List API providers from the config file and the active one. |
 | `routing [set\|clear\|stop]` | Show or change [request-body routing](#pinning-the-upstream-provider-openrouter-routing) (e.g. pin OpenRouter to CoreWeave). |
@@ -2616,18 +2616,29 @@ state (pid/port file, auth token, session logs) stays machine-local under
 
 ## Usage reporting
 
-`claunch usage <name[:harness]>` follows the profile selector. The supported
-cases are deliberately narrow:
+`claunch usage <name[:harness]>` follows the profile selector. An explicit
+selector always determines the harness. For a bare profile created before
+harness selectors existed, claunch selects an initialized same-name usage
+harness when the configured default has no usable usage credential. This lets
+an existing `codex` profile resolve to `codex:codex` while preserving a
+credentialed provider on a profile such as `kimi`.
+
+The supported cases are deliberately narrow:
 
 - `usage work:claude` queries Anthropic only when the profile's effective
   provider is `default`. A Kimi/other Claude-compatible provider is refused;
   claunch does not pretend Anthropic's counters describe that backend.
+- A Claude-compatible profile whose effective endpoint is the managed Kimi
+  Code service (`api.kimi.com/coding`) queries its authenticated `/v1/usages`
+  endpoint. This covers existing Kimi profiles that run through Claude Code.
 - `usage work:codex` uses that profile's isolated `CODEX_HOME` and Codex
   app-server's documented `account/rateLimits/read` RPC.
-- Pi, Kimi and Cursor have no supported equivalent in claunch and fail
-  explicitly rather than scraping terminal output.
+- `usage work:kimi` starts the Kimi Code local server under that profile's
+  isolated `KIMI_CODE_HOME`; the server refreshes OAuth and returns its managed
+  account usage response.
+- Pi and Cursor return an explicit unsupported-harness error.
 
-Both supported paths print per-window utilization:
+Supported paths print per-window utilization:
 
 ```text
 usage for profile 'work'

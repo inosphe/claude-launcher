@@ -822,7 +822,7 @@ def _cmd_mcp(_args: argparse.Namespace) -> int:
 
 
 def _cmd_usage(args: argparse.Namespace) -> int:
-    p = profile.require_selector(args.name)
+    p = usage.resolve_target(profile.require_selector(args.name))
     report = usage.fetch(p)
     if args.json:
         import json
@@ -967,6 +967,8 @@ def _print_usage(name: str, report: usage.UsageReport) -> None:
     suffix = {
         "ratelimit-headers": "  (via rate-limit headers)",
         "codex-app-server": "  (via Codex app-server)",
+        "kimi-managed-usage": "  (via Kimi Code usage API)",
+        "kimi-web-server": "  (via Kimi Code local server)",
     }.get(report.source, "")
     print(f"usage for profile {name!r}{suffix}")
     active = [w for w in report.windows if w.utilization > 0 or w.resets_at]

@@ -1,15 +1,10 @@
 """The context reading the dashboard shows for each session.
 
-``daemon/ctxsize.py`` answers one question — how full is this session's
-conversation — from the transcript claude itself writes. The tests here pin
-the four things that can go wrong with that: reading the *wrong* turn (an
-older one, or a subagent's), reading a turn that says nothing, paying for the
-read twice, and reporting a number where there is none.
-
-The last is the one worth being strict about. There is no denominator
-anywhere — nothing records the context limit and it differs by model — so the
-only defence against a plausible-looking lie is that "not known" must never
-arrive as a number, not even as zero.
+``daemon/ctxsize.py`` reads Claude transcripts and Codex rollouts. The tests
+cover selecting the correct request, excluding cumulative Codex usage and
+Claude sidechains, caching unchanged files, and preserving missing readings as
+missing values. Codex supplies a model context window; Claude can supply an
+auto-compact threshold and has no recorded hard limit.
 """
 
 from __future__ import annotations
@@ -21,7 +16,7 @@ import time
 
 import pytest
 
-from claude_launcher import transcripts
+from claude_launcher import harnesses, profile as profile_mod, transcripts
 from claude_launcher.daemon import ctxsize
 from claude_launcher.daemon.harness import SessionDef
 
@@ -53,6 +48,59 @@ def turn(*, read=0, write=0, fresh=0, out=0, model="claude-opus-5",
             },
         },
     })
+
+
+def codex_context(model="gpt-5.6-sol", at="2026-08-27T08:27:13.265Z") -> str:
+    """One Codex turn context, which precedes that turn's token events."""
+    return json.dumps(
+        {
+            "timestamp": at,
+            "type": "turn_context",
+            "payload": {"turn_id": "turn-1", "model": model},
+        }
+    )
+
+
+def codex_count(
+    *,
+    input_tokens=187_281,
+    cached=186_112,
+    cache_write=0,
+    out=59,
+    cumulative=7_283_309,
+    window=258_400,
+    at="2026-08-27T08:27:18.504Z",
+) -> str:
+    """One Codex rollout token event in the installed CLI's wire shape."""
+    return json.dumps(
+        {
+            "timestamp": at,
+            "type": "event_msg",
+            "payload": {
+                "type": "token_count",
+                "info": {
+                    "total_token_usage": {
+                        "input_tokens": cumulative,
+                        "cached_input_tokens": max(0, cumulative - 10_000),
+                        "cache_write_input_tokens": 0,
+                        "output_tokens": 6_339,
+                        "reasoning_output_tokens": 1_142,
+                        "total_tokens": cumulative + 6_339,
+                    },
+                    "last_token_usage": {
+                        "input_tokens": input_tokens,
+                        "cached_input_tokens": cached,
+                        "cache_write_input_tokens": cache_write,
+                        "output_tokens": out,
+                        "reasoning_output_tokens": 13,
+                        "total_tokens": input_tokens + out,
+                    },
+                    "model_context_window": window,
+                },
+                "rate_limits": None,
+            },
+        }
+    )
 
 
 def write_jsonl(tmp_path, *lines):
@@ -100,6 +148,90 @@ def test_unparseable_counts_do_not_become_numbers():
     entry["message"]["usage"]["input_tokens"] = 5
     got = ctxsize.usage_of(entry)
     assert got["tokens"] == 5 and got["cache_read"] == 0
+
+
+def test_codex_context_uses_the_latest_request_instead_of_cumulative_usage(
+    tmp_path,
+):
+    path = write_jsonl(tmp_path, codex_context(), codex_count())
+
+    got = ctxsize.read_codex_tail(path)
+
+    assert got["tokens"] == 187_281
+    assert got["tokens"] != 7_283_309
+    assert (got["input"], got["cache_read"], got["cache_write"]) == (
+        1_169,
+        186_112,
+        0,
+    )
+    assert got["output"] == 59
+    assert got["model"] == "gpt-5.6-sol"
+    assert got["model_context_window"] == 258_400
+    assert got["at"] == "2026-08-27T08:27:18.504Z"
+
+
+def test_codex_newest_token_event_wins_after_compaction(tmp_path):
+    path = write_jsonl(
+        tmp_path,
+        codex_context(model="gpt-5.5"),
+        codex_count(input_tokens=190_000, cached=180_000),
+        json.dumps(
+            {
+                "timestamp": "2026-08-27T08:28:00Z",
+                "type": "response_item",
+                "payload": {"type": "compaction"},
+            }
+        ),
+        codex_context(model="gpt-5.6-sol", at="2026-08-27T08:29:00Z"),
+        codex_count(
+            input_tokens=20_000,
+            cached=18_000,
+            cumulative=8_000_000,
+            at="2026-08-27T08:29:05Z",
+        ),
+    )
+
+    got = ctxsize.read_codex_tail(path)
+
+    assert got["tokens"] == 20_000
+    assert got["model"] == "gpt-5.6-sol"
+
+
+def test_codex_model_is_from_the_turn_owning_the_selected_token_event(tmp_path):
+    path = write_jsonl(
+        tmp_path,
+        codex_context(model="gpt-5.5"),
+        codex_count(input_tokens=80_000, cached=70_000),
+        # The next turn can start before it records its first token event.
+        codex_context(model="gpt-5.6-sol", at="2026-08-27T08:30:00Z"),
+    )
+
+    got = ctxsize.read_codex_tail(path)
+
+    assert got["tokens"] == 80_000
+    assert got["model"] == "gpt-5.5"
+
+
+def test_codex_read_widens_to_find_the_model_before_large_tool_output(tmp_path):
+    filler = json.dumps(
+        {
+            "timestamp": "2026-08-27T08:27:15Z",
+            "type": "response_item",
+            "payload": {"type": "custom_tool_call_output", "output": "x" * 20_000},
+        }
+    )
+    path = write_jsonl(
+        tmp_path,
+        codex_context(),
+        *[filler] * 8,
+        codex_count(input_tokens=90_000, cached=80_000),
+    )
+
+    got = ctxsize.read_codex_tail(path)
+
+    assert path.stat().st_size > ctxsize.FIRST_CHUNK
+    assert got["tokens"] == 90_000
+    assert got["model"] == "gpt-5.6-sol"
 
 
 # --------------------------------------------------------------------------- #
@@ -176,16 +308,64 @@ def _claude_session(tmp_path, *lines):
     return SessionDef(name="s1", harness="claude", cwd=str(cwd), conversation_id=CID)
 
 
+def _codex_session(tmp_path, *lines):
+    """A Codex session with its rollout under the harness profile home."""
+    cwd = tmp_path / "work"
+    cwd.mkdir(exist_ok=True)
+    prof = profile_mod.create("codex-context")
+    entry = harnesses.get("codex")
+    assert entry is not None
+    rollout = (
+        entry.profile_home(prof.config_dir)
+        / "sessions"
+        / "2026"
+        / "08"
+        / "27"
+        / f"rollout-2026-08-27T08-27-13-{CID}.jsonl"
+    )
+    rollout.parent.mkdir(parents=True, exist_ok=True)
+    meta = json.dumps(
+        {
+            "timestamp": "2026-08-27T08:27:13Z",
+            "type": "session_meta",
+            "payload": {"id": CID, "cwd": str(cwd)},
+        }
+    )
+    rollout.write_text(
+        "\n".join((meta, *lines)) + "\n",
+        encoding="utf-8",
+    )
+    return SessionDef(
+        name="cx1",
+        profile="codex-context:codex",
+        harness="codex",
+        cwd=str(cwd),
+        conversation_id=CID,
+    )
+
+
 def test_a_session_is_read_through_the_path_claude_files_it_under(home, tmp_path):
     sdef = _claude_session(tmp_path, turn(read=42_000, write=1_000))
     assert ctxsize.for_session(sdef)["tokens"] == 43_000
 
 
-def test_another_harness_keeps_no_such_file(home, tmp_path):
-    sdef = _claude_session(tmp_path, turn(read=42_000))
-    assert ctxsize.for_session(SessionDef(
-        name="s1", harness="codex", cwd=sdef.cwd, conversation_id=CID
-    )) is None
+def test_a_codex_session_is_read_through_its_profile_rollout(home, tmp_path):
+    sdef = _codex_session(tmp_path, codex_context(), codex_count())
+
+    got = ctxsize.for_session(sdef)
+
+    assert got["tokens"] == 187_281
+    assert got["model"] == "gpt-5.6-sol"
+    assert got["model_context_window"] == 258_400
+
+
+def test_an_unsupported_harness_has_no_context_reading(home, tmp_path):
+    assert (
+        ctxsize.for_session(
+            SessionDef(name="s1", harness="pi", cwd=str(tmp_path), conversation_id=CID)
+        )
+        is None
+    )
 
 
 def test_a_session_with_no_conversation_pinned_has_nothing_to_read(home, tmp_path):
@@ -231,6 +411,17 @@ def test_attach_hangs_the_reading_on_the_session(home, tmp_path):
     assert info["name"] == "s1" and info["status"] == "busy"
     assert info["context"]["tokens"] == 42_000
     assert info["context"]["output"] == 300
+
+
+def test_attach_hangs_a_codex_window_on_the_session(home, tmp_path):
+    sdef = _codex_session(tmp_path, codex_context(), codex_count())
+
+    info = ctxsize.attach(_Stub(sdef))
+
+    assert info["name"] == "cx1"
+    assert info["context"]["tokens"] == 187_281
+    assert info["context"]["model_context_window"] == 258_400
+    assert "compact_window" not in info["context"]
 
 
 def test_attach_omits_the_key_rather_than_reporting_zero(home, tmp_path):
@@ -373,6 +564,34 @@ def test_both_endpoints_carry_the_reading(home, tmp_path, monkeypatch):
         finally:
             await client.close()
             await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_both_endpoints_carry_a_codex_rollout_reading(home, tmp_path):
+    from claude_launcher.daemon.manager import SessionManager
+
+    sdef = _codex_session(tmp_path, codex_context(), codex_count())
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mgr.stage(sdef)
+        client = await _serve(mgr)
+        try:
+            resp = await client.get("/api/sessions", headers=BEARER)
+            assert resp.status == 200
+            listed = (await resp.json())["sessions"][0]
+            assert listed["context"]["tokens"] == 187_281
+            assert listed["context"]["model"] == "gpt-5.6-sol"
+            assert listed["context"]["model_context_window"] == 258_400
+
+            resp = await client.get("/api/sessions/cx1/meta", headers=BEARER)
+            assert resp.status == 200
+            meta = (await resp.json())["session"]
+            assert meta["context"] == listed["context"]
+        finally:
+            await client.close()
+            mgr.discard("cx1")
 
     asyncio.run(run())
 
