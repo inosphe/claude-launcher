@@ -68,9 +68,9 @@ import secrets
 import signal
 import subprocess
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
 
-from .. import digests
+from .. import daemon_client, digests
 from . import checkout, model, responders, state as state_mod
 from .model import Delegate, Step, Workflow
 
@@ -991,11 +991,38 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
     from_step = state.get("current")
     _settle_timers(workflow, state, target, cwd)
     if target is None:
+        # BEFORE the run is marked done, and deliberately: `status == "done"`
+        # with no pending start is the daemon's kill-on-end condition, and it
+        # is sampled by a clock that takes no lock against this function. The
+        # escalation's own work — a workflow file read, and two daemon round
+        # trips for the role and the issue — is exactly the window in which
+        # that sample would find a finished run with nothing pending and
+        # start ending the session. It would not be undone by the request
+        # arriving a moment later: the clock latches the run in `_end_done`
+        # and its kill task rechecks only `session.exited` and `keep_alive`,
+        # never the pending start again. `recur` sits after the save and is
+        # safe there because the clock has a second, independent guard for it
+        # (`not payload.get("recur")`); an escalation has no such guard, so
+        # the ONLY thing standing between it and a killed session is that its
+        # request is already on disk when `done` becomes visible.
+        #
+        # An escalation declared on the step the run just left wins over
+        # `recur`: the workflow-wide "this run happens again" is the default,
+        # and a particular ending saying "the work continues under other
+        # rules" is the more specific statement about THIS ending. When the
+        # escalation is declined (an unresolvable target, or one whose
+        # filter_roles turns this session away) the run falls back to the
+        # ordinary ending, which for a recurring workflow is its next round —
+        # a declined hand-off must not also silence a service loop.
+        ended_at = workflow.steps.get(from_step) if from_step else None
+        escalated = False
+        if ended_at is not None and ended_at.escalate is not None:
+            escalated = _request_escalation(ended_at, state, cwd)
         state["current"] = None
         state["status"] = "done"
         state_mod.save_state(state, cwd)
         state_mod.journal("done", {"run": state["run_id"]}, cwd)
-        if workflow.recur:
+        if workflow.recur and not escalated:
             _request_next_round(workflow, state, cwd)
         return
     state["current"] = target
@@ -1058,6 +1085,190 @@ def _request_next_round(workflow: Workflow, state: dict, cwd) -> None:
     )
 
 
+#: Ceiling on the escalation's daemon lookup. It runs while the run's slot
+#: lock is held, like the other daemon calls this package makes, so it is
+#: bounded well under the lock's own patience.
+_ISSUE_LOOKUP_TIMEOUT = 5.0
+
+
+def _session_issue(cwd: Optional[str]) -> Tuple[Optional[str], Optional[str]]:
+    """The beads issue this run's session is for, and why it is unknown.
+
+    Read from the daemon's own session record (``GET /api/sessions/{name}``,
+    which serves ``SessionDef.issue``) rather than parsed out of prose. The
+    field is set when the session is created — from the ``issue: <id>`` the
+    request named, or from the issue the daemon minted for the task — so it
+    holds whether or not any agent remembered to write the id into a report.
+    A run whose id came from a report would lose it exactly in the rounds
+    where the reporting was thin, and lose it silently.
+
+    Never raises: the second element says why the answer is ``None``, so a
+    hand-off with no issue on it records the reason instead of looking like a
+    session that simply had no issue.
+    """
+    session = state_mod.current_scope()
+    if not session or session == state_mod.DEFAULT_SCOPE:
+        return None, "not a managed session: it has no issue of its own"
+    client, why = daemon_client.connect_with_diagnosis()
+    if client is None:
+        return None, f"the claunch {daemon_client.unreachable_reason(why)}"
+    try:
+        doc = client.get(
+            f"/api/sessions/{session}", timeout=_ISSUE_LOOKUP_TIMEOUT
+        )
+    except daemon_client.DaemonClientError as exc:
+        return None, f"the daemon did not answer: {exc}"
+    if not isinstance(doc, dict):
+        return None, "the daemon's session record was unreadable"
+    issue = str(doc.get("issue") or "").strip()
+    if not issue:
+        return None, None  # answered, and the session has no issue
+    return issue, None
+
+
+def _request_escalation(step: Step, state: dict, cwd: Optional[str]) -> bool:
+    """File the start request a finishing step's ``escalate`` declares.
+
+    Returns whether the hand-off was actually filed. The whole point of the
+    request is what it does to the ending: a pending start spares the session
+    from the daemon's kill-on-end, and the finished run's payload names the
+    start its driver must perform. So the checks run HERE, on this side of the
+    ending, where declining costs nothing but a journal line — declining at
+    start time is far more expensive, because ``_start_impl`` archives the old
+    run BEFORE it holds the new one against ``filter_roles``, leaving the
+    session holding an unfulfillable request with no active run at all.
+
+    **Called before the run is saved as done, and it must stay that way.**
+    Everything below takes real time — a workflow file read and two daemon
+    round trips — and for all of it the run must not yet look finished to the
+    kill-on-end clock, which samples the state without taking this lock and
+    does not look again. See the comment at the call site in ``_advance``.
+
+    A request already waiting in the slot is left alone and the escalation
+    stands down: a person's declared intent outranks a step's declaration, and
+    the run ends the ordinary way.
+
+    The role check has three outcomes and they are not interchangeable:
+    approved (escalate), refused (do NOT escalate — the run ends the ordinary
+    way), and unenforceable, which is what a session with no mesh identity
+    gets. Unenforceable proceeds — the filter guards a fleet's division of
+    labour and a standalone run has no fleet — but it is recorded as its own
+    answer rather than folded into "approved".
+    """
+    escalate = step.escalate
+    assert escalate is not None  # only called for steps that declare one
+    run_id = state["run_id"]
+    # The mesh the run was started with, not the empty default: an empty mesh
+    # reads as "any mesh this session is in", which does hold for a session
+    # that belongs to one mesh but goes unenforced for a session in several.
+    mesh = str(state.get("mesh") or "")
+
+    pending = state_mod.read_request(cwd)
+    if pending:
+        # The slot holds one request. Somebody asked for something while this
+        # run was finishing, and that request outranks the step's declaration
+        # for the same reason recurrence yields to it in
+        # `_request_next_round` — except the stake is higher here: `recur`
+        # merely postpones the same workflow's next round, while an escalation
+        # changes the rules the session works under, so overwriting one would
+        # wake the session up under B when a person asked for A.
+        #
+        # Recorded rather than silent, and under a name of its own. A declined
+        # escalation (`escalate_declined`) says the hand-off could not be made;
+        # this one says it COULD and was stood down. The distinction matters
+        # after the fact because a step's escalation fires at one particular
+        # ending: unlike a recurring round it does not come around again, so
+        # without this line there is nothing to explain why a declared hand-off
+        # never happened. The pending request's `by` is carried so the reader
+        # can tell a person's intent from this run's own earlier escalation —
+        # which is what a forced `goto` reopening a finished run and ending it
+        # at the same step produces, and what keeps that from firing twice.
+        state_mod.journal(
+            "escalate_skipped",
+            {"run": run_id, "step": step.id, "workflow": escalate.workflow,
+             "reason": "a start request was already pending",
+             "pending": pending.get("id"),
+             "pending_by": pending.get("by")},
+            cwd,
+        )
+        return False
+
+    try:
+        composed = state_mod.load_workflow(escalate.workflow, cwd)
+    except Exception as exc:  # unresolvable name, unreadable or invalid file
+        state_mod.journal(
+            "escalate_declined",
+            {"run": run_id, "step": step.id, "workflow": escalate.workflow,
+             "reason": "the target workflow could not be loaded",
+             "detail": str(exc)},
+            cwd,
+        )
+        return False
+
+    target = composed.workflow
+    try:
+        filter_note = _enforce_role_filter(target, mesh=mesh, cwd=cwd)
+    except CflowError as exc:
+        state_mod.journal(
+            "escalate_declined",
+            {"run": run_id, "step": step.id, "workflow": escalate.workflow,
+             "reason": "the target workflow's filter_roles turns this "
+                       "session away",
+             "detail": str(exc)},
+            cwd,
+        )
+        return False
+
+    issue, issue_problem = _session_issue(cwd)
+    # Carried, not rewritten: `recur` hands the finishing run's own context to
+    # its next round, and an escalated run needs it for the same reason — it
+    # continues the same work. The issue line goes FIRST and is the piece that
+    # makes the hand-off findable: two runs, two journals, one board record.
+    parts: List[str] = []
+    if issue:
+        parts.append(f"issue: {issue}")
+    if escalate.context:
+        parts.append(escalate.context)
+    own = str(state.get("context") or "").strip()
+    if own:
+        parts.append(own)
+
+    request = {
+        "id": f"req-{secrets.token_hex(3)}",
+        "workflow": escalate.workflow,
+        "name": target.name,
+        "resolved": str(composed.path),
+        "context": "\n\n".join(parts),
+        # A `by` of its own, so the journal says what happened. It also keeps
+        # the escalation out of the daemon's auto-start path, which admits
+        # `by: recur` only — an escalation changes which rules the session
+        # works under, and the driver performs that start itself.
+        "by": "escalate",
+        "mesh": mesh,
+        "from_run": run_id,
+        "from_workflow": str(state.get("workflow") or ""),
+        "from_step": step.id,
+        **({"issue": issue} if issue else {}),
+        **({"role_filter": filter_note} if filter_note else {}),
+        "at": state_mod.utcnow(),
+    }
+    state_mod.write_request(request, cwd)
+    state_mod.journal(
+        "escalate_requested",
+        {"run": run_id, "step": step.id, "request": request["id"],
+         "workflow": target.name,
+         # All three recorded, and each says a different thing: the id that
+         # was carried, the reason there is none, and the fact that the role
+         # check could not be made. A hand-off missing its issue must not read
+         # like a session that had none.
+         "issue": issue,
+         **({"issue_problem": issue_problem} if issue_problem else {}),
+         **({"role_filter": filter_note} if filter_note else {})},
+        cwd,
+    )
+    return True
+
+
 def _done_payload(state: dict, cwd: Optional[str]) -> dict:
     entries = state_mod.read_journal(cwd, run_id=state["run_id"])
     summaries = [
@@ -1107,6 +1318,20 @@ def _done_payload(state: dict, cwd: Optional[str]) -> dict:
                     "ends the loop ('claunch cflow request --cancel', or "
                     "archiving the run)"
                 )
+        elif pending.get("by") == "escalate":
+            # The run declared its own hand-off: the step it ended on named
+            # the workflow that takes the slot over. Spelled out rather than
+            # folded into the human-request note below, because nobody asked
+            # for this one — the driver would otherwise have to work out from
+            # a bare request why a finished run is not finished.
+            payload["note"] = (
+                "workflow finished, and the step it ended on escalates to "
+                f"{pending.get('name') or pending.get('workflow')!r} (see "
+                "pending_start) — report this run's journal to the user, "
+                "then start the requested workflow with exactly the requested "
+                "context. That context carries this run's issue, which is "
+                "what keeps the two runs one piece of work"
+            )
         else:
             # A human already asked for the next run; telling the agent to go
             # ask again would bounce the request back at its own author.
@@ -1691,6 +1916,89 @@ def _delegations(workflow: Workflow) -> List[tuple]:
     return out
 
 
+def escalation_check(
+    workflow: Workflow, *, mesh: str = "", cwd: Optional[str] = None
+) -> Optional[dict]:
+    """What this workflow's ``escalate`` declarations resolve to right now.
+
+    Reported wherever a declaration is READ — at ``start``, at
+    ``request_start``, and by ``cflow show`` — because that is where it is
+    still cheap to be wrong about one. An escalation that turns out to be
+    unusable at the moment it fires costs a whole round: the run is already
+    finished, there is no step to go back to, and the fallback is the plain
+    ending the escalation existed to avoid.
+
+    Two things are held against each declaration, and neither is enforced
+    here: whether the target workflow resolves to a file at all, and what its
+    ``filter_roles`` says about the session that would be driving. The second
+    is reported rather than enforced because the answer may legitimately
+    change before the escalation fires (a session's mesh role is not fixed at
+    parse time), and because a run that never reaches the escalating step is
+    not wrong for declaring one.
+    """
+    declared = [s for s in workflow.steps.values() if s.escalate is not None]
+    if not declared:
+        return None
+    session = state_mod.current_scope()
+    if session == state_mod.DEFAULT_SCOPE:
+        session = ""
+    reach = responders.pool(session=session, mesh=mesh, cwd=cwd)
+    steps: List[dict] = []
+    for step in declared:
+        escalate = step.escalate
+        assert escalate is not None
+        entry: dict = {"step": step.id, "workflow": escalate.workflow}
+        try:
+            composed = state_mod.load_workflow(escalate.workflow, cwd)
+        except Exception as exc:
+            entry["problem"] = f"does not resolve to a workflow: {exc}"
+            steps.append(entry)
+            continue
+        # Resolved: the target exists and this is what it declares. Answered
+        # from files alone, so it holds with no daemon in reach.
+        target = composed.workflow
+        entry["resolves"] = str(composed.path)
+        entry["name"] = target.name
+        role_filter = target.filter_roles
+        entry["filter_roles"] = (
+            role_filter.describe() if role_filter else "none — any role may drive it"
+        )
+        # A PREVIEW of the run-time check, kept in its own field because it is
+        # answered from the daemon rather than from files: whether this
+        # session's mesh role passes that filter. "The filter said no" and
+        # "nothing could ask the filter" are different answers, and folding
+        # them together is how an unchecked declaration comes to look checked.
+        if role_filter is None:
+            entry["role_check"] = "admits any role"
+        elif reach.problem or not reach.me:
+            entry["role_check"] = (
+                "unchecked: "
+                f"{reach.problem or 'the driving session has no mesh identity'}"
+                " — the escalation would proceed and record that it went "
+                "unchecked"
+            )
+        elif role_filter.allows(reach.me_role):
+            entry["role_check"] = f"admits {reach.me_role!r}"
+        else:
+            entry["role_check"] = (
+                f"would be declined: {reach.me} holds role "
+                f"{reach.me_role!r}, which this filter turns away — the run "
+                f"would end the ordinary way instead of handing over"
+            )
+        steps.append(entry)
+    unresolved = [e for e in steps if e.get("problem")]
+    refused = [e for e in steps if str(e.get("role_check", "")).startswith("would be")]
+    note = f"{len(steps)} escalation(s) declared"
+    if unresolved:
+        note += f"; {len(unresolved)} name(s) no workflow"
+    if refused:
+        note += (
+            f"; {len(refused)} would be declined by the target's filter_roles "
+            f"as this session stands"
+        )
+    return {"note": note, "steps": steps}
+
+
 def delegation_check(
     workflow: Workflow, *, mesh: str = "", cwd: Optional[str] = None
 ) -> Optional[dict]:
@@ -1966,6 +2274,9 @@ def _start_impl(
     check = delegation_check(workflow, mesh=state["mesh"], cwd=cwd)
     if check:
         payload["delegation_check"] = check
+    escalations = escalation_check(workflow, mesh=state["mesh"], cwd=cwd)
+    if escalations:
+        payload["escalation_check"] = escalations
     return payload
 
 
@@ -2086,6 +2397,9 @@ def request_start(
     check = delegation_check(workflow, cwd=cwd)
     if check:
         result["delegation_check"] = check
+    escalations = escalation_check(workflow, cwd=cwd)
+    if escalations:
+        result["escalation_check"] = escalations
     if role_filter_note:
         result["role_filter"] = role_filter_note
     return result
