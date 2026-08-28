@@ -468,8 +468,16 @@
             <textarea name="issue_text" rows="3"
               placeholder="what the issue says — first line is its title; empty uses the opening task"></textarea>
           </label>
+          <!-- The search box above the picker, in the same hidden row.
+               Open boards run to hundreds of issues, and the box narrows
+               the SAME list — it is not a second question, so it has no
+               label of its own beyond its placeholder. -->
           <label id="new-issue-row" class="hidden">
-            Issue <select name="issue"></select>
+            Issue
+            <input name="issue_filter" type="search"
+                   placeholder="filter the board — id, title or assignee"
+                   autocomplete="off">
+            <select name="issue"></select>
           </label>
           <p id="new-issue-hint" class="hidden"></p>
         </fieldset>

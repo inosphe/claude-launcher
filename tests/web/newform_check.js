@@ -106,8 +106,8 @@ check("the form's controls read in the new order", named(form.text), [
   // what it is told first
   "task",
   // where that job is written down — three radios sharing one name, then
-  // the two rows each of which only one of them opens
-  "beads", "beads", "beads", "issue_text", "issue",
+  // the rows each of which only one of them opens
+  "beads", "beads", "beads", "issue_text", "issue_filter", "issue",
 ]);
 
 check("the arrangement is asked before the machinery",
@@ -124,7 +124,7 @@ check("Profile and Harness are separate runtime choices",
       named(runsOn.text), ["profile", "harness"]);
 check("the credential hint travels with the profile it qualifies",
       ids(runsOn.text).includes("profile-hint"), true);
-const BOARD_ROWS = ["beads", "issue_text", "issue"];
+const BOARD_ROWS = ["beads", "issue_text", "issue_filter", "issue"];
 check("the opening task is the last thing asked before the board",
       named(form.text).filter((n) => !BOARD_ROWS.includes(n)).slice(-1),
       ["task"]);
@@ -273,6 +273,10 @@ check("the issue text is sent only under the answer that mints",
   const issueSel = {
     value: "", innerHTML: "", options: [],
     appendChild(o) { this.options.push(o); },
+    /* The renderer rebuilds the row from nothing each time — the popup
+       would otherwise keep the previous search's rows. The harness has to
+       honour the same reset the browser does. */
+    set innerHTML(v) { if (v === "") this.options.length = 0; },
   };
   const hintBox = { textContent: "", classList: cls() };
   const rowBox = { classList: cls() };
@@ -281,13 +285,15 @@ check("the issue text is sent only under the answer that mints",
                issue_text: { value: "" } };
   const bctx = {};
   new Function("exports", "$", "Option", "issuesCache", "issuesError",
-    "issuesRead",
+    "issuesRead", "issueFilter",
+    sliceFrom("function issueSearchMatches(") + "\n" +
     sliceFrom("function beadsMode()") + "\n" +
     sliceFrom("function syncBeadsRow()") + "\n" +
     sliceFrom("function renderIssueOptions()") + "\n" +
     "exports.mode = beadsMode;\n" +
     "exports.sync = syncBeadsRow;\n" +
-    "exports.render = renderIssueOptions;\n")(
+    "exports.render = renderIssueOptions;\n" +
+    "exports.setFilter = (v) => { issueFilter = v; };\n")(
     bctx,
     (id) => ({ "new-session": bf, "new-issue-row": rowBox,
                "new-issue-text-row": textBox,
@@ -299,7 +305,7 @@ check("the issue text is sent only under the answer that mints",
         held_by: "lead" },
     ],
     "",
-    true);
+    true, "");
 
   bctx.render();
   check("the picker leads with an unchosen row, then the board's",
@@ -309,6 +315,34 @@ check("the issue text is sent only under the answer that mints",
   check("an issue somebody holds says who, and what picking it would do",
         issueSel.options[2].text,
         "cl-2  the leader's own [in_progress] — held by lead, would JOIN");
+
+  /* The search box: the same list, narrowed. An id, a word of the title, a
+     status, an assignee or a holder may all be searched, and every term
+     must hit. The lead row reports the breadth of the narrowing so an open
+     popup does not read its depth as the board's size. */
+  bctx.setFilter("rail");
+  bctx.render();
+  check("a search narrows the picker to the matches",
+        issueSel.options.map((o) => o.value), ["", "cl-1"]);
+  check("...and the lead row says how many of the board matched",
+        issueSel.options[0].text, "(1 of 2 match)");
+  bctx.setFilter("lead");
+  bctx.render();
+  check("a search can find the holder as well as the id",
+        issueSel.options.map((o) => o.value), ["", "cl-2"]);
+  bctx.setFilter("CL-1  wire");
+  bctx.render();
+  check("every term must hit — case-blind, on id and title alike",
+        issueSel.options.map((o) => o.value), ["", "cl-1"]);
+  bctx.setFilter("zzz");
+  bctx.render();
+  check("a dead end says so and offers nothing to pick",
+        [issueSel.options.map((o) => o.value), issueSel.options[0].text],
+        [[""], `(no issue matches "zzz")`]);
+  bctx.setFilter("");
+  bctx.render();
+  check("clearing the search gives the whole board back",
+        issueSel.options.map((o) => o.value), ["", "cl-1", "cl-2"]);
 
   check("the picker is hidden while the answer is 'new'",
         [rowBox.classList.has("hidden"), hintBox.classList.has("hidden")],

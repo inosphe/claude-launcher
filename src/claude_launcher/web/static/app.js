@@ -3942,6 +3942,9 @@ document
     // decides — so the memo is dropped here as well as on the Directory row.
     issuesFor = null;
     issuesRead = false;
+    // ...and the search with it: the board the filter was written against
+    // is not the board a new parent stands in.
+    issueFilter = "";
     if (beadsMode() === "existing") refreshIssueChoices();
   });
 
@@ -7392,12 +7395,41 @@ async function refreshIssueChoices() {
   renderIssueOptions();
 }
 
+/* The search box above the picker narrows the board to what a reader is
+   after: an id, a word of the title, a status, an assignee or a holder,
+   matched case-insensitively. Every term must hit ("wire rail" finds a
+   title carrying both words), which is what makes a multi-word box a
+   filter and not a second guess. Shared with the spawn modal's own Issue
+   row — both read the same candidate list, so they answer to the same
+   filter. */
+function issueSearchMatches(q, issue) {
+  const terms = String(q || "").trim().toLowerCase().split(/\s+/).filter(Boolean);
+  if (!terms.length) return true;
+  const hay = [issue.id, issue.title, issue.status, issue.assignee,
+               issue.held_by].filter(Boolean).join(" ").toLowerCase();
+  return terms.every((t) => hay.includes(t));
+}
+
+/* What the search box is asking right now. Not part of the request: it
+   only narrows what the picker offers. */
+let issueFilter = "";
+
 function renderIssueOptions() {
   const sel = $("new-session").issue;
+  const q = (issueFilter || "").trim();
   const kept = sel.value;
   sel.innerHTML = "";
-  sel.appendChild(new Option("(pick an issue)", ""));
-  for (const i of issuesCache) {
+  const shown = q ? issuesCache.filter((i) => issueSearchMatches(q, i))
+                  : issuesCache;
+  // The lead row changes with the search, so the open popup says how many
+  // of the board's issues the filter left — and that a dead end is one.
+  sel.appendChild(new Option(
+    !q ? "(pick an issue)"
+       : shown.length
+         ? `(${shown.length} of ${issuesCache.length} match)`
+         : `(no issue matches "${q}")`,
+    ""));
+  for (const i of shown) {
     const held = i.held_by ? ` — held by ${i.held_by}, would JOIN` : "";
     sel.appendChild(
       new Option(`${i.id}  ${i.title || ""}`.trim() + ` [${i.status}]${held}`,
@@ -7419,6 +7451,17 @@ for (const radio of document.querySelectorAll(
   });
 }
 $("new-session").issue.addEventListener("change", syncBeadsRow);
+/* The search box above the picker. Present on any page that ships the row
+   (the box and the page ship together), but a page holding only an older
+   js must boot without it — a missing filter field is a missing search,
+   not a reason the whole form dies. */
+const issueSearch = $("new-session").issue_filter;
+if (issueSearch) {
+  issueSearch.addEventListener("input", () => {
+    issueFilter = issueSearch.value;
+    renderIssueOptions();
+  });
+}
 
 $("new-session").mesh.addEventListener("change", async () => {
   const form = $("new-session");
@@ -7438,6 +7481,9 @@ document
     // looked at; the memo below makes the next open re-read it regardless.
     issuesFor = null;
     issuesRead = false;
+    // A different directory is a different board: a search that meant
+    // something on the old one means nothing here.
+    issueFilter = "";
     if (beadsMode() === "existing") refreshIssueChoices();
   });
 
@@ -13108,6 +13154,9 @@ function syncSpawnBeads(ui) {
   // two answers and comes back should find their words where they left them.
   ui.issueTextRow.hidden = ui.beads.value !== "new";
   ui.issueRow.hidden = !picking;
+  // The search box folds with the picker — it narrows the SAME list. A ui
+  // bag that predates the row was never hidden from anything.
+  if (ui.issueFilterRow) ui.issueFilterRow.hidden = !picking;
   const hint = ui.issueHint;
   // Only the consequence a reader cannot see from the row is written out:
   // an issue that would simply be assigned needs no warning.
@@ -13504,6 +13553,17 @@ function buildSpawnForm(parentName, seed) {
   ui.issueTextRow = spawnSubRow("Issue text", ui.issueText, null);
   ui.issueTextRow.hidden = true;
   box.appendChild(ui.issueTextRow);
+  /* The search box above the picker, folded shut with it: a board of
+     hundreds of open issues is not navigable through a bare popup, and
+     the box's value narrows the SAME list — it is not a second question,
+     so it has no label of its own beyond its placeholder. */
+  ui.issueFilter = document.createElement("input");
+  ui.issueFilter.type = "search";
+  ui.issueFilter.autocomplete = "off";
+  ui.issueFilter.placeholder = "filter the board — id, title or assignee";
+  ui.issueFilterRow = spawnSubRow("Find", ui.issueFilter, null);
+  ui.issueFilterRow.hidden = true;
+  box.appendChild(ui.issueFilterRow);
   ui.issuePick = document.createElement("select");
   ui.issueHint = el("span", "sess-spawn-note");
   ui.issueRow = spawnSubRow("Issue", ui.issuePick, ui.issueHint);
@@ -14039,6 +14099,10 @@ async function spawnModalLoad(st) {
     // drop the create form does on its Directory row).
     ui._issuesFor = null;
     ui._issuesRead = false;
+    // A different workspace is a different board — the search goes with
+    // the memo, or a filter written for one directory reads as silence on
+    // another.
+    ui.issueFilter.value = "";
     if (ui.beads.value === "existing") refreshSpawnBeads(st);
   });
   ui.workflow.addEventListener("change", () => syncSpawnGates(ui));
@@ -14060,6 +14124,9 @@ async function spawnModalLoad(st) {
     syncSpawnBeads(ui);
   });
   ui.issuePick.addEventListener("change", () => syncSpawnBeads(ui));
+  /* The search box re-narrows the picker on every keystroke; it answers to
+     the same list the picker reads, so it needs no fetch of its own. */
+  ui.issueFilter.addEventListener("input", () => fillSpawnIssueOptions(ui));
 }
 
 /* The issues the "existing" answer offers, fetched from the daemon's own
@@ -14104,20 +14171,28 @@ async function refreshSpawnBeads(st) {
 
 /* The picker, filled from the last board answer and kept on the row the
    operator already chose — the same "leave a value standing where it was"
-   rule the other pickers refill under. */
+   rule the other pickers refill under. The search box narrows the same
+   list, with a lead row that says how many survived; a pick the filter
+   left out is given back, exactly as the create form's picker lets it go. */
 function fillSpawnIssueOptions(ui) {
   const kept = ui.issuePick.value;
+  const q = ((ui.issueFilter && ui.issueFilter.value) || "").trim();
+  const all = ui._issues || [];
+  const shown = q ? all.filter((i) => issueSearchMatches(q, i)) : all;
   fillSpawnSelect(
     ui.issuePick,
-    (ui._issues || []).map((i) => {
+    shown.map((i) => {
       const held = i.held_by ? ` — held by ${i.held_by}, would JOIN` : "";
       return [
         i.id,
         `${i.id}  ${i.title || ""}`.trim() + ` [${i.status}]${held}`,
       ];
     }),
-    "(pick an issue)",
-    kept
+    !q ? "(pick an issue)"
+       : shown.length
+         ? `(${shown.length} of ${all.length} match)`
+         : `(no issue matches "${q}")`,
+    kept && shown.some((i) => i.id === kept) ? kept : ""
   );
 }
 
