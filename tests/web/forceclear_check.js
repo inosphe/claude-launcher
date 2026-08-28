@@ -13,11 +13,10 @@
    still reports the memberships that would not release. */
 const fs = require("fs");
 const path = require("path");
-const src = fs.readFileSync(
-  path.join(__dirname, "..", "..", "src", "claude_launcher", "web", "static",
-            "app.js"),
-  "utf8"
-);
+const STATIC = path.join(__dirname, "..", "..", "src", "claude_launcher",
+                         "web", "static");
+const src = fs.readFileSync(path.join(STATIC, "app.js"), "utf8");
+const css = fs.readFileSync(path.join(STATIC, "style.css"), "utf8");
 
 /* Slice one function out of the shipped file by balancing its braces. The
    bodies contain template literals whose ${...} pairs are balanced, so the
@@ -409,7 +408,28 @@ async function checkChildrenQuestion() {
   }
 }
 
+/* --------- the guard the eye can see: disabled has to look disabled -------- */
+
+/* The acknowledgement gate is enforced in JS (requiresCheck above), and for a
+   while that was the whole of it: the held button kept full contrast, the
+   pointer cursor and its hover fill, so the only way to find out it was inert
+   was to press it. These rules are what make the state visible, so they are
+   checked here rather than left to a screenshot. */
+function checkDisabledStyling() {
+  check("a held answer is dimmed and refuses the pointer",
+        /#modal-actions button:disabled\s*\{[^}]*opacity:[^}]*cursor:\s*not-allowed/
+          .test(css),
+        true);
+  check("neither hover fill paints over a held answer",
+        [/#modal-actions button:hover:not\(:disabled\)/.test(css),
+         /#modal-actions button\.danger:hover:not\(:disabled\)/.test(css)],
+        [true, true]);
+  check("no bare :hover rule is left to override it",
+        /#modal-actions button(\.danger)?:hover\s*\{/.test(css), false);
+}
+
 (async () => {
+  checkDisabledStyling();
   await checkShowModal();
   await checkOfferForce();
   await checkIndividualRemove();
