@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 
+import pytest
+
 from claude_launcher import cli, harnesses, lineage, profile, runner, spawn, wizard
 from claude_launcher.daemon import harness as daemon_harness
 from claude_launcher.daemon.harness import SessionDef
@@ -93,6 +95,34 @@ def assert_full_access(argv, *remaining):
     # element before it names the program (an interpreter, a script path).
     assert all(not a.startswith("-") for a in argv[:at]), argv
     assert argv[at:] == [FULL_ACCESS_FLAG, *remaining]
+
+
+@pytest.fixture(params=["one element", "two elements"], autouse=True)
+def program_prefix(request, monkeypatch):
+    """Run every case in this module under both program prefix shapes.
+
+    ``launch_command`` opens the argv with the declared executable, except
+    on Windows with Codex installed through npm globally: there the ``.CMD``
+    shim is bypassed and the prefix becomes ``[node.exe, codex.js]``. Which
+    shape a run sees therefore depends on the machine, not on the tree --
+    the same commit is green on a machine without that install and red on
+    one with it, and that is how the regression this module now pins reached
+    master unseen.
+
+    Forcing the branch here takes the machine out of the answer: both shapes
+    are exercised on every machine and on every platform, because the
+    decision is patched rather than measured from the filesystem.
+    """
+    if request.param == "one element":
+        monkeypatch.setattr(
+            harnesses.Harness, "_windows_codex_npm_command", lambda self, first: None
+        )
+    else:
+        monkeypatch.setattr(
+            harnesses.Harness,
+            "_windows_codex_npm_command",
+            lambda self, first: ["node.exe", "codex.js"],
+        )
 
 
 def test_the_full_access_assertion_holds_for_either_program_prefix():
