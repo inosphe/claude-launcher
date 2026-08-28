@@ -12874,7 +12874,13 @@ function buildSpawnForm(parentName, seed) {
   box.append(ui.wtRow, ui.wtNameRow, ui.wtPickRow, updRow, ui.rebaseRow);
 
   ui.fork = null; ui.forkNote = null;
-  const forkRow = spawnCheckRow("start from a copy of the parent's conversation", null);
+  // A note is asked for here because this box is greyed more often than it is
+  // offered: a non-claude child, a parent holding no conversation, and — the
+  // one an operator meets first — the "new worktree" this form opens on, which
+  // puts the child in a directory claude keeps no transcript of. syncSpawnGates
+  // has the wording for all three; without the element it wrote them nowhere,
+  // and the row went grey saying nothing at all.
+  const forkRow = spawnCheckRow("start from a copy of the parent's conversation", true);
   ui.fork = forkRow.querySelector("input");
   ui.forkNote = forkRow.querySelector(".sess-spawn-note");
   box.appendChild(forkRow);
