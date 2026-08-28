@@ -10609,6 +10609,17 @@ function wfDiagramSvg(wf, run, selected) {
     if (s.select && (s.select.options || []).some((o) => o.interval)) {
       flags.push("paced");
     }
+    /* A timed wait is the step's own schedule — the daemon moves the run
+       `every` seconds per fire, `max` fires per round — so the box carries
+       the schedule itself, values included, where the edges cannot. While
+       the run is actually parked on it (`waiting_timer`), the next fire's
+       local time rides at the end of the same line. */
+    if (s.timer) {
+      const next = active && run.status === "waiting_timer"
+        ? ` · next ${fmtOpensAt(run.opens_at)}`
+        : "";
+      flags.push(`timed · every ${fmtPace(s.timer.every)} · max ${s.timer.max}${next}`);
+    }
     // Shape last, after the properties: `fork:2` counts where this step can
     // send the run, `merge:2` counts how many places send the run here. The
     // arrowheads say the second one too — this says it in a number, and says
