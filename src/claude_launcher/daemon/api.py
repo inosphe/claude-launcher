@@ -1222,6 +1222,21 @@ def _serialize_workflow(wf) -> dict:
             "verify": s.verify.command if s.verify else None,
             "next": s.next,
             "select": None,
+            # A timed wait's schedule, so a *drawing* can say what the
+            # engine's payload already says in prose: this step sits until
+            # the daemon moves it, `every` seconds per fire, `max` fires per
+            # round. `select` and `timer` are mutually exclusive (model
+            # validation), so the two fields never both carry a value.
+            "timer": (
+                {
+                    "every": s.timer.every,
+                    "max": s.timer.max,
+                    "then": s.timer.then,
+                    "after": s.timer.after,
+                }
+                if s.timer
+                else None
+            ),
             # A checklist is the step's exit, so a workflow view that omitted
             # it would draw the step as a dead end.
             "checklist": (
