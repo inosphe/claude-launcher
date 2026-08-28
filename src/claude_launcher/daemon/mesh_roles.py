@@ -7,9 +7,10 @@ handle like ``coder1`` fell through to ``"member"``, a value nothing acts on.
 
 The vocabulary now ships as a **document**. The packaged default carries
 interconnect's proven set — ``leader``/``operator``/``worker``/``reviewer``/
-``specialist``, their aliases, and ``reviewer`` as the default so an
-unlabelled member is never a rubber stamp — and a mesh may **override** it by
-uploading its own YAML through the daemon.
+``specialist``, their aliases, plus ``no-role`` as the default so an
+unlabelled member is a member with nothing — assigned no work, authorized
+no audit — until a human or the leader says otherwise, and a mesh may
+**override** it by uploading its own YAML through the daemon.
 
 Scope is the mesh, not the machine: a mesh is the unit a team actually is,
 one machine hosts members of several meshes at once, and the authority owns
@@ -339,8 +340,11 @@ DEFAULT_YAML = """\
 version: 1
 
 # The role a handle gets when its leading word names none of the roles below.
-# reviewer on purpose: an unlabelled member should audit, never rubber-stamp.
-default: reviewer
+# no-role on purpose: an unlabelled member is assigned NOTHING — not a
+# worker, and (unlike the old reviewer default) not an auditor either. It
+# stays a member with no stance of its own until a human or the leader
+# gives it one; see the no-role role below.
+default: no-role
 
 # What a join wires up. A child is ALWAYS connected to its parent — that is
 # the join, not a rule — so everything here is about the edges beyond it.
@@ -374,6 +378,18 @@ auto_link:
     - between: [{role: reviewer}, {role: worker}]
 
 roles:
+
+  no-role:
+    # The default — and the description of having no description. A member
+    # the mesh assigned nothing is TOLD so, and sent to the leader for an
+    # assignment, instead of quietly becoming a worker or an auditor.
+    # Deliberately no aliases: nothing else should land a handle here.
+    stance: |
+      You are a member of this mesh and hold no role: nothing is assigned
+      to you, and you are authorized for nothing a role would have to give
+      you. Produce no work and review none — an unassigned member is not a
+      reviewer by default. Ask the leader for an assignment before doing
+      anything else; if the leader has nothing for you, leave the mesh.
 
   leader:
     aliases: [lead, moderator, mod, chair]
@@ -491,8 +507,7 @@ roles:
       the diff themselves. A real impasse is recorded and handed to the
       leader; it is not settled by agreeing to close the thread.
     stance: |
-      You are the independent ADVERSARY — the default role, so an unlabelled
-      member audits rather than agrees. Pressure-test claims against the
+      You are the independent ADVERSARY. Pressure-test claims against the
       actual code, docs and tests, not the prose describing them, and demand
       justification. Reply to the author of the claim you challenge. Never own
       production you would then have to review. Record a real impasse and let
