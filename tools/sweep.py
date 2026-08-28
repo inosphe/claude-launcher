@@ -272,8 +272,19 @@ NON_CODE_ENTRIES = frozenset({".beads"})
 
 def _git(repo: Path, *args: str) -> str:
     """``git -C repo args...``, stripped. Raises LookupError on failure."""
+    # ``encoding``/``errors`` rather than a bare ``text=True``: git writes
+    # utf-8 (commit subjects, paths, its own messages) and ``text=True``
+    # decodes with the process locale, which is cp949 on this machine. The two
+    # disagree the moment a non-ASCII byte appears, and the disagreement does
+    # not surface as a decode error here -- it kills the reader thread inside
+    # subprocess.run, so ``proc.stdout`` arrives as ``None`` and the next line
+    # raises about ``NoneType``. See the same pair at the suite call below.
     proc = subprocess.run(
-        ["git", "-C", str(repo), *args], capture_output=True, text=True
+        ["git", "-C", str(repo), *args],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if proc.returncode != 0:
         raise LookupError(
@@ -591,10 +602,36 @@ def cmd_run(args) -> int:
 
     started = datetime.now(timezone.utc)
     print(f"sweep: {command}\n  repo={repo}\n  {args.branch}={commit}", flush=True)
+    # The suite's output is read as utf-8 with undecodable bytes replaced,
+    # never with the locale ``text=True`` picks. Measured at 5516c651c732 on a
+    # cp949 machine: the first Korean byte in a failure dump
+    # (``ec 9d bd``, position 3772) raised UnicodeDecodeError inside
+    # subprocess.run's reader thread, which left ``proc.stdout`` at ``None``
+    # and filed a receipt with ``counts {}``, ``failures []`` and a 0-byte
+    # output file. The gate reads that as red -- correctly -- but nothing on
+    # disk could say WHAT was red, so a real failure and a broken judge looked
+    # identical. ``errors="replace"`` is what keeps the summary line (ASCII)
+    # readable even when the bytes around it are not.
+    #
+    # The child's own encoding is deliberately left alone. Handing the suite
+    # ``PYTHONIOENCODING``/``PYTHONUTF8`` would make the sweep judge a process
+    # the operator's own ``pytest`` never runs, which is how a sweep goes green
+    # over a tip that is red in the default environment.
     proc = subprocess.run(
-        command, shell=True, cwd=str(repo), capture_output=True, text=True
+        command,
+        shell=True,
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     finished = datetime.now(timezone.utc)
+    # A stream that came back as ``None`` is not an empty stream: the reader
+    # died and took the output with it. Both states parse to ``counts {}``, and
+    # a receipt that cannot tell them apart sends its reader to look for a
+    # failing test that was never named. Say which one this was.
+    lost = [n for n in ("stdout", "stderr") if getattr(proc, n) is None]
     output = (proc.stdout or "") + (proc.stderr or "")
     print(output)
 
@@ -615,6 +652,14 @@ def cmd_run(args) -> int:
         "finished_at": finished.isoformat(),
         "seconds": round((finished - started).total_seconds(), 1),
     }
+    if lost:
+        receipt["stream_error"] = (
+            f"{' and '.join(lost)} could not be read back from the suite "
+            f"process, so this receipt describes only what survived; empty "
+            f"counts here mean the output was lost, not that the suite "
+            f"printed no summary"
+        )
+        print(f"WARNING: {receipt['stream_error']}", file=sys.stderr)
     dest = receipt_path(repo, commit, args.receipts)
     dest.parent.mkdir(parents=True, exist_ok=True)
 
@@ -809,10 +854,20 @@ def cmd_check(args) -> int:
             )
         else:
             where = ""
+        # A receipt whose streams were lost says "no counts" for a reason that
+        # has nothing to do with the suite, and the reader of a red gate is
+        # about to go looking for a failing test it does not name. Put the
+        # reason next to the emptiness it explains rather than leaving it in
+        # the json for somebody who already stopped reading.
+        blind = (
+            f"\nstreams: {receipt['stream_error']}"
+            if receipt.get("stream_error")
+            else ""
+        )
         print(
             f"sweep of {commit[:12]} was red: {summary}, exit "
             f"{receipt.get('exit_code')}\n  {failures}\n"
-            f"command: {receipt.get('command')}{where}",
+            f"command: {receipt.get('command')}{blind}{where}",
             file=sys.stderr,
         )
         return 1
@@ -823,6 +878,8 @@ def cmd_check(args) -> int:
     # sitting in the receipts directory looking like this sweep's output.
     if receipt.get("output_error"):
         print(f"WARNING: {receipt['output_error']}", file=sys.stderr)
+    if receipt.get("stream_error"):
+        print(f"WARNING: {receipt['stream_error']}", file=sys.stderr)
     print(
         f"sweep of {args.branch} tip {commit[:12]} green: {summary} "
         f"in {receipt.get('seconds')}s\ncommand: {receipt.get('command')}\n"
