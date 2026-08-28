@@ -2469,6 +2469,19 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   color: #d8dbe0; cursor: pointer;
 }
 .modal-check input { margin-top: 3px; }
+/* The radio group for a question with more than two answers (showModal's
+   `choices`) — what happens to the sessions under one being removed. Bordered
+   as a block so it reads as one question rather than as more body text. */
+.modal-choices {
+  margin-top: 14px; border: 1px solid #2a2e36; border-radius: 6px;
+  padding: 8px 10px; display: flex; flex-direction: column; gap: 6px;
+}
+.modal-choice {
+  display: flex; gap: 8px; align-items: flex-start;
+  color: #d8dbe0; cursor: pointer;
+}
+.modal-choice input { margin-top: 3px; flex: none; }
+.modal-choice small { color: #6b7280; }
 #modal-actions { flex: none; display: flex; gap: 8px; justify-content: flex-end; margin-top: 16px; }
 #modal-actions button {
   padding: 6px 14px; font-size: 12px; cursor: pointer; border-radius: 4px;

@@ -3340,10 +3340,19 @@ async def h_session_delete(request: web.Request) -> web.Response:
     The exited half is guarded: see :func:`_mesh_holds`. ``?force=1`` takes
     a held record off its rosters first (:func:`_leave_meshes`) and then
     drops it. One word because it is one stance — do it anyway.
+
+    ``?children=escalate`` (the default) moves the sessions below this one up
+    to its own parent, so a grandchild keeps answering to the grandparent
+    instead of becoming a root nobody commands; each promoted session's mesh
+    edge to that new parent is opened here, the same way the re-parent route
+    opens it. ``?children=remove`` drops their records too, and is refused
+    (409) while any of them is still running or is still named by a mesh row.
+    The reply carries ``escalated`` or ``removed_children`` accordingly.
     """
     manager: SessionManager = request.app["manager"]
     name = request.match_info["name"]
     force = request.query.get("force") in ("1", "true")
+    cascade = request.query.get("children") in ("remove", "cascade")
     session = manager.get(name)  # ManagerError -> 400, as it always did
     if not session.exited:
         return json_error(
@@ -3351,13 +3360,44 @@ async def h_session_delete(request: web.Request) -> web.Response:
             f"{name!r} is still running — DELETE only drops a record. "
             f"Kill it first (POST /api/sessions/{name}/kill).",
         )
-    held = _mesh_holds(request, name)
-    if held and force:
-        held = await _leave_meshes(request.app["mesh"], held)
-    if held:
-        return json_error(409, _mesh_holds_error(name, held))
-    session = manager.remove(name)
-    return web.json_response(session.info())
+    # A cascade drops several records, so the mesh guard is asked of every one
+    # of them: the roster of a grandchild strands just as badly as the named
+    # session's own, and it must be asked before anything is deleted.
+    doomed = [name] + (manager.descendants(name) if cascade else [])
+    for one in doomed:
+        rows = _mesh_holds(request, one)
+        if rows and force:
+            rows = await _leave_meshes(request.app["mesh"], rows)
+        if rows:
+            # Named per session rather than per call: on a cascade the record
+            # that will not go is usually not the one the operator typed, and
+            # an error naming the wrong session sends them to the wrong roster.
+            return json_error(409, _mesh_holds_error(one, rows))
+    above = manager.get(name).sdef.parent
+    if above not in {s.sdef.name for s in manager.list()}:
+        above = ""  # already dangling — the same answer escalate_children gives
+    try:
+        session, touched = manager.remove(
+            name, children="remove" if cascade else "escalate"
+        )
+    except ManagerError as exc:
+        return json_error(409, str(exc))
+    body = {**session.info()}
+    if cascade:
+        body["removed_children"] = touched
+    else:
+        body["escalated"] = touched
+        # The promoted sessions need the mesh edge to their new parent for the
+        # same reason a re-parented one does: a child that cannot reach its
+        # parent cannot report. link_lineage is a no-op when the pair share no
+        # mesh, or when the grandparent is gone.
+        mm = request.app.get("mesh")
+        opened: List[dict] = []
+        if mm and above:
+            for child in touched:
+                opened.extend(await mm.link_lineage(child, above))
+        body["connected"] = opened
+    return web.json_response(body)
 
 
 async def h_session_keep_alive(request: web.Request) -> web.Response:

@@ -75,7 +75,10 @@ function stubDom() {
         type: "", textContent: "", focused: false, disabled: false,
         checked: false, children: [],
         classes: new Set(), handlers: {},
-        classList: { add: (c) => el.classes.add(c) },
+        classList: {
+          add: (c) => el.classes.add(c),
+          toggle: (c, on) => (on ? el.classes.add(c) : el.classes.delete(c)),
+        },
         addEventListener(ev, fn) { el.handlers[ev] = fn; },
         append(...kids) { el.children.push(...kids); },
         appendChild(kid) { el.children.push(kid); },
@@ -164,6 +167,48 @@ async function checkShowModal() {
     remove.click();
     check("the enabled guarded action resolves", await p, true);
   }
+  {
+    // A radio group: the answer merges into the pressed action's value, and
+    // the button follows the picked option's danger, so "remove them too" is
+    // not read from a button that still looks like the safe one.
+    const { showModal, els } = stubDom();
+    const p = showModal({
+      title: "Remove?", body: "b",
+      choices: {
+        options: [
+          { label: "Move them up", value: { children: "escalate" } },
+          { label: "Remove them too", value: { children: "remove" },
+            destructive: true },
+        ],
+      },
+      actions: [
+        { label: "Cancel", value: null },
+        { label: "Remove", value: { force: false }, dangerWhen: "destructive" },
+      ],
+    });
+    const group = els["modal-body"].children[0];
+    const remove = els["modal-actions"].children[1];
+    check("every option is a radio, first one selected",
+          group.children.map((c) => c.children[0].checked), [true, false]);
+    check("the safe default leaves the button undressed",
+          remove.classes.has("danger"), false);
+    group.children[1].children[0].handlers.change();
+    check("picking the destructive option marks the button",
+          remove.classes.has("danger"), true);
+    remove.click();
+    check("the answer carries both the action's value and the choice's",
+          await p, { force: false, children: "remove" });
+  }
+  {
+    const { showModal, els } = stubDom();
+    const p = showModal({
+      title: "Remove?", body: "b",
+      choices: { options: [{ label: "a", value: { children: "escalate" } }] },
+      actions: [{ label: "Cancel", value: null }],
+    });
+    els["modal-actions"].children[0].click();
+    check("cancel stays null even with a choice picked", await p, null);
+  }
 }
 
 /* ------------- offerForce: the hold turned into a question ------------- */
@@ -242,7 +287,7 @@ async function checkOfferForce() {
 
 /* -------- individual remove: membership is decided before DELETE -------- */
 
-function removeHarness(meshes, answer, response = { ok: true }) {
+function removeHarness(meshes, answer, response = { ok: true }, sessions = []) {
   const calls = [], modals = [], infos = [];
   const ctx = {};
   const api = async (url, opts) => {
@@ -256,11 +301,12 @@ function removeHarness(meshes, answer, response = { ok: true }) {
   const location = { hash: "#/s/s1" };
   new Function(
     "exports", "sessMeshes", "showModal", "api", "modalInfo",
-    "refreshSessions", "detach", "location",
+    "refreshSessions", "detach", "location", "sessionsCache",
+    slice("function sessionSubtree(") + "\n" +
     slice("async function removeExitedSession(") +
       "\nexports.removeExitedSession = removeExitedSession;"
   )(ctx, () => meshes, showModal, api, modalInfo,
-    refreshSessions, detach, location);
+    refreshSessions, detach, location, sessions);
   return { remove: ctx.removeExitedSession, calls, modals, infos, location };
 }
 
@@ -293,10 +339,81 @@ async function checkIndividualRemove() {
   }
 }
 
+/* ---- the sessions under it: promoted by default, dropped only if asked ---- */
+
+/* lead -> mid -> (kid -> grand, kid2). Dropping mid's record used to leave
+   kid and kid2 naming a session that is gone, which the tree reads as "no
+   parent" — so the modal asks instead, and the answer rides the DELETE. */
+const TREE = [
+  { name: "lead", parent: "", status: "exited" },
+  { name: "mid", parent: "lead", status: "exited" },
+  { name: "kid", parent: "mid", status: "idle" },
+  { name: "kid2", parent: "mid", status: "exited" },
+  { name: "grand", parent: "kid", status: "idle" },
+];
+
+async function checkChildrenQuestion() {
+  {
+    const h = removeHarness([], { force: false, children: "escalate" },
+                            { ok: true }, TREE);
+    await h.remove("mid");
+    const q = h.modals[0];
+    check("a session with children is asked what happens to them",
+          q.choices.options.map((o) => o.value),
+          [{ children: "escalate" }, { children: "remove" }]);
+    check("the whole subtree is named, not just the direct children",
+          /kid, kid2, grand/.test(q.body), true);
+    check("the promotion names the grandparent it moves them to",
+          /Move them up to 'lead'/.test(q.choices.options[0].label), true);
+    check("the destructive answer is marked so the button can follow it",
+          [q.choices.options[0].destructive, q.choices.options[1].destructive],
+          [undefined, true]);
+    check("a still-running session under it is counted in the warning",
+          / 2 of them is still running/.test(q.choices.options[1].hint), true);
+    check("escalate is the default and adds nothing to the URL",
+          h.calls, [{ url: "/api/sessions/mid", method: "DELETE" }]);
+  }
+  {
+    const h = removeHarness([], { force: false, children: "remove" },
+                            { ok: true }, TREE);
+    await h.remove("mid");
+    check("the cascade answer is the one thing that changes the call",
+          h.calls,
+          [{ url: "/api/sessions/mid?children=remove", method: "DELETE" }]);
+  }
+  {
+    const h = removeHarness([{ mesh: "mesh0" }], { force: true, children: "remove" },
+                            { ok: true }, TREE);
+    await h.remove("mid");
+    check("force and the cascade travel together, one query",
+          h.calls,
+          [{ url: "/api/sessions/mid?force=1&children=remove",
+             method: "DELETE" }]);
+  }
+  {
+    // A root: there is nothing above it, so the safe answer says so rather
+    // than naming a session that does not exist.
+    const h = removeHarness([], { force: false, children: "escalate" },
+                            { ok: true }, TREE);
+    await h.remove("lead");
+    check("a root's children are left top-level, and it says so",
+          h.modals[0].choices.options[0].label,
+          "Leave them as top-level sessions");
+  }
+  {
+    const h = removeHarness([], { force: false }, { ok: true }, TREE);
+    await h.remove("grand");
+    check("a leaf is not asked the question at all",
+          [h.modals[0].choices, h.calls],
+          [null, [{ url: "/api/sessions/grand", method: "DELETE" }]]);
+  }
+}
+
 (async () => {
   await checkShowModal();
   await checkOfferForce();
   await checkIndividualRemove();
+  await checkChildrenQuestion();
   if (failures) {
     console.error(`${failures} check(s) failed`);
     process.exit(1);
