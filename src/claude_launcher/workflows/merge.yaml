@@ -356,6 +356,15 @@ steps:
     # 그 한 줄은 --branch master 를 박으므로 다른 대상을 쓰는 실행에서는 틀린
     # 답을 낸다. 그 한계를 안고도 여기만 무장한 이유는 stance 의 주석에 있다:
     # outcome 의 chooser: agent 를 받치는 기계 백스톱이 이 한 줄뿐이다.
+    #
+    # 그 백스톱이 잡는 거짓 complete 는 **절반**이다. 도중에 멈춘 뒤 complete 는
+    # 잡는다 — 중간 트리에는 영수증이 없다. 한 건도 얹지 못한 뒤 complete 는 못
+    # 잡는다 — 대상 트리가 직전 배치의 트리 그대로라 그 영수증이 그대로 선다
+    # (17회차가 닫힌 직후의 master 가 `via the receipt for 4d99ed40aea2 ... the
+    # same tree 91a3af589fa6` 로 exit 0 을 낸다). 이 게이트가 재는 것은 「지금
+    # 대상 트리가 스윕된 트리인가」이고 「이번 회차가 무엇을 했는가」가 아니다.
+    # 남는 절반은 handoff 의 done_when 이 사람 쪽에서 메운다. 이 게이트를 「거짓
+    # complete 를 막는 장치」로 읽지 마라 — 절반만 참이다.
     done_when: |
       스윕 게이트의 출력 전문과 종료 코드가 보고에 있고, 영수증이 트리로
       찾아졌으면 그 `via the receipt for ...` 줄이 그대로 실려 있다.
