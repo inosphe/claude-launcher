@@ -472,18 +472,12 @@ def _brief(mgr, *, session_role, member_role, roles_doc=None):
     return mm.briefing_block(mesh, member)
 
 
-def test_a_carried_stance_is_pointed_at_and_never_pasted(home):
-    """The common case must not get longer.
-
-    A session spawned with a role has the stance in an appended system
-    prompt, re-injected on every spawn and restore — so a ``/compact`` cannot
-    take it, and a paste here would be one more copy of a text the agent is
-    already looking at.
-    """
+def test_a_legacy_session_role_still_gets_the_common_stance_briefing(home):
+    """SessionDef.role no longer selects a harness-specific delivery path."""
     block = _brief(_Manager(), session_role="worker", member_role="worker")
     assert "claunch mesh stance m" in block
-    assert "stance (worker), binding:" not in block
-    assert "You are a PRODUCER" not in block
+    assert "stance (worker), binding [text id: " in block
+    assert "You are a PRODUCER" in block
 
 
 def test_a_session_with_no_role_is_given_the_prose(home):
@@ -499,12 +493,7 @@ def test_a_session_with_no_role_is_given_the_prose(home):
 
 
 def test_a_replaced_vocabulary_is_pasted_because_no_prompt_can_carry_it(home):
-    """``_spawn_role`` drops a role the packaged set cannot resolve.
-
-    That drop is right — it keeps custom vocabularies spawnable — but it
-    means the system prompt is empty for every member of such a mesh, and
-    the briefing is the only place the stance can come from.
-    """
+    """Custom vocabularies use the same membership-owned briefing path."""
     doc = {
         "version": 1,
         "replace": True,
@@ -518,38 +507,23 @@ def test_a_replaced_vocabulary_is_pasted_because_no_prompt_can_carry_it(home):
     assert "stance (surveyor), binding [text id: " in block
 
 
-def test_a_role_that_disagrees_with_the_prompt_says_which_one_binds(home):
-    """Two bindings, both claiming to be binding, and nothing detected it.
-
-    The session's role is resolved once at spawn against the packaged
-    vocabulary; the member's is resolved at join against the mesh's. They can
-    differ, and the appended prompt cannot be rewritten — so the briefing has
-    to name the clash and say which wins.
-    """
+def test_a_legacy_record_does_not_compete_with_the_mesh_role(home):
     block = _brief(_Manager(), session_role="worker", member_role="leader")
-    assert "was spawned as a 'worker'" in block
-    assert "On this mesh you are a leader and the text below is what binds" in block
+    assert "was spawned as" not in block
     assert "stance (leader), binding [text id: " in block
     assert "You set direction and OWN the decisions" in block
 
 
-def test_only_the_pasted_stance_is_named_by_an_id(home):
-    """The id goes where the prose goes, and nowhere else.
-
-    An agent checks an id by looking for it NEXT TO its text. An id printed
-    on a pointer-only briefing would sit in the context with nothing behind
-    it, and the check would answer "yes, I still have it" about a stance the
-    agent has never read. So the pointer carries none, and the id the paste
-    carries is the WHOLE stance's -- the cap below it does not move it.
-    """
+def test_every_local_stance_is_named_beside_its_text(home):
+    """Role delivery is identical for sessions with and without legacy data."""
     from claude_launcher import digests
     from claude_launcher.daemon import mesh_roles
 
     pasted = _brief(_Manager(), session_role=None, member_role="worker")
-    pointed = _brief(_Manager(), session_role="worker", member_role="worker")
-    assert "text id: " not in pointed
+    legacy = _brief(_Manager(), session_role="worker", member_role="worker")
     ident = digests.text_digest(mesh_roles.resolve().get("worker").stance.strip())
     assert f"[text id: {ident}]" in pasted
+    assert f"[text id: {ident}]" in legacy
 
 
 def test_a_remote_member_is_left_to_its_own_daemon(home):

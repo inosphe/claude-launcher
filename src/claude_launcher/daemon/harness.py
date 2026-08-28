@@ -89,9 +89,9 @@ class SessionDef:
     #: never ``--continue``, which grabs whatever conversation in the same
     #: cwd+profile happens to be the most recent and can hijack another one.
     conversation_id: Optional[str] = None
-    #: The role this session runs as, from the packaged vocabulary (see
-    #: :mod:`mesh_roles`). Its stance is injected into the system prompt at
-    #: every spawn — claude harness only. ``None`` = no role, no injection.
+    #: Compatibility record for sessions created before role became solely a
+    #: mesh-membership property. New creation keeps this empty; role stance is
+    #: delivered in the common opening/rebrief/session-reminder path.
     role: Optional[str] = None
     #: Which conversation to open instead of a fresh one. ``None`` = a new
     #: conversation; ``""`` = claude's interactive picker (bare ``--resume``);
@@ -112,8 +112,8 @@ class SessionDef:
     #: that no longer resolves as a root.
     parent: Optional[str] = None
     #: Who this session *is*, decided at creation and true for its whole life:
-    #: its mesh handle, the run it drives. Appended to the system prompt next
-    #: to the role stance — claude harness only, same as the role.
+    #: its mesh handle, the run it drives. Appended to Claude's system prompt;
+    #: role stance follows the harness-independent opening/reminder path.
     #:
     #: Only the unchanging half lives here. Which peers it can reach right now
     #: is deliberately absent: the member graph is rewired mid-session by
@@ -331,14 +331,12 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
                 f"{entry.program()!r} was not found on PATH — install it, or "
                 f"point 'harnesses.{sdef.harness}.command' at the executable"
             )
-        # Role injection and conversation resumption are both spelled in
-        # claude's own flags. Refusing beats accepting and silently dropping
-        # them: a session asked to run as 'reviewer' that does not would be
-        # discovered much later, and by its behaviour.
+        # Conversation resumption and null-token launch are spelled in
+        # claude's own flags. Role is absent here: it belongs to mesh
+        # onboarding and every harness receives it through the common opening.
         extras = [
             what
             for what, given in (
-                ("role", sdef.role),
                 ("resume", sdef.resume is not None),
                 ("fork_session", sdef.fork_session),
                 ("borrow", sdef.borrow and not entry.borrowable),
@@ -540,20 +538,10 @@ def build_command(
                         argv.extend(["--session-id", sdef.conversation_id])
             elif sdef.conversation_id:
                 argv.extend(["--session-id", sdef.conversation_id])
-        # Re-injected on every spawn, restores included: an appended system
-        # prompt lives in the process, not the transcript, so a resumed
-        # session would otherwise come back without its role or its identity.
-        # One flag, not one per block: claude's own prompt is what is being
-        # appended to, and two appends would be two edits to it.
-        blocks = []
-        if sdef.role:
-            role = mesh_roles.resolve().get(sdef.role)
-            if role is not None:
-                blocks.append(mesh_roles.system_prompt(role))
+        # Identity still uses Claude's persistent channel. Role stance has
+        # moved to the harness-independent opening/rebrief/reminder path.
         if sdef.identity:
-            blocks.append(sdef.identity)
-        if blocks:
-            argv.extend(["--append-system-prompt", "\n\n".join(blocks)])
+            argv.extend(["--append-system-prompt", sdef.identity])
         argv.extend(sdef.args)
         if opening and not restoring:
             # The positional prompt — claude's first turn. Dated with the same

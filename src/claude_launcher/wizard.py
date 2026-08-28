@@ -395,6 +395,10 @@ class Sources:
     def roles(self) -> List[dict]:
         return []
 
+    def roles_for(self, mesh: str) -> List[dict]:
+        """The selected mesh's vocabulary; packaged roles as a fallback."""
+        return self.roles()
+
     def sessions(self) -> List[dict]:
         return []
 
@@ -521,6 +525,16 @@ class DaemonSources(Sources):
 
     def roles(self) -> List[dict]:
         return self._get("roles", "/api/roles", "roles", [])
+
+    def roles_for(self, mesh: str) -> List[dict]:
+        if not mesh:
+            return self.roles()
+        from urllib.parse import quote
+
+        quoted = quote(mesh, safe="")
+        return self._get(
+            f"roles:{mesh}", f"/api/mesh/{quoted}/roles", "roles", []
+        )
 
     def sessions(self) -> List[dict]:
         return self._get("sessions", "/api/sessions", "sessions", [])
@@ -1640,6 +1654,7 @@ class Wizard(Form):
         self._workflows_for: Optional[tuple] = None
         self._workflow_auto: str = ""
         self._members_for: Optional[str] = None
+        self._roles_for: Optional[str] = None
         self._worktrees_for: Optional[str] = None
         self._issues_for: Optional[tuple] = None
         self._borrow_for: Optional[str] = None
@@ -1701,7 +1716,7 @@ class Wizard(Form):
         roles = self.sources.roles() or []
         role = ChoiceField(
             key="role", label="Role",
-            hint="a stance injected into the session's system prompt at every spawn",
+            hint="this mesh membership's stance; delivered in the common opening briefing",
             options=[Option("(no role)", "")]
             + [
                 Option(
@@ -1711,7 +1726,17 @@ class Wizard(Form):
                 for r in roles
             ],
         )
-        role.select(get("role") or "")
+        preset_role = get("role") or ""
+        if preset_role and not (get("mesh") or ""):
+            # A pre-membership recall file may contain the old standalone
+            # session role. Drop that remembered half-pair, while preserving
+            # a role explicitly typed on this command line so validation can
+            # ask for its missing mesh instead of silently discarding intent.
+            from . import wizard_recall
+
+            if not wizard_recall.typed(d, "role"):
+                preset_role = ""
+        role.select(preset_role)
 
         resume = ChoiceField(
             key="resume", label="Resume",
@@ -1947,10 +1972,13 @@ class Wizard(Form):
                 )
             ),
         )
-        for key in ("role", "resume", "null_token"):
+        for key in ("resume", "null_token"):
             f = self.field(key)
             f.disabled = not claude
             f.disabled_note = "the claude harness only"
+        role = self.field("role")
+        role.disabled = False
+        role.disabled_note = ""
         borrow = self.field("borrow")
         borrow.disabled = not borrow_allowed
         borrow.disabled_note = (
@@ -1979,6 +2007,20 @@ class Wizard(Form):
 
         mesh = self.value("mesh") or ""
         self.field("handle").hidden = not mesh
+        role_field = self.field("role")
+        if self._roles_for != mesh:
+            self._roles_for = mesh
+            picked = self.value("role") or ""
+            rows = self.sources.roles_for(mesh)
+            role_field.options = [Option("(no role)", "")] + [
+                Option(
+                    r.get("name", ""), r.get("name", ""),
+                    ", ".join(r.get("aliases") or []),
+                )
+                for r in rows
+            ]
+            allowed = {o.value for o in role_field.options}
+            role_field.select(picked if picked in allowed else "")
         connect = self.field("connect")
         if self._members_for != mesh:
             self._members_for = mesh
@@ -1987,8 +2029,8 @@ class Wizard(Form):
             connect.chosen = [c for c in connect.chosen if c in members]
         connect.hidden = not mesh or not connect.options
 
-        # The role only counts for a claude session (the row is greyed out
-        # otherwise), and a greyed-out row must not keep steering this one.
+        # A disabled role row has no membership to hold it and therefore must
+        # not keep steering workflow ranking.
         role = "" if self.field("role").disabled else (self.value("role") or "")
         sync_workflows(self, cwd, role)
         self.field("context").hidden = not self.value("workflow")
@@ -2015,6 +2057,8 @@ class Wizard(Form):
                 f"profile {self.value('profile')!r} selects unavailable harness "
                 f"{detail.get('harness')!r}",
             ))
+        if self.value("role") and not self.value("mesh"):
+            out.append(("role", "a role requires a mesh membership"))
         out.extend(check_worktree(self))
         return out
 
@@ -2418,7 +2462,7 @@ class SpawnWizard(Form):
         )
         role = ChoiceField(
             key="role", label="Role",
-            hint="the child's stance, injected into its system prompt",
+            hint="the child's mesh stance, delivered in its opening briefing",
             options=[Option("(no role)", "")]
             + [
                 Option(

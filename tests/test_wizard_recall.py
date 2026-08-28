@@ -177,14 +177,13 @@ def test_a_cancelled_form_remembers_nothing(home, monkeypatch):
     assert wizard_recall.load("new") == {"profile": "work"}  # unchanged
 
 
-def test_a_remembered_option_that_no_longer_exists_is_ignored(home, monkeypatch):
-    """A profile deleted since the last launch must not make the form lie."""
+def test_a_remembered_option_or_incomplete_role_pair_is_ignored(home, monkeypatch):
     wizard_recall.save("new", {"profile": "gone-profile", "role": "worker"})
     plain, seen = capturing()
     assert drive(monkeypatch, SUBMIT, new_args(), form=plain) is True
     w = seen["form"]
     assert w.value("profile") == "work"  # the form's own default, not the ghost
-    assert w.value("role") == "worker"  # the answer that still exists survives
+    assert w.value("role") == ""  # old standalone role has no mesh membership
 
 
 def test_spawn_remembers_its_own_shorter_list(home):

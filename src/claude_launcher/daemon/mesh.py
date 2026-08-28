@@ -1972,51 +1972,14 @@ class MeshManager:
     def _stance_lines(
         self, mesh: Mesh, member: Member, *, inline: bool = True
     ) -> str:
-        """The briefing's stance section for this member — possibly empty.
+        """The role stance supplied by every local member's briefing.
 
-        A POINTER **when something else already holds the prose**, and the
-        prose itself when nothing does.
-
-        Pointing is right, and was right for the reason first written down
-        here: pasting doubles the length of a block typed into a live
-        terminal, and it freezes the stance into the agent's context at join
-        time, so a later upload would leave the member acting on a vocabulary
-        the mesh no longer has. ``mesh stance`` always prints the current
-        text, and doubles as the recovery path after a compaction.
-
-        What that reasoning assumed is that the agent has the stance from
-        somewhere else — and for the common case it does: a session spawned
-        with a role carries it in an appended system prompt, re-injected on
-        every spawn and restore (:func:`harness.build_command`), which is why
-        a ``/compact`` cannot take it. But three shapes carry no such copy,
-        and for them a pointer is the *only* place the stance ever appears —
-        one command away, on a turn the agent has to decide to spend, and
-        gone again at the next compaction with only another pointer to
-        replace it:
-
-        * a session with no role at all (a human started it, then it joined);
-        * a mesh that replaced the vocabulary, whose role names the packaged
-          set cannot resolve — ``SessionManager._spawn_role`` drops those
-          rather than fail the spawn, so nothing reaches the system prompt;
-        * a member whose mesh role is not the role its session was spawned
-          as, where the system prompt holds a *different* stance and both
-          claim to bind.
-
-        There the prose goes in. Capped (:data:`_INLINE_STANCE`) so a long
-        one cannot crowd out the roster it arrives with, or overrun the
-        re-briefing's hook budget when this block is composed again
-        (:mod:`rebrief`); the pointer rides along either way, because the
-        capped copy is a starting position and ``mesh stance`` is still the
-        current text.
-
-        The pasted prose is NAMED: a content id printed beside it, digested
-        from the whole stance rather than the capped copy. That is what lets
-        a step reminder ask later whether the agent still has this text
-        without pasting it again to ask, and what a recall by that id serves
-        (:func:`rebrief.recall`). It rides here and nowhere else, because an
-        id an agent has only ever seen alone would answer "is it in my
-        context?" yes for prose that never arrived — which is why the
-        pointer-only returns above carry no id at all.
+        Role is a mesh membership property and every harness receives the
+        same opening block.  The full stance therefore arrives here, named by
+        the content id that later session reminders can check and
+        :func:`rebrief.recall` can serve.  ``inline=False`` remains the
+        rebrief budget fallback, and a remote member is left to the daemon
+        hosting its terminal.
         """
         role = mesh.roleset.get(member.role)
         if not (role and role.stance.strip()):
@@ -2025,28 +1988,17 @@ class MeshManager:
             f"stance: run 'claunch mesh stance {mesh.name}' now — it prints "
             f"what a {member.role} is on this mesh, and it is binding\n"
         )
-        if not inline:
+        if not inline or not self._is_local(mesh, member):
             # The caller has a harder budget than the join does and would
             # rather cut this than anything else it carries. Right ordering:
             # the stance is the one section with a guaranteed alternative
             # one command away — the owed ledger and the opening task have
             # none. See :func:`rebrief.compose`.
             return pointer
-        if self.stance_carried(mesh, member):
-            return pointer
-        spawned_as, prompt_stance = self._stance_in_system_prompt(mesh, member)
         whole = role.stance.strip()
         body = whole
         if len(body) > _INLINE_STANCE:
             body = body[:_INLINE_STANCE].rstrip() + " [...]"
-        clash = ""
-        if prompt_stance.strip():
-            clash = (
-                f"note: this session was spawned as a {spawned_as!r} and its "
-                f"system prompt carries THAT stance. On this mesh you are a "
-                f"{member.role} and the text below is what binds — a role is "
-                "per mesh, and an appended prompt cannot be re-written.\n"
-            )
         # The id names the WHOLE stance, not the copy below it, which may
         # have been cut at :data:`_INLINE_STANCE`. That is the point rather
         # than a discrepancy: an agent that finds the id here knows it still
@@ -2058,61 +2010,13 @@ class MeshManager:
         ident = digests.text_digest(whole)
         marker = f" [text id: {ident}]" if ident else ""
         return (
-            f"{pointer}{clash}stance ({member.role}), binding{marker}:\n"
+            f"{pointer}stance ({member.role}), binding{marker}:\n"
             f"{body}\n"
         )
 
-    def stance_carried(self, mesh: Mesh, member: Member) -> bool:
-        """Whether this member already holds its stance without being told.
-
-        The decision :meth:`_stance_lines` pastes on, named so callers
-        outside this class can ask it. ``True`` means the session's own
-        system prompt carries the same text the mesh's role does — the
-        common case, and one an appended prompt keeps through every
-        ``/compact`` — so a briefing gives a pointer and nothing more.
-
-        Unanswerable counts as carried, exactly as the paste path treats
-        it: a member hosted on another daemon is briefed by that daemon,
-        and guessing on its behalf would push a second copy of a stance
-        into a terminal that already has one.
-
-        :mod:`rebrief` needs this apart from the text, to decide whether
-        this session was ever *given* an id for its stance. Naming an id
-        at an agent that only ever saw a pointer would buy a recall it
-        does not need, on every reminder, forever.
-        """
-        role = mesh.roleset.get(member.role)
-        if not (role and role.stance.strip()):
-            return True  # nothing to hold
-        carried = self._stance_in_system_prompt(mesh, member)
-        if carried is None:
-            return True
-        _, prompt_stance = carried
-        return prompt_stance.strip() == role.stance.strip()
-
-    def _stance_in_system_prompt(self, mesh: Mesh, member: Member):
-        """``(spawned_as, stance)`` for this member's session, or ``None``.
-
-        ``None`` when the question cannot be answered here — a member hosted
-        on another daemon, or a session this one no longer has a record of.
-        The caller treats unanswerable as "carried", deliberately: a remote
-        daemon briefs its own members, and guessing on its behalf would paste
-        a stance into a terminal that already has one.
-
-        A session with no role answers ``("", "")`` rather than ``None``:
-        that is a real, knowable answer — it carries nothing — and it is the
-        commonest of the three shapes the caller pastes for.
-        """
-        if not self._is_local(mesh, member):
-            return None
-        try:
-            sdef = self.manager.get(member.session).sdef
-        except ManagerError:
-            return None
-        if not sdef.role:
-            return "", ""
-        packaged = mesh_roles.resolve().get(sdef.role)
-        return sdef.role, (packaged.stance if packaged is not None else "")
+    def stance_given(self, mesh: Mesh, member: Member) -> bool:
+        """Whether this daemon supplied the stance and its id to the member."""
+        return self._is_local(mesh, member)
 
     def briefing_block(
         self, mesh: Mesh, member: Member, *, inline_stance: bool = True

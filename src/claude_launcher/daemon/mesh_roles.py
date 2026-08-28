@@ -120,13 +120,12 @@ class Role:
     #: Body for this role's task-poll nudge. The mesh's own
     #: ``policy.task_poll.bodies`` still wins when it sets one.
     task_poll: str = ""
-    #: One line for this role, carried by the cflow step reminder's FULL form
-    #: (:func:`daemon.cflow_clock.role_reminder_lines`). Not a summary of
-    #: :attr:`stance` — a session spawned with a role already carries that
-    #: text in its system prompt, re-sent on every request, so restating it
-    #: buys nothing and costs the block it rides in. What belongs here is what
-    #: the stance cannot say because it does not know where the agent is:
-    #: what THIS role stops doing when a run has been sitting on one step.
+    #: One line for this role, carried in the Role section of the cflow
+    #: source's first full fire at a position. Not a summary of
+    #: :attr:`stance`: the Role section already carries the stance content id
+    #: and recovery command. This field says what the stable stance cannot
+    #: know — what this role commonly misses after one run position stops
+    #: moving.
     cflow_reminder: str = ""
     #: Whether members of this role receive stall warnings about others.
     stall_watch: bool = False
@@ -384,7 +383,8 @@ roles:
     # held twice without the holders spending their time coordinating with
     # each other; a second command line becomes a nested worker instead.
     exclusive: true
-    # One line, carried only by a step reminder's full form. It says what a
+    # One line, carried in the Role section of a cflow source's full form. It
+    # says what a
     # STALLED leader is most often doing wrong, which is the one thing the
     # stance below cannot say: the stance does not know where the agent is.
     cflow_reminder: >-
@@ -990,20 +990,3 @@ def load_override(doc) -> Optional[dict]:
 def to_yaml(doc: dict) -> str:
     """A role-set document as YAML the user can edit and upload back."""
     return yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=88)
-
-
-def system_prompt(role: Role) -> str:
-    """The stance as a session's system-prompt injection.
-
-    A *mesh* member reads its stance through a file the join briefing points
-    at — it is already running, and an injection would cost it a turn. A
-    session spawned WITH a role has no such turn to spend: it is told who it
-    is before its first prompt, by appending this to claude's system prompt
-    (``--append-system-prompt``, which adds to the built-in one rather than
-    replacing it).
-    """
-    head = (
-        f"Your role in this session is {role.name!r}. It was chosen when the "
-        f"session was spawned and holds for the whole session."
-    )
-    return f"{head}\n\n{role.stance.rstrip()}" if role.stance else head

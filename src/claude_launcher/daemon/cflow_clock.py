@@ -7,13 +7,11 @@ run registry the dashboard lists runs from:
 
 * :class:`AskClock` — a delegated decision's ``timeout``. The one agent that
   would notice an expiry is the one stopped waiting for the answer.
-* :class:`ReminderClock` — the step instructions an agent has drifted away
-  from. The agent that would notice it has forgotten the protocol is,
-  definitionally, the one that forgot it. The same clock carries the opposite
-  errand for a step that declares an ``awaits``: re-measuring what the step is
-  waiting for and speaking only when it moves. One class, because the two are
-  the same decision — *does this position have anything to say right now?* —
-  and splitting them would need two clocks negotiating each other's silence.
+* :class:`CflowReminderSource` — the cflow contribution to the daemon's
+  session reminder service: the current step instructions after a position
+  stops moving, and the opposite ``awaits`` signal when a measured condition
+  changes.  It owns cflow's position key and full/repeat state; delivery and
+  the other session-level sources live in :mod:`.session_reminder`.
 * :class:`StallPingClock` — the session that simply STOPPED, at a step no
   gate is holding. The reminder above never reaches it (it types only into a
   session that is working), and no gate event fires (there is no gate), so
@@ -54,7 +52,6 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
-from . import mesh_roles, rebrief
 from .session import STATUS_BUSY, STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.cflow")
@@ -164,7 +161,7 @@ def reminder_policy(payload: dict, cfg: dict) -> Tuple[bool, float]:
     """Effective ``(enabled, interval)`` for one run: the machine defaults
     with the run's own override laid over them, floor applied.
 
-    Split out of :meth:`ReminderClock.scan` because the dashboard has to
+    Split out of :meth:`CflowReminderSource.scan` because the dashboard has to
     answer the same question — *is this clock going to fire here, and how
     often* — and a second copy of the rule is a second rule. The floor is
     part of the answer, not a detail of enforcement: a run overridden to 5s
@@ -192,19 +189,19 @@ def ping_policy(cfg: dict) -> Tuple[bool, float]:
     return enabled and interval > 0, interval
 
 
-class ReminderClock:
-    """Re-types the current step's instructions into runs that stopped moving.
+class CflowReminderSource:
+    """The cflow source consumed by the session reminder service.
 
     Sessions forget the /cflow protocol the way they forget everything else —
     compaction, distraction, a long side quest — and a forgotten run does not
-    fail, it just sits. This clock watches every run on the machine and, when
+    fail, it just sits. This source watches every run on the machine and, when
     one has held the same agent-actionable position for its reminder interval,
-    types that position's instructions back into the driving session.
+    yields that position's reminder to the session-level coordinator.
 
     *No progress* is the trigger, not the calendar: the position key
     (run, status, step, visit) resets the timer whenever it changes, so an
-    agent that is advancing hears nothing, and one that has stalled hears
-    from this clock every interval until it moves.
+    an advancing run yields nothing, while a stalled position becomes due
+    every interval until it moves.
 
     It does not hear the same thing every time. The FIRST reminder at a
     position restates the step in full (:func:`reminder_block`), because an
@@ -220,14 +217,9 @@ class ReminderClock:
     context the step is competing for. The full block is worth its size
     once; after that the agent is told where to pull it from instead.
 
-    And *only while the agent is working*: the drift this clock corrects is
-    an agent mid-turn, burying the step instructions under everything else
-    on its screen — so a reminder is typed only into a session that reads
-    busy. Idle, suspended and exited sessions hear nothing: nobody is
-    working there, so there is no work to steer, and a paste would open a
-    fresh turn just to say "keep going" to an agent that has stopped. A due
-    reminder is held rather than dropped — retried every poll — so it lands
-    the moment the session is working again.
+    :class:`daemon.session_reminder.SessionReminderService` applies the busy
+    gate, batches this source with Role, and advances ``restated`` only after
+    the combined delivery succeeds.
 
     Configuration is read fresh on every pass: the machine defaults
     (``cflow_reminder`` / ``cflow_reminder_interval``) come from
@@ -236,43 +228,13 @@ class ReminderClock:
     both in its own state (:func:`cflow.engine.set_reminder`).
     """
 
-    def __init__(self, manager, mesh=None, *, poll: float = REMINDER_POLL) -> None:
+    def __init__(self, manager) -> None:
         self.manager = manager
-        #: The mesh registry, for the situation lines (:func:`situation_lines`).
-        #: Optional the way :class:`RunEventClock` takes it: a daemon without
-        #: meshes still reminds, it just has one fewer thing to say.
-        self.mesh = mesh
-        self.poll = poll
-        self._task: Optional[asyncio.Task] = None
         #: (cwd, scope) -> {"pos": position key, "at": monotonic seconds} —
         #: in memory only. A daemon restart forgets the timers, which merely
         #: delays each run's next reminder by one interval; persisting them
         #: would buy nothing worth a state write per tick.
         self._seen: Dict[Tuple[str, str], dict] = {}
-
-    def start(self) -> None:
-        if self._task is None:
-            self._task = asyncio.get_running_loop().create_task(self._run())
-
-    async def shutdown(self) -> None:
-        task, self._task = self._task, None
-        if task is not None:
-            task.cancel()
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-
-    async def _run(self) -> None:
-        while True:
-            try:
-                await asyncio.sleep(self.poll)
-                due = await asyncio.to_thread(self.scan, time.monotonic())
-                for cwd, scope, block, kind in due:
-                    await self._deliver(cwd, scope, block, kind)
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # One unreadable run must not stop the clock for the rest.
-                log.exception("cflow reminder clock tick failed")
 
     def scan(self, now: float) -> List[Tuple[str, str, str, str]]:
         """Decide who is due, as ``(cwd, scope, block, kind)``.
@@ -281,9 +243,8 @@ class ReminderClock:
         interval has elapsed — so call it in a thread. Public for the tests,
         which own ``now`` there (and, through it, the probe spacing).
 
-        ``kind`` is ``"reminder"`` or ``"signal"``, and it is carried rather
-        than inferred because the two are delivered under different rules;
-        see :meth:`_deliver`.
+        ``kind`` is ``"reminder"`` or ``"signal"``. The session-level
+        service applies their different delivery rules.
         """
         try:
             cfg = store.daemon_config()
@@ -443,85 +404,6 @@ class ReminderClock:
             awaits["probe"], cwd, min(timeout, cflow_model.MAX_AWAITS_TIMEOUT)
         )
 
-    async def _deliver(
-        self, cwd: str, scope: str, block: str, kind: str = "reminder"
-    ) -> None:
-        session = self._session_for(cwd, scope)
-        if session is None:
-            return
-        if kind == "reminder" and session.status() != STATUS_BUSY:
-            # A REMINDER waits for a working session. It carries nothing the
-            # agent does not already have — it restates the step — so its
-            # whole value is landing in front of an agent mid-turn that has
-            # buried the protocol under everything else on its screen. Pasted
-            # into a session that has ended its turn it would open a fresh one
-            # just to say "keep going" to somebody who already stopped. Held,
-            # not dropped: the debt stays due and is retried each poll, so it
-            # lands the moment the session is working again.
-            #
-            # A SIGNAL does not wait, and the difference is not a preference.
-            # It is news the agent does NOT have, about the very thing it
-            # ended its turn to wait for. Holding it until the session happens
-            # to be busy would leave the run correctly waiting while the
-            # daemon sits on the answer — the exact failure this path exists
-            # to remove. So a signal wakes an idle session, as a released
-            # window does (:class:`WindowClock`).
-            log.debug("cflow reminder held for %r: session is not working", scope)
-            entry = self._seen.get((cwd, scope))
-            if entry is not None:
-                # Stamped, not merely logged: "due, but the session stopped"
-                # is the one state where this clock is configured, armed and
-                # correctly silent — indistinguishable from broken to anyone
-                # reading a countdown, unless the hold itself is reported.
-                entry["held_at"] = time.monotonic()
-            return
-        if kind == "reminder":
-            # Composed HERE and not in `scan`, and the reason is threading,
-            # not taste: `scan` runs in a worker thread (see this module's
-            # docstring) and ``MeshManager`` is event-loop only. The one
-            # source that is neither — the open-ask scan — is a filesystem
-            # walk, so it goes back to a thread rather than blocking the loop
-            # this method runs on. Deliveries are rare enough (four figures
-            # across this machine's entire history) that the hop costs nothing.
-            try:
-                open_asks = len(
-                    await asyncio.to_thread(cflow_engine.open_asks, scope)
-                )
-            except Exception:  # noqa: BLE001 — decoration must not sink a send
-                open_asks = 0
-            extra = situation_lines(scope, self.manager, self.mesh, open_asks)
-            # ``restated`` is written after a successful send, so it is still
-            # False here on the fire that carries the full restatement —
-            # which is the one fire the session-level ids ride on.
-            if not (self._seen.get((cwd, scope)) or {}).get("restated"):
-                extra = extra + carried_id_lines(
-                    scope, self.manager, self.mesh
-                ) + role_reminder_lines(scope, self.manager, self.mesh)
-            block = splice(block, extra)
-        try:
-            delivered = await session.deliver(block)
-        except Exception:
-            log.exception("cflow %s delivery to %r failed", kind, scope)
-            return
-        if delivered:
-            # Rearm only on success: a delivery that failed past deliver's
-            # holds keeps its debt and is tried again next poll.
-            entry = self._seen.get((cwd, scope))
-            if entry is not None:
-                entry["at"] = time.monotonic()
-                entry["fired_at"] = entry["at"]
-                entry["fired_kind"] = kind
-                entry["held_at"] = None
-                if kind == "reminder":
-                    # Stamped on DELIVERY, never on composition. A block held
-                    # for a session that stopped is composed again next poll,
-                    # and flipping this in `scan` would let the full
-                    # restatement be replaced by the short form having never
-                    # actually landed. A signal is not a restatement and
-                    # leaves this alone.
-                    entry["restated"] = True
-            log.info("cflow %s delivered to %r (%s)", kind, scope, cwd)
-
     def skip(self, cwd: str, scope: str) -> bool:
         """Let ONE of a run's reminders go by, without switching the clock off.
 
@@ -562,17 +444,6 @@ class ReminderClock:
         entry["held_at"] = None
         log.info("cflow reminder skipped once for %r (%s)", scope, cwd)
         return True
-
-    @property
-    def running(self) -> bool:
-        """Whether the tick is actually alive.
-
-        The difference between "reminders are on" and "reminders happen" is
-        this attribute, and nothing else on the machine records it: the
-        config says what was asked for, and a clock whose task died to an
-        unhandled cancel keeps every configured value saying yes.
-        """
-        return self._task is not None and not self._task.done()
 
     def timers(self, now: Optional[float] = None) -> Dict[Tuple[str, str], dict]:
         """What this clock is holding for each run, in plain seconds.
@@ -615,6 +486,19 @@ class ReminderClock:
 
     def _session_for(self, cwd: str, scope: str):
         return session_for(self.manager, cwd, scope)
+
+
+def ReminderClock(manager, mesh=None, *, poll: float = REMINDER_POLL):
+    """Compatibility constructor for the session-level reminder service.
+
+    Older callers and downstream tests imported ``ReminderClock`` from this
+    module.  The runtime owner now lives in :mod:`.session_reminder`; keeping
+    this lazy constructor preserves that import without pulling session-level
+    delivery back under cflow or creating an import cycle at module load.
+    """
+    from .session_reminder import SessionReminderService
+
+    return SessionReminderService(manager, mesh, poll=poll)
 
 
 def session_for(manager, cwd: str, scope: str):
@@ -791,214 +675,6 @@ def repeat_block(payload: dict, interval: float, stalled_for: float) -> str:
         )
     lines.append("---")
     return "\n".join(lines)
-
-
-def splice(block: str, lines: List[str]) -> str:
-    """Put ``lines`` inside a block's fence, just before it closes.
-
-    The blocks here are fenced so an agent can tell where machine-generated
-    text starts and stops; anything appended after the closing ``---`` reads
-    as a separate paste, and anything that replaces the fence stops reading
-    as machine-generated at all. So additions go inside, at the end, where a
-    reader has already taken in the position they belong to.
-    """
-    if not lines:
-        return block
-    rows = block.splitlines()
-    if rows and rows[-1] == "---":
-        return "\n".join(rows[:-1] + list(lines) + ["---"])
-    return "\n".join(rows + list(lines))
-
-
-def situation_lines(name: str, manager, mesh_mgr, open_asks: int = 0) -> List[str]:
-    """What is true around this session right now, said in full every time.
-
-    The counterpart to the content id, and the reason both exist. A step's
-    text is immutable for the life of a position, so it can be named by a
-    hash and pulled back on demand. None of *this* is: replies come due, a
-    child exits, a decision lands. An id for it would be a promise the
-    daemon cannot keep — quote ``7c1e`` for a roster and the agent that calls
-    for it later gets either a stale snapshot or a different roster, and both
-    are worse than the two lines it would have replaced. So the volatile half
-    is pushed, in full, and stays small enough to be worth pushing.
-
-    Only what has something to say. A session with no mail owing, no
-    decisions on it, no children and a live parent adds nothing here — which
-    is the ordinary case, and why the repeat stays at its measured size.
-
-    Never raises: this decorates a reminder, and a reminder that failed to
-    send because the roster was mid-write would be a bad trade.
-    """
-    lines: List[str] = []
-    try:
-        sdef = manager.get(name).sdef
-    except Exception:  # noqa: BLE001 — raced an exit; the rest still stands
-        return lines
-    if open_asks:
-        lines.append(
-            f"asks: {open_asks} delegated decision(s) from other runs await "
-            "your answer -- their workflows are stopped on it. The cflow "
-            "'asks' tool serves them, 'answer' closes them."
-        )
-    if mesh_mgr is not None:
-        try:
-            for row in mesh_mgr.meshes_for_session(name):
-                mesh = mesh_mgr.get(row["mesh"])
-                member = mesh_mgr.member_for_session(mesh, name)
-                if member is None:
-                    continue
-                owed = mesh.owed(member.handle)
-                if owed:
-                    lines.append(
-                        f"owed: {len(owed)} delivered message(s) on mesh "
-                        f"{mesh.name} still await your reply -- to the "
-                        "senders, silence is silence. 'claunch mesh history "
-                        f"{mesh.name} -n 30' shows them."
-                    )
-        except Exception:  # noqa: BLE001 — a mesh deleted under us says nothing
-            pass
-    try:
-        live = manager.live_children(name)
-    except Exception:  # noqa: BLE001
-        live = []
-    if live:
-        lines.append(
-            f"children: {', '.join(live)} still running and still reporting "
-            "to you -- a child holding a finished result keeps holding it "
-            "until you ask."
-        )
-    if sdef.parent:
-        try:
-            if manager.get(sdef.parent).exited:
-                lines.append(
-                    f"parent: {sdef.parent} has exited -- whatever you were "
-                    "going to report to it has nowhere to go. Say so in this "
-                    "run's next report rather than reporting into the void."
-                )
-        except Exception:  # noqa: BLE001 — no record is not "exited"
-            pass
-    if lines:
-        lines.insert(
-            0,
-            "-- around you right now (this part changes; it is stated in "
-            "full because there is no id that could stay true for it) --",
-        )
-    return lines
-
-
-def carried_id_lines(name: str, manager, mesh_mgr) -> List[str]:
-    """The ids of the session-level text this agent was handed, named not sent.
-
-    The same trade the step's own id makes (:func:`repeat_block`), applied to
-    the two blocks that outlive any one position: the opening task and the
-    binding stance. Both are immutable, both are re-derivable, and both are
-    exactly the kind of thing an agent quietly stops having after a summary
-    without noticing it stopped.
-
-    Named ONLY on the full form, once per position, and the reason is a
-    measurement rather than taste: the repeat is 777 characters against the
-    full block's 1545, and that gap is the whole product. A reference line on
-    every repeat would spend a third of the saving on a question that is
-    almost never the one being asked — an agent whose context was compacted
-    has already had the hook re-deliver these blocks, with their ids, before
-    its next turn.
-
-    Only ids the session was *given next to their text*
-    (:func:`rebrief.given_ids`). An id it has never seen attached to prose
-    would fail the check by construction, and buy a recall of text it may
-    well already hold.
-
-    Never raises, for :func:`situation_lines`' reason: this decorates a
-    reminder, and a reminder lost to a mid-write roster is a bad trade.
-    """
-    try:
-        ids = rebrief.given_ids(name, manager=manager, mesh_mgr=mesh_mgr)
-    except Exception:  # noqa: BLE001 — no ids is not a reason to send nothing
-        return []
-    if not ids:
-        return []
-    named = "; ".join(f"{ident} ({kind})" for ident, kind in ids)
-    return [
-        f"session text ids: {named}. These name text you were GIVEN, printed "
-        "next to it — not text in this reminder, and not this line. If you "
-        "cannot find one of them attached to its text in this conversation, "
-        "your context no longer holds that block: call the mesh 'rebrief' "
-        "tool with that id and it hands the text back."
-    ]
-
-
-def role_reminder_lines(name: str, manager, mesh_mgr) -> List[str]:
-    """The one line this session's ROLE has for a run that is not moving.
-
-    The stance answers "who are you"; this answers "what does someone who is
-    you get wrong *here*". They are different questions, and only the second
-    one belongs in a reminder — which is why this carries
-    :attr:`mesh_roles.Role.cflow_reminder` and never the stance itself.
-
-    Pasting the stance was the obvious design and it is the wrong one, for a
-    reason that is measurable rather than aesthetic. A session spawned with a
-    role holds its stance in the system prompt (``--append-system-prompt``),
-    re-sent on every request and surviving every ``/compact`` — on this
-    machine that was 13 of 14 recorded sessions. For them the text has not
-    gone anywhere, so re-sending it is the move :func:`repeat_block` already
-    refuses for the step's own instructions: a paste that failed to reach the
-    agent's attention does not reach it by arriving twice, and the second copy
-    is charged to the very block it competes with. That block is already over
-    budget — it cuts the step's own text at
-    :data:`_INSTRUCTIONS_LIMIT` (1200 of 5782 characters, measured on
-    ``improv-worker``'s ``work`` step), and a worker stance would add 36% to
-    it, a leader stance 156%.
-
-    So the budget, stated rather than assumed: ONE line, capped at
-    :data:`mesh_roles.MAX_CFLOW_REMINDER`, riding the FULL form only — the
-    same single fire per position that :func:`carried_id_lines` rides. The
-    repeat form, which is the one that actually repeats, is untouched, so the
-    recurring cost of this feature is zero. Nothing is displaced.
-
-    The mesh role wins over the session's own, because a role is per mesh and
-    the mesh's is what binds; a session with a role but no mesh still gets its
-    line from the packaged vocabulary. Never raises, for
-    :func:`situation_lines`' reason: this decorates a reminder, and a reminder
-    lost to a mid-write roster is a bad trade.
-    """
-    seen: Set[str] = set()
-    out: List[str] = []
-
-    def take(role, where: str) -> None:
-        line = (getattr(role, "cflow_reminder", "") or "").strip()
-        if not line or role.name in seen:
-            return
-        seen.add(role.name)
-        out.append(f"as {role.name}{where}: {line}")
-
-    if mesh_mgr is not None:
-        try:
-            rows = mesh_mgr.meshes_for_session(name)
-        except Exception:  # noqa: BLE001
-            rows = []
-        for row in rows:
-            try:
-                mesh = mesh_mgr.get(row["mesh"])
-                member = mesh_mgr.member_for_session(mesh, name)
-                if member is None:
-                    continue
-                role = mesh.roleset.get(member.role)
-                if role is not None:
-                    take(role, f" on {mesh.name}")
-            except Exception:  # noqa: BLE001 — one broken mesh, not all of them
-                continue
-    if not out:
-        # No mesh, or no mesh role with a line: fall back to the role the
-        # session was SPAWNED with, resolved through the packaged vocabulary.
-        # That session is exactly the one the mesh path cannot serve and the
-        # commonest holder of a role on this machine.
-        try:
-            spawned = (manager.get(name).sdef.role or "").strip()
-            if spawned:
-                take(mesh_roles.resolve().get(spawned), "")
-        except Exception:  # noqa: BLE001 — no role is not a reason to send nothing
-            pass
-    return out
 
 
 def signal_block(payload: dict, before: dict, after: dict) -> str:
@@ -1228,13 +904,13 @@ class StallPingClock:
 
     @property
     def running(self) -> bool:
-        """Whether the tick is alive — see :attr:`ReminderClock.running`."""
+        """Whether the tick is alive — the shared daemon-clock contract."""
         return self._task is not None and not self._task.done()
 
     def timers(self, now: Optional[float] = None) -> Dict[Tuple[str, str], dict]:
         """What this clock is holding for each run, in plain seconds.
 
-        Same contract as :meth:`ReminderClock.timers`, plus ``working``:
+        Same contract as the session reminder's cflow timer view, plus ``working``:
         this clock re-arms every pass while somebody is at work in the
         session, so a countdown drawn from ``armed_ago`` alone would look
         stuck at the top and read as broken. It is not counting down because
@@ -2102,7 +1778,7 @@ class RunEventClock:
     def _driver_gone(self, cwd: str, scope: str) -> bool:
         """True when the run's scope names a managed session that has exited.
 
-        Same containment rule as :meth:`ReminderClock._session_for`: the
+        Same containment rule as :func:`session_for`: the
         scope IS the session name, and the cwd must match. A scope no manager
         knows is a standalone/CLI run — not driven by a session, so never
         orphaned by one — and a matching name in another directory is

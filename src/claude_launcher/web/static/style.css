@@ -247,7 +247,7 @@ option:disabled { color: #6b7280; }
    plainly inert — the tooltip carries the how-to-enable */
 #session-list .sess-brief-toggle:disabled { color: #3d434d; cursor: default; }
 #session-list .sess-cflow { order: 3; }
-/* The "the daemon will not type here" line: delivery held, step reminder off.
+/* The "the daemon will not type here" line: delivery held, cflow reminder off.
    Its own full-width line rather than pills loose on the name row — see the
    invariant on .rail-head; anything at order 0 that does not shrink pushes
    the ⓘ onto a line of its own. Ordered just above the cflow badge, because

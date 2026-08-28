@@ -16,7 +16,7 @@ from pathlib import Path
 from claude_launcher import lineage, profile, store, workspaces
 from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.cflow import state as cflow_state
-from claude_launcher.daemon import harness as harness_mod
+from claude_launcher.daemon import harness as harness_mod, mesh_roles
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -667,9 +667,7 @@ def test_an_exited_parent_cannot_spawn(home, tmp_path):
 
 
 def test_a_spawn_role_becomes_the_members_role_in_the_mesh(home, tmp_path):
-    """`role` on a spawn reaches the mesh join. (Its other half — the system
-    prompt stance — is claude-harness only; see test_spawn.py for that split,
-    which cannot be exercised here without spawning a real claude.)"""
+    """One role reaches the membership and common opening for any harness."""
     _register_py_harness()
 
     async def run():
@@ -725,7 +723,7 @@ def test_create_joins_a_mesh_and_starts_a_run_in_one_call(home, tmp_path):
                 "/api/sessions",
                 json={
                     "name": "w1", "profile": "py", "cwd": str(tmp_path),
-                    "mesh": "team", "handle": "worker_1",
+                    "mesh": "team", "handle": "worker_1", "role": "worker",
                     "workflow": "review", "task": "take the API",
                 },
                 headers=BEARER,
@@ -738,10 +736,17 @@ def test_create_joins_a_mesh_and_starts_a_run_in_one_call(home, tmp_path):
             assert body["name"] == "w1"
             assert body["mesh"]["ok"] is True
             assert body["mesh"]["handle"] == "worker_1"
+            assert body["mesh"]["role"] == "worker"
             assert body["workflow"]["ok"] is True, body["workflow"]
             assert body["workflow"]["scope"] == "w1"
             assert body["task"]["ok"] is True
             assert mm.get("team").members["worker_1"].session == "w1"
+            assert mgr.get("w1").sdef.role is None
+            await _wait_for(
+                lambda: "stance (worker), binding [text id:" in
+                "\n".join(mgr.get("w1").capture(history=True)),
+                "the harness-neutral role stance opening",
+            )
 
             await mgr.shutdown_all()
         finally:
@@ -779,6 +784,29 @@ def test_an_unknown_mesh_is_refused_before_anything_is_built(home, tmp_path):
             )
             assert resp.status == 400
             assert "no workflow named" in (await resp.json())["error"]
+            assert [s.sdef.name for s in mgr.list()] == []
+
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "w1", "profile": "py", "cwd": str(tmp_path),
+                      "role": "worker"},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            assert "only mean something with a 'mesh'" in (
+                await resp.json()
+            )["error"]
+            assert [s.sdef.name for s in mgr.list()] == []
+
+            mm.create("team")
+            resp = await client.post(
+                "/api/sessions",
+                json={"name": "w1", "profile": "py", "cwd": str(tmp_path),
+                      "mesh": "team", "role": "unknown-role"},
+                headers=BEARER,
+            )
+            assert resp.status == 400
+            assert "unknown role" in (await resp.json())["error"]
             assert [s.sdef.name for s in mgr.list()] == []
 
             await mgr.shutdown_all()
@@ -998,6 +1026,7 @@ class _FakeMeshMgr:
     class _Mesh:
         name = "team"
         members: dict = {}
+        roleset = mesh_roles.resolve()
 
     def get(self, name):
         if name != "team":

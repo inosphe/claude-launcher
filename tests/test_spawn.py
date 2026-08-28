@@ -7,6 +7,8 @@ in ``test_member_graph.py``.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 from claude_launcher import lineage, profile, spawn, store, workspaces, worktree
@@ -867,32 +869,21 @@ def test_require_commands_names_the_rule():
 
 
 # --------------------------------------------------------------------------- #
-# role: one word, two authorities
-#
-# A session's role comes from the packaged vocabulary and injects a stance
-# into a claude system prompt; a member's role comes from the mesh's own
-# vocabulary and applies to any harness. A spawn names one word and means
-# both, so the session half is dropped — never raised — wherever it does not
-# apply, or a custom vocabulary and every non-claude harness would become
-# un-spawnable.
+# role: one membership property
 # --------------------------------------------------------------------------- #
-def test_a_packaged_role_on_a_claude_child_becomes_its_stance():
-    assert SessionManager._spawn_role("reviewer", "claude") == "reviewer"
+def test_a_child_definition_does_not_copy_its_membership_role(tmp_path):
+    """The original request still reaches onboarding; SessionDef keeps no
+    packaged/harness-specific second interpretation of the same word."""
+    async def scenario():
+        mgr = SessionManager(
+            idle_threshold=0.1, scrollback=100, restore_default=True
+        )
+        mgr.stage(SessionDef(name="lead", profile="work", cwd=str(tmp_path)))
+        return mgr.stage_child("lead", {"name": "kid", "role": "reviewer"})
 
+    child = asyncio.run(scenario())
 
-def test_a_role_is_dropped_for_a_harness_with_no_system_prompt():
-    assert SessionManager._spawn_role("reviewer", "codex") is None
-
-
-def test_a_role_outside_the_packaged_vocabulary_is_dropped_not_raised():
-    """A mesh may replace the vocabulary wholesale; such a name is a legal
-    member role with no session stance behind it."""
-    assert SessionManager._spawn_role("gardener", "claude") is None
-
-
-def test_no_role_is_still_no_role():
-    assert SessionManager._spawn_role("", "claude") is None
-    assert SessionManager._spawn_role(None, "claude") is None
+    assert child.sdef.role is None
 
 
 # --------------------------------------------------------------------------- #
@@ -976,6 +967,43 @@ def test_detached_is_the_way_out(monkeypatch, tmp_path):
     assert reached["body"]["name"] == "solo"
     # nobody's child: --detached does not smuggle a parent through
     assert "parent" not in reached["body"]
+
+
+def test_new_session_role_requires_and_travels_with_a_mesh(
+    monkeypatch, capsys, tmp_path
+):
+    from claude_launcher import cli, daemon_client
+
+    monkeypatch.delenv("CLAUNCH_SESSION", raising=False)
+    reached = {}
+
+    class _Client:
+        base_url = "http://x"
+
+        def get(self, path):
+            return {}
+
+        def post(self, path, body=None):
+            reached["body"] = body
+            return {
+                "name": "worker", "harness": "py", "profile": "work:py",
+                "mesh": {"ok": True, "role": "worker"},
+            }
+
+    monkeypatch.setattr(daemon_client, "ensure_running", lambda: _Client())
+    assert cli.main([
+        "new-session", "--profile", "work", "-c", str(tmp_path),
+        "--role", "worker",
+    ]) == 1
+    assert "--role requires --mesh" in capsys.readouterr().err
+    assert reached == {}
+
+    assert cli.main([
+        "new-session", "--profile", "work", "-c", str(tmp_path),
+        "--mesh", "team", "--role", "worker",
+    ]) == 0
+    assert reached["body"]["mesh"] == "team"
+    assert reached["body"]["role"] == "worker"
 
 
 def test_cli_spawn_sends_the_gated_fields_it_grew(monkeypatch, tmp_path):

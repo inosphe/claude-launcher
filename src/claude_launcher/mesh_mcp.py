@@ -315,7 +315,7 @@ TOOLS = [
             "in it — the result is the current truth, not a summary of what "
             "you used to know. Pass 'id' to pull back ONE block by the content "
             "id it was given with (your opening task, your binding stance): a "
-            "step reminder names those ids, and an id you cannot find attached "
+            "session reminders name those ids, and an id you cannot find attached "
             "to its text anywhere in this conversation is the signal that your "
             "context no longer holds it."
         ),

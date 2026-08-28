@@ -2,7 +2,7 @@
    functions from app.js.
 
    Two settings put it there, and they arrive on two different polls: the
-   delivery hold rides /api/sessions (one field per row), the step reminder
+   delivery hold rides /api/sessions (one field per row), the cflow reminder
    rides /api/cflow (inside that run's timers). What has to hold:
 
    - a row with neither setting grows no line at all, because an

@@ -217,6 +217,12 @@ DAEMON_DEFAULTS = {
     # tick — unlike the keys above, editing these needs no restart.
     "cflow_reminder": True,
     "cflow_reminder_interval": 600.0,
+    # Session-level role recovery is scheduled independently from cflow.  A
+    # role-bearing session with no run still receives a short stance-id check,
+    # while a cflow reminder that arrives first satisfies the same debt in the
+    # combined Session reminder.
+    "role_reminder": True,
+    "role_reminder_interval": 600.0,
     # The run event clock's machine switch: whether an overseer session (the
     # driver's spawn parent, else its mesh leader) is told when a run it
     # oversees hits a human gate, finishes a recurring round, or loses its

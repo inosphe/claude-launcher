@@ -334,7 +334,7 @@ async function main() {
   check("an old spawnable_harnesses field adds no Harness option",
         form.harness.options.some((o) => o.value === "codex"), false);
 
-  /* An OAuth child has no shared token route and no Claude-only rows. */
+  /* An OAuth child has no shared token route. Role remains a mesh field. */
   PROFILE_DETAILS.home.harness = "codex";
   PROFILE_DETAILS.home.borrow_allowed = false;
   PROFILE_DETAILS.home.borrow_mode = "none";
@@ -342,10 +342,10 @@ async function main() {
   form.harness.value = "codex";
   form.args.value = "";
   ctx.sync();
-  check("a non-claude child has no token rows and no role",
+  check("a non-claude child has no token rows and keeps role available",
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled,
          form.borrow.value, form.role.value],
-        [true, true, true, "", ""]);
+        [true, true, false, "", ""]);
   check("Codex gets its own runtime panel",
         [box_["new-codex-runtime"].classList.contains("hidden"),
          form.codex_yolo.checked, form.codex_sandbox.checked],
@@ -359,9 +359,9 @@ async function main() {
         ctx.fields(form, {}).args,
         ["--approval-mode", "full-auto", "--sandbox", "workspace-write"]);
   form.codex_sandbox.checked = false;
-  check("the stance was re-rendered when the role was taken back",
-        stances > 0, true);
-  /* An API-key child keeps Borrow, but still has no Claude-only rows. */
+  check("changing harness does not rewrite the membership stance",
+        stances, 0);
+  /* An API-key child keeps Borrow and the harness-neutral role. */
   PROFILE_DETAILS.home.harness = "pi";
   PROFILE_DETAILS.home.borrow_allowed = true;
   PROFILE_DETAILS.home.borrow_mode = "token";
@@ -370,9 +370,9 @@ async function main() {
   ctx.sync();
   check("another harness does not reuse the Codex runtime layout",
         box_["new-codex-runtime"].classList.contains("hidden"), true);
-  check("an API-key child can borrow but cannot use Claude null/role",
+  check("an API-key child can borrow, cannot use null, and can use role",
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled],
-        [true, false, true]);
+        [true, false, false]);
   PROFILE_DETAILS.home.harness = "claude";
   PROFILE_DETAILS.home.borrow_allowed = true;
   PROFILE_DETAILS.home.borrow_mode = "provider-token";

@@ -274,8 +274,9 @@ SessionStart hook fires it on /compact and /clear — so if a rebrief block is
 already on screen, act on that instead of asking again.
 
 Blocks that never change carry a `text id:` printed next to them — your
-opening task, your stance, the cflow step you are on. A step reminder names
-those ids without repeating the text. Use them as a check you can actually
+opening task, your stance, the cflow step you are on. A session reminder's
+Role, Context and Cflow sections name those ids without repeating the text.
+Use them as a check you can actually
 perform: search this conversation for the id ATTACHED TO ITS TEXT. A bare
 mention (the reminder's own line) does not count. If it is not there, that
 block is gone from your context — `rebrief` with `id` hands it back

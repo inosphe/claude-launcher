@@ -1334,7 +1334,7 @@ and a form painted into its PTY would hang the session it was creating.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn the harness owned by required `--profile P` in a managed PTY. `--wizard` uses one `Profile : Harness` picker and picks every other field (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, Claude-only `--role R`/`--resume [S]`/`--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH`, `-a/--attach`; trailing args pass through). Also **what it is for**: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."`. `--harness` remains only as a deprecated, refused compatibility flag. **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
+| `new-session` (`new`) | Spawn the harness owned by required `--profile P` in a managed PTY. `--wizard` uses one `Profile : Harness` picker and picks every other field (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R` with `--mesh`, Claude-only `--resume [S]`/`--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH`, `-a/--attach`; trailing args pass through). Also **what it is for**: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."`. `--harness` remains only as a deprecated, refused compatibility flag. **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
 | `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` uses the inherited or allowed replacement `Profile : Harness`; by flag: (`--parent S`, `-s NAME`, `--profile P` when allowed, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `-w/--workspace NAME`, `--worktree NAME --rebase-onto BRANCH`). `--harness` is refused; changing an allowed profile is the only way to change the child harness. `--mesh` defaults to the parent's own. |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
@@ -1615,35 +1615,28 @@ straight into it — register it like any other directory:
 claunch workspace add .claude/worktrees/review --name review
 ```
 
-### Spawning with a role, or from another session's conversation
+### Joining with a role, or opening another session's conversation
 
-Two things are decided at spawn and cannot be typed in afterwards: **who the
-session is**, and **which conversation it opens**. Both are options on
-`new-session` and controls in the web UI's create form (claude harness only —
-they are spelled in claude's own flags):
+Two creation-time choices sit beside each other in the form. A **role** is the
+new session's membership in a mesh and works with every harness. **Resume**
+selects a Claude conversation and therefore remains Claude-specific:
 
 ```bash
-claunch new-session -s rev --profile work --role reviewer   # spawn as the adversary
+claunch new-session -s rev --profile work --mesh team --role reviewer
 claunch new-session -s side --profile work --resume rev --fork-session
 claunch new-session -s pick --profile work --resume         # claude's own picker
 ```
 
-**`--role NAME`** takes a role from the same vocabulary the
-[mesh](#mesh-session-to-session-messaging) uses — `leader`, `operator`,
-`worker`, `reviewer`, `specialist`, and their aliases (`--role mod` is
-`leader`). The role's **stance is injected into the system prompt** at spawn
-(`--append-system-prompt`, which *adds to* claude's built-in prompt rather
-than replacing it), so the session knows what it is before its first turn —
-no priming message, no turn spent. It is re-injected on every restore, since
-an appended system prompt lives in the process, not in the transcript. A role
-is optional; without one nothing is injected. Unknown names are refused
-rather than silently ignored, and `GET /api/roles` lists the vocabulary with
-each stance (that is what fills the web picker, stance and all).
-
-This is *not* the same thing as a mesh role: joining a mesh resolves a role
-for the roster, on a vocabulary the mesh's authority can override. This one is
-about a single session's own system prompt, so it always reads the packaged
-set.
+**`--role NAME`** requires `--mesh` and resolves against that mesh's current
+vocabulary — packaged roles such as `leader`, `worker` and `reviewer`, or a
+custom role the mesh authority installed. The join briefing carries the full
+stance and a content id before the first task. Later session reminders name
+that id; when the attached text is no longer in the conversation, `rebrief`
+or `recall` returns the current stance. Claude, Codex and declared harnesses
+therefore receive the same role text through the same path. Unknown names are
+refused before the session is built. `GET /api/roles` serves the packaged
+preview and `GET /api/mesh/<mesh>/roles` serves the selected membership's
+authoritative options.
 
 **`--resume [SESSION|UUID]`** opens an existing conversation instead of a new
 one. Name a session this daemon knows and the registry maps it to that
@@ -2557,7 +2550,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/auth/session`            | token → HttpOnly cookie (browser login) |
 | GET    | `/api/daemon`                  | version/`boot_id`/uptime/session count |
 | POST   | `/api/daemon/shutdown`         | graceful stop |
-| GET/POST | `/api/sessions`              | list / create (`profile` is required and owns the harness; a submitted `harness` is refused; other fields include `{name?, cwd?, args?, env?, role?, resume?, fork_session?}`). Onboarding is optional and composed in the same call: `{mesh?, handle?, connect?, workflow?, context?, task?}` — checked before anything is built, and reported per leg beside the session's own fields |
+| GET/POST | `/api/sessions`              | list / create (`profile` is required and owns the harness; a submitted `harness` is refused; session fields include `{name?, cwd?, args?, env?, resume?, fork_session?}`). Onboarding is optional and composed in the same call: `{mesh?, handle?, role?, connect?, workflow?, context?, task?}` — checked before anything is built, and reported per leg beside the session's own fields |
 | DELETE | `/api/sessions`                | clear all exited records (`?logs=1` deletes their logs; `?running=1` first shuts down and waits out every running session, so this drops *all* of them — `stopped` names what it ended). Records a mesh still names are kept back and reported in `kept` |
 | POST   | `/api/sessions/kill`           | stop every running session (`?force=1`). Records stay, so all of them are still respawnable; `killed`/`failed` name both halves |
 | POST   | `/api/sessions/respawn`        | relaunch every exited session under its own name, in creation order; `respawned`/`failed` |
@@ -2575,7 +2568,7 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | GET    | `/api/sessions/{name}/ws`      | terminal WebSocket (binary = PTY bytes, text = JSON control) |
 | GET    | `/api/profiles`                | base profile names, policy-filtered execution selectors, labelled default options, and diagnostic selector details |
 | GET    | `/api/borrow-options`          | `?profile=PROFILE[:HARNESS]` — secret-free lender validation; returns every base-profile option, including the runtime base profile, with policy/credential status and `selectable` |
-| GET    | `/api/roles`                   | the roles a session can be spawned with, each with its aliases, stance and the exact system-prompt injection |
+| GET    | `/api/roles`                   | packaged role preview (name, aliases, stance); a selected mesh's `/roles` resource is authoritative |
 | GET    | `/api/workspaces`              | registered directories, for the create form's picker and the manage page |
 | POST   | `/api/workspaces`              | register one — `{"path": "...", "name": "..."}`; `400` (with the reason) if the directory is not there |
 | DELETE | `/api/workspaces/{name}`       | unregister one; the directory itself is untouched |
@@ -2615,28 +2608,28 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | POST   | `/api/cflow/reminder`          | `{cwd, scope, enabled?, interval?}` or `{cwd, scope, clear: true}` — one run's override, stored (and archived) with the run |
 | POST   | `/api/cflow/reminder/skip`     | `{cwd, scope}` — let ONE of that run's reminders go by: re-arms the clock's timer (and drops one held for a stopped session) without writing an override. Answers `{skipped}`; `false` = the clock was keeping no timer there |
 
-**Step reminders.** An agent mid-work forgets the /cflow protocol the way it
-forgets everything else — a long side quest buries the step instructions —
-and a forgotten run does not fail, it just sits. The daemon therefore
-watches every run: when one has held the same agent-actionable position
-(`step` or `select`) for its reminder interval, the current step's own
-instructions are re-typed into the driving session, and again every interval
-until the run moves. Progress resets the timer, so an agent that is
-advancing hears nothing — and a reminder is only typed into a session that
-is actually **working** (busy). An idle session has ended its turn, and a
-suspended one (process stopped, machine asleep, TUI wedged) is not reading:
-neither is mid-way through forgetting anything, so neither hears a reminder;
-the due reminder is held and lands the moment the session is working again.
-Defaults:
+**Session reminders.** One service coordinates independent sources per
+session. The Role source is keyed by `(mesh, role, stance id)` and remains
+active without a cflow run. The Cflow source is keyed by
+`(run, status, step, visit)` and becomes due after that position stops moving.
+When both are due, one terminal delivery carries peer `## Role` and
+`## Cflow` sections; each source advances only after the delivery succeeds.
+Mutable situation data (owed replies, open decisions, children and parent)
+is recomputed at delivery time and appears in its own section.
+
+The first Cflow reminder at a position carries the step text, while repeats
+carry its content id and recovery command. The Role section always carries
+the current membership and stance id; its longer `cflow_reminder` correction
+appears on the first Cflow fire at that position. Progress resets only the
+Cflow timer. A role or stance update resets only the Role timer. Reminders are
+typed only while the session is **working** (busy); a due reminder for an idle
+or suspended session is held until it is working again. Defaults:
 `claunch daemon config cflow_reminder true|false` /
 `cflow_reminder_interval 600` — these two keys are read live, no restart —
-with a per-run override on the run's web page (or the POST above).
-A session's own header carries the narrow verb beside them: **⏭ skips one
-reminder** — the timer is re-armed where it stands (and a reminder held for a
-stopped session is dropped), the clock stays on, and nothing is written. It is
-there because pausing is the wrong size for the usual want, *not this one, I am
-watching this session do one long thing* — and a pause is a state somebody has
-to remember to undo, set at the moment they are least likely to.
+with a per-run override on the run's web page (or the POST above). Role uses
+`role_reminder true|false` / `role_reminder_interval 600`. A session's header
+verb **⏭** skips one Cflow-source reminder by re-arming that source; the Role
+source keeps its independent deadline.
 
 **Resuming what a restart stopped.** A daemon restart brings restorable
 sessions back (`--resume` of the pinned conversation), but a restored session
@@ -2657,7 +2650,8 @@ true|false` (read at restore, so an edit applies to the next restart).
 
 Daemon settings live under `daemon:` in `~/.claunch.yaml`
 (`host`, `port`, `idle_threshold`, `scrollback_lines`, `restore`,
-`cflow_reminder`, `cflow_reminder_interval`, `resume_nudge`); runtime
+`cflow_reminder`, `cflow_reminder_interval`, `role_reminder`,
+`role_reminder_interval`, `resume_nudge`); runtime
 state (pid/port file, auth token, session logs) stays machine-local under
 `~/.claude-launcher/daemon/`.
 

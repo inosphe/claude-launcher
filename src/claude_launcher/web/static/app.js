@@ -923,8 +923,8 @@ function applyCflowBadges() {
    session's own row.
 
    They are separate mechanisms — one is the mesh delivery gate
-   (Session.delivery_held), the other is the step reminder clock
-   (cflow_clock.ReminderClock) — and they are shown together because from the
+   (Session.delivery_held), the other is the cflow reminder source
+   (session_reminder.SessionReminderService) — and they are shown together because from the
    rail they are one question: which of these terminals is the daemon not
    going to speak into. Both are silences somebody chose, and a silence
    nobody remembers choosing is indistinguishable from a broken daemon; that
@@ -968,13 +968,13 @@ function railQuietFlags(name) {
       cls: "quiet-remind",
       text: "reminder off",
       title:
-        "step reminder off: the daemon will not re-type this run's current " +
+        "cflow reminder off: the daemon will not re-type this run's current " +
         "step into this session, however long it sits.\n" +
         (own
           ? "Set for this run (its own override, kept in the run's state " +
             "and so still off after a daemon restart). Turn it back on " +
             "from the run page, or the terminal header's chip."
-          : "Not this run's doing — step reminders are off machine-wide " +
+          : "Not this run's doing — cflow reminders are off machine-wide " +
             "(daemon config `cflow_reminder`). Every run reads this way " +
             "until that is changed."),
     });
@@ -1089,7 +1089,7 @@ const RAIL_TIMER_GLYPH = {
    into negative numbers would be the one thing worse than saying nothing. */
 function railTimerLine(pick, elapsed = 0) {
   if (!pick) return null;
-  const name = pick.clock === "ping" ? "stall ping" : "step reminder";
+  const name = pick.clock === "ping" ? "stall ping" : "cflow reminder";
   let state = pick.state;
   const due = pick.due_in === null || pick.due_in === undefined
     ? null : pick.due_in - (Number(elapsed) || 0);
@@ -1118,7 +1118,7 @@ function railTimerLine(pick, elapsed = 0) {
    has its answer in the reminder's own line. */
 function railTimerTitle(pick, state) {
   const say = (c, st) => {
-    const bits = [c.clock === "ping" ? "stall ping" : "step reminder", st];
+    const bits = [c.clock === "ping" ? "stall ping" : "cflow reminder", st];
     if (!c.running) bits.push("clock not running");
     else if (!c.enabled) bits.push("switched off");
     else if (c.interval) bits.push(`every ${fmtCountdown(c.interval)}`);
@@ -1179,7 +1179,7 @@ function termTimerRun() {
    `remind` rides along beside the pick because the chip is a SWITCH as well
    as a readout, and the two do not always speak for the same clock: the line
    reports whichever clock is loudest (the strip's ranking, unchanged), while
-   the switch is always this run's step reminder — the only one of the two a
+   the switch is always this run's cflow reminder — the only one of the two a
    person can turn off here at all (the stall ping is machine-wide, see
    cflow_clock.ping_policy). So the reminder's own standing has to be kept,
    not re-derived from a pick that may be about the ping. */
@@ -1310,9 +1310,9 @@ function termTimerTitle(pick, line, hold) {
   if (hold) {
     lines.push(
       "Click to " + (hold.on
-        ? "PAUSE this run's step reminder: the daemon stops re-typing the "
+        ? "PAUSE this run's cflow reminder: the daemon stops re-typing the "
         + "step into this session until you say."
-        : "RESUME this run's step reminder: the daemon may re-type the step "
+        : "RESUME this run's cflow reminder: the daemon may re-type the step "
         + "into this session again."),
       // Named by the route that survives: the badge is on the session's own
       // row and goes to that session's run, where the strip above the nav is
@@ -1361,7 +1361,7 @@ async function termTimerClick() {
 
    Icon only, and that is not a space saving. The chip next to it already
    spells the clock out in words, and the one thing this button adds to that
-   sentence is a verb — a second copy of "step reminder" on the same row
+   sentence is a verb — a second copy of "cflow reminder" on the same row
    would push the countdown into its ellipsis to say nothing new. */
 function paintTermTimerSkip(skip) {
   const box = $("term-timer-skip");
@@ -1394,7 +1394,7 @@ function termTimerSkipTitle(skip) {
       ? "SKIP the reminder now waiting: it is due and is retried every "
         + "poll, so it lands the moment this session is working again. "
         + "Press to let it go instead."
-      : "SKIP this one step reminder: the daemon does not re-type the step "
+      : "SKIP this one cflow reminder: the daemon does not re-type the step "
         + "into this session now.",
     "The clock stays on" + (skip.interval
       ? `, and the next one is due in ${fmtCountdown(skip.interval)}.`
@@ -2416,7 +2416,7 @@ async function renderReminderDefaults() {
   on.type = "checkbox";
   on.checked = !!defs.enabled;
   head.appendChild(on);
-  head.appendChild(el("span", null, "step reminders — machine default"));
+  head.appendChild(el("span", null, "cflow reminders — machine default"));
   head.title = "while a run sits on the same step, the daemon re-types that " +
     "step's instructions into its session at this interval";
   box.appendChild(head);
@@ -3065,6 +3065,7 @@ const PICKER = "@picker";
    without a second round-trip. The vocabulary is fixed for the daemon's
    lifetime — fetched once at boot, never polled. */
 let rolesByName = {};
+let rolesRequest = 0;
 
 /* Signature of the workspace list currently rendered. The registry changes
    from the CLI (`claunch workspace add`), so it IS polled — but rebuilding
@@ -3106,7 +3107,7 @@ async function refreshHarnesses() {
       if (item && item.name) harnessDetails[item.name] = item;
     }
   } catch { /* an older daemon leaves the capability rows hidden */ }
-  syncForkAvailability();  // role/resume/fork only apply to the claude harness
+  syncForkAvailability();  // resume/fork/null still follow the harness
   syncSpawnMode();
 }
 
@@ -3172,11 +3173,17 @@ async function refreshWorkspaces() {
   syncSpawnMode();
 }
 
-async function refreshRoles() {
+async function refreshRoles(meshName = "") {
   const select = document.querySelector("#new-session select[name=role]");
+  const previous = select.value;
+  const request = ++rolesRequest;
   try {
-    const resp = await api("/api/roles");
+    const resp = await api(meshName
+      ? `/api/mesh/${encodeURIComponent(meshName)}/roles`
+      : "/api/roles");
+    if (!resp.ok) throw new Error(String(resp.status));
     const data = await resp.json();
+    if (request !== rolesRequest) return;
     rolesByName = {};
     select.innerHTML = "";
     select.appendChild(new Option("(no role)", ""));
@@ -3187,12 +3194,22 @@ async function refreshRoles() {
         : role.name;
       select.appendChild(new Option(label, role.name));
     }
-  } catch { /* ignore */ }
+    select.value = [...select.options].some((o) => o.value === previous)
+      ? previous : "";
+    renderRoleStance();
+  } catch {
+    if (request !== rolesRequest) return;
+    rolesByName = {};
+    select.innerHTML = "";
+    select.appendChild(new Option("(no roles available)", ""));
+    select.value = "";
+    renderRoleStance();
+  }
 }
 
-/* What the chosen role would put in the session's system prompt. Shown in
-   full rather than summarised: it is the one thing about a spawned session
-   the user cannot inspect afterwards from the terminal. */
+/* The stance the selected mesh will place in the common opening briefing.
+   Shown in full because it binds every harness and is later recalled by its
+   content id rather than repeated on every reminder. */
 function renderRoleStance() {
   const select = document.querySelector("#new-session select[name=role]");
   const box = $("role-stance");
@@ -3320,7 +3337,6 @@ function syncForkAvailability() {
   );
   f.fork.disabled = !resuming || !claude;
   if (f.fork.disabled) f.fork.checked = false;
-  f.role.disabled = !claude;
   f.resume.disabled = !claude;
   renderNewClaudeRuntime(f, harnessName, capabilities, parent);
   renderNewCodexRuntime(f, harnessName, capabilities, parent);
@@ -3335,7 +3351,6 @@ function syncForkAvailability() {
     (f.borrow._validationPending ? "validating borrow candidates" : "");
   if (f.borrow.disabled) f.borrow.value = "";
   if (!claude) {
-    f.role.value = "";
     f.resume.value = "";
     f.null_token.checked = false;
     renderRoleStance();
@@ -3709,12 +3724,9 @@ function syncSpawnMode() {
     );
     renderNewClaudeRuntime(f, childHarness, childCapabilities, parent);
     renderNewCodexRuntime(f, childHarness, childCapabilities, parent);
-    f.role.disabled = !claude;
     if (!claude) {
       f.null_token.checked = false;
       f.null_token.disabled = true;
-      f.role.value = "";
-      renderRoleStance();
     }
     if (f.borrow._validationPending || f.borrow._validationError) {
       f.borrow.value = "";
@@ -7208,6 +7220,10 @@ function syncOnboardPickers() {
   for (const m of meshCache) mesh.appendChild(new Option(m.name, m.name));
   mesh.value = [...mesh.options].some((o) => o.value === keptMesh) ? keptMesh : "";
   $("new-handle-row").classList.toggle("hidden", !mesh.value);
+  // Before a mesh is picked the packaged vocabulary is a useful preview.
+  // Submission still requires a mesh for a non-empty role; once one is
+  // selected refreshRoles replaces these options with that mesh's authority.
+  form.role.disabled = false;
 
   // Ranked by the picked role, exactly as the CLI wizard's Workflow row and
   // the spawn modal's rank it: the role's own defaults first, then the rest,
@@ -7388,7 +7404,11 @@ for (const radio of document.querySelectorAll(
 }
 $("new-session").issue.addEventListener("change", syncBeadsRow);
 
-$("new-session").mesh.addEventListener("change", syncOnboardPickers);
+$("new-session").mesh.addEventListener("change", async () => {
+  const form = $("new-session");
+  await refreshRoles(form.mesh.value);
+  syncOnboardPickers();
+});
 $("new-session").workflow.addEventListener("change", () => {
   // From here on this row is the operator's, not the role's.
   newWfPicked = true;

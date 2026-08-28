@@ -68,7 +68,7 @@ from typing import Tuple
 
 from ..cflow import engine as cflow_engine
 from ..cflow import state as cflow_state
-from . import harness as harness_mod
+from . import harness as harness_mod, mesh_roles
 from .harness import CLAUDE_HARNESS
 from .mesh import MeshError
 
@@ -327,6 +327,15 @@ def preflight(
                     f"handle {wanted_handle!r} is already taken in mesh "
                     f"{mesh!r} — pick another"
                 )
+            if wanted_handle and role:
+                try:
+                    # Resolve now, before a session record or mesh membership
+                    # exists. The join repeats the authority-owned check, but
+                    # an explicit stale/custom role can already be refused
+                    # without leaving a half-onboarded terminal behind.
+                    local_mesh.roleset.resolve(wanted_handle, role)
+                except mesh_roles.RoleError as exc:
+                    raise OnboardError(str(exc)) from None
             # An exclusive role already held live fails the CREATE, not just
             # the join: a session built anyway would come up outside its mesh,
             # and a half-arrived member is worse than a refused request. The
@@ -343,9 +352,10 @@ def preflight(
                         f"worker that integrates upward), or retire "
                         f"{holder.handle!r} first"
                     )
-    elif handle or connect:
+    elif role or handle or connect:
         raise OnboardError(
-            "'handle' and 'connect' only mean something with a 'mesh' to join"
+            "'role', 'handle' and 'connect' only mean something with a "
+            "'mesh' to join"
         )
 
     if workflow:

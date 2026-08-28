@@ -1022,40 +1022,21 @@ A member holding a role the new set dropped keeps it and simply matches no
 rule — no migration code, and the CLI/web surface it as an *orphan* so the
 state is visible rather than mysterious.
 
-**Stance is delivered by pointer — when something else is carrying it.** The
-join briefing names the role and tells the agent to run `claunch mesh stance
-<mesh>`. Inlining unconditionally is wrong twice over: it doubles a block
-that is typed into a live terminal, and it freezes the stance into the
-agent's context at join time, so every later upload would leave that member
-acting on a vocabulary the mesh no longer has. The same command is the
-recovery path after a compaction drops the briefing.
+**Stance uses one delivery path for every harness.** A role is resolved and
+stored on the mesh membership. The join briefing carries the role's stance,
+the content id of the whole stance and the `claunch mesh stance <mesh>`
+pointer to its current definition. Claude, Codex and configured harnesses all
+receive that same opening block. `SessionDef.role` remains only as a
+compatibility field for old persisted records and contributes no second
+binding.
 
-What that reasoning assumes is that the agent has the prose from somewhere
-else, and for the common case it does. A session **spawned with a role**
-carries its stance in an appended system prompt, re-injected on every spawn
-and restore (`harness.build_command`), which lives in the process rather
-than the transcript — so neither `/compact` nor `/clear` can take it, and a
-paste in the briefing would be a second copy of text already on screen.
-
-Three shapes carry no such copy, and for them the pointer is the *only*
-appearance the stance ever makes — one command away, on a turn the agent has
-to decide to spend, and replaced by another pointer at the next compaction:
-
-- a session with **no role** (a human started it; it joined afterwards);
-- a mesh that **replaced the vocabulary**, whose role names the packaged set
-  cannot resolve. `SessionManager._spawn_role` drops those rather than fail
-  the spawn — which is what keeps custom vocabularies spawnable — so nothing
-  reaches the system prompt for *any* member of such a mesh;
-- a member whose **mesh role is not the role its session was spawned as**.
-  The prompt then holds a different stance and both claim to bind; an
-  appended prompt cannot be rewritten, so the briefing names the clash and
-  says which wins (the mesh's — a role is per mesh).
-
-For those the prose goes in, capped at `mesh._INLINE_STANCE` (4 KB: every
-packaged stance fits whole, and a custom vocabulary writing up to the 8 KB
-`MAX_STANCE` gets a starting position rather than pushing the roster out of
-the block). The pointer rides along either way, because the pasted copy is a
-starting position and `mesh stance` is still the current text.
+The inline copy is capped at `mesh._INLINE_STANCE` (4 KB: every packaged
+stance fits whole, and a custom vocabulary writing up to the 8 KB
+`MAX_STANCE` receives a starting copy without displacing the roster). The id
+is calculated from the uncapped text. A session reminder can therefore ask
+whether the id is still attached to its text, while `rebrief`/`recall` returns
+the whole current stance. A role-set edit changes the id, making the previous
+one stale instead of serving an old snapshot as current.
 
 The re-briefing has a harder budget than the join does — the SessionStart
 hook's stdout is capped around 9500 characters — so when a block overruns it,
@@ -1086,24 +1067,18 @@ history); and the **default role may not be exclusive** — an upload that
 tries is refused whole, since the second unlabelled join of a mesh's life
 must not be an error nobody asked for.
 
-**What a role actually drives** today: the stance in the join briefing
-(pointed at, or pasted where nothing else carries it — above), `stall_watch`
-(who hears about a stuck member), `exclusive` (at most one live holder),
-`task_poll` wording, and `cflow_reminder` — one line the cflow step
-reminder's **full** form carries for a run that has stopped moving.
+**What a role drives** today: the stance and content id in the join briefing,
+`stall_watch` (who receives a stuck-member warning), `exclusive` (at most one
+live holder), `task_poll` wording, and `cflow_reminder`. The last field is a
+capped role-specific correction for a cflow position that stopped moving.
 
-That last one is deliberately a line and not the stance again. A session
-spawned with a role holds its stance in the system prompt, re-sent on every
-request and surviving `/compact` (13 of 14 recorded sessions on the machine
-this was measured on), so for that population the text has not gone anywhere
-and repeating it buys nothing. It would not be free either: the full reminder
-block already truncates the step's own instructions at 1200 characters of
-5782, and a worker stance would add 36% to that block, a leader stance 156%.
-So the role gets one capped line, on the single fire per position that
-already carries the session-level ids, and nothing on the repeat — the form
-that actually repeats. What the line says is what the stance structurally
-cannot: not who you are, but what someone who is you gets wrong when a run
-has been sitting on one step.
+The daemon's `SessionReminderService` maintains Role and Cflow as independent
+sources. A due message renders them as peer `## Role` and `## Cflow` sections
+inside one delivery. The Role section always names the current membership and
+stance id. The longer `cflow_reminder` correction appears with the Cflow
+source's first full fire at a position; repeats retain the short role identity
+and stance recovery instruction. Sessions with a role and no cflow run still
+receive the Role source on its own interval.
 
 Role-based **routing
 bans** (worker↔worker, the operator pipe) are still not implemented — the

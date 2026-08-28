@@ -237,16 +237,11 @@ def test_a_recall_needs_an_id_at_all(home, tmp_path):
     assert found["status"] == "error"
 
 
-def test_a_stance_the_session_already_carries_is_addressable_but_not_named(
+def test_a_legacy_session_role_does_not_hide_the_mesh_stance(
     home, tmp_path
 ):
-    """The split ``given`` draws, and the whole reason it exists.
-
-    A session spawned INTO its role carries the stance in its own system
-    prompt, so a briefing pastes a pointer and no id ever arrives next to
-    prose. Naming that id at a reminder would guarantee a miss and buy a
-    recall of text the agent already holds -- so ``given_ids`` withholds it,
-    while ``recall`` still serves it to anyone who asks by name."""
+    """Persisted SessionDef.role is compatibility data; every local mesh
+    membership receives the same stance text and id through its briefing."""
     _register_py_harness()
     mgr = _manager()
     mm = MeshManager(mgr)
@@ -254,15 +249,11 @@ def test_a_stance_the_session_already_carries_is_addressable_but_not_named(
     async def joins():
         mm.create("team")
         with mm.defer_briefing("w1"):
-            # The SAME role the session was spawned as: a clash between the
-            # two is the third pasted shape, and not what this test is about.
+            # A local membership always receives this role's text and id.
             await mm.join("team", "w1", handle="w1", role="worker")
 
     async def scenario():
         mgr.stage(SessionDef(name="w1", harness="py", cwd=str(tmp_path), task="dig"))
-        # A role is a claude-harness flag, so it cannot be staged onto the
-        # stub harness these tests run on -- but the state it produces can
-        # be, and that state is all `stance_carried` reads.
         sess = mgr.get("w1")
         sess.sdef = replace(sess.sdef, role="worker")
         await joins()
@@ -276,14 +267,13 @@ def test_a_stance_the_session_already_carries_is_addressable_but_not_named(
     stance = [d for d, e in known.items() if e["kind"].startswith("stance")]
     assert stance, known
     ident = stance[0]
-    # Addressable: a pull by that id still works.
+    # Addressable and named: the common briefing delivered both text and id.
     assert rebrief.recall(
         "w1", ident, manager=mgr, mesh_mgr=mm
     )["status"] == "recalled"
-    # Not named, and not pasted -- the two go together.
-    assert ident not in [d for d, _ in named]
-    assert ident not in block
-    assert [k for _, k in named] == ["task"]
+    assert ident in [d for d, _ in named]
+    assert f"[text id: {ident}]" in block
+    assert {k for _, k in named} == {"stance (team)", "task"}
 
 
 def test_a_stance_the_session_does_not_carry_is_pasted_with_its_id(

@@ -19,6 +19,7 @@ from aiohttp import web
 
 from .. import daemon_client, store
 from . import cflow_clock, paths, restart_notice, resume, runtime_state
+from . import session_reminder
 from .api import build_app, notify_shutdown
 from .manager import SessionManager
 from .mesh import MeshError, MeshManager
@@ -176,7 +177,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     mesh_manager.start()
     ask_clock = cflow_clock.AskClock()
     ask_clock.start()
-    reminder_clock = cflow_clock.ReminderClock(manager, mesh_manager)
+    reminder_clock = session_reminder.SessionReminderService(manager, mesh_manager)
     reminder_clock.start()
     ping_clock = cflow_clock.StallPingClock(manager)
     ping_clock.start()
@@ -195,6 +196,10 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     # a person watching a terminal has no way to see coming, and the ones
     # whose silence is ambiguous — configured-and-armed and
     # configured-but-dead look identical from outside.
+    app["session_reminder"] = reminder_clock
+    # The dashboard's cflow timer readout consumes the cflow source's proxy
+    # surface from the session-level service.  Keep this key for the existing
+    # API while the runtime owner is published above under its real name.
     app["cflow_clocks"] = {"reminder": reminder_clock, "ping": ping_clock}
     # Last, and only now: the sessions restore brought back are alive but
     # nothing is driving them. Started after the server is up because a nudge
