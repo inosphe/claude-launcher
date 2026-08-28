@@ -573,6 +573,18 @@ async function refreshSessions() {
       handleBox.textContent = hTag.text;
       handleBox.title = hTag.title;
     }
+    // The live compaction state, beside the role: rare and transient, it
+    // says "this session is compacting its conversation right now" — the
+    // row whose turn just came back shorter is the one the reader came to
+    // find. Computed on the daemon from the pty stream (daemon/compacting
+    // .py), never from the screen; rides the list the rail already polls.
+    const comp = s.compacting ? document.createElement("span") : null;
+    if (comp) {
+      comp.className = "rail-compacting";
+      comp.textContent = "compacting";
+      comp.title = "this session is compacting its conversation right now — " +
+        "older turns are being folded into a summary";
+    }
     // Then which rooms it is in. Role first and in colour, membership after
     // it in neutral grey: the pair reads as "what this session is, and where
     // it belongs", and only the first of those is a property of the session
@@ -659,8 +671,13 @@ async function refreshSessions() {
     // to and give up width instead, which is what ellipsis is for.
     const head = document.createElement("span");
     head.className = "rail-head";
+    // The agreed ordering (s250 <-> s248, both boards CONFIRMED): the name's
+    // alias first, then what the session is, then what it is doing right
+    // now, then where it belongs — identity reads left, state after,
+    // belonging last.
     head.append(label, ...(handleBox ? [handleBox] : []),
-                ...(role ? [role] : []), ...(meshBox ? [meshBox] : []));
+                ...(role ? [role] : []), ...(comp ? [comp] : []),
+                ...(meshBox ? [meshBox] : []));
     // Where it runs, then how full it is, then who has been near it: the two
     // identity lines first and the state line under them, so a reader
     // scanning for "which of these has nobody touched" finds it in one

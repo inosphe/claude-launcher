@@ -213,6 +213,15 @@ option:disabled { color: #6b7280; }
 /* The `+N` counter is the one pill that must not be shortened: "+2" clipped
    to "+" is a lie about how many rooms are hiding behind it. */
 #session-list .rail-mesh-more { flex: none; }
+/* The live compaction state. Purple: not the blue "what it is", not the grey
+   "where it belongs" — a transient state that will be gone by the next poll,
+   carrying no demand of its own. Rigid: "compacting" must not be half-shown
+   squashed against the ellipsis, and the pill is rare enough to afford it. */
+#session-list .rail-compacting {
+  flex: none; font-size: 11px; padding: 1px 5px; border-radius: 9px;
+  background: #221a33; color: #a371f7; border: 1px solid #3a2c5c;
+  white-space: nowrap;
+}
 #session-list .rail-meshes {
   display: flex; gap: 4px; min-width: 0; flex: 0 1 auto; flex-wrap: nowrap;
   overflow: hidden;
