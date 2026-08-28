@@ -518,6 +518,9 @@ async function refreshSessions() {
     return;
   }
   sessionsCache = data.sessions || [];
+  // Reduced embedded consumers execute this poll in isolation.  Keep that
+  // contract while the full page reconciles the kill controls here.
+  if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
   briefingLLM = data.llm_configured !== false;
   forgetDeadSessions();
   const list = $("session-list");
@@ -1948,23 +1951,17 @@ function seenAgo(iso) {
   return { secs, text: fmtAge(secs) };
 }
 
-/* How stale a reading has to be before the row says so in colour. One step
-   for the two pairs that only age: this line is a glance, and a colour
-   gradient on three pairs would be states to learn for a row that is trying
-   to say one thing. */
+/* How stale each reading has to be before the row says so in red. Seen and
+   moved retain their one-hour threshold; typed becomes relevant earlier,
+   after half an hour. All three use one visual state once their own threshold
+   is crossed, so an old value is identifiable without reading each number. */
 const SEEN_COLD = 3600;  // an hour without the reader, or without the agent
 
-/* A second step, which one pair asks for and the other two do not. Half an
-   hour since a person last typed here is drawn red rather than amber: the
+/* Half an hour since a person last typed here is drawn red: the
    row an operator scans this rail for is the session they handed something
    to and then walked away from, and that one is legible at half an hour —
    well before the hour at which "nobody has looked" and "nothing has moved"
-   become worth a colour. A pair gets this step only if it is asked for
-   (`staleAfter`), so `seen` and `moved` keep the single amber one.
-
-   Both steps read the same field, so they are ordered rather than combined:
-   past 30 minutes the typed value is red and stays red, and the hour mark
-   passes without changing anything. */
+   become worth a colour. */
 const TYPED_STALE = 1800;
 
 function seenPair(label, iso, title, opts) {
@@ -1984,7 +1981,6 @@ function seenPair(label, iso, title, opts) {
       live ? " live"
       : !ago ? " unknown"
       : stale ? " stale"
-      : ago.secs >= SEEN_COLD ? " cold"
       : ""),
     live ? "now" : ago ? ago.text : "\u2013"
   );
@@ -1996,7 +1992,11 @@ function seenPair(label, iso, title, opts) {
     // says what the three readings are, which is the wrong place to explain
     // one row's colour: a reader hovering a red number is asking about that
     // number.
-    + (stale ? `\nover ${Math.round(after / 60)}m since anyone typed here` : "");
+    + (stale ? `\nover ${Math.round(after / 60)}m since ${
+      label === "seen" ? "anyone looked here"
+      : label === "moved" ? "the screen moved for real"
+      : "anyone typed here"
+    }` : "");
   return pair;
 }
 
@@ -2014,7 +2014,8 @@ function railSeenLine(s) {
     // that somebody is still there.
     seenPair("seen", s && s.last_visited_at,
              "when a person last had this session open — the web terminal " +
-             "or `claunch attach`", { live: watching }),
+             "or `claunch attach`",
+             { live: watching, staleAfter: SEEN_COLD }),
     // Typed into. A human at a keyboard only: `claunch send-keys` and mesh
     // deliveries type into this session too, and counting those would answer
     // "when was this session last written to", which is a different question
@@ -2028,7 +2029,8 @@ function railSeenLine(s) {
     // row that is NOT an animation changed.
     seenPair("moved", s && s.last_activity_at,
              "when the screen last changed for real — spinners and the " +
-             "elapsed-time counter do not count")
+             "elapsed-time counter do not count",
+             { staleAfter: SEEN_COLD })
   );
   line.title =
     "who has been here: last looked at / last typed into / last moved on " +
@@ -2036,8 +2038,8 @@ function railSeenLine(s) {
     "A dash means no reading: nobody has visited or typed since this " +
     "session started, and 'moved' is read off the running screen, so a " +
     "daemon restart leaves it blank until the session paints again.\n" +
-    "Amber is an hour without the reader or without the agent; red is " +
-    "half an hour since anyone typed, and only 'typed' is drawn that way.";
+    "Red is an hour without the reader or without the agent, or half an " +
+    "hour since anyone typed.";
   return line;
 }
 
@@ -2271,14 +2273,14 @@ function applyBriefingTop() {
 }
 
 /* What a rail row says whether folded or open: the briefing's one-line job
-   description, or the recorded opening task until a briefing exists. The
+   description only — the opening task belongs to the detail panel. The
    digest rides the /api/sessions poll (see briefing.digest), so a browser
    refresh repaints it from the daemon's session state instead of asking the
    LLM again. The row's ⟳ refresh sits beside it as the collapsed-state
    handle — same fetch as the card's, but it never opens the card. Built here
    on every row rebuild; the ▸ toggle and the card are applyBriefingCards'. */
 function decorateBriefingRow(li, s) {
-  const one = (s.briefing && s.briefing.one_line) || s.task || "";
+  const one = (s.briefing && s.briefing.one_line) || "";
   let oline = li.querySelector(".rail-brief");
   if (one) {
     if (!oline) {
@@ -4217,33 +4219,117 @@ $("term-details").addEventListener("click", () => openDetail(currentName));
    gotoSessionCard). */
 $("term-goto").addEventListener("click", () => { gotoSessionCard(); });
 
+/* A kill can take two distinct intervals that the session's ordinary
+   busy/idle status does not describe: the HTTP request itself, then a
+   graceful termination waiting for the process to exit. Keep those local
+   intervals per session so switching terminals cannot transfer one
+   session's pending action onto another one's button. Wind-down is durable
+   daemon state and therefore remains in sessionsCache. */
+const killUiState = new Map(); // session -> "requesting" | "ending"
+
+function killControlState(session, localState = null) {
+  if (localState === "requesting") {
+    return {
+      label: "ending…", disabled: true, phase: "pending",
+      title: "kill request in progress",
+    };
+  }
+  if (localState === "ending") {
+    return {
+      label: "ending…", disabled: true, phase: "pending",
+      title: "termination requested; waiting for the session to exit",
+    };
+  }
+  if (session && session.winddown) {
+    return {
+      label: "stop now", disabled: false, phase: "winddown",
+      title: "wind-down in progress; stop this session now",
+    };
+  }
+  return {
+    label: "kill", disabled: false, phase: "ready",
+    title: "terminate the program running in this session",
+  };
+}
+
+function reconcileKillUiState(sessions = sessionsCache) {
+  for (const name of [...killUiState.keys()]) {
+    const session = (sessions || []).find((s) => s.name === name);
+    if (!session || session.status === "exited" || session.winddown) {
+      killUiState.delete(name);
+    }
+  }
+}
+
+function syncSessionKillControls(name = currentName) {
+  if (!name || name !== currentName) return;
+  const session = sessionsCache.find((s) => s.name === name);
+  const state = killControlState(session, killUiState.get(name));
+  for (const id of ["term-kill", "m-kill"]) {
+    const button = $(id);
+    if (!button) continue;
+    button.textContent = state.label;
+    button.disabled = state.disabled;
+    button.title = state.title;
+    button.setAttribute("aria-busy", state.phase === "pending" ? "true" : "false");
+    button.classList.toggle("kill-pending", state.phase === "pending");
+    button.classList.toggle("kill-winddown", state.phase === "winddown");
+  }
+}
+
 /* Kill ends, remove forgets, and the two buttons never share a meaning:
    kill posts to the kill route (which leaves an exited session alone), and
    remove is the only thing on the page that makes a session unresumable.
    The header shows exactly one of them at a time (see setStatusBadge). */
-$("term-kill").addEventListener("click", async () => {
+async function killCurrentSession() {
   if (!currentName) return;
   const name = currentName;
+  if (killUiState.has(name)) return;
   // A live session holding board issues is wound down first (the daemon
   // types a settle-the-board block in and waits for that turn); the same
   // button pressed again while that runs means "stop now" — the daemon
   // reads the second kill that way, this only says so in the URL.
   const winding = !!(sessionsCache.find((s) => s.name === name) || {}).winddown;
-  const resp = await api(
-    `/api/sessions/${encodeURIComponent(name)}/kill${winding ? "?winddown=0" : ""}`,
-    { method: "POST" }
-  );
-  const info = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    await modalInfo(`Could not kill '${name}'`,
-                    info.error || `HTTP ${resp.status}`);
-  } else if (info.status === "exited") {
+  killUiState.set(name, "requesting");
+  syncSessionKillControls(name);
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/kill${winding ? "?winddown=0" : ""}`,
+      { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`Could not kill '${name}'`,
+                      info.error || `HTTP ${resp.status}`);
+      return;
+    }
     const at = sessionsCache.findIndex((s) => s.name === name);
-    if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], ...info };
-    setSessionFilter("killed");
+    if (at >= 0) {
+      sessionsCache[at] = {
+        ...sessionsCache[at], ...info,
+        winddown: info.winding_down
+          ? sessionsCache[at].winddown || { since: "", issues: [] }
+          : undefined,
+      };
+    }
+    if (info.winding_down) {
+      killUiState.delete(name);
+    } else if (info.status === "exited") {
+      killUiState.delete(name);
+    } else {
+      killUiState.set(name, "ending");
+    }
+  } catch (err) {
+    await modalInfo(`Could not kill '${name}'`,
+                    err && err.message ? err.message : "request failed");
+  } finally {
+    if (killUiState.get(name) === "requesting") killUiState.delete(name);
+    syncSessionKillControls(name);
+    await refreshSessions();
   }
-  refreshSessions();
-});
+}
+
+$("term-kill").addEventListener("click", killCurrentSession);
 
 async function archiveExitedSession(name) {
   const resp = await api(
@@ -4257,10 +4343,8 @@ async function archiveExitedSession(name) {
   }
   const at = sessionsCache.findIndex((s) => s.name === name);
   if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], ...info };
-  // Archive changes the rail classification while the final screen, detail
-  // pane and URL remain on this session. The state-specific filter follows
-  // the transition so the selected row stays visible.
-  setSessionFilter("archived");
+  // Archive changes the rail classification while the selected filter,
+  // final screen, detail pane and URL remain unchanged.
   await refreshSessions();
   setStatusBadge("exited");
   return true;
@@ -4325,7 +4409,6 @@ $("archive-exited").addEventListener("click", async () => {
     $("archive-exited"), "/api/sessions/archive",
     { method: "POST" }, "archive"
   );
-  setSessionFilter("archived");
   await refreshSessions();
 });
 
@@ -4455,6 +4538,7 @@ function setStatusBadge(status) {
   $("term-rebrief").classList.toggle("hidden", exited);
   $("term-kill").classList.toggle("hidden", exited);
   $("term-archive").classList.toggle("hidden", !exited || archived);
+  syncSessionKillControls();
   // Every attach path passes through here (freshAttach and restoreTerminal
   // both seed the header with it), so this is where the countdown is told
   // which session it is now about — a whole second of the last session's
@@ -6785,6 +6869,7 @@ function syncMobileBars() {
   $("m-kill").classList.toggle("hidden", !has || status === "exited");
   $("m-archive").classList.toggle(
     "hidden", !has || status !== "exited" || !!(sess && sess.archived_at));
+  syncSessionKillControls();
 
   const bDot = $("mb-dot");
   bDot.className = `dot ${status}`;
@@ -10740,6 +10825,17 @@ function wfDiagramSvg(wf, run, selected) {
     // exists; the edges say which branch carries it, and at what cadence.
     if (s.select && (s.select.options || []).some((o) => o.interval)) {
       flags.push("paced");
+    }
+    /* A timed wait is the step's own schedule — the daemon moves the run
+       `every` seconds per fire, `max` fires per round — so the box carries
+       the schedule itself, values included, where the edges cannot. While
+       the run is actually parked on it (`waiting_timer`), the next fire's
+       local time rides at the end of the same line. */
+    if (s.timer) {
+      const next = active && run.status === "waiting_timer"
+        ? ` · next ${fmtOpensAt(run.opens_at)}`
+        : "";
+      flags.push(`timed · every ${fmtPace(s.timer.every)} · max ${s.timer.max}${next}`);
     }
     // Shape last, after the properties: `fork:2` counts where this step can
     // send the run, `merge:2` counts how many places send the run here. The

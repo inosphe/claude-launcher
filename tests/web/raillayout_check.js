@@ -336,8 +336,9 @@ ctx.setMeshes([
     check(`the one-line summary declares no ${prop} — it is not truncated`,
           decl("#session-list .rail-brief", prop), undefined);
   }
-  /* A recorded opening task carries paths and branch names, which offer no
-     break opportunity — without this the rail scrolls sideways instead. */
+  /* The one-line (a briefing digest) can carry paths and branch names,
+     which offer no break opportunity — without this the rail scrolls
+     sideways instead. */
   check("a long unbreakable token breaks rather than widening the rail",
         decl("#session-list .rail-brief", "overflow-wrap"), "anywhere");
 

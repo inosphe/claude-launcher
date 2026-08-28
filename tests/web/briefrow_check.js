@@ -5,11 +5,12 @@
    toggle + detail section; this holds what a row says whether folded or not.
    Each row carries a persistent one-line (the digest that rides the
    /api/sessions poll — so a browser refresh repaints it from the daemon's
-   session state instead of regenerating), falling back to the recorded
-   opening task until a briefing exists. The row's ⟳ refreshes the summary
-   from the collapsed state: it re-asks the daemon, bypassing the cache, and
-   does not open the card. Off (no llm: block) the ⟳ goes inert, its tooltip
-   pointing at the config, while the task-line still shows. */
+   session state instead of regenerating) and nothing else: the recorded
+   opening task is drawn only in the detail panel (sesstask_check), never as
+   the row's summary. The row's ⟳ refreshes the summary from the collapsed
+   state: it re-asks the daemon, bypassing the cache, and does not open the
+   card. Off (no llm: block) the ⟳ goes inert, its tooltip pointing at the
+   config, while the digest one-line still shows. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -132,7 +133,8 @@ const refresh = (li) => li.querySelector(".sess-brief-rowref");
 const click = (n) => n.listeners.click({ stopPropagation() {} });
 
 (async () => {
-  /* A digest one-line goes on the row, folded; the task is the fallback. */
+  /* A digest one-line goes on the row, folded; the recorded opening task is
+     never the row's summary — it belongs to the detail panel. */
   const s1 = row("s1");
   ctx.decorate(s1, { name: "s1", briefing: { one_line: "한 줄", state: "working" }, task: "테스크" });
   check("the digest one-line is on the row, always visible",
@@ -141,27 +143,25 @@ const click = (n) => n.listeners.click({ stopPropagation() {} });
 
   const s2 = row("s2");
   ctx.decorate(s2, { name: "s2", task: "개설 태스크" });
-  check("no digest yet: the recorded task is the one-line",
-        oneLine(s2).textContent, "개설 태스크");
+  check("no digest: no one-line at all, the task untold",
+        oneLine(s2), null);
 
   const s3 = row("s3");
   ctx.decorate(s3, { name: "s3" });
-  check("neither digest nor task: no one-line at all", oneLine(s3), null);
+  check("neither digest nor task recorded: no one-line at all", oneLine(s3), null);
 
-  /* The row carries the WHOLE summary, however long — the stylesheet wraps
+  /* The row carries the WHOLE digest, however long — the stylesheet wraps
      it (raillayout_check pins that) and nothing here may shorten it first.
      A cut made in JS would be the worse half of the same bug: invisible to
      the CSS check, and unrecoverable, because the element's title is a fixed
-     label rather than the text. The fallback task is the long case in
-     practice — it is a briefing paragraph, newlines and all, so its own line
-     breaks have to survive the trip too. */
+     label rather than the text. The digest is a briefing paragraph, newlines
+     and all, so its own line breaks have to survive the trip too. The task
+     is not a case at all: however long, it never reaches the row. */
   const long = "긴 요약: " + "여러 줄로 접혀야 하는 문장. ".repeat(12)
     + "\n두 번째 줄 — F:\\works\\claude-launcher\\.claude\\worktrees\\s82-railbrief-full";
   const s5 = row("s5");
   ctx.decorate(s5, { name: "s5", task: long });
-  check("a long task goes on the row whole, newlines included",
-        [oneLine(s5).textContent === long, oneLine(s5).textContent.length],
-        [true, long.length]);
+  check("a long recorded task is still no one-line", oneLine(s5), null);
   const s6 = row("s6");
   ctx.decorate(s6, { name: "s6", briefing: { one_line: long, state: "working" }, task: "짧은 태스크" });
   check("a long digest one-line is not shortened either",
@@ -224,7 +224,8 @@ const click = (n) => n.listeners.click({ stopPropagation() {} });
   check("a retry that succeeds clears the mark", failed(refresh(s1)), false);
 
   /* Off (no llm: block): the ⟳ is inert with the config tooltip; the
-     task-line (a local fact) still shows. */
+     digest one-line (a fact poured by the /api/sessions poll, not the LLM)
+     still shows — and a recorded task still never does. */
   ctx.setLLM(false);
   const s4 = row("s4");
   ctx.decorate(s4, { name: "s4", task: "로컬 태스크" });
@@ -232,7 +233,11 @@ const click = (n) => n.listeners.click({ stopPropagation() {} });
         [refresh(s4).disabled, refresh(s4).title],
         [true, "briefing off — set the llm section (endpoint, model, api_key)"
           + " in ~/.claunch.yaml to enable"]);
-  check("the task-line is not gated on the llm", oneLine(s4).textContent, "로컬 태스크");
+  check("off, a task is still no one-line", oneLine(s4), null);
+  const s7 = row("s7");
+  ctx.decorate(s7, { name: "s7", briefing: { one_line: "뽑아온 줄", state: "working" } });
+  check("the digest one-line is not gated on the llm",
+        oneLine(s7).textContent, "뽑아온 줄");
   ctx.setLLM(true);
 
   /* A row rebuilt by the poll keeps its one-line and ⟳ (decorate is

@@ -270,3 +270,19 @@ def test_timer_clock_leaves_non_timer_runs_alone(proj, clock):
     cwd = str(proj)
     engine.start("poller", cwd=cwd, scope="w2")
     assert cflow_clock.TimerClock(_FakeManager({})).scan() == []
+
+
+def test_timer_serialized_for_the_run_page():
+    """The dashboard's workflow view carries a timed step's schedule, so
+    the drawing can say what the engine is doing: `every` is the cadence
+    the diagram shows, `max` the fires per round, and then/after where the
+    run goes by fire and by budget."""
+    from claude_launcher.daemon.api import _serialize_workflow
+
+    view = _serialize_workflow(model.parse(POLL))
+    wait = next(s for s in view["steps"] if s["id"] == "wait")
+    assert wait["timer"] == {
+        "every": 300, "max": 3, "then": "poll", "after": "end",
+    }
+    poll = next(s for s in view["steps"] if s["id"] == "poll")
+    assert poll["timer"] is None

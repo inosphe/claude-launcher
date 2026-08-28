@@ -1,10 +1,11 @@
 /* The session detail panel's Opening task section.
 
    The record has been in every session payload the daemon serves for a long
-   time (`SessionDef.task`), and the page drew it in exactly one place: the
-   rail row's one-line job description, and only as the fallback for a session
-   with no LLM briefing, cut to one line. This section is the whole of it,
-   under the facts and above the briefing.
+   time (`SessionDef.task`). It once doubled as the rail row's one-line job
+   description — the fallback for a session with no LLM briefing; that
+   fallback is gone, the row shows the briefing digest only (briefrow_check),
+   and this detail section is the one place left where the task is drawn. It
+   sits under the facts and above the briefing.
 
    What has to hold, and what each check below is for:
 

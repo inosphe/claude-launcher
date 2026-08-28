@@ -20,7 +20,10 @@ holds the name, its role and its rooms to a single shrinking line — pinning
 which children are allowed to break the row, and that a tag may be
 abbreviated but never shrunk to a capsule with nothing in it — ``bulk_check`` on the
 rail's bulk bar — which of stop/resume/archive is offered on a given rail,
-and what each claims it would touch — ``sessionfilters_check`` on the
+and what each claims it would touch — ``killstate_check`` on the terminal's
+kill action — immediate request feedback, the wind-down escalation action,
+the final exit wait, and API error recovery kept identical on desktop and
+mobile — ``sessionfilters_check`` on the
 current/running/killed/archived partitions and their retained selection — ``owed_check`` on
 the Unanswered box and the requests its nudge/dismiss buttons send,
 ``panel_check`` on where the session detail docks (the rail beside the
@@ -85,8 +88,8 @@ two other homes, the top header's toggle (whose pane sits between the
 header and the terminal) and the detail panel's section, bound to the same
 open-set and off-state — ``briefrow_check`` on the row's always-on face —
 the one-line job description the /api/sessions poll pours into every row
-(digest first, the opening task as fallback) and the collapsed ⟳ that
-refreshes without opening — ``railhold_check`` on why those two glyphs used
+(the briefing digest — the recorded opening task is detail-panel-only) and
+the collapsed ⟳ that refreshes without opening — ``railhold_check`` on why those two glyphs used
 to swallow a press: the rail is rebuilt whole on every poll, and a rebuild
 landing between a pointerdown and its pointerup takes the pressed node out
 of the document, leaving the browser no common ancestor to send the click
@@ -171,7 +174,8 @@ onto the visit stamp — plus the two shapes that are not durations at all: the
 green "now" that means somebody has the terminal open this second (no stamp
 taken in the past can say that), and the dash that means no reading, drawn on
 every row whether or not it has one so the three columns stay where the eye
-left them.
+left them. It also holds the red stale state on each reading at its own
+threshold: one hour for ``seen`` and ``moved``, half an hour for ``typed``.
 
 ``railtimer_check`` on the nudge countdown's shared vocabulary — the clock
 for the daemon's automatic nudge, which is the one thing on this dashboard
@@ -255,6 +259,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "railsplit_check.js",
         "detailsplit_check.js",
         "bulk_check.js",
+        "killstate_check.js",
         "owed_check.js",
         "panel_check.js",
         "sesssend_check.js",
@@ -306,6 +311,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "beads_check.js",
         "beadskanban_check.js",
         "wfdpace_check.js",
+        "wfdtimer_check.js",
         "wftime_check.js",
         "askdoor_check.js",
         "railtimer_check.js",
