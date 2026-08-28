@@ -488,3 +488,66 @@ def test_a_declined_escalation_leaves_the_ordinary_ending_untouched(proj, monkey
     _finish("workerflow")
 
     assert seen == [None]
+
+
+# --------------------------------------------------------------------------- #
+# the slot already holds a request
+# --------------------------------------------------------------------------- #
+def test_a_pending_request_is_not_overwritten_by_an_escalation(proj, monkeypatch):
+    """A person's declared intent outranks the step's declaration.
+
+    The slot holds one request. Overwriting one a person asked for would wake
+    the session up under a workflow nobody chose, and `_request_next_round`
+    already refuses to do that for the weaker reason that recurrence merely
+    postpones a round of the SAME workflow.
+
+    The route this reproduces is the one that actually exists: `request_start`
+    refuses while a run is active, so a request can only reach the slot once
+    the run is over — and a forced `goto` can then reopen that finished run and
+    end it at the escalating step a second time.
+    """
+    _role(monkeypatch)
+    done = _finish("workerflow")
+    assert done["pending_start"]["by"] == "escalate"
+
+    engine.cancel_request(by="human")
+    engine.request_start("midflow", "asked for by a person", by="human")
+    asked = state_mod.read_request(None)
+
+    engine.goto("wrapup", by="human", reason="one more pass")
+    engine.next_step()  # deliver the step again before it can be reported
+    engine.report("step done")
+    engine.next_step()
+
+    pending = state_mod.read_request(None)
+    assert pending["id"] == asked["id"], (
+        "the escalation overwrote a request that was already waiting"
+    )
+    assert pending["by"] == "human"
+
+    skipped = _events(event="escalate_skipped")
+    assert skipped, "standing down left no record of why the hand-off never happened"
+    assert skipped[-1]["pending_by"] == "human"
+
+
+def test_one_declaration_files_one_hand_off(proj, monkeypatch):
+    """A reopened run ending at the same step does not file a second request.
+
+    Nothing guards this but the check above: the second ending finds this
+    run's OWN request still in the slot and stands down. Once that first
+    request has been fulfilled, `_start_impl` has cleared it and archived the
+    run, so what a `goto` opens afterwards is a new run rather than this one.
+    """
+    _role(monkeypatch)
+    done = _finish("workerflow")
+    first = done["pending_start"]
+
+    engine.goto("wrapup", by="human", reason="one more pass")
+    engine.next_step()  # deliver the step again before it can be reported
+    engine.report("step done")
+    engine.next_step()
+
+    pending = state_mod.read_request(None)
+    assert pending["id"] == first["id"], "the second ending filed a second request"
+    skipped = _events(event="escalate_skipped")
+    assert skipped and skipped[-1]["pending_by"] == "escalate"

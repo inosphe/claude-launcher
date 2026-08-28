@@ -1140,6 +1140,10 @@ def _request_escalation(step: Step, state: dict, cwd: Optional[str]) -> bool:
     kill-on-end clock, which samples the state without taking this lock and
     does not look again. See the comment at the call site in ``_advance``.
 
+    A request already waiting in the slot is left alone and the escalation
+    stands down: a person's declared intent outranks a step's declaration, and
+    the run ends the ordinary way.
+
     The role check has three outcomes and they are not interchangeable:
     approved (escalate), refused (do NOT escalate — the run ends the ordinary
     way), and unenforceable, which is what a session with no mesh identity
@@ -1154,6 +1158,36 @@ def _request_escalation(step: Step, state: dict, cwd: Optional[str]) -> bool:
     # reads as "any mesh this session is in", which does hold for a session
     # that belongs to one mesh but goes unenforced for a session in several.
     mesh = str(state.get("mesh") or "")
+
+    pending = state_mod.read_request(cwd)
+    if pending:
+        # The slot holds one request. Somebody asked for something while this
+        # run was finishing, and that request outranks the step's declaration
+        # for the same reason recurrence yields to it in
+        # `_request_next_round` — except the stake is higher here: `recur`
+        # merely postpones the same workflow's next round, while an escalation
+        # changes the rules the session works under, so overwriting one would
+        # wake the session up under B when a person asked for A.
+        #
+        # Recorded rather than silent, and under a name of its own. A declined
+        # escalation (`escalate_declined`) says the hand-off could not be made;
+        # this one says it COULD and was stood down. The distinction matters
+        # after the fact because a step's escalation fires at one particular
+        # ending: unlike a recurring round it does not come around again, so
+        # without this line there is nothing to explain why a declared hand-off
+        # never happened. The pending request's `by` is carried so the reader
+        # can tell a person's intent from this run's own earlier escalation —
+        # which is what a forced `goto` reopening a finished run and ending it
+        # at the same step produces, and what keeps that from firing twice.
+        state_mod.journal(
+            "escalate_skipped",
+            {"run": run_id, "step": step.id, "workflow": escalate.workflow,
+             "reason": "a start request was already pending",
+             "pending": pending.get("id"),
+             "pending_by": pending.get("by")},
+            cwd,
+        )
+        return False
 
     try:
         composed = state_mod.load_workflow(escalate.workflow, cwd)

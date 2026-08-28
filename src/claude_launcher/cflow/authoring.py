@@ -426,6 +426,13 @@ driver must perform, and the request carries the driving session's beads
 issue as an `issue: <id>` line in the context, so one board record spans both
 journals.
 
+One thing does stop it: a start request already waiting in the slot. The slot
+holds one, and a request a person filed outranks a step's declaration — the
+escalation stands down, the run ends the ordinary way, and `escalate_skipped`
+in the journal says so with the waiting request's `by`. That is the same rule
+`recur` follows, and it is also why one declaration files one hand-off when a
+forced `goto` reopens a finished run and ends it at the same step again.
+
 Use it where a round's ending is a change of procedure rather than a stop: a
 worker round whose remaining work is stack management, an intake run that
 turns out to need a review flow. Do not use it as a loop — that is `recur`,
