@@ -1489,3 +1489,174 @@ def test_an_explicit_base_is_left_exactly_as_given(stacked):
         "integration",
         "given",
     )
+
+
+# --------------------------------- an upstream that is only a push target (d4yo)
+
+
+@pytest.fixture
+def pushed(repo) -> Path:
+    """``master``, tracking an ``origin/master`` that is behind it.
+
+    The shape a session on the root checkout stands in: the branch has an
+    upstream, so ``--base auto`` finds one, but it names this same branch on a
+    remote rather than a branch to integrate into. Nothing here has been
+    pushed, so ``origin/master`` sits at the first commit while master carries
+    two more. Nothing is ever transferred: ``git remote add`` is here for the
+    fetch refspec, without which ``@{upstream}`` cannot map ``refs/heads/master``
+    on ``origin`` to the tracking ref and answers "no upstream" instead.
+    """
+    _git(repo, "checkout", "-q", "master")
+    old = _git(repo, "rev-parse", "HEAD").strip()
+    _git(repo, "remote", "add", "origin", str(repo))
+    _git(repo, "update-ref", "refs/remotes/origin/master", old)
+    _git(repo, "config", "branch.master.remote", "origin")
+    _git(repo, "config", "branch.master.merge", "refs/heads/master")
+
+    _write(repo, "src/pkg/batch_one.py")
+    _write(repo, "tests/test_batch_one.py")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "another session's landed work")
+    _write(repo, "tools/deploy_check.py", "changed = 1\n")
+    _git(repo, "commit", "-qam", "and another")
+    return repo
+
+
+def test_base_auto_does_not_measure_against_the_branchs_own_remote_copy(pushed):
+    """The defect, and the control next to it -- the unpushed work is not mine.
+
+    ``origin/master`` is where master is pushed, not a branch master
+    integrates into, so measuring against it reads everything unpushed as this
+    round's change. On the real repository that was 102 paths -> 114 modules
+    for a session that had committed nothing (``claunch-d4yo``).
+    """
+    against_the_remote_copy = changed_tests.select(
+        pushed, changed_tests.changed_paths(pushed, "origin/master")
+    )
+    assert against_the_remote_copy == [
+        "tests/test_batch_one.py",
+        "tests/test_deploy_check.py",
+    ]
+
+    base, how = changed_tests.resolve_base(pushed, changed_tests.BASE_AUTO)
+    assert (base, how) == ("master", "self-tracking")
+    assert changed_tests.changed_paths(pushed, base) == []
+    assert changed_tests.select(pushed, changed_tests.changed_paths(pushed, base)) == []
+
+
+def test_falling_back_off_a_self_tracking_upstream_says_so_and_still_passes(
+    pushed, capsys
+):
+    """Loud for the same reason ``no-upstream`` is loud.
+
+    The selection line would otherwise read ``vs master`` with nothing to say
+    that ``auto`` was asked at all, and an empty selection is a pass the step
+    reports on -- so the exit code does not move.
+    """
+    assert changed_tests.main(["--repo", str(pushed), "--base", "auto", "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "own remote copy" in out
+    assert "--set-upstream-to" in out
+    assert "no test modules map to this change" in out
+
+
+def test_an_upstream_naming_another_branch_holds_even_when_it_is_an_ancestor(stacked):
+    """Why the test is ancestry-free: a parent being an ancestor is the stack.
+
+    Three real branches in this repository sit exactly here --
+    ``s127-7w7g-gate-dirty``, ``s127-qj03-doc-body`` and ``s217-wf-followup``
+    -- so a rule that fell back to master whenever the upstream was an
+    ancestor of HEAD would put all three back on the base ``--base auto``
+    exists to keep them off.
+    """
+    _git(stacked, "checkout", "-q", "integration")
+    _git(stacked, "merge", "-q", "--ff-only", "worker")
+    _git(stacked, "checkout", "-q", "worker")
+    _git(stacked, "branch", "--set-upstream-to=integration", "worker")
+    assert _git(stacked, "merge-base", "--is-ancestor", "integration", "worker") == ""
+
+    assert changed_tests.resolve_base(stacked, changed_tests.BASE_AUTO) == (
+        "integration",
+        "upstream",
+    )
+
+
+def test_a_worker_branch_tracking_a_differently_named_remote_ref_is_untouched(repo):
+    """The edge of the rule, stated so it is not read as wider than it is.
+
+    ``branch.<X>.merge`` is compared against ``refs/heads/<X>``, so only a
+    branch paired with its own name falls back. A worker branch pointed at
+    ``origin/master`` names a different branch and keeps that axis, stale or
+    not -- this rule is about what an upstream *means*, not about how old one
+    is.
+    """
+    _git(repo, "remote", "add", "origin", str(repo))
+    _git(repo, "update-ref", "refs/remotes/origin/master",
+         _git(repo, "rev-parse", "master").strip())
+    _git(repo, "config", "branch.feature.remote", "origin")
+    _git(repo, "config", "branch.feature.merge", "refs/heads/master")
+
+    assert changed_tests.resolve_base(repo, changed_tests.BASE_AUTO) == (
+        "origin/master",
+        "upstream",
+    )
+
+
+def test_the_board_is_not_a_change_this_branch_made(repo):
+    """``.beads`` is tracked, is written by every session, and guards nothing.
+
+    On the root checkout it is uncommitted essentially always, and it maps to
+    four modules for a round that committed nothing. The count is not even
+    stable -- one tree read 113 then 114 because another session wrote an
+    issue in between (``claunch-d4yo``). Subtracted with the set the other two
+    gates already subtract, so one rule covers all three.
+    """
+    _write(repo, ".beads/issues.jsonl", '{"id": "x"}\n')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "board exists and is tracked")
+    _write(repo, ".beads/issues.jsonl", '{"id": "x"}\n{"id": "another session"}\n')
+
+    assert ".beads" in changed_tests.sweep.NON_CODE_ENTRIES
+    assert changed_tests.changed_paths(repo, "master") == []
+
+    _write(repo, "src/pkg/mesh.py", "mine = 1\n")
+    assert changed_tests.changed_paths(repo, "master") == ["src/pkg/mesh.py"]
+
+
+def test_the_code_that_handles_the_board_is_not_dropped_with_it(repo):
+    """The first question anyone asks of the rule above, pinned rather than answered.
+
+    What comes off is the data under ``.beads/``. A source file that *handles*
+    the board has a first path component of ``src`` or ``tools``, so it never
+    meets the rule and maps as it always did. Measured on this repository:
+    ``src/claude_launcher/daemon/beads.py`` selects ``test_beads_daemon``,
+    ``test_beads_protocol`` and ``test_reports``; ``tools/sweep.py`` selects
+    eight. A round editing either still gets its gate.
+    """
+    _write(repo, "src/pkg/beads.py", "board = 1\n")
+    _write(repo, "tests/test_beads.py", "from pkg import beads\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "code that handles the board")
+    _write(repo, ".beads/issues.jsonl", '{"id": "someone else"}\n')
+    _write(repo, "src/pkg/beads.py", "board = 2\n")
+
+    paths = changed_tests.changed_paths(repo, "master")
+    assert ".beads/issues.jsonl" not in paths       # the data comes off
+    assert "src/pkg/beads.py" in paths              # the code does not
+    assert "tests/test_beads.py" in changed_tests.select(repo, paths)
+
+
+def test_a_path_no_rule_recognises_is_still_code(repo):
+    """Subtraction, not selection -- the direction that fails towards running.
+
+    Only the entries named in ``NON_CODE_ENTRIES`` come off. A top-level name
+    that merely looks like data keeps its place in the changed set, because
+    the cost of running a module nobody needed is one module and the cost of
+    skipping the one that guarded the change is a red landing.
+    """
+    _write(repo, ".beadsdata/issues.jsonl", "{}\n")
+    _write(repo, "notes.jsonl", "{}\n")
+    assert changed_tests.changed_paths(repo, "master") == [
+        ".beadsdata/issues.jsonl",
+        "notes.jsonl",
+    ]
