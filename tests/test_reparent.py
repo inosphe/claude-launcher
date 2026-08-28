@@ -45,6 +45,11 @@ class _Fake:
     last_visited_at = None
     last_input_at = None
     exited_at = None
+    # Archive is a retained record's lifecycle marker, and persist()
+    # records it beside the stamps above. Session and DeadSession both
+    # set it in __init__ (None until archive stamps one), so a double
+    # that omits it is the only thing that can make that read raise.
+    archived_at = None
 
     def __init__(self, name: str, parent, exited: bool = False):
         self.sdef = SessionDef(name=name, harness="py", parent=parent)
