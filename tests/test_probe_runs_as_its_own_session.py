@@ -33,7 +33,12 @@ layer goes red:
 * ``ReminderClock`` -- the ``awaits`` probe, the path that flipped a worker's
   landing signal;
 * ``ChecklistClock`` -- the checklist item, the path that held a worker's
-  ``landed`` gate shut with an ``exit 2`` no flag could work around.
+  ``landed`` gate shut with an ``exit 2`` no flag could work around;
+* ``SessionReminderService`` -- the compatibility surface in front of the
+  first of those. It is here because it broke: while this fix was in review
+  the reminder clock was split, and the forwarding wrapper left behind kept
+  the old argument list and would have dropped the scope on the floor. That
+  is the same defect one layer up, and a wrapper is where nobody looks.
 """
 
 from __future__ import annotations
@@ -46,6 +51,7 @@ import pytest
 from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.cflow import state as state_mod
 from claude_launcher.daemon import cflow_clock
+from claude_launcher.daemon import session_reminder
 from claude_launcher.daemon.harness import SessionDef
 
 #: The name the daemon is holding. Anything that is not the run's scope would
@@ -314,3 +320,40 @@ def test_a_checklist_item_runs_as_the_run_it_is_gating(proj, tmp_path):
     items = cflow_engine.status(cwd, scope=RUN_SCOPE)["checklist"]["items"]
     measured = {i["id"]: (i["ok"], i["exit_code"]) for i in items}
     assert measured["merged"] == (True, 0)
+
+
+# --------------------------------------------------------------------------- #
+# the compatibility surface in front of the clock
+# --------------------------------------------------------------------------- #
+def test_the_reminder_services_wrapper_forwards_the_scope_it_was_given():
+    """A forwarding wrapper must forward the scope, not drop it.
+
+    ``SessionReminderService`` wraps :class:`CflowReminderSource` so older
+    callers keep working across the reminder split. Its ``_measure`` exists
+    only to hand the call through -- which makes it exactly the kind of code
+    that gets written from the OLD signature and reviewed as a no-op. It was,
+    and for a while the merged tree had a wrapper that would have passed
+    ``awaits`` where ``scope`` belongs.
+
+    Nothing in production calls it today (the daemon reaches the source
+    directly), so a broken wrapper is quiet until the first caller returns.
+    Asserting on the forwarded arguments rather than on a probe's output is
+    deliberate: the wrapper's whole contract is what it passes on.
+    """
+    seen = {}
+
+    class _Source:
+        def _measure(self, cwd, scope, awaits, entry, now):
+            seen.update(cwd=cwd, scope=scope, awaits=awaits, entry=entry, now=now)
+            return {"code": 0, "says": ""}
+
+    service = session_reminder.SessionReminderService.__new__(
+        session_reminder.SessionReminderService
+    )
+    service.cflow = _Source()
+    service._measure("C:/somewhere", RUN_SCOPE, {"probe": "x"}, {}, 1000.0)
+
+    assert seen["scope"] == RUN_SCOPE
+    assert seen["cwd"] == "C:/somewhere"
+    assert seen["awaits"] == {"probe": "x"}
+    assert seen["now"] == 1000.0
