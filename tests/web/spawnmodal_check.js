@@ -198,7 +198,7 @@ new Function(
   + slice("spawnModalKey") + slice("spawnModalClose")
   + slice("refreshSpawnBorrowOptions") + slice("openSpawnModal")
   + slice("spawnModalLoad") + slice("refreshSpawnConnect") + slice("spawnModalGo")
-  + slice("refreshSpawnBeads") + slice("fillSpawnIssueOptions")
+  + slice("refreshSpawnBeads") + slice("issueSearchMatches") + slice("fillSpawnIssueOptions")
   + `
 Object.assign(exports, {
   spawnPayload, syncSpawnGates, syncSpawnBeads, spawnRankWorkflows, spawnWorkflowAdmits,
@@ -279,6 +279,7 @@ function uiStub(over = {}) {
     handleRow: ctl(), connectRow: ctl(), connectHandles: [],
     meshNote: ctl(), parentMeshes: [],
     beads: beadsGroup(), issueText: ctl(), issueTextRow: ctl({ hidden: true }),
+    issueFilter: ctl(), issueFilterRow: ctl({ hidden: true }),
     issuePick: ctl(), issueRow: ctl({ hidden: true }), issueHint: ctl({ hidden: true }),
     _issues: [], _issuesFor: null, _issuesError: "", _issuesRead: false,
     connect: () => [],
@@ -513,16 +514,19 @@ async function main() {
   /* ---- the board row's two detail rows follow the picked answer ---------- */
   const sg = uiStub({});
   ctx.syncSpawnBeads(sg);
-  check("'new' shows the box and folds the picker",
-    sg.issueTextRow.hidden === false && sg.issueRow.hidden === true);
+  check("'new' shows the box and folds the picker with its search",
+    sg.issueTextRow.hidden === false && sg.issueRow.hidden === true &&
+    sg.issueFilterRow.hidden === true);
   sg.beads.value = "existing";
   ctx.syncSpawnBeads(sg);
-  check("'existing' shows the picker and folds the box",
-    sg.issueTextRow.hidden === true && sg.issueRow.hidden === false);
+  check("'existing' shows the picker and its search and folds the box",
+    sg.issueTextRow.hidden === true && sg.issueRow.hidden === false &&
+    sg.issueFilterRow.hidden === false);
   sg.beads.value = "none";
   ctx.syncSpawnBeads(sg);
   check("'none' folds both",
-    sg.issueTextRow.hidden === true && sg.issueRow.hidden === true);
+    sg.issueTextRow.hidden === true && sg.issueRow.hidden === true &&
+    sg.issueFilterRow.hidden === true);
   sg.issueText.value = "the spec";
   sg.beads.value = "new";
   ctx.syncSpawnBeads(sg);
@@ -567,6 +571,46 @@ async function main() {
   ctx.syncSpawnGates(noRow);
   ctx.syncSpawnBeads(noRow);
   check("a bag without the row passes the gates untouched", true);
+
+  /* ---- the search box: same list, same filter as the create form --------- */
+  const fsel = document.createElement("select");
+  const fui = uiStub({
+    beads: beadsGroup("existing"), issuePick: fsel,
+    issueFilter: ctl({ value: "rail" }),
+    _issues: [
+      { id: "cl-1", title: "wire the rail", status: "open", held_by: null },
+      { id: "cl-2", title: "the leader's own", status: "in_progress",
+        held_by: "lead" },
+    ],
+  });
+  ctx.fillSpawnIssueOptions(fui);
+  check("the search narrows the spawn picker to the matches",
+    fsel.options.map((o) => o.value).join(",") === ",cl-1",
+    fsel.options.map((o) => o.value));
+  check("...with the verdicts the pick would carry still on the rows",
+    fsel.options[1].textContent === "cl-1  wire the rail [open]",
+    fsel.options[1].textContent);
+  check("...and a lead row that counts what survived",
+    fsel.options[0].textContent === "(1 of 2 match)",
+    fsel.options[0].textContent);
+  fui.issueFilter.value = "zzz";
+  ctx.fillSpawnIssueOptions(fui);
+  check("a dead end offers nothing to adopt",
+    fsel.options.length === 1 && /no issue matches/.test(fsel.options[0].textContent),
+    fsel.options.map((o) => o.textContent));
+  fui.issueFilter.value = "";
+  ctx.fillSpawnIssueOptions(fui);
+  check("clearing the search gives the whole board back",
+    fsel.options.map((o) => o.value).join(",") === ",cl-1,cl-2",
+    fsel.options.map((o) => o.value));
+  /* A pick the filter left out is given back, the way the create form's
+     picker lets it go — a value that no longer survives is not an answer
+     the operator meant to keep. */
+  fui.issueFilter.value = "rail";
+  fsel.value = "cl-2";
+  ctx.fillSpawnIssueOptions(fui);
+  check("a pick the filter left out is given back",
+    fsel.value === "" || fsel.value === undefined, fsel.value);
 
   /* ---- the brain: gates -------------------------------------------------- */
   const g = uiStub({
