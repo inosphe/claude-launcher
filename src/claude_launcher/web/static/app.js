@@ -518,6 +518,9 @@ async function refreshSessions() {
     return;
   }
   sessionsCache = data.sessions || [];
+  // Reduced embedded consumers execute this poll in isolation.  Keep that
+  // contract while the full page reconciles the kill controls here.
+  if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
   briefingLLM = data.llm_configured !== false;
   forgetDeadSessions();
   const list = $("session-list");
@@ -4084,33 +4087,118 @@ $("term-details").addEventListener("click", () => openDetail(currentName));
    gotoSessionCard). */
 $("term-goto").addEventListener("click", () => { gotoSessionCard(); });
 
+/* A kill can take two distinct intervals that the session's ordinary
+   busy/idle status does not describe: the HTTP request itself, then a
+   graceful termination waiting for the process to exit. Keep those local
+   intervals per session so switching terminals cannot transfer one
+   session's pending action onto another one's button. Wind-down is durable
+   daemon state and therefore remains in sessionsCache. */
+const killUiState = new Map(); // session -> "requesting" | "ending"
+
+function killControlState(session, localState = null) {
+  if (localState === "requesting") {
+    return {
+      label: "ending…", disabled: true, phase: "pending",
+      title: "kill request in progress",
+    };
+  }
+  if (localState === "ending") {
+    return {
+      label: "ending…", disabled: true, phase: "pending",
+      title: "termination requested; waiting for the session to exit",
+    };
+  }
+  if (session && session.winddown) {
+    return {
+      label: "stop now", disabled: false, phase: "winddown",
+      title: "wind-down in progress; stop this session now",
+    };
+  }
+  return {
+    label: "kill", disabled: false, phase: "ready",
+    title: "terminate the program running in this session",
+  };
+}
+
+function reconcileKillUiState(sessions = sessionsCache) {
+  for (const name of [...killUiState.keys()]) {
+    const session = (sessions || []).find((s) => s.name === name);
+    if (!session || session.status === "exited" || session.winddown) {
+      killUiState.delete(name);
+    }
+  }
+}
+
+function syncSessionKillControls(name = currentName) {
+  if (!name || name !== currentName) return;
+  const session = sessionsCache.find((s) => s.name === name);
+  const state = killControlState(session, killUiState.get(name));
+  for (const id of ["term-kill", "m-kill"]) {
+    const button = $(id);
+    if (!button) continue;
+    button.textContent = state.label;
+    button.disabled = state.disabled;
+    button.title = state.title;
+    button.setAttribute("aria-busy", state.phase === "pending" ? "true" : "false");
+    button.classList.toggle("kill-pending", state.phase === "pending");
+    button.classList.toggle("kill-winddown", state.phase === "winddown");
+  }
+}
+
 /* Kill ends, remove forgets, and the two buttons never share a meaning:
    kill posts to the kill route (which leaves an exited session alone), and
    remove is the only thing on the page that makes a session unresumable.
    The header shows exactly one of them at a time (see setStatusBadge). */
-$("term-kill").addEventListener("click", async () => {
+async function killCurrentSession() {
   if (!currentName) return;
   const name = currentName;
+  if (killUiState.has(name)) return;
   // A live session holding board issues is wound down first (the daemon
   // types a settle-the-board block in and waits for that turn); the same
   // button pressed again while that runs means "stop now" — the daemon
   // reads the second kill that way, this only says so in the URL.
   const winding = !!(sessionsCache.find((s) => s.name === name) || {}).winddown;
-  const resp = await api(
-    `/api/sessions/${encodeURIComponent(name)}/kill${winding ? "?winddown=0" : ""}`,
-    { method: "POST" }
-  );
-  const info = await resp.json().catch(() => ({}));
-  if (!resp.ok) {
-    await modalInfo(`Could not kill '${name}'`,
-                    info.error || `HTTP ${resp.status}`);
-  } else if (info.status === "exited") {
+  killUiState.set(name, "requesting");
+  syncSessionKillControls(name);
+  try {
+    const resp = await api(
+      `/api/sessions/${encodeURIComponent(name)}/kill${winding ? "?winddown=0" : ""}`,
+      { method: "POST" }
+    );
+    const info = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      await modalInfo(`Could not kill '${name}'`,
+                      info.error || `HTTP ${resp.status}`);
+      return;
+    }
     const at = sessionsCache.findIndex((s) => s.name === name);
-    if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], ...info };
-    setSessionFilter("killed");
+    if (at >= 0) {
+      sessionsCache[at] = {
+        ...sessionsCache[at], ...info,
+        winddown: info.winding_down
+          ? sessionsCache[at].winddown || { since: "", issues: [] }
+          : undefined,
+      };
+    }
+    if (info.winding_down) {
+      killUiState.delete(name);
+    } else if (info.status === "exited") {
+      killUiState.delete(name);
+      setSessionFilter("killed");
+    } else {
+      killUiState.set(name, "ending");
+    }
+  } catch (err) {
+    await modalInfo(`Could not kill '${name}'`,
+                    err && err.message ? err.message : "request failed");
+  } finally {
+    if (killUiState.get(name) === "requesting") killUiState.delete(name);
+    syncSessionKillControls(name);
+    await refreshSessions();
   }
-  refreshSessions();
-});
+}
+
+$("term-kill").addEventListener("click", killCurrentSession);
 
 async function archiveExitedSession(name) {
   const resp = await api(
@@ -4322,6 +4410,7 @@ function setStatusBadge(status) {
   $("term-rebrief").classList.toggle("hidden", exited);
   $("term-kill").classList.toggle("hidden", exited);
   $("term-archive").classList.toggle("hidden", !exited || archived);
+  syncSessionKillControls();
   // Every attach path passes through here (freshAttach and restoreTerminal
   // both seed the header with it), so this is where the countdown is told
   // which session it is now about — a whole second of the last session's
@@ -6652,6 +6741,7 @@ function syncMobileBars() {
   $("m-kill").classList.toggle("hidden", !has || status === "exited");
   $("m-archive").classList.toggle(
     "hidden", !has || status !== "exited" || !!(sess && sess.archived_at));
+  syncSessionKillControls();
 
   const bDot = $("mb-dot");
   bDot.className = `dot ${status}`;
