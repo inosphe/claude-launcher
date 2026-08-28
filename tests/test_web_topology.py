@@ -85,8 +85,8 @@ two other homes, the top header's toggle (whose pane sits between the
 header and the terminal) and the detail panel's section, bound to the same
 open-set and off-state — ``briefrow_check`` on the row's always-on face —
 the one-line job description the /api/sessions poll pours into every row
-(digest first, the opening task as fallback) and the collapsed ⟳ that
-refreshes without opening — ``railhold_check`` on why those two glyphs used
+(the briefing digest — the recorded opening task is detail-panel-only) and
+the collapsed ⟳ that refreshes without opening — ``railhold_check`` on why those two glyphs used
 to swallow a press: the rail is rebuilt whole on every poll, and a rebuild
 landing between a pointerdown and its pointerup takes the pressed node out
 of the document, leaving the browser no common ancestor to send the click
