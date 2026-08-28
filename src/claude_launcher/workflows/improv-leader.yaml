@@ -21,10 +21,27 @@ description: >
   테스트(스윕)와 머지 실행은 리더의 턴에서 일어나지 않는다 — 매번
   subagent를 spawn해 그 안에서 돌리고, 리더는 돌아온 수치·해시를 값싼
   읽기 명령으로 되확인해 심사에만 쓴다.
-  recur가 끝난 회차마다 다음 회차를 요청하는 상주 서비스 루프이며,
-  반복을 멈추는 것은 사용자다(claunch cflow request --cancel).
+  recur가 끝난 회차마다 다음 회차를 요청하는 상주 서비스 루프이며, 그 시작은
+  데몬이 대행한다(recur auto) — 리더의 마지막 스텝이 라이브 재기동이라 회차를
+  닫는 턴이 그 재기동과 함께 죽고, 그러면 「드라이버가 start를 친다」가 성립할
+  턴이 남지 않는다. 반복을 멈추는 것은 사용자다(claunch cflow request --cancel).
 start: intake
-recur: true
+# 다음 회차의 start를 데몬이 대행한다(RoundStartClock). plain recur는 그 start를
+# 드라이버에게 맡기는데, 이 워크플로의 마지막 스텝 reflect는 라이브 데몬을
+# 재기동하고 데몬은 붙은 터미널을 전부 데리고 내려간다 — 회차를 닫을 턴이 그
+# 재기동과 함께 죽는다. 그리고 리더가 앉는 자리 done은 아무 클럭도 찌르지
+# 않는다: cflow_clock.py의 _ACTIONABLE은 step과 select뿐이라 리마인더도
+# stall ping도 done을 건너뛰고, RunEventClock의 round-done은 드라이버가 아니라
+# 상위로 가는데(같은 파일) 리더에게는 상위가 없다. 그래서 12회차가 닫힌 뒤
+# 13회차는 사람이 손으로 start를 불러 열렸다.
+# auto는 그 자리를 둘 다 메운다 — 데몬이 라운드를 시작하고, round_block은 idle
+# 세션도 깨운다(RoundStartClock._deliver에는 busy 검사가 없다).
+# 고아 런 우려는 측정으로 걸렀다(claunch-usfz): 런은 (cwd, scope)로 키가 잡히고
+# scope는 세션 이름이므로, 드라이버가 죽은 auto 런은 다른 세션의 start를 막지
+# 않는다(별개 슬롯). 같은 이름으로 돌아오는 경로는 respawn과
+# clear-sessions --logs 뒤의 이름 재활용 둘뿐이고, 앞의 것은 그 런의 주인이
+# 돌아온 것이라 거절이 맞다.
+recur: {auto: true}
 
 # 관제 런은 leader 역할 세션만 몬다 — 워커가 이 런을 시작해 스스로 통합
 # 권한을 얻는 사고를 시작 시점에 막는다.
@@ -794,7 +811,8 @@ steps:
     instructions: |
       라이브 서버를 재기동하고, 기동 후 새 머지 커밋의 기능이 실제로
       서빙되는지 한 가지 이상 확인해 증거(확인 방법과 결과)를 보고에
-      남긴다. 이 회차는 여기서 마감된다 — recur가 다음 회차를 요청한다.
+      남긴다. 이 회차는 여기서 마감된다 — recur가 다음 회차를 요청하고
+      데몬이 그것을 시작한다. 재기동으로 이 턴이 죽어도 회차는 이어진다.
 
       ── 재기동을 인지하는 규율 ──
       재기동을 거는 턴과 그 결과를 읽는 턴은 같은 턴이 아니다. 데몬은
@@ -855,9 +873,10 @@ steps:
       요약 — 처리한 요청, 확정한 규칙, 머지 커밋, 반영 여부, 남은 통합
       대기 브랜치 — 를 저널 기반으로 남기고, 보드의 잔량(`claunch beads list
       --status open --status in_progress --status in_review --json`)을
-      붙인다. 이 런은 recur라서 종료 후에도
-      다음 회차 요청이 접수된다 — 교대를 정말 끝내려면 사용자가 요청을
-      철회해야 함을 안내한다(claunch cflow request --cancel).
+      붙인다. 이 런은 recur(auto)라서 종료 후에도
+      다음 회차 요청이 접수되고 데몬이 그것을 시작한다 — 교대를 정말
+      끝내려면 사용자가 요청을 철회해야 함을 안내한다
+      (claunch cflow request --cancel).
     done_when: |
       유휴가 확인된 워커(와 남아 있던 tester) 세션이 모두 종료되었고, 교대 최종 보고
       (처리한 요청, 확정 규칙, 머지 커밋, 반영 여부, 남은 통합 대기)가

@@ -597,6 +597,41 @@ def test_the_project_override_leader_gates_are_self_decided():
     assert wf.steps["wrapup"].ask.delegate.otherwise == model.OTHERWISE_HUMAN
 
 
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_leader_loop_is_started_by_the_daemon_not_by_the_driver(layer):
+    """``improv-leader`` recurs with ``auto``, in both copies of the name.
+
+    Plain ``recur: true`` leaves the next round's ``start`` to the driving
+    agent. This workflow cannot pay that: its last step, ``reflect``,
+    restarts the live daemon, and the daemon takes every attached terminal
+    down with it — the turn that would close the round dies with it. What is
+    left behind is a run at ``done``, and ``done`` is the one position no
+    clock pokes: ``cflow_clock``'s ``_ACTIONABLE`` is ``step`` and
+    ``select``, so neither the reminder nor the stall ping reaches it, and
+    the ``round-done`` event goes to the driver's overseer rather than to the
+    driver — which a leader does not have. The loop then stops until a person
+    calls ``start`` by hand, which is what happened between rounds 12 and 13.
+
+    ``auto`` fills both halves: ``RoundStartClock`` performs the start, and
+    its ``round_block`` wakes an idle session (its ``_deliver`` has no busy
+    check, unlike the reminder's).
+
+    Both layers are pinned for the reason the gate test above states: this
+    repository's override shadows the bundled copy for every run here, so the
+    two carrying different recurrence would be two policies under one name.
+    """
+    if layer == "bundled":
+        wf = model.load(dict(state_mod.bundled_workflows())["improv-leader"])
+    else:
+        wf = model.load(PROJECT_OVERRIDES / "improv-leader.yaml")
+
+    assert wf.recur, "the leader is a service loop"
+    assert wf.recur_auto, (
+        "the leader's rounds must be started by the daemon: its last step "
+        "restarts the daemon, so no turn survives to perform the start"
+    )
+
+
 def test_a_global_install_seeds_the_global_layer(project, home):
     lines = install_mod.install_into_user()
     assert [line for line in lines if line.startswith("workflow ->")]
