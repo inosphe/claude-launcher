@@ -70,9 +70,10 @@ def test_the_open_pool_criteria_section_is_part_of_the_shared_block():
     workflow's own half — a worker-only pin would teach the leader nothing
     about the pool it is the leader's to tidy."""
     block = _block(_bundled("improv-worker"))
+    flat = " ".join(block.split())                     # prose wraps mid-phrase
     assert "── open 풀 판정 기준 ──" in block
     assert "--limit 0" in block                       # full-pool measurement, never the 50-row view
-    assert "일괄 변경은 없다" in block            # per-issue verdicts only, never a batch
+    assert "일괄 변경은 없다" in flat            # per-issue verdicts only, never a batch
     assert "merged 해시가 코멘트에 있는데 open인" in block
     assert "SESSION ENDED 코멘트가 있고 assignee 없이 3일" in block
     assert "재배정이 먼저" in block                 # reassignment before closing
