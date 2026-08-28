@@ -788,6 +788,61 @@ async function main() {
   check("the parent line names the opener",
     texts(built.box).includes("child of lead1"));
 
+  /* ---- the fork lock, on the form the operator is actually handed --------
+     The gate checks above drive a stub bag whose forkNote the harness itself
+     made, so they held while the real form built that row WITHOUT a note:
+     `spawnCheckRow(label, null)` skips the span, `ui.forkNote` came back
+     null, and lock()'s `if (note)` dropped every reason on the floor. The
+     checkbox greyed and said nothing — and the modal opens on "new worktree"
+     by default (spawnModalLoad), so that silence was the FIRST thing an
+     operator met. These drive syncSpawnGates against the BUILT ui, which is
+     the only place the missing element shows. */
+  check("the fork row is built with a note to carry its lock reason",
+    !!bui.forkNote && typeof bui.forkNote === "object", bui.forkNote);
+  const forkCase = (over = {}) => {
+    const u = ctx.buildSpawnForm("lead1", {}).ui;
+    u.parentSess = over.parentSess || { harness: "claude" };
+    u.report = over.report || { may_choose: ["fork", "worktree"], workspaces: [] };
+    u.git = over.git || { repo: true, worktrees: [] };
+    if (over.mode !== undefined) u.wtMode.value = over.mode;
+    ctx.syncSpawnGates(u);
+    return u;
+  };
+  /* Null-safe on purpose: the note element is the thing under test, so a
+     regression that takes it away must come back as a FAIL on each line
+     rather than as a TypeError that stops the run at the first one. */
+  const noteOf = (u) => u.forkNote || { hidden: null, textContent: null };
+  const noConvo = forkCase({ report: { may_choose: [], workspaces: [] },
+                             git: { repo: false, worktrees: [] } });
+  check("a parent with no conversation says so on the built form",
+    noConvo.fork.disabled === true && noteOf(noConvo).hidden === false &&
+      /no claude conversation to copy/.test(noteOf(noConvo).textContent),
+    [noConvo.fork.disabled, noConvo.forkNote && noConvo.forkNote.hidden,
+     noConvo.forkNote && noConvo.forkNote.textContent]);
+  /* claunch-meic: two reasons can lock this one box, and which of them is
+     shown is fixed here rather than left to the order the branches happen to
+     sit in. The harness rule wins — a child that cannot run claude has no
+     copy to make wherever it stands, so naming the directory would answer
+     the smaller half of the question. */
+  const forkElsewhere = forkCase({ mode: "new" });
+  check("the default 'new worktree' names the directory as the reason",
+    forkElsewhere.fork.disabled === true &&
+      noteOf(forkElsewhere).hidden === false &&
+      /worktree of its own/.test(noteOf(forkElsewhere).textContent),
+    forkElsewhere.forkNote && forkElsewhere.forkNote.textContent);
+  const forkNonClaude = forkCase({
+    mode: "new", parentSess: { harness: "codex" },
+  });
+  check("...but a non-claude child answers with the harness, not the directory",
+    forkNonClaude.fork.disabled === true &&
+      noteOf(forkNonClaude).textContent === "the claude harness only",
+    forkNonClaude.forkNote && forkNonClaude.forkNote.textContent);
+  const forkOpen = forkCase({ mode: "" });
+  check("nothing locking it leaves the note away",
+    forkOpen.fork.disabled === false && noteOf(forkOpen).hidden === true &&
+      noteOf(forkOpen).textContent === "",
+    [forkOpen.fork.disabled, forkOpen.forkNote && forkOpen.forkNote.hidden]);
+
   /* ---- the route: the quick job opening lands in the same modal ---------- */
   Object.keys(store).forEach((k) => delete store[k]);
   const m0Members = { members: [{ handle: "lead1", role: "leader" },
