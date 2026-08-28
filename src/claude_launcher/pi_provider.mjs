@@ -4,11 +4,12 @@
 
 const provider = process.env.CLAUNCH_PI_PROVIDER;
 const baseUrl = process.env.CLAUNCH_PI_BASE_URL;
+const api = process.env.CLAUNCH_PI_API;
 const tokenEnv = process.env.CLAUNCH_PI_TOKEN_ENV;
 const rawModels = process.env.CLAUNCH_PI_MODELS;
 
 export default function (pi) {
-  if (!provider || !baseUrl || !tokenEnv || !rawModels) return;
+  if (!provider || !baseUrl || !api || !tokenEnv || !rawModels) return;
 
   const ids = JSON.parse(rawModels);
   if (!Array.isArray(ids) || ids.length === 0) {
@@ -22,12 +23,20 @@ export default function (pi) {
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     contextWindow: 128000,
     maxTokens: 16384,
+    compat: {
+      supportsStore: false,
+      supportsDeveloperRole: false,
+      supportsReasoningEffort: false,
+      supportsUsageInStreaming: false,
+      maxTokensField: "max_tokens",
+      supportsStrictMode: false,
+    },
   }));
 
   pi.registerProvider(provider, {
     baseUrl,
     apiKey: tokenEnv,
-    api: "anthropic-messages",
+    api,
     authHeader: process.env.CLAUNCH_PI_AUTH_HEADER === "1",
     models,
   });
