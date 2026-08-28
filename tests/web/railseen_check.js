@@ -146,7 +146,7 @@ Object.assign(exports, {
   refresh: refreshSessions,
   ago: seenAgo,
   line: railSeenLine,
-  COLD: SEEN_COLD,
+  SEEN_STALE: SEEN_COLD,
   STALE: TYPED_STALE,
 });`)(ctx, document, el, api, list, []);
 
@@ -180,7 +180,7 @@ check("...or where the stamp is not a date", ctx.ago("soon"), null);
    age. Pinned on `secs` and not on the text, because the text cannot tell:
    any negative number falls through the "< 10 seconds" branch and reads as
    "now" whether it was clamped or not. `secs` is the half that is actually
-   consumed — it is what decides the cold colouring — so it is the half worth
+   consumed — it is what decides the stale colouring — so it is the half worth
    holding. */
 check("a stamp from the future is clamped rather than left negative",
       ctx.ago(new Date(Date.now() + 7_200_000).toISOString()).secs, 0);
@@ -260,20 +260,21 @@ check("viewers do not make the session look busy",
       pairs({ viewers: 3, last_activity_at: ago(4000) }).moved, "1h06m");
 
 /* ------------------------------------------------------------------ */
-/* the one colour step: cold                                           */
+/* stale thresholds: one hour for seen/moved, half an hour for typed  */
 /* ------------------------------------------------------------------ */
 check("fresh readings are drawn plainly",
       [classOf({ last_visited_at: ago(60) }, "seen"),
        classOf({ last_activity_at: ago(60) }, "moved")],
       ["rail-seen-val", "rail-seen-val"]);
-check("...and go cold past the hour, which is the row being hunted for",
-      [classOf({ last_visited_at: ago(ctx.COLD + 60) }, "seen"),
-       classOf({ last_activity_at: ago(ctx.COLD + 60) }, "moved")],
-      ["rail-seen-val cold", "rail-seen-val cold"]);
+check("seen and moved stay plain right up to the hour",
+      [classOf({ last_visited_at: ago(ctx.SEEN_STALE - 60) }, "seen"),
+       classOf({ last_activity_at: ago(ctx.SEEN_STALE - 60) }, "moved")],
+      ["rail-seen-val", "rail-seen-val"]);
+check("...and are emphasized past the hour",
+      [classOf({ last_visited_at: ago(ctx.SEEN_STALE + 60) }, "seen"),
+       classOf({ last_activity_at: ago(ctx.SEEN_STALE + 60) }, "moved")],
+      ["rail-seen-val stale", "rail-seen-val stale"]);
 
-/* ------------------------------------------------------------------ */
-/* the second step, on the typed reading alone                         */
-/* ------------------------------------------------------------------ */
 /* Half an hour since a person typed is drawn as an error state rather than
    as an age: the session somebody handed a task to and then walked away from
    is legible well before the hour at which the other two readings become
@@ -288,26 +289,20 @@ check("the typed reading is drawn plainly right up to the half hour",
 check("...and past it, it is an error state",
       classOf({ last_input_at: ago(ctx.STALE + 60) }, "typed"),
       "rail-seen-val stale");
-/* Both steps read the same field, so the order between them is a real
-   choice and not an accident: the later, quieter one must not take back a
-   row the earlier one has already flagged. */
-check("...which the hour mark does not downgrade back to amber",
-      classOf({ last_input_at: ago(ctx.COLD * 5) }, "typed"),
+check("...and remains emphasized past the hour",
+      classOf({ last_input_at: ago(ctx.SEEN_STALE * 5) }, "typed"),
       "rail-seen-val stale");
-/* It is asked for per pair. If it ever leaks onto the other two, the rail
-   goes red for a condition nobody asked to see — a session read an hour ago,
-   an agent quiet for an hour — and the reading that IS about the keyboard
-   stops standing out. */
-check("the step is the typed reading's alone, at an age past it",
+/* The three readings retain their own thresholds. Seen and moved do not turn
+   red at typed's earlier half-hour boundary. */
+check("seen and moved retain their one-hour threshold",
       [classOf({ last_visited_at: ago(ctx.STALE + 60) }, "seen"),
        classOf({ last_activity_at: ago(ctx.STALE + 60) }, "moved")],
       ["rail-seen-val", "rail-seen-val"]);
-/* Absence is not a stale timer. Almost every session on this rail was
-   spawned by an agent and never typed into by anybody, so colouring the dash
-   would paint the rail red and bury the rows the step exists to pick out. */
-check("a session nobody has ever typed into is not an error, it is a dash",
-      [classOf({}, "typed"), pairs({}).typed],
-      ["rail-seen-val unknown", "\u2013"]);
+/* Absence is not a stale timer. */
+check("a missing reading is not an error, it is a dash",
+      [classOf({}, "seen"), classOf({}, "typed"), classOf({}, "moved")],
+      ["rail-seen-val unknown", "rail-seen-val unknown",
+       "rail-seen-val unknown"]);
 
 /* The colour has to exist. This is the failure the DOM cannot see: the class
    keeps being written onto the value and the value keeps rendering grey. */
@@ -332,6 +327,12 @@ check("a red value says on hover what tripped it",
       /over 30m since anyone typed here/.test(
         titleOf({ last_input_at: ago(ctx.STALE + 60) }, "typed")),
       true);
+check("stale seen and moved values explain their own thresholds",
+      [/over 60m since anyone looked here/.test(
+         titleOf({ last_visited_at: ago(ctx.SEEN_STALE + 60) }, "seen")),
+       /over 60m since the screen moved for real/.test(
+         titleOf({ last_activity_at: ago(ctx.SEEN_STALE + 60) }, "moved"))],
+      [true, true]);
 check("...and a value that has not tripped does not carry the note",
       /since anyone typed here/.test(
         titleOf({ last_input_at: ago(60) }, "typed")),
@@ -415,6 +416,9 @@ served = { sessions: [WATCHED, FORGOTTEN, PLAIN, GONE] };
   };
   check("the row the poll builds carries the error state on typed",
         classOnRow("forgotten", "typed"), "rail-seen-val stale");
+  check("...and on stale seen and moved readings",
+        [classOnRow("forgotten", "seen"), classOnRow("forgotten", "moved")],
+        ["rail-seen-val stale", "rail-seen-val stale"]);
   check("...and the row typed into ten minutes ago does not",
         classOnRow("watched", "typed"), "rail-seen-val");
   /* The exited record's 40-minute stamp is past the threshold too. Nothing

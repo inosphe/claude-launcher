@@ -171,7 +171,8 @@ onto the visit stamp — plus the two shapes that are not durations at all: the
 green "now" that means somebody has the terminal open this second (no stamp
 taken in the past can say that), and the dash that means no reading, drawn on
 every row whether or not it has one so the three columns stay where the eye
-left them.
+left them. It also holds the red stale state on each reading at its own
+threshold: one hour for ``seen`` and ``moved``, half an hour for ``typed``.
 
 ``railtimer_check`` on the nudge countdown's shared vocabulary — the clock
 for the daemon's automatic nudge, which is the one thing on this dashboard
