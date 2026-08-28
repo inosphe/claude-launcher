@@ -250,6 +250,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "lineage_check.js",
         "railbadge_check.js",
         "sessmesh_check.js",
+        "sesshandle_check.js",
         "raillayout_check.js",
         "railsplit_check.js",
         "detailsplit_check.js",

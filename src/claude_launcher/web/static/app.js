@@ -548,6 +548,19 @@ async function refreshSessions() {
       role.className = "mesh-role";
       role.textContent = s.role;
     }
+    // And the name the mesh calls it by, when that is not the name above.
+    // First of the qualifiers, before the role, because it is another way of
+    // saying WHO this row is — the role and the rooms are both properties of
+    // that identity, and a reader who came here from a mesh log looking for
+    // `merger-r13` has to find it beside the name, not after two other pills.
+    const hTag = handleTag(s.name);
+    let handleBox = null;
+    if (hTag) {
+      handleBox = document.createElement("span");
+      handleBox.className = "rail-handle";
+      handleBox.textContent = hTag.text;
+      handleBox.title = hTag.title;
+    }
     // Then which rooms it is in. Role first and in colour, membership after
     // it in neutral grey: the pair reads as "what this session is, and where
     // it belongs", and only the first of those is a property of the session
@@ -632,7 +645,8 @@ async function refreshSessions() {
     // to and give up width instead, which is what ellipsis is for.
     const head = document.createElement("span");
     head.className = "rail-head";
-    head.append(label, ...(role ? [role] : []), ...(meshBox ? [meshBox] : []));
+    head.append(label, ...(handleBox ? [handleBox] : []),
+                ...(role ? [role] : []), ...(meshBox ? [meshBox] : []));
     // Where it runs, then how full it is, then who has been near it: the two
     // identity lines first and the state line under them, so a reader
     // scanning for "which of these has nobody touched" finds it in one
@@ -675,6 +689,9 @@ async function refreshSessions() {
   // The mobile bottom bar carries this session's harness/profile, which only
   // the list knows.
   syncMobileBars();
+  // The rail rows above were rebuilt with the handles the mesh poll last
+  // knew; the header beside them is repainted from the same value here.
+  renderTermHandle();
   // The rows and the runs arrive on separate polls; whichever lands last
   // paints the cflow badges over the rows that exist now.
   applyCflowBadges();
@@ -728,6 +745,64 @@ function railMeshTags(name) {
     });
   }
   return shown;
+}
+
+/* The names a session answers to in its rooms, when they are not the name
+   this page calls it by.
+
+   A session's mesh handle is chosen at join time and is free to differ from
+   its session name: `s236` answers to `merger-r13`, and every message about
+   it on the mesh uses that word. Until now the page said the handle in two
+   tooltips and one chip at the bottom of the details panel, so a reader
+   watching the rail had no way to connect the two — the mesh log named a
+   session the rail did not list. Hence a value the three places that carry a
+   session's identity can each draw.
+
+   Only DIFFERING handles are collected. The common case is handle == name,
+   and a pill repeating the name it sits beside is noise on a 260px rail; the
+   fact worth surfacing is precisely the mismatch. Duplicates across rooms
+   collapse for the same reason — joining four meshes as `merger-r13` is one
+   name, not four. */
+function sessHandles(name) {
+  const out = [];
+  for (const m of sessMeshes(name)) {
+    if (!m.handle || m.handle === name) continue;
+    if (!out.some((h) => h.handle === m.handle)) out.push(m);
+  }
+  return out;
+}
+
+/* That value as something drawable: the first differing handle, plus a count
+   when a session answers to more than one, and the whole of it as hover.
+   Null when there is nothing to say, which is what every caller tests. */
+function handleTag(name) {
+  const hs = sessHandles(name);
+  if (!hs.length) return null;
+  const rest = hs.length - 1;
+  return {
+    handle: hs[0].handle,
+    text: rest ? `${hs[0].handle} +${rest}` : hs[0].handle,
+    title:
+      `session '${name}' answers to ` +
+      hs.map((h) => `'${h.handle}' in ${h.mesh}` +
+                    (h.role ? ` (${h.role})` : "")).join(", ") +
+      " — address it by that name on the mesh",
+  };
+}
+
+/* The terminal header's copy of that, painted from whatever the mesh poll
+   last knew. Called at attach AND on both polls, because the two arrive
+   independently: an attach that lands before the first /api/mesh answer has
+   nothing to draw, and without a repaint the chip would stay empty until the
+   reader switched terminals and came back. Down to nothing when the session
+   answers to its own name, which is the ordinary case. */
+function renderTermHandle() {
+  const box = $("term-handle");
+  if (!box) return;
+  const tag = currentName ? handleTag(currentName) : null;
+  box.classList.toggle("hidden", !tag);
+  box.textContent = tag ? tag.text : "";
+  box.title = tag ? tag.title : "";
 }
 
 /* The cflow run a rail row speaks for. Runs are keyed (cwd, session); after a
@@ -5450,6 +5525,7 @@ function restoreTerminal(b) {
   // controls never linger on this one.
   showView("terminal");
   $("term-title").textContent = b.name;
+  renderTermHandle();
   setStatusBadge((sessionsCache.find((s) => s.name === b.name) || {}).status || "starting");
   document.querySelectorAll("#session-list li").forEach((li) =>
     li.classList.toggle("active", li.dataset.name === b.name)
@@ -5656,6 +5732,7 @@ function freshAttach(name) {
   // zero-height box fits to nothing.
   showView("terminal");
   $("term-title").textContent = name;
+  renderTermHandle();
   // Seed the header from the list until the socket's `init` says otherwise,
   // so the previous session's controls never linger on this one.
   setStatusBadge((sessionsCache.find((s) => s.name === name) || {}).status || "starting");
@@ -10860,6 +10937,18 @@ function metaRow(dl, label, value, title) {
 function sessHead(s) {
   const head = el("div", "wf-head sess-head");
   head.appendChild(el("h2", null, s.name || "session"));
+  // Directly after the name, the other name: what the mesh calls this
+  // session when that differs. The panel already carried it, at the bottom,
+  // inside the Meshes chips — which is the wrong altitude for an identity.
+  // A reader arrives here from a mesh log holding a handle and needs the
+  // head to confirm they opened the right session, before any of the
+  // metadata below is worth reading.
+  const hTag = handleTag(s.name || "");
+  if (hTag) {
+    const chip = el("span", "sess-handle", hTag.text);
+    chip.title = hTag.title;
+    head.appendChild(chip);
+  }
   head.appendChild(el("span", `badge ${s.status || ""}`, s.status || "?"));
   const mine = !!s.name && s.name === currentName;
   // Opening another row's ⓘ is a legitimate thing to do — read one session
@@ -11047,6 +11136,19 @@ function renderSession(data) {
     dl, "role", data.role ? data.role.name : s.role,
     data.role ? data.role.stance : ""
   );
+  // Beside the role, because the two are one fact between them: what this
+  // session is on a mesh, and what it is called there. Spelt out as a row
+  // rather than left to the head's chip so it can say WHICH room each name
+  // belongs to — the chip has room for one word and a count.
+  const handles = sessHandles(s.name || "");
+  if (handles.length) {
+    metaRow(
+      dl, "mesh handle",
+      handles.map((h) => `${h.handle} (in ${h.mesh})`).join(", "),
+      "the name this session joined its mesh under — messages to it are " +
+      "addressed to this, not to the session name"
+    );
+  }
   // A `--worktree` session sits inside its workspace rather than at its root,
   // so say which of the two it is: "workspace X" and "in X / wt-name" are
   // different facts, and reading the second as the first would have the
@@ -14160,6 +14262,10 @@ async function refreshMeshList() {
     });
     list.appendChild(li);
   }
+  // A room may have been joined (or left) since the last session poll, so
+  // the header's handle chip is repainted on this poll too — it is the mesh
+  // that owns the fact, and this is where the fact arrives.
+  renderTermHandle();
   renderOutgoingJoins(data.outgoing || []);
   syncOnboardPickers();
   if (currentPage === "home") renderHome();

@@ -103,6 +103,10 @@ function refreshParentChoices() {}
 function renderHome() {}
 function syncBulkActions() {}
 function syncMobileBars() {}
+/* The terminal header's mesh-handle chip, which the session poll
+   repaints (sesshandle_check's subject); here it is only a call that
+   has to resolve — this harness draws no header. */
+function renderTermHandle() {}
 function applyCflowBadges() {}
 function applyGotoFlash() {}
 function applyRailQuiet() {}
@@ -121,6 +125,10 @@ function railCwdLine(s) { return el("span", "rail-cwd"); }
    the row's lines say (railseen_check holds that one). */
 function railSeenLine(s) { return el("span", "rail-seen"); }
 function railMeshTags(name) { return []; }
+/* The mesh handle a row/head wears when it differs from the session name
+   (sesshandle_check's subject); here it is only a call that has to
+   resolve. */
+function handleTag(name) { return null; }
 function openSpawnModal() {}
 function openDetail() {}
 function $(id) { return list; }

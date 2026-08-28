@@ -113,6 +113,10 @@ function refreshParentChoices() {}
 function renderHome() {}
 function syncBulkActions() {}
 function syncMobileBars() {}
+/* The terminal header's mesh-handle chip, which the session poll
+   repaints (sesshandle_check's subject); here it is only a call that
+   has to resolve — this harness draws no header. */
+function renderTermHandle() {}
 function applyCflowBadges() {}
 function applyGotoFlash() {}
 function applyRailQuiet() {}
@@ -129,7 +133,7 @@ new Function(
   "exports", "document", "el", "api", "list", "meshCache",
   stubs + constLine("RAIL_MESH_TAGS") + constLine("CTX_DOMAIN")
   + constLine("SEEN_COLD") + constLine("TYPED_STALE")
-  + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags")
+  + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
   + slice("fmtAge") + slice("ctxShort") + slice("ctxAgeOf")
   + slice("ctxKnowable") + slice("ctxSentence") + slice("ctxBreakdown")
   + slice("ctxTooltip") + slice("ctxNoteOnRow") + slice("modelShort")

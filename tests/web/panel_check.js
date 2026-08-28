@@ -133,6 +133,10 @@ function openFlowTopology() {}
 function openWorkspaces() {}
 function openReports() {}
 function openHome() {}
+/* The mesh handle a row/head wears when it differs from the session name
+   (sesshandle_check's subject); here it is only a call that has to
+   resolve. */
+function handleTag(name) { return null; }
 function refreshMeshList() {}
 function refreshWorkflowChoices() {}
 function refreshCflow() {}
