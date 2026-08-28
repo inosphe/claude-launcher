@@ -83,16 +83,22 @@ option:disabled { color: #6b7280; }
 #refresh-all.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
-#archived-sessions-toggle {
-  flex: none; width: 100%; padding: 7px 16px;
-  border: 0; border-bottom: 1px solid #2a2e36;
-  background: #171a20; color: #8b949e; cursor: pointer;
-  font-size: 11px; text-align: left;
+.session-filters {
+  flex: none; display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+  padding: 6px; border-bottom: 1px solid #2a2e36; background: #11151b;
 }
-#archived-sessions-toggle:hover,
-#archived-sessions-toggle[aria-expanded="true"] { color: #c9d1d9; background: #1d2128; }
+.session-filters button {
+  min-width: 0; padding: 6px 7px; border: 0; border-radius: 4px;
+  background: transparent; color: #7d8590; cursor: pointer;
+  font-size: 11px; line-height: 1.2; text-align: left;
+}
+.session-filters button:hover { color: #c9d1d9; background: #1d2128; }
+.session-filters button[aria-pressed="true"] {
+  color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
+}
+.session-filter-count { float: right; color: #8b949e; font-variant-numeric: tabular-nums; }
 #session-list { list-style: none; overflow-y: auto; flex: 1; }
-#session-list:not(.show-archived) > li.archived-record { display: none; }
+#session-list > li.session-filtered { display: none; }
 /* The gap and the right padding are tight on purpose: this row carries a
    name, a role, the rooms it is in, its profile and two buttons inside about
    260px, and every pixel spent between them is a pixel the mesh pill loses
@@ -2780,7 +2786,9 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   #sidebar header { padding: 10px 14px; }
   /* thumb-sized, like every other tap target on the rail */
   #refresh-all { font-size: 17px; padding: 6px 10px; }
-  #archived-sessions-toggle { padding: 11px 16px; font-size: 13px; }
+  .session-filters { grid-template-columns: repeat(4, minmax(0, 1fr)); padding: 7px; }
+  .session-filters button { padding: 9px 7px; font-size: 12px; text-align: center; }
+  .session-filter-count { float: none; margin-left: 3px; }
   /* The rail is the whole screen here, so the list takes what it needs and
      the nav sits at the thumb end rather than floating mid-screen. */
   #session-list { flex: 1 0 auto; max-height: none; overflow: visible; }

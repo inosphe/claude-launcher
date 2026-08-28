@@ -84,8 +84,17 @@
       </div>
       <span id="relay-badge" class="badge hidden"></span>
     </header>
-    <button id="archived-sessions-toggle" class="hidden" type="button"
-            aria-controls="session-list" aria-expanded="false"></button>
+    <div id="session-filters" class="session-filters" role="group"
+         aria-label="Filter sessions by state">
+      <button id="session-filter-current" type="button" data-filter="current"
+              aria-pressed="true"></button>
+      <button id="session-filter-running" type="button" data-filter="running"
+              aria-pressed="false"></button>
+      <button id="session-filter-killed" type="button" data-filter="killed"
+              aria-pressed="false"></button>
+      <button id="session-filter-archived" type="button" data-filter="archived"
+              aria-pressed="false"></button>
+    </div>
     <ul id="session-list"></ul>
     <!-- The working fleet at once. Each button hides itself when it would act on
          nothing, so what is up is a count of what it would do — the bar is

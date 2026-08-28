@@ -56,8 +56,8 @@ function check(what, got, want) {
 }
 
 /* What the bar reads as: the label of every button that is up, in order. */
-function bar(sessions) {
-  syncBulkActions(sessions);
+function bar(sessions, filter = "current") {
+  syncBulkActions(sessions, filter);
   return IDS.filter((id) => !buttons[id].classes.has("hidden"))
     .map((id) => buttons[id].textContent.replace(/^[^a-z]+/, ""));
 }
@@ -96,6 +96,16 @@ check(
   ]),
   ["stop 1"]
 );
+
+const mixed = [
+  { name: "live", status: "idle" },
+  { name: "dead", status: "exited" },
+  { name: "old", status: "exited", archived_at: "2026-08-28T00:00:00Z" },
+];
+check("running mode exposes only its running action", bar(mixed, "running"), ["stop 1"]);
+check("killed mode exposes only its killed actions", bar(mixed, "killed"),
+      ["resume 1", "archive 1 exited"]);
+check("archived mode does not act on hidden current records", bar(mixed, "archived"), []);
 
 /* Going back to nothing has to put the bar away again: these are toggled, not
    rebuilt, so a stale "stop 2" left up over an emptied rail would still be

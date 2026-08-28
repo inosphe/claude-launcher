@@ -20,8 +20,8 @@ holds the name, its role and its rooms to a single shrinking line — pinning
 which children are allowed to break the row, and that a tag may be
 abbreviated but never shrunk to a capsule with nothing in it — ``bulk_check`` on the
 rail's bulk bar — which of stop/resume/archive is offered on a given rail,
-and what each claims it would touch — ``archivedsessions_check`` on the
-retained history fold and the absence of permanent removal controls — ``owed_check`` on
+and what each claims it would touch — ``sessionfilters_check`` on the
+current/running/killed/archived partitions and their retained selection — ``owed_check`` on
 the Unanswered box and the requests its nudge/dismiss buttons send,
 ``panel_check`` on where the session detail docks (the rail beside the
 terminal, or the page slot on a phone) and what closing it leaves behind,
@@ -247,7 +247,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "layout_check.js",
         "render_check.js",
         "lineage_check.js",
-        "archivedsessions_check.js",
+        "sessionfilters_check.js",
         "railbadge_check.js",
         "sessmesh_check.js",
         "sesshandle_check.js",
