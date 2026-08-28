@@ -4184,7 +4184,6 @@ async function killCurrentSession() {
       killUiState.delete(name);
     } else if (info.status === "exited") {
       killUiState.delete(name);
-      setSessionFilter("killed");
     } else {
       killUiState.set(name, "ending");
     }
@@ -4212,10 +4211,8 @@ async function archiveExitedSession(name) {
   }
   const at = sessionsCache.findIndex((s) => s.name === name);
   if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], ...info };
-  // Archive changes the rail classification while the final screen, detail
-  // pane and URL remain on this session. The state-specific filter follows
-  // the transition so the selected row stays visible.
-  setSessionFilter("archived");
+  // Archive changes the rail classification while the selected filter,
+  // final screen, detail pane and URL remain unchanged.
   await refreshSessions();
   setStatusBadge("exited");
   return true;
@@ -4280,7 +4277,6 @@ $("archive-exited").addEventListener("click", async () => {
     $("archive-exited"), "/api/sessions/archive",
     { method: "POST" }, "archive"
   );
-  setSessionFilter("archived");
   await refreshSessions();
 });
 
