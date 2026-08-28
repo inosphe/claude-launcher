@@ -19,6 +19,13 @@ def test_packaged_set_declares_supported_harnesses(home):
     assert reg["codex"].restore_args == ["resume", "--last"]
     assert reg["pi"].command == ["pi"]
     assert reg["kimi"].auth == "oauth"
+    # The routing key usage.py:742 dispatches on and cli.py:971 labels.
+    # Two tests in test_usage_harnesses already go red when the yaml
+    # line is dropped, but both fail inside the routing they exercise,
+    # reporting "usage reporting is not available for harness 'kimi'"
+    # -- the symptom, several call frames away from the declaration.
+    # This one names the field and the value it lost.
+    assert reg["kimi"].usage == "kimi-web-server"
     assert reg["agent"].home_env == "CURSOR_CONFIG_DIR"
     assert reg["pi"].auth == "api-key"
     assert reg["pi"].token_env == "ANTHROPIC_API_KEY"

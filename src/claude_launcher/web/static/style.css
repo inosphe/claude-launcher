@@ -342,10 +342,12 @@ option:disabled { color: #6b7280; }
    cflow line so it reads as belonging to the name above. A full-width
    line-breaker (see the invariant on .rail-head), ordered between the ▸
    toggle and the cflow line. Every bar spans the same fixed 0–1M domain (JS
-   sets the fill inline), and the tick is this session's auto-compact
-   window — the point the conversation compacts at, which is what the fill
-   is read against; the fill goes amber past 70% of that window and red past
-   90% — the "which of these is about to compact" glance. The tick overhangs
+   sets the fill inline), and the tick is whichever threshold the harness
+   actually reports: claude's auto-compact window, the point the
+   conversation compacts at, or the model context window codex is told on
+   every request. Either way it is what the fill is read against; the fill
+   goes amber past 70% of that threshold and red past 90% — the "which of
+   these is about to run out of room" glance. The tick overhangs
    the 3px track by 2px each side so it reads as a mark on the scale, not a
    sliver of fill — which is why the track cannot clip its overflow. The
    unknown form keeps the empty track beside a greyed italic "?", so it
