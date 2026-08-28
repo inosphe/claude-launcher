@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import re
 import shutil
+import sys
 from dataclasses import dataclass, field
 from importlib import resources
 from pathlib import Path
@@ -149,12 +150,53 @@ class Harness:
 
         npm-installed agents commonly expose ``codex.cmd``/``kimi.cmd`` on
         Windows. ``shutil.which`` understands PATHEXT while CreateProcess does
-        not resolve a bare extensionless argv element reliably.
+        not resolve a bare extensionless argv element reliably. The Codex npm
+        shim needs one additional step: ``cmd.exe`` truncates a quoted argument
+        at its first newline, so invoke the shim's Node entry point directly.
+        This preserves a multi-line opening briefing as one argv element.
         """
         if self.builtin:
             return []
         first = shutil.which(self.program()) or self.program()
-        return [first, *self.command[1:]]
+        prefix = self._windows_codex_npm_command(first) or [first]
+        return [*prefix, *self.command[1:]]
+
+    def _windows_codex_npm_command(self, first: str) -> Optional[List[str]]:
+        """Bypass Codex's npm ``.CMD`` shim when its package is available.
+
+        A Windows batch file receives the opening through ``%*``. Embedded
+        CR/LF characters end that command even while the argument is quoted;
+        the Node and native Codex children consequently receive only the
+        delivery-stamp line. npm's generated shim delegates to the package's
+        ``bin/codex.js`` file, so calling that same entry point through Node
+        keeps the complete argument and retains the package's normal launcher.
+
+        Custom Codex commands and non-npm installations keep their declared
+        executable. The candidate paths below are the two branches in npm's
+        generated Windows shim: a colocated ``node.exe`` or Node from PATH.
+        """
+        if (
+            sys.platform != "win32"
+            or self.name != "codex"
+            or Path(first).suffix.lower() != ".cmd"
+        ):
+            return None
+        shim = Path(first)
+        entry = (
+            shim.parent
+            / "node_modules"
+            / "@openai"
+            / "codex"
+            / "bin"
+            / "codex.js"
+        )
+        if not entry.is_file():
+            return None
+        local_node = shim.with_name("node.exe")
+        node = str(local_node) if local_node.is_file() else shutil.which("node")
+        if not node:
+            return None
+        return [node, str(entry)]
 
     def available(self) -> bool:
         """Whether this machine can actually run it right now.

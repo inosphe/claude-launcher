@@ -620,6 +620,48 @@ def test_a_declared_argv_opening_strategy_gets_the_positional_prompt(home, tmp_p
     assert harness.takes_opening_argv("h") is True
 
 
+def test_windows_codex_npm_shim_preserves_the_multiline_opening(
+    home, tmp_path, monkeypatch
+):
+    """The npm CMD shim treats a newline as a new batch command.
+
+    claunch therefore starts the same JavaScript entry point through Node.
+    The full opening remains one argv element through the executable boundary.
+    """
+    from claude_launcher import harnesses
+
+    bin_dir = tmp_path / "npm"
+    shim = bin_dir / "codex.CMD"
+    entry = bin_dir / "node_modules" / "@openai" / "codex" / "bin" / "codex.js"
+    entry.parent.mkdir(parents=True)
+    shim.write_text("@node codex.js %*", encoding="utf-8")
+    entry.write_text("", encoding="utf-8")
+    node = tmp_path / "node.exe"
+    _profile_for("work", "codex")
+
+    original_which = harnesses.shutil.which
+
+    def which(program):
+        if program == "codex":
+            return str(shim)
+        if program == "node":
+            return str(node)
+        return original_which(program)
+
+    monkeypatch.setattr(harnesses.sys, "platform", "win32")
+    monkeypatch.setattr(harnesses.shutil, "which", which)
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work", cwd=str(tmp_path))
+    )
+    block = "---\nmesh: team\n---\n\nworkflow: review"
+
+    argv, _, _ = harness.build_command(sdef, opening=block)
+
+    assert argv[:2] == [str(node), str(entry)]
+    assert argv[-2] == "--"
+    assert argv[-1].endswith("\n" + block)
+
+
 def test_the_packaged_codex_strategies_name_its_tui_contract(home):
     from claude_launcher import harnesses
 
