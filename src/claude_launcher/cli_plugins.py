@@ -219,8 +219,10 @@ def _cmd_shared_set(args: argparse.Namespace) -> int:
         if not key:
             print(f"error: empty key in {item!r}", file=sys.stderr)
             return 1
-        plugins.set_shared_setting(key, _parse_value(value))
-        print(f"declared settings key {key}={value}")
+        if plugins.set_shared_setting(key, _parse_value(value)):
+            print(f"declared settings key {key}={value}")
+        else:
+            print(f"settings key {key}={value} was already declared")
     keys = store.shared_settings()
     if not (args.assignments or args.unset):
         if not keys:
