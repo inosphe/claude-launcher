@@ -87,6 +87,7 @@ function box(id) {
   };
 }
 for (const id of ["parent-hint", "new-fork-row", "new-over-row", "new-over-text",
+                  "new-model-row",
                   "new-claude-runtime", "new-claude-runtime-hint",
                   "new-codex-runtime", "new-codex-runtime-hint"]) {
   box_[id] = box(id);
@@ -99,6 +100,7 @@ const form = {
   parent: picker(), name: control(""),
   profile: picker([["work", "work"], ["home", "home"]]),
   harness: picker([["claude", "claude"]]),
+  model: picker(),
   borrow: picker([["(this profile's own token)", ""], ["work", "work"]]),
   null_token: control(""),
   cwd: picker([["(daemon cwd)", ""], ["repo — F:/repo", "F:/repo"]]),
@@ -132,10 +134,14 @@ const PROFILE_OPTIONS = [
   { value: "home:codex", profile: "home", harness: "codex", default: false },
   { value: "home:pi", profile: "home", harness: "pi", default: false },
 ];
+const HARNESS_DETAILS = {
+  claude: { name: "claude", models: ["haiku", "sonnet", "opus", "fable"] },
+  codex: { name: "codex", models: ["luna", "terra", "sol"] },
+};
 new Function(
   "exports", "$", "document", "Option", "sessionsCache", "syncForkAvailability",
   "renderRoleStance", "refreshWorkflowChoices", "spawnReport", "workspacesCache",
-  "profileDetails", "profileOptions",
+  "profileDetails", "profileOptions", "harnessDetails",
   "syncRuntimeFold", "renderRuntimeSummary", "renderProfileHint",
   "syncNewBorrowOptions",
   [`let newProfileOptions = profileOptions, newHarnessFor = null;`,
@@ -151,6 +157,7 @@ new Function(
    slice("newProfileUi"), slice("newProfileSelector"),
    slice("newProfileOverride"), slice("newProfileDetail"),
    slice("newProfileHarnessName"), slice("refillNewHarnessOptions"),
+   slice("syncNewModelOptions"),
    slice("argvHasGroup"), slice("codexModeGroups"),
    slice("withoutArgGroups"), slice("codexRuntimeState"),
    slice("codexRuntimeArgs"), slice("codexRuntimeText"),
@@ -180,7 +187,7 @@ exports.setSessions = (s) => { sessionsCache = s; };
    () => { wfRefreshes++; },
    async (name) => { fetched.push(name); return reports[name] || null; },
    [{ name: "repo", path: "F:/repo", exists: true }],
-   PROFILE_DETAILS, PROFILE_OPTIONS,
+   PROFILE_DETAILS, PROFILE_OPTIONS, HARNESS_DETAILS,
    // The "How it runs" fold opens itself when the policy hands a row back.
    // That rule reads the fold element, which this stub page does not have,
    // and it is newform_check's to hold — here it only has to exist. The
@@ -196,7 +203,7 @@ function check(what, got, want) {
     failures++;
   }
 }
-const INHERITED = ["profile", "harness", "borrow", "null_token", "cwd", "args",
+const INHERITED = ["profile", "harness", "model", "borrow", "null_token", "cwd", "args",
                    "resume", "fork", "skip_permissions",
                    "codex_yolo", "codex_sandbox"];
 const greyed = () => INHERITED.map((k) => form[k].disabled);
@@ -212,7 +219,7 @@ function reread(name) {
 }
 
 const SESSIONS = [
-  { name: "lead", status: "idle", harness: "claude", conversation_id: "c-1",
+  { name: "lead", status: "idle", harness: "claude", model: "opus", conversation_id: "c-1",
     cwd: "F:/repo" },
   { name: "quiet", status: "busy", harness: "claude" },      // nothing pinned
   { name: "pi", status: "idle", harness: "codex", conversation_id: "c-2" },
@@ -248,8 +255,20 @@ async function main() {
      which is the reading that cannot invent a permission. */
   form.parent.value = "lead";
   ctx.sync();
+  check("the model picker starts from the parent's saved selection",
+        form.model.value, "opus");
+  SESSIONS[0].model = "sonnet";
+  ctx.setSessions(SESSIONS);
+  ctx.refresh();
+  ctx.sync();
+  check("a poll refreshes a changed model on the same parent",
+        form.model.value, "sonnet");
+  SESSIONS[0].model = "opus";
+  ctx.setSessions(SESSIONS);
+  ctx.refresh();
+  ctx.sync();
   check("with no report every inherited row stays the parent's",
-        greyed(), [true, true, true, true, true, true, true, true, true, true, true]);
+        greyed(), [true, true, true, true, true, true, true, true, true, true, true, true]);
   check("the rows that make it a different worker still travel",
         form.role.disabled, false);
   check("the hint names the parent",
@@ -258,7 +277,7 @@ async function main() {
         [false, true]);
   check("...and says which rows an unlock would open",
         box_["parent-hint"].textContent.includes(
-          "profile, harness, borrow, null_token, cwd, args, skip_permissions " +
+          "profile, harness, model, borrow, null_token, cwd, args, skip_permissions " +
           "stay its parent's"),
         true);
   check("the blank directory entry now means the parent's",
@@ -271,7 +290,7 @@ async function main() {
      the form used to get wrong: `allow_profile: true` in ~/.claunch.yaml, the
      CLI wizard offering the row, and the browser greying it anyway. */
   reports.lead = {
-    may_choose: ["args", "borrow", "null_token", "profile", "worktree"],
+    may_choose: ["args", "model", "borrow", "null_token", "profile", "worktree"],
     spawnable_harnesses: [],
     workspaces: [{ name: "repo", path: "F:/repo", exists: true }],
     soft_blocked_by: [],
@@ -279,7 +298,7 @@ async function main() {
   await ctx.policy();
   check("the report was fetched for the parent named", fetched, ["lead"]);
   check("what the policy opened is handed back, what it shuts stays grey",
-        greyed(), [false, false, false, false, false, false, true, true,
+        greyed(), [false, false, false, false, false, false, false, true, true,
                    true, false, false]);
   check("a child's workflows are re-read for where the child will stand",
         wfRefreshes > 0, true);
@@ -297,13 +316,15 @@ async function main() {
   /* The payload: only what the policy left open AND the operator filled in. */
   form.profile.value = "home";
   form.harness.value = "claude";
+  ctx.sync();
+  form.model.value = "sonnet";
   form.borrow.value = "work";
-  form.args.value = "--verbose  --model x";
+  form.args.value = "--verbose  --trace x";
   form.cwd.value = "F:/repo";
   check("a child sends what was opened, spelt in the API's keys",
         ctx.fields(form, { name: "kid" }),
-        { name: "kid", profile: "home:claude", borrow: "work",
-          args: ["--verbose", "--model", "x"], workspace: "repo" });
+        { name: "kid", profile: "home:claude", borrow: "work", model: "sonnet",
+          args: ["--verbose", "--trace", "x"], workspace: "repo" });
   check("...and the directory travels as a registry name, never a path",
         ctx.fields(form, {}).cwd, undefined);
 
@@ -445,7 +466,7 @@ async function main() {
         box_["new-fork-row"].title,
         "the parent has no claude conversation to copy");
   check("another parent is another policy — nothing is carried over",
-        greyed(), [true, true, true, true, true, true, true, true, true, true, true]);
+        greyed(), [true, true, true, true, true, true, true, true, true, true, true, true]);
 
   /* A report that arrives after the pick moved on is dropped: it describes a
      parent this form is no longer building a child of. */
@@ -468,8 +489,8 @@ async function main() {
   form.parent.value = "";
   ctx.sync();
   check("clearing the parent hands the rows back",
-        ["profile", "harness", "cwd", "args"].map((k) => form[k].disabled),
-        [false, false, false, false]);
+        ["profile", "harness", "model", "cwd", "args"].map((k) => form[k].disabled),
+        [false, false, false, false, false]);
   check("the inherit entries go with it, leaving a concrete pair",
         [form.profile.options[0].value, !!form.profile.value,
          form.harness.options[0].value, !!form.harness.value],

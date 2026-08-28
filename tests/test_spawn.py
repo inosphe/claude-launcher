@@ -57,6 +57,7 @@ def test_child_inherits_everything_that_decides_what_runs():
         "profile": "work",
         "cwd": "/tmp/project",
         "args": ["--flag"],
+        "model": None,
         "env": {"A": "1"},
         "borrow": None,
         "null_token": False,
@@ -87,6 +88,30 @@ def test_an_unlocked_field_is_taken_from_the_request():
     )
     assert child["cwd"] == "/tmp/elsewhere"
     assert child["profile"] == "work"  # still inherited
+
+
+def test_model_inherits_and_uses_the_args_policy_for_override_and_clear():
+    parent = {**PARENT, "model": "luna"}
+    inherited = spawn.check(
+        _policy(), {}, parent=parent, depth=0, children=0
+    )
+    assert inherited["model"] == "luna"
+
+    with pytest.raises(spawn.SpawnDenied, match="spawn.allow_args"):
+        spawn.check(
+            _policy(), {"model": "terra"}, parent=parent, depth=0, children=0
+        )
+
+    policy = _policy(allow_args=True)
+    changed = spawn.check(
+        policy, {"model": "terra"}, parent=parent, depth=0, children=0
+    )
+    cleared = spawn.check(
+        policy, {"model": ""}, parent=parent, depth=0, children=0
+    )
+    assert changed["model"] == "terra"
+    assert cleared["model"] is None
+    assert "model" in spawn.capabilities(policy, depth=0, children=0)["may_choose"]
 
 
 def test_env_is_merged_over_the_parents_not_replaced():

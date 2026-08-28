@@ -80,6 +80,11 @@ class SessionDef:
     profile: Optional[str] = None
     cwd: str = ""
     args: Tuple[str, ...] = ()
+    #: Model selected for this session.  It stays separate from free harness
+    #: args so create/spawn forms can inherit and override it without parsing
+    #: an arbitrary argv string.  Profile/provider env may still resolve the
+    #: selected alias to a backend-specific model id.
+    model: Optional[str] = None
     env: Dict[str, str] = field(default_factory=dict)
     restore: bool = True
     cols: int = 120
@@ -160,6 +165,7 @@ class SessionDef:
             "profile": self.profile,
             "cwd": self.cwd,
             "args": list(self.args),
+            "model": self.model,
             "env": dict(self.env),
             "restore": self.restore,
             "cols": self.cols,
@@ -185,6 +191,7 @@ class SessionDef:
             profile=data.get("profile") or None,
             cwd=str(data.get("cwd") or ""),
             args=tuple(str(a) for a in data.get("args") or ()),
+            model=str(data.get("model") or "").strip() or None,
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
             restore=bool(data.get("restore", True)),
             cols=int(data.get("cols") or 120),
@@ -220,6 +227,19 @@ def _resume_field(raw) -> Optional[str]:
 #: Args that already steer which conversation claude opens; when the caller
 #: passes any of these, the daemon must not pin or restore an id of its own.
 CONVERSATION_FLAGS = ("--continue", "-c", "--resume", "-r", "--session-id")
+
+
+def steers_model(args: Iterable[str]) -> bool:
+    """Whether free harness args already select a model.
+
+    Creation surfaces own the explicit ``model`` field.  Refusing a second
+    model in ``args`` keeps the saved definition and concrete command from
+    carrying competing choices whose winner depends on harness parsing.
+    """
+    return any(
+        value in ("--model", "-m") or value.startswith("--model=")
+        for value in args
+    )
 
 
 def steers_conversation(args: Iterable[str]) -> bool:
@@ -274,6 +294,22 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
             f"unknown harness {sdef.harness!r} (known: {known}); "
             f"declare it under 'harnesses:' in {store.path()}"
         )
+    if sdef.model:
+        if not entry.models:
+            raise HarnessError(
+                f"harness {sdef.harness!r} does not declare selectable models"
+            )
+        if sdef.model not in entry.models:
+            known = ", ".join(entry.models)
+            raise HarnessError(
+                f"unknown model {sdef.model!r} for harness {sdef.harness!r} "
+                f"(known: {known})"
+            )
+        if steers_model(sdef.args):
+            raise HarnessError(
+                "the extra args already select a model; drop their --model/-m "
+                "flag, or drop the session model choice"
+            )
     if sdef.null_token and sdef.borrow:
         # Both answer the same question (whose credential) and the pair is
         # invalid before lender lookup: a typo or deleted lender must not hide
@@ -542,6 +578,8 @@ def build_command(
         # moved to the harness-independent opening/rebrief/reminder path.
         if sdef.identity:
             argv.extend(["--append-system-prompt", sdef.identity])
+        if sdef.model:
+            argv.append(f"--model={sdef.model}")
         argv.extend(sdef.args)
         if opening and not restoring:
             # The positional prompt — claude's first turn. Dated with the same
@@ -575,7 +613,8 @@ def build_command(
             arg for arg in entry.args
             if not (manages_mode and arg in entry.mode_conflict_args)
         ]
-        runtime_args = [*base_args, *sdef.args]
+        model_args = [f"--model={sdef.model}"] if sdef.model else []
+        runtime_args = [*base_args, *model_args, *sdef.args]
         if prof is not None:
             try:
                 runtime_args = runner.harness_launch_args(

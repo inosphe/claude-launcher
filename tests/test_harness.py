@@ -48,7 +48,8 @@ def _write_transcript(sdef, profile_name: str = "work") -> None:
 def test_sessiondef_roundtrip():
     sdef = SessionDef(
         name="work", harness="claude", profile="p", cwd="/tmp",
-        args=("--resume",), env={"A": "1"}, restore=False, cols=80, rows=24,
+        args=("--resume",), model="opus", env={"A": "1"}, restore=False,
+        cols=80, rows=24,
         conversation_id="11111111-2222-3333-4444-555555555555",
         role="worker", resume="", fork_session=True, borrow="lender",
     )
@@ -130,6 +131,55 @@ def test_claude_command_uses_profile_env(home, monkeypatch, tmp_path):
     assert env["CLAUDE_CONFIG_DIR"] == str(p.config_dir)
     assert env["MY_FLAG"] == "on"
     assert cwd == str(tmp_path)
+
+
+def test_selected_claude_model_is_an_argv_alias_and_profile_env_still_maps_it(
+    home, tmp_path
+):
+    p = profile.create("work")
+    from claude_launcher import settings
+
+    settings.set_env(p, {"ANTHROPIC_DEFAULT_OPUS_MODEL": "vendor/opus-v2"})
+    sdef = harness.normalize(
+        SessionDef(
+            name="x", profile="work", cwd=str(tmp_path), model="opus"
+        )
+    )
+
+    argv, env, _ = harness.build_command(sdef)
+    assert "--model=opus" in argv
+    assert env["ANTHROPIC_DEFAULT_OPUS_MODEL"] == "vendor/opus-v2"
+
+
+def test_declared_non_claude_model_is_inserted_before_free_args(home, tmp_path):
+    _declare_harness("other", models=["luna", "terra", "sol"])
+    _profile_for("work", "other")
+    sdef = harness.normalize(
+        SessionDef(
+            name="x", profile="work", cwd=str(tmp_path),
+            model="terra", args=("--verbose",),
+        )
+    )
+
+    argv, _, _ = harness.build_command(sdef)
+    assert argv[-2:] == ["--model=terra", "--verbose"]
+
+
+def test_model_must_be_declared_and_not_repeated_in_free_args(home, tmp_path):
+    profile.create("work")
+    with pytest.raises(HarnessError, match="unknown model"):
+        harness.normalize(
+            SessionDef(
+                name="x", profile="work", cwd=str(tmp_path), model="unknown"
+            )
+        )
+    with pytest.raises(HarnessError, match="already select a model"):
+        harness.normalize(
+            SessionDef(
+                name="x", profile="work", cwd=str(tmp_path), model="opus",
+                args=("--model=sonnet",),
+            )
+        )
 
 
 def test_session_env_cannot_restore_api_key_beside_claude_auth_token(

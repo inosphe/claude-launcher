@@ -15,6 +15,7 @@ override or extend it::
         args: ["--yolo"]        # optional, before the session's own args
         restore_args: [resume, --last]  # optional, only on relaunch
         env: {KEY: VALUE}       # optional overrides
+        models: [small, large]  # optional session-start model choices
         home_env: CODEX_HOME     # optional isolated per-profile home
         auth: oauth              # claude, oauth, api-key, or none
         clear_env: [OPENAI_API_KEY]  # forbidden ambient credentials
@@ -81,6 +82,10 @@ class Harness:
     command: List[str] = field(default_factory=list)
     #: Flags inserted before the session's own args.
     args: List[str] = field(default_factory=list)
+    #: Closed model choices offered by session-start forms.  The selected
+    #: value is handed to the harness as ``--model=<value>``; profile/provider
+    #: env remains responsible for resolving aliases to backend model ids.
+    models: List[str] = field(default_factory=list)
     #: Arguments appended only when claunch restores an existing session.
     restore_args: List[str] = field(default_factory=list)
     #: Environment overrides layered under the session's own ``--env``.
@@ -230,6 +235,7 @@ class Harness:
             "name": self.name,
             "command": list(self.command),
             "args": list(self.args),
+            "models": list(self.models),
             "restore_args": list(self.restore_args),
             "description": self.description,
             "builtin": self.builtin,
@@ -366,6 +372,7 @@ def _parse_entry(name: str, body) -> Harness:
         name=name,
         command=command,
         args=_as_list(body.get("args"), f"harness {name!r} args"),
+        models=_as_list(body.get("models"), f"harness {name!r} models"),
         restore_args=_as_list(
             body.get("restore_args"), f"harness {name!r} restore_args"
         ),

@@ -549,7 +549,10 @@ class FakeClient:
 
     def post(self, path, body):
         self.posted = (path, body)
-        return {"name": "s1", "harness": "claude", "profile": "work", "pid": 1}
+        return {
+            "name": "s1", "harness": "claude", "profile": "work",
+            "model": body.get("model"), "pid": 1,
+        }
 
     def get(self, path):
         return {}
@@ -581,6 +584,16 @@ def test_new_session_without_a_worktree_uses_the_directory_itself(
     assert cli.main(["new-session", "--profile", "work"]) == 0
     _, body = fake_daemon.posted
     assert body["cwd"] == str(repo)
+
+
+def test_new_session_model_reaches_the_daemon(repo, fake_daemon, monkeypatch):
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(worktree, "interactive", lambda: False)
+    assert cli.main([
+        "new-session", "--profile", "work", "--model", "opus",
+    ]) == 0
+    _, body = fake_daemon.posted
+    assert body["model"] == "opus"
 
 
 def test_new_session_worktree_is_cut_from_the_c_flag_not_the_shell(

@@ -512,6 +512,8 @@ def test_the_child_cap_answer_reaches_the_payload(home, monkeypatch, capsys):
     assert "over_limit" not in body()               # did not say
     assert body("--over-limit")["over_limit"] is True
     assert body("--within-limit")["over_limit"] is False
+    assert body("--model", "terra")["model"] == "terra"
+    assert body("--model", "")["model"] == ""
 
     # And the daemon's warning is printed, above the line it is about.
     out = capsys.readouterr().out
