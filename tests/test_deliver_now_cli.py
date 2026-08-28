@@ -169,6 +169,10 @@ def test_the_routes_the_cli_posts_to_are_the_routes_the_daemon_serves():
         """Only what build_app touches while wiring the router."""
         exit_hooks: list = []
 
+        def take_retired_for_sweep(self):
+            """build_app sweeps what restore_all retired — none here."""
+            return []
+
     async def routes():
         # build_app constructs the shell pty, which wants a running loop.
         app = build_app(_Manager(), "t", started_at=0.0)
