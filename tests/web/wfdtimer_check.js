@@ -83,7 +83,12 @@ ok(!/· next /.test(idle),
    "without a live wait in progress nothing claims a next fire");
 ok(!idle.includes("wfd-edge paced"),
    "a timed step draws no dashed branch — pacing's mark belongs to paced options");
-ok(!idle.includes("timed ·"), "the plain poll step gains no timer marks");
+// The marker must live on the timed step's own box, not on a sibling:
+// look inside the poll node's group, not across the whole SVG (which
+// correctly contains the wait step's schedule label).
+const pollNode = /<g class="[^"]*" data-step="poll">([\s\S]*?)<\/g>/.exec(idle);
+ok(pollNode && !pollNode[1].includes("timed"),
+   "the plain poll step gains no timer marks");
 
 /* ---- parked on it: waiting_timer -------------------------------------- */
 const LIVE = {
@@ -96,7 +101,11 @@ const LIVE = {
 };
 const live = wfDiagramSvg(WF, LIVE, null);
 
-ok(/· next \d{1,2}:\d{2}/.test(live),
+// `next` carries fmtOpensAt's answer, which is locale-dependent ("오후
+// 9:15" on a Korean host vs "9:15 PM" elsewhere) — pin the presence of a
+// clock time, not the exact shape.
+const nextM = /· next ([^<]*)</.exec(live);
+ok(nextM && /\d{1,2}[:.]\d{2}/.test(nextM[1]),
    "while the run waits on the timer the next fire's local time is on the box");
 ok(live.includes("timed · every 5m · max 22"),
    "...and the declared schedule still reads alongside it");
