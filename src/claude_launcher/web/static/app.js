@@ -491,6 +491,29 @@ function railMetaText(s) {
   return [identity, state].filter(Boolean).join(" · ");
 }
 
+/* Exited records remain resumable and therefore stay in /api/sessions, but
+   mixing them into the live fleet makes a long-running daemon's rail mostly
+   historical. Keep them in the same DOM list so every existing detail,
+   briefing and resume path still applies; this control only changes their
+   visibility. An exited session that is already open reveals the group so a
+   direct route never points at a row the rail conceals. */
+let exitedSessionsVisible = false;
+
+function syncExitedSessions(sessions) {
+  const button = $("exited-sessions-toggle");
+  const list = $("session-list");
+  if (!button || !list) return;
+  const exited = (sessions || []).filter((s) => s.status === "exited");
+  if (currentName && exited.some((s) => s.name === currentName)) {
+    exitedSessionsVisible = true;
+  }
+  const visible = exited.length > 0 && exitedSessionsVisible;
+  button.classList.toggle("hidden", exited.length === 0);
+  button.textContent = `${visible ? "Hide" : "Show"} exited sessions (${exited.length})`;
+  button.setAttribute("aria-expanded", visible ? "true" : "false");
+  list.classList.toggle("show-exited", visible);
+}
+
 async function refreshSessions() {
   let data;
   try {
@@ -517,6 +540,7 @@ async function refreshSessions() {
   for (const [s, depth] of rebuild ? byLineage(sessionsCache) : []) {
     const li = document.createElement("li");
     li.dataset.name = s.name;
+    if (s.status === "exited") li.classList.add("exited-record");
     if (s.name === currentName) li.classList.add("active");
     // The indent goes on the row, not on a spacer element, so the whole row
     // stays one click target and the hover/active background still spans it.
@@ -651,6 +675,12 @@ async function refreshSessions() {
   refreshParentChoices();  // ...and the same sessions, as parents to spawn from
   if (currentPage === "home") renderHome();
   syncBulkActions(sessionsCache);
+  // Some embedded consumers reuse refreshSessions with a reduced rail DOM;
+  // the shipped page has the control, while those consumers keep the list
+  // behaviour they had before this optional view was added.
+  if (typeof syncExitedSessions === "function") {
+    syncExitedSessions(sessionsCache);
+  }
 
   const cur = currentName && sessionsCache.find((s) => s.name === currentName);
   if (cur && attachedPid && cur.pid !== attachedPid && linkState === "live") {
@@ -3960,6 +3990,11 @@ $("clear-exited").addEventListener("click", async () => {
   const result = await offerForce($("clear-exited"), "/api/sessions", "clear");
   dropIfGone(result, dead);
   refreshSessions();
+});
+
+$("exited-sessions-toggle").addEventListener("click", () => {
+  exitedSessionsVisible = !exitedSessionsVisible;
+  syncExitedSessions(sessionsCache);
 });
 
 /* The whole rail, gone: running sessions stopped and waited out, then every
