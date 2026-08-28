@@ -143,6 +143,8 @@ def _reset(field: Any) -> None:
     """Put one row back on the answer it would hold with nothing remembered."""
     if hasattr(field, "chosen"):  # MultiField, before its ChoiceField base
         field.chosen = []
+    elif hasattr(field, "checked"):
+        field.checked = False
     elif hasattr(field, "options"):
         field.index = 0
     elif hasattr(field, "text"):

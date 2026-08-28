@@ -28,7 +28,14 @@ class CodexWizardSources(wizard.Sources):
         self.cwd = cwd
 
     def harnesses(self):
-        return [{"name": "codex", "available": True, "description": "Codex"}]
+        return [{
+            "name": "codex", "available": True, "description": "Codex",
+            "args": [FULL_ACCESS_FLAG],
+            "mode_conflict_args": [FULL_ACCESS_FLAG],
+            "skip_permissions_args": ["--approval-mode", "full-auto"],
+            "full_access_args": ["--sandbox", "danger-full-access"],
+            "full_access_off_args": ["--sandbox", "workspace-write"],
+        }]
 
     def profiles(self):
         return ["codex"]

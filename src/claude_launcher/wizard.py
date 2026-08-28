@@ -285,6 +285,32 @@ class MultiField(ChoiceField):
 
 
 @dataclass
+class CheckboxField(Field):
+    """One boolean answer, rendered and operated as a checkbox.
+
+    Most boolean answers in the wizard are sentences whose two alternatives
+    need a picker (for example, whether the daemon restores a session).  A
+    harness runtime switch is different: its name already states the whole
+    setting, and opening a two-row picker only obscures that it is a toggle.
+    ``Space``/``Enter`` toggle it directly; left and right retain the form's
+    usual false/true keyboard convention.
+    """
+
+    checked: bool = False
+
+    @property
+    def value(self) -> bool:
+        return bool(self.checked)
+
+    def display(self) -> str:
+        return "[x] enabled" if self.checked else "[ ] disabled"
+
+    def select(self, value: Any) -> bool:
+        self.checked = bool(value)
+        return True
+
+
+@dataclass
 class TextField(Field):
     text: str = ""
     placeholder: str = ""
@@ -1056,6 +1082,9 @@ _HELP = {
 }
 
 _HELP_MULTI = "up/down move   Space toggle   Enter done   Esc back"
+_HELP_CHECKBOX = (
+    "up/down move   Space/Enter toggle   left off   right on   Ctrl+S create   Esc cancel"
+)
 
 
 class Form:
@@ -1176,6 +1205,10 @@ class Form:
             self.focus = self._next_selectable(self.focus, -1)
         elif key in ("down", "tab"):
             self.focus = self._next_selectable(self.focus, +1)
+        elif key in ("left", "right") and isinstance(f, CheckboxField):
+            f.select(key == "right")
+            self.error = ""
+            self._sync()
         elif key in ("left", "right") and isinstance(f, ChoiceField) \
                 and not isinstance(f, MultiField):
             f.cycle(+1 if key == "right" else -1)
@@ -1184,7 +1217,11 @@ class Form:
         elif key in ("enter", "space"):
             if isinstance(f, ActionField):
                 return self._submit()
-            if isinstance(f, ChoiceField):
+            if isinstance(f, CheckboxField):
+                f.select(not f.value)
+                self.error = ""
+                self._sync()
+            elif isinstance(f, ChoiceField):
                 self.mode = PICK
                 self.pick = f.index
             elif isinstance(f, TextField):
@@ -1338,6 +1375,8 @@ class Form:
         f = self.current
         if self.mode == PICK and isinstance(f, MultiField):
             help_line = _HELP_MULTI
+        elif self.mode == FORM and isinstance(f, CheckboxField):
+            help_line = _HELP_CHECKBOX
         else:
             help_line = _HELP[self.mode]
         styled = (
@@ -1449,6 +1488,129 @@ def _profile_own_auth_label(
     return f"({identity} profile authentication)"
 
 
+def _argv_has_group(argv: List[str], group: Any) -> bool:
+    """Whether the contiguous argv ``group`` occurs in ``argv``."""
+    wanted = [str(value) for value in (group or [])]
+    if not wanted:
+        return False
+    return any(
+        argv[i:i + len(wanted)] == wanted
+        for i in range(len(argv) - len(wanted) + 1)
+    )
+
+
+def _codex_mode_groups(capabilities: dict) -> List[List[str]]:
+    """The argv groups controlled by the Codex runtime panel."""
+    groups = []
+    for key, fallback in (
+        ("mode_conflict_args", ["--dangerously-bypass-approvals-and-sandbox"]),
+        ("skip_permissions_args", ["--approval-mode", "full-auto"]),
+        ("full_access_args", ["--sandbox", "danger-full-access"]),
+        ("full_access_off_args", ["--sandbox", "workspace-write"]),
+    ):
+        group = [str(value) for value in (capabilities.get(key) or fallback)]
+        if group and group not in groups:
+            groups.append(group)
+    return groups
+
+
+def _without_argv_groups(argv: Any, groups: List[List[str]]) -> List[str]:
+    """Remove every complete managed group while preserving other argv."""
+    remaining = [str(value) for value in (argv or []) if value != "--"]
+    i = 0
+    while i < len(remaining):
+        found = next(
+            (
+                group for group in groups
+                if remaining[i:i + len(group)] == group
+            ),
+            None,
+        )
+        if found:
+            del remaining[i:i + len(found)]
+        else:
+            i += 1
+    return remaining
+
+
+def _codex_runtime_state(argv: Any, capabilities: dict) -> "tuple[bool, bool]":
+    """Return ``(yolo, sandbox)`` for one Codex session's own argv.
+
+    An empty session argv still runs with the harness declaration's default
+    YOLO argument.  Once any managed mode group is present, daemon command
+    construction removes that default and the session groups are the complete
+    answer.  Reading the state by the same boundary keeps a Spawn wizard's
+    inherited checkboxes aligned with the command the parent actually runs.
+    """
+    own = [str(value) for value in (argv or []) if value != "--"]
+    groups = _codex_mode_groups(capabilities)
+    managed = any(_argv_has_group(own, group) for group in groups)
+    bypass = capabilities.get("mode_conflict_args") or [
+        "--dangerously-bypass-approvals-and-sandbox"
+    ]
+    declared = capabilities.get("args") or bypass
+    effective = own if managed else [
+        *[str(value) for value in declared],
+        *own,
+    ]
+    skip = capabilities.get("skip_permissions_args") or [
+        "--approval-mode", "full-auto"
+    ]
+    sandbox_on = capabilities.get("full_access_off_args") or [
+        "--sandbox", "workspace-write"
+    ]
+    sandbox_off = capabilities.get("full_access_args") or [
+        "--sandbox", "danger-full-access"
+    ]
+    skipping = _argv_has_group(effective, skip)
+    yolo = _argv_has_group(effective, bypass) or skipping
+    sandbox = _argv_has_group(effective, sandbox_on) or (
+        skipping and not _argv_has_group(effective, sandbox_off)
+    )
+    return yolo, sandbox
+
+
+def _codex_runtime_args(
+    argv: Any,
+    capabilities: dict,
+    *,
+    yolo: bool,
+    sandbox: bool,
+) -> List[str]:
+    """Apply the Codex panel's two switches to arbitrary extra argv.
+
+    The four states are explicit and mutually consistent:
+
+    * YOLO on, sandbox off: bypass approvals and the sandbox;
+    * YOLO on, sandbox on: full-auto approvals with workspace-write;
+    * YOLO off, sandbox off: approval prompts with danger-full-access;
+    * YOLO off, sandbox on: approval prompts with workspace-write.
+
+    Existing managed groups are removed first, so a value typed into Args
+    cannot leave two contradictory Codex modes in the command.
+    """
+    clean = _without_argv_groups(argv, _codex_mode_groups(capabilities))
+    bypass = list(capabilities.get("mode_conflict_args") or [
+        "--dangerously-bypass-approvals-and-sandbox"
+    ])
+    skip = list(capabilities.get("skip_permissions_args") or [
+        "--approval-mode", "full-auto"
+    ])
+    sandbox_on = list(capabilities.get("full_access_off_args") or [
+        "--sandbox", "workspace-write"
+    ])
+    sandbox_off = list(capabilities.get("full_access_args") or [
+        "--sandbox", "danger-full-access"
+    ])
+    if yolo and not sandbox:
+        return [*bypass, *clean]
+    mode = []
+    if yolo:
+        mode.extend(skip)
+    mode.extend(sandbox_on if sandbox else sandbox_off)
+    return [*mode, *clean]
+
+
 class Wizard(Form):
     """``new-session``: the human's door, with every field spelled out.
 
@@ -1464,7 +1626,8 @@ class Wizard(Form):
     # promise a default the form never applies.
     recall_fields = (
         "profile", "borrow", "null_token", "role", "args",
-        "mesh", "restore", "attach", "skip_permissions", "full_access",
+        "mesh", "restore", "attach", "skip_permissions",
+        "codex_yolo", "codex_sandbox",
     )
 
     # -- construction ---------------------------------------------------- #
@@ -1581,20 +1744,41 @@ class Wizard(Form):
             text=" ".join(x for x in extra if x != "--"),
         )
 
-        skip_permissions = ChoiceField(
-            key="skip_permissions", label="Approval mode",
-            hint="use this harness's non-interactive approval mode",
-            options=[Option("ask before acting", False),
-                     Option("full auto - do not ask", True)],
+        # Codex exposes two independent runtime decisions.  They live in a
+        # named harness section rather than being inferred from generic
+        # capability flags: another harness may also declare a permission
+        # toggle, but it must receive its own labels and layout.
+        remembered_yolo = get("codex_yolo", None)
+        if remembered_yolo is None:
+            # One-release migration from the former generic Approval mode
+            # row.  With no recalled value, match the packaged Codex launch.
+            remembered_yolo = get("skip_permissions", None)
+        if remembered_yolo is None:
+            remembered_yolo = True
+        remembered_sandbox = get("codex_sandbox", None)
+        if remembered_sandbox is None:
+            old_full_access = get("full_access", None)
+            remembered_sandbox = (
+                not bool(old_full_access) if old_full_access is not None else False
+            )
+        codex_yolo = CheckboxField(
+            key="codex_yolo", label="YOLO mode", section="CODEX RUNTIME",
+            hint="skip approval prompts; with Sandbox off this uses Codex's "
+                 "dangerous bypass mode",
+            checked=bool(remembered_yolo),
         )
-        skip_permissions.select(bool(get("skip_permissions")))
-        full_access = ChoiceField(
-            key="full_access", label="Sandbox",
-            hint="Codex sandbox policy (danger-full-access is the launch default here)",
-            options=[Option("workspace-write", False),
-                     Option("danger-full-access", True)],
+        codex_sandbox = CheckboxField(
+            key="codex_sandbox", label="Sandbox",
+            hint="limit file writes to the workspace; may be combined with "
+                 "YOLO mode",
+            checked=bool(remembered_sandbox),
         )
-        full_access.select(get("full_access", True) is not False)
+        skip_permissions = CheckboxField(
+            key="skip_permissions", label="Skip permissions",
+            section="CLAUDE RUNTIME",
+            hint="launch Claude with --dangerously-skip-permissions",
+            checked=bool(get("skip_permissions")),
+        )
 
         meshes = self.sources.meshes() or []
         mesh = ChoiceField(
@@ -1665,7 +1849,7 @@ class Wizard(Form):
         return [
             name, profile, borrow, null, directory,
             *worktree_fields(""), role,
-            resume, fork, skip_permissions, full_access,
+            resume, fork, skip_permissions, codex_yolo, codex_sandbox,
             args_field, mesh, handle, connect, workflow, context, task,
             # After the task, because the default answer is read from it and
             # the other two are only worth asking once the reader has seen
@@ -1785,14 +1969,10 @@ class Wizard(Form):
         fork.disabled_note = "needs a conversation to fork"
         if fork.disabled:
             fork.select(False)
-        permissions = self.field("skip_permissions")
-        permissions.hidden = not bool(capabilities.get("skip_permissions_args"))
-        if permissions.hidden:
-            permissions.select(False)
-        full_access = self.field("full_access")
-        full_access.hidden = not bool(capabilities.get("full_access_args"))
-        if full_access.hidden:
-            full_access.select(False)
+        codex_runtime = harness_name == "codex"
+        self.field("skip_permissions").hidden = not claude
+        self.field("codex_yolo").hidden = not codex_runtime
+        self.field("codex_sandbox").hidden = not codex_runtime
 
         cwd = self.value("cwd") or self.cwd
         sync_worktree(self, cwd)
@@ -1875,14 +2055,18 @@ class Wizard(Form):
             (h for h in self.sources.harnesses()
              if h.get("name") == detail.get("harness")), {}
         )
-        if self.value("skip_permissions"):
+        args.codex_yolo = bool(self.value("codex_yolo"))
+        args.codex_sandbox = bool(self.value("codex_sandbox"))
+        args.skip_permissions = bool(self.value("skip_permissions"))
+        if claude and args.skip_permissions:
             args.args.extend(capabilities.get("skip_permissions_args") or [])
-        args.args.extend(
-            capabilities.get(
-                "full_access_args" if self.value("full_access")
-                else "full_access_off_args"
-            ) or []
-        )
+        if detail.get("harness") == "codex":
+            args.args = _codex_runtime_args(
+                args.args,
+                capabilities,
+                yolo=args.codex_yolo,
+                sandbox=args.codex_sandbox,
+            )
 
         args.mesh = self.value("mesh") or None
         args.handle = (self.value("handle") or None) if args.mesh else None
@@ -1911,6 +2095,14 @@ class Wizard(Form):
         if detail.get("harness") == "claude":
             if self.value("null_token"):
                 parts.append("no oauth token")
+            if self.value("skip_permissions"):
+                parts.append("Claude permission prompts disabled")
+        elif detail.get("harness") == "codex":
+            parts.append(
+                "Codex "
+                + ("YOLO" if self.value("codex_yolo") else "approval prompts")
+                + (" with sandbox" if self.value("codex_sandbox") else " without sandbox")
+            )
         wt, base = worktree_answer(self)
         if wt is not worktree.NEVER:
             parts.append("worktree " + (wt or "(auto)"))
@@ -2067,6 +2259,9 @@ class SpawnWizard(Form):
         self._workflow_auto: str = ""
         self._worktrees_for: Optional[tuple] = None
         self._issues_for: Optional[tuple] = None
+        self._codex_mode_for: Optional[tuple] = None
+        self._codex_mode_original: "tuple[bool, bool]" = (True, False)
+        self._codex_base_args: List[str] = []
         # Fixed once, not per render: a name that ticked over between the
         # picker showing it and Create sending it would cut a worktree under
         # a name nobody read.
@@ -2191,6 +2386,18 @@ class SpawnWizard(Form):
             hint=self.ARGS_HINT,
             text=" ".join(x for x in extra if x != "--"),
         )
+        codex_yolo = CheckboxField(
+            key="codex_yolo", label="YOLO mode", section="CODEX RUNTIME",
+            hint="skip approval prompts; with Sandbox off this uses Codex's "
+                 "dangerous bypass mode",
+            checked=True,
+        )
+        codex_sandbox = CheckboxField(
+            key="codex_sandbox", label="Sandbox",
+            hint="limit file writes to the workspace; may be combined with "
+                 "YOLO mode",
+            checked=False,
+        )
         workspace = ChoiceField(
             key="workspace", label="Workspace",
             hint="a registered directory to run the child in instead of its "
@@ -2261,7 +2468,7 @@ class SpawnWizard(Form):
         return [
             parent, over_limit, name, profile, borrow, null, fork,
             workspace,
-            *worktree_fields(""), args_field,
+            *worktree_fields(""), codex_yolo, codex_sandbox, args_field,
             mesh, handle, role, connect, workflow, context, task,
             # The board rows follow the task here too, and read the CHILD's
             # directory rather than this session's -- a spawn into a workspace
@@ -2383,6 +2590,34 @@ class SpawnWizard(Form):
             (h for h in self.sources.harnesses()
              if h.get("name") == child_harness), {}
         )
+        mode_for = (parent, effective_selector, child_harness)
+        if mode_for != self._codex_mode_for:
+            self._codex_mode_for = mode_for
+            self._codex_base_args = (
+                list(parent_info.get("args") or [])
+                if child_harness == parent_info.get("harness") else []
+            )
+            state = _codex_runtime_state(
+                self._codex_base_args, capabilities
+            )
+            self.field("codex_yolo").select(state[0])
+            self.field("codex_sandbox").select(state[1])
+            self._codex_mode_original = state
+        codex_runtime = child_harness == "codex"
+        inherits_codex_mode = child_harness == parent_info.get("harness")
+        for key in ("codex_yolo", "codex_sandbox"):
+            field = self.field(key)
+            field.hidden = not codex_runtime
+            field.disabled = codex_runtime and "args" not in may
+            if field.disabled:
+                state = "enabled" if field.value else "disabled"
+                field.disabled_note = (
+                    f"inherited from the parent: {state} (spawn.allow_args)"
+                    if inherits_codex_mode else
+                    f"Codex default: {state} (spawn.allow_args to override)"
+                )
+            else:
+                field.disabled_note = ""
         borrow_allowed = bool(
             detail.get("borrow_allowed", child_harness == "claude")
         )
@@ -2737,6 +2972,28 @@ class SpawnWizard(Form):
             args.args = shlex.split(text, posix=os.name != "nt") if text else []
         except ValueError:
             args.args = text.split()
+        codex_yolo = self.field("codex_yolo")
+        codex_sandbox = self.field("codex_sandbox")
+        args.codex_yolo = bool(codex_yolo.value)
+        args.codex_sandbox = bool(codex_sandbox.value)
+        if not codex_yolo.hidden and not codex_yolo.disabled:
+            selected = (args.codex_yolo, args.codex_sandbox)
+            changed = selected != self._codex_mode_original
+            if text or changed:
+                capabilities = next(
+                    (
+                        h for h in self.sources.harnesses()
+                        if h.get("name") == "codex"
+                    ),
+                    {},
+                )
+                base = args.args if text else self._codex_base_args
+                args.args = _codex_runtime_args(
+                    base,
+                    capabilities,
+                    yolo=args.codex_yolo,
+                    sandbox=args.codex_sandbox,
+                )
         # The workspace travels as a NAME, which is what `-w` means and what
         # the API resolves -- a path would be the free-text directory that
         # spawn.allow_cwd exists to keep an agent away from.
@@ -2782,6 +3039,12 @@ class SpawnWizard(Form):
             parts.append("no oauth token")
         if not self.field("fork").disabled and self.value("fork"):
             parts.append("forking the parent's conversation")
+        if not self.field("codex_yolo").hidden:
+            parts.append(
+                "Codex "
+                + ("YOLO" if self.value("codex_yolo") else "approval prompts")
+                + (" with sandbox" if self.value("codex_sandbox") else " without sandbox")
+            )
         for label, key in (
             ("workspace", "workspace"), ("role", "role"),
             ("workflow", "workflow"),

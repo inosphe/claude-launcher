@@ -86,10 +86,14 @@ function box(id) {
     },
   };
 }
-for (const id of ["parent-hint", "new-fork-row", "new-over-row", "new-over-text"]) {
+for (const id of ["parent-hint", "new-fork-row", "new-over-row", "new-over-text",
+                  "new-claude-runtime", "new-claude-runtime-hint",
+                  "new-codex-runtime", "new-codex-runtime-hint"]) {
   box_[id] = box(id);
 }
 box_["new-over-row"].classes.add("hidden");
+box_["new-claude-runtime"].classes.add("hidden");
+box_["new-codex-runtime"].classes.add("hidden");
 
 const form = {
   parent: picker(), name: control(""),
@@ -99,6 +103,8 @@ const form = {
   null_token: control(""),
   cwd: picker([["(daemon cwd)", ""], ["repo — F:/repo", "F:/repo"]]),
   args: control(""), resume: control(""), fork: control(""),
+  skip_permissions: control(""),
+  codex_yolo: control(""), codex_sandbox: control(""),
   fork_parent: control(""),
   role: picker([["(no role)", ""], ["worker", "worker"]]),
   over_limit: control(""),
@@ -145,6 +151,11 @@ new Function(
    slice("newProfileUi"), slice("newProfileSelector"),
    slice("newProfileOverride"), slice("newProfileDetail"),
    slice("newProfileHarnessName"), slice("refillNewHarnessOptions"),
+   slice("argvHasGroup"), slice("codexModeGroups"),
+   slice("withoutArgGroups"), slice("codexRuntimeState"),
+   slice("codexRuntimeArgs"), slice("codexRuntimeText"),
+   slice("seedNewCodexRuntime"), slice("renderNewCodexRuntime"),
+   slice("renderNewClaudeRuntime"),
    slice("fillSpawnSelect"), slice("profileBorrowCapability"),
    slice("spawnUnlocked"), slice("refreshSpawnPolicy"),
    slice("spawnWorkspaceName"), slice("refreshParentChoices"),
@@ -186,7 +197,8 @@ function check(what, got, want) {
   }
 }
 const INHERITED = ["profile", "harness", "borrow", "null_token", "cwd", "args",
-                   "resume", "fork"];
+                   "resume", "fork", "skip_permissions",
+                   "codex_yolo", "codex_sandbox"];
 const greyed = () => INHERITED.map((k) => form[k].disabled);
 /* Re-reading a parent's report the way a changed policy would: the fetch is
    cached per parent, so this moves off it and back. */
@@ -237,7 +249,7 @@ async function main() {
   form.parent.value = "lead";
   ctx.sync();
   check("with no report every inherited row stays the parent's",
-        greyed(), [true, true, true, true, true, true, true, true]);
+        greyed(), [true, true, true, true, true, true, true, true, true, true, true]);
   check("the rows that make it a different worker still travel",
         form.role.disabled, false);
   check("the hint names the parent",
@@ -246,10 +258,14 @@ async function main() {
         [false, true]);
   check("...and says which rows an unlock would open",
         box_["parent-hint"].textContent.includes(
-          "profile, harness, borrow, null_token, cwd, args stay its parent's"),
+          "profile, harness, borrow, null_token, cwd, args, skip_permissions " +
+          "stay its parent's"),
         true);
   check("the blank directory entry now means the parent's",
         form.cwd.options[0].textContent, "(inherit the parent's directory)");
+  check("the Claude child shows its own inherited runtime panel",
+        [box_["new-claude-runtime"].classList.contains("hidden"),
+         form.skip_permissions.disabled], [false, true]);
 
   /* The policy arrives. Every row it opens is handed back — this is the case
      the form used to get wrong: `allow_profile: true` in ~/.claunch.yaml, the
@@ -263,7 +279,8 @@ async function main() {
   await ctx.policy();
   check("the report was fetched for the parent named", fetched, ["lead"]);
   check("what the policy opened is handed back, what it shuts stays grey",
-        greyed(), [false, false, false, false, false, false, true, true]);
+        greyed(), [false, false, false, false, false, false, true, true,
+                   true, false, false]);
   check("a child's workflows are re-read for where the child will stand",
         wfRefreshes > 0, true);
   check("the profile row gains an inherit entry, and starts on it",
@@ -323,11 +340,25 @@ async function main() {
   PROFILE_DETAILS.home.borrow_mode = "none";
   form.profile.value = "home";
   form.harness.value = "codex";
+  form.args.value = "";
   ctx.sync();
   check("a non-claude child has no token rows and no role",
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled,
          form.borrow.value, form.role.value],
         [true, true, true, "", ""]);
+  check("Codex gets its own runtime panel",
+        [box_["new-codex-runtime"].classList.contains("hidden"),
+         form.codex_yolo.checked, form.codex_sandbox.checked],
+        [false, true, false]);
+  check("the Claude layout is removed when the child is Codex",
+        box_["new-claude-runtime"].classList.contains("hidden"), true);
+  check("an unchanged Codex mode inherits without replacing parent args",
+        ctx.fields(form, {}).args, undefined);
+  form.codex_sandbox.checked = true;
+  check("changing the Codex sandbox preserves the two-axis YOLO choice",
+        ctx.fields(form, {}).args,
+        ["--approval-mode", "full-auto", "--sandbox", "workspace-write"]);
+  form.codex_sandbox.checked = false;
   check("the stance was re-rendered when the role was taken back",
         stances > 0, true);
   /* An API-key child keeps Borrow, but still has no Claude-only rows. */
@@ -337,6 +368,8 @@ async function main() {
   form.profile.value = "home";
   form.harness.value = "pi";
   ctx.sync();
+  check("another harness does not reuse the Codex runtime layout",
+        box_["new-codex-runtime"].classList.contains("hidden"), true);
   check("an API-key child can borrow but cannot use Claude null/role",
         [form.null_token.disabled, form.borrow.disabled, form.role.disabled],
         [true, false, true]);
@@ -412,7 +445,7 @@ async function main() {
         box_["new-fork-row"].title,
         "the parent has no claude conversation to copy");
   check("another parent is another policy — nothing is carried over",
-        greyed(), [true, true, true, true, true, true, true, true]);
+        greyed(), [true, true, true, true, true, true, true, true, true, true, true]);
 
   /* A report that arrives after the pick moved on is dropped: it describes a
      parent this form is no longer building a child of. */

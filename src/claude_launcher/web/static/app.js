@@ -2772,6 +2772,91 @@ function newProfileHarnessName(f, selector = "") {
     (spawnParent() || {}).harness || "";
 }
 
+/* ---- Codex's harness-specific runtime panel ----------------------------
+   Approval and file isolation are independent Codex settings.  They are not
+   rendered from generic capability flags: a different harness that happens
+   to declare a permission toggle still needs its own vocabulary and layout.
+   The argv remains declaration-driven so a configured Codex command and the
+   daemon continue to agree on the exact native flags. */
+function argvHasGroup(argv, group) {
+  argv = (argv || []).map(String);
+  group = (group || []).map(String);
+  if (!group.length) return false;
+  return argv.some((_, i) =>
+    group.every((arg, j) => argv[i + j] === arg));
+}
+
+function codexModeGroups(capabilities) {
+  capabilities = capabilities || {};
+  const declared = (key, fallback) => {
+    const group = (capabilities[key] || []).map(String);
+    return group.length ? group : fallback.slice();
+  };
+  const groups = {
+    bypass: declared("mode_conflict_args",
+      ["--dangerously-bypass-approvals-and-sandbox"]),
+    skip: declared("skip_permissions_args", ["--approval-mode", "full-auto"]),
+    sandboxOn: declared("full_access_off_args", ["--sandbox", "workspace-write"]),
+    sandboxOff: declared("full_access_args", ["--sandbox", "danger-full-access"]),
+  };
+  groups.all = [];
+  for (const group of [groups.bypass, groups.skip,
+                       groups.sandboxOn, groups.sandboxOff]) {
+    if (!groups.all.some((seen) => JSON.stringify(seen) === JSON.stringify(group))) {
+      groups.all.push(group);
+    }
+  }
+  return groups;
+}
+
+function withoutArgGroups(argv, groups) {
+  const out = (argv || []).filter((arg) => arg !== "--").map(String);
+  const usable = (groups || []).filter((group) => group && group.length);
+  let i = 0;
+  while (i < out.length) {
+    const found = usable.find((group) =>
+      group.every((arg, j) => out[i + j] === arg));
+    if (found) out.splice(i, found.length);
+    else i++;
+  }
+  return out;
+}
+
+function codexRuntimeState(argv, capabilities) {
+  const own = (argv || []).filter((arg) => arg !== "--").map(String);
+  const groups = codexModeGroups(capabilities);
+  const managed = groups.all.some((group) => argvHasGroup(own, group));
+  const declared = ((capabilities && capabilities.args) || []).map(String);
+  const effective = managed
+    ? own
+    : [...(declared.length ? declared : groups.bypass), ...own];
+  const skipping = argvHasGroup(effective, groups.skip);
+  return {
+    yolo: argvHasGroup(effective, groups.bypass) || skipping,
+    sandbox: argvHasGroup(effective, groups.sandboxOn) ||
+      (skipping && !argvHasGroup(effective, groups.sandboxOff)),
+  };
+}
+
+function codexRuntimeArgs(argv, capabilities, yolo, sandbox) {
+  const groups = codexModeGroups(capabilities);
+  const out = withoutArgGroups(argv, groups.all);
+  if (yolo && !sandbox) return [...groups.bypass, ...out];
+  const mode = [];
+  if (yolo) mode.push(...groups.skip);
+  mode.push(...(sandbox ? groups.sandboxOn : groups.sandboxOff));
+  return [...mode, ...out];
+}
+
+function codexRuntimeText(yolo, sandbox) {
+  if (yolo && !sandbox) {
+    return "YOLO enabled · sandbox disabled · approvals and sandbox are bypassed";
+  }
+  return `${yolo ? "YOLO enabled · approval prompts disabled" :
+    "YOLO disabled · approval prompts enabled"} · ` +
+    `${sandbox ? "workspace-write sandbox enabled" : "sandbox disabled"}`;
+}
+
 function refillNewHarnessOptions(f, want, force = false) {
   const parent = spawnParent() || {};
   const signature = newProfileOptions.map((item) =>
@@ -3108,6 +3193,76 @@ function refreshResumeChoices() {
   syncForkAvailability();
 }
 
+function seedNewCodexRuntime(f, capabilities, argv, key) {
+  if (!f.codex_yolo || !f.codex_sandbox || f._codexRuntimeFor === key) return;
+  const state = codexRuntimeState(argv, capabilities);
+  f.codex_yolo.checked = state.yolo;
+  f.codex_sandbox.checked = state.sandbox;
+  f._codexRuntimeFor = key;
+  f._codexRuntimeOriginal = state;
+  f._codexRuntimeBaseArgs = (argv || []).slice();
+}
+
+function renderNewCodexRuntime(f, harnessName, capabilities, parent = null) {
+  const panel = $("new-codex-runtime");
+  if (!panel || !f.codex_yolo || !f.codex_sandbox) return;
+  const codex = harnessName === "codex";
+  panel.classList.toggle("hidden", !codex);
+  if (!codex) return;
+  if (!parent) {
+    seedNewCodexRuntime(
+      f, capabilities, [], `new:${newProfileSelector(f)}:${harnessName}`
+    );
+    f.codex_yolo.disabled = false;
+    f.codex_sandbox.disabled = false;
+  }
+  const hint = $("new-codex-runtime-hint");
+  if (hint) {
+    const inherited = parent && f.codex_yolo.disabled
+      ? (harnessName === parent.harness
+        ? ` · inherited from ${parent.name} (spawn.allow_args)`
+        : " · Codex default (spawn.allow_args to override)")
+      : "";
+    hint.textContent = codexRuntimeText(
+      f.codex_yolo.checked, f.codex_sandbox.checked
+    ) + inherited;
+  }
+}
+
+function renderNewClaudeRuntime(f, harnessName, capabilities, parent = null) {
+  const panel = $("new-claude-runtime");
+  if (!panel || !f.skip_permissions) return;
+  const claude = harnessName === "claude";
+  panel.classList.toggle("hidden", !claude);
+  if (!claude) return;
+
+  const permissionArgs = (capabilities.skip_permissions_args || []).map(String);
+  if (parent) {
+    const base = harnessName === parent.harness ? (parent.args || []) : [];
+    const key = `child:${parent.name}:${newProfileSelector(f)}:${harnessName}`;
+    if (f._claudeRuntimeFor !== key) {
+      f.skip_permissions.checked = argvHasGroup(base, permissionArgs);
+      f._claudeRuntimeFor = key;
+      f._claudeRuntimeOriginal = f.skip_permissions.checked;
+      f._claudeRuntimeBaseArgs = base.slice();
+    }
+  } else {
+    f.skip_permissions.disabled = false;
+  }
+  const hint = $("new-claude-runtime-hint");
+  if (hint) {
+    const mode = f.skip_permissions.checked
+      ? `enabled${permissionArgs.length ? ` (${permissionArgs.join(" ")})` : ""}`
+      : "disabled";
+    const source = parent && f.skip_permissions.disabled
+      ? (harnessName === parent.harness
+        ? ` · inherited from ${parent.name} (spawn.allow_args)`
+        : " · Claude default (spawn.allow_args to override)")
+      : "";
+    hint.textContent = `permission skipping ${mode}${source}`;
+  }
+}
+
 /* --fork-session is claude's own "use with --resume or --continue": with
    nothing to fork it is not a weaker choice, it is a rejected one. */
 function syncForkAvailability() {
@@ -3126,21 +3281,8 @@ function syncForkAvailability() {
   if (f.fork.disabled) f.fork.checked = false;
   f.role.disabled = !claude;
   f.resume.disabled = !claude;
-  const permissionsRow = $("new-permissions-row");
-  const permissionArgs = capabilities.skip_permissions_args || [];
-  if (permissionsRow) {
-    permissionsRow.classList.toggle("hidden", !permissionArgs.length);
-    if (!permissionArgs.length) f.skip_permissions.checked = false;
-    $("new-permissions-text").textContent = permissionArgs.length
-      ? `Run without approval prompts (${permissionArgs.join(" ")})`
-      : "Run without approval prompts";
-  }
-  const fullAccessArgs = capabilities.full_access_args || [];
-  const fullAccessRow = $("new-full-access-row");
-  if (fullAccessRow) {
-    fullAccessRow.classList.toggle("hidden", !fullAccessArgs.length);
-    if (!fullAccessArgs.length) f.full_access.checked = false;
-  }
+  renderNewClaudeRuntime(f, harnessName, capabilities, parent);
+  renderNewCodexRuntime(f, harnessName, capabilities, parent);
   // Claude and declared API-key harnesses consume the shared profile token.
   // OAuth harnesses keep auth in their own profile home. --null remains a
   // Claude-only answer and cannot coexist with a borrow.
@@ -3216,8 +3358,17 @@ function renderRuntimeSummary() {
     bits.push(f.resume.value === PICKER ? "resume (picker)" : `resume ${f.resume.value}`);
   }
   if (speaks("args") && f.args.value.trim()) bits.push("+args");
-  if (f.skip_permissions && f.skip_permissions.checked) bits.push("full auto");
-  if (f.full_access && f.full_access.checked) bits.push("full access");
+  const claudePanel = $("new-claude-runtime");
+  if (claudePanel && !claudePanel.classList.contains("hidden") &&
+      speaks("skip_permissions") && f.skip_permissions.checked) {
+    bits.push("Claude permissions skipped");
+  }
+  const codexPanel = $("new-codex-runtime");
+  if (codexPanel && !codexPanel.classList.contains("hidden") &&
+      speaks("codex_yolo")) {
+    if (f.codex_yolo && f.codex_yolo.checked) bits.push("Codex YOLO");
+    if (f.codex_sandbox && f.codex_sandbox.checked) bits.push("Codex sandbox");
+  }
   if (parent) {
     out.textContent = bits.length
       ? `— ${parent.name}'s setup · ${bits.join(" · ")}`
@@ -3312,6 +3463,14 @@ function syncRuntimeFold(f, parent) {
 /* One listener for the whole form rather than one per folded row: `input`
    bubbles from every control in it, and both lines are cheap to rebuild. */
 $("new-session").addEventListener("input", () => {
+  const f = $("new-session");
+  const harnessName = newProfileHarnessName(f) || "claude";
+  const capabilities = (typeof harnessDetails !== "undefined"
+    ? harnessDetails[harnessName] : null) || {};
+  renderNewClaudeRuntime(f, harnessName, capabilities, spawnParent());
+  renderNewCodexRuntime(
+    f, harnessName, capabilities, spawnParent()
+  );
   renderRuntimeSummary();
   renderProfileHint();
 });
@@ -3330,8 +3489,8 @@ $("new-session").addEventListener("input", () => {
    wrong; one that withholds what the policy opened teaches it just as
    wrong, and lies to the person who set 'allow_profile: true'. */
 const SPAWN_INHERITS = ["profile", "harness", "borrow", "null_token", "cwd",
-                        "args", "resume", "fork", "skip_permissions",
-                        "full_access"];
+                        "args", "resume", "fork", "skip_permissions", "codex_yolo",
+                        "codex_sandbox"];
 
 /* Of those, the two that no longer live in the fold. They are still
    inherited — the spawn policy governs them exactly as before, and
@@ -3377,8 +3536,14 @@ function spawnUnlocked(report) {
     // omits the list rather than emptying it when that is shut.
     cwd: !!(report && report.workspaces),
     args: may.includes("args"),
-    skip_permissions: may.includes("args"),
-    full_access: may.includes("args"),
+    // The child API treats an empty args list as inheritance, so a checkbox
+    // cannot faithfully remove a parent's sole Claude permission flag. Keep
+    // the Claude panel visible as inherited; the free Args override remains
+    // the policy-controlled escape hatch. Codex always emits an explicit
+    // mode group and therefore has no empty-override ambiguity.
+    skip_permissions: false,
+    codex_yolo: may.includes("args"),
+    codex_sandbox: may.includes("args"),
     // Not the policy's: a spawn has no --resume of its own, and the one
     // conversation a child can start from is its parent's — the fork row,
     // which is where that question is actually asked.
@@ -3476,7 +3641,6 @@ function syncSpawnMode() {
   }
   // Seeding happens once per parent, not on every poll: the second call
   // would be the one that throws away the operator's own pick.
-  const fresh = (parent ? parent.name : null) !== newSpawnDefaultsFor;
   newSpawnDefaultsFor = parent ? parent.name : null;
   syncSpawnProfileRow(f, !!parent);
   refillNewHarnessOptions(
@@ -3497,18 +3661,13 @@ function syncSpawnMode() {
     const claude = !childHarness || childHarness === "claude";
     const childCapabilities = (typeof harnessDetails !== "undefined"
       ? harnessDetails[childHarness] : null) || {};
-    if (fresh) {
-      const parentArgs = parent.args || [];
-      const hasGroup = (group) => group.length && parentArgs.some((_, i) =>
-        group.every((arg, j) => parentArgs[i + j] === arg));
-      if (f.skip_permissions) {
-        f.skip_permissions.checked = hasGroup(
-          childCapabilities.skip_permissions_args || []);
-      }
-      if (f.full_access) {
-        f.full_access.checked = hasGroup(childCapabilities.full_access_args || []);
-      }
-    }
+    const modeBase = childHarness === parent.harness ? (parent.args || []) : [];
+    seedNewCodexRuntime(
+      f, childCapabilities, modeBase,
+      `child:${parent.name}:${selector}:${childHarness}`
+    );
+    renderNewClaudeRuntime(f, childHarness, childCapabilities, parent);
+    renderNewCodexRuntime(f, childHarness, childCapabilities, parent);
     f.role.disabled = !claude;
     if (!claude) {
       f.null_token.checked = false;
@@ -3532,8 +3691,17 @@ function syncSpawnMode() {
     // form and of an open one alike, and the operator who unlocked profile
     // in ~/.claunch.yaml needs to see which rows are still shut to know the
     // daemon read the file.
+    const panelVisible = (id) => {
+      const panel = $(id);
+      return panel && !panel.classList.contains("hidden");
+    };
+    const runtimeVisible = (key) =>
+      key === "skip_permissions" ? panelVisible("new-claude-runtime") :
+      (key === "codex_yolo" || key === "codex_sandbox")
+        ? panelVisible("new-codex-runtime") : true;
     const shut = SPAWN_INHERITS.filter(
-      (k) => f[k] && f[k].disabled && k !== "resume" && k !== "fork");
+      (k) => f[k] && runtimeVisible(k) && f[k].disabled &&
+        k !== "resume" && k !== "fork");
     hint.textContent =
       `a child of ${parent.name}: it inherits that session's setup, and the ` +
       `rows left open below are what may differ` +
@@ -3639,24 +3807,45 @@ function spawnChildFields(f, body) {
   }
   if (!f.borrow.disabled) put("borrow", f.borrow.value);
   if (!f.null_token.disabled && f.null_token.checked) body.null_token = true;
-  if (!f.args.disabled && f.args.value.trim()) {
-    body.args = f.args.value.trim().split(/\s+/);
-  }
   const selector = newProfileSelector(f);
   const harnessName = newProfileHarnessName(f, selector);
   const capabilities = (typeof harnessDetails !== "undefined"
     ? harnessDetails[harnessName] : null) || {};
-  body.args = body.args || [];
-  if (f.skip_permissions && !f.skip_permissions.disabled &&
-      f.skip_permissions.checked) {
-    body.args.push(...(capabilities.skip_permissions_args || []));
+  const typed = !f.args.disabled && f.args.value.trim()
+    ? f.args.value.trim().split(/\s+/) : [];
+  const codexPanel = $("new-codex-runtime");
+  const claudePanel = $("new-claude-runtime");
+  const codexOpen = harnessName === "codex" && codexPanel &&
+    !codexPanel.classList.contains("hidden") &&
+    f.codex_yolo && !f.codex_yolo.disabled;
+  const claudeOpen = harnessName === "claude" && claudePanel &&
+    !claudePanel.classList.contains("hidden") &&
+    f.skip_permissions && !f.skip_permissions.disabled;
+  if (codexOpen) {
+    const original = f._codexRuntimeOriginal || { yolo: true, sandbox: false };
+    const changed = f.codex_yolo.checked !== original.yolo ||
+      f.codex_sandbox.checked !== original.sandbox;
+    if (typed.length || changed) {
+      body.args = codexRuntimeArgs(
+        typed.length ? typed : (f._codexRuntimeBaseArgs || []),
+        capabilities,
+        !!f.codex_yolo.checked,
+        !!f.codex_sandbox.checked
+      );
+    }
+  } else if (claudeOpen) {
+    const changed = f.skip_permissions.checked !== !!f._claudeRuntimeOriginal;
+    if (typed.length || changed) {
+      const permissionArgs = (capabilities.skip_permissions_args || []).map(String);
+      body.args = withoutArgGroups(
+        typed.length ? typed : (f._claudeRuntimeBaseArgs || []),
+        [permissionArgs]
+      );
+      if (f.skip_permissions.checked) body.args.push(...permissionArgs);
+    }
+  } else if (typed.length) {
+    body.args = typed;
   }
-  if (f.full_access && !f.full_access.disabled && f.full_access.checked) {
-    body.args.push(...(capabilities.full_access_args || []));
-  } else if (f.full_access && !f.full_access.disabled) {
-    body.args.push(...(capabilities.full_access_off_args || []));
-  }
-  if (!body.args.length) delete body.args;
   if (!f.cwd.disabled && f.cwd.value) {
     const name = spawnWorkspaceName(f.cwd.value);
     // No entry for the path (a registry edited under the form): send it as
@@ -3729,12 +3918,18 @@ $("new-session").addEventListener("submit", async (e) => {
     const selector = newProfileSelector(f);
     const harnessName = newProfileHarnessName(f, selector) || "claude";
     const capabilities = harnessDetails[harnessName] || {};
-    if (f.skip_permissions.checked) {
-      body.args.push(...(capabilities.skip_permissions_args || []));
+    if (harnessName === "codex") {
+      body.args = codexRuntimeArgs(
+        body.args,
+        capabilities,
+        !!f.codex_yolo.checked,
+        !!f.codex_sandbox.checked
+      );
+    } else if (harnessName === "claude") {
+      const permissionArgs = (capabilities.skip_permissions_args || []).map(String);
+      body.args = withoutArgGroups(body.args, [permissionArgs]);
+      if (f.skip_permissions.checked) body.args.push(...permissionArgs);
     }
-    body.args.push(...(f.full_access.checked
-      ? (capabilities.full_access_args || [])
-      : (capabilities.full_access_off_args || [])));
   }
   // A child sends what the spawn policy left open, and nothing else: a value
   // standing on a greyed row is not an answer anybody gave, and sending it
@@ -12593,6 +12788,50 @@ function spawnRankWorkflows(raws, role) {
   return { options, auto: auto ? auto.name : "" };
 }
 
+function syncSpawnCodexRuntime(ui, childHarness, capabilities, may) {
+  if (!ui.codexPanel || !ui.codexYolo || !ui.codexSandbox) return;
+  const codex = childHarness === "codex";
+  ui.codexPanel.hidden = !codex;
+  if (!codex) return;
+
+  const parentArgs = childHarness === (ui.parentSess || {}).harness
+    ? ((ui.parentSess || {}).args || []) : [];
+  const key = `${spawnProfileSelector(ui)}:${childHarness}:` +
+    JSON.stringify(parentArgs);
+  if (ui._codexRuntimeFor !== key) {
+    const state = codexRuntimeState(parentArgs, capabilities);
+    ui.codexYolo.checked = state.yolo;
+    ui.codexSandbox.checked = state.sandbox;
+    ui._codexRuntimeFor = key;
+    ui._codexRuntimeOriginal = state;
+    ui._codexRuntimeBaseArgs = parentArgs.slice();
+  }
+
+  const inherited = !may.includes("args");
+  const inheritsParent = childHarness === (ui.parentSess || {}).harness;
+  ui.codexYolo.disabled = inherited;
+  ui.codexSandbox.disabled = inherited;
+  for (const [field, note] of [
+    [ui.codexYolo, ui.codexYoloNote],
+    [ui.codexSandbox, ui.codexSandboxNote],
+  ]) {
+    if (!note) continue;
+    note.hidden = !inherited;
+    note.textContent = inherited
+      ? (inheritsParent
+        ? `inherited from the parent: ${field.checked ? "enabled" : "disabled"} ` +
+          "(spawn.allow_args)"
+        : `Codex default: ${field.checked ? "enabled" : "disabled"} ` +
+          "(spawn.allow_args to override)")
+      : "";
+  }
+  if (ui.codexState) {
+    ui.codexState.textContent = codexRuntimeText(
+      ui.codexYolo.checked, ui.codexSandbox.checked
+    );
+  }
+}
+
 /* The wizard's _sync: every dependency between rows, re-derived on every
    change. Locks carry the wizard's own wording — a greyed row says which
    policy key opens it, not just that it is shut. */
@@ -12646,6 +12885,9 @@ function syncSpawnGates(ui) {
     : null;
   const childHarness = String((ui.harness && ui.harness.value) || "") ||
     (pickedDetail ? pickedDetail.harness : (ui.parentSess || {}).harness || "");
+  const childCapabilities = (typeof harnessDetails !== "undefined"
+    ? harnessDetails[childHarness] : null) || {};
+  syncSpawnCodexRuntime(ui, childHarness, childCapabilities, may);
   lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
     "the child runs under its parent's profile (spawn.allow_profile)");
   if (ui.harness) {
@@ -12824,8 +13066,31 @@ function spawnPayload(ui) {
   if (!ui.borrow.disabled) put("borrow", ui.borrow.value);
   if (!ui.nullTok.disabled && ui.nullTok.checked) body.null_token = true;
   if (!ui.fork.disabled && ui.fork.checked) body.fork = true;
-  if (!ui.args.disabled && (ui.args.value || "").trim()) {
-    body.args = ui.args.value.trim().split(/\s+/);
+  const typedArgs = !ui.args.disabled && (ui.args.value || "").trim()
+    ? ui.args.value.trim().split(/\s+/) : [];
+  const codexOpen = ui.codexPanel && !ui.codexPanel.hidden &&
+    ui.codexYolo && !ui.codexYolo.disabled;
+  if (codexOpen) {
+    const original = ui._codexRuntimeOriginal || { yolo: true, sandbox: false };
+    const changed = ui.codexYolo.checked !== original.yolo ||
+      ui.codexSandbox.checked !== original.sandbox;
+    if (typedArgs.length || changed) {
+      const selector = spawnProfileSelector(ui);
+      const detail = (ui.profileDetails || {})[selector] ||
+        (ui.profileDetails || {})[baseProfileName(selector)] || {};
+      const harnessName = String((ui.harness && ui.harness.value) || "") ||
+        detail.harness || (ui.parentSess || {}).harness || "";
+      const capabilities = (typeof harnessDetails !== "undefined"
+        ? harnessDetails[harnessName] : null) || {};
+      body.args = codexRuntimeArgs(
+        typedArgs.length ? typedArgs : (ui._codexRuntimeBaseArgs || []),
+        capabilities,
+        !!ui.codexYolo.checked,
+        !!ui.codexSandbox.checked
+      );
+    }
+  } else if (typedArgs.length) {
+    body.args = typedArgs;
   }
   // Both travel as NAMES, never paths: the workspace is what the API
   // resolves, and the child's worktree is cut by the daemon from the
@@ -13178,6 +13443,28 @@ function buildSpawnForm(parentName, seed) {
   ui.args = document.createElement("input");
   ui.args.placeholder = "extra harness flags";
   box.appendChild(spawnRow("Args", ui.args, (ui.argsNote = el("span", "sess-spawn-note"))));
+
+  /* Codex has a named runtime panel rather than generic permission rows.
+     Other harnesses do not acquire Codex labels merely because their
+     declaration exposes a similar argv capability. */
+  ui.codexPanel = document.createElement("fieldset");
+  ui.codexPanel.className = "sess-spawn-harness sess-spawn-codex";
+  ui.codexPanel.hidden = true;
+  ui.codexPanel.appendChild(el("legend", null, "Codex runtime"));
+  const yoloRow = spawnCheckRow("YOLO mode — skip approval prompts", true);
+  ui.codexYolo = yoloRow.querySelector("input");
+  ui.codexYolo.checked = true;
+  ui.codexYoloNote = yoloRow.querySelector(".sess-spawn-note");
+  const sandboxRow = spawnCheckRow(
+    "Sandbox — limit writes to the workspace", true
+  );
+  ui.codexSandbox = sandboxRow.querySelector("input");
+  ui.codexSandbox.checked = false;
+  ui.codexSandboxNote = sandboxRow.querySelector(".sess-spawn-note");
+  ui.codexState = el("p", "sess-spawn-harness-state");
+  ui.codexPanel.append(yoloRow, sandboxRow, ui.codexState);
+  box.appendChild(ui.codexPanel);
+
   ui.workspace = document.createElement("select");
   box.appendChild(spawnRow("Directory", ui.workspace, (ui.workspaceNote = el("span", "sess-spawn-note"))));
 
@@ -13653,6 +13940,8 @@ async function spawnModalLoad(st) {
   ui.harness.addEventListener("change", () =>
     refreshSpawnBorrowOptions(st, true));
   ui.nullTok.addEventListener("change", () => syncSpawnGates(ui));
+  ui.codexYolo.addEventListener("change", () => syncSpawnGates(ui));
+  ui.codexSandbox.addEventListener("change", () => syncSpawnGates(ui));
   ui.wtMode.listen(() => syncSpawnGates(ui));
   ui.wtPick.addEventListener("change", () => syncSpawnGates(ui));
   ui.update.addEventListener("change", () => syncSpawnGates(ui));

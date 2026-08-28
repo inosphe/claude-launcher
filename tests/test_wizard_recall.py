@@ -194,13 +194,19 @@ def test_spawn_remembers_its_own_shorter_list(home):
     # a child's harness, args and workspace are its parent's and the policy's
     # to offer, so they are not carried across parents; its mesh is the
     # parent's answer, not last launch's
-    assert not spawn_fields & {"harness", "args", "workspace", "name", "mesh"}
+    assert not spawn_fields & {
+        "harness", "args", "workspace", "name", "mesh",
+        "codex_yolo", "codex_sandbox",
+    }
     # the PARENT is carried: it is the answer every other row is re-read
     # from, and "spawn another child of the same parent" is the human's
     # repeat action (a remembered parent that no longer stands is just not
     # selected, so it cannot make the form lie)
     assert "parent" in spawn_fields
     assert {"profile", "role"} <= spawn_fields
+    assert {"skip_permissions", "codex_yolo", "codex_sandbox"} <= set(
+        wizard.Wizard.recall_fields
+    )
 
 
 def test_no_form_remembers_a_row_that_takes_no_preset(home):

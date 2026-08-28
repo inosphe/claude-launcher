@@ -146,7 +146,16 @@ let sessionsCache = [];
 let spawnModal = null;
 let BASE = "/";
 let harnessDetails = {
-  claude: { auth: "claude" }, codex: { auth: "oauth" }, pi: { auth: "api-key" },
+  claude: { auth: "claude" },
+  codex: {
+    auth: "oauth",
+    args: ["--dangerously-bypass-approvals-and-sandbox"],
+    mode_conflict_args: ["--dangerously-bypass-approvals-and-sandbox"],
+    skip_permissions_args: ["--approval-mode", "full-auto"],
+    full_access_args: ["--sandbox", "danger-full-access"],
+    full_access_off_args: ["--sandbox", "workspace-write"],
+  },
+  pi: { auth: "api-key" },
 };
 function refreshSessions() { railRefreshed++; afterSpawn.push("rail"); }
 /* The box's remembered size is a contract of its own — spawnsize_check drives
@@ -170,10 +179,14 @@ new Function(
   + slice("spawnRecall") + slice("saveSpawnRecall")
   + slice("spawnMeshNow") + slice("spawnWtFragment")
   + slice("spawnAutoWorktree") + slice("spawnAutoWorktreeHint")
+  + slice("argvHasGroup") + slice("codexModeGroups")
+  + slice("withoutArgGroups") + slice("codexRuntimeState")
+  + slice("codexRuntimeArgs") + slice("codexRuntimeText")
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
   + slice("baseProfileName") + slice("profileBorrowCapability")
   + slice("profileOwnAuthLabel") + slice("readBorrowOptions")
   + slice("fillValidatedBorrow") + slice("syncSpawnGates") + slice("syncSpawnBeads")
+  + slice("syncSpawnCodexRuntime")
   + slice("spawnPayload")
   + slice("spawnReport") + slice("spawnPreflightNote")
   + slice("spawnHardBlocks") + slice("postSpawn")
@@ -190,6 +203,7 @@ new Function(
 Object.assign(exports, {
   spawnPayload, syncSpawnGates, syncSpawnBeads, spawnRankWorkflows, spawnWorkflowAdmits,
   spawnWorkflowEntry, spawnAutoWorktree, spawnAutoWorktreeHint,
+  codexRuntimeArgs, codexRuntimeState,
   spawnMeshNow, spawnRadioGroup,
   normalizeSpawnProfileOptions, spawnProfileSelector, refillSpawnHarnesses,
   spawnRecall, saveSpawnRecall, buildSpawnForm, openSpawnModal, spawnModalClose,
@@ -252,6 +266,9 @@ function uiStub(over = {}) {
     mesh: ctl(), handle: ctl(), task: ctl(), args: ctl(),
     profile: ctl(), harness: ctl(), borrow: ctl(),
     nullTok: ctl(), fork: ctl(), over: ctl(), overRow: ctl(),
+    codexPanel: ctl({ hidden: true }), codexYolo: ctl({ checked: true }),
+    codexSandbox: ctl(), codexYoloNote: ctl({ hidden: true }),
+    codexSandboxNote: ctl({ hidden: true }), codexState: ctl(),
     profileNote: ctl(), harnessNote: ctl(), borrowNote: ctl(),
     nullNote: ctl(), forkNote: ctl(), argsNote: ctl(),
     workspace: ctl(), workspaceNote: ctl(),
@@ -269,6 +286,26 @@ function uiStub(over = {}) {
 }
 
 async function main() {
+  const codexCaps = {
+    args: ["--dangerously-bypass-approvals-and-sandbox"],
+    mode_conflict_args: ["--dangerously-bypass-approvals-and-sandbox"],
+    skip_permissions_args: ["--approval-mode", "full-auto"],
+    full_access_args: ["--sandbox", "danger-full-access"],
+    full_access_off_args: ["--sandbox", "workspace-write"],
+  };
+  const modeCases = [
+    [true, false, ["--dangerously-bypass-approvals-and-sandbox"]],
+    [true, true, ["--approval-mode", "full-auto", "--sandbox", "workspace-write"]],
+    [false, false, ["--sandbox", "danger-full-access"]],
+    [false, true, ["--sandbox", "workspace-write"]],
+  ];
+  check("the Web encoder covers all four Codex runtime combinations",
+    modeCases.every(([yolo, sandbox, expected]) =>
+      JSON.stringify(ctx.codexRuntimeArgs([], codexCaps, yolo, sandbox)) ===
+        JSON.stringify(expected)),
+    modeCases.map(([yolo, sandbox]) =>
+      ctx.codexRuntimeArgs([], codexCaps, yolo, sandbox)));
+
   /* ---- the brain: ranking ---------------------------------------------- */
   const WL = { type: "whitelist", roles: ["worker", "qa"] };
   check("whitelist admits its own role",
@@ -547,6 +584,39 @@ async function main() {
       Object.values(g.wtMode.inputs).every((i) => i.disabled === true) &&
       /spawn\.allow_worktree/.test(g.worktreeNote.textContent),
     g.worktreeNote.textContent);
+
+  const codexLocked = uiStub({
+    report: { may_choose: [], workspaces: [] },
+    harness: ctl({ value: "codex" }),
+    parentSess: {
+      harness: "codex", profile: "codex:codex",
+      args: ["--model", "parent-model", "--sandbox", "workspace-write"],
+    },
+    profileDetails: {},
+  });
+  ctx.syncSpawnGates(codexLocked);
+  check("a Codex parent keeps its specialised panel visible while inherited",
+    codexLocked.codexPanel.hidden === false &&
+      codexLocked.codexYolo.disabled === true &&
+      codexLocked.codexSandbox.disabled === true,
+    [codexLocked.codexPanel.hidden, codexLocked.codexYolo.disabled,
+      codexLocked.codexSandbox.disabled]);
+  check("the locked panel reflects the parent's actual mode",
+    codexLocked.codexYolo.checked === false &&
+      codexLocked.codexSandbox.checked === true,
+    [codexLocked.codexYolo.checked, codexLocked.codexSandbox.checked]);
+  check("an inherited Codex mode sends no args override",
+    !("args" in ctx.spawnPayload(codexLocked)), ctx.spawnPayload(codexLocked));
+
+  codexLocked.report.may_choose = ["args"];
+  ctx.syncSpawnGates(codexLocked);
+  codexLocked.codexYolo.checked = true;
+  const codexChanged = ctx.spawnPayload(codexLocked);
+  check("a Codex mode override preserves the parent's unrelated args",
+    JSON.stringify(codexChanged.args) === JSON.stringify([
+      "--approval-mode", "full-auto", "--sandbox", "workspace-write",
+      "--model", "parent-model",
+    ]), codexChanged.args);
 
   const g2 = uiStub({
     report: { may_choose: ["worktree", "profile", "fork"], workspaces: [] },
@@ -1041,6 +1111,29 @@ async function main() {
         "(codex/codex profile's own OAuth login)",
     borrowSel && [borrowSel.disabled, borrowSel.value,
       borrowSel.options.map((o) => o.text)]);
+  const codexUi = ctx.spawnUi();
+  check("the Codex child gets a distinct runtime panel",
+    codexUi && codexUi.codexPanel.hidden === false &&
+      texts(codexUi.codexPanel).includes("Codex runtime"),
+    codexUi && [codexUi.codexPanel.hidden, texts(codexUi.codexPanel)]);
+  check("the panel opens in direct-run YOLO mode with the sandbox off",
+    codexUi && codexUi.codexYolo.checked === true &&
+      codexUi.codexSandbox.checked === false,
+    codexUi && [codexUi.codexYolo.checked, codexUi.codexSandbox.checked]);
+  check("an unchanged Codex mode leaves args absent for daemon defaults",
+    !("args" in ctx.spawnPayload(codexUi)), ctx.spawnPayload(codexUi));
+  codexUi.codexSandbox.checked = true;
+  await codexUi.codexSandbox.fire("change");
+  check("YOLO with Sandbox sends full-auto plus workspace-write",
+    JSON.stringify(ctx.spawnPayload(codexUi).args) === JSON.stringify([
+      "--approval-mode", "full-auto", "--sandbox", "workspace-write",
+    ]), ctx.spawnPayload(codexUi).args);
+  codexUi.codexYolo.checked = false;
+  await codexUi.codexYolo.fire("change");
+  check("approval prompts with Sandbox sends workspace-write alone",
+    JSON.stringify(ctx.spawnPayload(codexUi).args) === JSON.stringify([
+      "--sandbox", "workspace-write",
+    ]), ctx.spawnPayload(codexUi).args);
   profileSel.value = "";
   await profileSel.fire("change");
   await settle();
@@ -1048,6 +1141,9 @@ async function main() {
     harnessSel && harnessSel.value === "" && harnessSel.options[0].text ===
       "(inherit the parent's harness)",
     harnessSel && [harnessSel.value, harnessSel.options.map((o) => o.text)]);
+  check("returning to Claude removes the Codex-specific layout",
+    ctx.spawnUi().codexPanel.hidden === true,
+    ctx.spawnUi().codexPanel.hidden);
   check("the mesh picker opens on inherit", meshSel && meshSel.value === "",
     meshSel && meshSel.value);
   check("...with the parent's own mesh still on offer to name outright",

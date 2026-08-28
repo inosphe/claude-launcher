@@ -571,6 +571,7 @@ def build_command(
         if entry is None:  # normalize() refuses these; belt and braces
             raise HarnessError(f"unknown harness {sdef.harness!r}")
         managed_groups = (
+            entry.mode_conflict_args,
             entry.skip_permissions_args,
             entry.full_access_args,
             entry.full_access_off_args,
