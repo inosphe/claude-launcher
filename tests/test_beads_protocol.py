@@ -65,6 +65,19 @@ def test_the_improv_workflows_share_one_beads_rule_block():
         )
 
 
+def test_the_open_pool_criteria_section_is_part_of_the_shared_block():
+    """The open-pool triage criteria live in the one shared block, not in a
+    workflow's own half — a worker-only pin would teach the leader nothing
+    about the pool it is the leader's to tidy."""
+    block = _block(_bundled("improv-worker"))
+    assert "── open 풀 판정 기준 ──" in block
+    assert "--limit 0" in block                       # full-pool measurement, never the 50-row view
+    assert "일괄 변경은 없다" in block            # per-issue verdicts only, never a batch
+    assert "merged 해시가 코멘트에 있는데 open인" in block
+    assert "SESSION ENDED 코멘트가 있고 assignee 없이 3일" in block
+    assert "재배정이 먼저" in block                 # reassignment before closing
+
+
 def test_the_block_sits_in_every_intake():
     """The block is read where a round begins, in each workflow."""
     for name in ("improv-worker", "improv-leader", "improv-mid"):
