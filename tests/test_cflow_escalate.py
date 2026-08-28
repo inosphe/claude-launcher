@@ -436,3 +436,55 @@ def test_a_select_step_may_escalate_through_an_ending_option():
         "        again: {description: keep going, next: one}\n"
     )
     assert workflow.steps["one"].escalate.workflow == "midflow"
+
+
+# --------------------------------------------------------------------------- #
+# the order the daemon can see
+# --------------------------------------------------------------------------- #
+def test_the_request_is_on_disk_before_the_run_is_marked_done(proj, monkeypatch):
+    """`status == "done"` with nothing pending is a kill order.
+
+    The daemon's kill-on-end clock samples the run's status without taking the
+    run lock, so any moment where `done` is visible and no start is pending is
+    a moment it can decide to end the session — and it never rechecks: the run
+    is latched, and the kill task that follows the grace period looks only at
+    whether the session already exited and at `keep_alive`. The escalation's
+    own work (a file read, two daemon round trips) is long enough to be
+    sampled, so the request must be written first. Asserted at the write
+    itself rather than through the clock, because the clock's sample is
+    exactly what cannot be scheduled from a test.
+    """
+    _role(monkeypatch)
+    seen = []
+    real = state_mod.save_state
+
+    def watched(state, cwd=None):
+        if state.get("status") == "done":
+            pending = state_mod.read_request(cwd)
+            seen.append(pending.get("by") if pending else None)
+        return real(state, cwd)
+
+    monkeypatch.setattr(state_mod, "save_state", watched)
+    _finish("workerflow")
+
+    assert seen == ["escalate"], (
+        "the run was saved as done before its escalation request existed — "
+        "that window is where kill-on-end ends the session"
+    )
+
+
+def test_a_declined_escalation_leaves_the_ordinary_ending_untouched(proj, monkeypatch):
+    """Writing the request first must not leave a stale one behind on refusal."""
+    _role(monkeypatch, role="reviewer")
+    seen = []
+    real = state_mod.save_state
+
+    def watched(state, cwd=None):
+        if state.get("status") == "done":
+            seen.append(state_mod.read_request(cwd))
+        return real(state, cwd)
+
+    monkeypatch.setattr(state_mod, "save_state", watched)
+    _finish("workerflow")
+
+    assert seen == [None]

@@ -987,10 +987,21 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
     from_step = state.get("current")
     _settle_timers(workflow, state, target, cwd)
     if target is None:
-        state["current"] = None
-        state["status"] = "done"
-        state_mod.save_state(state, cwd)
-        state_mod.journal("done", {"run": state["run_id"]}, cwd)
+        # BEFORE the run is marked done, and deliberately: `status == "done"`
+        # with no pending start is the daemon's kill-on-end condition, and it
+        # is sampled by a clock that takes no lock against this function. The
+        # escalation's own work — a workflow file read, and two daemon round
+        # trips for the role and the issue — is exactly the window in which
+        # that sample would find a finished run with nothing pending and
+        # start ending the session. It would not be undone by the request
+        # arriving a moment later: the clock latches the run in `_end_done`
+        # and its kill task rechecks only `session.exited` and `keep_alive`,
+        # never the pending start again. `recur` sits after the save and is
+        # safe there because the clock has a second, independent guard for it
+        # (`not payload.get("recur")`); an escalation has no such guard, so
+        # the ONLY thing standing between it and a killed session is that its
+        # request is already on disk when `done` becomes visible.
+        #
         # An escalation declared on the step the run just left wins over
         # `recur`: the workflow-wide "this run happens again" is the default,
         # and a particular ending saying "the work continues under other
@@ -1003,6 +1014,10 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
         escalated = False
         if ended_at is not None and ended_at.escalate is not None:
             escalated = _request_escalation(ended_at, state, cwd)
+        state["current"] = None
+        state["status"] = "done"
+        state_mod.save_state(state, cwd)
+        state_mod.journal("done", {"run": state["run_id"]}, cwd)
         if workflow.recur and not escalated:
             _request_next_round(workflow, state, cwd)
         return
@@ -1118,6 +1133,12 @@ def _request_escalation(step: Step, state: dict, cwd: Optional[str]) -> bool:
     start time is far more expensive, because ``_start_impl`` archives the old
     run BEFORE it holds the new one against ``filter_roles``, leaving the
     session holding an unfulfillable request with no active run at all.
+
+    **Called before the run is saved as done, and it must stay that way.**
+    Everything below takes real time — a workflow file read and two daemon
+    round trips — and for all of it the run must not yet look finished to the
+    kill-on-end clock, which samples the state without taking this lock and
+    does not look again. See the comment at the call site in ``_advance``.
 
     The role check has three outcomes and they are not interchangeable:
     approved (escalate), refused (do NOT escalate — the run ends the ordinary

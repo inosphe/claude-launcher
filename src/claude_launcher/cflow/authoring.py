@@ -494,6 +494,14 @@ What the table is for, read row by row:
 A refused escalation on a `recur` workflow still files that workflow's next
 round: a hand-off that could not happen must not also silence a service loop.
 
+One ordering constraint holds all of this up, and it is in the engine rather
+than in anything you write: the request is on disk BEFORE the run is saved as
+done. `done` with nothing pending is the daemon's kill-on-end condition, its
+clock samples that without taking the run's lock, and it does not look a
+second time — so a request written even a moment after the save can arrive to
+find the session already being ended. `recur` survives the same window only
+because the clock carries a separate guard for it.
+
 ## Shape
 
 - The file's own header is `name` and `description`. The description is the
