@@ -43,6 +43,7 @@ function renderNewClaudeRuntime() {}
 function renderNewCodexRuntime() {}
 function renderRuntimeSummary() {}
 function renderProfileHint() {}
+function syncNewModelOptions() {}
 ` + slice("baseProfileName") + slice("spawnProfileSelector") +
 slice("newProfileUi") + slice("newProfileSelector") +
 slice("newProfileDetail") + slice("newProfileHarnessName") +
