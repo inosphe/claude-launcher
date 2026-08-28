@@ -17,6 +17,18 @@ from claude_launcher import cli_sessions, wizard, worktree
 from claude_launcher.cflow import model, state as cflow_state
 
 
+CODEX_RUNTIME = {
+    "name": "codex",
+    "available": True,
+    "auth": "oauth",
+    "args": ["--dangerously-bypass-approvals-and-sandbox"],
+    "mode_conflict_args": ["--dangerously-bypass-approvals-and-sandbox"],
+    "skip_permissions_args": ["--approval-mode", "full-auto"],
+    "full_access_args": ["--sandbox", "danger-full-access"],
+    "full_access_off_args": ["--sandbox", "workspace-write"],
+}
+
+
 class FakeSources(wizard.Sources):
     """Everything the daemon would publish, decided by the test instead."""
 
@@ -86,6 +98,32 @@ class FakeSources(wizard.Sources):
             "branches": [branch, "topic", "old-thing"],
             "worktrees": ["review"],
         }
+
+
+class CodexSources(FakeSources):
+    """A current daemon exposing one Claude and one Codex execution pair."""
+
+    def harnesses(self):
+        return [
+            {"name": "claude", "available": True, "auth": "claude"},
+            dict(CODEX_RUNTIME),
+        ]
+
+    def profile_options(self):
+        return [
+            {"value": "work:claude", "label": "work/claude",
+             "harness": "claude"},
+            {"value": "codex:codex", "label": "codex/codex",
+             "harness": "codex"},
+        ]
+
+    def profile_details(self):
+        return [
+            {"name": "work:claude", "harness": "claude",
+             "harness_available": True, "borrow_allowed": True},
+            {"name": "codex:codex", "harness": "codex",
+             "harness_available": True, "borrow_allowed": False},
+        ]
 
 
 def form(**kw) -> wizard.Wizard:
@@ -290,6 +328,119 @@ def test_oauth_harness_cannot_borrow_in_the_wizard():
     pick(wiz, "profile", "ds4")
     assert not wiz.field("borrow").selectable
     assert "own profile storage" in wiz.field("borrow").disabled_note
+
+
+def test_codex_gets_a_named_checkbox_section_and_other_harnesses_do_not():
+    wiz = form(sources=CodexSources())
+    yolo = wiz.field("codex_yolo")
+    sandbox = wiz.field("codex_sandbox")
+    assert yolo.hidden and sandbox.hidden
+
+    pick(wiz, "profile", "codex/codex")
+    assert isinstance(yolo, wizard.CheckboxField)
+    assert isinstance(sandbox, wizard.CheckboxField)
+    assert not yolo.hidden and not sandbox.hidden
+    assert yolo.value is True
+    assert sandbox.value is False
+    screen = "\n".join(wiz.render(90, 40))
+    assert "CODEX RUNTIME" in screen
+    assert "YOLO mode" in screen and "Sandbox" in screen
+
+    # A checkbox toggles in place instead of opening a two-option picker.
+    focus_on(wiz, "codex_sandbox")
+    assert wiz.handle("space") is None
+    assert wiz.mode == wizard.FORM
+    assert sandbox.value is True
+    assert "Space/Enter toggle" in "\n".join(wiz.render(90, 40))
+
+    pick(wiz, "profile", "work/claude")
+    assert yolo.hidden and sandbox.hidden
+    assert "CODEX RUNTIME" not in "\n".join(wiz.render(90, 40))
+
+
+def test_codex_layout_is_not_inferred_from_another_harness_capabilities():
+    class OtherSources(CodexSources):
+        def harnesses(self):
+            return [{**CODEX_RUNTIME, "name": "other", "auth": "none"}]
+
+        def profile_options(self):
+            return [{"value": "work:other", "label": "work/other",
+                     "harness": "other"}]
+
+        def profile_details(self):
+            return [{"name": "work:other", "harness": "other",
+                     "harness_available": True, "borrow_allowed": False}]
+
+    wiz = form(sources=OtherSources())
+    assert wiz.value("profile") == "work:other"
+    assert wiz.field("codex_yolo").hidden
+    assert wiz.field("codex_sandbox").hidden
+
+
+def test_claude_keeps_its_own_permission_checkbox_layout():
+    class ClaudeSources(FakeSources):
+        def harnesses(self):
+            return [{
+                "name": "claude", "available": True, "auth": "claude",
+                "skip_permissions_args": ["--dangerously-skip-permissions"],
+            }]
+
+    wiz = form(sources=ClaudeSources())
+    field = wiz.field("skip_permissions")
+    assert isinstance(field, wizard.CheckboxField)
+    assert not field.hidden
+    assert wiz.field("codex_yolo").hidden
+    assert "CLAUDE RUNTIME" in "\n".join(wiz.render(90, 40))
+    field.select(True)
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.args == ["--dangerously-skip-permissions"]
+
+
+@pytest.mark.parametrize(
+    "yolo,sandbox,expected",
+    [
+        (True, False, ["--dangerously-bypass-approvals-and-sandbox"]),
+        (True, True, ["--approval-mode", "full-auto",
+                      "--sandbox", "workspace-write"]),
+        (False, False, ["--sandbox", "danger-full-access"]),
+        (False, True, ["--sandbox", "workspace-write"]),
+    ],
+)
+def test_new_codex_runtime_checkboxes_encode_all_four_modes(
+    yolo, sandbox, expected
+):
+    wiz = form(sources=CodexSources())
+    pick(wiz, "profile", "codex/codex")
+    wiz.field("codex_yolo").select(yolo)
+    wiz.field("codex_sandbox").select(sandbox)
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.args == expected
+
+
+def test_codex_runtime_panel_removes_conflicting_flags_from_extra_args():
+    wiz = wizard.Wizard(
+        CodexSources(), cwd="/work/repo",
+        defaults=argparse.Namespace(
+            profile="codex:codex",
+            args=["--sandbox", "danger-full-access", "--model", "m"],
+        ),
+    )
+    wiz.field("codex_yolo").select(True)
+    wiz.field("codex_sandbox").select(True)
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.args == [
+        "--approval-mode", "full-auto", "--sandbox", "workspace-write",
+        "--model", "m",
+    ]
+
+
+def test_codex_full_auto_parent_is_read_as_yolo_with_its_default_sandbox():
+    assert wizard._codex_runtime_state(
+        ["--approval-mode", "full-auto"], CODEX_RUNTIME
+    ) == (True, True)
 
 
 def test_the_borrow_picker_offers_the_profiles():
@@ -1019,6 +1170,20 @@ class FakeSpawnSources(FakeSources):
         return ["lead", "api", "docs"] if mesh == "team" else []
 
 
+class CodexSpawnSources(FakeSpawnSources, CodexSources):
+    """Spawn source with Codex metadata and a Codex parent."""
+
+    def __init__(self, *, report=None, args=None):
+        super().__init__(
+            report=report,
+            sessions=[
+                {"name": "lead", "status": "idle", "harness": "codex",
+                 "profile": "codex:codex", "cwd": "/work/repo",
+                 "args": list(args or [])},
+            ],
+        )
+
+
 def spawn_form(**kw) -> wizard.SpawnWizard:
     # `defaults` is the namespace argparse already filled in: flags typed
     # alongside --wizard arrive exactly this way, so a test that passes one
@@ -1242,6 +1407,56 @@ def _open_report(**extra):
         "profiles": ["other", "work"],
         **extra,
     }
+
+
+def test_spawn_codex_runtime_is_visible_but_inherited_when_args_are_locked():
+    sources = CodexSpawnSources(
+        report={**_open_report(), "may_choose": []},
+        args=["--model", "parent-model"],
+    )
+    wiz = spawn_form(sources=sources)
+    yolo = wiz.field("codex_yolo")
+    sandbox = wiz.field("codex_sandbox")
+    assert not yolo.hidden and not sandbox.hidden
+    assert yolo.value is True and sandbox.value is False
+    assert not yolo.selectable and not sandbox.selectable
+    assert "spawn.allow_args" in yolo.disabled_note
+
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    # No override travels; spawn.check retains the parent's complete args.
+    assert answers.args == []
+
+
+def test_spawn_codex_runtime_override_preserves_the_parents_other_args():
+    sources = CodexSpawnSources(
+        report={**_open_report(), "may_choose": ["args"]},
+        args=["--model", "parent-model", "--sandbox", "workspace-write"],
+    )
+    wiz = spawn_form(sources=sources)
+    assert wiz.field("codex_yolo").selectable
+    assert wiz.value("codex_yolo") is False
+    assert wiz.value("codex_sandbox") is True
+
+    # With no change, blank Args retains the parent's definition.
+    unchanged = argparse.Namespace()
+    wiz.apply(unchanged)
+    assert unchanged.args == []
+
+    wiz.field("codex_yolo").select(True)
+    changed = argparse.Namespace()
+    wiz.apply(changed)
+    assert changed.args == [
+        "--approval-mode", "full-auto", "--sandbox", "workspace-write",
+        "--model", "parent-model",
+    ]
+
+
+def test_spawn_codex_runtime_section_disappears_for_a_claude_parent():
+    wiz = spawn_form()
+    assert wiz.field("codex_yolo").hidden
+    assert wiz.field("codex_sandbox").hidden
+    assert "CODEX RUNTIME" not in "\n".join(wiz.render(90, 40))
 
 
 def test_spawn_borrow_picker_includes_the_runtime_profile_auth():

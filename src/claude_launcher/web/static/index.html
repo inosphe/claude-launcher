@@ -381,14 +381,32 @@
               <input type="checkbox" name="fork" disabled>
               <span><code>--fork-session</code> (leave the original untouched)</span>
             </label>
-            <label class="check hidden" id="new-permissions-row">
-              <input type="checkbox" name="skip_permissions">
-              <span id="new-permissions-text">Run without approval prompts</span>
-            </label>
-            <label class="check hidden" id="new-full-access-row">
-              <input type="checkbox" name="full_access" checked>
-              <span><code>--sandbox danger-full-access</code></span>
-            </label>
+            <!-- Harness runtime controls have their own layout and wording.
+                 Codex is the first specialised panel: its approval and file
+                 isolation choices form one two-axis mode, while Claude and
+                 other harnesses retain their own rows. JavaScript reveals
+                 exactly the panel belonging to the selected harness. -->
+            <fieldset id="new-claude-runtime"
+                      class="harness-runtime harness-runtime-claude hidden">
+              <legend>Claude runtime</legend>
+              <label class="check">
+                <input type="checkbox" name="skip_permissions">
+                <span><strong>Skip permissions</strong> — run without permission prompts</span>
+              </label>
+              <p id="new-claude-runtime-hint"></p>
+            </fieldset>
+            <fieldset id="new-codex-runtime" class="harness-runtime hidden">
+              <legend>Codex runtime</legend>
+              <label class="check">
+                <input type="checkbox" name="codex_yolo" checked>
+                <span><strong>YOLO mode</strong> — skip approval prompts</span>
+              </label>
+              <label class="check">
+                <input type="checkbox" name="codex_sandbox">
+                <span><strong>Sandbox</strong> — limit writes to the workspace</span>
+              </label>
+              <p id="new-codex-runtime-hint"></p>
+            </fieldset>
             <label>Args <input name="args" placeholder="extra harness flags"></label>
           </div>
         </details>

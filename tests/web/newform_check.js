@@ -102,7 +102,7 @@ check("the form's controls read in the new order", named(form.text), [
   "mesh", "handle", "role", "workflow", "context",
   // how it runs — folded
   "borrow", "null_token", "cwd", "resume", "fork", "skip_permissions",
-  "full_access", "args",
+  "codex_yolo", "codex_sandbox", "args",
   // what it is told first
   "task",
   // where that job is written down — three radios sharing one name, then
@@ -171,6 +171,29 @@ check("the role stance and the parent hint are not",
 check("the fold carries the summary line the JS writes into",
       ids(fold.text).includes("new-runtime-sum"), true);
 
+/* Harness runtime layout is explicit. A pair of generic permission rows
+   would give Claude and any custom harness Codex terminology merely because
+   they expose similar argv capabilities. */
+const codexRuntime = block(
+  '<fieldset id="new-codex-runtime"', "</fieldset>", fold.start
+);
+const claudeRuntime = block(
+  '<fieldset id="new-claude-runtime"', "</fieldset>", fold.start
+);
+check("Claude keeps a separate runtime fieldset",
+      named(claudeRuntime.text), ["skip_permissions"]);
+check("Codex runtime controls have their own fieldset",
+      named(codexRuntime.text), ["codex_yolo", "codex_sandbox"]);
+check("the two harness layouts share no controls",
+      named(claudeRuntime.text).filter((name) =>
+        named(codexRuntime.text).includes(name)), []);
+check("the Codex fieldset is hidden until Codex is selected",
+      /class="harness-runtime hidden"/.test(codexRuntime.text), true);
+check("Codex starts in the direct-run mode",
+      [/name="codex_yolo" checked/.test(codexRuntime.text),
+       /name="codex_sandbox" checked/.test(codexRuntime.text)],
+      [true, false]);
+
 /* ---- the fold's membership IS the inheritance list ---- */
 function sliceConst(name) {
   const start = src.indexOf(`const ${name} =`);
@@ -214,6 +237,14 @@ check("Create reads nothing the form does not offer",
 check("...and it does read a fair few of them", read.length > 8, true);
 check("standalone Create recombines Profile and Harness for the API",
       /profile:\s*newProfileSelector\(f\)/.test(submit), true);
+check("standalone Codex Create serializes its specialised checkboxes",
+      /harnessName === "codex"/.test(submit) &&
+        /codexRuntimeArgs\(/.test(submit) &&
+        /f\.codex_yolo\.checked/.test(submit) &&
+        /f\.codex_sandbox\.checked/.test(submit), true);
+check("standalone Claude Create retains its own permission checkbox",
+      /harnessName === "claude"/.test(submit) &&
+        /f\.skip_permissions\.checked/.test(submit), true);
 
 /* The board's own rule, read out of the submit handler: "new" is the absence
    of both keys. A request that says nothing gets an issue minted from its

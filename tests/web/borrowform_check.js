@@ -39,6 +39,8 @@ new Function(
 function spawnParent() { return null; }
 function renderRoleStance() {}
 function syncSpawnMode() {}
+function renderNewClaudeRuntime() {}
+function renderNewCodexRuntime() {}
 function renderRuntimeSummary() {}
 function renderProfileHint() {}
 ` + slice("baseProfileName") + slice("spawnProfileSelector") +

@@ -729,6 +729,29 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
    it trails: a reminder of what is set, not a second copy of the fields. */
 #new-runtime-sum { color: #7d8590; font-size: 11px; overflow-wrap: anywhere; }
 #new-runtime-body { margin-top: 10px; }
+/* Harness-specific runtime controls are visually nested inside the generic
+   How-it-runs fold.  The class is shared by future harness panels; Codex's
+   accent and two-axis layout remain scoped to its own id/class so another
+   harness does not inherit Codex terminology or ordering. */
+#new-session .harness-runtime {
+  margin: 10px 0; padding: 9px 11px 5px;
+  border: 1px solid #344661; border-left: 3px solid #58a6ff;
+  border-radius: 6px; background: #111923;
+}
+#new-session .harness-runtime[hidden] { display: none; }
+#new-session .harness-runtime legend {
+  padding: 0 6px; color: #79c0ff; font-size: 11px;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+#new-session .harness-runtime-claude {
+  border-color: #493b62; border-left-color: #a371f7; background: #171320;
+}
+#new-session .harness-runtime-claude legend { color: #d2a8ff; }
+#new-session #new-codex-runtime-hint,
+#new-session #new-claude-runtime-hint {
+  margin: -1px 0 5px 22px; color: #8b949e; font-size: 11px;
+  line-height: 1.4; overflow-wrap: anywhere;
+}
 /* The opening task, fenced on its own under everything that decides who
    ends up reading it. */
 #new-task {
@@ -2925,6 +2948,30 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   grid-column: 1 / -1; padding-left: 22px;
 }
 .sess-spawn-note { grid-column: 2; color: #7d8590; font-size: 11.5px; }
+/* A harness panel is one runtime decision with several controls, not more
+   unrelated rows in the generic spawn grid.  Codex gets its own heading and
+   accent; panels for other harnesses can define their own class alongside it. */
+.sess-spawn-harness {
+  margin: 3px 0; padding: 9px 11px 7px;
+  border: 1px solid #344661; border-left: 3px solid #58a6ff;
+  border-radius: 6px; background: #111923;
+}
+.sess-spawn-harness[hidden] { display: none; }
+.sess-spawn-harness legend {
+  padding: 0 6px; color: #79c0ff; font-size: 11px;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+.sess-spawn-harness .sess-spawn-row {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+}
+.sess-spawn-harness .sess-spawn-row + .sess-spawn-row { margin-top: 5px; }
+.sess-spawn-harness .sess-spawn-note {
+  grid-column: auto; padding-left: 22px; line-height: 1.35;
+}
+.sess-spawn-harness-state {
+  margin: 6px 0 0 22px; color: #8b949e; font-size: 11px;
+  line-height: 1.4; overflow-wrap: anywhere;
+}
 /* A folded row is folded. Every row in this form is `display: grid` (or
    flex), and an author `display` beats the UA sheet's `[hidden] { display:
    none }` — which is not !important — so `row.hidden = true` left the row on

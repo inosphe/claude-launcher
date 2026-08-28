@@ -522,6 +522,23 @@ def test_declared_runtime_mode_replaces_conflicting_harness_default(
         assert argv[-2:] == ["--sandbox", mode]
 
 
+def test_an_explicit_yolo_mode_replaces_the_same_harness_default_once(
+    home, tmp_path
+):
+    flag = "--dangerously-bypass-approvals-and-sandbox"
+    _declare_harness(
+        "codex",
+        args=[flag],
+        mode_conflict_args=[flag],
+    )
+    _profile_for("custom", "codex")
+    sdef = harness.normalize(SessionDef(
+        name="x", profile="custom", cwd=str(tmp_path), args=(flag,),
+    ))
+    argv, _, _ = harness.build_command(sdef)
+    assert argv.count(flag) == 1
+
+
 def test_codex_restore_resumes_its_pinned_conversation_id(
     home, tmp_path
 ):
