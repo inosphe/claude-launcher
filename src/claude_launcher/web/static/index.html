@@ -121,6 +121,15 @@
          socket and 5000 lines of scrollback, so pages are laid over it. -->
     <div id="term-header" class="hidden">
       <span id="term-title"></span>
+      <!-- The name the mesh calls this session by, when that is not the name
+           to its left. A session joins under a handle of its own choosing
+           (`s236` answers to `merger-r13`), and every message about it on the
+           mesh uses that word — so without this the header names a session
+           the mesh log never mentions, and the reader has to open the details
+           panel and scroll to its Meshes chips to join the two up. Sits with
+           the title because it is the same fact as the title: who this is.
+           Rendered by renderTermHandle(). -->
+      <span id="term-handle" class="term-handle hidden"></span>
       <!-- The name, and beside it the way back to that name in the rail. The
            list is a monitor of twenty-odd sessions in a 260px column: the row
            for the one you are typing in is as likely to be scrolled out of

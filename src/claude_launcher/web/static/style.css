@@ -171,6 +171,19 @@ option:disabled { color: #6b7280; }
   flex: 0 1 auto; padding: 1px 5px; min-width: 3em;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+/* The name the mesh calls this session by, when that is not the name it sits
+   beside. Green rather than the role's blue or the rooms' grey: on this rail
+   blue already means "what this session IS" and grey "where it belongs", and
+   this is a third thing — another word for the same session. It shrinks like
+   its neighbours (see the note above .mesh-role) but keeps a wider floor,
+   because a handle clipped to two letters is exactly the confusion the pill
+   exists to end. */
+#session-list .rail-handle {
+  font-size: 11px; padding: 1px 5px; border-radius: 9px; flex: 0 1 auto;
+  background: #10251a; color: #3fb950; border: 1px solid #1b4522;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  min-width: 4em;
+}
 /* Long names lose their tail rather than the row losing its shape — the full
    name is one hover away on the label's own title. */
 #session-list .rail-name {
@@ -847,6 +860,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .badge {
   font-size: 11px; padding: 2px 8px; border-radius: 10px; background: #30363d;
 }
+/* The header's handle chip: the name the mesh calls the attached session by,
+   when that is not the title beside it. Same green as the rail pill and the
+   details head, so the three read as one fact drawn in three places. Not a
+   .badge — the badges on this row report state, and this reports identity. */
+.term-handle {
+  font-size: 11px; padding: 2px 8px; border-radius: 10px;
+  background: #10251a; color: #3fb950; border: 1px solid #1b4522;
+}
 .badge.idle { background: #1f4428; color: #3fb950; }
 .badge.busy { background: #4d3800; color: #d29922; }
 .badge.exited { background: #30363d; color: #8b949e; }
@@ -1172,6 +1193,13 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
    equal halves read as a switch, a pair of pills reads as a menu. */
 .sess-tabs { margin: 12px 0 0; }
 .sess-tabs .seq-tab { flex: 1 1 0; max-width: 160px; text-align: center; }
+/* The details head's copy of the rail's handle pill — same green, same
+   meaning, laid out for a head rather than a 260px row, so nothing here
+   shrinks or clips. */
+.sess-handle {
+  font-size: 11px; padding: 1px 7px; border-radius: 9px;
+  background: #10251a; color: #3fb950; border: 1px solid #1b4522;
+}
 /* This panel is describing a session other than the terminal on screen. */
 .sess-elsewhere {
   font-size: 11px; padding: 1px 7px; border-radius: 9px;

@@ -163,6 +163,10 @@ let sessionsCache = [];
 function setLink(s) { linkState = s; __record("link", s); }
 function setStatusBadge(s) { __record("status", s); }
 function markDetailRow() { __record("detail"); }
+/* The header's mesh-handle chip, repainted on every attach
+   (sesshandle_check's subject); here it is only a call that has to
+   resolve. */
+function renderTermHandle() {}
 function showView(v) { __record("show", v); }
 function refitSoon(d) { __record("fit", d); }
 function updateScrollChip() {}
