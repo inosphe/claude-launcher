@@ -54,7 +54,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from .. import store
 from ..cflow import engine as cflow_engine, model as cflow_model, state as cflow_state
-from . import rebrief
+from . import mesh_roles, rebrief
 from .session import STATUS_BUSY, STATUS_IDLE
 
 log = logging.getLogger("claunch.daemon.cflow")
@@ -496,7 +496,7 @@ class ReminderClock:
             if not (self._seen.get((cwd, scope)) or {}).get("restated"):
                 extra = extra + carried_id_lines(
                     scope, self.manager, self.mesh
-                )
+                ) + role_reminder_lines(scope, self.manager, self.mesh)
             block = splice(block, extra)
         try:
             delivered = await session.deliver(block)
@@ -925,6 +925,80 @@ def carried_id_lines(name: str, manager, mesh_mgr) -> List[str]:
         "your context no longer holds that block: call the mesh 'rebrief' "
         "tool with that id and it hands the text back."
     ]
+
+
+def role_reminder_lines(name: str, manager, mesh_mgr) -> List[str]:
+    """The one line this session's ROLE has for a run that is not moving.
+
+    The stance answers "who are you"; this answers "what does someone who is
+    you get wrong *here*". They are different questions, and only the second
+    one belongs in a reminder — which is why this carries
+    :attr:`mesh_roles.Role.cflow_reminder` and never the stance itself.
+
+    Pasting the stance was the obvious design and it is the wrong one, for a
+    reason that is measurable rather than aesthetic. A session spawned with a
+    role holds its stance in the system prompt (``--append-system-prompt``),
+    re-sent on every request and surviving every ``/compact`` — on this
+    machine that was 13 of 14 recorded sessions. For them the text has not
+    gone anywhere, so re-sending it is the move :func:`repeat_block` already
+    refuses for the step's own instructions: a paste that failed to reach the
+    agent's attention does not reach it by arriving twice, and the second copy
+    is charged to the very block it competes with. That block is already over
+    budget — it cuts the step's own text at
+    :data:`_INSTRUCTIONS_LIMIT` (1200 of 5782 characters, measured on
+    ``improv-worker``'s ``work`` step), and a worker stance would add 36% to
+    it, a leader stance 156%.
+
+    So the budget, stated rather than assumed: ONE line, capped at
+    :data:`mesh_roles.MAX_CFLOW_REMINDER`, riding the FULL form only — the
+    same single fire per position that :func:`carried_id_lines` rides. The
+    repeat form, which is the one that actually repeats, is untouched, so the
+    recurring cost of this feature is zero. Nothing is displaced.
+
+    The mesh role wins over the session's own, because a role is per mesh and
+    the mesh's is what binds; a session with a role but no mesh still gets its
+    line from the packaged vocabulary. Never raises, for
+    :func:`situation_lines`' reason: this decorates a reminder, and a reminder
+    lost to a mid-write roster is a bad trade.
+    """
+    seen: Set[str] = set()
+    out: List[str] = []
+
+    def take(role, where: str) -> None:
+        line = (getattr(role, "cflow_reminder", "") or "").strip()
+        if not line or role.name in seen:
+            return
+        seen.add(role.name)
+        out.append(f"as {role.name}{where}: {line}")
+
+    if mesh_mgr is not None:
+        try:
+            rows = mesh_mgr.meshes_for_session(name)
+        except Exception:  # noqa: BLE001
+            rows = []
+        for row in rows:
+            try:
+                mesh = mesh_mgr.get(row["mesh"])
+                member = mesh_mgr.member_for_session(mesh, name)
+                if member is None:
+                    continue
+                role = mesh.roleset.get(member.role)
+                if role is not None:
+                    take(role, f" on {mesh.name}")
+            except Exception:  # noqa: BLE001 — one broken mesh, not all of them
+                continue
+    if not out:
+        # No mesh, or no mesh role with a line: fall back to the role the
+        # session was SPAWNED with, resolved through the packaged vocabulary.
+        # That session is exactly the one the mesh path cannot serve and the
+        # commonest holder of a role on this machine.
+        try:
+            spawned = (manager.get(name).sdef.role or "").strip()
+            if spawned:
+                take(mesh_roles.resolve().get(spawned), "")
+        except Exception:  # noqa: BLE001 — no role is not a reason to send nothing
+            pass
+    return out
 
 
 def signal_block(payload: dict, before: dict, after: dict) -> str:

@@ -18,7 +18,7 @@ import pytest
 from claude_launcher import store
 from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.cflow.engine import CflowError
-from claude_launcher.daemon import cflow_clock, rebrief
+from claude_launcher.daemon import cflow_clock, mesh_roles, rebrief
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -857,18 +857,22 @@ class _KinManager(_FakeManager):
 
 
 class _FakeMesh:
-    def __init__(self, name, owed):
+    def __init__(self, name, owed, roleset=None):
         self.name = name
         self._owed = owed
+        # The vocabulary in force on this mesh. Defaults to the packaged one
+        # so a test that only cares about `owed` needs to say nothing.
+        self.roleset = roleset if roleset is not None else mesh_roles.resolve()
 
     def owed(self, handle):
         return self._owed
 
 
 class _FakeMeshMgr:
-    def __init__(self, mesh, handle="w1"):
+    def __init__(self, mesh, handle="w1", role="worker"):
         self._mesh = mesh
         self._handle = handle
+        self._role = role
 
     def meshes_for_session(self, name):
         return [{"mesh": self._mesh.name}]
@@ -877,7 +881,7 @@ class _FakeMeshMgr:
         return self._mesh
 
     def member_for_session(self, mesh, name):
-        return type("M", (), {"handle": self._handle})()
+        return type("M", (), {"handle": self._handle, "role": self._role})()
 
 
 def test_splice_puts_lines_inside_the_fence():
@@ -987,6 +991,81 @@ def test_a_broken_roster_never_costs_the_ids_a_delivery(proj):
     mgr = _KinManager({"w1": sess})
     lines = cflow_clock.carried_id_lines("w1", mgr, _Exploding())
     assert lines and "(task)" in lines[0]     # the task id still stands
+
+
+def test_the_role_line_rides_the_full_form_and_not_the_repeat(proj):
+    """claunch-2l3f. The role gets ONE line, on the fire that already carries
+    the session-level ids, and nothing on the repeat.
+
+    The measurement this is priced on: the full block cuts the step's own
+    instructions at _INSTRUCTIONS_LIMIT, so it is already over budget. A
+    worker stance pasted whole would add 36% to it and a leader stance 156%,
+    which is why what rides here is the role's cflow_reminder line and never
+    the stance.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    sess.sdef = SessionDef(name="w1", cwd=cwd, task="count the beans")
+    mesh_mgr = _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    clock = cflow_clock.ReminderClock(_KinManager({"w1": sess}), mesh_mgr)
+    worker = mesh_roles.resolve().get("worker")
+
+    t = time.monotonic()
+    clock.scan(t)
+    asyncio.run(clock._deliver(*clock.scan(t + 601)[0]))
+    first = sess.delivered[0]
+    assert "as worker on m:" in first
+    assert worker.cflow_reminder in first
+    # The STANCE is what this deliberately does not send.
+    assert worker.stance.split("\n")[0].strip() not in first
+    assert first.splitlines()[-1] == "---"      # spliced inside the fence
+
+    asyncio.run(clock._deliver(*clock.scan(time.monotonic() + 601)[0]))
+    repeat = sess.delivered[1]
+    assert "as worker" not in repeat
+    assert worker.cflow_reminder not in repeat
+
+
+def test_the_role_line_falls_back_to_the_role_the_session_was_spawned_with(proj):
+    """The commonest holder of a role on this machine is a session spawned
+    with --role, whose stance lives in its system prompt. The mesh path
+    cannot serve it, so the packaged vocabulary does."""
+    sess = _FakeSession("w1", str(proj))
+    sess.sdef = SessionDef(name="w1", cwd=str(proj), role="leader")
+    mgr = _KinManager({"w1": sess})
+    lines = cflow_clock.role_reminder_lines("w1", mgr, None)
+    assert lines == [f"as leader: {mesh_roles.resolve().get('leader').cflow_reminder}"]
+
+    # The MESH role wins over it: a role is per mesh, and the mesh's binds.
+    mesh_mgr = _FakeMeshMgr(_FakeMesh("m", 0), role="reviewer")
+    lines = cflow_clock.role_reminder_lines("w1", mgr, mesh_mgr)
+    assert lines == [
+        f"as reviewer on m: {mesh_roles.resolve().get('reviewer').cflow_reminder}"
+    ]
+
+
+def test_a_role_with_no_line_and_a_broken_roster_both_say_nothing(proj):
+    """Absent rather than empty, for the block's size; and a decoration must
+    never sink a send."""
+    quiet = mesh_roles.resolve(
+        mesh_roles.parse("roles: {worker: {stance: build it}}")
+    )
+    sess = _FakeSession("w1", str(proj))
+    sess.sdef = SessionDef(name="w1", cwd=str(proj))
+    mgr = _KinManager({"w1": sess})
+    mesh_mgr = _FakeMeshMgr(_FakeMesh("m", 0, roleset=quiet), role="worker")
+    assert cflow_clock.role_reminder_lines("w1", mgr, mesh_mgr) == []
+    # No role at all, no mesh: nothing to say.
+    assert cflow_clock.role_reminder_lines("w1", mgr, None) == []
+
+    class _Exploding:
+        def meshes_for_session(self, name):
+            raise RuntimeError("mesh registry mid-write")
+
+    sess.sdef = SessionDef(name="w1", cwd=str(proj), role="worker")
+    lines = cflow_clock.role_reminder_lines("w1", mgr, _Exploding())
+    assert lines == [f"as worker: {mesh_roles.resolve().get('worker').cflow_reminder}"]
 
 
 def test_recall_is_journalled_so_the_pull_rate_can_be_measured(proj):

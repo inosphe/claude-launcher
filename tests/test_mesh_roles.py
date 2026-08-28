@@ -267,6 +267,39 @@ def test_a_newer_daemons_document_keeps_the_roles_this_build_can_read():
         mesh_roles.parse({"version": mesh_roles.SCHEMA_VERSION + 1, "roles": {}})
 
 
+def test_cflow_reminder_is_a_capped_line_that_rides_the_document():
+    # claunch-2l3f. It is a LINE, so it is folded to one the way task_poll is
+    # — a role that wants prose wants `stance`, which the session already
+    # carries. Every packaged role that has one keeps it under the cap.
+    rs = mesh_roles.resolve()
+    for name, role in rs.roles.items():
+        assert "\n" not in role.cflow_reminder, name
+        assert len(role.cflow_reminder) <= mesh_roles.MAX_CFLOW_REMINDER, name
+    assert rs.get("worker").cflow_reminder, "the packaged worker carries one"
+
+    # An upload sets it, folds it, and it survives the document round trip.
+    doc = _yaml("""
+        roles:
+          worker:
+            stance: build it
+            cflow_reminder: >-
+              first half
+              second half
+    """)
+    assert doc["roles"]["worker"]["cflow_reminder"] == "first half second half"
+    again = mesh_roles.resolve(mesh_roles.parse(mesh_roles.to_yaml(doc)))
+    assert again.get("worker").cflow_reminder == "first half second half"
+    # A role without one says nothing rather than an empty key.
+    assert "cflow_reminder" not in mesh_roles.Role(name="w").to_dict()
+
+    with pytest.raises(mesh_roles.RoleError, match="over the"):
+        mesh_roles.parse({
+            "roles": {
+                "w": {"cflow_reminder": "x" * (mesh_roles.MAX_CFLOW_REMINDER + 1)}
+            }
+        })
+
+
 def test_the_yaml_view_round_trips_back_into_an_upload():
     doc = _yaml("roles: {worker: {aliases: [hacker], stance: build it}}")
     again = mesh_roles.parse(mesh_roles.to_yaml(doc))

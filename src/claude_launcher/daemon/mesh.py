@@ -2915,6 +2915,7 @@ class MeshManager:
                     "stall_watch": r.stall_watch,
                     "exclusive": r.exclusive,
                     "task_poll": r.task_poll,
+                    "cflow_reminder": r.cflow_reminder,
                     "stance": r.stance,
                     # How many members currently hold it — the roster is the
                     # only place the vocabulary meets reality, and a role

@@ -70,6 +70,11 @@ SCHEMA_VERSION = 1
 #: brief that needs more than this wants to be a skill, not a role.
 MAX_STANCE = 8000
 MAX_TASK_POLL = 500
+#: Cap for ``cflow_reminder``. Same as ``task_poll`` and for the same reason:
+#: it is a per-role LINE the daemon composes into a block it did not write,
+#: not prose the role gets to restate itself in. A role wanting more than a
+#: line wants ``stance``, which the session already carries.
+MAX_CFLOW_REMINDER = 500
 MAX_ROLES = 32
 MAX_DOC = 64_000
 #: Auto-link rules are evaluated once per (joiner, existing member) pair, so
@@ -86,7 +91,8 @@ MAX_TIER = 64
 #: second copy is how the lenient path would quietly go on refusing a key the
 #: strict path had learned.
 _ROLE_KEYS = frozenset(
-    {"aliases", "stance", "task_poll", "stall_watch", "exclusive"}
+    {"aliases", "stance", "task_poll", "stall_watch", "exclusive",
+     "cflow_reminder"}
 )
 
 #: A role/alias name: lower-case word characters, dashes and dots. Deliberately
@@ -114,6 +120,14 @@ class Role:
     #: Body for this role's task-poll nudge. The mesh's own
     #: ``policy.task_poll.bodies`` still wins when it sets one.
     task_poll: str = ""
+    #: One line for this role, carried by the cflow step reminder's FULL form
+    #: (:func:`daemon.cflow_clock.role_reminder_lines`). Not a summary of
+    #: :attr:`stance` — a session spawned with a role already carries that
+    #: text in its system prompt, re-sent on every request, so restating it
+    #: buys nothing and costs the block it rides in. What belongs here is what
+    #: the stance cannot say because it does not know where the agent is:
+    #: what THIS role stops doing when a run has been sitting on one step.
+    cflow_reminder: str = ""
     #: Whether members of this role receive stall warnings about others.
     stall_watch: bool = False
     #: At most one LIVE member of this role per mesh. Enforced at join, on
@@ -133,6 +147,8 @@ class Role:
             out["exclusive"] = True
         if self.task_poll:
             out["task_poll"] = self.task_poll
+        if self.cflow_reminder:
+            out["cflow_reminder"] = self.cflow_reminder
         if self.stance:
             out["stance"] = self.stance
         return out
@@ -368,6 +384,15 @@ roles:
     # held twice without the holders spending their time coordinating with
     # each other; a second command line becomes a nested worker instead.
     exclusive: true
+    # One line, carried only by a step reminder's full form. It says what a
+    # STALLED leader is most often doing wrong, which is the one thing the
+    # stance below cannot say: the stance does not know where the agent is.
+    cflow_reminder: >-
+      a step that has not moved is usually a decision you are holding rather
+      than work you are doing. If it is yours, make it and record it on the
+      board so whoever joins later can pull it; if it is not, it belongs to
+      your user or to whoever can defend the claim. Do not spend this
+      position producing what a member should be handing you.
     stance: |
       You set direction and OWN the decisions: scope, priority, tradeoffs,
       tie-breaks. You are this mesh's ONLY leader: integration of shared
@@ -419,6 +444,10 @@ roles:
 
   operator:
     aliases: [op, liaison, relay]
+    cflow_reminder: >-
+      a step that has not moved usually means you are deciding something that
+      is your user's or the leader's. Carry the question to whoever holds it,
+      in their own words, rather than answering it here.
     stance: |
       You relay between your user and the leader; you are not a producer.
       Carry your user's requirements, answers and authorizations to the leader
@@ -435,6 +464,12 @@ roles:
       you are idle and caught up (no unread mesh mail). If you have no task in
       flight, ask the leader to assign one -- or leave the mesh if your work
       here is done. Do NOT reply to this notice.
+    cflow_reminder: >-
+      a step that has not moved usually means the evidence is not there yet.
+      Ground what you are about to report in code, tests or docs and cite the
+      files you stand on; put the bundle on the board and send a pointer, not
+      a copy. If you are stuck on something that is not yours to decide,
+      escalate it with options rather than picking one to keep moving.
     stance: |
       You are a PRODUCER: do the real work and ground every claim in code,
       docs or tests — never prose — citing the files you stand on. Write that
@@ -450,6 +485,11 @@ roles:
 
   reviewer:
     aliases: [review, peer, critic, auditor, checker, qa]
+    cflow_reminder: >-
+      a step that has not moved usually means you are weighing the author's
+      account of the work rather than the work. Open the code, the tests and
+      the diff themselves. A real impasse is recorded and handed to the
+      leader; it is not settled by agreeing to close the thread.
     stance: |
       You are the independent ADVERSARY — the default role, so an unlabelled
       member audits rather than agrees. Pressure-test claims against the
@@ -462,6 +502,11 @@ roles:
 
   specialist:
     aliases: [service, gatekeeper]
+    cflow_reminder: >-
+      a step that has not moved may have other members' requests queued
+      behind it. Work them in order and report each outcome to whoever asked;
+      a request you are silently holding looks identical to one you never
+      received.
     stance: |
       You solely and serially own ONE resource and operate it for everyone
       else. Perform other members' requests against it rather than letting
@@ -564,6 +609,12 @@ def _parse_role(name: str, body, lenient: bool = False) -> Role:
             _text(
                 body.get("task_poll") or "", MAX_TASK_POLL,
                 f"role {name!r} task_poll",
+            ).split()
+        ),
+        cflow_reminder=" ".join(
+            _text(
+                body.get("cflow_reminder") or "", MAX_CFLOW_REMINDER,
+                f"role {name!r} cflow_reminder",
             ).split()
         ),
         stall_watch=bool(body.get("stall_watch")),
