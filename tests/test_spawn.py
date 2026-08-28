@@ -370,6 +370,38 @@ TALKER = {
 }
 
 
+def _wrote_a_transcript(parent: dict) -> dict:
+    """Put behind ``parent``'s pinned id the jsonl claude writes on its first
+    turn, and hand the parent back.
+
+    A pinned id alone is not a conversation, and ``spawn`` now says so: the
+    file has to be on disk before a fork is offered or accepted. Every fork
+    test needs a parent that has actually spoken, so the setup is written
+    once here instead of four times below.
+    """
+    from claude_launcher import transcripts
+
+    where = transcripts.project_dir(
+        profile.require(str(parent["profile"])).config_dir, str(parent["cwd"])
+    )
+    where.mkdir(parents=True, exist_ok=True)
+    (where / f"{parent['conversation_id']}.jsonl").write_text(
+        "{}", encoding="utf-8"
+    )
+    return parent
+
+
+@pytest.fixture(autouse=True)
+def _talker_has_spoken(_profile_owned_harnesses):
+    """TALKER's own transcript, for the tests that reach for it by name.
+
+    Depends on the profile fixture by name rather than trusting declaration
+    order: the transcript is filed under ``talk``'s config dir, so the
+    profile has to exist before this runs.
+    """
+    _wrote_a_transcript(TALKER)
+
+
 def test_fork_hands_the_child_a_copy_of_the_parents_conversation():
     """Spelled as the two fields the harness already launches with, so the
     child's copy is restorable like any other conversation."""
@@ -407,6 +439,38 @@ def test_forking_a_parent_with_no_conversation_is_refused():
             parent={**TALKER, "conversation_id": None}, depth=0, children=0,
         )
     assert "no conversation to fork" in str(exc.value)
+
+
+def test_forking_a_conversation_with_no_transcript_is_refused(tmp_path):
+    """A pinned id is not yet a conversation. Claude writes the jsonl on the
+    session's first turn (a measured 7-28 s after the daemon records the
+    session), and `--resume` of a file it never wrote kills the child on
+    startup — so a parent that has not spoken is refused here rather than
+    handed to a child that exits."""
+    quiet = {**TALKER, "cwd": str(tmp_path), "conversation_id": "c-unspoken"}
+    with pytest.raises(spawn.SpawnDenied) as exc:
+        spawn.check(_policy(), {"fork": True}, parent=quiet, depth=0, children=0)
+    assert "no transcript on disk" in str(exc.value)
+    # And the offer agrees with the refusal, which is the whole reason
+    # can_fork exists: the row greys instead of inviting a spawn that dies.
+    assert "fork" not in spawn.capabilities(
+        _policy(), depth=0, children=0, parent=quiet
+    )["may_choose"]
+    # It becomes forkable the moment the parent has spoken — nothing else
+    # about the parent changed.
+    _wrote_a_transcript(quiet)
+    assert "fork" in spawn.capabilities(
+        _policy(), depth=0, children=0, parent=quiet
+    )["may_choose"]
+
+
+def test_a_fork_offer_survives_a_profile_this_process_cannot_resolve():
+    """Generous in one direction on purpose: an unresolvable profile leaves
+    the transcript unprovable, and a wrong yes costs one child that fails
+    loudly with claude's own message, while a wrong no takes the fork off the
+    form for a reason that is not true."""
+    unknown = {**TALKER, "profile": "no-such-profile"}
+    assert spawn.can_fork(unknown)
 
 
 def test_forking_onto_another_harness_is_refused():
@@ -481,10 +545,10 @@ def test_a_forked_child_launches_on_the_parents_conversation(tmp_path):
     from claude_launcher.daemon import harness as harness_mod
 
     conversation = "11111111-2222-3333-4444-555555555555"
-    parent = {
+    parent = _wrote_a_transcript({
         **TALKER, "cwd": str(tmp_path), "args": [],
         "conversation_id": conversation,
-    }
+    })
     child = spawn.check(_policy(), {"fork": True}, parent=parent, depth=0, children=0)
     sdef = harness_mod.normalize(
         SessionDef.from_dict({**child, "name": "helper", "parent": "lead"})

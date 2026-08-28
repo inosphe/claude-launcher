@@ -1685,19 +1685,29 @@ def test_sending_the_child_elsewhere_takes_the_fork_with_it():
     """Claude keeps transcripts per working directory, so a child in a
     workspace of its own would open a conversation that is not there. The
     form greys the row instead of letting the daemon refuse a filled-in
-    form -- and a yes given before the workspace was picked does not travel."""
+    form -- and the ANSWER goes back to "no" with it, because `apply` reads
+    fork through its disable: a yes left standing on a greyed row would be
+    dropped at the press with nothing on screen saying so (claunch-409i)."""
     wiz = spawn_form(report=_forkable())
     pick(wiz, "fork", "yes")
     assert wiz.value("fork") is True
     pick(wiz, "workspace", "api")
     assert not wiz.field("fork").selectable
     assert "per directory" in wiz.field("fork").disabled_note
+    # The row now reads what will actually be sent, which is the whole point.
+    assert wiz.value("fork") is False
     args = argparse.Namespace()
     wiz.apply(args)
     assert args.fork is False
-    # ...and putting the child back beside its parent brings it back.
+    # Putting the child back beside its parent offers the row again -- as an
+    # unanswered row, not a remembered yes. Somebody who still wants the copy
+    # says so where they can see it.
     pick(wiz, "workspace", "(the parent")
     assert wiz.field("fork").selectable
+    assert wiz.value("fork") is False
+    wiz.apply(args)
+    assert args.fork is False
+    pick(wiz, "fork", "yes")
     wiz.apply(args)
     assert args.fork is True
 
@@ -1708,6 +1718,34 @@ def test_a_worktree_of_its_own_also_takes_the_fork():
     pick(wiz, "worktree", "new worktree")
     assert not wiz.field("fork").selectable
     assert "worktree of its own" in wiz.field("fork").disabled_note
+    assert wiz.value("fork") is False
+
+
+def test_a_non_claude_child_clears_the_null_token_answer_too():
+    """The second row of the same shape: `apply` reads null_token through its
+    disable, so a yes standing on a greyed row is a dropped answer rather
+    than a weaker one. It is cleared where the row greys."""
+    class Sources(FakeSpawnSources):
+        def profile_details(self):
+            return [
+                {"name": "codex", "harness": "codex",
+                 "harness_available": True, "borrow_allowed": False},
+                {"name": "work", "harness": "claude",
+                 "harness_available": True, "borrow_allowed": True},
+            ]
+
+    wiz = spawn_form(sources=Sources(report=_open_report(profiles=[
+        "codex", "work",
+    ])))
+    pick(wiz, "null_token", "yes")
+    assert wiz.value("null_token") is True
+    pick(wiz, "profile", "codex")
+    assert not wiz.field("null_token").selectable
+    assert "claude harness only" in wiz.field("null_token").disabled_note
+    assert wiz.value("null_token") is False
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.null_token is False
 
 
 def test_a_fork_is_named_in_the_summary_and_the_flags():

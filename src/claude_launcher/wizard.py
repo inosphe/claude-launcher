@@ -2402,6 +2402,11 @@ class SpawnWizard(Form):
             null_f.disabled, null_f.disabled_note = (
                 True, "the claude harness only",
             )
+            # Answered back to "no", the way the borrow row below is: `apply`
+            # reads every answer through its disable, so a yes left standing
+            # on a greyed row is dropped at the press without a word. See the
+            # fork row's own note further down -- same rule, same reason.
+            null_f.select(False)
         else:
             null_f.disabled = False
         if not borrow_allowed:
@@ -2480,6 +2485,16 @@ class SpawnWizard(Form):
             )
         else:
             fork_f.disabled = False
+        # The answer goes back to "no" with the row, and this is the whole
+        # point of the two lines. `apply` reads fork through its disable, so a
+        # yes standing on a greyed row travels as False -- the operator picked
+        # the copy, picked a worktree, pressed Spawn, and got a child that
+        # started empty with the row still reading "yes" behind it. Measured:
+        # session s245's recorded argv is `--session-id <uuid>` with no
+        # `--resume` and no refusal anywhere (claunch-409i). Reset here, the
+        # row and what will be sent are the same thing again.
+        if fork_f.disabled:
+            fork_f.select(False)
         # A child's run comes from its parent's pair, never from its own role
         # -- "" (the daemon's answer when the parent pairs with nothing) is
         # itself the answer, so it is passed rather than falling back.

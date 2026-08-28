@@ -82,6 +82,7 @@ from . import (
     profile as profile_mod,
     providers,
     store,
+    transcripts,
     workspaces,
     worktree as worktree_mod,
 )
@@ -470,16 +471,51 @@ _MOVES_THE_CHILD = ("cwd", "workspace", "worktree")
 def can_fork(parent: Optional[dict]) -> bool:
     """Whether ``parent`` has a conversation a child could be handed a copy of.
 
-    The same two facts :func:`_fork_parents_conversation` refuses on, asked
-    ahead of time — it is what the capability report and the spawn wizard's
-    Fork row both need, and asking it in one place is what keeps the offer and
-    the refusal from disagreeing.
+    The same facts :func:`_fork_parents_conversation` refuses on, asked ahead
+    of time — it is what the capability report and the spawn wizard's Fork row
+    both need, and asking it in one place is what keeps the offer and the
+    refusal from disagreeing.
+
+    A pinned id is not yet a conversation: claude writes the jsonl on the
+    session's first turn, and a parent spawned seconds ago has an id and no
+    transcript (measured window 7-28 s — see
+    :func:`claude_launcher.daemon.harness.restores_blank`). ``--resume`` of a
+    file claude never wrote is fatal on startup, so offering the fork there
+    hands the operator a child that exits instead of one that inherits.
+    :func:`_on_disk` is what asks.
     """
     if not parent:
         return False
     return (
         (parent.get("harness") or "") == "claude"
         and bool(parent.get("conversation_id"))
+        and _on_disk(parent)
+    )
+
+
+def _on_disk(parent: dict) -> bool:
+    """Whether the parent's pinned conversation has a transcript behind it.
+
+    Generous in exactly one direction, and deliberately. When the profile
+    cannot be resolved (an unknown selector, an unreadable config) this
+    answers *yes* rather than no: a wrong yes costs one child that fails
+    loudly at startup with claude's own "No conversation found with session
+    ID", while a wrong no takes the fork off the form with a reason that is
+    not true and no way for the operator to tell. The unprovable case is the
+    one where the loud failure is the better of the two.
+    """
+    conversation = str(parent.get("conversation_id") or "")
+    if not conversation:
+        return False
+    selector = str(parent.get("profile") or "")
+    if not selector:
+        return True
+    try:
+        prof = profile_mod.require_selector(selector)
+    except Exception:  # noqa: BLE001 — ProfileError and anything under it
+        return True
+    return transcripts.exists(
+        prof.config_dir, conversation, str(parent.get("cwd") or "")
     )
 
 
@@ -532,6 +568,13 @@ def _fork_parents_conversation(child: dict, parent: dict, request: dict) -> None
             "the parent has no conversation to fork: it steers its own with "
             "harness args, or it opened claude's picker and nothing is "
             "pinned yet — spawn without 'fork'"
+        )
+    if not _on_disk(parent):
+        raise SpawnDenied(
+            f"the parent's conversation {conversation} has no transcript on "
+            "disk yet — claude writes it on the session's first turn, and "
+            "'--resume' of a file it never wrote kills the child on startup. "
+            "Let the parent take a turn, then fork"
         )
     # Spelled as the two fields the harness already knows how to launch:
     # `--resume <id> --fork-session`. normalize() then pins the child a fresh
