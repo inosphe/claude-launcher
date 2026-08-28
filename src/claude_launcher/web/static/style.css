@@ -585,6 +585,32 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .cflow-line.error { color: #ff7b72; }
+/* A checklist item on the flows list. The mark carries the state and the
+   colour only reinforces it: an item that reads as false to a reader who
+   cannot separate these greens is the prose problem again. */
+.cflow-line.checklist-item {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+.cflow-line.checklist-item.ok { color: #7ee787; }
+.cflow-line.checklist-item.no { color: #ff7b72; }
+.cflow-line.checklist-item.unknown { color: #d29922; }
+/* The same list on the run page, where there is room for the measurement. */
+.wf-checklist { margin: 8px 0; display: flex; flex-direction: column; gap: 6px; }
+.wf-check {
+  display: flex; gap: 8px; align-items: flex-start;
+  padding: 6px 9px; border: 1px solid #30363d; border-radius: 5px;
+  background: #0f1216;
+}
+.wf-check-mark { font-weight: 700; line-height: 1.4; }
+.wf-check.ok .wf-check-mark { color: #3fb950; }
+.wf-check.no .wf-check-mark { color: #f85149; }
+.wf-check.unknown .wf-check-mark { color: #d29922; }
+.wf-check-body { min-width: 0; }
+.wf-check-what { color: #c9d1d9; font-size: 13px; }
+.wf-check-meta {
+  color: #7d8590; font-size: 11px; margin-top: 2px;
+  font-family: Cascadia Mono, Consolas, Menlo, monospace;
+}
 .cflow-hint {
   display: inline-block; margin-top: 5px; padding: 2px 7px; font-size: 11px;
   font-family: Cascadia Mono, Consolas, Menlo, monospace;

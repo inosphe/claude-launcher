@@ -149,6 +149,69 @@ is the tier inside a ``recur`` loop: one round polls at most ``max`` times,
 and ``recur`` (possibly ``{auto: true}``) repeats the round. Fires count as
 visits, so size ``max_visits`` past ``max``.
 
+Checklist gate — `checklist:`
+------------------------------
+A step may declare a ``checklist:`` — a named list of machine-checked
+conditions, and the run leaves it only when every one of them is true::
+
+    landed:
+      checklist:
+        prompt: has this branch actually landed?
+        then: wrapup        # where the run goes when every item passes
+        poll: 60            # seconds between the daemon's re-measurements
+        timeout: 30         # per-item command timeout
+        items:
+          - id: merged
+            describe: a merge commit on the target lists my tip as a parent
+            check: 'python tools/landed_check.py'
+          - id: frozen
+            describe: the working tree is clean
+            check: 'git diff --quiet && git diff --cached --quiet'
+      instructions: |
+        ...
+
+It exists because the decisions that matter most in a multi-session workflow
+— *did the parent merge my branch*, *did the live server pick up the merge* —
+were carried by prose. A step stated them in its ``instructions`` and its
+``done_when``, and the driving agent read that prose and decided for itself
+whether to advance. A person watching could not see which conditions were
+true; they could only read the agent's account of them.
+
+A checklist answers the same question with a **list of exit codes**. Each item
+is a command: exit 0 is true, any other code is false, and a command that
+cannot be run or times out is ``unknown`` — never true. The run reports
+``waiting_checklist``, carrying every item with its current state, so the
+same list renders in ``claunch cflow status`` and on the dashboard.
+
+**The transition is the daemon's, not the agent's.** While the run sits here
+it is waiting, exactly like a ``timer:`` step: the agent ends its turn, the
+ReminderClock stays quiet, and
+:class:`..daemon.cflow_clock.ChecklistClock` re-measures every ``poll``
+seconds. When every item is true the daemon moves the run to ``then``
+(:func:`cflow.engine.check_checklist`) and the per-item evidence — id, exit
+code, output tail, measurement time — is journalled as ``checklist_passed``.
+The agent transcribes no hashes by hand.
+
+Two properties make the gate mean something:
+
+* **There is no agent exit.** ``next:`` is refused on a checklist step;
+  ``then`` is the only edge out. An agent cannot file its way past a
+  condition that is false, which is the whole point of moving these
+  particular gates off prose. The escape is a person's ``claunch cflow
+  goto``, and that is journalled as the override it is.
+* **A report is still required.** The move waits for all items true AND the
+  step's own report to have been filed. Items are what a command can check;
+  the report is the rest, and a gate that skipped it would close a round
+  with the human-checked half of ``done_when`` missing from the journal. A
+  report does not open the gate — a filed report with a red item moves
+  nothing.
+
+``poll`` and ``timeout`` carry the same floor and ceiling as ``awaits`` and
+for the same reasons: below the floor the clock hammers the condition instead
+of sampling it, and above the ceiling a checklist item becomes a way to run a
+test suite on a loop. An item is a cheap question about state somebody else
+changed.
+
 Waiting for a signal
 --------------------
 ``verify`` and ``done_when`` both answer "may this step be left?". ``awaits``
@@ -297,6 +360,19 @@ MIN_AWAITS_POLL = 15.0
 #: the sweep is green" from being written as "run the sweep every minute".
 DEFAULT_AWAITS_TIMEOUT = 10.0
 MAX_AWAITS_TIMEOUT = 30.0
+
+#: How often the daemon re-measures a ``checklist:`` step's items, and the
+#: floor under it. Same trade as ``awaits``: below the floor the clock stops
+#: sampling a condition and starts hammering it.
+DEFAULT_CHECKLIST_POLL = 60.0
+MIN_CHECKLIST_POLL = 15.0
+
+#: How long one checklist item's command may take. Capped for the reason the
+#: probe ceiling exists: an item is a cheap question about state somebody else
+#: changed, and a ceiling is what stops "wait until the suite is green" from
+#: being written as "run the suite every minute".
+DEFAULT_CHECKLIST_TIMEOUT = 10.0
+MAX_CHECKLIST_TIMEOUT = 30.0
 
 #: Reserved next-target meaning "the workflow ends here".
 END = "end"
@@ -516,6 +592,53 @@ class Timer:
 
 
 @dataclass(frozen=True)
+class ChecklistItem:
+    """One machine-checked condition of a :class:`Checklist`.
+
+    ``check`` is a command and its exit code is the whole answer: 0 is true,
+    any other code is false. Nothing here interprets a particular non-zero
+    code — an item is a yes/no question, and an author who needs to tell 1
+    from 3 writes two items.
+
+    ``describe`` is what a person reads next to the checkbox. It is required
+    rather than optional because the command is not a description: a reader
+    looking at a stuck gate needs to know what is not true, not which script
+    was run.
+    """
+
+    id: str
+    describe: str
+    check: str
+
+
+@dataclass(frozen=True)
+class Checklist:
+    """A step's gate as a list of conditions, moved by the daemon.
+
+    Every item must measure true before the run leaves for :attr:`then`,
+    which is the only edge out — a checklist step takes no ``next``. See the
+    module docstring's "Checklist gate" section for why the agent has no exit
+    of its own and why a report is still required.
+    """
+
+    items: Tuple[ChecklistItem, ...]
+    #: Where the run goes once every item is true. Not optional: a checklist
+    #: with nowhere to go is a step nothing can leave.
+    then: str
+    #: One line naming what the whole list is deciding, for the payload and
+    #: the dashboard heading.
+    prompt: Optional[str] = None
+    poll: float = DEFAULT_CHECKLIST_POLL
+    timeout: float = DEFAULT_CHECKLIST_TIMEOUT
+
+    def item(self, item_id: str) -> Optional[ChecklistItem]:
+        for entry in self.items:
+            if entry.id == item_id:
+                return entry
+        return None
+
+
+@dataclass(frozen=True)
 class Select:
     prompt: str
     chooser: str  # "agent" | "user" | "delegate"
@@ -547,6 +670,11 @@ class Step:
     #: sits here it reports ``waiting_timer`` and the ReminderClock stays
     #: quiet — a timed wait is not a stall. See :class:`Timer`.
     timer: Optional[Timer] = None
+    #: A machine-checked gate: the run leaves for :attr:`Checklist.then` only
+    #: once every item's command exits 0 and the step's report has been
+    #: filed, and the DAEMON performs that move. While the run sits here it
+    #: reports ``waiting_checklist``. See :class:`Checklist`.
+    checklist: Optional[Checklist] = None
     select: Optional[Select] = None
     next: Optional[str] = None  # None = termination (non-select steps)
 
@@ -573,6 +701,17 @@ class Step:
             out.append(None if self.ask.on_decline == END else self.ask.on_decline)
         if self.select:
             out.extend(o.next for o in self.select.options.values())
+        elif self.checklist is not None:
+            # Unlike `timer.then`, this IS the step's ordinary exit — the only
+            # one it has, since a checklist step takes no `next` — so it
+            # counts for reachability and for the "can this workflow finish"
+            # check exactly like a `next` would. Appending `self.next` as
+            # well would be worse than redundant: it is always None here, and
+            # None reads as a termination, which would let every checklist
+            # step silently satisfy the loop check.
+            out.append(
+                None if self.checklist.then == END else self.checklist.then
+            )
         else:
             out.append(self.next)
         if self.timer is not None:
@@ -866,7 +1005,14 @@ def _advice(workflow: Workflow) -> List[str]:
     silent = [
         s.id
         for s in workflow.steps.values()
-        if not s.is_select and s.timer is None and not s.verify and not s.done_when
+        if not s.is_select
+        and s.timer is None
+        # A checklist step states its completion in the most checkable form
+        # this schema has — a list of commands — so it is exempt like a
+        # select, whatever else it does or does not declare.
+        and s.checklist is None
+        and not s.verify
+        and not s.done_when
     ]
     if not silent:
         return []
@@ -1124,7 +1270,44 @@ def _parse_step(step_id: str, raw) -> Step:
     done_when = done_when.strip() if done_when else None
     awaits = _parse_awaits(raw.get("awaits"), step_id)
     timer = _parse_timer(raw.get("timer"), step_id)
+    checklist = _parse_checklist(raw.get("checklist"), step_id)
     select = _parse_select(raw.get("select"), step_id)
+    if checklist is not None:
+        # Every one of these is the same refusal: a checklist step's exit is
+        # its items going green, and a second way out is a way past a
+        # condition that is false.
+        if select is not None:
+            raise WorkflowError(
+                f"step {step_id!r}: a select step routes via its options; "
+                f"'checklist' is not allowed on one"
+            )
+        if timer is not None:
+            raise WorkflowError(
+                f"step {step_id!r}: 'timer' and 'checklist' are two different "
+                f"daemon-driven exits from the same step — keep one. A timed "
+                f"wait moves on a schedule; a checklist moves when its items "
+                f"are true"
+            )
+        if "next" in raw:
+            raise WorkflowError(
+                f"step {step_id!r}: a checklist step leaves through "
+                f"'checklist.then' only; 'next' is not allowed. An agent exit "
+                f"is a way past an item that is false, which is what this "
+                f"gate exists to refuse"
+            )
+        if verify is not None:
+            raise WorkflowError(
+                f"step {step_id!r}: 'verify' is the machine gate on leaving "
+                f"through 'next', and a checklist step has no 'next' — write "
+                f"that command as a checklist item instead"
+            )
+        if awaits is not None:
+            raise WorkflowError(
+                f"step {step_id!r}: 'awaits' has nothing to add to a "
+                f"checklist — the checklist IS the re-measured condition, and "
+                f"the daemon already samples every item every "
+                f"'checklist.poll' seconds"
+            )
     if timer is not None and select is not None:
         raise WorkflowError(
             f"step {step_id!r}: a select step routes via its options; "
@@ -1183,6 +1366,7 @@ def _parse_step(step_id: str, raw) -> Step:
         done_when=done_when,
         awaits=awaits,
         timer=timer,
+        checklist=checklist,
         select=select,
         next=_parse_next(raw.get("next"), step_id),
     )
@@ -1359,7 +1543,9 @@ def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
     else:
         probe = probe.strip()
 
-    poll = _parse_seconds(raw.get("poll"), DEFAULT_AWAITS_POLL, step_id, "poll")
+    poll = _parse_seconds(
+        raw.get("poll"), DEFAULT_AWAITS_POLL, step_id, "awaits.poll"
+    )
     if poll < MIN_AWAITS_POLL:
         raise WorkflowError(
             f"step {step_id!r}: 'awaits.poll' must be at least "
@@ -1367,7 +1553,7 @@ def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
             f"not sampling a condition, it is hammering it"
         )
     timeout = _parse_seconds(
-        raw.get("timeout"), min(DEFAULT_AWAITS_TIMEOUT, poll), step_id, "timeout"
+        raw.get("timeout"), min(DEFAULT_AWAITS_TIMEOUT, poll), step_id, "awaits.timeout"
     )
     if timeout <= 0:
         raise WorkflowError(
@@ -1402,18 +1588,23 @@ def _parse_awaits(raw, step_id: str) -> Optional[Awaits]:
 
 
 def _parse_seconds(raw, default: float, step_id: str, field_name: str) -> float:
-    """A number of seconds from an ``awaits`` field, or its default."""
+    """A number of seconds from a duration field, or its default.
+
+    ``field_name`` is the dotted path as an author wrote it (``awaits.poll``,
+    ``checklist.timeout``): it goes into the error verbatim, so a message
+    always names the key that is actually wrong.
+    """
     if raw is None:
         return float(default)
     if isinstance(raw, bool):
         raise WorkflowError(
-            f"step {step_id!r}: 'awaits.{field_name}' must be a number of seconds"
+            f"step {step_id!r}: {field_name!r} must be a number of seconds"
         )
     try:
         return float(raw)
     except (TypeError, ValueError):
         raise WorkflowError(
-            f"step {step_id!r}: 'awaits.{field_name}' must be a number of "
+            f"step {step_id!r}: {field_name!r} must be a number of "
             f"seconds, got {raw!r}"
         ) from None
 
@@ -1501,6 +1692,95 @@ def _parse_timer(raw, step_id: str) -> Optional[Timer]:
     return Timer(every=every, max=max_fires, then=then, after=after)
 
 
+def _parse_checklist(raw, step_id: str) -> Optional["Checklist"]:
+    """Parse a step's ``checklist:`` — a gate written as machine-checked items.
+
+    ``items`` and ``then`` are required; ``prompt``, ``poll`` and ``timeout``
+    are not. Each item needs all three of ``id``, ``describe`` and ``check``:
+    the id is what the payload, the journal and the dashboard key on, the
+    description is what a person reads next to the checkbox, and the check is
+    the command whose exit code decides it.
+    """
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise WorkflowError(
+            f"step {step_id!r}: 'checklist' must be a mapping "
+            f"{{items, then, ...}}"
+        )
+    unknown = sorted(set(raw) - {"items", "then", "prompt", "poll", "timeout"})
+    if unknown:
+        raise WorkflowError(
+            f"step {step_id!r}: 'checklist' has unknown key(s): "
+            f"{', '.join(unknown)} "
+            f"(allowed: items, then, prompt, poll, timeout)"
+        )
+    then = str(raw.get("then") or "").strip()
+    if not then:
+        raise WorkflowError(
+            f"step {step_id!r}: 'checklist.then' is required — where the run "
+            f"goes once every item is true. It is the step's only exit"
+        )
+    raw_items = raw.get("items")
+    if not isinstance(raw_items, list) or not raw_items:
+        raise WorkflowError(
+            f"step {step_id!r}: 'checklist.items' must be a non-empty list — "
+            f"a gate with no conditions is a gate that is always open"
+        )
+    items: List[ChecklistItem] = []
+    seen: Set[str] = set()
+    for index, entry in enumerate(raw_items):
+        where = f"step {step_id!r}: checklist item {index}"
+        if not isinstance(entry, dict):
+            raise WorkflowError(
+                f"{where} must be a mapping {{id, describe, check}}"
+            )
+        extra = sorted(set(entry) - {"id", "describe", "check"})
+        if extra:
+            raise WorkflowError(
+                f"{where} has unknown key(s): {', '.join(extra)} "
+                f"(allowed: id, describe, check)"
+            )
+        item_id = str(entry.get("id") or "").strip()
+        if not item_id:
+            raise WorkflowError(f"{where} needs an 'id'")
+        if item_id in seen:
+            raise WorkflowError(
+                f"step {step_id!r}: checklist item id {item_id!r} appears "
+                f"twice — ids key the payload, the journal and the dashboard, "
+                f"so they must be unique within a list"
+            )
+        seen.add(item_id)
+        describe = str(entry.get("describe") or "").strip()
+        if not describe:
+            raise WorkflowError(
+                f"{where} ({item_id!r}) needs a 'describe' — the command is "
+                f"not a description, and a person reading a stuck gate needs "
+                f"to know what is not true"
+            )
+        check = str(entry.get("check") or "").strip()
+        if not check:
+            raise WorkflowError(
+                f"{where} ({item_id!r}) needs a 'check' — the command whose "
+                f"exit code decides it (0 = true)"
+            )
+        items.append(ChecklistItem(id=item_id, describe=describe, check=check))
+    poll = _parse_seconds(
+        raw.get("poll"), DEFAULT_CHECKLIST_POLL, step_id, "checklist.poll"
+    )
+    timeout = _parse_seconds(
+        raw.get("timeout"), DEFAULT_CHECKLIST_TIMEOUT, step_id, "checklist.timeout"
+    )
+    prompt = raw.get("prompt")
+    return Checklist(
+        items=tuple(items),
+        then=then,
+        prompt=str(prompt).strip() if prompt else None,
+        poll=max(poll, MIN_CHECKLIST_POLL),
+        timeout=min(timeout, MAX_CHECKLIST_TIMEOUT),
+    )
+
+
 def _parse_select(raw, step_id: str) -> Optional[Select]:
     if raw is None:
         return None
@@ -1566,6 +1846,11 @@ def _validate_graph(workflow: Workflow) -> None:
                     f"step {step.id!r} points at unknown step {target!r} "
                     f"(use '{END}' to terminate)"
                 )
+        if step.checklist is not None and step.checklist.then == step.id:
+            raise WorkflowError(
+                f"step {step.id!r}: 'checklist.then' must be a different "
+                f"step — a gate whose only exit re-enters itself never leaves"
+            )
         if step.timer is not None:
             # `timer.then` is entered only by a fire, so it is not one of the
             # successors() above; it still must name a real, different step.

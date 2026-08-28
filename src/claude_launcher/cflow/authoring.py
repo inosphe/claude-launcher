@@ -241,6 +241,57 @@ it the moment the round ends — the loop continues without the driver
 performing each start, which is the point when the round is a wait. A human
 still stops either form (`claunch cflow request --cancel`, abort, archive).
 
+## Checklist gates — `checklist:`
+
+A `verify` refuses a bad exit; a `checklist:` replaces the *decision to
+advance* with a list of exit codes, and hands the transition to the daemon:
+
+```yaml
+landed:
+  checklist:
+    prompt: has this branch actually landed?
+    then: review        # the step's ONLY exit
+    poll: 60            # seconds between the daemon's re-measurements
+    timeout: 30         # per-item command timeout
+    items:
+      - id: merged
+        describe: a merge commit on the target lists my tip as a parent
+        check: 'python tools/landed_check.py'
+      - id: frozen
+        describe: the working tree is clean
+        check: 'git diff --quiet && git diff --cached --quiet'
+  instructions: |
+    freeze the branch, file the request, and report what you froze
+  done_when: |
+    the half no command can answer is in the report
+```
+
+Write one when the step waits on a fact **somebody else establishes** and a
+person needs to see which parts of it are true: did the parent merge this
+branch, did the live server pick the merge up. Those decisions were carried
+by step prose, and prose put the only readable account of them inside the
+driving agent's report. A checklist puts it in `claunch cflow status` and on
+the dashboard instead, as `[x] merged` / `[ ] frozen` / `[?] deployed`.
+
+The rules, and the reason for each:
+
+- **Exit 0 is true; anything else is false; unmeasurable is neither.** A
+  command that times out or cannot be launched records `null`, and `null`
+  never opens a gate. A broken check holds the run rather than releasing it.
+- **`then` is the only way out.** `next`, `verify`, `awaits` and `timer` are
+  all refused on the same step. An agent exit is a way past a condition that
+  is false, and refusing it is the whole point.
+- **The move waits for the step's `report` too.** Items are what a command
+  can check; the report is the rest of `done_when`. A report does not open
+  the gate — with a red item it moves nothing — it only stops being what
+  holds it.
+- **`poll` has a floor and `timeout` a ceiling**, exactly as `awaits` does:
+  an item is a cheap question about state somebody else changed, not a way
+  to run a suite on a loop.
+
+A human override is still a human override: `claunch cflow goto <step>`
+moves a run past a gate that will never go green, and is journaled as such.
+
 ## `awaits:` — what the step is WAITING for
 
 `verify` and `done_when` both answer "may this step be left?". `awaits`

@@ -254,6 +254,38 @@ def _cmd_asks(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_checklist(args: argparse.Namespace) -> int:
+    """Show the current checklist gate, optionally re-measuring it first.
+
+    ``--recheck`` is the door that keeps a checklist honest without a daemon:
+    the clock is what normally measures and moves, and a run with no daemon
+    behind it would otherwise sit at a gate nothing ever samples. It is not an
+    override — it runs the same items under the same two conditions, so a red
+    item stays red.
+    """
+    scope, cwd = _resolve_run(args, required=False)
+    if args.recheck:
+        moved = engine.check_checklist(cwd=cwd, scope=scope)
+        if moved and moved.get("moved_to"):
+            print(
+                f"checklist passed: {moved['step']} -> {moved['moved_to']} "
+                f"({moved['passed']}/{moved['total']} items true)"
+            )
+    payload = engine.status(cwd=cwd, scope=scope)
+    if args.json:
+        _print_payload(payload.get("checklist") or {})
+        return 0
+    if payload.get("status") != "waiting_checklist":
+        print(
+            f"this run is not at a checklist gate "
+            f"(status: {payload.get('status')})"
+        )
+        return 0
+    print(f"step:     {payload.get('step_id')}")
+    _print_checklist(payload.get("checklist") or {})
+    return 0
+
+
 def _cmd_status(args: argparse.Namespace) -> int:
     scope, cwd = _resolve_run(args, required=False)
     payload = engine.status(cwd=cwd, scope=scope)
@@ -346,6 +378,8 @@ def _cmd_status(args: argparse.Namespace) -> int:
         _print_block("decision", payload.get("prompt"))
         _print_options(payload.get("options", []))
         print(f"pending:  {payload.get('chooser')} decides this one")
+    if status == "waiting_checklist":
+        _print_checklist(payload.get("checklist") or {})
     if status == "waiting_window":
         # The agent chose; the workflow paces that option. Nobody is asked
         # anything — but a person CAN take it now: a confirm from here is not
@@ -390,6 +424,50 @@ def _print_block(label: str, text) -> None:
         for line in textwrap.wrap(para.strip(), _WIDTH - _LABEL) or [""]:
             print(f"{head if first else pad}{line}")
             first = False
+
+
+#: What a checklist item's three states look like on a terminal. ``?`` is not
+#: a decoration: an item nobody could measure is a different fact from one
+#: that measured false, and a reader chasing a stuck gate needs to tell them
+#: apart before deciding where to look.
+_MARKS = {True: "[x]", False: "[ ]", None: "[?]"}
+
+
+def _print_checklist(checklist: dict) -> None:
+    """The gate as a list a person can read: what is true, and what is not.
+
+    This is the whole point of the ``checklist:`` gate reaching the CLI. The
+    same decisions used to be carried by a step's prose, where the only way
+    to learn which conditions held was to ask the agent — and its account is
+    exactly what a mechanical gate exists to stop relying on.
+    """
+    if not checklist:
+        return
+    if checklist.get("prompt"):
+        _print_block("gate", checklist["prompt"])
+    print(
+        f"{'checklist:':<{_LABEL}}{checklist.get('passed')}/"
+        f"{checklist.get('total')} true"
+        + (f"  (measured {checklist['checked_at']})" if checklist.get("checked_at") else "")
+    )
+    pad = " " * _LABEL
+    for item in checklist.get("items") or []:
+        code = item.get("exit_code")
+        detail = "not measured yet" if item.get("measured_at") is None else (
+            f"exit {code}" if code is not None else "could not measure"
+        )
+        print(f"{pad}{_MARKS.get(item.get('ok'), '[?]')} {item.get('id')}: "
+              f"{item.get('describe')} ({detail})")
+    then = checklist.get("then")
+    if checklist.get("all_true") and not checklist.get("report_filed"):
+        print(f"{'held by:':<{_LABEL}}the step's report has not been filed — "
+              f"every item is true and the move is waiting on it")
+    elif checklist.get("all_true"):
+        print(f"{'moves to:':<{_LABEL}}{then} — the daemon performs it")
+    else:
+        print(f"{'moves to:':<{_LABEL}}{then}, once every item is true "
+              f"(the daemon measures; nobody has to advance it)")
+    print(f"{'recheck:':<{_LABEL}}claunch cflow checklist --recheck")
 
 
 def _print_options(options: list) -> None:
@@ -800,6 +878,19 @@ def register(sub) -> None:
         "--cancel", action="store_true", help="withdraw the pending request"
     )
     q.set_defaults(func=_cmd_request)
+
+    q = _scoped(csub.add_parser(
+        "checklist",
+        help="show the current checklist gate; --recheck re-measures it now",
+    ))
+    q.add_argument(
+        "--recheck",
+        action="store_true",
+        help="run every item now instead of waiting for the daemon's poll "
+        "(the gate's two conditions are unchanged — this is not an override)",
+    )
+    q.add_argument("--json", action="store_true")
+    q.set_defaults(func=_cmd_checklist)
 
     q = _scoped(csub.add_parser(
         "approve", help="approve the current human gate (the agent cannot)"

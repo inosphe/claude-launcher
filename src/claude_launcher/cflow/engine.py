@@ -68,7 +68,7 @@ import secrets
 import signal
 import subprocess
 from datetime import datetime, timedelta, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional, Sequence
 
 from .. import digests
 from . import checkout, model, responders, state as state_mod
@@ -979,6 +979,11 @@ def _move_to(workflow: Workflow, state: dict, target: Optional[str], cwd) -> Non
     state["declined"] = None
     state["unanswered"] = None
     state["report"] = None
+    # Measurements belong to the position that was being measured. They are
+    # keyed on (step, visit) as well, so this is tidiness rather than
+    # correctness — but a stale record in the file reads as a live one to
+    # anyone opening it.
+    state["checklist"] = None
     from_step = state.get("current")
     _settle_timers(workflow, state, target, cwd)
     if target is None:
@@ -1158,6 +1163,73 @@ def step_digest(payload: dict) -> str:
     if not any(p.strip() for p in parts):
         return ""
     return digests.text_digest("\x1e".join(parts))
+
+
+# --------------------------------------------------------------------------- #
+# checklist: a gate written as machine-checked items, moved by the daemon
+# --------------------------------------------------------------------------- #
+def _checklist_record(state: dict, step: Step) -> dict:
+    """The stored measurements for this step AND visit, or an empty record.
+
+    Keyed on the visit for the same reason a gate approval is: a run that
+    loops back here is asking the question again, and last visit's green
+    items are not an answer to it.
+    """
+    record = state.get("checklist") or {}
+    if (
+        record.get("step") == step.id
+        and record.get("visit") == _visits(state, step.id)
+    ):
+        return record
+    return {}
+
+
+def _checklist_items(step: Step, record: dict) -> List[dict]:
+    """Every declared item with whatever is known about it right now.
+
+    ``ok`` has three values and the third is the load-bearing one: ``True``
+    (exit 0), ``False`` (any other code), and ``None`` — not measured yet, or
+    measured and *unmeasurable* (the command could not be launched, or timed
+    out). Unknown is never true, so a checklist cannot be opened by a broken
+    command any more than by a failing one.
+    """
+    measured = (record or {}).get("items") or {}
+    items: List[dict] = []
+    for item in step.checklist.items:
+        seen = measured.get(item.id) or {}
+        items.append(
+            {
+                "id": item.id,
+                "describe": item.describe,
+                "check": item.check,
+                "ok": seen.get("ok"),
+                "exit_code": seen.get("code"),
+                "output": seen.get("says"),
+                "measured_at": seen.get("at"),
+            }
+        )
+    return items
+
+
+def _checklist_green(items: Sequence[dict]) -> bool:
+    return bool(items) and all(entry.get("ok") is True for entry in items)
+
+
+def _checklist_payload(state: dict, step: Step) -> dict:
+    """The structured checklist a payload carries: what is true, and what is not."""
+    record = _checklist_record(state, step)
+    items = _checklist_items(step, record)
+    return {
+        "prompt": step.checklist.prompt,
+        "then": step.checklist.then,
+        "poll": step.checklist.poll,
+        "items": items,
+        "passed": sum(1 for entry in items if entry.get("ok") is True),
+        "total": len(items),
+        "all_true": _checklist_green(items),
+        "report_filed": _current_report(state, step.id) is not None,
+        "checked_at": record.get("checked_at"),
+    }
 
 
 def _payload(workflow: Workflow, state: dict, cwd: Optional[str], *, mutate: bool) -> dict:
@@ -1348,6 +1420,66 @@ def _position_payload(
             state_mod.journal(
                 "timer_presented",
                 {"run": state["run_id"], "step": step.id, "visit": visit},
+                cwd,
+            )
+            state_mod.save_state(state, cwd)
+        return payload
+
+    # A checklist gate: the run sits here and the DAEMON moves it once every
+    # item measures true (see `check_checklist`). Like a timed wait this is a
+    # waiting position, never work to do — but unlike one it has no schedule
+    # to state, so what the payload carries is the list itself.
+    if step.checklist is not None:
+        checklist = _checklist_payload(state, step)
+        payload = {
+            **base,
+            "status": "waiting_checklist",
+            "instructions": step.instructions,
+            "checklist": checklist,
+        }
+        if step.done_when:
+            payload["done_when"] = step.done_when
+        outstanding = [
+            entry["describe"]
+            for entry in checklist["items"]
+            if entry.get("ok") is not True
+        ]
+        if not checklist["all_true"]:
+            payload["note"] = (
+                f"this step is a checklist gate: "
+                f"{checklist['passed']}/{checklist['total']} items are true, "
+                f"and the run leaves for '{step.checklist.then}' only when "
+                f"all of them are. The daemon re-measures every "
+                f"{int(step.checklist.poll)}s and moves the run itself — end "
+                f"your turn, do not poll by hand, and do not try to advance "
+                f"with 'next' (there is no agent exit from here). File this "
+                f"step's 'report' so the move is not held up on it. Still "
+                f"false: " + "; ".join(outstanding)
+            )
+        elif not checklist["report_filed"]:
+            payload["note"] = (
+                f"every checklist item is true; the move to "
+                f"'{step.checklist.then}' is waiting on this step's report. "
+                f"File it with 'report' {{summary, details?}} and the daemon "
+                f"moves the run — a report does not open the gate, it only "
+                f"stops being what holds it"
+            )
+        else:
+            payload["note"] = (
+                f"every checklist item is true and the report is filed — the "
+                f"daemon moves this run to '{step.checklist.then}' on its "
+                f"next pass. End your turn"
+            )
+        if mutate and not state["delivered"]:
+            state["delivered"] = True
+            state_mod.journal(
+                "checklist_presented",
+                {
+                    "run": state["run_id"],
+                    "step": step.id,
+                    "visit": visit,
+                    "items": [entry.id for entry in step.checklist.items],
+                },
                 cwd,
             )
             state_mod.save_state(state, cwd)
@@ -2039,6 +2171,11 @@ def report(
     }
 
 
+#: "the caller named no target", kept apart from ``None`` — which is a real
+#: target here, and means the run ends.
+_UNSET = object()
+
+
 def _fence(state: dict) -> tuple:
     """The identity of 'the position a long operation was started from'."""
     current = state.get("current") or ""
@@ -2050,8 +2187,23 @@ def _fence(state: dict) -> tuple:
     )
 
 
-def _advance(workflow: Workflow, state: dict, step: Step, filed: dict, cwd) -> dict:
-    """Journal the step's completion and move to its successor."""
+def _advance(
+    workflow: Workflow,
+    state: dict,
+    step: Step,
+    filed: dict,
+    cwd,
+    *,
+    target: Optional[str] = _UNSET,
+) -> dict:
+    """Journal the step's completion and move to its successor.
+
+    ``target`` defaults to the step's own ``next``. A checklist step has no
+    ``next`` — its exit is ``checklist.then`` — so that one passes the
+    destination in rather than having a second copy of this journalling.
+    """
+    if target is _UNSET:
+        target = step.next
     state_mod.journal(
         "step_completed",
         {
@@ -2064,7 +2216,7 @@ def _advance(workflow: Workflow, state: dict, step: Step, filed: dict, cwd) -> d
         cwd,
     )
     state["completed"] += 1
-    _move_to(workflow, state, step.next, cwd)
+    _move_to(workflow, state, target, cwd)
     if state["status"] == "done":
         return _done_payload(state, cwd)
     return _payload(workflow, state, cwd, mutate=True)
@@ -2082,6 +2234,13 @@ def next_step(*, cwd: Optional[str] = None) -> dict:
             # Nothing has been handed out yet (fresh arrival, or a gate/loop
             # guard is closed): (re)attempt delivery.
             return _payload(workflow, state, cwd, mutate=True)
+
+        if step.checklist is not None:
+            # No agent exit from a checklist gate. `next` here is not an
+            # error either — it is the natural thing to try — so it answers
+            # with the position, which says what is still false and who moves
+            # the run.
+            return _payload(workflow, state, cwd, mutate=False)
 
         if step.is_select:
             if _current_window(state, step.id, _visits(state, step.id)):
@@ -2525,6 +2684,160 @@ def fire_timer(*, cwd: Optional[str] = None) -> Optional[dict]:
         "moved_to": step.timer.then,
         "opens_at": armed.get("opens_at"),
     }
+
+
+@_scoped_op
+def check_checklist(*, cwd: Optional[str] = None) -> Optional[dict]:
+    """Re-measure a checklist gate's items, and move the run if they are all true.
+
+    Daemon-driven, the same shape as :func:`fire_timer`: the one agent that
+    would notice the moment is the one that ended its turn to wait for it. The
+    daemon's clock (:class:`..daemon.cflow_clock.ChecklistClock`) calls this
+    over every run that reports ``waiting_checklist``. It is also what
+    ``claunch cflow checklist --recheck`` calls, so a run with no daemon
+    behind it is late rather than stuck.
+
+    The commands run **unlocked**, exactly as a ``verify`` does in
+    :func:`next_step` and for the same reason: holding the slot across a
+    subprocess would block every human control on the dashboard. The commit
+    below re-checks the position with :func:`_fence` and discards a
+    measurement whose position moved underneath it.
+
+    Two conditions gate the move, and both are stated in the workflow rather
+    than decided here:
+
+    * every item exited 0 — an unmeasurable item (could not be launched, or
+      timed out) is ``None``, never true, so a broken command holds the gate
+      shut instead of opening it;
+    * the step's own report has been filed. The items are what a command can
+      check; the report is the rest of ``done_when``, and a gate that moved
+      without it would close a round with the human-checked half missing from
+      the journal. A report never opens the gate on its own.
+
+    Returns ``None`` for every "nothing happened" answer (no run, not at a
+    checklist step, nothing measurable changed and nothing moved), a dict
+    describing the measurement otherwise — with ``moved_to`` set only when
+    the run actually left.
+    """
+    if not state_mod.has_run(cwd):
+        return None
+    with state_mod.run_lock(cwd):
+        workflow, state = _load(cwd)
+        if state["status"] in ("done", "aborted") or not state.get("current"):
+            return None
+        step = workflow.step(state["current"])
+        if step.checklist is None:
+            return None
+        before = {
+            entry["id"]: entry["ok"] for entry in _checklist_items(
+                step, _checklist_record(state, step)
+            )
+        }
+        fence = _fence(state)
+        visit = _visits(state, step.id)
+        checklist = step.checklist
+
+    measured: Dict[str, dict] = {}
+    for item in checklist.items:
+        probe = run_probe(item.check, cwd, checklist.timeout)
+        measured[item.id] = {
+            # `run_probe` returns None when the command could not be run at
+            # all, which is no answer rather than the answer "false". It is
+            # recorded as unknown so a reader can tell "this is not true" from
+            # "nobody could tell", and both hold the gate.
+            "ok": None if probe is None else probe["code"] == 0,
+            "code": None if probe is None else probe["code"],
+            "says": None if probe is None else probe["says"],
+            "at": _iso(_utc_now()),
+        }
+
+    with state_mod.run_lock(cwd):
+        workflow, state = _load(cwd)
+        if _fence(state) != fence:
+            # A human moved (or retired) the run while the items ran. The
+            # measurement describes a position that no longer exists.
+            state_mod.journal(
+                "checklist_discarded",
+                {"run": state["run_id"], "step": step.id, "was": fence[2]},
+                cwd,
+            )
+            return None
+        record = {
+            "step": step.id,
+            "visit": visit,
+            "items": measured,
+            "checked_at": _iso(_utc_now()),
+        }
+        state["checklist"] = record
+        items = _checklist_items(step, record)
+        after = {entry["id"]: entry["ok"] for entry in items}
+        changed = sorted(k for k in after if before.get(k) is not after[k])
+        green = _checklist_green(items)
+        filed = _current_report(state, step.id)
+        result = {
+            "run": state["run_id"],
+            "workflow": state["workflow"],
+            "step": step.id,
+            "visit": visit,
+            "passed": sum(1 for entry in items if entry.get("ok") is True),
+            "total": len(items),
+            "all_true": green,
+            "report_filed": filed is not None,
+            "changed": changed,
+            "items": items,
+        }
+        if changed:
+            # Only on a change. A poll that measured the same thing again is
+            # not news, and a journal that recorded every pass would bury the
+            # entries that say something under the ones that do not.
+            state_mod.journal(
+                "checklist_changed",
+                {
+                    "run": state["run_id"],
+                    "step": step.id,
+                    "visit": visit,
+                    "changed": changed,
+                    "state": {
+                        entry["id"]: {
+                            "ok": entry["ok"],
+                            "exit_code": entry["exit_code"],
+                        }
+                        for entry in items
+                    },
+                },
+                cwd,
+            )
+        if not green or filed is None:
+            state_mod.save_state(state, cwd)
+            return result if changed else None
+        state_mod.journal(
+            "checklist_passed",
+            {
+                "run": state["run_id"],
+                "step": step.id,
+                "visit": visit,
+                "then": checklist.then,
+                # The evidence the agent no longer has to transcribe: what was
+                # asked, what answered, with what code and when.
+                "items": [
+                    {
+                        "id": entry["id"],
+                        "describe": entry["describe"],
+                        "check": entry["check"],
+                        "exit_code": entry["exit_code"],
+                        "output": entry["output"],
+                        "measured_at": entry["measured_at"],
+                    }
+                    for entry in items
+                ],
+            },
+            cwd,
+        )
+        target = None if checklist.then == model.END else checklist.then
+        _advance(workflow, state, step, filed, cwd, target=target)
+        result["moved_to"] = "end" if target is None else target
+        result["status"] = state["status"]
+        return result
 
 
 @_locked_op
