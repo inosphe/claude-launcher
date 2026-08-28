@@ -145,6 +145,9 @@ let afterSpawn = [];
 let sessionsCache = [];
 let spawnModal = null;
 let BASE = "/";
+let harnessDetails = {
+  claude: { auth: "claude" }, codex: { auth: "oauth" }, pi: { auth: "api-key" },
+};
 function refreshSessions() { railRefreshed++; afterSpawn.push("rail"); }
 /* The box's remembered size is a contract of its own — spawnsize_check drives
    the real pair. Here they are stubs: this harness is about the form's RULES,
@@ -165,7 +168,8 @@ new Function(
   + slice("spawnMeshNow") + slice("spawnWtFragment")
   + slice("spawnAutoWorktree") + slice("spawnAutoWorktreeHint")
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
-  + slice("baseProfileName") + slice("profileBorrowCapability") + slice("readBorrowOptions")
+  + slice("baseProfileName") + slice("profileBorrowCapability")
+  + slice("profileOwnAuthLabel") + slice("readBorrowOptions")
   + slice("fillValidatedBorrow") + slice("syncSpawnGates") + slice("syncSpawnBeads")
   + slice("spawnPayload")
   + slice("spawnReport") + slice("spawnPreflightNote")
@@ -894,6 +898,9 @@ async function main() {
       { name: "blocked", label: "blocked — harness policy denied",
         selectable: false, valid: false, message: "harness policy denied" },
     ] } },
+    "GET /api/borrow-options?profile=codex%3Acodex": { doc: {
+      capability: { allowed: false, mode: "none" }, options: [],
+    } },
     "GET /api/mesh": { doc: { meshes: [{ name: "m0" }] } },
     "GET /api/git?cwd=C%3A%2Frepo": { doc: { repo: true, worktrees: [] } },
     "GET /api/cflow/workflows?cwd=C%3A%2Frepo": { doc: {
@@ -954,6 +961,18 @@ async function main() {
   check("policy-denied borrow choices are disabled with their verdict",
     borrowSel && (borrowSel.options || []).some((o) =>
       o.value === "blocked" && o.disabled && /policy denied/.test(o.text)));
+  profileSel.value = "codex:codex";
+  await profileSel.fire("change");
+  await settle();
+  check("a Codex child names its profile OAuth login instead of parent auth",
+    borrowSel && borrowSel.disabled === true && borrowSel.value === "" &&
+      borrowSel.options.length === 1 && borrowSel.options[0].text ===
+        "(codex/codex profile's own OAuth login)",
+    borrowSel && [borrowSel.disabled, borrowSel.value,
+      borrowSel.options.map((o) => o.text)]);
+  profileSel.value = "";
+  await profileSel.fire("change");
+  await settle();
   check("the mesh picker opens on inherit", meshSel && meshSel.value === "",
     meshSel && meshSel.value);
   check("...with the parent's own mesh still on offer to name outright",

@@ -2643,8 +2643,28 @@ function profileBorrowCapability(detail, harnessName) {
   };
 }
 
+/* The disabled Borrow row still needs to say which authentication will be
+   used. OAuth harnesses do not accept a `borrow` value: selecting the profile
+   selects its namespaced login, so the empty value is that profile's auth
+   rather than the parent's. Keep the qualified PROFILE/HARNESS in the label
+   because two selectors with one base profile can run different programs. */
+function profileOwnAuthLabel(selector, harnessName) {
+  const base = baseProfileName(selector);
+  const identity = base && harnessName
+    ? `${base}/${harnessName}` : (base || harnessName || "selected profile");
+  const detail = (typeof harnessDetails !== "undefined"
+    ? harnessDetails[harnessName] : null) || {};
+  if (detail.auth === "oauth") {
+    return `(${identity} profile's own OAuth login)`;
+  }
+  if (detail.auth === "none") return `(${identity} uses no authentication)`;
+  return `(${identity} profile authentication)`;
+}
+
 function profileHarnessName(selector, parent) {
-  const detail = selector ? profileDetails[selector] : null;
+  const detail = selector
+    ? profileDetails[selector] || profileDetails[baseProfileName(selector)]
+    : null;
   return detail ? (detail.harness || "") : ((parent || {}).harness || "");
 }
 
@@ -2700,14 +2720,22 @@ async function syncNewBorrowOptions(force = false) {
   if (!f || !f.borrow || !f.profile) return;
   const parent = spawnParent();
   const selector = f.profile.value || (parent && parent.profile) || "";
-  const ownLabel = parent
-    ? `(as ${parent.name} authenticates)`
-    : "(this profile's own token)";
-  // A parented form's empty answer means "as the parent authenticates", so
-  // the selected profile's OWN token needs a head option of its own there;
-  // on a standalone form the empty answer already means that and the base
-  // lender stays folded away (omitName).
-  const ownName = parent ? baseProfileName(selector) : "";
+  const harnessName = profileHarnessName(selector, parent);
+  const detail = profileDetails[selector] ||
+    profileDetails[baseProfileName(selector)];
+  const borrowCap = profileBorrowCapability(
+    detail, harnessName
+  );
+  const ownLabel = !borrowCap.allowed
+    ? profileOwnAuthLabel(selector, harnessName)
+    : parent
+      ? `(as ${parent.name} authenticates)`
+      : "(this profile's own token)";
+  // On a borrow-capable parented form the empty answer keeps the parent's
+  // auth arrangement, so the selected profile's OWN token needs a head option
+  // of its own. OAuth harnesses have no lender value: their one empty answer
+  // already names the selected profile login above.
+  const ownName = parent && borrowCap.allowed ? baseProfileName(selector) : "";
   const omitName = parent ? "" : baseProfileName(selector);
   const key = `${selector}|${ownLabel}`;
   if (!force && key === newBorrowFor) return;
@@ -12408,7 +12436,10 @@ function syncSpawnGates(ui) {
   if (ui.capGate) ui.capGate.hidden = !(overCap || ui.capped);
 
   const pickedProfile = ui.profile.value || "";
-  const pickedDetail = (ui.profileDetails || {})[pickedProfile];
+  const details = ui.profileDetails || {};
+  const pickedDetail = pickedProfile
+    ? details[pickedProfile] || details[baseProfileName(pickedProfile)]
+    : null;
   const childHarness = pickedDetail
     ? pickedDetail.harness : (ui.parentSess || {}).harness || "";
   lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
@@ -12418,8 +12449,9 @@ function syncSpawnGates(ui) {
   // capability: Claude borrows token+provider, API-key harnesses borrow only
   // the shared token, OAuth harnesses borrow neither.
   const nonClaude = !!childHarness && childHarness !== "claude";
-  const effectiveDetail = pickedDetail ||
-    (ui.profileDetails || {})[(ui.parentSess || {}).profile || ""];
+  const parentProfile = (ui.parentSess || {}).profile || "";
+  const effectiveDetail = pickedDetail || details[parentProfile] ||
+    details[baseProfileName(parentProfile)];
   const borrowCap = profileBorrowCapability(effectiveDetail, childHarness);
   if (nonClaude) {
     lock(ui.nullTok, ui.nullNote, "the claude harness only");
@@ -13105,11 +13137,18 @@ function spawnModalClose() {
 async function refreshSpawnBorrowOptions(st, force = false) {
   const ui = st.ui;
   const selector = ui.profile.value || (ui.parentSess || {}).profile || "";
-  const ownLabel = `(as ${st.parent} authenticates)`;
-  // The empty answer inherits the parent's auth, so the selected profile's
-  // OWN token rides as a head option (fillValidatedBorrow) instead of asking
-  // the operator to pick the profile's own name out of the lender list.
-  const ownName = baseProfileName(selector);
+  const details = ui.profileDetails || {};
+  const detail = details[selector] || details[baseProfileName(selector)];
+  const childHarness = (detail && detail.harness) ||
+    (ui.parentSess || {}).harness || "";
+  const borrowCap = profileBorrowCapability(detail, childHarness);
+  const ownLabel = borrowCap.allowed
+    ? `(as ${st.parent} authenticates)`
+    : profileOwnAuthLabel(selector, childHarness);
+  // A borrow-capable child keeps the parent's auth on the empty answer, so the
+  // selected profile's OWN token rides as a separate head option. An OAuth
+  // child has one empty answer, labelled as its selected profile login above.
+  const ownName = borrowCap.allowed ? baseProfileName(selector) : "";
   const key = `${selector}|${ownLabel}`;
   if (!force && ui._borrowFor === key) return;
   ui._borrowFor = key;
@@ -13238,9 +13277,21 @@ async function spawnModalLoad(st) {
   ui._borrowPreset =
     (seed.borrow !== undefined && seed.borrow !== null) ? seed.borrow :
       (re.borrow || "");
+  const initialSelector = ui.profile.value || (sess.profile || "");
+  const initialDetail = ui.profileDetails[initialSelector] ||
+    ui.profileDetails[baseProfileName(initialSelector)];
+  const initialHarness = (initialDetail && initialDetail.harness) ||
+    sess.harness || "";
+  const initialBorrowCap = profileBorrowCapability(
+    initialDetail, initialHarness
+  );
   fillValidatedBorrow(
-    ui.borrow, { options: [] }, `(as ${parent} authenticates)`, "", "",
-    baseProfileName(ui.profile.value || (sess.profile || ""))
+    ui.borrow, { options: [] },
+    initialBorrowCap.allowed
+      ? `(as ${parent} authenticates)`
+      : profileOwnAuthLabel(initialSelector, initialHarness),
+    "", "",
+    initialBorrowCap.allowed ? baseProfileName(initialSelector) : ""
   );
   fillSpawnSelect(ui.role, roleNames.map((r) => [r, r]), "(no role)",
     (seed.role !== undefined && seed.role !== null) ? seed.role :

@@ -1432,6 +1432,22 @@ class Form:
         return lines, self.pick
 
 
+def _profile_own_auth_label(
+    selector: str, harness_name: str, auth: str = ""
+) -> str:
+    """Describe the auth selected by an OAuth/none profile selector."""
+    base = str(selector or "").split(":", 1)[0]
+    identity = (
+        f"{base}/{harness_name}"
+        if base and harness_name
+        else base or harness_name or "selected profile"
+    )
+    if auth == "oauth":
+        return f"({identity} profile's own OAuth login)"
+    if auth == "none":
+        return f"({identity} uses no authentication)"
+    return f"({identity} profile authentication)"
+
 
 class Wizard(Form):
     """``new-session``: the human's door, with every field spelled out.
@@ -1729,20 +1745,28 @@ class Wizard(Form):
         """
         detail = self.sources.profile_harness(self.value("profile") or "")
         harness_name = detail.get("harness") or ""
-        self._sync_borrow_options(
-            self.value("profile") or "",
-            "(this profile's own token)",
-        )
         claude = harness_name == "claude"
         capabilities = next(
             (h for h in self.sources.harnesses()
              if h.get("name") == harness_name), {}
         )
+        borrow_allowed = bool(detail.get("borrow_allowed", claude))
+        self._sync_borrow_options(
+            self.value("profile") or "",
+            (
+                "(this profile's own token)"
+                if borrow_allowed
+                else _profile_own_auth_label(
+                    self.value("profile") or "",
+                    harness_name,
+                    str(capabilities.get("auth") or ""),
+                )
+            ),
+        )
         for key in ("role", "resume", "null_token"):
             f = self.field(key)
             f.disabled = not claude
             f.disabled_note = "the claude harness only"
-        borrow_allowed = bool(detail.get("borrow_allowed", claude))
         borrow = self.field("borrow")
         borrow.disabled = not borrow_allowed
         borrow.disabled_note = (
@@ -2331,11 +2355,10 @@ class SpawnWizard(Form):
         args_f.disabled_note = (
             "the child runs its parent's args (spawn.allow_args)"
         )
-        # Auth is claude's token machinery, so for a child that will run
-        # another harness both rows are moot however the policy is set — and
-        # like the other form, saying yes to null greys the borrow row
-        # rather than provoking the daemon's refusal of the pair. Re-derived
-        # every pass, because the answers follow the Profile and Null rows.
+        # Borrow follows the harness auth contract. OAuth harnesses name their
+        # selected profile login on a disabled row; Claude and API-key
+        # harnesses may expose lenders. Null remains Claude-only and greys the
+        # borrow row rather than provoking the daemon's refusal of the pair.
         picked_profile = self.value("profile") or ""
         parent_info = self._session(parent)
         effective_selector = picked_profile or parent_info.get("profile") or ""
@@ -2356,12 +2379,24 @@ class SpawnWizard(Form):
             if parent_info.get("borrow")
             else ""
         )
-        self._sync_borrow_options(
-            effective_selector,
-            f"(as the parent authenticates{inherited})",
+        capabilities = next(
+            (h for h in self.sources.harnesses()
+             if h.get("name") == child_harness), {}
         )
         borrow_allowed = bool(
             detail.get("borrow_allowed", child_harness == "claude")
+        )
+        self._sync_borrow_options(
+            effective_selector,
+            (
+                f"(as the parent authenticates{inherited})"
+                if borrow_allowed
+                else _profile_own_auth_label(
+                    effective_selector,
+                    child_harness,
+                    str(capabilities.get("auth") or ""),
+                )
+            ),
         )
         if child_harness and child_harness != "claude":
             null_f.disabled, null_f.disabled_note = (

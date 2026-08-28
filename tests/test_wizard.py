@@ -37,8 +37,10 @@ class FakeSources(wizard.Sources):
 
     def harnesses(self):
         return [
-            {"name": "claude", "available": True, "description": "Claude Code"},
-            {"name": "codex", "available": False, "description": "Codex"},
+            {"name": "claude", "available": True, "auth": "claude",
+             "description": "Claude Code"},
+            {"name": "codex", "available": False, "auth": "oauth",
+             "description": "Codex"},
         ]
 
     def profiles(self):
@@ -1258,6 +1260,48 @@ def test_spawn_borrow_picker_includes_the_runtime_profile_auth():
     wiz.apply(args)
 
     assert args.borrow == "work"
+
+
+def test_spawn_codex_profile_names_its_own_oauth_login():
+    class OAuthSpawnSources(FakeSpawnSources):
+        def profile_details(self):
+            return [
+                {"name": "work", "harness": "claude",
+                 "harness_available": True, "borrow_allowed": True,
+                 "borrow_mode": "provider-token"},
+                {"name": "codex:codex", "harness": "codex",
+                 "harness_available": True, "borrow_allowed": False,
+                 "borrow_mode": "none"},
+            ]
+
+        def borrow_options(self, profile_selector):
+            if profile_selector == "codex:codex":
+                return []
+            return super().borrow_options(profile_selector)
+
+    sources = OAuthSpawnSources(
+        report=_open_report(profile_options=[
+            {"value": "codex:codex", "label": "codex/codex",
+             "harness": "codex"},
+            {"value": "work", "label": "work/claude", "harness": "claude"},
+        ]),
+        sessions=[
+            {"name": "lead", "status": "idle", "harness": "claude",
+             "profile": "work", "cwd": "/work/repo"},
+        ],
+    )
+    wiz = spawn_form(sources=sources)
+
+    pick(wiz, "profile", "codex/codex")
+
+    borrow = wiz.field("borrow")
+    assert not borrow.selectable
+    assert borrow.options[0].label == "(codex/codex profile's own OAuth login)"
+    assert "own profile storage" in borrow.disabled_note
+    args = argparse.Namespace()
+    wiz.apply(args)
+    assert args.profile == "codex:codex"
+    assert args.borrow is None
 
 
 def test_a_locked_profile_row_never_travels():
