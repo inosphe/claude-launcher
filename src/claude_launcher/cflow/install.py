@@ -133,6 +133,16 @@ workflow to be started here), that is the answer; otherwise list candidates
      lands over a responder's and closes the question. That is a door, not a
      gate: do not write them the decision brief, do not wait for them, do not
      raise it again. The run is not stopped on them.
+   - `waiting_goto` — you asked for a position the workflow declares no
+     route to (see *When the graph has no route*) and nobody has answered.
+     The run does not advance until they do. STOP your turn and write the
+     decision brief below; if the reason stopped being true, withdraw the
+     request (`request_goto` with `cancel: true`) instead of leaving a
+     question no answer helps. When it is answered you are nudged: an
+     approval arrives as the new position, a refusal as `goto_request`
+     with `decision: denied` on your next `status`/`next` — read the
+     refusal's reason, say in your next report that it was refused and by
+     whom, and continue on the declared route.
    - `status: step` or `select` where the payload says the decision was
      meant to be somebody else's — the workflow declared `otherwise: self`
      and nobody could be reached, so it is yours by default. Say so plainly
@@ -273,6 +283,32 @@ and a fresh one started:
   section's case — it is already an explicit request; follow the protocol
   above.
 
+## When the graph has no route
+
+Sometimes the run has to go somewhere the workflow declares no transition
+to: a merge turns up work that belongs to a step already passed, a finding
+invalidates the outcome a step was reported on. The position is a human
+control (`claunch cflow goto`), and your shell is denied it by the harness —
+so attempting it yourself produces a permission failure, records nothing and
+asks nobody. `request_goto` is the door that exists instead.
+
+- Call it with the `step` you need and a `reason`. It files a REQUEST and
+  moves nothing; the run stops advancing until a person answers.
+- Then STOP your turn and write the decision brief below. What it must
+  carry, on top of the usual: what you found, why the declared route cannot
+  carry it, what redoing that step costs (work thrown away, time), and what
+  continuing without the move costs. Say plainly if you are not certain the
+  step needs redoing — that is the part they cannot see.
+- They answer with `! claunch cflow goto --approve` or `--deny`, or from the
+  dashboard's workflow panel. They may also send the run to a THIRD step
+  (`! claunch cflow goto <step>`), which answers your request too. Any of
+  the three is theirs to take.
+- You cannot approve it, and a refusal is an answer, not an obstacle: it
+  means continue on the declared route, and your next report says so.
+- Not for a route the workflow DOES declare — that is `next`/`select`. Not
+  for a step you are already on. Not a way around a gate: a gate you jump
+  is a gate nobody approved, and the journal records who asked for the jump.
+
 ## Answering for someone else
 
 Other sessions' runs may delegate a decision to your role — anything you are
@@ -310,7 +346,9 @@ run. Both are refused; neither is a thing to work around.
   are watched live by humans — write them as status updates for a reviewer,
   not as praise for yourself.
 - Approvals and user selections happen OUTSIDE your tools (CLI / `!`
-  commands / the web dashboard); nothing you can call grants them. The same
+  commands / the web dashboard); nothing you can call grants them. So does
+  granting a `request_goto`: the tool files the request, and no arrangement
+  of tool calls answers it. The same
   holds for a delegated decision: `answer` acts on OTHER sessions' runs and
   refuses your own, so there is no arrangement of tool calls that unblocks
   a gate on you.
@@ -328,8 +366,10 @@ run. Both are refused; neither is a thing to work around.
   loop that passes an `ask` twice asks twice, and the second answer may
   differ from the first.
 - A human may force the run's position while you are stopped
-  (`claunch cflow goto <step>`). Whatever `status` serves after a nudge IS
-  the current truth — even if it revisits a step you already finished.
+  (`claunch cflow goto <step>`), including in answer to a `request_goto` of
+  yours, and including to a step you did not ask for. Whatever `status`
+  serves after a nudge IS the current truth — even if it revisits a step you
+  already finished.
 - If a tool returns an error about no active run, `start` one. If `start`
   errors because a run is ALREADY ACTIVE, do not retry and do not force:
   call `status` and resume that run — unless the user explicitly asked for

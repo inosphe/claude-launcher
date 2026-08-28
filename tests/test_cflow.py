@@ -1227,6 +1227,8 @@ def test_mcp_initialize_and_tools():
         # the pull behind a reminder that names the step by id instead of
         # restating it
         "recall",
+        # asking a person for a position the graph declares no route to
+        "request_goto",
         # decisions other sessions' runs are waiting on it for
         "asks", "answer",
     }

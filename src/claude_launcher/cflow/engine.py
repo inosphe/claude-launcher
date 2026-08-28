@@ -117,6 +117,10 @@ NUDGE_CONTINUE = "cflow: continue per the /cflow protocol"
 NUDGE_STARTED = (
     "cflow: a new workflow run was started - continue per the /cflow protocol"
 )
+NUDGE_GOTO_DENIED = (
+    "cflow: your step-change request was refused - call the cflow 'status' "
+    "tool and continue per the /cflow protocol"
+)
 
 
 def _t_hint() -> str:
@@ -1903,6 +1907,7 @@ def _start_impl(
         "ask": None,
         "declined": None,
         "unanswered": None,
+        "goto_request": None,
         "report": None,
         "completed": 0,
         "visits": {workflow.start: 1},
@@ -2224,6 +2229,49 @@ def _advance(
 
 @_scoped_op
 def next_step(*, cwd: Optional[str] = None) -> dict:
+    """Advance the run, first settling any step-change request standing on it.
+
+    A live request HOLDS the run: advancing would carry the position out from
+    under the question, and an approval landing afterwards would move a run
+    that is no longer where the person answering was looking.
+
+    A refused one does not hold anything — it is news the agent has to act on
+    — so it rides along with this call's ordinary outcome and is then cleared.
+    Deliberately not a stop of its own: the agent had already filed the
+    report that earns this advance, and making the refusal cost an extra
+    ``next`` would mean a refusal is more expensive than a grant.
+    """
+    with state_mod.run_lock(cwd):
+        state = state_mod.load_state(cwd)
+        if state.get("status") not in ("done", "aborted"):
+            pending = _pending_goto(state)
+            if pending:
+                return _goto_payload(state, pending)
+        refused = state.get("goto_request")
+        if isinstance(refused, dict) and refused.get("decision") == "denied":
+            state["goto_request"] = None
+            state_mod.save_state(state, cwd)
+        else:
+            refused = None
+    payload = _next_step_impl(cwd=cwd)
+    if refused:
+        payload["goto_request"] = refused
+        payload["note"] = (
+            f"your request to move to {refused.get('step')!r} was refused by "
+            f"{refused.get('decided_by') or 'a human'}"
+            + (
+                f": {refused['decided_reason']}"
+                if refused.get("decided_reason")
+                else " (no reason given)"
+            )
+            + ". Continue on the route the workflow declares, and say in your "
+            "next report that it was refused. "
+            + str(payload.get("note") or "")
+        ).strip()
+    return payload
+
+
+def _next_step_impl(*, cwd: Optional[str] = None) -> dict:
     with state_mod.run_lock(cwd):
         workflow, state = _load(cwd)
         if state["status"] in ("done", "aborted"):
@@ -3200,20 +3248,70 @@ def goto(
     agent calls 'next', and nothing but 'next' ends that.
     """
     workflow, state = _load(cwd)
+    return _force_position(workflow, state, step_id, by=by, reason=reason, cwd=cwd)
+
+
+def _force_position(
+    workflow: Workflow,
+    state: dict,
+    step_id: str,
+    *,
+    by: str,
+    reason: Optional[str],
+    cwd: Optional[str],
+    granted: Optional[dict] = None,
+) -> dict:
+    """The move itself, shared by the human's :func:`goto` and by the approval
+    of an agent's :func:`request_goto`.
+
+    ``granted`` is the request this move answers, when it answers one: it is
+    journaled with the move, so the record says the position was *asked for*
+    and by whom rather than reading as a bare human override.
+    """
     target = None if step_id == model.END else step_id
     if target is not None:
         workflow.step(target)  # unknown id -> WorkflowError
+    superseded = state.get("goto_request")
+    if superseded is not None and superseded.get("decision"):
+        superseded = None  # already answered; only a live one can be superseded
     state_mod.journal(
         "state_forced",
         {
             "run": state["run_id"],
             "from": state.get("current"),
+            # Both spellings: 'to' is what this event has always carried, and
+            # 'step' is the key every other event names its step with (the
+            # dashboard's journal reader keys on that one).
             "to": step_id,
+            "step": step_id,
             "by": by,
             "reason": (reason or "").strip(),
+            **(
+                {"granted": granted.get("id"), "asked_by": granted.get("by")}
+                if granted
+                else {}
+            ),
         },
         cwd,
     )
+    if granted is not None:
+        state["goto_request"] = None
+    elif superseded is not None:
+        # A human forced the position while a request was pending. The move
+        # answers the request whether or not it named this step, so it must
+        # not stay behind and stop the run a second time.
+        state["goto_request"] = None
+        state_mod.journal(
+            "goto_superseded",
+            {
+                "run": state["run_id"],
+                "request": superseded.get("id"),
+                "step": superseded.get("step"),
+                "forced_to": step_id,
+                "by": by,
+            },
+            cwd,
+        )
     if state["status"] in ("done", "aborted"):
         state["status"] = "running"  # a forced goto can reopen a finished run
     _move_to(workflow, state, target, cwd)
@@ -3227,6 +3325,240 @@ def goto(
         "note": (
             "position forced; the agent picks the step up via 'next' "
             "- nudge it to continue"
+        ),
+    }
+
+
+@_locked_op
+def request_goto(
+    step_id: str,
+    reason: str,
+    *,
+    by: str = "agent",
+    cwd: Optional[str] = None,
+) -> dict:
+    """The agent's side of an off-graph move: ask for a position the workflow
+    declares no transition to, and let a person grant or refuse it.
+
+    Why a request and not a move. The graph is the run's account of what may
+    happen, and an agent that could re-position itself could also walk out of
+    any gate the graph puts in front of it -- which is why :func:`goto` is a
+    human command and why the harness deny rules keep the agent's shell off
+    it. But reality does out-run the graph: a merge turns up work belonging to
+    a step already passed. Until now that ended as a permission failure with
+    nothing recorded and nobody asked. This is the missing half -- the agent
+    states where it must go and why, the run stops instead of advancing, and a
+    human answers with :func:`resolve_goto` (or overrides with :func:`goto`,
+    which supersedes the request).
+
+    Deliberately NOT a case in :func:`_blocked`: a gate withholds a step's
+    content on entry, while this holds a run whose step has already been
+    delivered and reported on. Conflating the two would re-deliver the step on
+    every poll and drop the report already filed against it.
+    """
+    workflow, state = _load(cwd)
+    if state["status"] in ("done", "aborted"):
+        raise CflowError(
+            f"this run is {state['status']}; there is no position to move. A "
+            f"finished run is reopened by a human with 'claunch cflow goto "
+            f"<step>'{_t_hint()}"
+        )
+    target = None if step_id == model.END else step_id
+    if target is not None:
+        workflow.step(target)  # unknown id -> WorkflowError
+    note = (reason or "").strip()
+    if not note:
+        raise CflowError(
+            "'reason' is required: the person answering has not watched you "
+            "work, and a step id on its own is not something anyone can "
+            "approve or refuse"
+        )
+    if target is not None and target == state.get("current"):
+        raise CflowError(f"the run is already at {target!r} - nothing to request")
+    previous = state.get("goto_request")
+    request = {
+        "id": f"gr-{secrets.token_hex(3)}",
+        "step": step_id,
+        "reason": note,
+        "by": by,
+        "from": state.get("current"),
+        "visit": _visits(state, state["current"]) if state.get("current") else 0,
+        "at": state_mod.utcnow(),
+    }
+    state["goto_request"] = request
+    state_mod.save_state(state, cwd)
+    state_mod.journal(
+        "goto_requested",
+        {
+            "run": state["run_id"],
+            "request": request["id"],
+            "step": step_id,
+            "from": request["from"],
+            "by": by,
+            "reason": note,
+            **(
+                {"replaces": previous.get("id")}
+                if previous and not previous.get("decision")
+                else {}
+            ),
+        },
+        cwd,
+    )
+    return {
+        **_base(state),
+        "status": "goto_requested",
+        "step_id": state.get("current"),
+        "goto_request": request,
+        "note": (
+            "recorded; the run will not advance until a person answers. Stop "
+            "your turn and write them the decision brief -- where the run has "
+            "to go, what you found that the workflow declared no route for, "
+            "what redoing that step costs, and what continuing on the declared "
+            "route costs. They answer with 'claunch cflow goto --approve' or "
+            f"'claunch cflow goto --deny'{_t_hint()}, or from the dashboard's "
+            "workflow panel; they may also send the run somewhere else "
+            "entirely with 'claunch cflow goto <step>'"
+        ),
+        "how_to_unblock": _asking_well(
+            f"They are being asked to let this run leave the route its "
+            f"workflow declares, for {step_id!r}."
+        ),
+    }
+
+
+@_locked_op
+def cancel_goto_request(*, by: str = "agent", cwd: Optional[str] = None) -> dict:
+    """Withdraw a pending step-change request -- the agent found its own way
+    forward, or the reason stopped being true, and nobody should be left
+    holding a question no answer is worth giving to."""
+    _workflow, state = _load(cwd)
+    pending = state.get("goto_request")
+    if not pending or pending.get("decision"):
+        raise CflowError("no pending step-change request on this run")
+    state["goto_request"] = None
+    state_mod.save_state(state, cwd)
+    state_mod.journal(
+        "goto_withdrawn",
+        {
+            "run": state["run_id"],
+            "request": pending.get("id"),
+            "step": pending.get("step"),
+            "by": by,
+        },
+        cwd,
+    )
+    return {
+        **_base(state),
+        "status": "goto_withdrawn",
+        "step_id": state.get("current"),
+        "note": "request withdrawn; the run continues from where it stands",
+    }
+
+
+@_locked_op
+def resolve_goto(
+    decision: str,
+    *,
+    by: str = "user",
+    reason: Optional[str] = None,
+    cwd: Optional[str] = None,
+) -> dict:
+    """Answer a pending step-change request. CLI / dashboard only.
+
+    ``approve`` performs the move that was asked for; ``deny`` leaves the
+    position alone and hands the refusal back to the agent, which reads it on
+    its next ``status``/``next`` and carries on down the declared route. Not
+    exposed over MCP for the same reason ``approve`` is not: an
+    agent-callable grant is not a grant.
+    """
+    verdict = (decision or "").strip().lower()
+    if verdict not in ("approve", "deny"):
+        raise CflowError(f"decision must be 'approve' or 'deny', not {decision!r}")
+    workflow, state = _load(cwd)
+    pending = state.get("goto_request")
+    if not pending or pending.get("decision"):
+        raise CflowError("no pending step-change request on this run")
+    note = (reason or "").strip()
+    if verdict == "approve":
+        state_mod.journal(
+            "goto_approved",
+            {
+                "run": state["run_id"],
+                "request": pending.get("id"),
+                "step": pending.get("step"),
+                "by": by,
+                "reason": note,
+            },
+            cwd,
+        )
+        payload = _force_position(
+            workflow,
+            state,
+            pending["step"],
+            by=by,
+            reason=note or pending.get("reason") or "",
+            cwd=cwd,
+            granted=pending,
+        )
+        payload["goto_request"] = {**pending, "decision": "approved"}
+        return payload
+    decided = {
+        **pending,
+        "decision": "denied",
+        "decided_by": by,
+        "decided_reason": note,
+        "decided_at": state_mod.utcnow(),
+    }
+    state["goto_request"] = decided
+    state_mod.save_state(state, cwd)
+    state_mod.journal(
+        "goto_denied",
+        {
+            "run": state["run_id"],
+            "request": pending.get("id"),
+            "step": pending.get("step"),
+            "by": by,
+            "reason": note,
+        },
+        cwd,
+    )
+    return {
+        **_base(state),
+        "status": "goto_denied",
+        "step_id": state.get("current"),
+        "goto_request": decided,
+        "note": (
+            "refusal recorded; the run stays where it is and the agent is told "
+            "on its next 'status' or 'next' - nudge it to continue"
+        ),
+    }
+
+
+def _pending_goto(state: dict) -> Optional[dict]:
+    """The live (unanswered) step-change request on this run, if any."""
+    request = state.get("goto_request")
+    if isinstance(request, dict) and not request.get("decision"):
+        return request
+    return None
+
+
+def _goto_payload(state: dict, request: dict) -> dict:
+    """The stop a pending request puts the run in."""
+    return {
+        **_base(state),
+        "status": "waiting_goto",
+        "step_id": state.get("current"),
+        "goto_request": request,
+        "note": (
+            f"you asked for this run to be moved to {request.get('step')!r} and "
+            f"nobody has answered yet; it does not advance until they do. Stop "
+            f"your turn. If the reason stopped being true, withdraw the request "
+            f"('request_goto' with cancel) rather than leaving a question no "
+            f"answer helps"
+        ),
+        "how_to_unblock": _asking_well(
+            f"They are being asked to let this run leave the route its "
+            f"workflow declares, for {request.get('step')!r}."
         ),
     }
 
@@ -3350,6 +3682,14 @@ def status(cwd: Optional[str] = None) -> dict:
         # The per-run override only — the machine defaults are the daemon's
         # (store.daemon_config) and are reported by its API, not by a run.
         payload["reminder"] = dict(state["reminder"])
+    request = state.get("goto_request")
+    if isinstance(request, dict):
+        payload["goto_request"] = request
+        if not request.get("decision"):
+            # The stop overrides whatever position status would otherwise
+            # report: the dashboard and the agent both dispatch on this word,
+            # and "step" here would read as "nothing needs a human".
+            payload.update(_goto_payload(state, request))
     return payload
 
 

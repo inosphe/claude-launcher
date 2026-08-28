@@ -42,6 +42,17 @@ def test_the_rules_cover_every_gate_command_and_both_shells():
     assert not any("journal" in rule for rule in install_mod.GATE_DENY_RULES)
 
 
+def test_the_goto_rules_cover_answering_a_request_too():
+    """`goto` grew a second half — `--approve`/`--deny`, which answers the
+    agent's own `request_goto`. An agent that could type that would be
+    granting its own request, so the guard has to reach the flags and not
+    just the bare verb. It does, via the `:*` prefix form; asserted here
+    because the reachability is the whole point of the request path."""
+    for tool in ("Bash", "PowerShell"):
+        prefix = f"{tool}(claunch cflow goto:*)"
+        assert prefix in install_mod.GATE_DENY_RULES
+
+
 def test_a_project_install_plants_the_guard_once(project, home):
     lines = install_mod.install_into_project(project)
     path = project / ".claude" / "settings.json"

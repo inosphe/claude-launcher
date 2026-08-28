@@ -243,6 +243,7 @@ def build_app(
     r.add_post("/api/cflow/select", h_cflow_select)
     r.add_post("/api/cflow/nudge", h_cflow_nudge)
     r.add_post("/api/cflow/goto", h_cflow_goto)
+    r.add_post("/api/cflow/goto/resolve", h_cflow_goto_resolve)
     # One resource, three verbs: GET/PUT are the machine defaults (the config
     # file, read live by the reminder clock, so a PUT applies by its next
     # tick); POST is one run's override, stored in that run's state.
@@ -1658,6 +1659,38 @@ async def h_cflow_goto(request: web.Request) -> web.Response:
     payload = cflow_engine.goto(step, by="web", reason=reason, cwd=cwd, scope=scope)
     payload["nudged_sessions"] = await _nudge_sessions(
         request.app["manager"], cwd, scope, cflow_engine.nudge_for_state(step)
+    )
+    return web.json_response(payload)
+
+
+async def h_cflow_goto_resolve(request: web.Request) -> web.Response:
+    """Answer the agent's request to move to a step the workflow declares no
+    route to — the dashboard half of ``claunch cflow goto --approve|--deny``.
+
+    Separate from :func:`h_cflow_goto` rather than folded into it: that one
+    forces a position the operator chose, this one answers a question the
+    agent asked, and the difference is what the journal has to keep. Both end
+    in a nudge, because both leave the agent with something new to read.
+    """
+    resolved, err = await _cflow_action_cwd(request)
+    if err:
+        return err
+    cwd, scope, body = resolved
+    decision = str(body.get("decision") or "")
+    if decision not in ("approve", "deny"):
+        return json_error(400, "'decision' must be 'approve' or 'deny'")
+    reason = str(body.get("reason") or "") or None
+    payload = cflow_engine.resolve_goto(
+        decision, by="web", reason=reason, cwd=cwd, scope=scope
+    )
+    asked = (payload.get("goto_request") or {}).get("step") or ""
+    payload["nudged_sessions"] = await _nudge_sessions(
+        request.app["manager"],
+        cwd,
+        scope,
+        cflow_engine.NUDGE_GOTO_DENIED
+        if decision == "deny"
+        else cflow_engine.nudge_for_state(str(asked)),
     )
     return web.json_response(payload)
 

@@ -2,7 +2,9 @@
 
 The human/orchestrator side of cflow: list and inspect workflows, watch a
 run, and operate the controls the agent deliberately does not have —
-``approve`` (gates) and ``select`` (confirming user-chooser branches). Also
+``approve`` (gates), ``select`` (confirming user-chooser branches) and
+``goto`` (forcing the position, or answering with ``--approve``/``--deny`` an
+agent's request to leave the route its workflow declares). Also
 hosts ``cflow mcp``, the stdio server Claude Code spawns, and ``install``.
 """
 
@@ -576,7 +578,54 @@ def _cmd_select(args: argparse.Namespace) -> int:
 
 
 def _cmd_goto(args: argparse.Namespace) -> int:
+    """Force the position, or answer the agent's request for one.
+
+    One command for both because they are one question to the person typing
+    it — where should this run be — and because a reader who has just been
+    handed "approve with 'claunch cflow goto --approve'" should not have to
+    learn a second verb to say no, or to send the run somewhere third.
+    """
     scope, cwd = _resolve_run(args)
+    if args.approve or args.deny:
+        if args.step:
+            print(
+                "give a step or --approve/--deny, not both: --approve grants "
+                "the step the agent asked for, while naming a step forces "
+                "that one instead (which also answers the request)",
+                file=sys.stderr,
+            )
+            return 2
+        decision = "approve" if args.approve else "deny"
+        payload = engine.resolve_goto(
+            decision, by="user", reason=args.reason, scope=scope, cwd=cwd
+        )
+        asked = (payload.get("goto_request") or {}).get("step")
+        if decision == "deny":
+            _report_unblock(
+                f"refused the request to move to {asked!r}",
+                engine.NUDGE_GOTO_DENIED,
+                scope,
+                cwd,
+            )
+            return 0
+        if payload.get("status") in ("done", "aborted"):
+            print(f"granted; workflow is {payload['status']}")
+            return 0
+        _report_unblock(
+            f"granted the request to move to {asked!r} "
+            f"(visit {payload.get('visit')})",
+            engine.nudge_for_state(str(asked)),
+            scope,
+            cwd,
+        )
+        return 0
+    if not args.step:
+        print(
+            "give a step to force the run to, or --approve/--deny to answer "
+            "the agent's pending request",
+            file=sys.stderr,
+        )
+        return 2
     payload = engine.goto(args.step, by="user", reason=args.reason, scope=scope, cwd=cwd)
     if payload.get("status") in ("done", "aborted"):
         print(f"workflow forced to {payload['status']}")
@@ -906,10 +955,26 @@ def register(sub) -> None:
 
     q = _scoped(csub.add_parser(
         "goto",
-        help="force the run's current step (human override; 'end' finishes); "
+        help="force the run's current step, or answer the agent's request for "
+        "one with --approve/--deny (human override; 'end' finishes); "
         "auto-nudges the run's session",
     ))
-    q.add_argument("step")
+    q.add_argument(
+        "step",
+        nargs="?",
+        help="step id to force the run to ('end' finishes it); omit when "
+        "answering a request with --approve/--deny",
+    )
+    q.add_argument(
+        "--approve",
+        action="store_true",
+        help="grant the step-change the agent asked for (see 'status')",
+    )
+    q.add_argument(
+        "--deny",
+        action="store_true",
+        help="refuse it; the run stays where it is and the agent is told",
+    )
     q.add_argument("--reason", help="recorded in the journal")
     q.set_defaults(func=_cmd_goto)
 

@@ -1248,6 +1248,20 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
     )
     cflow_engine.start("wf.yaml", cwd=str(chooser))
 
+    # A plain two-step run, for the request an AGENT files to be moved to a
+    # step its workflow declares no route to. It needs two steps and no gate:
+    # the question here is the position, not entry to it.
+    jumper = tmp_path / "jumper"
+    jumper.mkdir()
+    (jumper / "wf.yaml").write_text(
+        "name: jump\nsteps:\n  one:\n    instructions: do one\n    next: two\n"
+        "  two:\n    instructions: do two\n",
+        encoding="utf-8",
+    )
+    cflow_engine.start("wf.yaml", cwd=str(jumper), scope="n2")
+    cflow_engine.report("did one", cwd=str(jumper), scope="n2")
+    cflow_engine.next_step(cwd=str(jumper), scope="n2")
+
     async def run():
         mgr = _manager()
         app = build_app(mgr, "sekrit", started_at=time.monotonic())
@@ -1336,6 +1350,68 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
             resp = await client.post(
                 "/api/cflow/approve",
                 json={"cwd": str(gated), "scope": "n1"},
+                headers=bearer,
+            )
+            assert resp.status == 400
+
+            # an agent's step-change request, answered from the dashboard.
+            worker2 = mgr.create(
+                SessionDef(name="n2", harness="py", cwd=str(jumper))
+            )
+            await _wait_screen(worker2, "READY")
+            cflow_engine.request_goto(
+                "one", "the merge turned up a case step one never handled",
+                by="n2", cwd=str(jumper), scope="n2",
+            )
+            # The run reports the stop, so the dashboard can draw the question.
+            assert cflow_engine.status(
+                cwd=str(jumper), scope="n2"
+            )["status"] == "waiting_goto"
+
+            resp = await client.post(
+                "/api/cflow/goto/resolve",
+                json={"cwd": str(jumper), "scope": "n2", "decision": "maybe"},
+                headers=bearer,
+            )
+            assert resp.status == 400  # only approve/deny answer this
+
+            # refusing leaves the position where it was and tells the agent
+            resp = await client.post(
+                "/api/cflow/goto/resolve",
+                json={"cwd": str(jumper), "scope": "n2", "decision": "deny",
+                      "reason": "step one's outcome still holds"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["status"] == "goto_denied"
+            assert doc["nudged_sessions"] == ["n2"]
+            assert cflow_engine.status(
+                cwd=str(jumper), scope="n2"
+            )["step_id"] == "two"
+            await _wait_screen(worker2, "echo:cflow: your step-change request")
+
+            # granting one moves the run to the step that was asked for
+            cflow_engine.next_step(cwd=str(jumper), scope="n2")  # clears the refusal
+            cflow_engine.request_goto(
+                "one", "still the right step", by="n2",
+                cwd=str(jumper), scope="n2",
+            )
+            resp = await client.post(
+                "/api/cflow/goto/resolve",
+                json={"cwd": str(jumper), "scope": "n2", "decision": "approve"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            doc = await resp.json()
+            assert doc["status"] == "state_set" and doc["step_id"] == "one"
+            assert doc["nudged_sessions"] == ["n2"]
+            await _wait_screen(worker2, "echo:cflow: current step forced")
+
+            # and with nothing left waiting it is a clean 400, not a 500
+            resp = await client.post(
+                "/api/cflow/goto/resolve",
+                json={"cwd": str(jumper), "scope": "n2", "decision": "deny"},
                 headers=bearer,
             )
             assert resp.status == 400
