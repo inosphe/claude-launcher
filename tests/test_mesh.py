@@ -151,9 +151,9 @@ def test_infer_role():
     assert infer_role("dev-2") == "worker"
     assert infer_role("qa") == "reviewer"
     assert infer_role("mod") == "leader"
-    # An unlabelled member audits rather than rubber-stamps (interconnect's
-    # rule); "member" — a role nothing acted on — is gone.
-    assert infer_role("alice") == "reviewer"
+    # An unlabelled member is assigned NOTHING — no-role, the packaged
+    # default — rather than quietly becoming a worker or an auditor.
+    assert infer_role("alice") == "no-role"
 
 
 def test_message_intents():

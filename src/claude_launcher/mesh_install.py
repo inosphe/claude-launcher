@@ -250,9 +250,10 @@ waiting on rather than assuming they carried on where they stopped.
 
 Your handle's leading word picks your role (`worker_1`/`coder2` -> worker,
 `moderator`/`lead` -> leader, `qa` -> reviewer; anything unrecognised ->
-reviewer, so an unlabelled member audits rather than rubber-stamps). The join
-briefing names your role and points you at your **stance** — run
-`claunch mesh stance MESH`, and treat what it prints as binding.
+no-role, a member with nothing assigned until a human or the leader says
+otherwise). The join briefing names your role and points you at your
+**stance** — run `claunch mesh stance MESH`, and treat what it prints as
+binding.
 
 A mesh may define its own vocabulary, so do not assume the names above:
 `claunch mesh roles MESH` lists the roles this mesh actually has, and
