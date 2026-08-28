@@ -94,7 +94,10 @@ or still in the working tree. ``--base auto`` reads the branch's upstream
 instead of a fixed ref, which is what a worker stacked on an integration
 branch needs: measured against master such a branch counts the entire batch
 as its own change, and three sessions in one day measured that at 78-93% of
-the suite -- the sweep this gate exists not to be. See :func:`resolve_base`.
+the suite -- the sweep this gate exists not to be. An upstream that is only
+this branch's own remote copy is not such a branch and is skipped, because
+measuring against it counts everything unpushed as this round's change. See
+:func:`resolve_base`.
 The runner's own scratch lock is not counted as a change; see
 :data:`RUNNER_LOCK_RE`.
 
@@ -253,7 +256,9 @@ keeps only stdout loses nothing it needs.
 DEFAULT_BASE = "master"
 
 #: ``--base auto``: ask git for the branch this one integrates into instead of
-#: pinning one. See :func:`resolve_base`.
+#: pinning one -- which is not the same as asking for the upstream, since a
+#: branch's own remote copy is an upstream and is no such branch. See
+#: :func:`resolve_base`.
 BASE_AUTO = "auto"
 
 #: Parallelism is bounded by how little there is to do. Each xdist worker
@@ -353,12 +358,42 @@ def resolve_base(repo: Path, base: str) -> tuple:
     exactly this question. Reading the same ref means the selection and the
     alignment check describe the same target instead of two.
 
-    Three answers, and the third is the one that has to be loud:
+    Not every upstream is an integration branch, though. ``master@{upstream}``
+    resolves to ``origin/master``, which is not a branch master integrates
+    into -- it is where master is pushed. Reading it as the axis makes the
+    selection "everything the repository changed since the last push", and on
+    this repository that measured **102 changed paths -> 114 modules** against
+    an ``origin/master`` 110 commits behind the local branch, for a session
+    that had committed nothing (``claunch-d4yo``, s262/s256/s259). Both
+    remotes held the same commit, so no fetch reaches it.
+
+    Git already records the difference, and it needs no threshold and no
+    ancestry test. ``branch.<X>.merge`` is the ref on the far side that ``<X>``
+    is paired with: ``refs/heads/<X>`` means the pairing is this branch's own
+    remote copy, anything else names a different branch. Both alternatives
+    were measured over all 285 local branches and both misread this repository:
+
+    * ancestry ("upstream is an ancestor of HEAD") also catches three real
+      stacked branches -- ``s127-7w7g-gate-dirty``, ``s127-qj03-doc-body`` and
+      ``s217-wf-followup`` -- because a parent being an ancestor of its child
+      is what a stack *is*.
+    * a threshold on how far behind the upstream is separates them today
+      (111 against 1-5) but makes the number the reason, and the number moves.
+
+    ``branch.<X>.merge`` catches ``master`` alone and leaves all eleven
+    stacked branches on their upstream.
+
+    Four answers, and two of them have to be loud:
 
     ``given``
         an explicit ``--base X``. Unchanged, and still the default.
     ``upstream``
-        ``--base auto`` and the branch has one.
+        ``--base auto`` and the branch has one that names a different branch.
+    ``self-tracking``
+        ``--base auto`` and the upstream is this branch's own remote copy. That
+        is a push destination, not something to measure against, so it falls
+        back to master and says so -- otherwise the output reads ``vs master``
+        with no way to tell that ``auto`` was even asked. Exit code unchanged.
     ``no-upstream``
         ``--base auto`` and it does not. Falling back to master is right for a
         branch cut from master and is the original defect for a stacked one,
@@ -382,6 +417,15 @@ def resolve_base(repo: Path, base: str) -> tuple:
         text=True,
     )
     if proc.returncode == 0 and proc.stdout.strip():
+        # Same reason: a branch with no ``merge`` configured is an ordinary
+        # answer, and reading it must not turn into a failure.
+        paired = subprocess.run(
+            ["git", "-C", str(repo), "config", f"branch.{branch}.merge"],
+            capture_output=True,
+            text=True,
+        )
+        if paired.stdout.strip() == f"refs/heads/{branch}":
+            return DEFAULT_BASE, "self-tracking"
         return proc.stdout.strip(), "upstream"
     return DEFAULT_BASE, "no-upstream"
 
@@ -1198,7 +1242,8 @@ def main(argv: Optional[list] = None) -> int:
             f"ref to diff against (default: {DEFAULT_BASE!r}). "
             f"{BASE_AUTO!r} reads the branch's upstream -- what a stacked "
             f"worker branch integrates into -- and falls back to "
-            f"{DEFAULT_BASE!r}, loudly, when none is set"
+            f"{DEFAULT_BASE!r}, loudly, when none is set or when the only "
+            f"upstream is this branch's own remote copy"
         ),
     )
     ap.add_argument(
@@ -1237,6 +1282,18 @@ def main(argv: Optional[list] = None) -> int:
 
     repo = args.repo.resolve()
     base, how = resolve_base(repo, args.base)
+    if how == "self-tracking":
+        print(
+            f"WARNING: --base {BASE_AUTO} found this branch's own remote copy "
+            f"as its upstream, which is a push destination and not a branch to "
+            f"measure against; measuring against {DEFAULT_BASE!r} instead.\n"
+            f"  Against that copy the selection is everything the repository "
+            f"changed since the last push, not this round: 102 paths -> 114 "
+            f"modules here, for a session that had committed nothing "
+            f"(claunch-d4yo).\n"
+            f"  If this branch does integrate into another one, name it:\n"
+            f"    git branch --set-upstream-to=<integration branch>"
+        )
     if how == "no-upstream":
         print(
             f"WARNING: --base {BASE_AUTO} found no upstream for this branch; "

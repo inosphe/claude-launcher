@@ -1489,3 +1489,114 @@ def test_an_explicit_base_is_left_exactly_as_given(stacked):
         "integration",
         "given",
     )
+
+
+# --------------------------------- an upstream that is only a push target (d4yo)
+
+
+@pytest.fixture
+def pushed(repo) -> Path:
+    """``master``, tracking an ``origin/master`` that is behind it.
+
+    The shape a session on the root checkout stands in: the branch has an
+    upstream, so ``--base auto`` finds one, but it names this same branch on a
+    remote rather than a branch to integrate into. Nothing here has been
+    pushed, so ``origin/master`` sits at the first commit while master carries
+    two more. Nothing is ever transferred: ``git remote add`` is here for the
+    fetch refspec, without which ``@{upstream}`` cannot map ``refs/heads/master``
+    on ``origin`` to the tracking ref and answers "no upstream" instead.
+    """
+    _git(repo, "checkout", "-q", "master")
+    old = _git(repo, "rev-parse", "HEAD").strip()
+    _git(repo, "remote", "add", "origin", str(repo))
+    _git(repo, "update-ref", "refs/remotes/origin/master", old)
+    _git(repo, "config", "branch.master.remote", "origin")
+    _git(repo, "config", "branch.master.merge", "refs/heads/master")
+
+    _write(repo, "src/pkg/batch_one.py")
+    _write(repo, "tests/test_batch_one.py")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "another session's landed work")
+    _write(repo, "tools/deploy_check.py", "changed = 1\n")
+    _git(repo, "commit", "-qam", "and another")
+    return repo
+
+
+def test_base_auto_does_not_measure_against_the_branchs_own_remote_copy(pushed):
+    """The defect, and the control next to it -- the unpushed work is not mine.
+
+    ``origin/master`` is where master is pushed, not a branch master
+    integrates into, so measuring against it reads everything unpushed as this
+    round's change. On the real repository that was 102 paths -> 114 modules
+    for a session that had committed nothing (``claunch-d4yo``).
+    """
+    against_the_remote_copy = changed_tests.select(
+        pushed, changed_tests.changed_paths(pushed, "origin/master")
+    )
+    assert against_the_remote_copy == [
+        "tests/test_batch_one.py",
+        "tests/test_deploy_check.py",
+    ]
+
+    base, how = changed_tests.resolve_base(pushed, changed_tests.BASE_AUTO)
+    assert (base, how) == ("master", "self-tracking")
+    assert changed_tests.changed_paths(pushed, base) == []
+    assert changed_tests.select(pushed, changed_tests.changed_paths(pushed, base)) == []
+
+
+def test_falling_back_off_a_self_tracking_upstream_says_so_and_still_passes(
+    pushed, capsys
+):
+    """Loud for the same reason ``no-upstream`` is loud.
+
+    The selection line would otherwise read ``vs master`` with nothing to say
+    that ``auto`` was asked at all, and an empty selection is a pass the step
+    reports on -- so the exit code does not move.
+    """
+    assert changed_tests.main(["--repo", str(pushed), "--base", "auto", "--list"]) == 0
+    out = capsys.readouterr().out
+    assert "own remote copy" in out
+    assert "--set-upstream-to" in out
+    assert "no test modules map to this change" in out
+
+
+def test_an_upstream_naming_another_branch_holds_even_when_it_is_an_ancestor(stacked):
+    """Why the test is ancestry-free: a parent being an ancestor is the stack.
+
+    Three real branches in this repository sit exactly here --
+    ``s127-7w7g-gate-dirty``, ``s127-qj03-doc-body`` and ``s217-wf-followup``
+    -- so a rule that fell back to master whenever the upstream was an
+    ancestor of HEAD would put all three back on the base ``--base auto``
+    exists to keep them off.
+    """
+    _git(stacked, "checkout", "-q", "integration")
+    _git(stacked, "merge", "-q", "--ff-only", "worker")
+    _git(stacked, "checkout", "-q", "worker")
+    _git(stacked, "branch", "--set-upstream-to=integration", "worker")
+    assert _git(stacked, "merge-base", "--is-ancestor", "integration", "worker") == ""
+
+    assert changed_tests.resolve_base(stacked, changed_tests.BASE_AUTO) == (
+        "integration",
+        "upstream",
+    )
+
+
+def test_a_worker_branch_tracking_a_differently_named_remote_ref_is_untouched(repo):
+    """The edge of the rule, stated so it is not read as wider than it is.
+
+    ``branch.<X>.merge`` is compared against ``refs/heads/<X>``, so only a
+    branch paired with its own name falls back. A worker branch pointed at
+    ``origin/master`` names a different branch and keeps that axis, stale or
+    not -- this rule is about what an upstream *means*, not about how old one
+    is.
+    """
+    _git(repo, "remote", "add", "origin", str(repo))
+    _git(repo, "update-ref", "refs/remotes/origin/master",
+         _git(repo, "rev-parse", "master").strip())
+    _git(repo, "config", "branch.feature.remote", "origin")
+    _git(repo, "config", "branch.feature.merge", "refs/heads/master")
+
+    assert changed_tests.resolve_base(repo, changed_tests.BASE_AUTO) == (
+        "origin/master",
+        "upstream",
+    )
