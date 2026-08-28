@@ -354,7 +354,7 @@ const FORGOTTEN = {
 };
 /* A harness that keeps no transcript gets no context gauge — the line under
    test must not have been riding on that one's presence. */
-const PLAIN = { name: "pi", status: "idle", harness: "codex", profile: "nc",
+const PLAIN = { name: "pi", status: "idle", harness: "pi", profile: "nc",
                 parent: null };
 /* An exited record: its screen reading is gone with the process, but the two
    human stamps came back with the record, and "when did I last look at the

@@ -1,49 +1,28 @@
-"""How full one session's context is, read from the transcript it is writing.
+"""Read one managed session's latest recorded context size.
 
-With twenty sessions on a screen the operator's question is no longer "what is
-this one doing" but "which of these is about to compact". Nothing in the
-launcher knew: the daemon owns processes, not conversations. The number does
-exist, though, and the harness itself reports it — every assistant turn claude
-writes to its jsonl carries the ``usage`` block the API answered with, and the
-input side of that block *is* the context that turn was sent.
+Claude and Codex persist the required values in different JSONL formats:
 
-So this module reads the tail of the same file :mod:`briefing` reads, finds the
-newest assistant turn, and adds up what was sent::
+* Claude assistant entries split the input into fresh, cache-read, and
+  cache-write token counts.  Their sum is the context sent for that turn.
+* Codex ``token_count`` events carry ``last_token_usage`` for the latest model
+  request and a separate cumulative ``total_token_usage``.  The former is the
+  context reading.  Codex also records ``model_context_window``.
 
-    context = input_tokens + cache_read_input_tokens + cache_creation_input_tokens
+The result is normalized for the daemon API and dashboard as ``tokens``, the
+three input components, output tokens, model, and timestamp.  Codex readings
+also carry ``model_context_window``.  Claude readings can carry the configured
+``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` as ``compact_window``.
 
-The three are one number split by how it was billed (fresh, replayed from
-cache, written to cache), not three different things — a session at 150k reads
-almost all of it from cache and that is still 150k of context.
+The reading is the latest value persisted by the harness.  During an active
+answer it can therefore describe the preceding model request.  A session with
+no recorded request returns ``None``.  Harnesses without a supported transcript
+format also return ``None``.
 
-Three limits are deliberate, and the UI must say them rather than paper over
-them:
+Claude sidechain entries are skipped because their usage belongs to the
+subagent conversation.  Codex subagents use separate rollout files and are
+selected by their own conversation ids.
 
-* **It is the last completed turn, not now.** The file is appended when a turn
-  finishes, so a session mid-answer still shows the previous number. That is
-  why ``at`` travels with the count: an idle session's hour-old number is
-  correct (nothing changed), and a busy one's is a floor.
-* **There is no denominator.** Nothing in the transcript records the context
-  limit, and it is not guessable — a claude-opus-5 session in this very fleet
-  was observed at 286,674 input tokens, so any hardcoded 200k would already be
-  wrong. Absolute tokens only, with the model beside them; a wrong percentage
-  is worse than none. What *is* knowable is the session's configured
-  ``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` — the point claude will compact at,
-  resolved from the same env the child was spawned with — and
-  :func:`compact_window_of` hangs that beside the reading as
-  ``compact_window`` so the UI can draw it as a threshold, still never as a
-  percentage of a hard limit.
-* **Only claude sessions have one.** Another harness keeps no such file, and a
-  claude session that has not answered yet has no turn to read. Both come back
-  as ``None`` — "not known", never zero.
-
-Sidechain entries (a subagent's own turns) are skipped: a subagent runs on its
-own context, and counting its usage would report the wrong conversation's size
-on the row of the session that spawned it.
-
-Nothing here is authoritative about *cost* — that is
-:mod:`claude_launcher.usage`, which asks the API about subscription windows and
-is a different question that happens to share a word.
+Subscription quota reporting is implemented by :mod:`claude_launcher.usage`.
 """
 
 from __future__ import annotations
@@ -54,23 +33,25 @@ import time
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
+from .. import harnesses as harness_registry
 from .. import lineage, providers
 from .. import profile as profile_mod
+from . import codex_sessions
 from .briefing import locate_transcript
 from .harness import CLAUDE_HARNESS
 
-#: How much of the file's end is read looking for the newest assistant turn.
-#: One turn is small, but the lines before it are tool results and can be
+CODEX_HARNESS = "codex"
+
+#: How much of the file's end is read looking for the newest usage record.
+#: One record is small, but the lines before it are tool results and can be
 #: large, so the read starts small and widens rather than paying for the worst
 #: case on every poll.
 FIRST_CHUNK = 64 * 1024
 MAX_TAIL = 1024 * 1024
 
-#: How long a *failed* lookup is remembered. Locating a transcript whose
-#: expected path is empty scans every project directory
-#: (:func:`transcripts.find`), which is a fine safety net once and a waste
-#: twenty times a second — but it must expire, or a session that only starts
-#: answering later would stay blank forever.
+#: How long a *failed* lookup is remembered. Both Claude's fallback locator
+#: and Codex's rollout locator can scan multiple files. The miss must expire
+#: so a session that records its first request later does not stay blank.
 MISS_TTL = 15.0
 
 #: path -> (mtime, size, reading). The file's identity is what would change
@@ -78,8 +59,8 @@ MISS_TTL = 15.0
 #: restart empties it, which is fine: the next poll reads again.
 _reads: Dict[str, Tuple[float, int, Optional[dict]]] = {}
 
-#: (profile, conversation, cwd) -> (path or None, when it was looked up).
-_located: Dict[Tuple[str, str, str], Tuple[Optional[Path], float]] = {}
+#: (harness, profile, conversation, cwd) -> (path or None, lookup time).
+_located: Dict[Tuple[str, str, str, str], Tuple[Optional[Path], float]] = {}
 
 #: The env var claude reads its auto-compact threshold from. The launcher
 #: sets it per profile (see template.py) and the dashboard draws it as the
@@ -145,6 +126,58 @@ def usage_of(entry: dict) -> Optional[dict]:
     }
 
 
+def codex_usage_of(entry: dict) -> Optional[dict]:
+    """Normalize one Codex ``token_count`` rollout entry.
+
+    ``total_token_usage`` accumulates across the conversation.  Context size
+    comes from ``last_token_usage.input_tokens``; cached and cache-write input
+    counts are subsets of that value in Codex's token-usage schema.
+    """
+    if not isinstance(entry, dict) or entry.get("type") != "event_msg":
+        return None
+    payload = entry.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") != "token_count":
+        return None
+    info = payload.get("info")
+    if not isinstance(info, dict):
+        return None
+    last = info.get("last_token_usage")
+    if not isinstance(last, dict):
+        return None
+
+    input_total = _int(last.get("input_tokens"))
+    if not input_total:
+        return None
+    cache_read = min(input_total, _int(last.get("cached_input_tokens")))
+    cache_write = min(
+        input_total - cache_read,
+        _int(last.get("cache_write_input_tokens")),
+    )
+    reading = {
+        "tokens": input_total,
+        "input": input_total - cache_read - cache_write,
+        "cache_read": cache_read,
+        "cache_write": cache_write,
+        "output": _int(last.get("output_tokens")),
+        "model": None,
+        "at": str(entry.get("timestamp") or "") or None,
+    }
+    window = _window_value(info.get("model_context_window"))
+    if window:
+        reading["model_context_window"] = window
+    return reading
+
+
+def codex_model_of(entry: dict) -> Optional[str]:
+    """Return the model selected by one Codex ``turn_context`` entry."""
+    if not isinstance(entry, dict) or entry.get("type") != "turn_context":
+        return None
+    payload = entry.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    return str(payload.get("model") or "").strip() or None
+
+
 def read_tail(path: Path) -> Optional[dict]:
     """The newest context reading in ``path``, or ``None``.
 
@@ -183,15 +216,66 @@ def read_tail(path: Path) -> Optional[dict]:
         window = min(window * 4, MAX_TAIL)
 
 
+def read_codex_tail(path: Path) -> Optional[dict]:
+    """Return the newest Codex context reading in ``path``.
+
+    The closest preceding ``turn_context`` supplies the model for the model
+    request represented by the selected ``token_count``.  A newer
+    ``turn_context`` can already exist when the next turn has started, so
+    model entries encountered before the token event during the reverse scan
+    are deliberately ignored.
+    """
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    window = FIRST_CHUNK
+    while True:
+        try:
+            with path.open("rb") as fh:
+                fh.seek(max(0, size - window))
+                blob = fh.read()
+        except OSError:
+            return None
+        lines = blob.decode("utf-8", errors="replace").splitlines()
+        if size > window and lines:
+            lines = lines[1:]
+        reading = None
+        for line in reversed(lines):
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if reading is None:
+                reading = codex_usage_of(entry)
+                continue
+            model = codex_model_of(entry)
+            if model:
+                reading["model"] = model
+                return reading
+        if window >= size or window >= MAX_TAIL:
+            return reading
+        window = min(window * 4, MAX_TAIL)
+
+
 def transcript_of(sdef) -> Optional[Path]:
-    """This session's transcript, remembered so the fallback scan stays rare."""
-    if getattr(sdef, "harness", None) != CLAUDE_HARNESS:
+    """This session's supported transcript, with path lookup caching."""
+    harness = str(getattr(sdef, "harness", None) or CLAUDE_HARNESS)
+    if harness not in (CLAUDE_HARNESS, CODEX_HARNESS):
         return None
     cid = getattr(sdef, "conversation_id", None)
     if not cid:
         return None
-    key = (str(getattr(sdef, "profile", "") or ""), str(cid),
-           str(getattr(sdef, "cwd", "") or ""))
+    profile = str(getattr(sdef, "profile", "") or "")
+    key = (
+        harness,
+        profile,
+        str(cid),
+        str(getattr(sdef, "cwd", "") or ""),
+    )
     hit = _located.get(key)
     now = time.monotonic()
     if hit is not None:
@@ -200,7 +284,21 @@ def transcript_of(sdef) -> Optional[Path]:
             return path
         if path is None and now - when < MISS_TTL:
             return None
-    path = locate_transcript(sdef)
+    if harness == CLAUDE_HARNESS:
+        path = locate_transcript(sdef)
+    else:
+        try:
+            prof = profile_mod.require_selector(profile)
+            entry = harness_registry.get(CODEX_HARNESS)
+            path = (
+                codex_sessions.find(entry.profile_home(prof.config_dir), str(cid))
+                if entry is not None
+                else None
+            )
+        except Exception:
+            # A deleted profile or unreadable harness registry must not make
+            # the session-list endpoint fail.  The path cache retries misses.
+            path = None
     _located[key] = (path, now)
     return path
 
@@ -218,7 +316,11 @@ def for_session(sdef) -> Optional[dict]:
     cached = _reads.get(key)
     if cached is not None and cached[0] == stat.st_mtime and cached[1] == stat.st_size:
         return cached[2]
-    reading = read_tail(path)
+    reading = (
+        read_codex_tail(path)
+        if getattr(sdef, "harness", None) == CODEX_HARNESS
+        else read_tail(path)
+    )
     _reads[key] = (stat.st_mtime, stat.st_size, reading)
     return reading
 
@@ -281,11 +383,10 @@ def attach(session) -> dict:
 
     The key is absent rather than null when unknown, so a reader that draws it
     cannot accidentally render "not known" as a number. When a reading exists
-    it also carries ``compact_window`` (when one is configured): the reading
-    is the numerator, and the compact threshold is the one denominator-like
-    fact that actually exists — the point claude will compact at, not the
-    model's unknowable hard limit. Copied, not annotated in place: the
-    reading is a cache entry shared across polls.
+    Claude readings also carry ``compact_window`` when one is configured.
+    Codex's ``model_context_window`` is already part of its normalized
+    reading.  The cached reading is copied before the Claude-only annotation
+    is added, so cache entries remain shared safely across polls.
     """
     info = session.info()
     sdef = getattr(session, "sdef", None)
