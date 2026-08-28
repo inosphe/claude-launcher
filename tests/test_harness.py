@@ -432,6 +432,42 @@ def test_api_key_session_borrows_lender_token_not_lender_harness(home, tmp_path)
     assert env["KEYED_HOME"] == str(runtime.config_dir / "keyed")
 
 
+def test_daemon_pi_adapter_projects_provider_model_and_token(home, tmp_path):
+    _declare_harness(
+        "keyed",
+        auth="api-key",
+        token_env="KEYED_API_KEY",
+        home_env="KEYED_HOME",
+        provider_adapter="pi",
+    )
+    runtime = _profile_for("work", "keyed")
+    credentials.save_token(runtime, "provider-secret")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {
+                "omlx": {
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://omlx.example/",
+                        "ANTHROPIC_MODEL": "solar-main",
+                    }
+                }
+            }
+        )
+    )
+    store.set_profile_field(runtime.name, "provider", "omlx")
+    sdef = harness.normalize(
+        SessionDef(name="x", profile="work:keyed", cwd=str(tmp_path))
+    )
+
+    argv, env, _ = harness.build_command(sdef)
+
+    assert argv[argv.index("--provider") + 1] == "claunch-profile"
+    assert argv[argv.index("--model") + 1] == "solar-main"
+    assert "--extension" in argv
+    assert env["KEYED_API_KEY"] == "provider-secret"
+    assert env["CLAUNCH_PI_TOKEN_ENV"] == "KEYED_API_KEY"
+
+
 def test_borrow_selector_is_rejected_even_when_its_harness_matches(home, tmp_path):
     _declare_harness("keyed", auth="api-key", token_env="KEYED_API_KEY")
     _profile_for("work", "keyed")

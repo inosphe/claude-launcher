@@ -39,8 +39,11 @@ harnesses:
     home_env: PI_CODING_AGENT_DIR
     auth: api-key
     token_env: ANTHROPIC_API_KEY
+    provider_adapter: pi
     heartbeat_args: [-p]
-    description: The pi CLI agent using the packaged Anthropic API-key route.
+    description: >-
+      The pi CLI agent using the packaged Anthropic API-key route and claunch
+      provider projection.
 
   kimi:
     command: kimi

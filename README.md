@@ -88,7 +88,8 @@ claunch usage work      # show this profile's subscription usage
 # One profile can run several harnesses. They share one set-token secret but
 # keep harness-owned config/auth homes separate:
 claunch set-token work
-claunch run work:pi                      # token -> ANTHROPIC_API_KEY
+claunch run work:pi                      # token -> ANTHROPIC_API_KEY; selected
+                                         # custom provider -> Pi model adapter
 claunch login work:kimi                  # Kimi harness OAuth, token ignored
 claunch run work:kimi
 claunch run work:claude                  # explicit Claude selector
@@ -463,10 +464,12 @@ descendant when you add more later.
 
 ## API providers (third-party backends)
 
-A **provider** points Claude Code at a particular API backend — Anthropic by
-default, or a third party such as a GLM endpoint — by supplying a bundle of
-environment variables (an `ANTHROPIC_BASE_URL`, model overrides and an auth
-token). Providers are defined and selected **in the config file**
+A **provider** points a compatible harness at a particular API backend —
+Anthropic by default, or a third party such as a GLM endpoint — by supplying a
+bundle of environment variables (an `ANTHROPIC_BASE_URL`, model overrides and
+an auth token). Claude Code consumes that bundle directly. The packaged Pi
+harness consumes non-default providers through its declared adapter. Providers
+are defined and selected **in the config file**
 (`~/.claunch.yaml`, the launcher's [source of truth](#configuration-source-of-truth)),
 which the launcher reads live at launch. You can edit that file directly, or use
 `set-provider` (below), which just records the selection in it.
@@ -514,6 +517,17 @@ The resulting precedence for a run is: shell env < provider `env` < profile `env
 (template + inherited + own) < the projected `set-token` value < the final
 harness auth boundary. For Claude that last boundary always forces
 `ANTHROPIC_API_KEY=""`.
+
+For `PROFILE:pi` with a non-default provider, the packaged adapter registers a
+process-local Pi provider from `ANTHROPIC_BASE_URL` and the configured
+`ANTHROPIC_MODEL`/default-model IDs. It selects `ANTHROPIC_MODEL` first and
+passes the stored profile token through Pi's declared `ANTHROPIC_API_KEY`
+route, with Bearer authentication for the custom endpoint. The registration is
+loaded from a packaged Pi extension for each launch, including managed-session
+restores and `validate`; it does not edit Pi's `models.json`. Explicit Pi
+`--provider`, `--model` or `--models` arguments retain model-selection
+precedence. A non-default provider selected for Pi therefore needs both
+`ANTHROPIC_BASE_URL` and at least one Anthropic model ID.
 
 A provider may declare `allowed_harnesses`. When present, selecting that
 provider is only valid for the listed harnesses; `set-provider` refuses an
@@ -1792,6 +1806,9 @@ harnesses:
 
 An `auth: api-key` declaration must add `token_env: SOME_API_KEY`; this is the
 destination of the profile's shared `set-token`, not another stored secret.
+The packaged Pi declaration also sets `provider_adapter: pi`; this adapter is
+valid only with `auth: api-key` and projects a selected claunch provider into
+Pi's native provider/model registration.
 
 Every new user-facing session requires a **profile selector**, and that
 selector is the only source of its harness. A bare profile uses the
@@ -1867,7 +1884,7 @@ follow that variable (Cursor documents it for CLI config, not every credential):
 | --- | --- | --- |
 | Claude Code | launcher token / Claude provider | profile root (`CLAUDE_CONFIG_DIR`) |
 | Codex | `codex login` OAuth | `codex/` (`CODEX_HOME`) |
-| Pi | `claunch set-token PROFILE` → packaged `ANTHROPIC_API_KEY` | `pi/` (`PI_CODING_AGENT_DIR`) |
+| Pi | `claunch set-token PROFILE` → packaged `ANTHROPIC_API_KEY`; selected custom provider → process-local Pi provider | `pi/` (`PI_CODING_AGENT_DIR`) |
 | Kimi harness | `kimi login` OAuth | `kimi/` (`KIMI_CODE_HOME`) |
 | Cursor agent | `agent login` OAuth | `agent/` (`CURSOR_CONFIG_DIR`, CLI config) |
 
@@ -1875,11 +1892,13 @@ There is one launcher-managed secret per base profile:
 `<profile>/.launcher-token`, written by `set-token`. The packaged harness
 document owns its projection. A non-default Claude provider routes it to
 `ANTHROPIC_AUTH_TOKEN`; Pi routes the same value to
-`ANTHROPIC_API_KEY`. Claude always forces `ANTHROPIC_API_KEY=""`, after
-provider, profile and session env have been layered. A custom API-key harness
-declares its own `token_env`; OAuth harnesses declare no token route and
-instead remove ambient API-key variables. There is no `set-key`, separate
-API-key file or per-profile env-route metadata.
+`ANTHROPIC_API_KEY` and, when its `provider_adapter: pi` is active, registers
+the selected custom endpoint and models without storing the token in Pi
+configuration. Claude always forces `ANTHROPIC_API_KEY=""`, after provider,
+profile and session env have been layered. A custom API-key harness declares
+its own `token_env`; OAuth harnesses declare no token route and instead remove
+ambient API-key variables. There is no `set-key`, separate API-key file or
+per-profile env-route metadata.
 
 Upgrade note: a short-lived build wrote `.launcher-api-key`. If that file is
 the profile's only launcher secret, the next bootstrap atomically moves it to
@@ -1896,9 +1915,11 @@ harness.
 
 Codex/Kimi/Cursor never receive the launcher token. Existing Claude-oriented
 `ANTHROPIC_*` and `CLAUDE_CODE_*` profile values remain intact for Claude, but
-are filtered from non-Claude harness environments. This prevents changing a
-profile's harness from silently carrying a Claude backend or OAuth token into
-another CLI.
+are filtered from non-Claude harness environments. The Pi adapter reads only
+the selected provider's endpoint and model IDs before that filter and exports
+them under launcher-owned `CLAUNCH_PI_*` names; the stored token follows the
+declared `token_env`. This prevents changing a profile's harness from silently
+carrying a Claude backend or OAuth token into another CLI.
 
 Sessions inherit the **daemon's** environment (tmux-server semantics), then the
 harness/profile safe env and the session's `--env`. Auth and home boundaries

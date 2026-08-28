@@ -20,6 +20,7 @@ from . import (
     harness_policy,
     harnesses,
     lineage,
+    pi_provider,
     providers,
     routing,
 )
@@ -57,7 +58,7 @@ BACKEND_ENV_KEYS = frozenset(
 
 def _managed_env_keys() -> frozenset:
     """Keys stripped from the base env: backend keys plus any provider's."""
-    keys = set(BACKEND_ENV_KEYS)
+    keys = set(BACKEND_ENV_KEYS) | set(pi_provider.PROJECTION_ENV)
     for env in providers.registry().values():
         keys.update(env)
     return frozenset(keys)
@@ -300,6 +301,18 @@ def harness_child_env(
     return env
 
 
+def harness_launch_args(
+    profile: Profile,
+    harness: harnesses.Harness,
+    args: Sequence[str],
+) -> list[str]:
+    """Apply a declared harness's provider adapter to launch arguments."""
+    try:
+        return pi_provider.launch_args(profile, harness, args)
+    except pi_provider.PiProviderError as exc:
+        raise RunnerError(str(exc)) from exc
+
+
 def finalize_harness_env(
     profile: Profile,
     harness: harnesses.Harness,
@@ -349,6 +362,10 @@ def finalize_harness_env(
             )
         env[token_env] = managed_token
     _finalize_declared_auth(harness, env)
+    try:
+        pi_provider.apply_env(profile, harness, env)
+    except pi_provider.PiProviderError as exc:
+        raise RunnerError(str(exc)) from exc
     if harness.home_env:
         home = harness.profile_home(profile.config_dir)
         home.mkdir(parents=True, exist_ok=True)
@@ -372,7 +389,10 @@ def _plain_spawn(
     cwd: Optional[str] = None,
     borrow: Optional[Profile] = None,
 ) -> int:
-    cmd = [*harness.launch_command(), *harness.args, *args]
+    cmd = [
+        *harness.launch_command(),
+        *harness_launch_args(profile, harness, [*harness.args, *args]),
+    ]
     try:
         return subprocess.run(
             cmd,
@@ -562,12 +582,10 @@ def heartbeat(
                 f"harness {harness.name!r} has no non-interactive health-check "
                 "command; declare harnesses.<name>.heartbeat_args to enable validate"
             )
-        cmd = [
-            *harness.launch_command(),
-            *harness.args,
-            *harness.heartbeat_args,
-            prompt,
-        ]
+        runtime_args = harness_launch_args(
+            profile, harness, [*harness.args, *harness.heartbeat_args, prompt]
+        )
+        cmd = [*harness.launch_command(), *runtime_args]
         env = harness_child_env(profile, harness)
     try:
         completed = subprocess.run(

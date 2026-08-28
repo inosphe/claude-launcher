@@ -575,7 +575,15 @@ def build_command(
             arg for arg in entry.args
             if not (manages_mode and arg in entry.mode_conflict_args)
         ]
-        argv = [*entry.launch_command(), *base_args, *sdef.args]
+        runtime_args = [*base_args, *sdef.args]
+        if prof is not None:
+            try:
+                runtime_args = runner.harness_launch_args(
+                    prof, entry, runtime_args
+                )
+            except runner.RunnerError as exc:
+                raise HarnessError(str(exc)) from exc
+        argv = [*entry.launch_command(), *runtime_args]
         if restoring:
             if sdef.harness == "codex" and sdef.conversation_id:
                 argv.extend(["resume", sdef.conversation_id])
