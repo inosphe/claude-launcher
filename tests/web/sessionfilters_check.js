@@ -106,15 +106,34 @@ check("the shipped page contains all four state controls",
 check("filtered rows leave the layout",
       /#session-list\s*>\s*li\.session-filtered\s*\{[^}]*display:\s*none/.test(css), true);
 
-const archiveStart = src.indexOf("async function archiveExitedSession(");
-const archiveEnd = src.indexOf("$(\"term-archive\")", archiveStart);
-const archiveBody = src.slice(archiveStart, archiveEnd);
-check("archive retains the current route and terminal",
-      !archiveBody.includes("location.hash") &&
-      !archiveBody.includes("currentName = null") &&
-      !archiveBody.includes("detach()"), true);
-check("archive follows the record into the archived filter",
-      archiveBody.includes('setSessionFilter("archived")'), true);
+const killStart = src.indexOf("async function killCurrentSession(");
+const killEnd = src.indexOf("async function archiveExitedSession(", killStart);
+const archiveStart = killEnd;
+const archiveEnd = src.indexOf('$("term-archive")', archiveStart);
+const bulkKillStart = src.indexOf('$("stop-all").addEventListener');
+const bulkKillEnd = src.indexOf('$("resume-all").addEventListener', bulkKillStart);
+const bulkArchiveStart = src.indexOf('$("archive-exited").addEventListener');
+const bulkArchiveEnd = src.indexOf("for (const filter of SESSION_FILTERS)",
+                                   bulkArchiveStart);
+const actionBodies = {
+  kill: src.slice(killStart, killEnd),
+  archive: src.slice(archiveStart, archiveEnd),
+  "bulk kill": src.slice(bulkKillStart, bulkKillEnd),
+  "bulk archive": src.slice(bulkArchiveStart, bulkArchiveEnd),
+};
+check("the terminal kill button invokes the inspected kill handler",
+      /\$\("term-kill"\)\.addEventListener\("click",\s*killCurrentSession\)/.test(src),
+      true);
+for (const [action, body] of Object.entries(actionBodies)) {
+  check(`${action} preserves the selected session filter`,
+        !body.includes("setSessionFilter(") &&
+        !body.includes("sessionFilter ="), true);
+  check(`${action} preserves the current route and terminal`,
+        !body.includes("location.hash") &&
+        !body.includes("currentName = null") &&
+        !body.includes("detach()") &&
+        !body.includes("go("), true);
+}
 
 if (failures) process.exit(1);
 console.log("sessionfilters_check: ok");
