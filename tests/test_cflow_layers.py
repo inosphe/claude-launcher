@@ -446,6 +446,34 @@ def test_the_worker_end_is_gated_by_the_session_above_it():
         assert wf.steps["end-hold"].next is None    # END
 
 
+def test_the_refusal_to_end_is_armed_by_this_repository():
+    """``end-hold``'s refusal has to be checkable, and here it is checked.
+
+    The daemon ends a finished one-shot run's session unless ``keep_alive``
+    is set, so a refusal that only tells the agent to set the flag is inert
+    if the agent does not. The check is an exit code in the project layer
+    (``tools/keepalive_check.py``), which is what the layer is for: the
+    packaged copy ships to every repository and cannot name a tool that
+    lives only in this one. So the two copies differ HERE on purpose, and
+    the assertion is written in both directions rather than one — a canon
+    that grew its own ``verify`` would collide with the graft.
+    """
+    project = model.load(PROJECT_OVERRIDES / "improv-worker.yaml")
+    verify = project.steps["end-hold"].verify
+    assert verify is not None, (
+        "the project layer stopped arming the refusal — end-hold is back to "
+        "judging its own prose, and a declined ending ends the session anyway"
+    )
+    assert "tools/keepalive_check.py" in verify.command
+
+    assert _bundled("improv-worker").steps["end-hold"].verify is None, (
+        "the packaged copy grew a verify; sync_project_layer grafts the "
+        "project layer's on top and two 'verify:' keys in one step is a "
+        "parse error, not a merge"
+    )
+
+
+
 def test_the_worker_wrapup_no_longer_says_landing_does_not_matter():
     """The prose that contradicted the new gate, pinned so it stays gone.
 

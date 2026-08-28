@@ -1627,4 +1627,23 @@ steps:
       keep-alive 플래그가 세워졌고(명령의 출력을 보고에 붙인다), 거절 사유와
       그에 따라 만든 handoff 이슈 id(있다면), 상위에 보낸 fyi의 메시지 id가
       보고에 있다.
+    # 이 스텝의 판정이 done_when 하나로 서 있었다 — 「keep-alive 플래그가
+    # 세워졌고」는 에이전트가 자기 행동을 스스로 판정하는 산문이다. 그런데
+    # 이 스텝은 거절을 집행하는 자리이고, 킬을 막는 조건은 하나뿐이다:
+    # daemon/cflow_clock.py의 `if session.sdef.keep_alive: ... return`.
+    # 명령을 실행하지 않으면 런은 그대로 done에 닿고 데몬이 세션을 끝낸다 —
+    # 거절이 아무 일도 하지 않는다. 산문 판정을 종료 코드로 옮긴 회차가
+    # 이 파일의 landed 스텝을 checklist로 바꾼 그 회차이므로, 같은 파일에
+    # 산문 판정을 새로 들여놓지 않는다.
+    # 조회 경로는 CLI가 아니라 데몬 API다: `claunch keep-alive <세션>`은
+    # off 없이 부르면 플래그를 세우므로(cli_sessions.py가 조건 없이 post)
+    # CLI로 물으면 답이 참이 된다. GET /api/sessions/{name}이 keep_alive를
+    # 평평하게 내고 값을 바꾸지 않는다 — keepalive_check.py가 그 길이다.
+    # 종료 코드: 0 서 있음 / 1 안 서 있음(명령을 실행하라) / 2 판정 불가
+    # (이름 없음·데몬 미도달·그런 세션 없음). 1과 2를 가른 이유는 고치는
+    # 방법이 다르기 때문이다.
+    # 한계: 이 무장은 이 저장소의 프로젝트 레이어에만 있다. 패키지 정본은
+    # tools/를 갖고 다니지 않으므로 다른 저장소의 improv-worker는 여전히
+    # done_when 산문뿐이다 — 읽기 전용 조회를 CLI에 두는 후속 이슈가 있다.
+    verify: 'uv run --no-sync python tools/keepalive_check.py'
     next: end

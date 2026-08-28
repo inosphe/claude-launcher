@@ -86,7 +86,7 @@ def _graft_fields() -> tuple:
 #: done. 세션 종료한다" and exited, and a request that was rejected, or asked
 #: for a rebase, or quietly dropped from a batch, had nobody left to notice.
 ARMED = {
-    "improv-worker": ("review", "rebase", "wrapup"),
+    "improv-worker": ("review", "rebase", "wrapup", "end-hold"),
     "improv-leader": ("sweep",),
 }
 
@@ -188,6 +188,15 @@ GATES = {
     # script answers it here and in the leader's preflight, so the two sides
     # cannot disagree about the same branch.
     ("improv-worker", "rebase"): "tools/merge_ready.py",
+    # The only gate here that reads the daemon rather than the tree. The
+    # worker's ending is put to the session above it, and a refusal routes to
+    # end-hold -- but refusing is not what keeps the session: the daemon ends
+    # a finished one-shot run's session unless keep_alive is set. So the step
+    # tells the agent to set it, and this asks whether that happened. It has
+    # to read, and `claunch keep-alive <session>` without `off` SETS the flag,
+    # so the CLI cannot be the probe; GET /api/sessions/{name} carries it and
+    # leaves it alone.
+    ("improv-worker", "end-hold"): "tools/keepalive_check.py",
     ("improv-leader", "sweep"): "tools/sweep.py",
     ("improv-leader", "reflect"): "tools/deploy_check.py",
 }
