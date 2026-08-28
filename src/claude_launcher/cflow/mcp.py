@@ -7,8 +7,16 @@ standalone ``claunch cflow mcp`` entry point remains for installs written
 before the servers were merged.
 
 Exposed tools: ``start``, ``report``, ``next``, ``select``, ``status`` for the
-run this session drives, plus ``asks`` and ``answer`` for decisions *other*
-sessions' runs are waiting on it for.
+run this session drives, ``request_goto`` to ask a person for a position the
+workflow declares no route to, plus ``asks`` and ``answer`` for decisions
+*other* sessions' runs are waiting on it for.
+
+``request_goto`` is the one that most needs its name read carefully: it files
+a REQUEST and moves nothing. The move it asks for is ``engine.goto``, which
+stays a human command — so an off-graph jump costs the agent a stop and a
+person's answer, exactly like a gate, instead of being refused with nothing
+recorded (which is what a shell ``claunch cflow goto`` gets: the harness deny
+rules block it, and the run learns nothing).
 
 There is deliberately **no approve tool** and no user-side select confirmation
 here: human gates are only operable via the CLI (``claunch cflow
@@ -235,10 +243,58 @@ TOOLS = [
             "required": ["ask", "decision"],
         },
     },
+    {
+        "name": "request_goto",
+        "description": (
+            "Ask a HUMAN to move this run to a step the workflow declares no "
+            "transition to — the exit for when reality out-runs the graph (a "
+            "merge turns up work belonging to a step already passed, a "
+            "finding invalidates a step's outcome). It records a request and "
+            "moves nothing: the run stops advancing until a person approves "
+            "or refuses, so file it, then STOP YOUR TURN and write them the "
+            "decision brief (where the run has to go, what you found that "
+            "the workflow declared no route for, what redoing that step "
+            "costs, what continuing on the declared route costs, your "
+            "recommendation and the weakest part of your case). They answer "
+            "with 'claunch cflow goto --approve' / '--deny' or from the "
+            "dashboard's workflow panel, and may send the run somewhere else "
+            "entirely. You cannot approve it and must not simulate approval. "
+            "Not for a route the workflow DOES declare — use 'next'/'select' "
+            "there; not for a step you are already on. Pass cancel:true to "
+            "withdraw a request whose reason stopped being true."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "step": {
+                    "type": "string",
+                    "description": (
+                        "the step id to move to ('end' force-finishes the run)"
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "why the declared route cannot carry this — journaled, "
+                        "shown on the dashboard, and the whole basis the person "
+                        "answering has. Required"
+                    ),
+                },
+                "cancel": {
+                    "type": "boolean",
+                    "description": (
+                        "withdraw the pending request instead of filing one "
+                        "('step' and 'reason' are then ignored)"
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 #: Tools that write to the run, and so must be fenced against a replacement.
-_MUTATING = ("report", "next", "select")
+_MUTATING = ("report", "next", "select", "request_goto")
 
 #: Tools that act on ANOTHER session's run. They are outside the fence in
 #: both directions: they are not refused when this slot was replaced (they
@@ -308,6 +364,15 @@ def call_tool(name: str, args: dict) -> dict:
         )
     elif name == "status":
         payload = engine.status()
+    elif name == "request_goto":
+        if bool(args.get("cancel")):
+            payload = engine.cancel_goto_request(by=_session() or "agent")
+        else:
+            payload = engine.request_goto(
+                str(args.get("step") or ""),
+                str(args.get("reason") or ""),
+                by=_session() or "agent",
+            )
     elif name == "recall":
         payload = engine.recall(str(args.get("id") or ""))
     elif name == "asks":

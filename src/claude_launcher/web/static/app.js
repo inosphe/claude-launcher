@@ -747,11 +747,15 @@ function sessCflowRun(name) {
    sit in the rail looking like somebody else's problem. */
 function sessCflowGated(r) {
   return r.status === "waiting_approval" || r.status === "waiting_selection" ||
-         answerFellToUs(r);
+         r.status === "waiting_goto" || answerFellToUs(r);
 }
 
 function sessCflowLabel(r) {
   if (r.status === "waiting_selection") return "choose an option";
+  // The agent is asking to leave the route its workflow declares. Named by
+  // where it wants to go: that is the whole of what is being decided.
+  if (r.status === "waiting_goto")
+    return `wants to move to '${(r.goto_request || {}).step || "?"}'`;
   if (r.status === "waiting_approval")
     return r.reason === "loop_limit" ? "loop limit — approve to continue"
          : r.reason === "declined" ? "declined — decide"
@@ -2122,7 +2126,8 @@ function wfDotClass(status, run) {
     return answerFellToUs(run) ? "wf-waiting" : "wf-delegated";
   }
   if (status === "waiting_approval" || status === "waiting_selection" ||
-      status === "waiting_checklist" || status === "report_required") return "wf-waiting";
+      status === "waiting_checklist" || status === "waiting_goto" ||
+      status === "report_required") return "wf-waiting";
   // A held choice: the agent decided, the workflow paces it — nobody's move.
   if (status === "waiting_window") return "wf-delegated";
   if (status === "done") return "wf-done";
@@ -2184,7 +2189,7 @@ function wfMarkState(status, run) {
   if (status === "waiting_window") return "held";
   if (status === "waiting_answer") return answerFellToUs(run) ? "yours" : "peer";
   if (status === "waiting_approval" || status === "waiting_selection" ||
-      status === "report_required") return "yours";
+      status === "waiting_goto" || status === "report_required") return "yours";
   if (status === "done") return "done";
   if (status === "error" || status === "aborted") return "error";
   return "running";
@@ -2500,6 +2505,8 @@ async function refreshCflow() {
         ? "declined"
         : r.status === "waiting_answer"
         ? (answerFellToUs(r) ? "asked of nobody" : `with ${askWho(r.ask)}`)
+        : r.status === "waiting_goto"
+        ? "step change asked"
         : r.status;
     head.append(mark, name, st);
     li.appendChild(head);
@@ -2590,6 +2597,13 @@ async function refreshCflow() {
       }
     } else if (r.status === "waiting_checklist") {
       for (const line of checklistLines(r.checklist)) li.appendChild(line);
+    } else if (r.status === "waiting_goto") {
+      const gr = r.goto_request || {};
+      li.appendChild(cflowLine(
+        `asked to move '${gr.from || r.step_id}' → '${gr.step}' — ` +
+        (mdPlain(gr.reason) || "no reason given")
+      ));
+      li.appendChild(cflowHint("claunch cflow goto --approve | --deny"));
     } else if (r.status === "waiting_window") {
       li.appendChild(cflowLine(
         `chose '${r.option}' — held until ${fmtOpensAt(r.opens_at)} ` +
@@ -9293,6 +9307,51 @@ function wfActions(data, opts = {}) {
     } else {
       msgs.appendChild(el("p", "wf-note", "the agent decides this branch on its own"));
     }
+  } else if (run.status === "waiting_goto") {
+    /* The agent has hit something the graph declares no route for and is
+       asking to be moved. Two presses, because the two answers are not
+       symmetric: granting moves the run and reopens work, refusing costs
+       nothing but leaves the agent on a route it says cannot carry this. The
+       diagram above is the third answer — force the run to some THIRD step —
+       and it stays where it already is rather than being duplicated here. */
+    const gr = run.goto_request || {};
+    const gate = el("div", "wf-gate md");
+    gate.appendChild(el(
+      "div", null,
+      `the agent asks to move from '${gr.from || run.step_id}' to '${gr.step}'`
+    ));
+    mdInto(gate, gr.reason || "no reason given");
+    msgs.appendChild(gate);
+    msgs.appendChild(el("p", "wf-note",
+      "the run does not advance until this is answered. Refusing leaves the " +
+      "position alone and tells the agent to continue on the declared route; " +
+      "to send it to a third step instead, pick that step on the diagram and " +
+      "force it — that answers the request too."));
+    const grant = el("button", "wf-btn approve", `Move to '${gr.step}'`);
+    grant.addEventListener("click", () => {
+      if (confirm(
+        `Move the run to '${gr.step}', as the agent asked?` +
+        (gr.step === "end" ? " (this finishes the run)" : "")
+      )) {
+        cflowAction("/api/cflow/goto/resolve", {
+          cwd: data.cwd, scope: data.scope, decision: "approve",
+        }, after);
+      }
+    });
+    main.appendChild(grant);
+    const refuse = el("button", "wf-btn", "Refuse");
+    refuse.title = "the run stays where it is; the agent is told and continues";
+    refuse.addEventListener("click", () => {
+      const why = prompt(
+        "Refuse the move? A reason is optional but is what the agent reads:",
+        ""
+      );
+      if (why === null) return; // cancelled the dialog, not the refusal
+      cflowAction("/api/cflow/goto/resolve", {
+        cwd: data.cwd, scope: data.scope, decision: "deny", reason: why,
+      }, after);
+    });
+    main.appendChild(refuse);
   } else if (run.status === "waiting_window") {
     msgs.appendChild(el("p", "wf-gate", run.prompt || "decision point"));
     msgs.appendChild(el(
@@ -16473,7 +16532,8 @@ function flowTrack(wf, run) {
    since approving it would unblock a run nobody is driving. */
 function flowNeedsHuman(f) {
   if (!f || f.remote || f.stopped) return false;
-  if (f.status === "waiting_approval" || f.status === "waiting_selection") return true;
+  if (f.status === "waiting_approval" || f.status === "waiting_selection" ||
+      f.status === "waiting_goto") return true;
   // ...and the ask that reached nobody, which is a gate wearing another
   // status word. flowState asks this before it says "delegated", so the
   // card reads "waiting on you" rather than "waiting on a peer".
@@ -17164,7 +17224,12 @@ function traceFlowLabel(e) {
     case "ask_discarded": return `question dropped: ${step}`;
     case "loop_limit": return `loop limit: ${step}`;
     case "loop_extended": return `loop limit raised: ${step}`;
-    case "state_forced": return `forced to: ${step}`;
+    case "state_forced":
+      return e.granted ? `move granted: ${step}` : `forced to: ${step}`;
+    case "goto_requested": return `asked to move to: ${step}`;
+    case "goto_denied": return `move refused: ${step}`;
+    case "goto_withdrawn": return `move request withdrawn: ${step}`;
+    case "goto_superseded": return `move request overtaken: ${step}`;
     case "done": return "run finished";
     case "aborted": return "run aborted";
     case "archived": return "run archived";

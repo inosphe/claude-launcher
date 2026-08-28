@@ -334,5 +334,11 @@ def test_the_skill_text_keeps_its_three_human_gate_branches_in_order():
 
 def test_the_skill_text_points_every_human_branch_at_the_brief():
     """Each branch names the brief rather than restating a piece of it —
-    three restatements is how they drifted apart the first time."""
-    assert _flat(install.SKILL_MD).count("decision brief below") == 3
+    three restatements is how they drifted apart the first time.
+
+    Five now: the `waiting_goto` branch and the section behind it (asking a
+    person for a position the graph declares no route to) are two more places
+    that stop the run on a person, and they point at the same brief for the
+    same reason. The number is asserted rather than bounded because growing
+    it silently is exactly the drift this guards."""
+    assert _flat(install.SKILL_MD).count("decision brief below") == 5
