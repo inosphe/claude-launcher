@@ -5898,19 +5898,24 @@ class MeshManager:
         before delivery. Nobody is holding a result to read in that case, so
         the daemon has to go and say it.
 
-        Exactly ONE report per death: the delivery worker runs every few
-        seconds and a stranded backlog never drains on its own, so anything
-        less than a latch is a message every tick forever. The latch clears
-        when the session comes back (see :meth:`_deliver_to`), which is what
-        makes a second death reportable.
+        Exactly one report per death PER SENDER. The delivery worker runs
+        every few seconds and a stranded backlog never drains on its own, so
+        anything less than a latch is a message every tick forever — but a
+        latch on the dead member alone told the first sender and left every
+        later one in the silence this exists to break. So the latch records
+        WHO has been told, and a sender not in it is told once. The record
+        clears when the session comes back (see :meth:`_deliver_to`), which
+        is what makes a second death reportable.
 
         Sent as ``fyi`` from the policy handle, like a stall warning: the
         senders are being told something, not asked for anything, and an
         answer here would only be owed back to a daemon.
         """
         st = mesh.activity.setdefault(member.handle, {"anchor": time.monotonic()})
-        if st.get("stranded_told"):
-            return
+        # A list, not a set: everything else in ``activity`` is a plain
+        # JSON value, and the one entry that is not is the one that
+        # breaks the day somebody serialises this dict.
+        told = list(st.get("stranded_told") or [])
         # Only members can be messaged back. An external sender (the operator
         # at a dashboard, or the policy engine itself) has no terminal in this
         # mesh, and a self-report would be a daemon talking to itself.
@@ -5922,28 +5927,32 @@ class MeshManager:
                 and str(m.get("from") or "") != member.handle
             }
         )
-        st["stranded_told"] = True  # set even with nobody to tell: retrying
-        if not senders:             # every tick would not find one either
+        fresh = [s for s in senders if s not in told]
+        st["stranded_told"] = told + fresh  # marked before the send: a raise
+        if not fresh:                       # below puts it back
             return
         held = stranded_notice(
             [{"handle": member.handle, "session": member.session, "state": state}]
         )
+        waiting = len([
+            m for m in pending if str(m.get("from") or "") in fresh
+        ])
         body = (
             f"{member.handle} is not reading you: {held} "
-            f"{len(pending)} message(s) of yours are waiting there."
+            f"{waiting} message(s) of yours are waiting there."
         )
         try:
-            self._send_core(mesh, mesh_policy.POLICY_SENDER, senders, body,
+            self._send_core(mesh, mesh_policy.POLICY_SENDER, fresh, body,
                             external=True, type="fyi")
             self._flush_guests_soon(mesh)
         except MeshError as exc:
             log.debug("mesh %r: stranded report failed: %s", mesh.name, exc)
-            st.pop("stranded_told", None)  # unreported; let a later tick retry
+            st["stranded_told"] = told  # unreported; let a later tick retry
             return
         log.info(
             "mesh %r: told %s that %r (session %r) is %s with %d message(s) held",
-            mesh.name, ", ".join(senders), member.handle, member.session,
-            state, len(pending),
+            mesh.name, ", ".join(fresh), member.handle, member.session,
+            state, waiting,
         )
 
     async def _deliver_to(

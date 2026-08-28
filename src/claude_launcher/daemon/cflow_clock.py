@@ -1869,6 +1869,10 @@ class RunEventClock:
       one: the driver is out of work until somebody gives it a goal.
     * **orphaned** — the run is active but its driving session has exited:
       nobody is driving, and no transition will ever come.
+    * **session-ended** — kill-on-end (below) reaped a finished one-shot
+      run's session. Sent after the kill lands, and NOT gated on
+      ``cflow_events``: the peers still messaging that session have no
+      other way to learn the terminal is gone.
 
     The overseer is the driver's spawn-tree parent when it is alive — in a
     leader/worker fleet the parent *is* the leader, and the daemon's manager
@@ -1935,7 +1939,7 @@ class RunEventClock:
         #: One-shot done runs whose session is queued for the end-sequence.
         #: scan() fills this; the loop drains it into :meth:`_finish_end`
         #: tasks. Same in-memory trade as the reminder's timers.
-        self._end_pending: List[Tuple[str, str, str]] = []
+        self._end_pending: List[Tuple[str, str, str, str]] = []
         #: In-flight end-sequences — cancelled at shutdown, resumed by the
         #: state-on-sight rule on the next boot.
         self._end_tasks: Set[asyncio.Task] = set()
@@ -2049,7 +2053,10 @@ class RunEventClock:
                                 "cflow kill-on-end: recorded the ending of %r "
                                 "(run %s)", scope, run_id,
                             )
-                            self._end_pending.append((cwd, scope, run_id))
+                            self._end_pending.append(
+                                (cwd, scope, run_id,
+                                 str(payload.get("workflow") or "?"))
+                            )
                 continue
             if (
                 enabled and run_id and status not in ("done", "aborted")
@@ -2122,14 +2129,16 @@ class RunEventClock:
         are caught inside :meth:`_finish_end`.
         """
         while self._end_pending:
-            cwd, scope, run_id = self._end_pending.pop(0)
+            cwd, scope, run_id, workflow = self._end_pending.pop(0)
             task = asyncio.get_running_loop().create_task(
-                self._finish_end(cwd, scope, run_id)
+                self._finish_end(cwd, scope, run_id, workflow)
             )
             self._end_tasks.add(task)
             task.add_done_callback(self._end_tasks.discard)
 
-    async def _finish_end(self, cwd: str, scope: str, run_id: str) -> None:
+    async def _finish_end(
+        self, cwd: str, scope: str, run_id: str, workflow: str = "?"
+    ) -> None:
         """End a finished one-shot run's session: wait out its current turn
         (bounded), then kill unless it was kept alive.
 
@@ -2175,6 +2184,31 @@ class RunEventClock:
             log.info("cflow kill-on-end: ended %r (run %s)", scope, run_id)
         except Exception as exc:
             log.warning("cflow kill-on-end: ending %r failed: %s", scope, exc)
+            return
+        # The kill landed. Everyone still holding a conversation with this
+        # session is now talking into a terminal that is not there, and the
+        # only one positioned to say so is this clock: the session cannot
+        # announce its own death after the fact, and the ``session ended``
+        # block it wrote goes into ITS transcript, which nobody else reads.
+        # So the overseer is told, through the same debt queue the other
+        # events use (retried every poll until it lands).
+        #
+        # Deliberately NOT gated on ``cflow_events``: that switch mutes
+        # transitions an overseer may reasonably not want typed at it, and
+        # this is not a transition — it is the fleet losing a member, and
+        # the switch that governs it is the one that caused the kill
+        # (``cflow_kill_on_end``, already checked by the scan that queued
+        # this). A daemon that ends sessions silently is the shape of the
+        # complaint this notice answers.
+        self._debt.append({
+            "cwd": cwd,
+            "scope": scope,
+            "kind": "session-ended",
+            "block": event_block(
+                scope, "session-ended",
+                {"run": run_id, "workflow": workflow},
+            ),
+        })
 
     async def _deliver(self, event: dict) -> bool:
         """Type the event into its overseer. True = settled (delivered, or
@@ -2353,6 +2387,19 @@ def event_block(scope: str, kind: str, payload: dict) -> str:
         lines.append(
             f"event: finished its round of {workflow}; recur filed the next "
             "one, so the session is waiting for a goal"
+        )
+    elif kind == "session-ended":
+        lines.append(
+            f"event: finished run {payload.get('run')} of {workflow} and "
+            "the session has been ENDED -- its slot is back and nothing "
+            "is reading that terminal any more"
+        )
+        lines.append(
+            "note: mesh messages addressed to it from here on are queued, "
+            "not delivered, and the sender is told so. Its branch and its "
+            "beads issue outlive the session -- take anything unfinished "
+            "from those. `claunch respawn " + scope + "` brings it back if "
+            "a person is really needed there."
         )
     elif kind == "orphaned":
         lines.append(
