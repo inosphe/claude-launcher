@@ -172,10 +172,11 @@ function byLineage(sessions) {
    Stop ends programs, resume brings exited records back, and archive moves
    exited records out of the working fleet while keeping them inspectable and
    resumable. Permanent removal remains on the explicit API and CLI paths. */
-function syncBulkActions(sessions) {
-  const live = sessions.filter((s) => s.status !== "exited").length;
-  const dead = sessions.filter((s) =>
-    s.status === "exited" && !s.archived_at).length;
+function syncBulkActions(sessions, filter = "current") {
+  const live = filter === "current" || filter === "running"
+    ? sessions.filter((s) => s.status !== "exited").length : 0;
+  const dead = filter === "current" || filter === "killed"
+    ? sessions.filter((s) => s.status === "exited" && !s.archived_at).length : 0;
   const set = (id, n, label, title) => {
     const btn = $(id);
     if (!btn) return;  // an older index.html served by a newer daemon
@@ -439,26 +440,67 @@ function railMetaText(s) {
   return [identity, state].filter(Boolean).join(" · ");
 }
 
-/* Archived records remain resumable and therefore stay in /api/sessions.
-   Keep them in the same DOM list so every existing detail, briefing and
-   resume path still applies; this control only changes their visibility.
-   An archived session that is already open reveals the group so a
-   direct route never points at a row the rail conceals. */
-let archivedSessionsVisible = false;
+/* One mutually exclusive state filter for the rail. "Current" is the normal
+   working set (running plus killed, excluding archived records); the other
+   three modes answer the state-specific questions directly. The browser
+   remembers the choice so repeated monitoring does not require resetting it
+   after every two-second poll. */
+const SESSION_FILTER_KEY = `claunch_session_filter:${BASE}`;
+const SESSION_FILTERS = ["current", "running", "killed", "archived"];
+let sessionFilter = localStorage.getItem(SESSION_FILTER_KEY) || "current";
+if (!SESSION_FILTERS.includes(sessionFilter)) sessionFilter = "current";
 
-function syncArchivedSessions(sessions) {
-  const button = $("archived-sessions-toggle");
-  const list = $("session-list");
-  if (!button || !list) return;
-  const archived = (sessions || []).filter((s) => !!s.archived_at);
-  if (currentName && archived.some((s) => s.name === currentName)) {
-    archivedSessionsVisible = true;
+function sessionCategory(s) {
+  if (s && s.archived_at) return "archived";
+  return s && s.status === "exited" ? "killed" : "running";
+}
+
+function sessionMatchesFilter(s, filter = sessionFilter) {
+  const category = sessionCategory(s);
+  return filter === "current" ? category !== "archived" : category === filter;
+}
+
+function sessionFilterCounts(sessions) {
+  const counts = { current: 0, running: 0, killed: 0, archived: 0 };
+  for (const session of sessions || []) {
+    const category = sessionCategory(session);
+    counts[category]++;
+    if (category !== "archived") counts.current++;
   }
-  const visible = archived.length > 0 && archivedSessionsVisible;
-  button.classList.toggle("hidden", archived.length === 0);
-  button.textContent = `${visible ? "Hide" : "Show"} archived sessions (${archived.length})`;
-  button.setAttribute("aria-expanded", visible ? "true" : "false");
-  list.classList.toggle("show-archived", visible);
+  return counts;
+}
+
+function setSessionFilter(filter, remember = true) {
+  if (!SESSION_FILTERS.includes(filter)) return;
+  sessionFilter = filter;
+  if (remember) localStorage.setItem(SESSION_FILTER_KEY, filter);
+  syncSessionFilters(sessionsCache);
+}
+
+function syncSessionFilters(sessions) {
+  const list = $("session-list");
+  if (!list) return;
+  const counts = sessionFilterCounts(sessions);
+  const labels = {
+    current: "Current", running: "Running", killed: "Killed", archived: "Archived",
+  };
+  for (const filter of SESSION_FILTERS) {
+    const button = $(`session-filter-${filter}`);
+    if (!button) continue;
+    button.textContent = "";
+    button.append(
+      document.createTextNode(labels[filter]),
+      Object.assign(document.createElement("span"), {
+        className: "session-filter-count", textContent: String(counts[filter]),
+      })
+    );
+    button.setAttribute("aria-pressed", filter === sessionFilter ? "true" : "false");
+  }
+  for (const row of list.querySelectorAll("li[data-name]")) {
+    const session = (sessions || []).find((s) => s.name === row.dataset.name);
+    row.classList.toggle("session-filtered", !session || !sessionMatchesFilter(session));
+  }
+  if (typeof syncBulkActions === "function") syncBulkActions(sessions || [], sessionFilter);
 }
 
 async function refreshSessions() {
@@ -487,7 +529,6 @@ async function refreshSessions() {
   for (const [s, depth] of rebuild ? byLineage(sessionsCache) : []) {
     const li = document.createElement("li");
     li.dataset.name = s.name;
-    if (s.archived_at) li.classList.add("archived-record");
     if (s.name === currentName) li.classList.add("active");
     // The indent goes on the row, not on a spacer element, so the whole row
     // stays one click target and the hover/active background still spans it.
@@ -641,8 +682,8 @@ async function refreshSessions() {
   // Some embedded consumers reuse refreshSessions with a reduced rail DOM;
   // the shipped page has the control, while those consumers keep the list
   // behaviour they had before this optional view was added.
-  if (typeof syncArchivedSessions === "function") {
-    syncArchivedSessions(sessionsCache);
+  if (typeof syncSessionFilters === "function") {
+    syncSessionFilters(sessionsCache);
   }
 
   const cur = currentName && sessionsCache.find((s) => s.name === currentName);
@@ -4029,10 +4070,14 @@ $("term-kill").addEventListener("click", async () => {
     `/api/sessions/${encodeURIComponent(name)}/kill${winding ? "?winddown=0" : ""}`,
     { method: "POST" }
   );
+  const info = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    const doc = await resp.json().catch(() => ({}));
     await modalInfo(`Could not kill '${name}'`,
-                    doc.error || `HTTP ${resp.status}`);
+                    info.error || `HTTP ${resp.status}`);
+  } else if (info.status === "exited") {
+    const at = sessionsCache.findIndex((s) => s.name === name);
+    if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], ...info };
+    setSessionFilter("killed");
   }
   refreshSessions();
 });
@@ -4047,10 +4092,14 @@ async function archiveExitedSession(name) {
                     info.error || `HTTP ${resp.status}`);
     return false;
   }
-  detach();
-  currentName = null;
-  location.hash = "#/";
+  const at = sessionsCache.findIndex((s) => s.name === name);
+  if (at >= 0) sessionsCache[at] = { ...sessionsCache[at], ...info };
+  // Archive changes the rail classification while the final screen, detail
+  // pane and URL remain on this session. The state-specific filter follows
+  // the transition so the selected row stays visible.
+  setSessionFilter("archived");
   await refreshSessions();
+  setStatusBadge("exited");
   return true;
 }
 
@@ -4113,13 +4162,14 @@ $("archive-exited").addEventListener("click", async () => {
     $("archive-exited"), "/api/sessions/archive",
     { method: "POST" }, "archive"
   );
-  refreshSessions();
+  setSessionFilter("archived");
+  await refreshSessions();
 });
 
-$("archived-sessions-toggle").addEventListener("click", () => {
-  archivedSessionsVisible = !archivedSessionsVisible;
-  syncArchivedSessions(sessionsCache);
-});
+for (const filter of SESSION_FILTERS) {
+  const button = $(`session-filter-${filter}`);
+  if (button) button.addEventListener("click", () => setSessionFilter(filter));
+}
 
 /* The rail polls, but a poll is a tick behind at best: a session spawned from
    somewhere else — another agent's `spawn`, a `claunch new` in a terminal, a

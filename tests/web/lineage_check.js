@@ -16,7 +16,10 @@ const a = src.indexOf("function byLineage(");
 const b = src.indexOf("async function refreshSessions(");
 if (a < 0 || b <= a) throw new Error("cannot locate byLineage in app.js");
 const ctx = {};
-new Function("exports", src.slice(a, b) + "\nexports.byLineage = byLineage;")(ctx);
+new Function("exports", "BASE", "localStorage",
+  src.slice(a, b) + "\nexports.byLineage = byLineage;")(
+    ctx, "/", { getItem: () => null, setItem() {} }
+  );
 const { byLineage } = ctx;
 
 let failures = 0;
