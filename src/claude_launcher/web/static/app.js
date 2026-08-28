@@ -1352,11 +1352,14 @@ async function termTimerSkipClick() {
 
    Two facts shape every string below:
 
-   * There is no percentage, because there is no denominator. Nothing records
-     the context limit and it differs by model — a claude-opus-5 session in
-     this fleet was measured at 286,674 tokens, so a hardcoded 200k would
-     already be a lie. The model's name is shown instead: it is what someone
-     who wants to judge "is that a lot" actually needs.
+   * No percentage is printed. On claude there is no denominator to make
+     one: nothing records the context limit and it differs by model — a
+     claude-opus-5 session in this fleet was measured at 286,674 tokens, so a
+     hardcoded 200k would already be a lie. Codex is a different case, since
+     it is told the model context window on every request; that number is
+     named directly in the breakdown and marked on the gauge, and the
+     arithmetic is left to the reader. The model's name is shown either way:
+     it is what someone who wants to judge "is that a lot" actually needs.
    * The number is the last *completed* turn's, never this instant's, so its
      age travels with it. An idle session's hour-old reading is exactly
      right; a busy one's is a floor.
@@ -1377,12 +1380,14 @@ function ctxAgeOf(iso) {
     : "";
 }
 
-/* Whether this session is one that *could* have a reading. Only claude keeps
-   the transcript this is read from, so on any other harness the absence is
-   not news to report — the row says nothing rather than "unknown", which
-   would read as something having gone wrong. */
+/* Whether this session is one that *could* have a reading. Two harnesses
+   keep a record the daemon reads this out of: claude's transcript and
+   codex's rollout. On any other harness the absence is not news to report —
+   the row says nothing rather than "unknown", which would read as something
+   having gone wrong. */
 function ctxKnowable(s) {
-  return !!s && (s.harness || "claude") === "claude";
+  const harness = (s && s.harness) || "claude";
+  return !!s && (harness === "claude" || harness === "codex");
 }
 
 /* ---- which model this session is actually answering on ---- */
@@ -1420,12 +1425,13 @@ function modelShort(id) {
 
 /* The detail panel's version: the full id and how old the reading is, or the
    honest absence. Empty — no row at all — where the session is not one that
-   could have a model to report, on the same terms as `ctxKnowable`: another
-   harness keeps no transcript, and "unknown" there would read as a fault. */
+   could have a model to report, on the same terms as `ctxKnowable`: a
+   harness that keeps neither transcript nor rollout has nothing to read, and
+   "unknown" there would read as a fault. */
 function modelSentence(s) {
   if (!ctxKnowable(s)) return "";
   const c = s && s.context;
-  if (!c || !c.model) return "not known yet — no completed turn to read";
+  if (!c || !c.model) return "not known yet — no context reading recorded";
   const age = ctxAgeOf(c.at);
   return `${c.model}${age ? ` (as of its turn ${age} ago)` : ""}`;
 }
@@ -1436,7 +1442,7 @@ function ctxSentence(s) {
   const c = s && s.context;
   if (!c) {
     return ctxKnowable(s)
-      ? "context not known yet — no completed turn to read"
+      ? "context not known yet — no reading recorded"
       : "";
   }
   const parts = [`context ${c.tokens.toLocaleString()} tokens`];
@@ -1452,13 +1458,23 @@ function ctxSentence(s) {
    "input 2". */
 function ctxBreakdown(c) {
   if (!c) return "";
+  const modelWindow = Number.isFinite(c.model_context_window)
+    && c.model_context_window > 0 ? c.model_context_window : 0;
   return [
     `fresh input ${c.input.toLocaleString()}`,
     `replayed from cache ${c.cache_read.toLocaleString()}`,
     `written to cache ${c.cache_write.toLocaleString()}`,
     `answer ${c.output.toLocaleString()}`,
-    "no percentage: the context limit is not recorded anywhere and " +
-      "differs by model",
+    /* Whichever of the two is true of this reading. Codex is told the
+       model's context window on every request, so naming it is the answer to
+       "is that a lot"; claude has no such number recorded anywhere, and
+       saying that out loud is what keeps the missing percentage from reading
+       as an oversight. Still no percentage either way — the count and the
+       window are both here and the arithmetic is the reader's. */
+    modelWindow
+      ? `model context window ${modelWindow.toLocaleString()} tokens`
+      : "no percentage: the context limit is not recorded anywhere and " +
+        "differs by model",
   ].join("\n");
 }
 
@@ -1532,8 +1548,16 @@ const CTX_DOMAIN = 1_000_000;
 function ctxRailLine(s) {
   if (!ctxKnowable(s)) return null;
   const c = s && s.context;
-  const win = c && Number.isFinite(c.compact_window) && c.compact_window > 0
-    ? Math.min(c.compact_window, CTX_DOMAIN) : 0;
+  /* What the tick marks is whichever threshold this harness actually
+     reports: claude's configured auto-compact point, or the model context
+     window codex is told on every request. They are different facts, so the
+     tick and the tooltip name the one they are drawing. */
+  const compact = c && Number.isFinite(c.compact_window) && c.compact_window > 0
+    ? c.compact_window : 0;
+  const reported = c && Number.isFinite(c.model_context_window)
+    && c.model_context_window > 0 ? c.model_context_window : 0;
+  const winKind = compact ? "auto-compact window" : "model context window";
+  const win = Math.min(compact || reported, CTX_DOMAIN);
   const line = el("span", "rail-ctx-line" + (c ? "" : " unknown"));
   const bar = el("span", "rail-ctx-bar");
   if (c) {
@@ -1546,8 +1570,8 @@ function ctxRailLine(s) {
   if (win) {
     const tick = el("span", "rail-ctx-tick");
     tick.style.left = ((win / CTX_DOMAIN) * 100).toFixed(1) + "%";
-    tick.title = `auto-compact window: ${ctxShort(win)} tokens ` +
-                 "(CLAUDE_CODE_AUTO_COMPACT_WINDOW)";
+    tick.title = `${winKind}: ${ctxShort(win)} tokens` +
+                 (compact ? " (CLAUDE_CODE_AUTO_COMPACT_WINDOW)" : "");
     bar.appendChild(tick);
   }
   const num = el("span", "rail-ctx" + (c ? "" : " unknown"),
@@ -1566,7 +1590,7 @@ function ctxRailLine(s) {
   const note = ctxTooltip(s);
   const scale = c
     ? "bar spans 0–1M tokens" +
-      (win ? `; the tick is the auto-compact window at ${ctxShort(win)}` : "")
+      (win ? `; the tick is the ${winKind} at ${ctxShort(win)}` : "")
     : "";
   line.title = [note, scale].filter(Boolean).join("\n");
   return line;
@@ -10930,8 +10954,8 @@ function renderSession(data) {
   // business being read out of the middle of a sentence about tokens.
   metaRow(
     dl, "model", modelSentence(s),
-    "the model of the last completed turn, read from the transcript — a " +
-    "/model switch shows here once the next turn finishes"
+    "the model of the latest context reading — claude's transcript or " +
+    "codex's rollout; a /model switch shows here once the next turn finishes"
   );
   // Under the conversation, because it is a fact about the conversation and
   // not about the process: how much of it the harness last carried.

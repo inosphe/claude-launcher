@@ -49,6 +49,7 @@ harnesses:
     clear_env: [KIMI_API_KEY]
     login_args: [login]
     heartbeat_args: [-p]
+    usage: kimi-web-server
     description: Moonshot AI's Kimi Code CLI.
 
   agent:
