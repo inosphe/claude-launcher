@@ -360,6 +360,16 @@ steps:
       스윕 게이트의 출력 전문과 종료 코드가 보고에 있고, 영수증이 트리로
       찾아졌으면 그 `via the receipt for ...` 줄이 그대로 실려 있다.
       이 턴에서 스위트를 돌리지 않았다.
+    # 프로젝트 레이어에만 있는 이유는 바로 위 주석 그대로다. 여기에 더할 것은
+    # 이 저장소가 실제로 무엇을 부르는가 하나뿐이고, 그것은 improv-leader 의
+    # sweep 스텝과 글자 그대로 같은 줄이다 — 두 워크플로가 같은 것을 물으므로
+    # 두 자리에 다른 명령이 서면 갈린다.
+    # 스윕을 돌리지 않고 영수증만 읽으므로 밀리초에 끝난다. 그 구분은
+    # tests/test_project_layer_override.py 의
+    # test_no_override_verify_runs_a_test_suite 가 못박고, 명령이 PATH 의
+    # 바이너리가 아니라 이 체크아웃의 파일을 부른다는 것은 같은 파일의
+    # test_no_gate_calls_a_binary_off_PATH 가 못박는다.
+    verify: 'uv run --no-sync python tools/sweep.py check --branch master'
     next: handoff
 
   handoff:
