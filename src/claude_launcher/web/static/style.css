@@ -83,7 +83,16 @@ option:disabled { color: #6b7280; }
 #refresh-all.spinning { color: #58a6ff; animation: spin 0.7s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
+#exited-sessions-toggle {
+  flex: none; width: 100%; padding: 7px 16px;
+  border: 0; border-bottom: 1px solid #2a2e36;
+  background: #171a20; color: #8b949e; cursor: pointer;
+  font-size: 11px; text-align: left;
+}
+#exited-sessions-toggle:hover,
+#exited-sessions-toggle[aria-expanded="true"] { color: #c9d1d9; background: #1d2128; }
 #session-list { list-style: none; overflow-y: auto; flex: 1; }
+#session-list:not(.show-exited) > li.exited-record { display: none; }
 /* The gap and the right padding are tight on purpose: this row carries a
    name, a role, the rooms it is in, its profile and two buttons inside about
    260px, and every pixel spent between them is a pixel the mesh pill loses
@@ -2720,6 +2729,7 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   #sidebar header { padding: 10px 14px; }
   /* thumb-sized, like every other tap target on the rail */
   #refresh-all { font-size: 17px; padding: 6px 10px; }
+  #exited-sessions-toggle { padding: 11px 16px; font-size: 13px; }
   /* The rail is the whole screen here, so the list takes what it needs and
      the nav sits at the thumb end rather than floating mid-screen. */
   #session-list { flex: 1 0 auto; max-height: none; overflow: visible; }
