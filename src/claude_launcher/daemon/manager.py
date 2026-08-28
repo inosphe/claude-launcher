@@ -70,6 +70,14 @@ class SessionManager:
         #: all — those sessions come back with the next daemon.
         self.exit_hooks: List[Callable[[Session], None]] = []
         self.shutting_down = False
+        #: Records :meth:`restore_all` retired because they did not come back
+        #: at a restart — the ``--no-restore`` sessions that were running when
+        #: the previous daemon went down, and the relaunches that failed. Their
+        #: exit never reaches :attr:`exit_hooks`: the hook is only wired in
+        #: :meth:`create`, and by the time :meth:`restore_all` runs the board
+        #: does not even exist yet. The board sweep their ending calls for is
+        #: owed at boot, and :meth:`take_retired_for_sweep` is who collects it.
+        self._retired_for_sweep: List[DeadSession] = []
         # Codex can create its rollout well after the initial discovery wait
         # expires.  Keep the launch snapshot so ordinary dashboard polling can
         # claim that exact rollout later without blocking session creation or
@@ -1220,9 +1228,9 @@ class SessionManager:
         self.persist()
         return failed
 
-    def _retire(self, sdef: SessionDef, entry: dict) -> None:
+    def _retire(self, sdef: SessionDef, entry: dict) -> DeadSession:
         """Register a definition as an exited record (nothing is running)."""
-        self._sessions[sdef.name] = DeadSession(
+        dead = DeadSession(
             sdef,
             exit_code=entry.get("exit_code"),
             pid=entry.get("pid"),
@@ -1235,3 +1243,20 @@ class SessionManager:
             scrollback=self.scrollback,
             idle_threshold=self.idle_threshold,
         )
+        self._sessions[sdef.name] = dead
+        # This ending never reaches the exit hooks (see
+        # :attr:`_retired_for_sweep`), so the issue sweep it owes has to be
+        # claimed at boot instead — by whoever owns the board.
+        self._retired_for_sweep.append(dead)
+        return dead
+
+    def take_retired_for_sweep(self) -> List[DeadSession]:
+        """The retired records whose board sweep is owed, once and once only.
+
+        Called at boot after the board exists (the daemon's ``build_app``).
+        Emptied here so a second call — a test rebuilding the app over the
+        same manager — does not sweep the same records twice.
+        """
+        taken = self._retired_for_sweep
+        self._retired_for_sweep = []
+        return taken
