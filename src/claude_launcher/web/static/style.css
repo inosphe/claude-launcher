@@ -855,7 +855,15 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #term-resume:disabled { opacity: 0.5; cursor: not-allowed; }
 #term-resume:disabled:hover { background: none; border-color: #1f4272; }
 #term-kill { color: #d98b8b; border-color: #56292b; }
-#term-kill:hover { background: #341c1e; color: #ff9c9c; border-color: #8b2e2e; }
+#term-kill:hover:not(:disabled) {
+  background: #341c1e; color: #ff9c9c; border-color: #8b2e2e;
+}
+.kill-winddown {
+  background: #341c1e !important; color: #ffb0b0 !important;
+  border-color: #8b2e2e !important;
+}
+.kill-pending { opacity: 0.65; cursor: wait !important; }
+.kill-pending:hover { background: none; }
 
 /* ---- text size ----
    One knob, so one pill: the three share borders instead of taking the gap
@@ -2746,6 +2754,10 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
     color: #fff; border: none; border-radius: 6px; background: #8b2e2e;
   }
   #mobile-top #m-resume { background: #1f6feb; }
+  #mobile-top #m-kill.kill-winddown {
+    background: #b33a3a !important; box-shadow: 0 0 0 1px #ff7b72 inset;
+  }
+  #mobile-top #m-kill.kill-pending { background: #56292b; }
   /* The size knob down here is a pair of taps, not a decision about the
      session: it wears the ☰ button's neutral grey so the only filled colours
      on the bar stay the two that change something. Square and thumb-sized,

@@ -255,6 +255,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "railsplit_check.js",
         "detailsplit_check.js",
         "bulk_check.js",
+        "killstate_check.js",
         "owed_check.js",
         "panel_check.js",
         "sesssend_check.js",
