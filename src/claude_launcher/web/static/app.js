@@ -582,8 +582,8 @@ async function refreshSessions() {
     if (comp) {
       comp.className = "rail-compacting";
       comp.textContent = "compacting";
-      comp.title = "this session is compacting its conversation right now — " +
-        "older turns are being folded into a summary";
+      comp.title = "this session is compacting its conversation — or has " +
+        "just finished; the label lingers after the notice leaves";
     }
     // Then which rooms it is in. Role first and in colour, membership after
     // it in neutral grey: the pair reads as "what this session is, and where

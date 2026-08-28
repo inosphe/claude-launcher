@@ -11,9 +11,15 @@ quotes the notice but carries no progress bar.
 
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
+from claude_launcher import lineage, profile as profile_mod
 from claude_launcher.daemon import compacting
+from claude_launcher.daemon.harness import SessionDef
+from claude_launcher.daemon.manager import SessionManager
+from claude_launcher.daemon.session import DeadSession
 
 #: A live paint as the daemon saw it on a running session (s127's log):
 #: notice line + progress bar, with the TUI's cursor moves and colour codes
@@ -150,3 +156,42 @@ def test_an_unsupported_harness_ignores_everything():
     det = compacting.Detector("codex")
     _feed(det, LIVE, LIVE_DOT, QUOTED_ONLY)
     assert not det.compacting
+
+
+def _register_claude_profile() -> None:
+    """A claude session needs a profile to exist; give it a throwaway one."""
+    if not profile_mod.resolve("p").exists():
+        lineage.set_harness(profile_mod.create("p"), "claude")
+
+
+def _manager() -> SessionManager:
+    return SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+
+
+def test_info_carries_the_compacting_flag(home, tmp_path):
+    _register_claude_profile()
+    """The display path's daemon leg: the key the rail actually reads.
+
+    The Detector unit tests cover the scanning; this pins the wiring around
+    it. ``Session.info()`` reports the flag (false, never missing, on a fresh
+    session; true after a live compaction paint comes through the real feed
+    path), and a dead session carries no key — nothing is running to have
+    compacted. Deleting the ``info()`` line or the ``_on_output`` feed call
+    turns this red.
+    """
+
+    async def run():
+        mgr = _manager()
+        try:
+            s = mgr.create(SessionDef(name="comp", harness="claude",
+                                      profile="p", cwd=str(tmp_path)))
+            assert s.info()["compacting"] is False
+            s._on_output(LIVE)
+            assert s.info()["compacting"] is True
+            dead = DeadSession(SessionDef(name="gone", harness="claude",
+                                          profile="p", cwd=str(tmp_path)))
+            assert "compacting" not in dead.info()
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
