@@ -25,7 +25,7 @@ from datetime import datetime, timezone
 from typing import Callable, Dict, List, Optional, Set, Tuple
 
 from .. import harnesses as harness_registry
-from . import keys as keys_mod
+from . import compacting, keys as keys_mod
 from . import paths, pty_backend
 from .harness import CLAUDE_HARNESS, SessionDef
 from .idle import IdleTracker
@@ -254,6 +254,10 @@ class Session:
         self.screen = ScreenState(sdef.cols, sdef.rows, history=scrollback)
         self._feeder = ScreenFeeder(self.screen)
         self.tracker = IdleTracker()
+        #: Compaction-notice scanner (see :mod:`compacting`): fed every pty
+        #: chunk in :meth:`_on_output`, read by the dashboard row as the
+        #: session's ``compacting`` flag.
+        self._compacting = compacting.Detector(sdef.harness)
         #: When this session was *first* made, not when this object was.
         #: A relaunch that keeps the name — a daemon restart's restore, a
         #: respawn, a redefine — is the same session continuing, and the
@@ -396,6 +400,10 @@ class Session:
         new_alt = self.screen.alt_screen
         new_mouse = self.screen.mouse_tracking
         self._append_log(chunk)
+        # The compaction notice rides the same stream the log does; scanning
+        # here (and nowhere shown to the user) is what lets the dashboard
+        # label a compacting session without asking the screen to.
+        self._compacting.feed(chunk)
         self._broadcast(("data", chunk))
         if new_alt != prev_alt:
             # The program entered or left the alternate screen. Queued after
@@ -1252,6 +1260,10 @@ class Session:
             # question it answers — which of these did I pin shut — is asked
             # of the whole fleet at once.
             "delivery_hold": self.delivery_held(),
+            # Whether the harness is (or just finished) compacting this
+            # session's context — see :mod:`compacting`. Live sessions only:
+            # a DeadSession has no stream for the notice to ride.
+            "compacting": self._compacting.compacting,
         }
 
 
