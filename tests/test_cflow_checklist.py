@@ -210,9 +210,19 @@ def test_an_unmeasurable_item_is_unknown_and_never_true(proj):
     _at_landed()
     engine.report("froze the branch")
     (proj / "frozen.flag").touch()
-    result = engine.check_checklist()
-    assert result["all_true"] is False and result.get("moved_to") is None
-    items = {i["id"]: i for i in result["items"]}
+    engine.check_checklist()
+    # Read the three states off the run rather than off that return value. The
+    # timeout is the *checklist's*, so `frozen` spends the same 0.5s launching
+    # a shell and a Python that the sleeping item spends timing out; on a busy
+    # machine it can miss it too, and then both items are unknown, nothing
+    # changed, and `check_checklist` announces nothing by answering None. The
+    # measurement is written to the state either way, and the position is what
+    # "no answer holds" actually means.
+    payload = engine.status()
+    assert payload["status"] == "waiting_checklist"  # unknown never opened it
+    checklist = payload["checklist"]
+    assert checklist["all_true"] is False
+    items = {i["id"]: i for i in checklist["items"]}
     assert items["merged"]["ok"] is None
     assert items["merged"]["exit_code"] is None
     assert items["merged"]["measured_at"] is not None  # measured, and unmeasurable

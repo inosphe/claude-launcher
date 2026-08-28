@@ -68,7 +68,11 @@ def test_the_stall_that_was_measured_does_not_read_as_absence(home, monkeypatch)
     with _delay_server(lambda i: stall if i == 0 else 0.0, max_stall=0.0) as port:
         _announce(monkeypatch, pid=os.getpid(), port=port)
         client, report = daemon_client.connect_with_diagnosis()
-    assert client is not None
+    # The report goes in the message because the bare assertion says only
+    # "None is not None", and the thing worth knowing when this fails on a
+    # loaded machine is which branch produced it: how many probes fitted, and
+    # what budget they were measured against.
+    assert client is not None, report
     assert report["state"] == daemon_client.SERVING
     assert report["probes"] >= 2  # the first one is the one that was missed
 

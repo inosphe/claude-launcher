@@ -417,12 +417,32 @@ def _shrink_budgets(monkeypatch, *, probe: float = 0.2) -> None:
     """Scale the whole diagnosis clock down from the one knob it hangs on.
 
     Production derives its budgets from HEALTH_TIMEOUT; the tests re-derive
-    theirs from ``probe`` the same way, so no duration is pinned twice and
-    none is pinned in wall-clock terms.
+    theirs from ``probe``, so no duration is pinned twice and none is pinned
+    in wall-clock terms. The two multipliers are not the same, and which one
+    is faithful matters:
+
+    * OBSERVATION_BUDGET keeps production's ratio exactly. There it is
+      ``2 * (HEALTH_TIMEOUT + PROBE_GAP)`` = **3x** the probe timeout, and
+      that multiplier is the whole margin the shrunken tests have: a probe
+      that fails costs one timeout plus whatever the machine adds, and the
+      budget is what decides whether a second probe gets to run at all
+      (``daemon_client.diagnose``: ``remaining <= 0`` breaks the loop). At
+      2x, a probe spending 0.2s over its own 0.2s timeout ended the budget
+      and turned a stall into UNRESPONSIVE — which is a diagnosis of the
+      machine, not of the daemon under test.
+    * VERDICT_BUDGET deliberately does NOT: production's is 15x the probe
+      timeout, and the tests that watch a whole verdict budget of silence
+      pay it in wall clock, so it is compressed to 6x. It only has to stay
+      above OBSERVATION_BUDGET for UNRESPONSIVE and WEDGED to stay apart.
+
+    PROBE_GAP is not shrinkable at all: ``diagnose`` and
+    ``connect_with_diagnosis`` bind it as a default argument at definition
+    time, so setattr here would not reach them. Nothing needs it to be —
+    every gap is clamped to the budget that is left.
     """
     monkeypatch.setattr(daemon_client, "HEALTH_TIMEOUT", probe)
     monkeypatch.setattr(daemon_client, "VERDICT_BUDGET", 6 * probe)
-    monkeypatch.setattr(daemon_client, "OBSERVATION_BUDGET", 2 * probe)
+    monkeypatch.setattr(daemon_client, "OBSERVATION_BUDGET", 3 * probe)
 
 
 def _canned(state: str, **over) -> dict:
