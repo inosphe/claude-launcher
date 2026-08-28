@@ -86,8 +86,26 @@ def _graft_fields() -> tuple:
 #: done. 세션 종료한다" and exited, and a request that was rejected, or asked
 #: for a rebase, or quietly dropped from a batch, had nobody left to notice.
 ARMED = {
-    "improv-worker": ("review", "rebase", "landed", "wrapup"),
-    "improv-leader": ("sweep", "reflect"),
+    "improv-worker": ("review", "rebase", "wrapup"),
+    "improv-leader": ("sweep",),
+}
+
+#: Steps whose gate is a ``checklist:`` — a list of item commands, measured by
+#: the daemon, and the run leaves only when every one of them exits 0. A third
+#: table rather than a third column in :data:`ARMED` because the field is run
+#: by a third thing: the engine runs a ``verify`` on the way out, the reminder
+#: clock samples an ``awaits`` while a run stands still, and the checklist
+#: clock both samples these AND performs the transition.
+#:
+#: Both entries were a ``verify`` until the gates they arm stopped being
+#: carried by prose. That is the change: the two decisions a person most needs
+#: to see — did the parent merge this branch, did the live daemon pick the
+#: merge up — used to be advanced by the driving agent reading its own step
+#: text, and are now advanced by exit codes a person can read in
+#: ``claunch cflow status``.
+CHECKED = {
+    "improv-worker": ("landed",),
+    "improv-leader": ("reflect",),
 }
 
 #: Steps whose project-layer field is an ``awaits`` probe rather than (or as
@@ -96,8 +114,8 @@ ARMED = {
 #: on a run standing still -- and only ``awaits`` may sit on a select step,
 #: which is the shape ``await-landing`` has.
 WATCHED = {
-    "improv-worker": ("await-landing", "landed"),
-    "improv-leader": ("reflect",),
+    "improv-worker": ("await-landing",),
+    "improv-leader": (),
 }
 
 # Every gate runs against a venv that is already there. A worker's worktree
@@ -107,7 +125,39 @@ WATCHED = {
 # 5). So every one of them is --no-sync.
 NO_SYNC = "uv run --no-sync python"
 
-#: What each armed step's verify must invoke. The point of the table is that
+#: Commands that reach nothing of this project's own — the outside tools a
+#: gate is allowed to call directly. Anything else is presumed to be this
+#: tree, and has to be reached the way :data:`NO_SYNC` says.
+_OUTSIDE_TOOLS = ("git",)
+
+
+def _runs_project_code(command: str) -> bool:
+    head = command.strip().split()
+    return not (head and head[0] in _OUTSIDE_TOOLS)
+
+
+def gate_commands(step) -> list:
+    """Every command a step arms, whichever field holds it.
+
+    Written once because the properties the tests below protect — reach into
+    this checkout, never run a suite — are properties of *a command a gate
+    runs*, and which field it was written in is not part of them. Reading
+    ``.verify.command`` directly was what made the census blind the moment a
+    gate moved to a ``checklist:``.
+    """
+    out = []
+    if step.verify is not None:
+        out.append(step.verify.command)
+    if step.awaits is not None:
+        command = step.awaits.command(step)
+        if command:
+            out.append(command)
+    if step.checklist is not None:
+        out.extend(item.check for item in step.checklist.items)
+    return out
+
+
+#: What each armed step's gate must invoke. The point of the table is that
 #: none of these is a suite: the worker's picks the tests its own change can
 #: affect, and the leader's two read a fact somebody else already established
 #: (a sweep receipt, a daemon's boot time).
@@ -156,6 +206,39 @@ def test_the_override_adds_no_other_awaits(stem):
     assert watched == list(WATCHED[stem])
 
 
+@pytest.mark.parametrize("stem", sorted(CHECKED))
+def test_the_override_adds_no_other_checklist(stem):
+    """The same census for the field that also MOVES the run.
+
+    A checklist is the most consequential of the three to add by accident: it
+    takes the transition away from the agent entirely, so a step that grows
+    one silently stops being a step anybody can advance.
+    """
+    wf = model.load(OVERRIDES / f"{stem}.yaml")
+    checked = [s.id for s in wf.steps.values() if s.checklist is not None]
+    assert checked == list(CHECKED[stem])
+
+
+@pytest.mark.parametrize("stem", sorted(CHECKED))
+def test_a_checklist_gate_has_no_other_way_out(stem):
+    """The property that makes these two gates worth the change.
+
+    A ``next:`` on a checklist step is refused by the parser, so this is not
+    re-checking the schema: it pins that the two steps kept the shape after
+    an edit, and that each item says in words what it is asserting — a
+    checklist a person cannot read is the prose problem again with boxes
+    drawn round it.
+    """
+    wf = model.load(OVERRIDES / f"{stem}.yaml")
+    for step_id in CHECKED[stem]:
+        step = wf.steps[step_id]
+        assert step.next is None
+        assert step.checklist.then != step_id
+        assert step.checklist.items
+        for item in step.checklist.items:
+            assert item.describe.strip(), f"{stem}:{step_id}:{item.id} has no describe"
+
+
 def test_the_waiting_probe_is_the_gate_the_worker_already_passed():
     """``await-landing`` re-measures what ``rebase`` gated, and that is the point.
 
@@ -185,13 +268,15 @@ def test_each_armed_step_runs_its_gate_without_touching_the_environment(
     stem, step_id = key
     wf = model.load(OVERRIDES / f"{stem}.yaml")
     assert wf.name == stem
-    verify = wf.steps[step_id].verify
-    assert verify is not None, f"{stem}:{step_id} lost its verify"
-    assert verify.command.startswith(NO_SYNC), (
-        f"{stem}:{step_id} must run --no-sync: a gate that re-resolves the "
-        f"venv fails on the claunch.exe a live daemon holds open"
-    )
-    assert script in verify.command
+    commands = gate_commands(wf.steps[step_id])
+    assert commands, f"{stem}:{step_id} lost its gate"
+    armed = [c for c in commands if script in c]
+    assert armed, f"{stem}:{step_id} no longer runs {script}"
+    for command in armed:
+        assert command.startswith(NO_SYNC), (
+            f"{stem}:{step_id} must run --no-sync: a gate that re-resolves the "
+            f"venv fails on the claunch.exe a live daemon holds open"
+        )
 
 
 def test_the_worker_gate_targets_the_change_rather_than_the_suite():
@@ -252,10 +337,15 @@ def test_the_leader_override_gates_the_deploy_on_a_real_restart():
     on the step that ends the round, and reads the branch the leader merges
     to.
     """
-    verify = model.load(OVERRIDES / "improv-leader.yaml").steps["reflect"].verify
-    assert verify is not None, "the deploy gate is gone from reflect"
-    assert "tools/deploy_check.py" in verify.command
-    assert "--branch master" in verify.command
+    step = model.load(OVERRIDES / "improv-leader.yaml").steps["reflect"]
+    assert step.checklist is not None, "the deploy gate is gone from reflect"
+    commands = gate_commands(step)
+    assert any("tools/deploy_check.py" in c for c in commands), commands
+    assert any("--branch master" in c for c in commands), commands
+    # And now it does more than refuse a green nobody earned: the daemon ends
+    # the round on it, so the leader no longer sits collecting reminders while
+    # the restart it is waiting for has already happened.
+    assert step.checklist.then == "end"
 
 
 def test_no_gate_calls_a_binary_off_PATH():
@@ -283,10 +373,19 @@ def test_no_gate_calls_a_binary_off_PATH():
     for path in sorted(OVERRIDES.glob("*.yaml")):
         wf = model.load(path)
         for step_id, step in wf.steps.items():
-            if step.verify is None:
-                continue
-            if not step.verify.command.startswith(NO_SYNC):
-                offenders.append(f"{path.name}:{step_id} -> {step.verify.command}")
+            for command in gate_commands(step):
+                if not _runs_project_code(command):
+                    # `git diff --quiet` is not this rule's business: the
+                    # failure it protects against is a command resolving to
+                    # ANOTHER COPY OF THIS TREE, and a tool that is not this
+                    # tree has no other copy to be confused with. Narrowed
+                    # here rather than at the gate that hit it, because the
+                    # alternative is writing `uv run --no-sync python -c
+                    # "subprocess.run(['git', ...])"` to satisfy a check about
+                    # something else entirely.
+                    continue
+                if not command.startswith(NO_SYNC):
+                    offenders.append(f"{path.name}:{step_id} -> {command}")
     assert not offenders, (
         "a gate must run this checkout, not a binary off PATH. Reach it "
         f"with '{NO_SYNC} ...'. Measured: 'claunch report check' exited 2 "
@@ -372,7 +471,8 @@ def test_no_override_verify_runs_a_test_suite(key):
     machine half: no verify in either override may invoke pytest.
     """
     stem, step_id = key
-    command = model.load(OVERRIDES / f"{stem}.yaml").steps[step_id].verify.command
+    commands = gate_commands(model.load(OVERRIDES / f"{stem}.yaml").steps[step_id])
+    command = "; ".join(commands)
     assert "pytest" not in command, (
         f"{stem}:{step_id} verify runs pytest ({command!r}). The engine runs "
         f"this synchronously on leaving the step, so a suite here is a "

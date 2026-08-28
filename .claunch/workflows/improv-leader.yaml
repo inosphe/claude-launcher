@@ -774,6 +774,35 @@ steps:
     next: reflect
 
   reflect:
+    # 이 스텝은 checklist 게이트다: 넘어가는 판정을 에이전트가 아니라
+    # 데몬이 내린다. 항목의 종료 코드가 전부 0이고 이 스텝의 report가
+    # 제출돼 있을 때 런이 끝나고, recur가 다음 회차를 요청한다.
+    # 이 자리가 산문이었을 때 무슨 일이 있었는가: reflect는 오래 서술문뿐
+    # 이었고, 재기동이 실제로 있었는지 아무것도 재지 않았다 — 리더에게는
+    # 재기동을 인지할 경로조차 없어 300초 리마인더만 반복됐다(사용자 신고).
+    # 그 뒤 verify와 awaits가 붙어 「재기동 없이 초록을 적는 것」과
+    # 「재기동을 아무도 안 알려주는 것」을 각각 막았지만, 넘어가는 행위
+    # 자체는 여전히 리더의 판단이었다. 체크리스트는 그 마지막 절반이다.
+    # 에이전트의 이탈 경로는 없다(checklist 스텝에는 next:를 쓸 수 없다).
+    checklist:
+      prompt: 이 회차의 머지가 라이브 서버에 실제로 반영됐는가
+      then: end
+      poll: 30
+      items:
+        # tools/deploy_check.py가 daemon.json의 started_at(부팅마다
+        # 기록된다)과 master tip의 커밋 시각을 견준다: 데몬이 그 머지보다
+        # 먼저 떠 있었다면 그 머지를 서빙할 수 없다. 0=머지 이후 재기동
+        # 확인 / 1=재기동 없음 / 2=판정 불가(데몬 파일 없음·브랜치 없음).
+        # 2와 타임아웃은 unknown으로 기록되고 unknown은 참이 아니다.
+        # 읽기 전용이다 — daemon.json 한 번 읽기 + git log 한 번이라
+        # 30초마다 다시 재도 값이 싸다(tools/deploy_check.py 도크스트링).
+        # 이 검사가 증명하지 못하는 절반(재기동한 데몬이 정말 새 코드를
+        # 서빙하는가)은 아래 done_when이 계속 사람에게 요구하고, report가
+        # 제출돼야 게이트가 열리므로 그 절반이 저널에서 빠지지 않는다.
+        # tests/test_deploy_check.py가 양방향과 판정 불가 두 갈래를 못박는다.
+        - id: deployed
+          describe: 라이브 데몬이 master의 이번 머지 이후에 재기동됐다
+          check: 'uv run --no-sync python tools/deploy_check.py --branch master'
     title: 라이브 서버 반영
     ask:
       # 기동 중인 사용자 화면을 건드리는 일 — 머지와 별개로 반영도 리더
@@ -823,27 +852,6 @@ steps:
       확인한 증거(방법과 결과)가 보고에 있다. 기동한 것이 새 데몬임을
       무엇으로 판정했는지도 적혀 있다 — 재기동 통지 블록이거나, 재기동
       전후의 pid다(응답이 있었다는 사실은 판정이 아니다).
-    # 이 문장을 받치는 기계. reflect는 오래 서술문뿐이었고, 그래서 재기동이
-    # 실제로 있었는지 아무것도 재지 않았다 — 리더에게는 재기동을 인지할
-    # 경로조차 없어 300초 리마인더만 반복됐다(사용자 신고).
-    # tools/deploy_check.py가 daemon.json의 started_at(부팅마다 기록된다)과
-    # master tip의 커밋 시각을 견준다: 데몬이 그 머지보다 먼저 떠 있었다면
-    # 그 머지를 서빙할 수 없다. 0=머지 이후 재기동 확인, 1=재기동 없음,
-    # 2=판정 불가(데몬 파일 없음·브랜치 없음) — 0이 아니면 회차가 닫히지
-    # 않는다. 이 검사가 증명하지 못하는 절반(재기동한 데몬이 정말 새 코드를
-    # 서빙하는가)은 위 done_when이 계속 사람에게 요구한다.
-    # tests/test_deploy_check.py가 양방향과 판정 불가 두 갈래를 못박는다.
-    verify: 'uv run --no-sync python tools/deploy_check.py --branch master'
-    # 그 사용자 신고의 나머지 절반이 이 줄이다. 위 verify는 「재기동 없이 초록을
-    # 적는 것」만 막았고, 「재기동이 일어난 것을 아무도 안 알려준다」는 열려 있었다.
-    # awaits는 같은 명령을 데몬이 30초마다 다시 재게 하고 exit code가 움직이는
-    # 순간에만 한 번 신호를 보낸다 — 안 움직이는 동안은 아무 말도 하지 않는다.
-    # 여기서 verify를 재사용해도 되는 근거: deploy_check는 daemon.json 한 번
-    # 읽기 + git log 한 번이고 아무것도 쓰지 않는다(tools/deploy_check.py 도크스트링).
-    # 이 줄이 그 읽기 전용·값쌈에 대한 저자의 선언이다 — 엔진은 verify를 절대
-    # 자동으로 재지 않는다.
-    awaits: {probe: verify, poll: 30}
-    next: end
 
   wrapup:
     title: 교대 종료

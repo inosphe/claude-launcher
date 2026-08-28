@@ -92,6 +92,19 @@ workflow to be started here), that is the answer; otherwise list candidates
      frame); your next `next` past the moment leaves the step normally if
      there is no daemon. To close the round early, file a one-line `report`
      and call `next`.
+   - `waiting_checklist` — this step is a CHECKLIST GATE (the workflow's
+     `checklist:`): the payload's `checklist` lists every condition with its
+     current state (`ok` is true / false / null for "could not measure", and
+     null is never true), and the run leaves for `then` only when all of them
+     are true AND this step's `report` has been filed. There is no agent exit
+     — `next` here answers with the position, not with a move. So: do the
+     step's work, file the `report` (do not save it for later, it is one of
+     the two conditions), and STOP your turn. The daemon re-measures every
+     `poll` seconds, moves the run itself and nudges you with a "checklist
+     passed" frame carrying each item's exit code; without a daemon, a person
+     runs `claunch cflow checklist --recheck`. Do not poll the conditions by
+     hand, and never try to make an item true in order to open the gate — a
+     gate you turned green yourself is the one thing it was built to refuse.
    - `select` with `chooser: user`, or `waiting_selection` — call `select`
      once to record your RECOMMENDATION with reasoning, then STOP your turn
      and write the decision brief below. Ask them to confirm with `!

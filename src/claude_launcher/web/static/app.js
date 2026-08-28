@@ -2121,7 +2121,8 @@ function wfDotClass(status, run) {
   if (status === "waiting_answer") {
     return answerFellToUs(run) ? "wf-waiting" : "wf-delegated";
   }
-  if (status === "waiting_approval" || status === "waiting_selection" || status === "report_required") return "wf-waiting";
+  if (status === "waiting_approval" || status === "waiting_selection" ||
+      status === "waiting_checklist" || status === "report_required") return "wf-waiting";
   // A held choice: the agent decided, the workflow paces it — nobody's move.
   if (status === "waiting_window") return "wf-delegated";
   if (status === "done") return "wf-done";
@@ -2233,6 +2234,56 @@ function cflowLine(text, cls) {
   el.className = `cflow-line${cls ? " " + cls : ""}`;
   el.textContent = text;
   return el;
+}
+
+/* A checklist item's three states, as a glyph. `?` is the one that has to be
+   distinguishable: an item nobody could measure is a different fact from one
+   that measured false, and the two send a reader to different places. */
+function checklistMark(ok) {
+  if (ok === true) return "\u2713";
+  if (ok === false) return "\u00d7";
+  return "?";
+}
+
+function checklistClass(ok) {
+  if (ok === true) return "ok";
+  if (ok === false) return "no";
+  return "unknown";
+}
+
+/* The gate as a list of conditions, which is the whole point of the
+   `checklist:` step type reaching a screen. These decisions -- did the parent
+   merge this branch, did the live daemon pick the merge up -- used to be
+   carried by the step's prose, so the only account of which parts were true
+   was the driving agent's, and a person watching had no way to check it. */
+function checklistLines(checklist) {
+  const out = [];
+  if (!checklist) return out;
+  const head = cflowLine(
+    `checklist ${checklist.passed}/${checklist.total} true` +
+    (checklist.all_true && !checklist.report_filed
+      ? " \u2014 waiting on this step's report"
+      : checklist.all_true ? " \u2014 the daemon is moving the run" : "")
+  );
+  out.push(head);
+  for (const item of checklist.items || []) {
+    const line = cflowLine(
+      `${checklistMark(item.ok)} ${item.id}: ${item.describe}` +
+      (item.exit_code === null || item.exit_code === undefined
+        ? (item.measured_at ? " (could not measure)" : " (not measured yet)")
+        : ` (exit ${item.exit_code})`),
+      `checklist-item ${checklistClass(item.ok)}`
+    );
+    out.push(line);
+  }
+  if (!checklist.all_true) {
+    out.push(cflowLine(
+      `moves to '${checklist.then}' once every item is true \u2014 nobody ` +
+      `advances this step by hand`,
+      "dim"
+    ));
+  }
+  return out;
 }
 
 function cflowHint(cmd) {
@@ -2537,6 +2588,8 @@ async function refreshCflow() {
         const opts = (r.options || []).map((o) => o.name).join("|");
         li.appendChild(cflowHint(`claunch cflow select <${opts}>`));
       }
+    } else if (r.status === "waiting_checklist") {
+      for (const line of checklistLines(r.checklist)) li.appendChild(line);
     } else if (r.status === "waiting_window") {
       li.appendChild(cflowLine(
         `chose '${r.option}' — held until ${fmtOpensAt(r.opens_at)} ` +
@@ -9143,6 +9196,47 @@ function wfActions(data, opts = {}) {
       }
     });
     main.appendChild(btn);
+  } else if (run.status === "waiting_checklist") {
+    const cl = run.checklist || {};
+    msgs.appendChild(el(
+      "p", "wf-gate",
+      cl.prompt || `every condition must be true to leave '${run.step_id}'`
+    ));
+    const box = el("div", "wf-checklist");
+    for (const item of cl.items || []) {
+      const row = el("div", `wf-check ${checklistClass(item.ok)}`);
+      row.appendChild(el("span", "wf-check-mark", checklistMark(item.ok)));
+      const body = el("div", "wf-check-body");
+      body.appendChild(el("div", "wf-check-what", item.describe || item.id));
+      const detail =
+        item.exit_code === null || item.exit_code === undefined
+          ? (item.measured_at ? "could not measure" : "not measured yet")
+          : `exit ${item.exit_code}`;
+      body.appendChild(el(
+        "div", "wf-check-meta",
+        `${item.id} \u2014 ${detail}` +
+        (item.measured_at ? ` \u2014 ${item.measured_at}` : "")
+      ));
+      if (item.check) body.title = item.check;
+      row.appendChild(body);
+      box.appendChild(row);
+    }
+    msgs.appendChild(box);
+    // No button. This gate is not a person's to grant -- that is what makes
+    // it different from every other stop on this page -- so the page says who
+    // does move it and what is still holding it, and offers the override that
+    // does exist (a goto, which is journalled as one).
+    msgs.appendChild(el(
+      "p", "wf-note",
+      cl.all_true && !cl.report_filed
+        ? `every item is true; the move to '${cl.then}' is waiting on this ` +
+          `step's report`
+        : cl.all_true
+          ? `every item is true and the report is filed \u2014 the daemon ` +
+            `moves this run to '${cl.then}'`
+          : `the daemon re-measures every ${Math.round(cl.poll || 60)}s and ` +
+            `moves the run to '${cl.then}' when all ${cl.total} are true`
+    ));
   } else if (run.status === "waiting_selection" || run.status === "select") {
     msgs.appendChild(el("p", "wf-gate", run.prompt || "decision point"));
     if (run.proposal) {

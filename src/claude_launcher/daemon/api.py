@@ -1174,12 +1174,32 @@ def _cflow_entry(
     ]
     if slim:
         payload = {k: v for k, v in payload.items() if k not in _CFLOW_LIST_DROP}
+        if payload.get("checklist"):
+            payload["checklist"] = _slim_checklist(payload["checklist"])
         recent = [
             {**r, "details": _clip(r.get("details"), _CFLOW_LIST_DETAILS)}
             for r in recent[-_CFLOW_LIST_REPORTS:]
         ]
         return {**entry, **payload, "reports": recent}
     return {**entry, **payload, "reports": recent[-_CFLOW_REPORT_TAIL:]}
+
+
+#: Per-item fields the list poll does not carry. The card draws a checkbox, a
+#: description and the exit code; the command and its captured output are for
+#: the run's own view, which is not polled. Left in, a gate whose items print
+#: anything at all would multiply that output by every run in the list, every
+#: two seconds — the same cost the whole of _CFLOW_LIST_DROP exists to avoid.
+_CFLOW_LIST_ITEM_DROP = ("check", "output")
+
+
+def _slim_checklist(checklist: dict) -> dict:
+    return {
+        **checklist,
+        "items": [
+            {k: v for k, v in item.items() if k not in _CFLOW_LIST_ITEM_DROP}
+            for item in (checklist.get("items") or [])
+        ],
+    }
 
 
 def _clip(text, limit: int):
@@ -1201,6 +1221,21 @@ def _serialize_workflow(wf) -> dict:
             "verify": s.verify.command if s.verify else None,
             "next": s.next,
             "select": None,
+            # A checklist is the step's exit, so a workflow view that omitted
+            # it would draw the step as a dead end.
+            "checklist": (
+                {
+                    "prompt": s.checklist.prompt,
+                    "then": s.checklist.then,
+                    "poll": s.checklist.poll,
+                    "items": [
+                        {"id": i.id, "describe": i.describe, "check": i.check}
+                        for i in s.checklist.items
+                    ],
+                }
+                if s.checklist
+                else None
+            ),
         }
         if s.select:
             entry["select"] = {

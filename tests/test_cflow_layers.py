@@ -354,23 +354,42 @@ def test_a_worker_round_is_not_done_until_the_merge_is_confirmed():
         landed = wf.steps["landed"]
         assert landed.select is None, (
             f"{label}: landed carries the machine gate, so it cannot be a "
-            "select -- the engine refuses a verify on one"
+            "select -- a select routes via its options"
         )
-        assert landed.next == "wrapup"
-        for token in ("--merges", "머지 커밋", "contains"):
-            assert token in landed.instructions, (
-                f"{label}: landed lost its {token!r} rule -- the check has to "
-                "be a merge-parent question, not a containment question"
-            )
+        # The gate moved from a `verify` the agent advanced past to a
+        # `checklist:` the daemon advances: same question, and now the answer
+        # is a list of exit codes a person can read instead of the agent's
+        # account of them. `then` is the step's only exit, so `next` is gone
+        # -- an agent exit here would be a way past a condition that is false.
+        assert landed.next is None
+        assert landed.checklist is not None, (
+            f"{label}: landed lost its checklist gate"
+        )
+        assert landed.checklist.then == "wrapup"
+        merged = landed.checklist.item("merged")
+        assert merged is not None, (
+            f"{label}: landed must still ask whether a merge took this branch in"
+        )
+        # The rule that survived the move: ask for a MERGE PARENT, never for
+        # containment. A child branch stacked on this tip contains it and has
+        # integrated nothing, which in a nested formation is the normal shape
+        # -- so containment reads as landed when nothing landed. The question
+        # now lives in the item's own words and in the script it names, and
+        # tools/landed_check.py is where it is actually asked.
+        assert "머지 커밋" in merged.describe and "부모" in merged.describe, (
+            f"{label}: the merged item must state the merge-parent question, "
+            f"not a containment one -- got {merged.describe!r}"
+        )
+        assert "landed_check.py" in merged.check
         assert "master를 직접 머지하지 않는다" in landed.instructions, (
             f"{label}: landed must forbid turning its own gate green by "
             "merging master, which is the one way to 'pass' it dishonestly"
         )
-        for token in ("머지", "요청했다"):
-            assert token in landed.done_when, (
-                f"{label}: landed's done_when must distinguish a merge from a "
-                f"request; lost {token!r}"
-            )
+        # A request is still not a landing. That distinction used to live in
+        # done_when because done_when was the only thing standing between the
+        # two; it is now the gate itself, so done_when asks for the half no
+        # command can answer and the checklist answers the rest.
+        assert "머지" in landed.done_when
 
     for wf in (
         _bundled("improv-worker"),

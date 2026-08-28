@@ -1464,6 +1464,183 @@ def timer_block(moved: dict) -> str:
     )
 
 
+#: How often the checklist clock LOOKS. Each run is measured no more often
+#: than its own ``checklist.poll``, so this only bounds how late a due
+#: measurement can be — a third of the shortest poll the schema allows.
+CHECKLIST_TICK = 5.0
+
+
+class ChecklistClock:
+    """Measures checklist gates, and moves the run when every item is true.
+
+    A ``checklist:`` step reports ``waiting_checklist``: the run sits there
+    while conditions somebody else controls become true — the parent merging
+    a branch, the live server picking up a deploy. The agent that would
+    notice is the one that ended its turn to wait, so the daemon carries the
+    measurement, the same shape as :class:`TimerClock`.
+
+    Each pass runs every item's command (:func:`cflow.engine.check_checklist`)
+    and writes the result into the run, which is what makes the gate legible
+    from outside: ``claunch cflow status`` and the dashboard render the same
+    list. When every item exits 0 AND the step's report has been filed, the
+    run MOVES to ``checklist.then`` and the driver is woken with a frame
+    naming what passed.
+
+    Nothing here decides anything: the items, the destination and the poll
+    are the workflow's, and the engine owns the two conditions. Spacing is
+    the only state kept in memory, so a restart merely re-measures early —
+    and without a daemon a checklist holds, which is the safe direction (the
+    open door is a person's ``claunch cflow checklist --recheck``).
+    """
+
+    def __init__(self, manager, *, poll: float = CHECKLIST_TICK) -> None:
+        self.manager = manager
+        self.poll = poll
+        #: (cwd, scope) -> wall clock at that run's last measurement.
+        self._checked: Dict[Tuple[str, str], float] = {}
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.poll)
+                for cwd, scope, frame in await asyncio.to_thread(self.scan):
+                    await self._deliver(cwd, scope, frame)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                # One unreadable run must not stop the clock for the rest.
+                log.exception("cflow checklist clock tick failed")
+
+    def scan(self, now: Optional[float] = None) -> List[Tuple[str, str, str]]:
+        """Measure every due checklist and report the runs that MOVED.
+
+        Blocking — it runs each item's command and writes run state — so call
+        it in a thread. Public for the tests, which own ``now`` there (and
+        through it the poll spacing). Only a move is returned: a measurement
+        that changed nothing, or changed an item without opening the gate, is
+        written into the run for the dashboard to show and is not spoken.
+        """
+        now = time.time() if now is None else now
+        moved_runs: List[Tuple[str, str, str]] = []
+        live = set()
+        for cwd, scope in cflow_state.known_runs():
+            key = (cwd, scope)
+            live.add(key)
+            try:
+                payload = cflow_engine.status(cwd, scope=scope)
+            except Exception as exc:
+                # Includes the slot being locked by the agent mid-transition:
+                # the gate is unchanged, so the next tick is soon enough.
+                log.debug("cflow checklist skipped %s/%s: %s", cwd, scope, exc)
+                continue
+            if payload.get("status") != "waiting_checklist":
+                self._checked.pop(key, None)
+                continue
+            poll = float(
+                (payload.get("checklist") or {}).get("poll")
+                or cflow_model.DEFAULT_CHECKLIST_POLL
+            )
+            last = self._checked.get(key)
+            if last is not None and now - last < poll:
+                continue
+            self._checked[key] = now
+            try:
+                result = cflow_engine.check_checklist(cwd=cwd, scope=scope)
+            except Exception as exc:
+                log.debug("cflow checklist measure failed %s/%s: %s", cwd, scope, exc)
+                continue
+            if not result:
+                continue
+            if not result.get("moved_to"):
+                log.info(
+                    "cflow checklist %s/%s: %s %s/%s (changed: %s)",
+                    cwd, scope, result.get("step"), result.get("passed"),
+                    result.get("total"), ", ".join(result.get("changed") or []),
+                )
+                continue
+            log.info(
+                "cflow checklist passed %s/%s: %s -> %s",
+                cwd, scope, result.get("step"), result.get("moved_to"),
+            )
+            moved_runs.append((cwd, scope, checklist_block(result)))
+        for stale in set(self._checked) - live:
+            self._checked.pop(stale, None)
+        return moved_runs
+
+    async def _deliver(self, cwd: str, scope: str, frame: str) -> None:
+        """The wake-up after a gate opened — the run has ALREADY moved."""
+        session = session_for(self.manager, cwd, scope)
+        if session is None:
+            # A CLI-driven run, or a driver that exited: the run has moved
+            # regardless, and whoever picks it up reads the new position.
+            return
+        try:
+            delivered = await session.deliver(frame)
+        except Exception:
+            log.exception("cflow checklist notice delivery to %r failed", scope)
+            return
+        if delivered:
+            log.info("cflow checklist notice delivered to %r (%s)", scope, cwd)
+
+
+def checklist_block(result: dict) -> str:
+    """The text the driver hears when a checklist gate opened the run's way.
+
+    Framed like the timer block, for the same reason: it lands in a session
+    that ended its turn. It names every item and the code it answered with,
+    because that evidence is what the agent would otherwise go and collect by
+    hand — and the run has ALREADY moved, so there is nothing to confirm.
+    """
+    position = (
+        "the run finished"
+        if result.get("moved_to") == "end"
+        else "step " + repr(result.get("moved_to"))
+    )
+    lines = [
+        "---",
+        "# claunch cflow: checklist passed -- machine-generated, not typed by "
+        "the user",
+        "workflow: " + str(result.get("workflow")),
+        "gate: {0!r} ({1}/{2} items true)".format(
+            result.get("step"), result.get("passed"), result.get("total")
+        ),
+    ]
+    for entry in result.get("items") or []:
+        lines.append(
+            "  [x] {0}: {1} (exit {2}, measured {3})".format(
+                entry.get("id"),
+                entry.get("describe"),
+                entry.get("exit_code"),
+                entry.get("measured_at"),
+            )
+        )
+    lines.extend(
+        [
+            "position: " + position,
+            "protocol: every item measured true and your report was on file, "
+            "so the gate opened and the run moved on its own -- nothing was "
+            "decided for you and there is nothing to confirm. The per-item "
+            "evidence above is journalled as 'checklist_passed'. Call the "
+            "cflow 'status' tool for the step you are now on and continue per "
+            "the /cflow protocol.",
+            "---",
+        ]
+    )
+    return "\n".join(lines)
+
+
 class RoundStartClock:
     """Starts a recurring run's next round when its workflow opted in.
 
