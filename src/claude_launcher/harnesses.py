@@ -20,7 +20,12 @@ override or extend it::
         clear_env: [OPENAI_API_KEY]  # forbidden ambient credentials
         login_args: [login]      # optional interactive login argv
         description: "..."      # optional, shown in status surfaces
-      pi: null                  # a tombstone: drop a packaged harness
+      pi:
+        command: pi
+        auth: api-key
+        token_env: ANTHROPIC_API_KEY
+        provider_adapter: pi     # claunch provider -> Pi model projection
+      agent: null                # a tombstone: drop a packaged harness
 
 Overriding is **per harness, not per field** (as with :mod:`mesh_roles`): a
 name in the config replaces that harness's whole definition, so a half-merged
@@ -94,6 +99,10 @@ class Harness:
     #: Destination for the profile's single ``claunch set-token`` value. This
     #: belongs to the harness declaration, not to the profile/YAML env.
     token_env: str = ""
+    #: Optional adapter that projects a selected claunch API provider into the
+    #: harness's native provider/model mechanism. ``pi`` loads the packaged Pi
+    #: extension and supplies its model selection on every launch.
+    provider_adapter: str = ""
     #: Variables always removed before launching this harness (principally
     #: ambient API keys that would bypass an OAuth login).
     clear_env: List[str] = field(default_factory=list)
@@ -227,6 +236,7 @@ class Harness:
             "home_env": self.home_env,
             "auth": self.auth,
             "token_env": self.token_env,
+            "provider_adapter": self.provider_adapter,
             "clear_env": list(self.clear_env),
             "empty_env": list(self.empty_env),
             "login_args": list(self.login_args),
@@ -308,6 +318,16 @@ def _parse_entry(name: str, body) -> Harness:
         raise HarnessConfigError(
             f"harness {name!r} uses oauth auth and cannot declare token_env"
         )
+    provider_adapter = str(body.get("provider_adapter") or "").strip()
+    if provider_adapter not in {"", "pi"}:
+        raise HarnessConfigError(
+            f"harness {name!r} provider_adapter must be pi, got "
+            f"{provider_adapter!r}"
+        )
+    if provider_adapter == "pi" and auth != "api-key":
+        raise HarnessConfigError(
+            f"harness {name!r} provider_adapter pi requires api-key auth"
+        )
     strategies = {
         "opening_transport": (
             str(body.get("opening_transport") or "pty").strip(),
@@ -357,6 +377,7 @@ def _parse_entry(name: str, body) -> Harness:
         home_env=str(body.get("home_env") or "").strip(),
         auth=auth,
         token_env=token_env,
+        provider_adapter=provider_adapter,
         clear_env=_env_names(body.get("clear_env"), f"harness {name!r} clear_env"),
         empty_env=_env_names(
             body.get(

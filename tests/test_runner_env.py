@@ -4,12 +4,15 @@ the stored ``set-token`` secret must override any plaintext
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from claude_launcher import (
     credentials,
     harnesses,
     lineage,
+    pi_provider,
     profile,
     providers,
     runner,
@@ -681,14 +684,116 @@ def test_pi_gets_only_its_projected_profile_token(home, monkeypatch):
     credentials.save_token(p, "pi-secret")
     monkeypatch.setenv("OPENAI_API_KEY", "ambient-openai")
 
-    env = runner.harness_child_env(p, harnesses.get("pi"), base_env=dict())
+    env = runner.harness_child_env(
+        p,
+        harnesses.get("pi"),
+        base_env={pi_provider.ENV_PROVIDER: "stale-provider"},
+    )
 
     assert env["ANTHROPIC_API_KEY"] == "pi-secret"
     assert env["KEEP_ME"] == "yes"
     assert "ANTHROPIC_BASE_URL" not in env
     assert "CLAUDE_CODE_AUTO_COMPACT_WINDOW" not in env
     assert "OPENAI_API_KEY" not in env
+    assert pi_provider.ENV_PROVIDER not in env
     assert env["PI_CODING_AGENT_DIR"] == str(p.config_dir / "pi")
+
+
+def _omlx_pi_profile():
+    p = profile.create("omlx")
+    store.update(
+        lambda doc: doc.setdefault("providers", {}).update(
+            {
+                "omlx": {
+                    "env": {
+                        "ANTHROPIC_BASE_URL": "https://omlx.example/",
+                        "ANTHROPIC_MODEL": "solar-main",
+                        "ANTHROPIC_DEFAULT_OPUS_MODEL": "hy3-opus",
+                        "ANTHROPIC_DEFAULT_SONNET_MODEL": "solar-main",
+                        "ANTHROPIC_AUTH_TOKEN": "plaintext-must-not-cross",
+                    }
+                }
+            }
+        )
+    )
+    store.set_profile_field(p.name, "provider", "omlx")
+    credentials.save_token(p, "stored-omlx-token")
+    return profile.require_selector("omlx:pi")
+
+
+def test_pi_projects_custom_provider_models_and_stored_token(home):
+    p = _omlx_pi_profile()
+
+    env = runner.harness_child_env(p, harnesses.get("pi"), base_env={})
+
+    assert env["ANTHROPIC_API_KEY"] == "stored-omlx-token"
+    assert env[pi_provider.ENV_PROVIDER] == pi_provider.PI_PROVIDER_NAME
+    assert env[pi_provider.ENV_BASE_URL] == "https://omlx.example/"
+    assert json.loads(env[pi_provider.ENV_MODELS]) == ["solar-main", "hy3-opus"]
+    assert env[pi_provider.ENV_TOKEN_NAME] == "ANTHROPIC_API_KEY"
+    assert env[pi_provider.ENV_AUTH_HEADER] == "1"
+    assert "ANTHROPIC_BASE_URL" not in env
+    assert "ANTHROPIC_MODEL" not in env
+    assert "plaintext-must-not-cross" not in env.values()
+
+
+def test_pi_launch_injects_extension_provider_and_default_model(
+    home, monkeypatch
+):
+    p = _omlx_pi_profile()
+    reached = {}
+
+    def fake_run(cmd, **kwargs):
+        reached["cmd"] = list(cmd)
+        reached["env"] = kwargs["env"]
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    assert runner.run(p, ["--verbose"]) == 0
+    cmd = reached["cmd"]
+    assert cmd[cmd.index("--extension") + 1] == str(pi_provider.extension_path())
+    assert cmd[cmd.index("--provider") + 1] == pi_provider.PI_PROVIDER_NAME
+    assert cmd[cmd.index("--model") + 1] == "solar-main"
+    assert cmd[-1] == "--verbose"
+    assert reached["env"]["ANTHROPIC_API_KEY"] == "stored-omlx-token"
+
+
+def test_pi_explicit_model_selection_keeps_its_values(
+    home, monkeypatch
+):
+    p = _omlx_pi_profile()
+    reached = {}
+
+    def fake_run(cmd, **kwargs):
+        reached["cmd"] = list(cmd)
+        return type("Done", (), {"returncode": 0})()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    assert runner.run(p, ["--provider", "openai", "--model", "gpt-4o"]) == 0
+    cmd = reached["cmd"]
+    assert "--extension" in cmd
+    assert cmd.count("--provider") == 1
+    assert cmd.count("--model") == 1
+
+
+def test_pi_heartbeat_uses_the_same_provider_projection(home, monkeypatch):
+    p = _omlx_pi_profile()
+    reached = {}
+
+    def fake_run(cmd, **kwargs):
+        reached["cmd"] = list(cmd)
+        reached["env"] = kwargs["env"]
+        return type("Done", (), {"returncode": 0, "stdout": "OK", "stderr": ""})()
+
+    monkeypatch.setattr(runner.subprocess, "run", fake_run)
+
+    report = runner.heartbeat(p, prompt="heartbeat")
+    assert report.ok is True
+    assert reached["cmd"][reached["cmd"].index("--model") + 1] == "solar-main"
+    assert "--extension" in reached["cmd"]
+    assert reached["env"]["ANTHROPIC_API_KEY"] == "stored-omlx-token"
 
 
 def test_pi_can_borrow_a_base_profiles_token_without_borrowing_its_env(home):

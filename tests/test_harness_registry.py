@@ -29,6 +29,7 @@ def test_packaged_set_declares_supported_harnesses(home):
     assert reg["agent"].home_env == "CURSOR_CONFIG_DIR"
     assert reg["pi"].auth == "api-key"
     assert reg["pi"].token_env == "ANTHROPIC_API_KEY"
+    assert reg["pi"].provider_adapter == "pi"
     assert reg["pi"].borrowable is True
     assert reg["pi"].borrow_mode == "token"
     assert reg["claude"].token_env == "ANTHROPIC_AUTH_TOKEN"
@@ -38,6 +39,17 @@ def test_packaged_set_declares_supported_harnesses(home):
     assert reg["codex"].borrowable is False
     # Claude leads displays; it is the default and the only builtin one.
     assert harnesses.names()[0] == "claude"
+
+
+def test_provider_adapter_is_validated_with_its_auth_contract(home):
+    with pytest.raises(HarnessConfigError, match="provider_adapter must be pi"):
+        harnesses.parse(
+            {"harnesses": {"x": {"command": "x", "provider_adapter": "other"}}}
+        )
+    with pytest.raises(HarnessConfigError, match="requires api-key auth"):
+        harnesses.parse(
+            {"harnesses": {"x": {"command": "x", "provider_adapter": "pi"}}}
+        )
 
 
 def test_packaged_runtime_capabilities_are_harness_native(home):
