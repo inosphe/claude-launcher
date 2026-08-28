@@ -311,12 +311,14 @@
              ("claude · nc · launcher"), which is not something anyone can
              check at a glance. The spawn modal has always asked it as a
              top-level row; this is the create form catching up.
-             Every option is already spelled PROFILE:HARNESS, so there is no
-             second read-only Harness row to repeat half of the answer. -->
+             The daemon still receives PROFILE:HARNESS; the form separates
+             those axes so each profile appears once and Harness follows the
+             selected profile's policy-filtered choices. -->
         <fieldset id="new-runs-on">
           <legend>Runs as</legend>
-          <label>Profile : Harness <select name="profile"></select></label>
-          <!-- What the profile row cannot say by itself. Three rows still in
+          <label>Profile <select name="profile"></select></label>
+          <label>Harness <select name="harness"></select></label>
+          <!-- What the selected pair cannot say by itself. Three rows still in
                the fold change what this pick MEANS — --borrow runs it on
                another profile's token, --null on none at all, and a profile
                whose harness is not installed here will not boot — and each
@@ -348,8 +350,8 @@
              (renderRuntimeSummary), because the directory a session is
              created in is not a thing anyone should have to open a fold to
              find out: an agent started in the wrong checkout does not report
-             the mistake, it just works on the wrong tree. The profile and
-             its harness once sat here for the same reason and were promoted
+             the mistake, it just works on the wrong tree. Profile and
+             Harness once sat here for the same reason and were promoted
              out (RUNTIME_PROMOTED) when the summary line proved too thin a
              place to check a credential; the summary no longer repeats them,
              since a line naming a row the reader can see is at best noise

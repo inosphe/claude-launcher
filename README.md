@@ -1850,14 +1850,17 @@ borrowed auth (the lender must also allow the consuming harness). API and UI
 selector lists omit denied combinations; `profile_details[].harness_policy`
 retains the denial reason for diagnostics.
 
-The Web create form, Spawn modal, `new --wizard` and `spawn --wizard` show one
-`Profile : Harness` picker. Display labels use `PROFILE/HARNESS`, such as
-`ds4/pi`; submitted values use canonical `PROFILE:HARNESS`, such as
-`ds4:pi`. The effective default and every non-default alternative go through
-the same profile/provider `allowed_harnesses` intersection. Denied
-combinations are omitted, so a `codex` profile restricted to `[codex]` shows
-`codex/codex` and does not show `codex/claude`. Sending a separate `harness`
-field/flag is rejected. A session saves the canonical selector, so
+The Web create form and Spawn modal show linked **Profile** and **Harness**
+pickers: each base profile appears once, and changing it rebuilds Harness from
+that profile's policy-filtered choices. The browser submits their combination
+as canonical `PROFILE:HARNESS`, such as `ds4:pi`. The terminal
+`new --wizard` and `spawn --wizard` forms show the same choices in one
+`Profile : Harness` picker, labelled `PROFILE/HARNESS`, such as `ds4/pi`.
+The effective default and every non-default alternative go through the same
+profile/provider `allowed_harnesses` intersection. Denied combinations are
+omitted, so a `codex` profile restricted to `[codex]` offers only `codex` in
+its Harness picker. Sending a separate `harness` field/flag to the API is
+rejected. A session saves the canonical selector, so
 `ds4:pi` restores as Pi even if `profiles.ds4.harness` later changes.
 The colon is logical only and never becomes part of a Windows path.
 
@@ -2393,10 +2396,12 @@ daemon answering with a boot id the page has not seen) tries again. The rail's
 version readout says `daemon offline` for as long as nothing answers, so a
 list of sessions is never mistaken for a list of *current* sessions.
 
-**Profile : Harness** is the only execution picker. It reflects the profile
-default and its allowed explicit alternatives; Harness cannot be submitted
-independently. Configure the default with `claunch set-harness`. The web UI,
-`new --wizard`, `spawn --wizard`, and the session API use that source.
+**Profile** and **Harness** are linked execution pickers in the Web create and
+Spawn forms. Profile lists each base name once; Harness reflects its default
+and allowed explicit alternatives. The browser combines them into the API's
+single canonical profile selector. Configure the default with
+`claunch set-harness`. The terminal wizards present the same source as one
+`Profile : Harness` picker.
 
 The create form's **Directory** is a picker over your
 [workspaces](#workspaces-where-a-session-may-be-spawned) — free-text paths are

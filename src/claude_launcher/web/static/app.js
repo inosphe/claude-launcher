@@ -2619,6 +2619,8 @@ async function refreshCflow() {
 }
 
 let profileDetails = {};
+let newProfileOptions = [];
+let newHarnessFor = null;
 let newBorrowFor = null;
 let newBorrowSeq = 0;
 
@@ -2682,6 +2684,51 @@ function profileHarnessName(selector, parent) {
   return detail ? (detail.harness || "") : ((parent || {}).harness || "");
 }
 
+/* New Session and Spawn share the daemon's qualified selector contract. The
+   page form keeps its controls as native form fields, so this adapter gives
+   the split-profile helpers the same small ui bag the Spawn modal uses. */
+function newProfileUi(f) {
+  return {
+    profile: f.profile,
+    harness: f.harness,
+    parentSess: spawnParent() || {},
+    _profileOptions: newProfileOptions,
+  };
+}
+
+function newProfileSelector(f) {
+  return spawnProfileSelector(newProfileUi(f));
+}
+
+function newProfileOverride(f) {
+  return spawnProfileOverride(newProfileUi(f));
+}
+
+function newProfileDetail(f, selector = "") {
+  selector = selector || newProfileSelector(f);
+  return profileDetails[selector] ||
+    profileDetails[baseProfileName(selector)] || null;
+}
+
+function newProfileHarnessName(f, selector = "") {
+  selector = selector || newProfileSelector(f);
+  const named = String(selector).split(":", 2)[1] || "";
+  const detail = newProfileDetail(f, selector);
+  return named || (detail && detail.harness) ||
+    (spawnParent() || {}).harness || "";
+}
+
+function refillNewHarnessOptions(f, want, force = false) {
+  const parent = spawnParent() || {};
+  const signature = newProfileOptions.map((item) =>
+    `${item.value}:${item.harness_available === false ? 0 : 1}`).join("|");
+  const key = `${f.profile.value}|${parent.profile || ""}|` +
+    `${parent.harness || ""}|${signature}`;
+  if (!force && key === newHarnessFor) return;
+  newHarnessFor = key;
+  refillSpawnHarnesses(newProfileUi(f), want);
+}
+
 async function readBorrowOptions(selector) {
   if (!selector) return { options: [], capability: { allowed: false } };
   const resp = await api(
@@ -2731,12 +2778,11 @@ function fillValidatedBorrow(select, doc, ownLabel, current, omitName = "", ownN
 
 async function syncNewBorrowOptions(force = false) {
   const f = $("new-session");
-  if (!f || !f.borrow || !f.profile) return;
+  if (!f || !f.borrow || !f.profile || !f.harness) return;
   const parent = spawnParent();
-  const selector = f.profile.value || (parent && parent.profile) || "";
-  const harnessName = profileHarnessName(selector, parent);
-  const detail = profileDetails[selector] ||
-    profileDetails[baseProfileName(selector)];
+  const selector = newProfileSelector(f);
+  const harnessName = newProfileHarnessName(f, selector);
+  const detail = newProfileDetail(f, selector);
   const borrowCap = profileBorrowCapability(
     detail, harnessName
   );
@@ -2782,23 +2828,47 @@ async function refreshProfiles() {
   try {
     const resp = await api("/api/profiles");
     const data = await resp.json();
-    const select = document.querySelector("#new-session select[name=profile]");
+    const f = $("new-session");
+    const select = f.profile;
+    const previousProfile = select.value || "";
+    const previousSelector = newProfileSelector(f);
+    const previousHarness = f.harness.value ||
+      (String(previousSelector).split(":", 2)[1] || "");
     profileDetails = {};
     for (const item of data.profile_details || []) {
       if (item && item.name) profileDetails[item.name] = item;
     }
-    select.innerHTML = "";
     const optionDefs = data.profile_options ||
       (data.profile_selectors || data.profiles || []).map(
         (name) => ({ value: name, label: name })
       );
-    for (const item of optionDefs) {
-      const opt = document.createElement("option");
-      opt.value = item.value;
-      opt.textContent = item.label || item.value;
-      opt.title = item.harness ? `runs ${item.harness}` : "";
-      select.appendChild(opt);
+    newProfileOptions = normalizeSpawnProfileOptions(optionDefs);
+    const grouped = new Map();
+    for (const item of newProfileOptions) {
+      const options = grouped.get(item.profile) || [];
+      options.push(item);
+      grouped.set(item.profile, options);
     }
+    const pairs = [...grouped].map(([profile, options]) => [
+      profile, profile,
+      options.every((item) => item.harness_available === false),
+    ]);
+    const child = !!spawnParent();
+    let wantedProfile = child && !previousProfile
+      ? "" : baseProfileName(previousSelector);
+    if (!wantedProfile && !child) {
+      const first = pairs.find((item) => !item[2]) || pairs[0];
+      wantedProfile = first ? first[0] : "";
+    }
+    fillSpawnSelect(
+      select, pairs,
+      child ? "(inherit the parent's profile)" : null,
+      wantedProfile
+    );
+    newHarnessFor = null;
+    refillNewHarnessOptions(
+      f, child && !select.value ? "" : previousHarness, true
+    );
     await syncNewBorrowOptions(true);
     syncForkAvailability();
   } catch { /* ignore */ }
@@ -2990,13 +3060,13 @@ function syncForkAvailability() {
   const f = $("new-session");
   const resuming = f.resume.value !== "";
   const parent = spawnParent();
-  const selector = f.profile.value || (parent && parent.profile) || "";
-  const harnessName = profileHarnessName(selector, parent) || "claude";
+  const selector = newProfileSelector(f);
+  const harnessName = newProfileHarnessName(f, selector) || "claude";
   const claude = harnessName === "claude";
   const capabilities = (typeof harnessDetails !== "undefined"
     ? harnessDetails[harnessName] : null) || {};
   const borrowCap = profileBorrowCapability(
-    profileDetails[selector], harnessName
+    newProfileDetail(f, selector), harnessName
   );
   f.fork.disabled = !resuming || !claude;
   if (f.fork.disabled) f.fork.checked = false;
@@ -3132,13 +3202,14 @@ function renderProfileHint() {
   if (!f || !f.profile) return;
   const parent = spawnParent();
   const speaks = (key) => !parent || !!(f[key] && !f[key].disabled);
-  const picked = f.profile.value || "";
-  const details = typeof profileDetails === "object" ? profileDetails : {};
-  const detail = picked ? details[picked] : null;
+  const picked = newProfileSelector(f);
+  const detail = picked ? newProfileDetail(f, picked) : null;
   const shown = detail && !detail.error
     ? profileHarnessLabel(detail.profile || picked, detail.harness)
     : profileHarnessLabel(picked, "");
-  const whose = shown || (parent ? `${parent.name}'s profile` : "this profile");
+  const choseOverride = !!f.profile.value || !!(f.harness && f.harness.value);
+  const whose = (shown && (!parent || choseOverride))
+    ? shown : (parent ? `${parent.name}'s profile` : "this profile");
   let text = "";
   if (speaks("null_token") && f.null_token && f.null_token.checked) {
     text = `--null: it boots with no token at all — ${whose}'s config and ` +
@@ -3204,15 +3275,15 @@ $("new-session").addEventListener("input", () => {
    spawn modal. A form that offers what it cannot send teaches the policy
    wrong; one that withholds what the policy opened teaches it just as
    wrong, and lies to the person who set 'allow_profile: true'. */
-const SPAWN_INHERITS = ["profile", "borrow", "null_token", "cwd",
+const SPAWN_INHERITS = ["profile", "harness", "borrow", "null_token", "cwd",
                         "args", "resume", "fork", "skip_permissions",
                         "full_access"];
 
-/* Of those, the one that no longer lives in the fold. It is still
-   inherited — the spawn policy still governs them exactly as before, and
+/* Of those, the two that no longer live in the fold. They are still
+   inherited — the spawn policy governs them exactly as before, and
    spawnChildFields still reads them through their disables — but they are
    asked on the face of the form, because what they decide is WHOSE
-   credentials the session runs on rather than merely how it runs. A profile
+   credentials the session runs on rather than merely how it runs. A pair
    picked wrong is not caught by anything downstream: the session boots, on
    the wrong token, and reports nothing.
 
@@ -3222,7 +3293,7 @@ const SPAWN_INHERITS = ["profile", "borrow", "null_token", "cwd",
    held to the same partition by tests/web/newform_check.js: the fold's rows
    plus these must be exactly SPAWN_INHERITS, so promoting a row means moving
    it, never copying it. */
-const RUNTIME_PROMOTED = ["profile"];
+const RUNTIME_PROMOTED = ["profile", "harness"];
 
 /* The picked parent's spawn capabilities, and which parent they are about:
    one report per parent, kept until the pick moves. */
@@ -3240,7 +3311,7 @@ let newSpawnDefaultsFor = null;
 function spawnUnlocked(report) {
   const may = (report && report.may_choose) || [];
   return {
-    harness: false,
+    harness: may.includes("profile"),
     profile: may.includes("profile"),
     borrow: may.includes("borrow"),
     // Ungated by the policy — it takes a credential away rather than
@@ -3354,6 +3425,9 @@ function syncSpawnMode() {
   const fresh = (parent ? parent.name : null) !== newSpawnDefaultsFor;
   newSpawnDefaultsFor = parent ? parent.name : null;
   syncSpawnProfileRow(f, !!parent);
+  refillNewHarnessOptions(
+    f, parent && !f.profile.value ? "" : undefined
+  );
   syncSpawnCwdRow(f, !!parent);
   syncNewBorrowOptions();
   if (parent) {
@@ -3361,10 +3435,10 @@ function syncSpawnMode() {
     // both rows are moot however the policy is set, and a yes on --null greys
     // the borrow row rather than provoking the daemon's refusal of the pair.
     // The same two rules the spawn modal applies.
-    const selector = f.profile.value || parent.profile || "";
-    const childHarness = profileHarnessName(selector, parent);
+    const selector = newProfileSelector(f);
+    const childHarness = newProfileHarnessName(f, selector);
     const borrowCap = profileBorrowCapability(
-      profileDetails[selector], childHarness
+      newProfileDetail(f, selector), childHarness
     );
     const claude = !childHarness || childHarness === "claude";
     const childCapabilities = (typeof harnessDetails !== "undefined"
@@ -3506,14 +3580,16 @@ function syncSpawnOverRow(f, report) {
    as the workspace NAME the registry vouched for, never as a path. */
 function spawnChildFields(f, body) {
   const put = (k, v) => { if (v) body[k] = v; };
-  if (!f.profile.disabled) put("profile", f.profile.value);
+  if (!f.profile.disabled && !f.harness.disabled) {
+    put("profile", newProfileOverride(f));
+  }
   if (!f.borrow.disabled) put("borrow", f.borrow.value);
   if (!f.null_token.disabled && f.null_token.checked) body.null_token = true;
   if (!f.args.disabled && f.args.value.trim()) {
     body.args = f.args.value.trim().split(/\s+/);
   }
-  const selector = f.profile.value || (spawnParent() || {}).profile || "";
-  const harnessName = profileHarnessName(selector, spawnParent());
+  const selector = newProfileSelector(f);
+  const harnessName = newProfileHarnessName(f, selector);
   const capabilities = (typeof harnessDetails !== "undefined"
     ? harnessDetails[harnessName] : null) || {};
   body.args = body.args || [];
@@ -3567,6 +3643,14 @@ document
   });
 $("new-session").resume.addEventListener("change", syncForkAvailability);
 $("new-session").profile.addEventListener("change", () => {
+  const f = $("new-session");
+  refillNewHarnessOptions(f, f.profile.value ? undefined : "", true);
+  syncNewBorrowOptions(true);
+  syncForkAvailability();
+  syncSpawnMode();
+  renderProfileHint();
+});
+$("new-session").harness.addEventListener("change", () => {
   syncNewBorrowOptions(true);
   syncForkAvailability();
   syncSpawnMode();
@@ -3583,12 +3667,13 @@ $("new-session").addEventListener("submit", async (e) => {
   // spawn policy, field by field.
   const body = parent ? { name: f.name.value.trim() } : {
     name: f.name.value.trim(),
-    profile: f.profile.value || null,
+    profile: newProfileSelector(f) || null,
     cwd: f.cwd.value,  // a registered workspace path, or "" = the daemon's cwd
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
   if (!parent) {
-    const harnessName = profileHarnessName(f.profile.value, null) || "claude";
+    const selector = newProfileSelector(f);
+    const harnessName = newProfileHarnessName(f, selector) || "claude";
     const capabilities = harnessDetails[harnessName] || {};
     if (f.skip_permissions.checked) {
       body.args.push(...(capabilities.skip_permissions_args || []));

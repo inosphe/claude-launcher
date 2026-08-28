@@ -97,7 +97,7 @@ check("the form's controls read in the new order", named(form.text), [
   // who it is
   "parent", "fork_parent", "over_limit", "name",
   // whose credentials it holds — promoted out of the fold
-  "profile",
+  "profile", "harness",
   // what it joins, and what it drives
   "mesh", "handle", "role", "workflow", "context",
   // how it runs — folded
@@ -114,16 +114,14 @@ check("the arrangement is asked before the machinery",
       named(form.text).indexOf("mesh") < named(form.text).indexOf("borrow"),
       true);
 /* The whole point of the promotion: it is readable without opening anything.
-   A profile row that drifted back below the fold's summary is the bug this
+   A Profile or Harness row that drifted back below the fold is the bug this
    pins. */
 check("the profile is asked above the fold, not inside it",
       [form.text.indexOf("new-runs-on") < form.text.indexOf("new-runtime"),
        named(fold.text).includes("profile")],
       [true, false]);
-check("the qualified profile selector is the only runtime choice",
-      named(runsOn.text), ["profile"]);
-check("there is no duplicate Harness control beside PROFILE:HARNESS",
-      /name="harness"/.test(runsOn.text), false);
+check("Profile and Harness are separate runtime choices",
+      named(runsOn.text), ["profile", "harness"]);
 check("the credential hint travels with the profile it qualifies",
       ids(runsOn.text).includes("profile-hint"), true);
 const BOARD_ROWS = ["beads", "issue_text", "issue"];
@@ -214,6 +212,8 @@ const present = named(form.text).slice().sort();
 check("Create reads nothing the form does not offer",
       read.filter((k) => !present.includes(k)), []);
 check("...and it does read a fair few of them", read.length > 8, true);
+check("standalone Create recombines Profile and Harness for the API",
+      /profile:\s*newProfileSelector\(f\)/.test(submit), true);
 
 /* The board's own rule, read out of the submit handler: "new" is the absence
    of both keys. A request that says nothing gets an issue minted from its
@@ -541,12 +541,19 @@ hintBox.classList = {
                           else hintBox.classes.delete(name); },
 };
 const h = {
-  profile: ctl("nc"), borrow: ctl(""), null_token: ctl(""),
+  profile: ctl("nc"), harness: ctl("claude"),
+  borrow: ctl(""), null_token: ctl(""),
 };
 const details = {};
 let hintParent = null;
 const hintCtx = {};
 new Function("exports", "$", "spawnParent", "profileDetails",
+  "let newProfileOptions = [];\n" +
+  sliceFrom("function baseProfileName(") +
+  sliceFrom("function spawnProfileSelector(") +
+  sliceFrom("function newProfileUi(") +
+  sliceFrom("function newProfileSelector(") +
+  sliceFrom("function newProfileDetail(") +
   sliceFrom("function profileHarnessLabel(") +
   sliceFrom("function renderProfileHint()") +
   "\nexports.hint = renderProfileHint;\n")(
@@ -612,11 +619,17 @@ details.nc = { name: "nc", harness: "?", harness_available: false,
                error: "profile nc: broken lineage" };
 hintCtx.hint();
 check("a broken profile reports its own error, not a guess at the harness",
-      shown(), "nc: profile nc: broken lineage");
+      shown(), "nc/claude: profile nc: broken lineage");
 
 /* Served against a page that predates the row, like every other rule here. */
 const bareHint = {};
 new Function("exports", "$", "spawnParent", "profileDetails",
+  "let newProfileOptions = [];\n" +
+  sliceFrom("function baseProfileName(") +
+  sliceFrom("function spawnProfileSelector(") +
+  sliceFrom("function newProfileUi(") +
+  sliceFrom("function newProfileSelector(") +
+  sliceFrom("function newProfileDetail(") +
   sliceFrom("function profileHarnessLabel(") +
   sliceFrom("function renderProfileHint()") +
   "\nexports.hint = renderProfileHint;\n")(
