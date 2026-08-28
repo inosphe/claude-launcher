@@ -438,6 +438,27 @@ def changed_paths(repo: Path, base: str) -> List[str]:
     HEAD`` is tracked-but-uncommitted. ``ls-files --others`` is new files that
     are not staged yet -- a new test module is exactly that, and leaving it
     out would let the gate miss the tests the round just wrote.
+
+    Then ``sweep.NON_CODE_ENTRIES`` comes off, which is why "touches" here
+    means "touches code". The board (``.beads``) is the case that forced it:
+    it is a tracked file every session on the checkout writes, so on the root
+    checkout it is uncommitted essentially always, and it mapped to four
+    modules -- ``test_beads_protocol``, ``test_cli_beads``, ``test_deploy_check``,
+    ``test_sweep`` -- for a session that had committed nothing. Worse than the
+    four is that they are not stable: the count for one tree moved 113 -> 114
+    mid-measurement because another session wrote an issue while it was being
+    read (``claunch-d4yo``). A gate whose selection depends on what a *different*
+    session did to the board is not measuring this branch.
+
+    ``sweep.py`` and ``tools/deploy_check.py`` already subtract the same set for
+    the same reason, so this is the third tool applying one rule rather than a
+    new one. Subtraction, not selection: an unrecognised path stays code, which
+    errs towards running a module nobody needed rather than towards skipping the
+    one that guarded the change.
+
+    Silent, like ``RUNNER_LOCK_RE`` directly above and for the same reason: on
+    the checkout where it fires it fires on every single run, and a warning
+    that is always there stops being read.
     """
     merge_base = _git(repo, "merge-base", base, "HEAD")
     out = set()
@@ -448,7 +469,11 @@ def changed_paths(repo: Path, base: str) -> List[str]:
         for rel in _git(repo, "ls-files", "--others", "--exclude-standard").splitlines()
         if not RUNNER_LOCK_RE.match(rel)   # the runner's own scratch, see above
     )
-    return sorted(p for p in out if p)
+    # git reports forward slashes on every platform, so the first path
+    # component is all that has to be looked at.
+    return sorted(
+        p for p in out if p and p.split("/", 1)[0] not in sweep.NON_CODE_ENTRIES
+    )
 
 
 def _is_test_module(p: Path) -> bool:

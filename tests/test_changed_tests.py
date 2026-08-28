@@ -1600,3 +1600,40 @@ def test_a_worker_branch_tracking_a_differently_named_remote_ref_is_untouched(re
         "origin/master",
         "upstream",
     )
+
+
+def test_the_board_is_not_a_change_this_branch_made(repo):
+    """``.beads`` is tracked, is written by every session, and guards nothing.
+
+    On the root checkout it is uncommitted essentially always, and it maps to
+    four modules for a round that committed nothing. The count is not even
+    stable -- one tree read 113 then 114 because another session wrote an
+    issue in between (``claunch-d4yo``). Subtracted with the set the other two
+    gates already subtract, so one rule covers all three.
+    """
+    _write(repo, ".beads/issues.jsonl", '{"id": "x"}\n')
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "board exists and is tracked")
+    _write(repo, ".beads/issues.jsonl", '{"id": "x"}\n{"id": "another session"}\n')
+
+    assert ".beads" in changed_tests.sweep.NON_CODE_ENTRIES
+    assert changed_tests.changed_paths(repo, "master") == []
+
+    _write(repo, "src/pkg/mesh.py", "mine = 1\n")
+    assert changed_tests.changed_paths(repo, "master") == ["src/pkg/mesh.py"]
+
+
+def test_a_path_no_rule_recognises_is_still_code(repo):
+    """Subtraction, not selection -- the direction that fails towards running.
+
+    Only the entries named in ``NON_CODE_ENTRIES`` come off. A top-level name
+    that merely looks like data keeps its place in the changed set, because
+    the cost of running a module nobody needed is one module and the cost of
+    skipping the one that guarded the change is a red landing.
+    """
+    _write(repo, ".beadsdata/issues.jsonl", "{}\n")
+    _write(repo, "notes.jsonl", "{}\n")
+    assert changed_tests.changed_paths(repo, "master") == [
+        ".beadsdata/issues.jsonl",
+        "notes.jsonl",
+    ]
