@@ -406,6 +406,94 @@ Cycles are legal and are warned about (`cflow show` prints them). Two rules:
   abort mid-round). Use a back-edge cycle for work that must *converge*;
   use `recur` for work that must *keep happening*.
 
+## Escalation — `escalate:` on the step a run ends through
+
+`recur` says "this run happens again". `escalate` says "this run's work
+continues under other rules":
+
+    wrapup:
+      instructions: ...
+      escalate:
+        workflow: improv-mid          # or the shorthand: escalate: improv-mid
+        context: the follow-up needs a stack   # optional
+
+Ending the run through that step files an ordinary start request for the
+named workflow (`by: escalate`). Nothing else is new — that request is the
+same record `claunch cflow request` leaves — and everything follows from it:
+a pending start is one of the two conditions that spare a finished run's
+session from the daemon's kill-on-end, the done payload names the start its
+driver must perform, and the request carries the driving session's beads
+issue as an `issue: <id>` line in the context, so one board record spans both
+journals.
+
+Use it where a round's ending is a change of procedure rather than a stop: a
+worker round whose remaining work is stack management, an intake run that
+turns out to need a review flow. Do not use it as a loop — that is `recur`,
+and if two rounds of the same procedure are what you want, the graph should
+say so.
+
+### Escalation and `default_child_cflow` are different pairings
+
+Both name another workflow, and they answer different questions. Read them
+together when you write either:
+
+    default_child_cflow    what a CHILD this session spawns starts on
+    escalate               what THIS session starts next, after this run ends
+
+`improv-worker` declares `default_child_cflow: improv-worker` — a worker's
+sub-workers are workers. An `escalate: improv-mid` on that same file would
+say something else entirely: this session stops being a worker round and
+becomes the stack's manager. Note that `improv-mid.yaml` states in its own
+comments that it is started only by a `mesh-delegate` spawn naming it; an
+escalation is a second door into that workflow, so a file that gains one must
+have that sentence corrected in the same change.
+
+### The three checks, and what each does NOT cover
+
+An escalation that turns out to be unusable at the moment it fires costs a
+whole round: the run has finished, there is no step to go back to. So it is
+checked three times, in three different places, and they are not
+interchangeable:
+
+    check                     where            answered from      guarantees
+    ------------------------  ---------------  -----------------  --------------------
+    the declaration is whole  model.py parser  the file alone     required fields, no
+                                                                  unknown keys, and the
+                                                                  step can actually end
+    the target exists         engine's         the workflow       a name that resolves,
+    and what it demands       escalation_      files (layers      and the target's own
+                              check, at        searched)          filter_roles, quoted
+                              start and at
+                              request
+    this session may          engine's         the daemon (the    that THIS session's
+    drive the target          _request_        session's mesh     role passes — or that
+                              escalation, at   role)              nothing could ask
+                              the ending
+
+What the table is for, read row by row:
+
+- The parser cannot know whether `improv-mid` exists — it has no layer search
+  in reach (`model.py` imports nothing from this package). A file that parses
+  is not a file whose escalation will work.
+- `escalation_check` resolves the target with no daemon in reach, so its
+  `resolves` / `filter_roles` fields hold anywhere. Its `role_check` field
+  does NOT: that one asks the daemon, and it reads `unchecked: ...` when
+  there is no mesh identity to hold against the filter.
+- **`role_check` is a preview, not enforcement** — the same property
+  `delegation_check`'s docstring states about its own output ("Reported at
+  start time and never enforced there"). The escalation may be an hour away,
+  and a session's role or mesh can change in between. That is why its refusal
+  reads "would be declined" rather than "is declined".
+- The run-time check is the only one that decides anything, and it has three
+  outcomes, not two: approved (the hand-off is filed), refused (it is NOT —
+  the run ends the ordinary way, and `escalate_declined` records why), and
+  unenforceable (the hand-off IS filed, with `role_filter` recording that
+  nothing could ask). Folding the third into either of the others is how an
+  unchecked escalation comes to look checked.
+
+A refused escalation on a `recur` workflow still files that workflow's next
+round: a hand-off that could not happen must not also silence a service loop.
+
 ## Shape
 
 - The file's own header is `name` and `description`. The description is the
@@ -542,6 +630,11 @@ child.
 - `claunch cflow request <workflow>` — reports `delegation_check`: what each
   delegated step resolves to *right now*, and which would fall to a human. It
   never blocks; a leader that has not spawned yet is legitimate.
+- The same command reports `escalation_check` when the file declares any
+  `escalate`: which workflow each one resolves to, what that target's
+  `filter_roles` demands, and whether this session's role would pass it right
+  now. Read the `role_check` line as a preview — see the table under
+  "Escalation" for what it does and does not settle.
 - Read the file back and ask, for each step: *what stops this being skipped?*
   If the answer is "the agent will not skip it", that step has no control
   point.

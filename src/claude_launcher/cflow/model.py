@@ -69,6 +69,9 @@ and loops need no duplicated content::
           timeout: 900
           on_decline: impl
         instructions: ...
+        escalate:               # optional: ending HERE hands the slot to
+          workflow: improv-mid  # another run instead of going quiet. See
+          context: ...          # "Escalation" below
         # no 'next' (or 'next: end') = termination
 
 Termination: omitting ``next`` (or the reserved target ``end``) ends the run.
@@ -103,6 +106,30 @@ own (``by: recur``), the daemon starts the round by itself instead of the
 driving agent performing the start — the loop keeps going while nobody is
 looking. Plain ``recur: true`` keeps the original flow, where the agent
 performs each next start per the protocol.
+
+Escalation
+----------
+``escalate`` on a step is the same lifecycle move aimed at a DIFFERENT
+workflow: ending the run through that step files a start request for the
+named one (``by: escalate``) instead of letting the slot go quiet. Where
+``recur`` says "this run happens again", an escalation says "this run's work
+continues under other rules" — a worker round that turns out to need a
+mid-worker's stack management, for example.
+
+Three things follow from filing an ordinary start request, and all three are
+the point: the pending request spares the session from the daemon's
+kill-on-end, the finished run's payload names the start the driver must
+perform, and the request carries the beads issue the finishing run named, so
+one board record spans both runs.
+
+The engine checks before it hands over: the target workflow is resolved and
+its ``filter_roles`` held against the driving session while the run is still
+this side of the ending. A target that turns this session away is NOT
+escalated to — the run ends the ordinary way, and the refusal is journaled.
+A check that could not run at all (no mesh identity to hold a role against)
+is recorded as such and the escalation proceeds; "the filter said no" and
+"nothing could ask the filter" are different answers and the journal keeps
+them apart.
 
 Cadence
 -------
@@ -639,6 +666,36 @@ class Checklist:
 
 
 @dataclass(frozen=True)
+class Escalate:
+    """A step's declaration that ending HERE hands the slot to another run.
+
+    A run that finishes normally goes quiet and its session's slot is
+    returned (the daemon's kill-on-end). ``escalate`` is how a workflow says
+    that one particular ending is not the end of the work: leaving through
+    this step files a start request for :attr:`workflow`, exactly the record
+    a human's ``claunch cflow request`` would leave, and the pending request
+    both keeps the driving session alive and tells it what to start next.
+
+    The mechanism is not new — the request file, the kill-on-end condition
+    that spares a run with a pending start, and the payload note that names
+    it were all already there. What was missing was a way for a workflow to
+    declare it, so the hand-off had to be typed by a human between two runs.
+
+    ``context`` is what the next run is told it is for. The request also
+    carries the finishing run's own context and the beads issue named in it,
+    so the two runs stay findable from one board record.
+    """
+
+    #: The workflow to start next: a name, or a path, resolved the same way
+    #: ``claunch cflow start`` resolves one — the layers are searched when the
+    #: request is fulfilled, not here.
+    workflow: str
+    #: What the escalated run is for, in the author's words. Optional: with
+    #: none, the request carries the finishing run's context alone.
+    context: Optional[str] = None
+
+
+@dataclass(frozen=True)
 class Select:
     prompt: str
     chooser: str  # "agent" | "user" | "delegate"
@@ -676,6 +733,11 @@ class Step:
     #: reports ``waiting_checklist``. See :class:`Checklist`.
     checklist: Optional[Checklist] = None
     select: Optional[Select] = None
+    #: Ending the run HERE hands the slot to another workflow instead of
+    #: going quiet: the engine files a start request for it. Only meaningful
+    #: on a step that can terminate, which the parser enforces. See
+    #: :class:`Escalate`.
+    escalate: Optional[Escalate] = None
     next: Optional[str] = None  # None = termination (non-select steps)
 
     @property
@@ -1272,6 +1334,7 @@ def _parse_step(step_id: str, raw) -> Step:
     timer = _parse_timer(raw.get("timer"), step_id)
     checklist = _parse_checklist(raw.get("checklist"), step_id)
     select = _parse_select(raw.get("select"), step_id)
+    escalate = _parse_escalate(raw.get("escalate"), step_id)
     if checklist is not None:
         # Every one of these is the same refusal: a checklist step's exit is
         # its items going green, and a second way out is a way past a
@@ -1356,7 +1419,7 @@ def _parse_step(step_id: str, raw) -> Step:
                 f"step {step_id!r}: a select step routes via its options; "
                 f"'next' is not allowed"
             )
-    return Step(
+    step = Step(
         id=step_id,
         title=str(raw["title"]) if raw.get("title") else None,
         instructions=str(instructions) if instructions else None,
@@ -1368,8 +1431,61 @@ def _parse_step(step_id: str, raw) -> Step:
         timer=timer,
         checklist=checklist,
         select=select,
+        escalate=escalate,
         next=_parse_next(raw.get("next"), step_id),
     )
+    if escalate is not None and None not in step.successors():
+        # An escalation fires when the run ENDS here, so a step that cannot
+        # end is a step whose declaration can never be read. Refused rather
+        # than warned: the author wrote a hand-off, and a hand-off that never
+        # happens looks exactly like one that did until somebody checks the
+        # board.
+        raise WorkflowError(
+            f"step {step_id!r}: 'escalate' hands the slot over when the run "
+            f"ENDS here, and this step never terminates (every edge out of "
+            f"it names another step) — put the escalation on the step that "
+            f"ends the run, or give this one a terminating edge"
+        )
+    return step
+
+
+def _parse_escalate(raw, step_id: str) -> Optional["Escalate"]:
+    """``escalate: <workflow>`` or ``escalate: {workflow: ..., context: ...}``.
+
+    The workflow reference is NOT resolved here: this parser runs with no
+    layer search in reach, and the file that will be started is the one on
+    disk when the request is fulfilled, not the one that exists now.
+    """
+    if raw is None or raw is False:
+        return None
+    if isinstance(raw, str):
+        raw = {"workflow": raw}
+    if not isinstance(raw, dict):
+        raise WorkflowError(
+            f"step {step_id!r}: 'escalate' must be a workflow name, or a "
+            f"mapping like {{workflow: improv-mid, context: '...'}}, got "
+            f"{raw!r}"
+        )
+    unknown = sorted(set(raw) - {"workflow", "context"})
+    if unknown:
+        raise WorkflowError(
+            f"step {step_id!r}: 'escalate' has unknown key(s): "
+            f"{', '.join(unknown)} (allowed: workflow, context)"
+        )
+    workflow = str(raw.get("workflow") or "").strip()
+    if not workflow:
+        raise WorkflowError(
+            f"step {step_id!r}: 'escalate' needs a 'workflow' — which run "
+            f"takes the slot over when this one ends"
+        )
+    context = raw.get("context")
+    if context is not None and not isinstance(context, str):
+        raise WorkflowError(
+            f"step {step_id!r}: 'escalate.context' must be a string — what "
+            f"the escalated run is for"
+        )
+    context = context.strip() if context else None
+    return Escalate(workflow=workflow, context=context or None)
 
 
 def _parse_candidate(raw, where: str) -> Candidate:
