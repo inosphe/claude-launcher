@@ -315,6 +315,75 @@ class SessionReminderService:
     def timers(self, now: Optional[float] = None):
         return self.cflow.timers(now)
 
+    def session_paused(self, name: str) -> bool:
+        """Whether a person paused repeating reminders for ``name``."""
+        try:
+            session = self.manager.get(name)
+        except Exception:  # noqa: BLE001 - an unknown session has no control
+            return False
+        if getattr(session, "exited", False):
+            return False
+        reader = getattr(session, "reminders_paused", None)
+        if callable(reader):
+            return bool(reader())
+        return bool(getattr(getattr(session, "sdef", None), "reminder_paused", False))
+
+    def _rearm_session(self, name: str, now: Optional[float] = None) -> List[str]:
+        """Re-arm every repeating source currently held for one session."""
+        stamp = time.monotonic() if now is None else now
+        sources: List[str] = []
+        for (cwd, scope), entry in list(self._seen.items()):
+            if scope != name or self.cflow._session_for(cwd, scope) is None:
+                continue
+            entry["at"] = stamp
+            entry["held_at"] = None
+            if "cflow" not in sources:
+                sources.append("cflow")
+        role = self._roles.get(name)
+        if role is not None:
+            role["at"] = stamp
+            role["held_at"] = None
+            sources.append("role")
+        return sources
+
+    def set_paused(
+        self, name: str, paused: bool, *, now: Optional[float] = None
+    ) -> bool:
+        """Persist a session-level pause and start both clocks from now."""
+        session = self.manager.get(name)
+        if getattr(session, "exited", False):
+            raise ValueError(f"session {name!r} has exited")
+        setter = getattr(session, "set_reminder_pause", None)
+        if not callable(setter):
+            raise ValueError(f"session {name!r} cannot store a reminder pause")
+        value = bool(setter(paused))
+        # Pausing must not accumulate an immediate delivery debt, and resuming
+        # must not release one.  Both transitions begin a fresh interval.
+        self._rearm_session(name, now)
+        persist = getattr(self.manager, "persist", None)
+        if callable(persist):
+            persist()
+        return value
+
+    def skip_session(
+        self, name: str, *, now: Optional[float] = None
+    ) -> List[str]:
+        """Skip the next repeating delivery by re-arming active sources."""
+        try:
+            session = self.manager.get(name)
+        except Exception:  # noqa: BLE001 - reported as no sources by the API
+            return []
+        if getattr(session, "exited", False) or self.session_paused(name):
+            return []
+        sources = self._rearm_session(name, now)
+        if sources:
+            log.info(
+                "session reminder skipped once for %r (%s)",
+                name,
+                ", ".join(sources),
+            )
+        return sources
+
     def _measure(self, cwd: str, awaits: dict, entry: dict, now: float):
         return self.cflow._measure(cwd, awaits, entry, now)
 
@@ -382,6 +451,59 @@ class SessionReminderService:
             for name, entry in list(self._roles.items())
         }
 
+    def status(
+        self, name: str, *, now: Optional[float] = None, cfg: Optional[dict] = None
+    ) -> dict:
+        """Header-facing state for the session-owned part of this service."""
+        at = time.monotonic() if now is None else now
+        try:
+            session = self.manager.get(name)
+        except Exception:  # noqa: BLE001 - an absent session has no source
+            return {"paused": False, "role": None}
+        if getattr(session, "exited", False):
+            return {"paused": False, "role": None}
+
+        paused = self.session_paused(name)
+        roles = role_entries(name, self.manager, self.mesh)
+        if not roles:
+            return {"paused": paused, "role": None}
+        if cfg is None:
+            cfg = self._config()
+        enabled, interval = role_reminder_policy(cfg or {})
+        timer = self._roles.get(name)
+        view = {
+            "running": self.running,
+            "enabled": enabled,
+            "interval": interval,
+            "due_in": None,
+            "fired_ago": None,
+            "state": "",
+        }
+        if timer is not None:
+            fired = timer.get("fired_at")
+            view["fired_ago"] = None if fired is None else max(0.0, at - fired)
+
+        if not self.running:
+            view["state"] = "stopped"
+        elif not enabled:
+            view["state"] = "off"
+        elif paused:
+            view["state"] = "paused"
+        elif timer is None:
+            view["state"] = "arming"
+        else:
+            due = interval - max(0.0, at - timer["at"])
+            view["due_in"] = due
+            if due > 0:
+                view["state"] = "counting"
+            else:
+                try:
+                    busy = session.status() == STATUS_BUSY
+                except Exception:  # noqa: BLE001 - raced with exit
+                    busy = False
+                view["state"] = "due" if busy else "held"
+        return {"paused": paused, "role": view}
+
     async def tick(self, now: float) -> None:
         """One coordinated pass, grouping due sources by session."""
         cflow_due, cfg = await asyncio.gather(
@@ -398,10 +520,12 @@ class SessionReminderService:
         for cwd, scope, block, kind in cflow_due:
             if kind == "signal":
                 await self._deliver(cwd, scope, block, kind)
-            else:
+            elif not self.session_paused(scope):
                 reminders[scope] = (cwd, block)
 
         for name in sorted(set(reminders) | set(roles_due)):
+            if self.session_paused(name):
+                continue
             cflow_item = reminders.get(name)
             if cflow_item is not None:
                 cwd, block = cflow_item

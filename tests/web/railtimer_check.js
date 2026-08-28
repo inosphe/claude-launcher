@@ -63,7 +63,7 @@ const ctx = {};
 new Function(
   "exports", "currentName", "cflowCache",
   [table("RAIL_TIMER_RANK"), table("RAIL_TIMER_GLYPH"),
-   slice("fmtCountdown"), slice("railTimerPick"), slice("railTimerTitle"),
+   slice("fmtCountdown"), slice("timerClockName"), slice("railTimerPick"), slice("railTimerTitle"),
    slice("railTimerLine")].join("\n") + `
 exports.fmtCountdown = fmtCountdown;
 exports.pick = railTimerPick;

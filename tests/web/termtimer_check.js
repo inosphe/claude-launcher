@@ -112,12 +112,14 @@ function cflowAction(path, body) {
 
 const ctx = {};
 new Function(
-  "exports", "$", "el", "location", "cflowAction",
-  "let currentName = null, cflowCache = [];\n" +
+  "exports", "$", "el", "location", "cflowAction", "refreshSessions",
+  "let currentName = null, cflowCache = [], sessionsCache = [];\n" +
   [table("RAIL_TIMER_RANK"), table("RAIL_TIMER_GLYPH"),
-   slice("fmtCountdown"), slice("railTimerPick"), slice("railTimerTitle"),
+   slice("fmtCountdown"), slice("timerClockName"), slice("railTimerPick"),
+   slice("railTimerTitle"),
    slice("railTimerLine"), slice("sessCflowRun"),
-   slice("termTimerRun"), table("TERM_TIMER_HOLD_GLYPH"),
+   slice("termTimerRun"), slice("termSessionReminder"),
+   slice("termTimerSubject"), table("TERM_TIMER_HOLD_GLYPH"),
    slice("renderTermTimer"), slice("termTimerHold"), slice("termTimerTitle"),
    table("TERM_TIMER_SKIPPABLE"), slice("termTimerSkip"),
    slice("termTimerSkipTitle"), slice("paintTermTimerSkip"),
@@ -135,8 +137,13 @@ exports.paint = paintTermTimer;
 exports.hold = termTimerHold;
 exports.read = () => termTimerRead;
 exports.age = (sec) => { termTimerRead.at -= sec * 1000; };
-exports.setWorld = (name, runs) => { currentName = name; cflowCache = runs; };
-`)(ctx, $, el, location, cflowAction);
+exports.setWorld = (name, runs, reminder) => {
+  currentName = name;
+  cflowCache = runs;
+  sessionsCache = name ? [{ name, ...(reminder
+    ? { session_reminder: reminder } : {}) }] : [];
+};
+`)(ctx, $, el, location, cflowAction, () => Promise.resolve());
 
 let failures = 0;
 function check(what, got, want) {
@@ -513,6 +520,60 @@ check("a paused reminder offers no skip", ctx.skip(), null);
 skipBtn.fire("click");
 await settle();
 check("...and pressing it anyway writes nothing", posts.length, 0);
+
+/* ---- Role-only Session reminder ------------------------------------- */
+/* Role owns an independent source and can exist without a cflow run. This
+   is the case the old run-bound header control could not represent. */
+const roleReminder = {
+  paused: false,
+  role: { running: true, enabled: true, interval: 300, due_in: 120,
+          fired_ago: null, state: "counting" },
+};
+posts.length = 0;
+ctx.setWorld("role-only", [], roleReminder);
+ctx.render();
+check("a Role-only session restores the header reminder control",
+      [chip.classList.contains("hidden"), chip.kids.map((k) => k.text)],
+      [false, ["⏸", "role reminder in 2:00"]]);
+check("its switch is the session-level delivery gate",
+      ctx.hold(), { on: true, name: "role-only", session: true });
+check("its active Role timer can be skipped",
+      ctx.skip(), { state: "counting", name: "role-only", session: true,
+                    interval: 300 });
+
+chip.fire("click");
+check("pausing a Role session uses the Session reminder endpoint",
+      posts, [{ path: "/api/sessions/role-only/reminder",
+                body: { paused: true } }]);
+await settle();
+check("the pause is visible immediately and removes the skip",
+      [chip.kids.map((k) => k.text), ctx.skip(),
+       skipBtn.classList.contains("hidden")],
+      [["▶", "session reminders paused"], null, true]);
+check("the tooltip names the two repeating sources and retained signals",
+      [/Role and Cflow/.test(chip.title), /signals and stall pings/.test(chip.title)],
+      [true, true]);
+
+posts.length = 0;
+chip.fire("click");
+check("pressing the paused control resumes the same session",
+      posts, [{ path: "/api/sessions/role-only/reminder",
+                body: { paused: false } }]);
+await settle();
+
+posts.length = 0;
+ctx.setWorld("role-only", [], {
+  paused: false,
+  role: { running: true, enabled: true, interval: 300, due_in: 120,
+          fired_ago: null, state: "counting" },
+});
+ctx.render();
+skipBtn.fire("click");
+check("skipping a Role session uses the Session reminder endpoint",
+      posts, [{ path: "/api/sessions/role-only/reminder/skip", body: {} }]);
+await settle();
+check("the Role countdown restarts at its full interval immediately",
+      chip.kids.map((k) => k.text)[1], "role reminder in 5:00");
 
 /* ---- the skip's hover text ------------------------------------------- */
 /* The one thing a reader cannot get from the icon: what it does NOT do.
