@@ -128,7 +128,15 @@ const response = (body, ok = true, status = 200) => ({
         [buttons["term-kill"].textContent, buttons["term-kill"].disabled,
          errors[0]],
         ["kill", false, ["Could not kill 's1'", "denied"]]);
-  check("refresh follows every completed request", refreshes, 3);
+
+  const offline = ctx.killCurrentSession();
+  replies.shift().reject(new Error("offline"));
+  await offline;
+  check("a network failure also restores the action and reports the reason",
+        [buttons["term-kill"].textContent, buttons["term-kill"].disabled,
+         errors[1]],
+        ["kill", false, ["Could not kill 's1'", "offline"]]);
+  check("refresh follows every completed request", refreshes, 4);
   check("a wind-down response does not select the killed filter", filter, null);
 
   console.log(failures ? `\n${failures} failure(s)` : "all kill state checks passed");

@@ -20,7 +20,10 @@ holds the name, its role and its rooms to a single shrinking line — pinning
 which children are allowed to break the row, and that a tag may be
 abbreviated but never shrunk to a capsule with nothing in it — ``bulk_check`` on the
 rail's bulk bar — which of stop/resume/archive is offered on a given rail,
-and what each claims it would touch — ``sessionfilters_check`` on the
+and what each claims it would touch — ``killstate_check`` on the terminal's
+kill action — immediate request feedback, the wind-down escalation action,
+the final exit wait, and API error recovery kept identical on desktop and
+mobile — ``sessionfilters_check`` on the
 current/running/killed/archived partitions and their retained selection — ``owed_check`` on
 the Unanswered box and the requests its nudge/dismiss buttons send,
 ``panel_check`` on where the session detail docks (the rail beside the
