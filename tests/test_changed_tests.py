@@ -1623,6 +1623,29 @@ def test_the_board_is_not_a_change_this_branch_made(repo):
     assert changed_tests.changed_paths(repo, "master") == ["src/pkg/mesh.py"]
 
 
+def test_the_code_that_handles_the_board_is_not_dropped_with_it(repo):
+    """The first question anyone asks of the rule above, pinned rather than answered.
+
+    What comes off is the data under ``.beads/``. A source file that *handles*
+    the board has a first path component of ``src`` or ``tools``, so it never
+    meets the rule and maps as it always did. Measured on this repository:
+    ``src/claude_launcher/daemon/beads.py`` selects ``test_beads_daemon``,
+    ``test_beads_protocol`` and ``test_reports``; ``tools/sweep.py`` selects
+    eight. A round editing either still gets its gate.
+    """
+    _write(repo, "src/pkg/beads.py", "board = 1\n")
+    _write(repo, "tests/test_beads.py", "from pkg import beads\n")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", "code that handles the board")
+    _write(repo, ".beads/issues.jsonl", '{"id": "someone else"}\n')
+    _write(repo, "src/pkg/beads.py", "board = 2\n")
+
+    paths = changed_tests.changed_paths(repo, "master")
+    assert ".beads/issues.jsonl" not in paths       # the data comes off
+    assert "src/pkg/beads.py" in paths              # the code does not
+    assert "tests/test_beads.py" in changed_tests.select(repo, paths)
+
+
 def test_a_path_no_rule_recognises_is_still_code(repo):
     """Subtraction, not selection -- the direction that fails towards running.
 
