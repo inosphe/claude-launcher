@@ -353,11 +353,22 @@ def marketplace_of(plugin_id: str) -> Optional[str]:
     return parts[1].strip() if len(parts) == 2 and parts[1].strip() else None
 
 
-def set_shared_setting(key: str, value) -> None:
-    """Declare one ``settings.json`` key every profile should carry."""
+def set_shared_setting(key: str, value) -> bool:
+    """Declare one ``settings.json`` key; ``False`` if it already said this.
+
+    Re-declaring the same value writes nothing, the way re-declaring a plugin
+    or a marketplace does. A no-op that still rewrites the config file is not
+    free: the rewrite goes through :func:`atomic.replace`, which is refused
+    outright while another process holds the destination open -- an editor
+    with the file loaded is enough on Windows -- so a command with nothing to
+    do would still fail.
+    """
     current = store.shared_settings()
+    if str(key) in current and current[str(key)] == value:
+        return False
     current[str(key)] = value
     store.set_shared_field("settings", current)
+    return True
 
 
 def unset_shared_setting(key: str) -> bool:

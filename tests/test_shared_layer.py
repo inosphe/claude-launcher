@@ -409,3 +409,32 @@ def test_error_line_quotes_the_end_of_the_output_not_the_progress(home):
     output = 'Installing plugin "thing@repo"...\nError: marketplace "repo" not found'
     assert plugins.error_line(output) == 'Error: marketplace "repo" not found'
     assert plugins.error_line("") == "failed"
+def test_redeclaring_the_same_settings_value_writes_nothing(home, monkeypatch):
+    """A no-op must not rewrite the config file: the rewrite can be refused.
+
+    ``atomic.replace`` cannot replace a file another process holds open, which
+    on Windows an editor with the file loaded is enough to cause. A command
+    that has nothing to do has to stay off that path entirely.
+    """
+    plugins.set_shared_setting("outputStyle", "korean")
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("the store was written for a no-op")
+
+    monkeypatch.setattr(store, "set_shared_field", refuse)
+    assert plugins.set_shared_setting("outputStyle", "korean") is False
+
+
+def test_declaring_a_different_value_still_writes(home):
+    plugins.set_shared_setting("outputStyle", "korean")
+    assert plugins.set_shared_setting("outputStyle", "english") is True
+    assert store.shared_settings() == {"outputStyle": "english"}
+
+
+def test_shared_command_reports_an_unchanged_declaration(home, capsys, monkeypatch):
+    profile.create("a")
+    monkeypatch.setattr(plugins, "_run", FakeClaude())
+    run("shared", "outputStyle=korean")
+    capsys.readouterr()
+    assert run("shared", "outputStyle=korean") == 0
+    assert "was already declared" in capsys.readouterr().out
