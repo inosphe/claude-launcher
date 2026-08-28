@@ -109,6 +109,11 @@ function applyGotoFlash() {}
 function applyRailQuiet() {}
 function applyBriefingCards() {}
 function decorateBriefingRow(li, s) {}
+/* s248's handle pill and header chip are another session's harness subject
+   (sesshandle_check), not this one's — no-op them the way the other
+   out-of-scope lines are. */
+function handleTag(s) { return null; }
+function renderTermHandle() {}
 function terminalOnScreen() { return false; }
 function attach() {}
 function setStatusBadge() {}
