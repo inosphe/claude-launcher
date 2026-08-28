@@ -23,11 +23,19 @@ EXTENSION_FILE = "pi_provider.mjs"
 
 ENV_PROVIDER = "CLAUNCH_PI_PROVIDER"
 ENV_BASE_URL = "CLAUNCH_PI_BASE_URL"
+ENV_API = "CLAUNCH_PI_API"
 ENV_MODELS = "CLAUNCH_PI_MODELS"
 ENV_TOKEN_NAME = "CLAUNCH_PI_TOKEN_ENV"
 ENV_AUTH_HEADER = "CLAUNCH_PI_AUTH_HEADER"
 PROJECTION_ENV = frozenset(
-    {ENV_PROVIDER, ENV_BASE_URL, ENV_MODELS, ENV_TOKEN_NAME, ENV_AUTH_HEADER}
+    {
+        ENV_PROVIDER,
+        ENV_BASE_URL,
+        ENV_API,
+        ENV_MODELS,
+        ENV_TOKEN_NAME,
+        ENV_AUTH_HEADER,
+    }
 )
 
 _BASE_URL_KEY = "ANTHROPIC_BASE_URL"
@@ -52,6 +60,7 @@ class Projection:
     """The non-secret provider values supplied to the packaged extension."""
 
     base_url: str
+    api: str
     models: tuple[str, ...]
     default_model: str
     token_env: str
@@ -85,8 +94,8 @@ def resolve(profile: Profile, harness) -> Optional[Projection]:
         if key in profile_env:
             backend[key] = profile_env[key]
 
-    base_url = str(backend.get(_BASE_URL_KEY) or "").strip()
-    if not base_url:
+    anthropic_base_url = str(backend.get(_BASE_URL_KEY) or "").strip()
+    if not anthropic_base_url:
         raise PiProviderError(
             f"provider {name!r} cannot be used by the Pi adapter: "
             f"{_BASE_URL_KEY} is not configured"
@@ -107,14 +116,18 @@ def resolve(profile: Profile, harness) -> Optional[Projection]:
             f"harness {harness.name!r} has no token_env for the Pi adapter"
         )
     return Projection(
-        base_url=base_url,
+        # The claunch provider vocabulary remains ANTHROPIC_*. Pi uses the
+        # same backend through its OpenAI Chat Completions endpoint because
+        # local Qwen-compatible Anthropic streams may complete without
+        # producing content blocks Pi can render.
+        base_url=_openai_base_url(anthropic_base_url),
+        api="openai-completions",
         models=tuple(models),
         default_model=models[0],
         token_env=harness.token_env,
-        # claunch's non-default Claude providers authenticate through
-        # ANTHROPIC_AUTH_TOKEN. Pi receives the same stored secret through its
-        # declared API-key env and must add the equivalent Bearer header.
-        auth_header=True,
+        # The OpenAI client derives Authorization: Bearer from this API key;
+        # an explicit header would duplicate that native route.
+        auth_header=False,
     )
 
 
@@ -129,6 +142,7 @@ def apply_env(profile: Profile, harness, env: dict) -> None:
         {
             ENV_PROVIDER: PI_PROVIDER_NAME,
             ENV_BASE_URL: projection.base_url,
+            ENV_API: projection.api,
             ENV_MODELS: json.dumps(
                 projection.models, ensure_ascii=False, separators=(",", ":")
             ),
@@ -172,3 +186,9 @@ def _has_explicit_selection(args: Sequence[str]) -> bool:
         if any(arg.startswith(flag + "=") for flag in _SELECTION_FLAGS):
             return True
     return False
+
+
+def _openai_base_url(base_url: str) -> str:
+    """Translate an Anthropic-compatible root into its OpenAI ``/v1`` root."""
+    normalized = base_url.rstrip("/")
+    return normalized if normalized.endswith("/v1") else normalized + "/v1"

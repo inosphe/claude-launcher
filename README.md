@@ -522,9 +522,12 @@ For `PROFILE:pi` with a non-default provider, the packaged adapter registers a
 process-local Pi provider from `ANTHROPIC_BASE_URL` and the configured
 `ANTHROPIC_MODEL`/default-model IDs. It selects `ANTHROPIC_MODEL` first and
 passes the stored profile token through Pi's declared `ANTHROPIC_API_KEY`
-route, with Bearer authentication for the custom endpoint. The registration is
-loaded from a packaged Pi extension for each launch, including managed-session
-restores and `validate`; it does not edit Pi's `models.json`. Explicit Pi
+route. The adapter translates the endpoint to `<ANTHROPIC_BASE_URL>/v1` and
+uses OpenAI Chat Completions with Bearer authentication; the Claude harness
+continues to use the same provider through its Anthropic-compatible endpoint.
+The registration is loaded from a packaged Pi extension for each launch,
+including managed-session restores and `validate`; it does not edit Pi's
+`models.json`. Explicit Pi
 `--provider`, `--model` or `--models` arguments retain model-selection
 precedence. A non-default provider selected for Pi therefore needs both
 `ANTHROPIC_BASE_URL` and at least one Anthropic model ID.
