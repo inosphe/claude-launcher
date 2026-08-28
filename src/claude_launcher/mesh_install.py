@@ -96,7 +96,10 @@ from your session automatically):
   genuinely shared announcements only.
 - **Fan-out with per-peer instructions = ONE batch send**: shared preamble
   as the body plus `--section w1="..."` `--section w2="..."` — each peer is
-  delivered only its own slice. Via MCP, `sections={handle: {text, type}}`;
+  delivered only its own slice. A recipient you give no section still
+  receives the send -- the shared body alone -- so write that body as a
+  message that stands on its own, or address only the members who have a
+  section. Via MCP, `sections={handle: {text, type}}`;
   a section `type` overrides the intent per recipient (fyi for the peer who
   only needs to know, ask for the one who must act).
 - **Thread answers**: `--reply-to <msgid>` (ids appear in delivery blocks

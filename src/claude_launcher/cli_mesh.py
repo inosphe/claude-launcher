@@ -944,7 +944,11 @@ def register(sub) -> None:
     p.add_argument("--section", action="append", metavar="HANDLE=TEXT",
                    help="batch send: per-recipient addendum; the main text "
                         "becomes the shared preamble and each recipient is "
-                        "delivered only its own slice (repeatable)")
+                        "delivered only its own slice (repeatable). A "
+                        "recipient with no --section of its own still "
+                        "receives the send -- the preamble alone -- so make "
+                        "the preamble a message that stands on its own, or "
+                        "leave those handles out of the address")
     p.set_defaults(func=_cmd_send)
 
     p = msub.add_parser(
