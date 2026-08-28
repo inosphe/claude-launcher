@@ -51,10 +51,12 @@ def test_sessiondef_roundtrip():
         args=("--resume",), env={"A": "1"}, restore=False, cols=80, rows=24,
         conversation_id="11111111-2222-3333-4444-555555555555",
         role="worker", resume="", fork_session=True, borrow="lender",
+        reminder_paused=True,
     )
     assert SessionDef.from_dict(sdef.to_dict()) == sdef
     nulled = SessionDef(name="bare", profile="p", null_token=True)
     assert SessionDef.from_dict(nulled.to_dict()) == nulled
+    assert "reminder_paused" not in nulled.to_dict()
 
 
 def test_resume_field_keeps_the_picker_distinct_from_no_resume():

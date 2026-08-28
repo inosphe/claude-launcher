@@ -332,6 +332,9 @@ def build_app(
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
     r.add_post("/api/sessions/{name}/queued/hold", h_session_hold)
+    r.add_get("/api/sessions/{name}/reminder", h_session_reminder)
+    r.add_post("/api/sessions/{name}/reminder", h_session_reminder_set)
+    r.add_post("/api/sessions/{name}/reminder/skip", h_session_reminder_skip)
     r.add_get("/api/sessions/{name}/children", h_session_children)
     r.add_post("/api/sessions/{name}/children", h_session_spawn)
     r.add_post("/api/sessions/{name}/children/{child}/kill", h_session_child_kill)
@@ -2546,6 +2549,15 @@ async def h_peer_deliver(request: web.Request) -> web.Response:
 
 async def h_sessions_list(request: web.Request) -> web.Response:
     manager: SessionManager = request.app["manager"]
+    reminder_service = request.app.get("session_reminder")
+    reminder_cfg = None
+    if reminder_service is not None:
+        try:
+            reminder_cfg = store.daemon_config()
+        except store.StoreError:
+            # The session list remains available; the service view reports
+            # the role source as off until the live config is readable again.
+            reminder_cfg = {}
     # ``attach`` rather than ``info`` — every reader of this list wants to know
     # which session is filling up, and the reading is cached against the
     # transcript's own mtime, so a poll where nothing was said costs one stat.
@@ -2570,6 +2582,10 @@ async def h_sessions_list(request: web.Request) -> web.Response:
         wd = request.app["beads"].winddowns.get(info.get("name") or "")
         if wd:
             info["winddown"] = wd
+        if reminder_service is not None:
+            info["session_reminder"] = reminder_service.status(
+                info.get("name") or "", cfg=reminder_cfg
+            )
         attached.append(info)
     # A config file that cannot be read must not cost the caller the session
     # list: this poll is the rail's lifeline (it carries every row, and the
@@ -3076,6 +3092,59 @@ def _session(request: web.Request):
 
 async def h_session_get(request: web.Request) -> web.Response:
     return web.json_response(_session(request).info())
+
+
+def _session_reminder_service(request: web.Request):
+    service = request.app.get("session_reminder")
+    if service is None:
+        return None, json_error(503, "this daemon runs no session reminder service")
+    return service, None
+
+
+async def h_session_reminder(request: web.Request) -> web.Response:
+    """The attached header's session-level reminder state."""
+    session = _session(request)
+    if session.exited:
+        return json_error(409, f"session {session.sdef.name!r} has exited")
+    service, err = _session_reminder_service(request)
+    if err:
+        return err
+    return web.json_response(service.status(session.sdef.name))
+
+
+async def h_session_reminder_set(request: web.Request) -> web.Response:
+    """Pause or resume repeating Role and Cflow reminders for one session."""
+    session = _session(request)
+    if session.exited:
+        return json_error(409, f"session {session.sdef.name!r} has exited")
+    body = await _json_body(request)
+    if "paused" not in body:
+        return json_error(400, "missing 'paused' boolean")
+    if not isinstance(body["paused"], bool):
+        return json_error(400, "'paused' must be a boolean")
+    service, err = _session_reminder_service(request)
+    if err:
+        return err
+    paused = service.set_paused(session.sdef.name, body["paused"])
+    return web.json_response({**service.status(session.sdef.name), "paused": paused})
+
+
+async def h_session_reminder_skip(request: web.Request) -> web.Response:
+    """Re-arm the current session's active repeating reminder sources."""
+    session = _session(request)
+    if session.exited:
+        return json_error(409, f"session {session.sdef.name!r} has exited")
+    service, err = _session_reminder_service(request)
+    if err:
+        return err
+    sources = service.skip_session(session.sdef.name)
+    return web.json_response(
+        {
+            **service.status(session.sdef.name),
+            "skipped": bool(sources),
+            "sources": sources,
+        }
+    )
 
 
 async def h_session_meta(request: web.Request) -> web.Response:

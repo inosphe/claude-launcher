@@ -152,9 +152,15 @@ class SessionDef:
     #: for the sake of a slot. Read live, right beside the kill, so a flag
     #: set while the end-sequence waits still protects the session.
     keep_alive: bool = False
+    #: A person's standing pause for the session-level reminder service.
+    #: Role and Cflow keep independent source clocks, but neither repeating
+    #: reminder is delivered into this session while this flag is set.
+    #: Persisted with the definition so a daemon restart or respawn does not
+    #: silently undo a pause made from the terminal header.
+    reminder_paused: bool = False
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "name": self.name,
             "harness": self.harness,
             "profile": self.profile,
@@ -176,6 +182,11 @@ class SessionDef:
             "issue": self.issue,
             "keep_alive": self.keep_alive,
         }
+        # Keep old session records stable in the common enabled case.  The
+        # field exists on disk only when it carries information.
+        if self.reminder_paused:
+            out["reminder_paused"] = True
+        return out
 
     @classmethod
     def from_dict(cls, data: dict) -> "SessionDef":
@@ -200,6 +211,7 @@ class SessionDef:
             task=str(data.get("task") or "").strip() or None,
             issue=str(data.get("issue") or "").strip() or None,
             keep_alive=bool(data.get("keep_alive")),
+            reminder_paused=bool(data.get("reminder_paused")),
         )
 
 

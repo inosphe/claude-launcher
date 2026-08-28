@@ -729,9 +729,11 @@ async function refreshSessions() {
   // knew; the header beside them is repainted from the same value here.
   renderTermHandle();
   // The rows and the runs arrive on separate polls; whichever lands last
-  // paints the cflow badges over the rows that exist now.
+  // paints the cflow badges over the rows that exist now. The session poll
+  // also carries the independent Role reminder and the session-level pause.
   applyCflowBadges();
   applyRailQuiet();
+  if (typeof renderTermTimer === "function") renderTermTimer();
   applyBriefingCards();
   // A rebuild throws away the class the goto press wrote onto its row; this
   // puts it back, so the mark outlives the poll that lands mid-scroll.
@@ -1064,7 +1066,7 @@ function fmtCountdown(sec) {
    nothing happening". */
 const RAIL_TIMER_RANK = {
   due: 0, counting: 1, held: 2, waiting: 3, watching: 4,
-  arming: 5, stopped: 6, blocked: 7, off: 8,
+  arming: 5, stopped: 6, blocked: 7, paused: 8, off: 9,
 };
 
 /* The clock a run's strip speaks for, or null when the daemon published no
@@ -1073,7 +1075,7 @@ function railTimerPick(run) {
   const timers = (run && run.timers) || null;
   if (!timers) return null;
   const cands = [];
-  for (const clock of ["reminder", "ping"]) {
+  for (const clock of ["reminder", "role", "ping"]) {
     const c = timers[clock];
     if (c && c.state) cands.push(Object.assign({}, c, { clock }));
   }
@@ -1093,9 +1095,15 @@ function railTimerPick(run) {
 
 const RAIL_TIMER_GLYPH = {
   due: "!", counting: "⏱", held: "⏸", waiting: "⏸",
-  watching: "◎", arming: "⏱", blocked: "⏸", off: "○",
+  watching: "◎", arming: "⏱", blocked: "⏸", paused: "○", off: "○",
   stopped: "⚠",
 };
+
+function timerClockName(clock) {
+  if (clock === "ping") return "stall ping";
+  if (clock === "role") return "role reminder";
+  return "cflow reminder";
+}
 
 /* One clock's line, `elapsed` seconds after its numbers were read.
 
@@ -1105,7 +1113,7 @@ const RAIL_TIMER_GLYPH = {
    into negative numbers would be the one thing worse than saying nothing. */
 function railTimerLine(pick, elapsed = 0) {
   if (!pick) return null;
-  const name = pick.clock === "ping" ? "stall ping" : "cflow reminder";
+  const name = timerClockName(pick.clock);
   let state = pick.state;
   const due = pick.due_in === null || pick.due_in === undefined
     ? null : pick.due_in - (Number(elapsed) || 0);
@@ -1118,6 +1126,7 @@ function railTimerLine(pick, elapsed = 0) {
   else if (state === "watching") text = `watching: ${pick.awaits || "a signal"}`;
   else if (state === "arming") text = `${name} arming`;
   else if (state === "blocked") text = `${name} paused — not this run's move`;
+  else if (state === "paused") text = "session reminders paused";
   else if (state === "off") text = `${name} off`;
   else if (state === "stopped") text = "clock not running";
   else text = `${name} — ${state}`;
@@ -1134,7 +1143,7 @@ function railTimerLine(pick, elapsed = 0) {
    has its answer in the reminder's own line. */
 function railTimerTitle(pick, state) {
   const say = (c, st) => {
-    const bits = [c.clock === "ping" ? "stall ping" : "cflow reminder", st];
+    const bits = [timerClockName(c.clock), st];
     if (!c.running) bits.push("clock not running");
     else if (!c.enabled) bits.push("switched off");
     else if (c.interval) bits.push(`every ${fmtCountdown(c.interval)}`);
@@ -1187,6 +1196,37 @@ function termTimerRun() {
   return run && run.timers ? run : null;
 }
 
+/* The session-level half of the header reading. It arrives on the session
+   poll because Role has no cflow run to attach to. Older daemons omit it;
+   those keep the cflow-only control below. */
+function termSessionReminder() {
+  if (typeof currentName !== "string" || !currentName) return null;
+  const session = (sessionsCache || []).find((s) => s.name === currentName);
+  return (session && session.session_reminder) || null;
+}
+
+function termTimerSubject(run, sessionReminder) {
+  const timers = Object.assign({}, (run && run.timers) || {});
+  if (sessionReminder && sessionReminder.role) {
+    timers.role = Object.assign({}, sessionReminder.role);
+  }
+  // The Cflow API continues to report its source clock for the run page.
+  // The attached header reports the session-level delivery pause that wins
+  // before either repeating source reaches the terminal.
+  if (sessionReminder && sessionReminder.paused && timers.reminder) {
+    timers.reminder = Object.assign({}, timers.reminder, {
+      state: "paused", due_in: null,
+    });
+  }
+  if (!Object.keys(timers).length) return null;
+  return {
+    scope: (run && run.scope) || currentName,
+    cwd: (run && run.cwd) || "",
+    workflow: (run && run.workflow) || "session",
+    timers,
+  };
+}
+
 /* The last reading, stamped with the session it was taken FOR. A terminal
    switch repaints long before the 2s poll comes round, and the previous
    session's countdown left on the new session's header would be the one
@@ -1206,9 +1246,12 @@ let termTimerSkipBusy = false;  // same, for the skip beside it
 
 function renderTermTimer() {
   const run = termTimerRun();
+  const sessionReminder = termSessionReminder();
+  const subject = termTimerSubject(run, sessionReminder);
   termTimerRead = {
-    name: currentName, pick: railTimerPick(run), at: Date.now(),
+    name: currentName, pick: railTimerPick(subject), at: Date.now(),
     remind: (run && run.timers && run.timers.reminder) || null,
+    sessionReminder,
   };
   paintTermTimer();
 }
@@ -1239,7 +1282,18 @@ const TERM_TIMER_HOLD_GLYPH = { on: "⏸", off: "▶" };
    silently did nothing would be worse than one that navigates. */
 function termTimerHold() {
   const read = termTimerRead;
-  if (!read || !read.pick || !read.remind) return null;
+  if (!read || !read.pick) return null;
+  // Role-bearing sessions use the service-level gate. Role and Cflow retain
+  // independent clocks; this switch is at their shared delivery boundary.
+  if (read.sessionReminder && read.sessionReminder.role) {
+    return {
+      on: !read.sessionReminder.paused,
+      name: read.name,
+      session: true,
+    };
+  }
+  // Cflow-only sessions and older daemons retain the original run override.
+  if (!read.remind) return null;
   if (!read.pick.cwd) return null;
   return { on: !!read.remind.enabled, cwd: read.pick.cwd,
            scope: read.pick.scope || "default" };
@@ -1273,7 +1327,24 @@ const TERM_TIMER_SKIPPABLE = { counting: 1, due: 1, held: 1 };
    same reason, as the switch's `remind` above. */
 function termTimerSkip() {
   const read = termTimerRead;
-  if (!read || !read.pick || !read.remind) return null;
+  if (!read || !read.pick) return null;
+  if (read.sessionReminder && read.sessionReminder.role) {
+    if (read.sessionReminder.paused) return null;
+    const sources = [read.sessionReminder.role, read.remind]
+      .filter((source) => source && TERM_TIMER_SKIPPABLE[source.state])
+      .sort((a, b) => (RAIL_TIMER_RANK[a.state] ?? 99) -
+                      (RAIL_TIMER_RANK[b.state] ?? 99));
+    if (!sources.length) return null;
+    const intervals = sources.map((source) => Number(source.interval) || 0)
+      .filter((interval) => interval > 0);
+    return {
+      state: sources[0].state,
+      name: read.name,
+      session: true,
+      interval: intervals.length ? Math.min(...intervals) : null,
+    };
+  }
+  if (!read.remind) return null;
   if (!read.pick.cwd) return null;
   const state = read.remind.state;
   if (!TERM_TIMER_SKIPPABLE[state]) return null;
@@ -1324,6 +1395,15 @@ function paintTermTimer() {
 function termTimerTitle(pick, line, hold) {
   const lines = [line.title];
   if (hold) {
+    if (hold.session) {
+      lines.push(
+        "Click to " + (hold.on ? "PAUSE" : "RESUME") +
+          " this session's repeating Role and Cflow reminders.",
+        "Cflow signals and stall pings remain active. The pause is stored " +
+          "with this session and survives daemon restart and respawn."
+      );
+      return lines.join("\n");
+    }
     lines.push(
       "Click to " + (hold.on
         ? "PAUSE this run's cflow reminder: the daemon stops re-typing the "
@@ -1357,6 +1437,32 @@ async function termTimerClick() {
   if (termTimerBusy) return;
   termTimerBusy = true;
   paintTermTimer();
+  if (hold.session) {
+    await cflowAction(
+      `/api/sessions/${encodeURIComponent(hold.name)}/reminder`,
+      { paused: hold.on }, refreshSessions
+    );
+    const session = (sessionsCache || []).find((s) => s.name === hold.name);
+    const state = session && session.session_reminder;
+    if (state) {
+      state.paused = hold.on;
+      if (state.role) {
+        state.role = Object.assign({}, state.role, {
+          state: hold.on ? "paused" : "arming", due_in: null,
+        });
+      }
+    }
+    const run = termTimerRun();
+    const reminder = run && run.timers && run.timers.reminder;
+    if (!hold.on && reminder && reminder.interval) {
+      run.timers.reminder = Object.assign({}, reminder, {
+        state: "counting", due_in: reminder.interval,
+      });
+    }
+    termTimerBusy = false;
+    renderTermTimer();
+    return;
+  }
   // `enabled` alone: the override merges, so a run that had an interval set
   // keeps it, and nothing here has to know the floor (cflow_engine.set_reminder).
   await cflowAction("/api/cflow/reminder", {
@@ -1410,14 +1516,20 @@ function termTimerSkipTitle(skip) {
       ? "SKIP the reminder now waiting: it is due and is retried every "
         + "poll, so it lands the moment this session is working again. "
         + "Press to let it go instead."
-      : "SKIP this one cflow reminder: the daemon does not re-type the step "
-        + "into this session now.",
+      : skip.session
+        ? "SKIP this Session reminder: active Role and Cflow source timers "
+          + "start a fresh interval now."
+        : "SKIP this one cflow reminder: the daemon does not re-type the step "
+          + "into this session now.",
     "The clock stays on" + (skip.interval
       ? `, and the next one is due in ${fmtCountdown(skip.interval)}.`
       : ".")
-      + " Nothing is stored: neither this run's setting nor the machine "
-      + "defaults change — that is the ⏸ beside it, and it is a pause you "
-      + "have to remember to undo.",
+      + (skip.session
+        ? " No source setting changes. The ⏸ control stores a pause on this "
+          + "session until it is resumed."
+        : " Nothing is stored: neither this run's setting nor the machine "
+          + "defaults change — that is the ⏸ beside it, and it is a pause "
+          + "you have to remember to undo."),
   ];
   return lines.join("\n");
 }
@@ -1431,25 +1543,45 @@ async function termTimerSkipClick() {
   // send it. `skipped: false` comes back when the daemon was keeping no
   // timer for the run — not an error, and the next poll says so in the
   // clock's own words, so it is left to the poll rather than alerted.
-  await cflowAction("/api/cflow/reminder/skip", {
-    cwd: skip.cwd, scope: skip.scope,
-  });
+  await cflowAction(
+    skip.session
+      ? `/api/sessions/${encodeURIComponent(skip.name)}/reminder/skip`
+      : "/api/cflow/reminder/skip",
+    skip.session ? {} : { cwd: skip.cwd, scope: skip.scope },
+    skip.session ? refreshSessions : undefined
+  );
   termTimerSkipBusy = false;
   // Same reason the switch does this: the poll is up to 2s away, and a
   // countdown that goes on counting down for two seconds after a skip reads
   // as a skip that did nothing. Re-armed locally exactly as the daemon just
   // re-armed it — a full interval from now.
   const read = termTimerRead;
-  if (read && read.remind && skip.interval) {
+  if (skip.session && read && read.sessionReminder && read.sessionReminder.role) {
+    const role = read.sessionReminder.role;
+    if (role.interval) {
+      read.sessionReminder.role = Object.assign({}, role, {
+        state: "counting", due_in: role.interval,
+      });
+      if (read.pick && read.pick.clock === "role") {
+        read.pick = Object.assign({}, read.pick, {
+          state: "counting", due_in: role.interval,
+        });
+        read.at = Date.now();
+      }
+    }
+  }
+  const cflowInterval = skip.session && read && read.remind
+    ? read.remind.interval : skip.interval;
+  if (read && read.remind && cflowInterval) {
     read.remind = Object.assign({}, read.remind, {
-      state: "counting", due_in: skip.interval,
+      state: "counting", due_in: cflowInterval,
     });
     // Only when the line is speaking for the reminder. When the ping is the
     // loudest clock the chip is telling the ping's story, and restamping the
     // reading would rewind the ping's countdown along with it.
     if (read.pick && read.pick.clock === "reminder") {
       read.pick = Object.assign({}, read.pick, {
-        state: "counting", due_in: skip.interval,
+        state: "counting", due_in: cflowInterval,
       });
       read.at = Date.now();
     }

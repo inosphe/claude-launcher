@@ -10,11 +10,12 @@ override in its own state — and both layers are exercised here.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import time
 
 import pytest
 
-from claude_launcher import store
+from claude_launcher import profile, store
 from claude_launcher.cflow import engine as cflow_engine
 from claude_launcher.cflow.engine import CflowError
 from claude_launcher.daemon import cflow_clock, mesh_roles, rebrief, session_reminder
@@ -62,6 +63,13 @@ class _FakeSession:
         self.delivered.append(text)
         return True
 
+    def reminders_paused(self) -> bool:
+        return self.sdef.reminder_paused
+
+    def set_reminder_pause(self, paused: bool) -> bool:
+        self.sdef = dataclasses.replace(self.sdef, reminder_paused=bool(paused))
+        return self.sdef.reminder_paused
+
 
 class _FakeManager:
     def __init__(self, sessions: dict) -> None:
@@ -74,6 +82,9 @@ class _FakeManager:
 
     def list(self):
         return list(self._sessions.values())
+
+    def persist(self):
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -540,6 +551,67 @@ def test_the_skip_door_re_arms_the_clock_and_writes_nothing(proj):
             assert resp.status == 400
         finally:
             await client.close()
+
+    asyncio.run(scenario())
+
+
+def test_session_reminder_header_doors_pause_resume_and_skip_both_sources(proj):
+    mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+    cwd = str(proj)
+    profile.create("work")
+
+    async def scenario():
+        from aiohttp.test_utils import TestClient, TestServer
+
+        session = mgr.stage(SessionDef(name="w1", profile="work", cwd=cwd))
+        mm = MeshManager(mgr)
+        mm.create("m")
+        await mm.join("m", "w1", handle="w1", role="worker")
+        cflow_engine.start("linear", cwd=cwd, scope="w1")
+        service = session_reminder.SessionReminderService(mgr, mm)
+        service.start()
+        service.scan(1000.0)
+        service.scan_roles(
+            1000.0, {"role_reminder": True, "role_reminder_interval": 600.0}
+        )
+
+        app = build_app(mgr, "sekrit", started_at=time.monotonic(), mesh=mm)
+        app["session_reminder"] = service
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        try:
+            resp = await client.post(
+                "/api/sessions/w1/reminder", headers=BEARER, json={"paused": True}
+            )
+            body = await resp.json()
+            assert resp.status == 200, body
+            assert body["paused"] is True
+            assert body["role"]["state"] == "paused"
+            assert session.sdef.reminder_paused is True
+
+            listed = await (await client.get("/api/sessions", headers=BEARER)).json()
+            row = next(s for s in listed["sessions"] if s["name"] == "w1")
+            assert row["session_reminder"]["paused"] is True
+
+            resp = await client.post(
+                "/api/sessions/w1/reminder/skip", headers=BEARER, json={}
+            )
+            assert (await resp.json())["skipped"] is False
+
+            resp = await client.post(
+                "/api/sessions/w1/reminder", headers=BEARER, json={"paused": False}
+            )
+            assert (await resp.json())["paused"] is False
+            resp = await client.post(
+                "/api/sessions/w1/reminder/skip", headers=BEARER, json={}
+            )
+            body = await resp.json()
+            assert body["skipped"] is True
+            assert body["sources"] == ["cflow", "role"]
+        finally:
+            await client.close()
+            await service.shutdown()
+            mgr.discard("w1")
 
     asyncio.run(scenario())
 
@@ -1072,6 +1144,79 @@ def test_due_role_and_cflow_sources_share_one_delivery(proj):
     assert sess.delivered[0].count("# claunch session: reminder") == 1
     assert "## Role" in sess.delivered[0]
     assert "## Cflow" in sess.delivered[0]
+
+
+def test_session_pause_holds_both_sources_and_resume_starts_fresh(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    mgr = _KinManager({"w1": sess})
+    mesh_mgr = _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    service = session_reminder.SessionReminderService(mgr, mesh_mgr)
+
+    asyncio.run(service.tick(1000.0))
+    assert service.set_paused("w1", True, now=1001.0) is True
+    asyncio.run(service.tick(1602.0))
+    assert sess.delivered == []
+
+    assert service.set_paused("w1", False, now=1602.0) is False
+    asyncio.run(service.tick(2201.0))
+    assert sess.delivered == []
+    asyncio.run(service.tick(2203.0))
+    assert len(sess.delivered) == 1
+    assert "## Role" in sess.delivered[0]
+    assert "## Cflow" in sess.delivered[0]
+
+
+def test_session_skip_rearms_active_role_and_cflow_sources(proj):
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _FakeSession("w1", cwd)
+    mgr = _KinManager({"w1": sess})
+    mesh_mgr = _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    service = session_reminder.SessionReminderService(mgr, mesh_mgr)
+
+    asyncio.run(service.tick(1000.0))
+    assert service.skip_session("w1", now=1300.0) == ["cflow", "role"]
+    asyncio.run(service.tick(1601.0))
+    assert sess.delivered == []
+    asyncio.run(service.tick(1901.0))
+    assert len(sess.delivered) == 1
+
+
+def test_role_timer_status_reports_session_pause_without_a_cflow_run(proj):
+    class _Running:
+        @staticmethod
+        def done():
+            return False
+
+    sess = _FakeSession("w1", str(proj))
+    mgr = _KinManager({"w1": sess})
+    service = session_reminder.SessionReminderService(
+        mgr, _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    )
+    service._task = _Running()
+    service.scan_roles(
+        1000.0, {"role_reminder": True, "role_reminder_interval": 600.0}
+    )
+
+    status = service.status(
+        "w1",
+        now=1120.0,
+        cfg={"role_reminder": True, "role_reminder_interval": 600.0},
+    )
+    assert status["paused"] is False
+    assert status["role"]["state"] == "counting"
+    assert status["role"]["due_in"] == 480.0
+
+    service.set_paused("w1", True, now=1120.0)
+    status = service.status(
+        "w1",
+        now=1120.0,
+        cfg={"role_reminder": True, "role_reminder_interval": 600.0},
+    )
+    assert status["paused"] is True
+    assert status["role"]["state"] == "paused"
 
 
 def test_cflow_progress_does_not_rearm_the_role_source(proj):

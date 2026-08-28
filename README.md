@@ -2632,6 +2632,9 @@ REST endpoints (JSON, `Bearer` or cookie auth; `/api/health` is open):
 | PUT    | `/api/cflow/reminder`          | `{enabled?, interval?}` — set those defaults; the clock re-reads them every tick, so this applies without a restart |
 | POST   | `/api/cflow/reminder`          | `{cwd, scope, enabled?, interval?}` or `{cwd, scope, clear: true}` — one run's override, stored (and archived) with the run |
 | POST   | `/api/cflow/reminder/skip`     | `{cwd, scope}` — let ONE of that run's reminders go by: re-arms the clock's timer (and drops one held for a stopped session) without writing an override. Answers `{skipped}`; `false` = the clock was keeping no timer there |
+| GET    | `/api/sessions/{name}/reminder` | the session-level pause and Role-source timer shown in the attached terminal header |
+| POST   | `/api/sessions/{name}/reminder` | `{paused: bool}` — pause/resume this session's repeating Role and Cflow reminder deliveries; persisted with the session |
+| POST   | `/api/sessions/{name}/reminder/skip` | re-arm this session's active Role and Cflow reminder sources for one interval without changing their settings |
 
 **Session reminders.** One service coordinates independent sources per
 session. The Role source is keyed by `(mesh, role, stance id)` and remains
@@ -2652,9 +2655,12 @@ or suspended session is held until it is working again. Defaults:
 `claunch daemon config cflow_reminder true|false` /
 `cflow_reminder_interval 600` — these two keys are read live, no restart —
 with a per-run override on the run's web page (or the POST above). Role uses
-`role_reminder true|false` / `role_reminder_interval 600`. A session's header
-verb **⏭** skips one Cflow-source reminder by re-arming that source; the Role
-source keeps its independent deadline.
+`role_reminder true|false` / `role_reminder_interval 600`. On a role-bearing
+session, the terminal header's pause/resume control gates both repeating
+sources at their shared delivery boundary, and **⏭** re-arms both active
+source timers for one interval. Cflow signals and stall pings remain active.
+The pause survives daemon restart and respawn. A Cflow-only session retains
+the original per-run Cflow pause and skip controls.
 
 **Resuming what a restart stopped.** A daemon restart brings restorable
 sessions back (`--resume` of the pinned conversation), but a restored session

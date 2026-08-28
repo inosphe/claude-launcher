@@ -970,6 +970,7 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 .timer-chip.due { color: #d29922; border-color: #4d3800; }
 .timer-chip.held { color: #a371f7; border-color: #3c2e5c; }
 .timer-chip.off { color: #6e7681; }
+.timer-chip.paused { color: #6e7681; border-color: #30363d; }
 .timer-chip.stopped { color: #ff7b72; border-color: #8b2e2e; }
 /* Switched off BY A PERSON, at this chip. Distinct from `.off` — which the
    line's own state sets, and which the machine defaults can cause without

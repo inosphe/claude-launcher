@@ -904,6 +904,20 @@ class Session:
         self._delivery_hold = bool(held)
         return self._delivery_hold
 
+    def reminders_paused(self) -> bool:
+        """Whether repeating Session reminders are paused for this session."""
+        return bool(self.sdef.reminder_paused)
+
+    def set_reminder_pause(self, paused: bool) -> bool:
+        """Pause or resume repeating Role and Cflow reminders.
+
+        The service owns source clocks and re-arms them when this changes.
+        The session owns the durable choice because it must survive process
+        replacement and daemon restart with the rest of the definition.
+        """
+        self.sdef = dataclasses.replace(self.sdef, reminder_paused=bool(paused))
+        return self.sdef.reminder_paused
+
     def keyboard_busy(
         self, guard: Optional[float] = None, *, terminal_only: bool = False
     ) -> bool:
@@ -1417,6 +1431,12 @@ class DeadSession:
 
     def set_delivery_hold(self, held: bool) -> bool:
         return False  # and no way to hold it: the answer is always "open"
+
+    def reminders_paused(self) -> bool:
+        return False  # no terminal remains for a reminder to reach
+
+    def set_reminder_pause(self, paused: bool) -> bool:
+        return False
 
     def capture(self, *, history: bool = False) -> List[str]:
         return self.screen.render_history() if history else self.screen.render_screen()
