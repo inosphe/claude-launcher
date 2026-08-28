@@ -12285,6 +12285,93 @@ async function postSpawn(parent, body) {
    (`report`, `parentSess`, `parentMesh`, `git`, `stamp`) and never touches
    the document. */
 
+/* The daemon publishes qualified PROFILE:HARNESS execution selectors. The
+   modal presents their two axes separately, while retaining those selectors
+   as the policy-filtered source of truth and recombining the picked pair for
+   the unchanged spawn API. */
+function normalizeSpawnProfileOptions(raws) {
+  const out = [];
+  for (const raw of raws || []) {
+    const item = raw && typeof raw === "object" ? raw : { value: raw };
+    const value = String(item.value || item.name || "").trim();
+    const parts = value.split(":", 2);
+    const profile = String(item.profile || parts[0] || "").trim();
+    const harness = String(item.harness || parts[1] || "").trim();
+    if (!profile) continue;
+    out.push({
+      value: value || (harness ? `${profile}:${harness}` : profile),
+      profile,
+      harness,
+      // A daemon old enough to publish bare profile names only still has a
+      // default harness; the empty harness option below preserves that bare
+      // request and lets the daemon resolve it as before.
+      default: item.default === undefined ? !harness : !!item.default,
+      harness_available: item.harness_available,
+    });
+  }
+  return out;
+}
+
+function spawnProfileSelector(ui) {
+  const picked = String((ui.profile && ui.profile.value) || "").trim();
+  // Compatibility for rule tests and clients built before the split: their
+  // one profile control still holds the already-qualified selector.
+  if (!ui.harness) {
+    return picked || String((ui.parentSess || {}).profile || "").trim();
+  }
+  const profile = picked || baseProfileName((ui.parentSess || {}).profile);
+  const harness = String(ui.harness.value || "").trim() ||
+    (picked ? "" : String((ui.parentSess || {}).harness || "").trim());
+  if (!profile) return "";
+  return harness ? `${profile}:${harness}` : profile;
+}
+
+function spawnProfileOverride(ui) {
+  if (!ui.harness) return (ui.profile && ui.profile.value) || "";
+  if (!ui.profile.value && !ui.harness.value) return "";
+  return spawnProfileSelector(ui);
+}
+
+function refillSpawnHarnesses(ui, want) {
+  if (!ui.harness) return;
+  const inherited = !ui.profile.value;
+  const profile = ui.profile.value || baseProfileName(ui.parentSess.profile);
+  const options = (ui._profileOptions || []).filter(
+    (item) => item.profile === profile
+  );
+  const seen = new Set();
+  const pairs = [];
+  for (const item of options) {
+    if (inherited && !item.harness) continue;
+    if (seen.has(item.harness)) continue;
+    seen.add(item.harness);
+    pairs.push([
+      item.harness, item.harness || "(profile default)",
+      item.harness_available === false,
+    ]);
+  }
+
+  let chosen = "";
+  if (want) {
+    // A remembered qualified selector is preserved even when it is no longer
+    // offered, so fillSpawnSelect can expose the stale value and the daemon
+    // can refuse it explicitly instead of silently changing the request.
+    chosen = want;
+  } else if (!inherited) {
+    const current = want === undefined ? ui.harness.value : "";
+    const currentAllowed = options.some((item) => item.harness === current);
+    const fallback = options.find((item) => item.default) || options[0];
+    chosen = currentAllowed ? current : (fallback ? fallback.harness : "");
+  }
+  fillSpawnSelect(
+    ui.harness,
+    pairs,
+    inherited ? "(inherit the parent's harness)" :
+      (pairs.length ? null : "(no allowed harness)"),
+    chosen
+  );
+}
+
 /* What the modal remembers between spawns — the CLI wizard's recall_fields,
    minus attach (the web has no terminal to take over). BASE-scoped like the
    auth token: daemons behind one relay share this localStorage. */
@@ -12435,15 +12522,19 @@ function syncSpawnGates(ui) {
   if (!overCap) ui.over.checked = false;
   if (ui.capGate) ui.capGate.hidden = !(overCap || ui.capped);
 
-  const pickedProfile = ui.profile.value || "";
+  const pickedProfile = spawnProfileSelector(ui);
   const details = ui.profileDetails || {};
   const pickedDetail = pickedProfile
     ? details[pickedProfile] || details[baseProfileName(pickedProfile)]
     : null;
-  const childHarness = pickedDetail
-    ? pickedDetail.harness : (ui.parentSess || {}).harness || "";
+  const childHarness = String((ui.harness && ui.harness.value) || "") ||
+    (pickedDetail ? pickedDetail.harness : (ui.parentSess || {}).harness || "");
   lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
     "the child runs under its parent's profile (spawn.allow_profile)");
+  if (ui.harness) {
+    lock(ui.harness, ui.harnessNote, may.includes("profile") ? "" :
+      "the child runs under its parent's harness (spawn.allow_profile)");
+  }
 
   // Null is Claude-only. Borrow follows the selected harness's declared auth
   // capability: Claude borrows token+provider, API-key harnesses borrow only
@@ -12610,7 +12701,9 @@ function spawnPayload(ui) {
   // that does something now — it asks for the refusal the cap no longer
   // gives by default — so it cannot ride the falsy-dropping `put` below.
   if (!ui.overRow.hidden) body.over_limit = !!ui.over.checked;
-  if (!ui.profile.disabled) put("profile", ui.profile.value);
+  if (!ui.profile.disabled && (!ui.harness || !ui.harness.disabled)) {
+    put("profile", spawnProfileOverride(ui));
+  }
   if (!ui.borrow.disabled) put("borrow", ui.borrow.value);
   if (!ui.nullTok.disabled && ui.nullTok.checked) body.null_token = true;
   if (!ui.fork.disabled && ui.fork.checked) body.fork = true;
@@ -12955,7 +13048,9 @@ function buildSpawnForm(parentName, seed) {
 
   /* the inherited rows: what a child may be told to differ on */
   ui.profile = document.createElement("select");
-  box.appendChild(spawnRow("Profile : Harness", ui.profile, (ui.profileNote = el("span", "sess-spawn-note"))));
+  box.appendChild(spawnRow("Profile", ui.profile, (ui.profileNote = el("span", "sess-spawn-note"))));
+  ui.harness = document.createElement("select");
+  box.appendChild(spawnRow("Harness", ui.harness, (ui.harnessNote = el("span", "sess-spawn-note"))));
   ui.borrow = document.createElement("select");
   box.appendChild(spawnRow("Borrow", ui.borrow, (ui.borrowNote = el("span", "sess-spawn-note"))));
   ui.nullTok = null; ui.nullNote = null;
@@ -13136,10 +13231,11 @@ function spawnModalClose() {
    verdict still marks it selectable. */
 async function refreshSpawnBorrowOptions(st, force = false) {
   const ui = st.ui;
-  const selector = ui.profile.value || (ui.parentSess || {}).profile || "";
+  const selector = spawnProfileSelector(ui);
   const details = ui.profileDetails || {};
   const detail = details[selector] || details[baseProfileName(selector)];
-  const childHarness = (detail && detail.harness) ||
+  const childHarness = String((ui.harness && ui.harness.value) || "") ||
+    (detail && detail.harness) ||
     (ui.parentSess || {}).harness || "";
   const borrowCap = profileBorrowCapability(detail, childHarness);
   const ownLabel = borrowCap.allowed
@@ -13256,11 +13352,12 @@ async function spawnModalLoad(st) {
   ui.git = gitDoc || { repo: false, worktrees: [] };
   ui._wfs = (wfDoc && wfDoc.workflows) || [];
   const roleNames = ((roles && roles.roles) || []).map((r) => r.name).filter(Boolean);
-  const profileOptions = ui.report.profile_options ||
+  const rawProfileOptions = ui.report.profile_options ||
     (profDoc && profDoc.profile_options) ||
     ((ui.report.profile_selectors) ||
       (profDoc && (profDoc.profile_selectors || profDoc.profiles)) || [])
       .map((value) => ({ value, label: value }));
+  const profileOptions = normalizeSpawnProfileOptions(rawProfileOptions);
   const meshNames = (meshDoc && meshDoc.meshes || []).map((m) => (m && m.name) || "");
   const seed = st.seed || {};
   const re = spawnRecall();
@@ -13269,15 +13366,28 @@ async function spawnModalLoad(st) {
   for (const item of (profDoc && profDoc.profile_details) || []) {
     if (item && item.name) ui.profileDetails[item.name] = item;
   }
-  fillSpawnSelect(ui.profile, profileOptions.map((item) => [
-    item.value, item.label || item.value, item.harness_available === false,
-  ]), "(inherit the parent's profile)",
+  ui._profileOptions = profileOptions;
+  const desiredSelector =
     (seed.profile !== undefined && seed.profile !== null) ? seed.profile :
-      (re.profile || ""));
+      (re.profile || "");
+  const desiredParts = String(desiredSelector || "").split(":", 2);
+  const desiredProfile = desiredParts[0] || "";
+  const desiredHarness = desiredParts[1] || "";
+  const groupedProfiles = new Map();
+  for (const item of profileOptions) {
+    const group = groupedProfiles.get(item.profile) || [];
+    group.push(item);
+    groupedProfiles.set(item.profile, group);
+  }
+  fillSpawnSelect(ui.profile, [...groupedProfiles].map(([profile, options]) => [
+    profile, profile,
+    options.every((item) => item.harness_available === false),
+  ]), "(inherit the parent's profile)", desiredProfile);
+  refillSpawnHarnesses(ui, desiredHarness);
   ui._borrowPreset =
     (seed.borrow !== undefined && seed.borrow !== null) ? seed.borrow :
       (re.borrow || "");
-  const initialSelector = ui.profile.value || (sess.profile || "");
+  const initialSelector = spawnProfileSelector(ui);
   const initialDetail = ui.profileDetails[initialSelector] ||
     ui.profileDetails[baseProfileName(initialSelector)];
   const initialHarness = (initialDetail && initialDetail.harness) ||
@@ -13419,7 +13529,12 @@ async function spawnModalLoad(st) {
   });
 
   // The choices that re-gate their neighbours:
-  ui.profile.addEventListener("change", () => refreshSpawnBorrowOptions(st, true));
+  ui.profile.addEventListener("change", () => {
+    refillSpawnHarnesses(ui, ui.profile.value ? undefined : "");
+    return refreshSpawnBorrowOptions(st, true);
+  });
+  ui.harness.addEventListener("change", () =>
+    refreshSpawnBorrowOptions(st, true));
   ui.nullTok.addEventListener("change", () => syncSpawnGates(ui));
   ui.wtMode.listen(() => syncSpawnGates(ui));
   ui.wtPick.addEventListener("change", () => syncSpawnGates(ui));

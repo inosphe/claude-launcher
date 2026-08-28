@@ -235,7 +235,8 @@ async function checkSpawnModalBorrowHead() {
     `let spawnModal = null;
 function syncSpawnGates() {}
 function spawnModalClose() {}
-` + slice("baseProfileName") + slice("profileBorrowCapability")
+` + slice("baseProfileName") + slice("spawnProfileSelector")
+    + slice("profileBorrowCapability")
     + slice("profileOwnAuthLabel") + slice("fillValidatedBorrow")
     + slice("readBorrowOptions") + slice("refreshSpawnBorrowOptions") + `
 exports.refresh = refreshSpawnBorrowOptions;

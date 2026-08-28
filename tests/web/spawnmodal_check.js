@@ -164,6 +164,9 @@ new Function(
   stubs
   + sliceStmt("const SPAWN_RECALL_FIELDS =")
   + sliceStmt("const SPAWN_RECALL_KEY =")
+  + slice("normalizeSpawnProfileOptions")
+  + slice("spawnProfileSelector") + slice("spawnProfileOverride")
+  + slice("refillSpawnHarnesses")
   + slice("spawnRecall") + slice("saveSpawnRecall")
   + slice("spawnMeshNow") + slice("spawnWtFragment")
   + slice("spawnAutoWorktree") + slice("spawnAutoWorktreeHint")
@@ -188,6 +191,7 @@ Object.assign(exports, {
   spawnPayload, syncSpawnGates, syncSpawnBeads, spawnRankWorkflows, spawnWorkflowAdmits,
   spawnWorkflowEntry, spawnAutoWorktree, spawnAutoWorktreeHint,
   spawnMeshNow, spawnRadioGroup,
+  normalizeSpawnProfileOptions, spawnProfileSelector, refillSpawnHarnesses,
   spawnRecall, saveSpawnRecall, buildSpawnForm, openSpawnModal, spawnModalClose,
   refillSpawnWorkflows, spawnConnectNow,
   spawnMissingSources, spawnSourceNote,
@@ -246,9 +250,9 @@ function uiStub(over = {}) {
     git: { repo: true, worktrees: [] }, stamp: "20260824-210000",
     name: ctl(), role: ctl(), workflow: ctl(), context: ctl(), contextRow: ctl(),
     mesh: ctl(), handle: ctl(), task: ctl(), args: ctl(),
-    profile: ctl(), borrow: ctl(),
+    profile: ctl(), harness: ctl(), borrow: ctl(),
     nullTok: ctl(), fork: ctl(), over: ctl(), overRow: ctl(),
-    profileNote: ctl(), borrowNote: ctl(),
+    profileNote: ctl(), harnessNote: ctl(), borrowNote: ctl(),
     nullNote: ctl(), forkNote: ctl(), argsNote: ctl(),
     workspace: ctl(), workspaceNote: ctl(),
     wtMode: wtGroup(), worktreeNote: ctl(), wtName: ctl(),
@@ -289,6 +293,22 @@ async function main() {
     ranked.options[ranked.options.length - 1].name === "secret");
   check("ranking marks the refusal in the option detail",
     ranked.options.some((o) => /filter_roles turns 'worker' away/.test(o.detail)), ranked.options);
+
+  /* The form splits qualified selectors without changing the API contract. */
+  const normalized = ctx.normalizeSpawnProfileOptions([
+    { value: "p1:claude", profile: "p1", harness: "claude", default: true },
+    "legacy",
+  ]);
+  check("qualified options retain their two axes",
+    normalized[0].profile === "p1" && normalized[0].harness === "claude",
+    normalized[0]);
+  check("a legacy bare profile remains a daemon-resolved default",
+    normalized[1].profile === "legacy" && normalized[1].harness === "" &&
+      normalized[1].default === true, normalized[1]);
+  check("the split controls recombine to the daemon's selector",
+    ctx.spawnProfileSelector(uiStub({
+      profile: ctl({ value: "p2" }), harness: ctl({ value: "pi" }),
+    })) === "p2:pi");
 
   /* ---- the pair: a child's run comes from its PARENT, not its role ------
      The role still ranks the list; what is preselected is the pair the
@@ -391,6 +411,8 @@ async function main() {
   check("payload sends mesh and handle", body.mesh === "m0" && body.handle === "c7");
   check("payload sends the connect list", body.connect && body.connect.join(",") === "w2", body.connect);
   check("payload splits args", body.args.join(" ") === "--verbose --json", body.args);
+  check("payload recombines Profile and Harness",
+    body.profile === "p1:claude", body.profile);
   check("a named new worktree sends that name", body.worktree === "my-wt", body.worktree);
   check("a hidden over-limit row is not asked",
     body.over_limit === undefined, body);
@@ -772,14 +794,15 @@ async function main() {
   const built = ctx.buildSpawnForm("lead1", { quick: true, task: "fix the tab", name: "w7" });
   const bui = built.ui;
   for (const k of ["name", "role", "workflow", "context", "mesh", "handle", "task",
-                   "profile", "borrow", "args", "workspace", "wtMode",
+                   "profile", "harness", "borrow", "args", "workspace", "wtMode",
                    "wtPick", "wtName", "update", "rebase", "fork", "over",
                    "beads", "issueText", "issueTextRow", "issuePick", "issueRow",
                    "issueHint"]) {
     check(`form builds ${k}`, bui[k] && typeof bui[k] === "object", k);
   }
-  check("the qualified Profile : Harness picker has no duplicate harness control",
-    bui.harness === undefined, bui.harness);
+  check("Profile and Harness are separate controls",
+    bui.profile !== bui.harness, [bui.profile && bui.profile.tag,
+      bui.harness && bui.harness.tag]);
   check("the board row opens on 'new'", bui.beads.value === "new", bui.beads.value);
   check("...with its two detail rows folded until the gates run",
     bui.issueTextRow.hidden === true && bui.issueRow.hidden === true,
@@ -944,26 +967,34 @@ async function main() {
   const meshSel = mSel.find((s) => (s.options || [])
     .some((o) => o.text === "(inherit the parent's mesh)"));
   const profileSel = mSel.find((s) => (s.options || [])
-    .some((o) => o.value === "p1:pi"));
+    .some((o) => o.value === "codex") &&
+      (s.options || []).some((o) => o.value === "p2"));
+  const harnessSel = mSel.find((s) => (s.options || [])
+    .some((o) => o.value === "claude") &&
+      (s.options || []).some((o) => o.value === "pi") && s !== profileSel);
   const borrowSel = mSel.find((s) => (s.options || [])
     .some((o) => o.value === "p2") && (s.options || [])
       .some((o) => o.value === "blocked"));
-  check("profile choices are qualified execution selectors",
-    profileSel && (profileSel.options || []).some((o) => o.value === "p2:pi"));
-  check("profile choices display PROFILE/HARNESS without a duplicate suffix",
-    profileSel && (profileSel.options || []).some((o) =>
-      o.value === "p1:claude" && o.text === "p1/claude"));
-  check("the child picker omits codex:claude",
-    profileSel && (profileSel.options || []).some((o) => o.value === "codex:codex") &&
-      !(profileSel.options || []).some((o) => o.value === "codex:claude"));
+  check("profile choices list each base profile once",
+    profileSel && profileSel.options.map((o) => o.value).join(",") ===
+      ",codex,p1,p2",
+    profileSel && profileSel.options.map((o) => o.value));
+  check("the harness axis starts on inheritance and lists the parent's choices",
+    harnessSel && harnessSel.value === "" &&
+      harnessSel.options.map((o) => o.value).join(",") === ",claude,pi",
+    harnessSel && [harnessSel.value, harnessSel.options.map((o) => o.value)]);
   check("borrow choices remain base profiles sharing the one token",
     borrowSel && (borrowSel.options || []).some((o) => o.value === "p2"));
   check("policy-denied borrow choices are disabled with their verdict",
     borrowSel && (borrowSel.options || []).some((o) =>
       o.value === "blocked" && o.disabled && /policy denied/.test(o.text)));
-  profileSel.value = "codex:codex";
+  profileSel.value = "codex";
   await profileSel.fire("change");
   await settle();
+  check("a profile change rebuilds Harness from its allowed selectors",
+    harnessSel && harnessSel.value === "codex" &&
+      harnessSel.options.map((o) => o.value).join(",") === "codex",
+    harnessSel && [harnessSel.value, harnessSel.options.map((o) => o.value)]);
   check("a Codex child names its profile OAuth login instead of parent auth",
     borrowSel && borrowSel.disabled === true && borrowSel.value === "" &&
       borrowSel.options.length === 1 && borrowSel.options[0].text ===
@@ -973,6 +1004,10 @@ async function main() {
   profileSel.value = "";
   await profileSel.fire("change");
   await settle();
+  check("returning to profile inheritance also restores harness inheritance",
+    harnessSel && harnessSel.value === "" && harnessSel.options[0].text ===
+      "(inherit the parent's harness)",
+    harnessSel && [harnessSel.value, harnessSel.options.map((o) => o.text)]);
   check("the mesh picker opens on inherit", meshSel && meshSel.value === "",
     meshSel && meshSel.value);
   check("...with the parent's own mesh still on offer to name outright",
@@ -1113,12 +1148,19 @@ async function main() {
   await settle();
   const bothSel = nodeSel(modalEls["modal-body"], "select") || [];
   const bothProfile = bothSel.find((x) => (x.options || [])
-    .some((o) => o.value === "p2:pi"));
-  bothProfile.value = "p2:pi";
-  await bothProfile.fire("change");     // -> refreshSpawnBorrowOptions
+    .some((o) => o.value === "p2") && (x.options || [])
+      .some((o) => o.value === "codex"));
+  const bothHarness = bothSel.find((x) => (x.options || [])
+    .some((o) => o.value === "claude") &&
+      (x.options || []).some((o) => o.value === "pi") && x !== bothProfile);
+  bothProfile.value = "p2";
+  await bothProfile.fire("change");
+  await settle();
+  bothHarness.value = "pi";
+  await bothHarness.fire("change");     // -> refreshSpawnBorrowOptions
   await settle();
   const bothBorrow = bothSel.find((x) => (x.options || [])
-    .some((o) => o.value === "p2") && x !== bothProfile);
+    .some((o) => o.value === "p2") && x !== bothProfile && x !== bothHarness);
   check("the validated lender is on offer after the profile change",
     bothBorrow && (bothBorrow.options || []).some((o) => o.value === "p2"),
     bothBorrow && (bothBorrow.options || []).map((o) => o.value));
