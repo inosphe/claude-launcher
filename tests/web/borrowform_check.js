@@ -1,6 +1,7 @@
-/* New-session's Borrow row follows the harness encoded in PROFILE:HARNESS;
-   there is no second Harness row. This is intentionally separate from spawn
-   checks: no parent/policy exists here to explain an accidentally grey row. */
+/* New-session's Borrow row follows the Profile + Harness pair and the two
+   controls recombine to PROFILE:HARNESS for the daemon. This is intentionally
+   separate from spawn checks: no parent/policy exists here to explain an
+   accidentally grey row. */
 const fs = require("fs");
 const path = require("path");
 const src = fs.readFileSync(
@@ -23,7 +24,7 @@ function slice(name) {
 
 const ctl = (over = {}) => Object.assign({ value: "", disabled: false, checked: false }, over);
 const form = {
-  profile: ctl({ value: "work:pi" }), harness: ctl({ value: "pi", disabled: true }),
+  profile: ctl({ value: "work" }), harness: ctl({ value: "pi" }),
   fork: ctl(), role: ctl(), resume: ctl(), null_token: ctl(), borrow: ctl({ value: "ds4" }),
 };
 const details = {
@@ -34,13 +35,16 @@ const details = {
 const ctx = {};
 new Function(
   "exports", "$", "profileDetails",
-  `function spawnParent() { return null; }
+  `let newProfileOptions = [];
+function spawnParent() { return null; }
 function renderRoleStance() {}
 function syncSpawnMode() {}
 function renderRuntimeSummary() {}
 function renderProfileHint() {}
-` + slice("profileHarnessLabel") + slice("profileBorrowCapability") +
-slice("profileHarnessName") +
+` + slice("baseProfileName") + slice("spawnProfileSelector") +
+slice("newProfileUi") + slice("newProfileSelector") +
+slice("newProfileDetail") + slice("newProfileHarnessName") +
+slice("profileHarnessLabel") + slice("profileBorrowCapability") +
 slice("syncForkAvailability") + `
 exports.sync = syncForkAvailability;
 exports.label = profileHarnessLabel;`
@@ -58,14 +62,12 @@ check("Pi can borrow the shared token", form.borrow.disabled === false);
 check("Pi still cannot use Claude --null", form.null_token.disabled === true);
 check("the lender survives the Pi sync", form.borrow.value === "ds4", form.borrow.value);
 
-form.profile.value = "work:kimi";
 form.harness.value = "kimi";
 form.borrow.value = "ds4";
 ctx.sync();
 check("OAuth harness locks Borrow", form.borrow.disabled === true);
 check("and clears a stale lender", form.borrow.value === "");
 
-form.profile.value = "work:claude";
 form.harness.value = "claude";
 form.borrow.value = "ds4";
 form.null_token.checked = true;
@@ -83,24 +85,29 @@ check("a mismatched stored pair remains visible",
    objects. Keep a denied compatibility selector in profile_selectors to
    prove that profile_options is authoritative when the daemon publishes it. */
 async function checkProfilePicker() {
-  const profileSelect = {
-    kids: [], value: "",
+  const makeSelect = () => ({
+    kids: [], value: "", disabled: false,
     set innerHTML(value) { this.kids = []; },
     get innerHTML() { return ""; },
     appendChild(child) { this.kids.push(child); return child; },
     get options() { return this.kids; },
-  };
+  });
+  const profileSelect = makeSelect();
+  const harnessSelect = makeSelect();
+  const pickerForm = { profile: profileSelect, harness: harnessSelect };
   const pickerDoc = {
     createElement: () => ({ value: "", textContent: "", title: "", disabled: false }),
-    querySelector: (selector) => selector.includes("name=profile") ? profileSelect : null,
   };
   const pickerApi = async () => ({
     ok: true, status: 200,
     json: async () => ({
       profile_selectors: ["codex:codex", "codex:claude", "work:claude"],
       profile_options: [
-        { value: "codex:codex", label: "codex/codex", harness: "codex" },
-        { value: "work:claude", label: "work/claude", harness: "claude" },
+        { value: "codex:codex", profile: "codex", harness: "codex",
+          default: true },
+        { value: "work:claude", profile: "work", harness: "claude",
+          default: true },
+        { value: "work:pi", profile: "work", harness: "pi", default: false },
       ],
       profile_details: [
         { name: "codex", harness: "codex" },
@@ -110,20 +117,39 @@ async function checkProfilePicker() {
   });
   const picker = {};
   new Function(
-    "exports", "api", "document", "syncNewBorrowOptions", "syncForkAvailability",
-    `let profileDetails = {};` + slice("refreshProfiles") + `
+    "exports", "api", "document", "form", "syncNewBorrowOptions",
+    "syncForkAvailability",
+    `let profileDetails = {}, newProfileOptions = [], newHarnessFor = null;
+function $(id) { return id === "new-session" ? form : null; }
+function spawnParent() { return null; }
+` + slice("baseProfileName") + slice("normalizeSpawnProfileOptions") +
+slice("spawnProfileSelector") + slice("newProfileUi") +
+slice("newProfileSelector") + slice("refillSpawnHarnesses") +
+slice("refillNewHarnessOptions") + slice("fillSpawnSelect") +
+slice("refreshProfiles") + `
 exports.refresh = refreshProfiles;
+exports.refill = () => refillNewHarnessOptions(form, undefined, true);
+exports.selector = () => newProfileSelector(form);
 exports.details = () => profileDetails;`
   )(
-    picker, pickerApi, pickerDoc, async () => {}, () => {}
+    picker, pickerApi, pickerDoc, pickerForm, async () => {}, () => {}
   );
   await picker.refresh();
-  check("the create picker displays the canonical default once",
-    profileSelect.options.some((o) =>
-      o.value === "codex:codex" && o.textContent === "codex/codex"));
-  check("the create picker omits codex:claude",
-    !profileSelect.options.some((o) => o.value === "codex:claude"),
+  check("the create Profile picker lists each base profile once",
+    profileSelect.options.map((o) => o.value).join(",") === "codex,work",
     profileSelect.options.map((o) => o.value));
+  check("the first profile starts on its policy-filtered default harness",
+    profileSelect.value === "codex" && harnessSelect.value === "codex",
+    [profileSelect.value, harnessSelect.value]);
+  profileSelect.value = "work";
+  picker.refill();
+  check("changing Profile rebuilds its Harness choices",
+    harnessSelect.options.map((o) => o.value).join(",") === "claude,pi" &&
+      harnessSelect.value === "claude",
+    [harnessSelect.value, harnessSelect.options.map((o) => o.value)]);
+  harnessSelect.value = "pi";
+  check("the split controls recombine to the canonical selector",
+    picker.selector() === "work:pi", picker.selector());
 }
 
 async function checkBorrowAuthModes() {
@@ -134,7 +160,9 @@ async function checkBorrowAuthModes() {
     appendChild(child) { this.kids.push(child); return child; },
     get options() { return this.kids; },
   };
-  const authForm = { profile: { value: "work:claude" }, borrow };
+  const authForm = {
+    profile: { value: "work" }, harness: { value: "claude" }, borrow,
+  };
   const authDocument = {
     createElement: () => ({ value: "", textContent: "", title: "", disabled: false }),
   };
@@ -160,15 +188,17 @@ async function checkBorrowAuthModes() {
   const auth = {};
   new Function(
     "exports", "api", "document", "form", "parentNow", "details", "harnesses",
-    `let newBorrowFor = null, newBorrowSeq = 0;
+    `let newBorrowFor = null, newBorrowSeq = 0, newProfileOptions = [];
 let profileDetails = details;
 let harnessDetails = harnesses;
 function $(id) { return id === "new-session" ? form : null; }
 function spawnParent() { return parentNow(); }
 function syncSpawnMode() {}
 function syncForkAvailability() {}
-` + slice("baseProfileName") + slice("profileBorrowCapability")
-    + slice("profileOwnAuthLabel") + slice("profileHarnessName")
+` + slice("baseProfileName") + slice("spawnProfileSelector")
+    + slice("newProfileUi") + slice("newProfileSelector")
+    + slice("newProfileDetail") + slice("newProfileHarnessName")
+    + slice("profileBorrowCapability") + slice("profileOwnAuthLabel")
     + slice("readBorrowOptions")
     + slice("fillValidatedBorrow") + slice("syncNewBorrowOptions") + `
 exports.sync = syncNewBorrowOptions;`
@@ -194,7 +224,8 @@ exports.sync = syncNewBorrowOptions;`
   check("the duplicate lender row is folded into that head answer",
     borrow.options.filter((o) => o.value === "work").length === 1, values);
 
-  authForm.profile.value = "codex:codex";
+  authForm.profile.value = "codex";
+  authForm.harness.value = "codex";
   await auth.sync(true);
   check("an OAuth profile replaces the parent-auth head with its own login",
     borrow.options.length === 1 && borrow.options[0].value === "" &&
