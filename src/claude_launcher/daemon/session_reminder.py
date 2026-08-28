@@ -415,11 +415,13 @@ class SessionReminderService:
             key = role_key(entries)
             entry = self._roles.get(name)
             if entry is None:
+                activity = self._session_activity(session)
                 self._roles[name] = {
                     "key": key,
                     "at": now,
                     "fired_at": None,
                     "held_at": None,
+                    "activity": activity,
                 }
                 continue
             if entry["key"] != key:
@@ -428,11 +430,43 @@ class SessionReminderService:
                 # initial opening already carried that first stance.
                 entry.update({"key": key, "at": now - interval, "held_at": None})
             if now - entry["at"] >= interval:
+                # A role reminder is useful after the session has made
+                # progress, but repeating it while the terminal has stayed
+                # at the same meaningful screen only grows the pending
+                # delivery queue.  Re-arm the timer when there is evidence
+                # that nothing moved since the last successful reminder.
+                # ``None`` means this session does not expose the activity
+                # API (older/fake session implementations), so retain the
+                # compatibility behaviour in that case.
+                activity = self._session_activity(session)
+                if (
+                    entry.get("fired_at") is not None
+                    and activity is not None
+                    and activity == entry.get("activity")
+                ):
+                    entry["at"] = now
+                    entry["held_at"] = None
+                    continue
                 due.append((name, entries))
         for name in list(self._roles):
             if name not in live:
                 del self._roles[name]
         return due
+
+    @staticmethod
+    def _session_activity(session) -> Optional[str]:
+        """Return the session's meaningful-screen activity marker.
+
+        The marker is intentionally optional.  ``Session`` exposes it, while
+        compatibility session objects used by older callers may not.
+        """
+        reader = getattr(session, "last_activity_at", None)
+        if not callable(reader):
+            return None
+        try:
+            return reader()
+        except Exception:  # noqa: BLE001 - activity is decoration only
+            return None
 
     def role_timers(self, now: Optional[float] = None) -> Dict[str, dict]:
         """In-memory role-source timers as ages, for diagnostics and tests."""
@@ -664,4 +698,10 @@ class SessionReminderService:
         stamp = time.monotonic()
         entry["at"] = stamp
         entry["fired_at"] = stamp
+        try:
+            session = self.manager.get(name)
+        except Exception:  # noqa: BLE001 - the session may exit after send
+            session = None
+        if session is not None:
+            entry["activity"] = self._session_activity(session)
         entry["held_at"] = None

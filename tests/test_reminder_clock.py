@@ -71,6 +71,15 @@ class _FakeSession:
         return self.sdef.reminder_paused
 
 
+class _ActivitySession(_FakeSession):
+    def __init__(self, name: str, cwd: str) -> None:
+        super().__init__(name, cwd)
+        self.activity = "first"
+
+    def last_activity_at(self):
+        return self.activity
+
+
 class _FakeManager:
     def __init__(self, sessions: dict) -> None:
         self._sessions = sessions
@@ -1126,6 +1135,28 @@ def test_role_source_reminds_a_session_with_no_cflow_run(proj):
     assert "## Role" in block
     assert "role: worker on m" in block
     assert "## Cflow" not in block
+
+
+def test_role_source_skips_repeats_when_session_has_not_moved(proj):
+    sess = _ActivitySession("w1", str(proj))
+    mgr = _KinManager({"w1": sess})
+    mesh_mgr = _FakeMeshMgr(_FakeMesh("m", 0), role="worker")
+    service = session_reminder.SessionReminderService(mgr, mesh_mgr)
+    cfg = {"role_reminder": True, "role_reminder_interval": 600.0}
+
+    base = time.monotonic()
+    asyncio.run(service.tick(base))
+    asyncio.run(service.tick(base + 601.0))
+    assert len(sess.delivered) == 1
+
+    # The timer reaches its next interval, but the terminal's meaningful
+    # screen marker is unchanged, so no second pending reminder is produced.
+    asyncio.run(service.tick(base + 1202.0))
+    assert len(sess.delivered) == 1
+
+    sess.activity = "second"
+    asyncio.run(service.tick(base + 1803.0))
+    assert len(sess.delivered) == 2
 
 
 def test_due_role_and_cflow_sources_share_one_delivery(proj):
