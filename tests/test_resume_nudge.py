@@ -95,6 +95,9 @@ class _Recorded:
         self.last_visited_at = None
         self.last_input_at = None
         self.exited_at = None
+        # ...and whether the record has been archived, which persist()
+        # writes from the same loop.
+        self.archived_at = None
         self.held = False
 
     def status(self, threshold=None) -> str:
