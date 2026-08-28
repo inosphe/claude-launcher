@@ -80,3 +80,34 @@ def test_a_brief_round_runs_the_machinery(seeded):
     assert wait["then"] == "poll"
     assert wait["max"] == 22
     assert wait["after"] == "end"
+
+
+def _instructions_of(wf: "model.Workflow", step: str) -> str:
+    """Instructions folded to one line — block scalars wrap mid-sentence."""
+    return " ".join(wf.steps[step].instructions.split())
+
+
+def test_brief_poll_only_reads_channels_and_never_sends():
+    """The briefing secretary is a watch, not a correspondent: the poll
+    step reads mesh history/owed and the board, and reports to the user.
+    No step of the workflow may instruct sending to another session —
+    without the user's explicit request it is a silent monitor only."""
+    wf = _bundled(BRIEF)
+    poll = _instructions_of(wf, "poll")
+    for read in ("mesh history", "mesh owed", "beads comments"):
+        assert read in poll
+    assert "사용자에게" in poll  # reports to the user, not to other sessions
+    whole = " ".join(
+        [wf.description or ""] + [_instructions_of(wf, s) for s in wf.steps]
+    )
+    assert "mesh send" not in whole
+
+
+def test_brief_description_declares_the_watch_only_contract():
+    """claunch-hrql: the pin that guards the property itself. brief may
+    only watch — the description says so in its own words, so a future
+    change that adds sending has to strike the declaration first."""
+    wf = _bundled(BRIEF)
+    desc = " ".join(wf.description.split())
+    assert "메시지를 보내지 않는다" in desc
+    assert "다른 세션에 아무것도 보내지 않고" in desc
