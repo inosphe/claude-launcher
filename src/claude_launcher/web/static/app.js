@@ -518,7 +518,9 @@ async function refreshSessions() {
     return;
   }
   sessionsCache = data.sessions || [];
-  reconcileKillUiState(sessionsCache);
+  // Reduced embedded consumers execute this poll in isolation.  Keep that
+  // contract while the full page reconciles the kill controls here.
+  if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
   briefingLLM = data.llm_configured !== false;
   forgetDeadSessions();
   const list = $("session-list");
