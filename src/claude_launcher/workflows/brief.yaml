@@ -8,9 +8,11 @@
 name: brief
 description: >-
   브리핑 비서: 주기적으로 채널(mesh history/owed, 보드 판정)의 변화를 읽어
-  사용자에게 한 줄 브리핑한다. context = JSON {"mesh": <이름>, "note": ...
-  } 또는 mesh 이름 하나. 라운드당 `max`회, 예산 소진 시 데몬이 다음 라운드를
-  연다(recur auto). poll과 같은 기반, 브리핑 절차를 얹은 것.
+  사용자에게 한 줄 브리핑한다. 메시지를 보내지 않는다 — 사용자가 명시적으로
+  요청하기 전에는 다른 세션에 아무것도 보내지 않고, 채널을 읽어 사용자에게만
+  보고한다. context = JSON {"mesh": <이름>, "note": ...} 또는 mesh 이름
+  하나. 라운드당 `max`회, 예산 소진 시 데몬이 다음 라운드를 연다(recur
+  auto). poll과 같은 기반, 브리핑 절차를 얹은 것.
 recur: {auto: true}
 # 타이머 발화가 방문으로 세어지므로 라운드 재작업 예산은 max + 2를 넘겨야
 # 한다(20회 폴링 + 도착). poll과 같은 값.
@@ -28,6 +30,8 @@ steps:
 
       1. 읽는다 — `claunch mesh history <mesh> -n 15`, `claunch mesh owed
          <mesh>`, 필요한 판정·이슈는 `claunch beads comments <id>`.
+         읽기만 한다 — 다른 세션에 메시지를 보내지 않는다(사용자가
+         명시적으로 요청한 회차가 아니면).
       2. 선별한다 — last_seen 이후의 메시지만. ask는 답변 owed, fyi는
          흡수, leader 판정·게이트 변화·배치 상태는 한 줄로 요약한다.
       3. 보고한다 — 사용자에게 한 줄 브리핑: "새 메시지 N (ask M · owed K)
