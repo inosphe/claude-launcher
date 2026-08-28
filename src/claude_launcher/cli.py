@@ -23,6 +23,7 @@ from . import (
     cli_commits,
     cli_cflow,
     cli_mesh,
+    cli_plugins,
     cli_report,
     cli_sessions,
     cli_sync,
@@ -34,6 +35,7 @@ from . import (
     herdr,
     lineage,
     migrate as migrate_mod,
+    plugins as plugins_mod,
     profile,
     prompt_input,
     providers,
@@ -134,6 +136,16 @@ def _cmd_create(args: argparse.Namespace) -> int:
         applied = template.apply_to(p)
         if applied:
             print(f"applied template env: {', '.join(sorted(applied))}")
+    if is_claude:
+        # A new profile is one more copy of the harness-global state, so it
+        # starts at whatever the shared declaration says -- otherwise it is
+        # born drifted and someone has to remember to converge it later.
+        shared = plugins_mod.apply_to(p)
+        for action in shared.done:
+            print(f"applied shared {action.describe()}")
+        for action, error in shared.failed:
+            line = plugins_mod.error_line(error)
+            print(f"could not apply shared {action.describe()}: {line}")
     entry = harnesses.get(selected)
     if entry and entry.auth == "api-key":
         print(f"next: claunch set-token {p.name}")
@@ -1292,6 +1304,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_sync.register(sub)
     cli_workspace.register(sub)
     cli_beads.register(sub)
+    cli_plugins.register(sub)
     cli_report.register(sub)
     cli_commits.register(sub)
 

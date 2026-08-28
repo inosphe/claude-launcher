@@ -106,6 +106,9 @@ claunch run work:claude                  # explicit Claude selector
 | `parent <name> [p]`    | Show, set, or `--clear` a profile's parent. |
 | `template [--init]`    | Show or write the default env template. |
 | `migrate <name> [src]` | Copy skills/MCP servers from a global or local path. |
+| `plugin [list\|install\|uninstall\|marketplace]` | Declare [plugins and marketplaces](#plugins--shared-settings-every-profile) for every profile, and install them. |
+| `shared [KEY=VALUE ...]` | Show or declare the `settings.json` keys every profile carries (`--unset KEY`). |
+| `apply [name]`         | Converge profiles onto the shared declaration (`--dry-run`, `--check`). |
 | `prune [--dry-run]`    | Delete local profile dirs not declared in `~/.claunch.yaml`. |
 | `sync [--mode ...]`    | Reconcile `~/.claunch.yaml` with the sync server (`merge`/`up`/`down`). |
 | `validate [name[:harness]]` | Run the selected harness's declared non-interactive heartbeat (all bare profile defaults if no name). |
@@ -659,7 +662,7 @@ migrate` pulls those into a profile from any source path:
 claunch migrate work                 # from ~/.claude (global skills + MCP)
 claunch migrate work ./my-project    # from a project's .claude/ and .mcp.json
 claunch migrate work --mcp           # MCP servers only (--skills for skills only)
-claunch migrate work --plugins       # also copy the plugins/ directory
+claunch migrate work --plugins       # copy the plugins/ directory as-is
 claunch migrate company --recursive  # also into every child profile (see Inheritance)
 claunch migrate work --dry-run       # preview without copying
 ```
@@ -670,6 +673,55 @@ profile's `skills/`; MCP servers are gathered from `settings.json`,
 `settings.local.json`, `.claude.json` and a project-root `.mcp.json`, then merged
 into the profile's `settings.json`. Default migrates skills + MCP; pass `--skills`
 or `--mcp` to narrow it.
+
+`--plugins` copies the `plugins/` directory verbatim, which is a one-off move
+between two profiles on this machine. To keep plugins the same across *every*
+profile, declare them instead — see the next section.
+
+## Plugins & shared settings (every profile)
+
+A profile *is* its own `CLAUDE_CONFIG_DIR`, so everything Claude Code keeps there
+exists once per profile: installed plugins, the marketplaces they came from, and
+the global `settings.json` keys. Seeding copies that state at **creation** time
+only, so a plugin installed afterwards reaches the one profile it was installed
+in — and the set drifts apart without anything reporting it.
+
+`claunch plugin` declares that state once, in the `shared` block of
+`~/.claunch.yaml`, and applies it to every Claude Code profile:
+
+```bash
+claunch plugin install fluent-korean@fluent-korean   # declare + install everywhere
+claunch plugin marketplace add snflkd/fluent-korean  # declare a marketplace source
+claunch shared outputStyle=fluent-korean:fluent-korean   # a settings.json key
+claunch plugin list                                  # the declaration, and any drift
+claunch apply                                        # converge every profile
+claunch apply work                                   # ...or just one
+claunch apply --check                                # report drift, exit 1 if any
+```
+
+Installing runs Claude Code's own `claude plugin` CLI once per profile with
+`CLAUDE_CONFIG_DIR` pointed at it — never a file copy. One install writes three
+places that must agree (the plugin's files under `plugins/`, the two JSON indexes
+beside them, and `enabledPlugins`/`extraKnownMarketplaces` in `settings.json`),
+and those indexes record absolute install paths naming the profile they were
+written for, so a copied index sends every other profile back to the profile it
+came from. This is why `claunch migrate --plugins` is a file copy for one-off use
+and this is the path for keeping profiles in step.
+
+`install` and `marketplace add` apply immediately; `--no-apply` declares only, and
+`--profile NAME` narrows one call to a single profile. A profile created later
+gets the declaration during `claunch create`, so it is never born drifted.
+
+Convergence is **additive**: `apply` installs what is declared and missing and
+never removes a plugin a profile has on its own. Removal is explicit —
+`claunch plugin uninstall <id>` drops the declaration and uninstalls it from the
+profiles in the same call. `claunch shared --unset KEY` stops managing a settings
+key and leaves the value each profile already has, since the value it replaced
+was never recorded and could not be restored.
+
+Values given to `claunch shared` parse as JSON when they can, so
+`autoCompactEnabled=false` stores a boolean and anything unparseable stays a
+string.
 
 ## Configuration source of truth
 
@@ -697,6 +749,11 @@ profiles:
   personal:
     harness: pi
     env: {}
+shared:
+  marketplaces: [snflkd/fluent-korean]
+  plugins: [fluent-korean@fluent-korean]
+  settings:
+    outputStyle: fluent-korean:fluent-korean
 ```
 
 A profile **exists** when its directory exists; this file holds the config
