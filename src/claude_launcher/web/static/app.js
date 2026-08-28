@@ -2139,14 +2139,14 @@ function applyBriefingTop() {
 }
 
 /* What a rail row says whether folded or open: the briefing's one-line job
-   description, or the recorded opening task until a briefing exists. The
+   description only — the opening task belongs to the detail panel. The
    digest rides the /api/sessions poll (see briefing.digest), so a browser
    refresh repaints it from the daemon's session state instead of asking the
    LLM again. The row's ⟳ refresh sits beside it as the collapsed-state
    handle — same fetch as the card's, but it never opens the card. Built here
    on every row rebuild; the ▸ toggle and the card are applyBriefingCards'. */
 function decorateBriefingRow(li, s) {
-  const one = (s.briefing && s.briefing.one_line) || s.task || "";
+  const one = (s.briefing && s.briefing.one_line) || "";
   let oline = li.querySelector(".rail-brief");
   if (one) {
     if (!oline) {
