@@ -206,8 +206,15 @@ function syncBulkActions(sessions) {
    yes or no, and the question these flows actually end on — a record a mesh
    row still names, force it off the roster or keep it — needs a third
    button. Resolves to the pressed action's `value`; Escape, the backdrop
-   and Cancel are all null, so every caller's "did not answer" is one shape. */
-function showModal({ title, body, actions, checkbox = null }) {
+   and Cancel are all null, so every caller's "did not answer" is one shape.
+
+   `choices` adds a radio group under the body for the questions that are not
+   yes/no either: what to do with the sessions under the one being removed is
+   two different actions, and putting each on its own button would leave the
+   safe answer and the destructive one side by side, one click apart. The
+   picked option's `value` is merged into the pressed action's value, so the
+   caller reads one object. */
+function showModal({ title, body, actions, checkbox = null, choices = null }) {
   return new Promise((resolve) => {
     const overlay = $("modal-overlay");
     $("modal-title").textContent = title;
@@ -230,6 +237,40 @@ function showModal({ title, body, actions, checkbox = null }) {
       label.append(check, document.createTextNode(checkbox.label));
       bodyEl.appendChild(label);
     }
+    // The first option is the one selected on open, so it is the safe answer
+    // in every group: a modal dismissed with Enter must not take the
+    // destructive branch of a question the operator never read.
+    let picked = choices ? choices.options[0] : null;
+    if (choices) {
+      const group = document.createElement("div");
+      group.classList.add("modal-choices");
+      for (const opt of choices.options) {
+        const label = document.createElement("label");
+        label.classList.add("modal-choice");
+        const radio = document.createElement("input");
+        radio.type = "radio";
+        radio.name = "modal-choice";
+        radio.checked = opt === picked;
+        radio.addEventListener("change", () => {
+          picked = opt;
+          for (const { action, button } of buttons) {
+            if (action.dangerWhen) {
+              button.classList.toggle("danger", !!opt[action.dangerWhen]);
+            }
+          }
+        });
+        const text = document.createElement("span");
+        text.textContent = opt.label;
+        if (opt.hint) {
+          const hint = document.createElement("small");
+          hint.textContent = opt.hint;
+          text.appendChild(hint);
+        }
+        label.append(radio, text);
+        group.appendChild(label);
+      }
+      bodyEl.appendChild(group);
+    }
     const buttons = [];
     for (const a of actions) {
       const btn = document.createElement("button");
@@ -237,7 +278,10 @@ function showModal({ title, body, actions, checkbox = null }) {
       btn.textContent = a.label;
       if (a.danger) btn.classList.add("danger");
       if (a.requiresCheck) btn.disabled = !check || !check.checked;
-      btn.addEventListener("click", () => done(a.value));
+      if (a.dangerWhen && picked && picked[a.dangerWhen]) btn.classList.add("danger");
+      btn.addEventListener("click", () => done(
+        a.value && picked ? { ...a.value, ...picked.value } : a.value
+      ));
       row.appendChild(btn);
       buttons.push({ action: a, button: btn });
     }
@@ -3540,36 +3584,99 @@ $("term-kill").addEventListener("click", async () => {
   refreshSessions();
 });
 
+/* The sessions below one being removed, oldest first — the rail's own tree
+   field (`parent`), walked breadth-first the way the daemon walks it. Read
+   from the cache rather than asked for: the remove modal has to name them
+   before the DELETE, and the cache is what drew the tree the operator is
+   looking at. */
+function sessionSubtree(name) {
+  const out = [];
+  const queue = [name];
+  const seen = new Set([name]);
+  while (queue.length) {
+    const at = queue.shift();
+    for (const s of sessionsCache) {
+      if (s.parent !== at || seen.has(s.name)) continue;
+      seen.add(s.name);
+      out.push(s);
+      queue.push(s.name);
+    }
+  }
+  return out;
+}
+
 async function removeExitedSession(name) {
   const memberships = sessMeshes(name);
   const inMesh = memberships.length > 0;
   const meshNames = memberships.map((m) => m.mesh).join(", ");
+  const row = sessionsCache.find((s) => s.name === name) || {};
+  const kids = sessionsCache.filter((s) => s.parent === name);
+  const below = sessionSubtree(name);
+  const running = below.filter((s) => s.status !== "exited");
+  const above = (row.parent && sessionsCache.some((s) => s.name === row.parent))
+    ? row.parent : "";
   // This is the one path that makes the session unresumable, so it asks
   // first. Only ever shown on an exited session; the DELETE route refuses
   // a running one outright. A mesh membership changes this same question,
   // rather than causing a 409 and a second question after the first DELETE.
+  //
+  // Sessions below it change it a second way. Dropping this record on its own
+  // leaves them naming a session that is no longer there, which the tree
+  // reads as "no parent": the grandchildren keep running, and the grandparent
+  // that used to command them stops without anything saying so. So when there
+  // are any, the modal asks what happens to them instead of deciding it.
+  let body = inMesh
+    ? `This session is still a member of: ${meshNames}.\n\n` +
+      "Force remove takes it off those rosters first, then forgets the " +
+      "record so it can no longer be resumed."
+    : "The daemon forgets it, so it can no longer be resumed from here.";
+  if (kids.length) {
+    body += `\n\n${below.length} session(s) sit under it: ` +
+      `${below.map((s) => s.name).join(", ")}.`;
+  }
   const choice = await showModal({
     title: `Remove exited session '${name}'?`,
-    body: inMesh
-      ? `This session is still a member of: ${meshNames}.\n\n` +
-        "Force remove takes it off those rosters first, then forgets the " +
-        "record so it can no longer be resumed."
-      : "The daemon forgets it, so it can no longer be resumed from here.",
+    body,
     checkbox: inMesh ? {
       label: "I understand it is still in a mesh and want to force remove it.",
+    } : null,
+    choices: kids.length ? {
+      options: [
+        {
+          label: above
+            ? `Move them up to '${above}'`
+            : "Leave them as top-level sessions",
+          hint: above
+            ? ` — ${kids.length} direct child(ren) answer to '${above}' after this`
+            : " — this session has no parent to move them to",
+          value: { children: "escalate" },
+        },
+        {
+          label: `Remove all ${below.length} of them too`,
+          hint: running.length
+            ? ` — refused while ${running.length} of them is still running`
+            : " — they can no longer be resumed either",
+          value: { children: "remove" },
+          destructive: true,
+        },
+      ],
     } : null,
     actions: [
       { label: "Cancel", value: null },
       {
         label: "Remove", value: { force: inMesh }, danger: true,
-        requiresCheck: inMesh,
+        requiresCheck: inMesh, dangerWhen: "destructive",
       },
     ],
   });
   if (!choice) return false;
-  const force = choice.force ? "?force=1" : "";
-  const resp = await api(`/api/sessions/${encodeURIComponent(name)}${force}`,
-                         { method: "DELETE" });
+  const query = [
+    choice.force ? "force=1" : "",
+    choice.children === "remove" ? "children=remove" : "",
+  ].filter(Boolean).join("&");
+  const resp = await api(
+    `/api/sessions/${encodeURIComponent(name)}${query ? "?" + query : ""}`,
+    { method: "DELETE" });
   if (!resp.ok) {
     const doc = await resp.json().catch(() => ({}));
     await modalInfo(`Could not remove '${name}'`,

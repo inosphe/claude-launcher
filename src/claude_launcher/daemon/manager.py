@@ -655,7 +655,43 @@ class SessionManager:
             self.persist()
         return session
 
-    def remove(self, name: str) -> AnySession:
+    def escalate_children(self, name: str) -> List[str]:
+        """Move ``name``'s direct children up to ``name``'s own parent.
+
+        The step every record-dropping path takes before the ``del``. The tree
+        is derived from ``SessionDef.parent`` on every walk (see above), so a
+        record that disappears leaves its children naming a session that is no
+        longer there — :meth:`ancestors` stops at the first missing name, and
+        the whole subtree silently becomes a set of roots. Nothing reports
+        that: the grandchildren are still running, still hold conversations
+        and worktrees and cflow runs, and the session that used to command
+        them (the grandparent) no longer does.
+
+        Promoting them one level up keeps the edge that existed in fact — a
+        lead's worker's worker still answers to the lead — instead of leaving
+        it to be re-drawn by hand. The move is always *shallower*, so no depth
+        check is needed, and the new parent is an ancestor of the children, so
+        no cycle can be made. A grandparent that is itself gone (or absent —
+        ``name`` was a root) makes them roots, which is what they would have
+        become anyway.
+
+        Returns the children moved, oldest first. The mesh edge to the new
+        parent is the caller's, exactly as it is for :meth:`reparent`
+        (:meth:`MeshManager.link_lineage`); this class knows nothing of meshes.
+        """
+        session = self._sessions.get(name)
+        above = session.sdef.parent if session else None
+        if above not in self._sessions or above == name:
+            above = None
+        moved = self.children(name)
+        for child in moved:
+            target = self._sessions[child]
+            target.sdef = replace(target.sdef, parent=above)
+        return moved
+
+    def remove(
+        self, name: str, *, children: str = "escalate"
+    ) -> Tuple[AnySession, List[str]]:
         """Drop one exited session's record — the per-session half of
         :meth:`clear`.
 
@@ -663,15 +699,49 @@ class SessionManager:
         ends, and a route that reached for this on a live session has the
         verbs confused. The mesh guard is the caller's, for the reason
         :meth:`clear` spells out — this class knows nothing of meshes.
+
+        ``children`` decides what happens to the subtree below ``name``, and
+        the two answers are the two things an operator can mean:
+
+        * ``escalate`` (default) — the children move up to ``name``'s own
+          parent (:meth:`escalate_children`) and keep running. This is the
+          answer that loses nothing.
+        * ``remove`` — every descendant's record is dropped along with it.
+          Refused, with nothing dropped, if any of them is still running:
+          the same rule as ``name`` itself, applied to the whole subtree, so
+          a cascade cannot become an accidental mass end-of-session.
+
+        Returns the removed record and the names of the sessions the choice
+        touched: the children promoted, or the descendants dropped.
         """
+        if children not in ("escalate", "remove"):
+            raise ManagerError(
+                f"unknown children policy {children!r} — 'escalate' (move them "
+                "up to the removed session's own parent) or 'remove' (drop "
+                "their records too)"
+            )
         session = self.get(name)
         if not session.exited:
             raise ManagerError(
                 f"session {name!r} is still running — kill it first"
             )
+        if children == "remove":
+            below = self.descendants(name)
+            running = [n for n in below if not self._sessions[n].exited]
+            if running:
+                raise ManagerError(
+                    f"{name!r} has {len(running)} running session(s) under it "
+                    f"({', '.join(running)}) — kill them first, or remove "
+                    f"{name!r} on its own and let them move up to its parent"
+                )
+            for child in below:
+                del self._sessions[child]
+            touched = below
+        else:
+            touched = self.escalate_children(name)
         del self._sessions[name]
         self.persist()
-        return session
+        return session, touched
 
     def set_keep_alive(self, name: str, on: bool) -> AnySession:
         """Set (or clear) a session's keep-alive flag.
@@ -702,6 +772,13 @@ class SessionManager:
         manager knows nothing of meshes, and a record a mesh row still names is
         one whose deletion strands that row (see ``_mesh_holds`` in the API,
         the only caller that passes this).
+
+        Children are escalated exactly as they are by :meth:`remove` — a live
+        session whose exited parent is cleared here would otherwise be left
+        naming a record nobody can respawn. The drop list is walked
+        ancestors-first (shallowest depth first, measured before anything is
+        deleted) so a chain of cleared records passes its live grandchildren
+        all the way up to the first session that survives the clear.
         """
         spared = set(keep)
         names = [
@@ -709,6 +786,8 @@ class SessionManager:
             for name, s in self._sessions.items()
             if s.exited and name not in spared
         ]
+        for name in sorted(names, key=self.depth):
+            self.escalate_children(name)
         for name in names:
             del self._sessions[name]
             if logs:
