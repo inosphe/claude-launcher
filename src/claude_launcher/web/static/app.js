@@ -12382,8 +12382,22 @@ function syncSpawnGates(ui) {
   const report = ui.report || {};
   const may = report.may_choose || [];
   const sess = ui.parentSess || {};
+  /* A locked row must not still be carrying a yes. spawnPayload reads every
+     answer THROUGH its disable, so a tick left standing on a greyed box is
+     not a weaker answer -- it is a dropped one, and dropped without a word:
+     the operator ticks "start from a copy of the parent's conversation",
+     picks a worktree two rows down, and the child boots empty with nothing
+     on screen having said the fork went away. That is the failure this
+     clears (claunch-409i, measured on session s245 -- its recorded argv
+     carries --session-id and no --resume).
+
+     Checkboxes only. A select or a text box keeps what was typed in it,
+     which is the same line the borrow and beads rows already draw: words
+     somebody typed are theirs to find again when the row comes back, while
+     a tick IS the whole answer and has nowhere else to be read from. */
   const lock = (field, note, why) => {
     field.disabled = !!why;
+    if (why && field.type === "checkbox") field.checked = false;
     if (note) { note.hidden = !why; note.textContent = why || ""; }
   };
 

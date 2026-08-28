@@ -843,6 +843,46 @@ async function main() {
       noteOf(forkOpen).textContent === "",
     [forkOpen.fork.disabled, forkOpen.forkNote && forkOpen.forkNote.hidden]);
 
+  /* ---- claunch-409i: a locked row must not still be carrying a yes -------
+     The bug: the operator ticks the fork box while the child is staying put,
+     picks a worktree two rows down, and presses Spawn. lock() greyed the box
+     and left the tick standing; spawnPayload reads every answer THROUGH its
+     disable, so `fork` was dropped from the body and the child booted empty
+     with the tick still on screen behind it. Measured on session s245 --
+     its recorded argv is `--session-id <uuid>` with no `--resume` and no
+     refusal anywhere. What holds now: the tick goes with the row, so what is
+     on screen and what will be sent are the same thing. */
+  const forkKept = forkCase({ mode: "" });
+  forkKept.fork.checked = true;
+  forkKept.wtMode.value = "new";
+  ctx.syncSpawnGates(forkKept);
+  check("locking the fork row clears the tick it was carrying",
+    forkKept.fork.disabled === true && forkKept.fork.checked === false,
+    [forkKept.fork.disabled, forkKept.fork.checked]);
+  check("...so the payload and the form agree there is no fork",
+    ctx.spawnPayload(forkKept).fork === undefined,
+    ctx.spawnPayload(forkKept));
+  /* The same rule on the other checkbox `spawnPayload` reads through a
+     disable. Null is claude-only, and a yes left on it was the same silent
+     drop wearing a different label. */
+  const nullKept = forkCase({ mode: "" });
+  nullKept.nullTok.checked = true;
+  nullKept.parentSess = { harness: "codex" };
+  ctx.syncSpawnGates(nullKept);
+  check("locking the --null row clears its tick too",
+    nullKept.nullTok.disabled === true && nullKept.nullTok.checked === false,
+    [nullKept.nullTok.disabled, nullKept.nullTok.checked]);
+  /* A text box is NOT cleared: words somebody typed are theirs to find again
+     when the row comes back, which is the line the borrow and beads rows
+     already draw. Only a tick, which has nowhere else to be read from. */
+  const argsKept = forkCase({ mode: "" });
+  argsKept.args.value = "--verbose";
+  argsKept.report = { may_choose: ["fork"], workspaces: [] };
+  ctx.syncSpawnGates(argsKept);
+  check("a locked text row keeps what was typed in it",
+    argsKept.args.disabled === true && argsKept.args.value === "--verbose",
+    [argsKept.args.disabled, argsKept.args.value]);
+
   /* ---- the route: the quick job opening lands in the same modal ---------- */
   Object.keys(store).forEach((k) => delete store[k]);
   const m0Members = { members: [{ handle: "lead1", role: "leader" },
