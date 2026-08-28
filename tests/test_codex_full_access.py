@@ -78,7 +78,37 @@ def codex_profile():
 
 
 def assert_full_access(argv, *remaining):
-    assert argv[1:] == [FULL_ACCESS_FLAG, *remaining]
+    """The flag leads the harness's own arguments, wherever the program ends.
+
+    The program prefix is not always one argv element. On Windows the Codex
+    npm ``.CMD`` shim is bypassed by invoking Node on the package's entry
+    point, so ``argv`` opens with ``[node.exe, codex.js]`` and the flag sits
+    at index 2. Anchoring on the flag keeps this assertion about what it was
+    written to guarantee -- full access leads the arguments and nothing else
+    is passed -- instead of about how many elements name the program.
+    """
+    assert FULL_ACCESS_FLAG in argv, argv
+    at = argv.index(FULL_ACCESS_FLAG)
+    # Nothing the harness would call an argument precedes the flag: every
+    # element before it names the program (an interpreter, a script path).
+    assert all(not a.startswith("-") for a in argv[:at]), argv
+    assert argv[at:] == [FULL_ACCESS_FLAG, *remaining]
+
+
+def test_the_full_access_assertion_holds_for_either_program_prefix():
+    """Both prefix shapes this machine can produce are covered.
+
+    Which shape ``build_command`` returns depends on what is installed:
+    with Codex on npm globally the Windows shim is bypassed and the prefix
+    is ``[node.exe, codex.js]``; without it the prefix stays the single
+    declared executable. A machine that lacks the npm install would never
+    see a regression pinned only to the two-element shape, so pin both here
+    where no installation is involved.
+    """
+    assert_full_access(["codex.cmd", FULL_ACCESS_FLAG, "--model", "m"], "--model", "m")
+    assert_full_access(
+        ["node.exe", "codex.js", FULL_ACCESS_FLAG, "--model", "m"], "--model", "m"
+    )
 
 
 def test_claunch_run_uses_the_codex_full_access_default(
