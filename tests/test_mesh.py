@@ -522,6 +522,62 @@ def test_a_member_that_dies_holding_mail_is_reported_to_its_senders(home, tmp_pa
     asyncio.run(run())
 
 
+def test_a_sender_that_arrives_after_the_first_report_is_told_too(home, tmp_path):
+    """The latch is per sender, not per death.
+
+    A latch on the dead member alone told whoever happened to have mail
+    waiting at the moment of the first delivery attempt and left everyone
+    after that in silence — which is the surprise the report exists to
+    break. So the record is of WHO has been told, and the senders already
+    told are not told twice.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr, settle=0.05, busy_hold=5.0)
+        mm.create("m4b")
+        a = mgr.create(SessionDef(name="lead4b", harness="py", cwd=str(tmp_path)))
+        b = mgr.create(SessionDef(name="w4b", harness="py", cwd=str(tmp_path)))
+        c = mgr.create(SessionDef(name="w5b", harness="py", cwd=str(tmp_path)))
+        for s in (a, b, c):
+            await _wait_screen(s, "READY")
+        await mm.join("m4b", "lead4b", handle="leader")
+        await mm.join("m4b", "w4b", handle="bob")
+        await mm.join("m4b", "w5b", handle="carol")
+
+        mesh = mm.get("m4b")
+        await mm.send("m4b", "leader", "bob", "one")
+        await b.send_keys(["quit", "Enter"])
+        await b.wait_for("exited", timeout=10.0, threshold=0.5)
+
+        member = mesh.members["bob"]
+        await mm._deliver_to(mesh, member)
+        reports = [m for m in mesh.messages if m["from"] == "policy"]
+        assert [r["to"] for r in reports] == [["leader"]]
+
+        # carol now sends into the same closed terminal. Her send result says
+        # so (the other half of this contract), and the mail queues.
+        await mm.send("m4b", "carol", "bob", "two")
+        await mm._deliver_to(mesh, member)
+        reports = [m for m in mesh.messages if m["from"] == "policy"]
+        assert len(reports) == 2, "the second sender heard nothing"
+        assert reports[1]["to"] == ["carol"]
+        assert "claunch respawn w4b" in reports[1]["body"]
+        # ...and the count is HER mail, not the whole backlog.
+        assert "1 message(s) of yours are waiting" in reports[1]["body"]
+
+        # Neither sender is told again on the ticks that follow.
+        for _ in range(3):
+            await mm._deliver_to(mesh, member)
+        assert len([m for m in mesh.messages if m["from"] == "policy"]) == 2
+
+        await mm.shutdown()
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_stranded_notice_separates_revivable_from_gone():
     """``exited`` and ``missing`` need opposite advice, so they read apart."""
     exited = mesh_mod.stranded_notice(

@@ -448,3 +448,109 @@ def test_kill_on_end_disabled_tracks_silently(proj):
     assert clock.scan() == []                   # ...and no replay
     assert worker.recorded == []
     assert worker.killed is False
+
+
+# --------------------------------------------------------------------------- #
+# the ending notice: the overseer hears that the session is gone
+# --------------------------------------------------------------------------- #
+
+
+def test_kill_on_end_tells_the_overseer_the_session_ended(proj):
+    """The kill is silent to everyone but the session that dies.
+
+    ``end_block`` goes into the dying session's OWN transcript, which no peer
+    reads, so before this the first anyone learned of the kill was a message
+    that never landed. The overseer is told after the kill lands, through the
+    same debt queue the other events use.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    boss = _FakeSession("boss", cwd)
+    worker = _FakeSession("w1", cwd, parent="boss")
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker, "boss": boss}))
+    clock.scan()
+    _finish_linear(cwd)
+    assert clock.scan() == []
+    assert clock._debt == []                    # nothing yet: the kill is next
+    asyncio.run(clock._finish_end(cwd, "w1", _run_id(cwd), "linear"))
+    assert worker.killed is True
+    assert [e["kind"] for e in clock._debt] == ["session-ended"]
+    assert asyncio.run(clock._deliver(clock._debt[0])) is True
+    block = boss.delivered[0]
+    assert "session: w1" in block
+    assert "ENDED" in block
+    # ...and what the reader is to do instead of messaging it.
+    assert "queued" in block and "claunch respawn w1" in block
+
+
+def test_the_ending_notice_names_the_workflow_the_scan_queued(proj):
+    """The workflow name travels with the queued end-sequence.
+
+    ``_finish_end`` runs after the run is done and cannot read the position
+    back, so a notice composed there would say '?' unless the scan hands the
+    name over with the queue entry.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    worker = _FakeSession("w1", cwd)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    _finish_linear(cwd)
+    clock.scan()
+    assert clock._end_pending == [(cwd, "w1", _run_id(cwd), "linear")]
+
+
+def test_no_ending_notice_when_keep_alive_kept_the_session(proj):
+    """Nothing ended, so nothing is announced — the peers can still reach it."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    worker = _FakeSession("w1", cwd, keep_alive=True)
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    _finish_linear(cwd)
+    clock.scan()
+    asyncio.run(clock._finish_end(cwd, "w1", _run_id(cwd), "linear"))
+    assert worker.killed is False
+    assert clock._debt == []
+
+
+def test_the_ending_notice_is_not_gated_on_cflow_events(proj):
+    """``cflow_events`` mutes transitions; a session disappearing is not one.
+
+    The switch that governs the ending is ``cflow_kill_on_end`` — the one that
+    caused the kill. Muting the notice with the other switch would restore
+    exactly the silence being fixed: the daemon ends a session and the peers
+    find out by talking to a closed terminal.
+    """
+    cwd = str(proj)
+    store.set_daemon_field("cflow_events", False)
+    try:
+        cflow_engine.start("linear", cwd=cwd, scope="w1")
+        worker = _FakeSession("w1", cwd)
+        clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+        clock.scan()
+        _finish_linear(cwd)
+        clock.scan()
+        asyncio.run(clock._finish_end(cwd, "w1", _run_id(cwd), "linear"))
+        assert [e["kind"] for e in clock._debt] == ["session-ended"]
+    finally:
+        store.set_daemon_field("cflow_events", True)
+
+
+def test_a_failed_kill_announces_nothing(proj):
+    """A session that is still alive must not be reported as ended."""
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    worker = _FakeSession("w1", cwd)
+
+    def boom(*, force: bool = False):
+        raise RuntimeError("pty is wedged")
+
+    worker.kill = boom
+    clock = cflow_clock.RunEventClock(_FakeManager({"w1": worker}))
+    clock.scan()
+    _finish_linear(cwd)
+    clock.scan()
+    asyncio.run(clock._finish_end(cwd, "w1", _run_id(cwd), "linear"))
+    assert worker.exited is False
+    assert clock._debt == []

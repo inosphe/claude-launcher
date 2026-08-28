@@ -398,6 +398,54 @@ def test_a_worker_round_is_not_done_until_the_merge_is_confirmed():
         assert wf.steps["landing-review"].select.options["hold"].next == "wrapup"
 
 
+def test_the_worker_end_is_gated_by_the_session_above_it():
+    """Ending a worker session passes an ``end-gate`` its overseer answers.
+
+    The daemon reaps a finished one-shot run's session on sight of ``done``
+    (``daemon/cflow_clock.py`` kill-on-end), so ``done`` IS the kill. Before
+    this gate the worker took that decision alone and its peers found out by
+    sending into a closed terminal. Both layers carry it, or the same name
+    runs two policies.
+    """
+    for label, wf in (
+        ("bundled", _bundled("improv-worker")),
+        ("project", model.load(PROJECT_OVERRIDES / "improv-worker.yaml")),
+    ):
+        assert wf.steps["wrapup"].next == "end-gate", (
+            f"{label}: wrapup still runs straight into end, which is the kill"
+        )
+        gate = wf.steps["end-gate"].ask
+        assert gate is not None, f"{label}: end-gate carries no ask"
+        roles = [c.role for c in gate.delegate.candidates]
+        assert roles == ["worker", "leader"], (
+            f"{label}: the ending must be put to the session above this one — "
+            f"parent (a mid worker) first, then the leader; got {roles}"
+        )
+        assert all(c.scope == "ancestor" for c in gate.delegate.candidates), (
+            f"{label}: a peer worker must not be able to end this session"
+        )
+        # A solo formation has nobody above it. Holding for a human there
+        # would leave one unanswered gate per worker, and an unanswered gate
+        # holds the slot this gate exists to return.
+        assert gate.delegate.otherwise == model.OTHERWISE_SELF, (
+            f"{label}: with no ancestor the run must pass itself, not park"
+        )
+        assert gate.delegate.timeout, f"{label}: the gate must not be open forever"
+        # A refusal has somewhere to go: the session stays up under
+        # keep-alive rather than the run ending anyway.
+        assert gate.on_decline == "end-hold", (
+            f"{label}: a declined ending falls through to the kill it declined"
+        )
+        hold = wf.steps["end-hold"].instructions
+        assert "claunch keep-alive $CLAUNCH_SESSION" in hold, (
+            f"{label}: end-hold must set the flag that actually stops the "
+            "daemon from ending the session — without it the run reaches done "
+            "and the kill happens regardless of the refusal"
+        )
+        assert wf.steps["end-gate"].next is None    # END
+        assert wf.steps["end-hold"].next is None    # END
+
+
 def test_the_worker_wrapup_no_longer_says_landing_does_not_matter():
     """The prose that contradicted the new gate, pinned so it stays gone.
 
