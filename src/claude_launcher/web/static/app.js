@@ -164,20 +164,18 @@ function byLineage(sessions) {
   return out;
 }
 
-/* The rail's bulk bar. Four verbs that act on every session at once, each
+/* The rail's bulk bar. Three verbs that act on the working fleet, each
    labelled with the number it would touch and hidden when that number is
    zero — so the bar is a reading of the rail rather than a fixed row of
    controls, half of which would do nothing on any given rail.
 
-   They are four and not two because the pairs differ in what survives. Stop
-   ends the programs and keeps the records, so the rail comes back with
-   `resume`; clear and delete are the ones that make a session unresumable,
-   which is why they are the ones that ask, and why they are coloured like it.
-   Exited sessions are kept indefinitely for exactly that reason: dropping
-   them is the user's call, in bulk, from here. */
+   Stop ends programs, resume brings exited records back, and archive moves
+   exited records out of the working fleet while keeping them inspectable and
+   resumable. Permanent removal remains on the explicit API and CLI paths. */
 function syncBulkActions(sessions) {
   const live = sessions.filter((s) => s.status !== "exited").length;
-  const dead = sessions.length - live;
+  const dead = sessions.filter((s) =>
+    s.status === "exited" && !s.archived_at).length;
   const set = (id, n, label, title) => {
     const btn = $(id);
     if (!btn) return;  // an older index.html served by a newer daemon
@@ -189,16 +187,14 @@ function syncBulkActions(sessions) {
       "kill the program in every running session — the records stay, so each "
       + "one can be resumed afterwards");
   set("resume-all", dead, `▶ resume ${dead}`,
-      "relaunch every exited session under its own name and conversation");
-  set("clear-exited", dead, `clear ${dead} exited`,
-      "forget the records of the exited sessions — they can no longer be "
-      + "resumed here. Running sessions are untouched");
-  set("delete-all", sessions.length, `✕ delete all ${sessions.length}`,
-      "stop every running session and forget every record");
+      "relaunch every unarchived exited session under its own name and conversation");
+  set("archive-exited", dead, `archive ${dead} exited`,
+      "move exited sessions into the archive while retaining their records, "
+      + "conversations and resume capability");
   // The bar's own border would otherwise sit above the nav as a stray rule on
   // a rail with nothing on it.
   const bar = $("bulk-actions");
-  if (bar) bar.classList.toggle("hidden", sessions.length === 0);
+  if (bar) bar.classList.toggle("hidden", live + dead === 0);
 }
 
 /* The stand-in for confirm()/alert() on the flows that end a session or its
@@ -317,9 +313,7 @@ const modalConfirm = (title, body, label, danger = true) =>
 /* A bulk call answers with what it did *and* with what it did not: a session
    that would not stop, one that would not come back. That omission is why
    the rail a second later does not match the count on the button, and left
-   unmentioned it reads as the button not having worked — the next click is
-   someone trying harder. (The other omission, a record a mesh still names,
-   is a question rather than a report and is offerForce()'s.) */
+   unmentioned it reads as the button not having worked. */
 async function reportBulk(result, verb) {
   const failed = (result && result.failed) || [];
   if (!failed.length) return;
@@ -349,52 +343,6 @@ async function bulkAction(btn, path, opts, verb) {
   } finally {
     btn.disabled = false;
   }
-}
-
-/* The clear/delete pair's second act. The server keeps a record a mesh row
-   still names rather than strand the row (the API's _mesh_holds), and used
-   to leave the operator to walk each roster's × by hand. The hold still
-   stands — it is what keeps the row and the record one fact — but it is now
-   a question instead of a wall: force re-issues the same call with ?force=1,
-   which takes the held records off their rosters first and then drops them.
-   A membership that will not release (its primary unreachable) comes back
-   still kept, with the refusal on the row, and is reported as such. */
-async function offerForce(btn, path, verb) {
-  let result = await bulkAction(btn, path, { method: "DELETE" }, verb);
-  const kept = (result && result.kept) || [];
-  if (!kept.length) return result;
-  const list = kept
-    .map((k) => `${k.name} — ${k.meshes.map((m) => m.mesh).join(", ")}`)
-    .join("\n");
-  const go = await showModal({
-    title: `Kept ${kept.length} record(s) still named by a mesh`,
-    body:
-      `${list}\n\n` +
-      `Dropping a record its roster still names would leave that member ` +
-      `pointing at nothing, so these were kept. Force ${verb} removes them ` +
-      `from their meshes first (the roster's ×), then drops the records.`,
-    actions: [
-      { label: "Keep them", value: null },
-      { label: `Force ${verb}`, value: true, danger: true },
-    ],
-  });
-  if (!go) return result;
-  const sep = path.includes("?") ? "&" : "?";
-  const forced = await bulkAction(btn, `${path}${sep}force=1`,
-                                  { method: "DELETE" }, verb);
-  const still = (forced && forced.kept) || [];
-  if (still.length) {
-    await modalInfo(
-      `${still.length} record(s) would not release`,
-      still.map((k) =>
-        `${k.name} — ` +
-        k.meshes
-          .map((m) => m.mesh + (m.error ? ` (${m.error})` : ""))
-          .join(", ")
-      ).join("\n")
-    );
-  }
-  return forced || result;
 }
 
 /* Everything this page remembers about a session, dropped when the session
@@ -485,33 +433,32 @@ function railMetaText(s) {
   const identity = s.borrow
     ? `${profileHarnessLabel(s.profile, s.harness)} → ${s.borrow}`
     : profileHarnessLabel(s.profile, s.harness);
-  const state = s.status === "exited"
+  const state = s.archived_at ? "archived" : s.status === "exited"
     ? `exit ${s.exit_code ?? "?"}`
     : s.winddown ? "winding down" : "";
   return [identity, state].filter(Boolean).join(" · ");
 }
 
-/* Exited records remain resumable and therefore stay in /api/sessions, but
-   mixing them into the live fleet makes a long-running daemon's rail mostly
-   historical. Keep them in the same DOM list so every existing detail,
-   briefing and resume path still applies; this control only changes their
-   visibility. An exited session that is already open reveals the group so a
+/* Archived records remain resumable and therefore stay in /api/sessions.
+   Keep them in the same DOM list so every existing detail, briefing and
+   resume path still applies; this control only changes their visibility.
+   An archived session that is already open reveals the group so a
    direct route never points at a row the rail conceals. */
-let exitedSessionsVisible = false;
+let archivedSessionsVisible = false;
 
-function syncExitedSessions(sessions) {
-  const button = $("exited-sessions-toggle");
+function syncArchivedSessions(sessions) {
+  const button = $("archived-sessions-toggle");
   const list = $("session-list");
   if (!button || !list) return;
-  const exited = (sessions || []).filter((s) => s.status === "exited");
-  if (currentName && exited.some((s) => s.name === currentName)) {
-    exitedSessionsVisible = true;
+  const archived = (sessions || []).filter((s) => !!s.archived_at);
+  if (currentName && archived.some((s) => s.name === currentName)) {
+    archivedSessionsVisible = true;
   }
-  const visible = exited.length > 0 && exitedSessionsVisible;
-  button.classList.toggle("hidden", exited.length === 0);
-  button.textContent = `${visible ? "Hide" : "Show"} exited sessions (${exited.length})`;
+  const visible = archived.length > 0 && archivedSessionsVisible;
+  button.classList.toggle("hidden", archived.length === 0);
+  button.textContent = `${visible ? "Hide" : "Show"} archived sessions (${archived.length})`;
   button.setAttribute("aria-expanded", visible ? "true" : "false");
-  list.classList.toggle("show-exited", visible);
+  list.classList.toggle("show-archived", visible);
 }
 
 async function refreshSessions() {
@@ -540,7 +487,7 @@ async function refreshSessions() {
   for (const [s, depth] of rebuild ? byLineage(sessionsCache) : []) {
     const li = document.createElement("li");
     li.dataset.name = s.name;
-    if (s.status === "exited") li.classList.add("exited-record");
+    if (s.archived_at) li.classList.add("archived-record");
     if (s.name === currentName) li.classList.add("active");
     // The indent goes on the row, not on a spacer element, so the whole row
     // stays one click target and the hover/active background still spans it.
@@ -614,7 +561,9 @@ async function refreshSessions() {
         "kill again to stop now"].filter(Boolean).join(" · ");
     }
     if (s.status === "exited") {
-      li.title = [li.title, "exited — open it to resume"].filter(Boolean).join(" · ");
+      li.title = [li.title, s.archived_at
+        ? "archived — open it to inspect or resume"
+        : "exited — open it to resume or archive"].filter(Boolean).join(" · ");
     }
     // How full this session's context is, on the rail row itself. The story
     // lives in the tooltip (a note on both the row and its name — that is
@@ -692,8 +641,8 @@ async function refreshSessions() {
   // Some embedded consumers reuse refreshSessions with a reduced rail DOM;
   // the shipped page has the control, while those consumers keep the list
   // behaviour they had before this optional view was added.
-  if (typeof syncExitedSessions === "function") {
-    syncExitedSessions(sessionsCache);
+  if (typeof syncArchivedSessions === "function") {
+    syncArchivedSessions(sessionsCache);
   }
 
   const cur = currentName && sessionsCache.find((s) => s.name === currentName);
@@ -3893,116 +3842,26 @@ $("term-kill").addEventListener("click", async () => {
   refreshSessions();
 });
 
-/* The sessions below one being removed, oldest first — the rail's own tree
-   field (`parent`), walked breadth-first the way the daemon walks it. Read
-   from the cache rather than asked for: the remove modal has to name them
-   before the DELETE, and the cache is what drew the tree the operator is
-   looking at. */
-function sessionSubtree(name) {
-  const out = [];
-  const queue = [name];
-  const seen = new Set([name]);
-  while (queue.length) {
-    const at = queue.shift();
-    for (const s of sessionsCache) {
-      if (s.parent !== at || seen.has(s.name)) continue;
-      seen.add(s.name);
-      out.push(s);
-      queue.push(s.name);
-    }
-  }
-  return out;
-}
-
-async function removeExitedSession(name) {
-  const memberships = sessMeshes(name);
-  const inMesh = memberships.length > 0;
-  const meshNames = memberships.map((m) => m.mesh).join(", ");
-  const row = sessionsCache.find((s) => s.name === name) || {};
-  const kids = sessionsCache.filter((s) => s.parent === name);
-  const below = sessionSubtree(name);
-  const running = below.filter((s) => s.status !== "exited");
-  const above = (row.parent && sessionsCache.some((s) => s.name === row.parent))
-    ? row.parent : "";
-  // This is the one path that makes the session unresumable, so it asks
-  // first. Only ever shown on an exited session; the DELETE route refuses
-  // a running one outright. A mesh membership changes this same question,
-  // rather than causing a 409 and a second question after the first DELETE.
-  //
-  // Sessions below it change it a second way. Dropping this record on its own
-  // leaves them naming a session that is no longer there, which the tree
-  // reads as "no parent": the grandchildren keep running, and the grandparent
-  // that used to command them stops without anything saying so. So when there
-  // are any, the modal asks what happens to them instead of deciding it.
-  let body = inMesh
-    ? `This session is still a member of: ${meshNames}.\n\n` +
-      "Force remove takes it off those rosters first, then forgets the " +
-      "record so it can no longer be resumed."
-    : "The daemon forgets it, so it can no longer be resumed from here.";
-  if (kids.length) {
-    body += `\n\n${below.length} session(s) sit under it: ` +
-      `${below.map((s) => s.name).join(", ")}.`;
-  }
-  const choice = await showModal({
-    title: `Remove exited session '${name}'?`,
-    body,
-    checkbox: inMesh ? {
-      label: "I understand it is still in a mesh and want to force remove it.",
-    } : null,
-    choices: kids.length ? {
-      options: [
-        {
-          label: above
-            ? `Move them up to '${above}'`
-            : "Leave them as top-level sessions",
-          hint: above
-            ? ` — ${kids.length} direct child(ren) answer to '${above}' after this`
-            : " — this session has no parent to move them to",
-          value: { children: "escalate" },
-        },
-        {
-          label: `Remove all ${below.length} of them too`,
-          hint: running.length
-            ? ` — refused while ${running.length} of them is still running`
-            : " — they can no longer be resumed either",
-          value: { children: "remove" },
-          destructive: true,
-        },
-      ],
-    } : null,
-    actions: [
-      { label: "Cancel", value: null },
-      {
-        label: "Remove", value: { force: inMesh }, danger: true,
-        requiresCheck: inMesh, dangerWhen: "destructive",
-      },
-    ],
-  });
-  if (!choice) return false;
-  const query = [
-    choice.force ? "force=1" : "",
-    choice.children === "remove" ? "children=remove" : "",
-  ].filter(Boolean).join("&");
+async function archiveExitedSession(name) {
   const resp = await api(
-    `/api/sessions/${encodeURIComponent(name)}${query ? "?" + query : ""}`,
-    { method: "DELETE" });
+    `/api/sessions/${encodeURIComponent(name)}/archive`, { method: "POST" }
+  );
+  const info = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    const doc = await resp.json().catch(() => ({}));
-    await modalInfo(`Could not remove '${name}'`,
-                    doc.error || `HTTP ${resp.status}`);
-    refreshSessions();
+    await modalInfo(`Could not archive '${name}'`,
+                    info.error || `HTTP ${resp.status}`);
     return false;
   }
   detach();
   currentName = null;
   location.hash = "#/";
-  refreshSessions();
+  await refreshSessions();
   return true;
 }
 
-$("term-remove").addEventListener("click", async () => {
+$("term-archive").addEventListener("click", async () => {
   if (!currentName) return;
-  await removeExitedSession(currentName);
+  await archiveExitedSession(currentName);
 });
 
 /* Stop everything. The records stay and every one of them is resumable after,
@@ -4031,7 +3890,7 @@ $("stop-all").addEventListener("click", async () => {
    the child it was bound to. */
 $("resume-all").addEventListener("click", async () => {
   const dead = sessionsCache
-    .filter((s) => s.status === "exited").map((s) => s.name);
+    .filter((s) => s.status === "exited" && !s.archived_at).map((s) => s.name);
   if (!dead.length) return;
   if (!(await modalConfirm(
     `Resume ${dead.length} exited session(s)?`,
@@ -4041,7 +3900,8 @@ $("resume-all").addEventListener("click", async () => {
     "Resume", false
   ))) return;
   const result = await bulkAction(
-    $("resume-all"), "/api/sessions/respawn", { method: "POST" }, "resume"
+    $("resume-all"), "/api/sessions/respawn?archived=0",
+    { method: "POST" }, "resume"
   );
   const back = (result && result.respawned) || [];
   detach();
@@ -4049,63 +3909,22 @@ $("resume-all").addEventListener("click", async () => {
   if (currentName && back.includes(currentName)) attach(currentName);
 });
 
-$("clear-exited").addEventListener("click", async () => {
-  const dead = sessionsCache.filter((s) => s.status === "exited").map((s) => s.name);
+$("archive-exited").addEventListener("click", async () => {
+  const dead = sessionsCache
+    .filter((s) => s.status === "exited" && !s.archived_at)
+    .map((s) => s.name);
   if (!dead.length) return;
-  if (!(await modalConfirm(
-    `Drop the records of ${dead.length} exited session(s)?`,
-    `${dead.join(", ")}\n\n` +
-    `They can no longer be resumed. Running sessions are untouched.`,
-    "Clear"
-  ))) return;
-  // A record a mesh row still names is kept, not dropped — the two are one
-  // fact, and half of it left behind is a member nobody can respawn or reach.
-  // offerForce() is what says so, for this button and for delete alike, and
-  // what turns the hold into a choice: release the rosters too, or keep both.
-  const result = await offerForce($("clear-exited"), "/api/sessions", "clear");
-  dropIfGone(result, dead);
-  refreshSessions();
-});
-
-$("exited-sessions-toggle").addEventListener("click", () => {
-  exitedSessionsVisible = !exitedSessionsVisible;
-  syncExitedSessions(sessionsCache);
-});
-
-/* The whole rail, gone: running sessions stopped and waited out, then every
-   record forgotten. One call rather than stop-all followed by clear, because
-   a session that has just been signalled is not yet `exited` — a clear sent
-   straight after it would skip exactly the sessions it was meant to remove. */
-$("delete-all").addEventListener("click", async () => {
-  const all = sessionsCache.map((s) => s.name);
-  if (!all.length) return;
-  const live = sessionsCache.filter((s) => s.status !== "exited").length;
-  if (!(await modalConfirm(
-    `Delete all ${all.length} session(s)?`,
-    `${all.join(", ")}\n\n` +
-    (live ? `${live} of them are still running and are stopped first. ` : "") +
-    `The daemon then forgets every record, so none of them can be resumed.`,
-    "Delete all"
-  ))) return;
-  const result = await offerForce(
-    $("delete-all"), "/api/sessions?running=1", "delete"
+  await bulkAction(
+    $("archive-exited"), "/api/sessions/archive",
+    { method: "POST" }, "archive"
   );
-  dropIfGone(result, all);
   refreshSessions();
 });
 
-/* Was the session this tab is attached to among the records just dropped? Then
-   there is nothing left to watch — not even an exited screen — so let the
-   terminal go and fall back to home. A record the mesh guard kept is still
-   there, and stays open. */
-function dropIfGone(result, candidates) {
-  if (!result || !currentName || !candidates.includes(currentName)) return;
-  const kept = (result.kept || []).map((k) => k.name);
-  if (kept.includes(currentName)) return;
-  detach();
-  currentName = null;
-  location.hash = "#/";
-}
+$("archived-sessions-toggle").addEventListener("click", () => {
+  archivedSessionsVisible = !archivedSessionsVisible;
+  syncArchivedSessions(sessionsCache);
+});
 
 /* The rail polls, but a poll is a tick behind at best: a session spawned from
    somewhere else — another agent's `spawn`, a `claunch new` in a terminal, a
@@ -4217,15 +4036,17 @@ function setStatusBadge(status) {
   const badge = $("term-status");
   badge.textContent = status;
   badge.className = `badge ${status}`;
-  // An exited session is revivable, not attachable — offer resume, and swap
-  // kill for remove: one verb per button, one button per state.
+  // An exited session is revivable and archivable. An archived record keeps
+  // resume while archive itself disappears because the transition is done.
   const exited = status === "exited";
+  const archived = !!(sessionsCache.find((s) =>
+    s.name === currentName) || {}).archived_at;
   $("term-resume").classList.toggle("hidden", !exited);
   // Rebrief types into a live terminal; on an exited one there is nobody to
   // read it, so the button yields its spot to resume.
   $("term-rebrief").classList.toggle("hidden", exited);
   $("term-kill").classList.toggle("hidden", exited);
-  $("term-remove").classList.toggle("hidden", !exited);
+  $("term-archive").classList.toggle("hidden", !exited || archived);
   // Every attach path passes through here (freshAttach and restoreTerminal
   // both seed the header with it), so this is where the countdown is told
   // which session it is now about — a whole second of the last session's
@@ -6554,7 +6375,8 @@ function syncMobileBars() {
   // Nothing to size without a terminal under the bar.
   $("m-zoom").classList.toggle("hidden", !has);
   $("m-kill").classList.toggle("hidden", !has || status === "exited");
-  $("m-remove").classList.toggle("hidden", !has || status !== "exited");
+  $("m-archive").classList.toggle(
+    "hidden", !has || status !== "exited" || !!(sess && sess.archived_at));
 
   const bDot = $("mb-dot");
   bDot.className = `dot ${status}`;
@@ -6571,10 +6393,10 @@ function syncMobileBars() {
 // the rail on a phone. Going through the router rather than flipping the
 // flag keeps the URL honest about what is on screen.
 $("m-menu").addEventListener("click", () => { location.hash = "#/"; });
-// The header's controls are the real ones; these just reach them, so kill's
-// confirm-before-forgetting and resume's reattach stay in one place.
+// The header's controls are the real ones; these mirrors keep archive and
+// resume behaviour in one place.
 $("m-kill").addEventListener("click", () => $("term-kill").click());
-$("m-remove").addEventListener("click", () => $("term-remove").click());
+$("m-archive").addEventListener("click", () => $("term-archive").click());
 $("m-resume").addEventListener("click", () => $("term-resume").click());
 
 $("mobile-bottom").addEventListener("click", () => {

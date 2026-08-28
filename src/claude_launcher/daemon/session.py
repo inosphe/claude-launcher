@@ -286,6 +286,10 @@ class Session:
         self.last_input_at: Optional[str] = last_input_at
         self.exit_code: Optional[int] = None
         self.exited_at: Optional[str] = None
+        # Archiving is a retained record's lifecycle marker. A live session
+        # always starts outside the archive; respawn therefore clears it by
+        # constructing a new Session from the retained definition.
+        self.archived_at: Optional[str] = None
         self.exited = False
         self._started_mono = time.monotonic()
         self._subscribers: Set[asyncio.Queue] = set()
@@ -1241,6 +1245,7 @@ class Session:
             "last_activity_at": self.last_activity_at(),
             "viewers": self.viewers(),
             "exited_at": self.exited_at,
+            "archived_at": self.archived_at,
             # A person's standing "type nothing in here" (:meth:`delivery_held`).
             # On the list poll rather than only on the per-session queued
             # endpoint, because the rail draws one row per session and the
@@ -1272,8 +1277,8 @@ class DeadSession:
     does the right to revive them: on restart everything the previous daemon
     did not relaunch — already exited, created ``--no-restore``, or a relaunch
     that failed — comes back as one of these instead of being forgotten, so
-    ``claunch respawn`` (and the web UI's resume) still reach it. Only the user
-    drops such a record, via ``kill-session`` or ``clear-sessions``.
+    ``claunch respawn`` (and the web UI's resume) still reach it. Archive keeps
+    this record; explicit DELETE and ``clear-sessions`` drop it.
 
     It answers the read-only surface a viewer needs (list, capture, attach to
     read the final screen — replayed from the raw log) and raises
@@ -1293,6 +1298,7 @@ class DeadSession:
         last_visited_at: Optional[str] = None,
         last_input_at: Optional[str] = None,
         exited_at: Optional[str] = None,
+        archived_at: Optional[str] = None,
         scrollback: int = 5000,
         idle_threshold: float = 2.0,
     ) -> None:
@@ -1307,6 +1313,7 @@ class DeadSession:
         self.last_visited_at = last_visited_at
         self.last_input_at = last_input_at
         self.exited_at = exited_at
+        self.archived_at = archived_at
         self.idle_threshold = idle_threshold
         self._scrollback = scrollback
         self._screen: Optional[ScreenState] = None
@@ -1436,5 +1443,6 @@ class DeadSession:
             "last_activity_at": self.last_activity_at(),
             "viewers": self.viewers(),
             "exited_at": self.exited_at,
+            "archived_at": self.archived_at,
             "delivery_hold": self.delivery_held(),  # always False; see above
         }

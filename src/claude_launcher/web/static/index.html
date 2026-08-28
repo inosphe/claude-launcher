@@ -20,10 +20,7 @@
   </div>
 </div>
 
-<!-- The confirm/report dialog for the destructive session flows, in place of
-     the browser's confirm()/alert(). Not for looks: a native dialog can only
-     answer yes or no, and the one question these flows end on — a record a
-     mesh still names, force it or keep it — needs a third button. One
+<!-- The confirm/report dialog used by fleet and session actions. One
      instance, driven by showModal(); empty and hidden between askings. -->
 <div id="modal-overlay" class="hidden">
   <div class="modal-box" role="dialog" aria-modal="true"
@@ -68,7 +65,7 @@
     </span>
     <button id="m-resume" class="m-act hidden" type="button">resume</button>
     <button id="m-kill" class="m-act hidden" type="button">kill</button>
-    <button id="m-remove" class="m-act hidden" type="button">remove</button>
+    <button id="m-archive" class="m-act hidden" type="button">archive</button>
   </div>
 
   <!-- The rail. Only things that move on their own live here: the session
@@ -87,17 +84,16 @@
       </div>
       <span id="relay-badge" class="badge hidden"></span>
     </header>
-    <button id="exited-sessions-toggle" class="hidden" type="button"
+    <button id="archived-sessions-toggle" class="hidden" type="button"
             aria-controls="session-list" aria-expanded="false"></button>
     <ul id="session-list"></ul>
-    <!-- The whole rail at once. Each button hides itself when it would act on
+    <!-- The working fleet at once. Each button hides itself when it would act on
          nothing, so what is up is a count of what it would do — the bar is
-         empty on an empty rail rather than four dead controls. -->
+         empty on an archived-only rail rather than three inactive controls. -->
     <div id="bulk-actions">
       <button id="stop-all" class="bulk hidden" type="button"></button>
       <button id="resume-all" class="bulk hidden" type="button"></button>
-      <button id="clear-exited" class="bulk hidden" type="button"></button>
-      <button id="delete-all" class="bulk danger hidden" type="button"></button>
+      <button id="archive-exited" class="bulk hidden" type="button"></button>
     </div>
     <nav id="rail-nav">
       <a href="#/" data-page="home"><span>⌂</span>Home</a>
@@ -213,8 +209,8 @@
                 title="re-type this session's briefing (mesh, run, parent, task) into its terminal — for an agent whose context was cleared or compacted">rebrief</button>
         <button id="term-kill" class="term-btn"
                 title="terminate the program running in this session">kill</button>
-        <button id="term-remove" class="term-btn hidden"
-                title="forget this exited session (it can no longer be resumed here)">remove</button>
+        <button id="term-archive" class="term-btn hidden"
+                title="retain this exited session in the archive">archive</button>
       </span>
       <!-- Text size, and with it the session's grid: bigger glyphs mean fewer
            columns and rows, and that new size is sent to the program. Three

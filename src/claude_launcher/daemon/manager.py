@@ -6,11 +6,10 @@ marked ``restore``. Claude pins an id at creation; Codex reports its chosen id
 through its rollout metadata immediately after spawn. Both are stored in the
 definition so a relaunch recovers that session's own conversation.
 
-Everything it does *not* relaunch is kept as a :class:`DeadSession` record
-rather than forgotten, so a session that exited (or opted out of restore) can
-still be respawned days later. The daemon never drops a record on its own:
-that is :meth:`SessionManager.kill` for one and :meth:`SessionManager.clear`
-for all of them, both reachable only from the CLI and the web UI.
+Everything it does *not* relaunch is kept as a :class:`DeadSession` record,
+so a session that exited (or opted out of restore) can still be respawned days
+later. Archive is the normal retirement path and retains that record. Explicit
+remove/clear calls are the exceptional paths that permanently drop it.
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ import os
 import re
 import shutil
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple, Union
 
@@ -873,6 +873,25 @@ class SessionManager:
             self._sessions[name] = session  # keep the exited record on failure
             raise
 
+    def archive(self, name: str) -> AnySession:
+        """Move an exited record out of the working fleet while retaining it.
+
+        The definition, conversation id, output log and lineage remain in
+        place, so archive is reversible through :meth:`respawn`. Repeating
+        the operation is idempotent and preserves the original archive time.
+        """
+        session = self.get(name)
+        if not session.exited:
+            raise ManagerError(
+                f"session {name!r} is still running — kill it before archiving"
+            )
+        if not session.archived_at:
+            session.archived_at = datetime.now(timezone.utc).isoformat(
+                timespec="seconds"
+            )
+            self.persist()
+        return session
+
     async def redefine(self, name: str, **changes) -> Session:
         """Stop a session and relaunch it under a changed definition.
 
@@ -1139,6 +1158,10 @@ class SessionManager:
                     "last_visited_at": session.last_visited_at,
                     "last_input_at": session.last_input_at,
                     "exited_at": session.exited_at,
+                    # Archive retains the record and only changes which fleet
+                    # view owns it. Kept outside SessionDef because it is
+                    # lifecycle state, not a launch option.
+                    "archived_at": session.archived_at,
                     # A person's standing "type nothing in here". Written
                     # here so it survives the restart that has nothing to do
                     # with them; an exited record always reports False (see
@@ -1230,6 +1253,7 @@ class SessionManager:
             last_visited_at=entry.get("last_visited_at"),
             last_input_at=entry.get("last_input_at"),
             exited_at=entry.get("exited_at"),
+            archived_at=entry.get("archived_at"),
             scrollback=self.scrollback,
             idle_threshold=self.idle_threshold,
         )
