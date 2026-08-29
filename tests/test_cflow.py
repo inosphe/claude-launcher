@@ -224,6 +224,13 @@ BRANCH_SELF = DELEGATED_BRANCH.replace(
     "from: [{role: reviewer}]", "from: [{role: reviewer}]\n        otherwise: self"
 )
 
+#: `self:<option>` — the exhausted select takes the named branch itself, by
+#: nobody, where bare `self` would hand the choice back to the driver.
+BRANCH_SELF_DEFAULT = DELEGATED_BRANCH.replace(
+    "from: [{role: reviewer}]",
+    "from: [{role: reviewer}]\n        otherwise: self:ready",
+)
+
 
 @pytest.fixture
 def flow_dir(home, tmp_path, monkeypatch):
@@ -1924,6 +1931,28 @@ def test_select_chooser_accepts_a_delegation():
     assert model.parse(BRANCH_SELF).steps["verdict"].select.delegate.otherwise == "self"
 
 
+def test_otherwise_self_option_names_a_real_option():
+    delegate = model.parse(BRANCH_SELF_DEFAULT).steps["verdict"].select.delegate
+    assert delegate.otherwise == "self"
+    assert delegate.default_option == "ready"
+    assert delegate.describe() == "reviewer -> self:ready"
+
+    with pytest.raises(WorkflowError, match="names no option"):
+        model.parse(BRANCH_SELF_DEFAULT.replace("self:ready", "self:sideways"))
+    with pytest.raises(WorkflowError, match="names no option"):
+        # a bare trailing colon is not even YAML; the quoted spelling is the
+        # one a slip can actually produce
+        model.parse(BRANCH_SELF_DEFAULT.replace("self:ready", '"self:"'))
+    with pytest.raises(WorkflowError, match="means nothing"):
+        model.parse(BRANCH_SELF_DEFAULT.replace("self:ready", "human:ready"))
+
+
+def test_otherwise_self_option_is_refused_on_an_approval():
+    """An approval has no branches to take — bare `self` already covers it."""
+    with pytest.raises(WorkflowError, match="no branches"):
+        model.parse(ASK_SELF.replace("otherwise: self", "otherwise: self:yes"))
+
+
 def test_unknown_chooser_names_the_delegation_form():
     bad = """
 steps:
@@ -2280,6 +2309,64 @@ def test_otherwise_self_hands_a_branch_back_to_the_driver(flow_dir, monkeypatch)
     # and the driver may now take it, where a delegated select refuses it
     engine.select("rework", "I judged it myself", by="agent")
     assert engine.status()["step_id"] == "impl"
+
+
+def test_otherwise_self_option_takes_the_branch_without_the_driver(
+    flow_dir, monkeypatch
+):
+    """The deadlock fix: nobody reachable, and the run never asks the driver."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch)  # no reviewer
+    _write(flow_dir, "branch", BRANCH_SELF_DEFAULT)
+    engine.start("branch")
+    payload = engine.status()
+    # `ready` goes to `end`: the run took the declared default itself rather
+    # than parking on a select the driver is the wrong party to answer
+    assert payload["status"] == "done"
+
+    events = [e["event"] for e in state_mod.read_journal()]
+    assert "ask_unanswered_proceeded" in events
+    assert "ask_opened" not in events  # nobody was ever asked
+    assert "select_presented" not in events  # the driver was never presented it
+    confirmed = next(
+        e for e in state_mod.read_journal() if e["event"] == "select_confirmed"
+    )
+    assert confirmed["option"] == "ready"
+    assert confirmed["by"] == "unanswered"  # chosen, and chosen by nobody
+
+
+def test_expiry_takes_the_declared_default_without_anyone(
+    flow_dir, monkeypatch
+):
+    """The daemon path: every group times out, and the run still moves."""
+    _driving_session(monkeypatch)
+    _mesh(monkeypatch, ("reviewer", "peer"), ("leader", "boss"))
+    _write(
+        flow_dir, "branch",
+        BRANCH_SELF_DEFAULT.replace(
+            "from: [{role: reviewer}]",
+            "timeout: 60\n        from: [{role: reviewer}, {role: leader}]",
+        ),
+    )
+    engine.start("branch")
+    assert engine.status()["status"] == "waiting_answer"
+
+    later = datetime.now(timezone.utc) + timedelta(seconds=61)
+    moved = engine.expire_ask(now=later)
+    assert moved["now_with"] == ["leader-boss"]  # escalated, still delegated
+
+    far = datetime.now(timezone.utc) + timedelta(seconds=122)
+    moved = engine.expire_ask(now=far)
+    assert moved["now_with"] == []  # groups exhausted...
+    assert moved["moved_to"] == "end"  # ...and the default took it, no stall
+    assert engine.status()["status"] == "done"
+
+    events = [e["event"] for e in state_mod.read_journal()]
+    assert events.count("ask_escalated") == 2
+    confirmed = next(
+        e for e in state_mod.read_journal() if e["event"] == "select_confirmed"
+    )
+    assert confirmed["by"] == "unanswered" and confirmed["option"] == "ready"
 
 
 def test_a_delegated_branch_falls_through_once_per_visit(flow_dir, monkeypatch):

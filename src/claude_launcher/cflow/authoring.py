@@ -124,6 +124,16 @@ happens when that list is exhausted**: `human` (default — the run holds for
 `claunch cflow approve|select`) or `self` (the driver proceeds alone,
 journaled as unanswered and never as an approval).
 
+On a select's chooser there is a third spelling, `otherwise: self:<option>`:
+the run takes the named option itself, journaled as unanswered. Write it for
+the decision the driver must not be handed back — a delegated review whose
+candidates all lapse under bare `self` becomes an ordinary agent-chooses
+select, and a step whose instructions say "this is not yours to answer" then
+deadlocks against the engine handing it to exactly that agent. The declared
+default is the way out that involves nobody: not the responders who never
+answered, not the driver who must not choose, not a person who was never
+meant to be paged.
+
 - **`role` is required.** A delegation is to a function. "Whoever I happen to
   be wired to" would make the answer depend on topology alone.
 - **`scope: ancestor`** narrows to the asking session's own chain of command.
@@ -670,7 +680,11 @@ child.
 - **`otherwise: self` as a default.** It is the one escape hatch, it is
   journaled as unanswered rather than approved, and it belongs only where
   proceeding unreviewed is genuinely better than stopping. Never put it on a
-  step that ships, deletes or publishes.
+  step that ships, deletes or publishes. On a select, ask who bare `self`
+  hands the choice to: if the step's own instructions tell the driver the
+  decision is not theirs, bare `self` deadlocks that driver against the
+  engine — declare the branch instead (`otherwise: self:<option>`) or hold
+  for a person (`otherwise: human`).
 """
 
 
