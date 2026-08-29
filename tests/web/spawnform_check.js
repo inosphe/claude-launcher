@@ -137,7 +137,7 @@ new Function(
   "renderRoleStance", "refreshWorkflowChoices", "spawnReport", "workspacesCache",
   "profileDetails", "profileOptions",
   "syncRuntimeFold", "renderRuntimeSummary", "renderProfileHint",
-  "syncNewBorrowOptions",
+  "syncNewBorrowOptions", "syncNewWorktree",
   [`let newProfileOptions = profileOptions, newHarnessFor = null;`,
    sliceConst("SPAWN_INHERITS"), sliceLet("newSpawnReport"),
    sliceLet("newSpawnReportFor"), sliceLet("newSpawnDefaultsFor"),
@@ -186,7 +186,11 @@ exports.setSessions = (s) => { sessionsCache = s; };
    // and it is newform_check's to hold — here it only has to exist. The
    // summary line the fold carries, and the credential hint under the
    // promoted Profile row, are the same story.
-   () => {}, () => {}, () => {}, () => {});
+   () => {}, () => {}, () => {}, () => {},
+   // syncSpawnMode ends by re-greying the worktree picker, whose rows and
+   // radios this stub form does not carry — same story again: it has to
+   // exist, and its gating is held where the picker is actually driven.
+   () => {});
 
 let failures = 0;
 function check(what, got, want) {

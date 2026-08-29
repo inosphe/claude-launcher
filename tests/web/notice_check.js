@@ -119,7 +119,7 @@ function build(opts) {
     "$", "el", "setTimeout", "clearTimeout", "Date", "api", "daemonHealth",
     "renderRelayBadge", "refreshProfiles", "refreshHarnesses", "refreshRoles",
     "refreshWorkspaces", "refreshSessions", "refreshMeshList", "refreshCflow",
-    "refreshTermQueued", "reconnectNow", "route",
+    "refreshTermQueued", "reconnectNow", "route", "refreshNewWorktree",
     code +
     "\nreturn {notify, dismissNotice, noticeClock, setDaemonOnline, boot, pollOnce," +
     " get cards() { return [...notices.keys()]; }," +
@@ -134,6 +134,10 @@ function build(opts) {
     setTimeoutStub, clearTimeoutStub, FakeDate, apiStub, daemonHealth,
     () => {}, () => {}, () => {}, () => {}, () => {}, () => {}, () => {},
     () => {}, () => {}, () => {}, () => {},
+    // The poll's refresh batch gained the worktree picker with the spawn
+    // form's checkout choice; what it fetches and greys is newform_check's
+    // and spawnform_check's to hold — here it only has to exist.
+    () => {},
   );
 
   return { api, nodes, daemon, clock, apiCalls, timers,

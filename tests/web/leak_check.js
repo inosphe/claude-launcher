@@ -307,13 +307,36 @@ const byId = parsed.ids;
 
 /* A <form>'s named controls reachable as `form.<name>`. app.js uses that
    shorthand throughout the spawn wizard, and it is the one piece of the DOM
-   API that is not a method call and so cannot be stubbed on the prototype. */
+   API that is not a method call and so cannot be stubbed on the prototype.
+   A name shared by several controls — a radio group like worktree_mode —
+   comes back as a RadioNodeList in a browser: iterable, and its `value` is
+   the checked member's. Binding only the first node would hand app.js a
+   single element where it writes `for (const radio of f.worktree_mode)`. */
 for (const form of query(docRoot, "form")) {
+  const named = new Map();
   walk(form, (node) => {
     const name = node._attrs.name;
-    if (!name || name in form) return;
-    Object.defineProperty(form, name, { get: () => node, configurable: true });
+    if (!name) return;
+    if (!named.has(name)) named.set(name, []);
+    named.get(name).push(node);
   });
+  for (const [name, members] of named) {
+    if (name in form) continue;
+    if (members.length === 1) {
+      const node = members[0];
+      Object.defineProperty(form, name, { get: () => node, configurable: true });
+    } else {
+      const group = members.slice();
+      Object.defineProperty(group, "value", {
+        get: () => {
+          const on = group.find((n) => n.checked);
+          return on ? on.value : "";
+        },
+        configurable: true,
+      });
+      Object.defineProperty(form, name, { get: () => group, configurable: true });
+    }
+  }
 }
 
 const document = {
