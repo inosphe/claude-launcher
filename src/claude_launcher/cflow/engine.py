@@ -2940,6 +2940,11 @@ def select(
             f"(options: {', '.join(step.select.options)})"
         )
 
+    if by == "agent" and step.select.require_reason and not (reason or "").strip():
+        raise CflowError(
+            f"step {step.id!r} requires a reason with the agent selection"
+        )
+
     if by == "agent" and _live_chooser(state, step) == "delegate":
         raise CflowError(
             f"step {step.id!r} delegates this decision — it is not yours to "

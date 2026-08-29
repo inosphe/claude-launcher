@@ -241,7 +241,36 @@ steps:
       intake에서 정한 범위의 구현이 피처 브랜치 커밋으로 존재하고(범위 밖
       파일은 건드리지 않았다), 바꾼 파일 목록과 접근 방식 요지, 범위 밖
       발견이 있었다면 그 이슈 id가 보고에 있다.
-    next: review
+    next: test-decision
+
+  test-decision:
+    title: 표적 테스트 실행 여부 결정
+    select:
+      chooser: agent
+      require_reason: true
+      prompt: |
+        이번 변경에 표적 테스트를 실행할지 자율적으로 결정한다. 변경된
+        영역의 회귀 위험, 테스트가 제공하는 검증 가치, 실행 비용을 확인하고
+        `run` 또는 `skip`을 선택한다. 선택과 동시에 판단 근거를 reason으로
+        기록한다. 판단이 불명확하면 `run`을 선택한다.
+      options:
+        run:
+          description: 표적 테스트를 실행하고 결과를 기록한다.
+          next: review
+        skip:
+          description: 표적 테스트를 생략하고 생략 사유를 기록한 뒤 진행한다.
+          next: test-skipped
+
+  test-skipped:
+    title: 표적 테스트 생략 기록
+    instructions: |
+      표적 테스트를 생략한 선택과 reason을 보고에 그대로 기록한다. 테스트
+      결과를 실행한 것처럼 작성하지 않으며, 생략으로 남는 검증 범위를
+      명시한다.
+    done_when: |
+      표적 테스트 생략 선택의 reason, 생략 대상, 남은 검증 범위가 보고에
+      기록되어 있다.
+    next: commit
 
   review:
     title: 테스트 (표적)

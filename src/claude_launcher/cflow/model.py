@@ -719,6 +719,8 @@ class Select:
     options: Dict[str, Option] = field(default_factory=dict)
     #: Set exactly when ``chooser`` is "delegate".
     delegate: Optional[Delegate] = None
+    #: Require the driving agent to provide a reason with its selection.
+    require_reason: bool = False
 
 
 @dataclass(frozen=True)
@@ -1948,6 +1950,12 @@ def _parse_select(raw, step_id: str) -> Optional[Select]:
         return None
     if not isinstance(raw, dict):
         raise WorkflowError(f"step {step_id!r}: 'select' must be a mapping")
+    unknown = sorted(set(raw) - {"prompt", "chooser", "options", "require_reason"})
+    if unknown:
+        raise WorkflowError(
+            f"step {step_id!r}: select has unknown key(s): {', '.join(unknown)} "
+            "(allowed: prompt, chooser, options, require_reason)"
+        )
     prompt = raw.get("prompt")
     if not prompt:
         raise WorkflowError(f"step {step_id!r}: select needs a 'prompt'")
@@ -1999,8 +2007,14 @@ def _parse_select(raw, step_id: str) -> Optional[Select]:
                 f"select (options: {', '.join(options)}) — the run would have "
                 f"nothing to take when every candidate runs out"
             )
+    require_reason = raw.get("require_reason", False)
+    if not isinstance(require_reason, bool):
+        raise WorkflowError(
+            f"step {step_id!r}: select require_reason must be a boolean"
+        )
     return Select(
-        prompt=str(prompt), chooser=chooser, options=options, delegate=delegate
+        prompt=str(prompt), chooser=chooser, options=options, delegate=delegate,
+        require_reason=require_reason,
     )
 
 
