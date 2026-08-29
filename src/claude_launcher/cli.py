@@ -27,6 +27,7 @@ from . import (
     cli_report,
     cli_sessions,
     cli_sync,
+    cli_window,
     cli_workspace,
     config,
     credentials,
@@ -1307,6 +1308,7 @@ def build_parser() -> argparse.ArgumentParser:
     cli_plugins.register(sub)
     cli_report.register(sub)
     cli_commits.register(sub)
+    cli_window.register(sub)
 
     return parser
 

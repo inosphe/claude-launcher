@@ -29,6 +29,7 @@ from .. import worktree as worktree_mod
 from . import beads as beads_mod
 from . import briefing, cflow_clock, clipty, ctxsize, onboard, rebrief
 from . import transcript_view
+from . import window as window_mod
 from ..cli_beads import BeadsError
 from ..cflow import engine as cflow_engine, state as cflow_state
 from ..cflow.engine import CflowError
@@ -159,6 +160,7 @@ def build_app(
     relay_state=None,
     shell: "clipty.ShellPty | None" = None,
     beads: "beads_mod.Board | None" = None,
+    window: "window_mod.WindowManager | None" = None,
     gate_timeout: float = restart_gate.GATE_TIMEOUT,
 ) -> web.Application:
     cookie_sessions: set = set()
@@ -210,9 +212,23 @@ def build_app(
     board = beads if beads is not None else beads_mod.Board()
     app["beads"] = board
     manager.exit_hooks.append(board.session_exited)
+    # The measurement window: one per daemon, injected for tests. Its
+    # session_exited rides the same exit funnel as the board's, for the same
+    # reason: a holder that dies must release without a human noticing.
+    window = window if window is not None else window_mod.WindowManager(
+        manager, app["mesh"]
+    )
+    app["window"] = window
+    manager.exit_hooks.append(window.session_exited)
 
     r = app.router
     r.add_get("/api/health", h_health)
+    # The measurement window (daemon/window.py): the machine's test-run
+    # arbiter as readable state — who holds it, who waits — so the sweep
+    # protocol stops standing on process scans and mesh chat.
+    r.add_get("/api/window", h_window_status)
+    r.add_post("/api/window/acquire", h_window_acquire)
+    r.add_post("/api/window/release", h_window_release)
     r.add_post("/api/auth/session", h_auth_session)
     r.add_get("/api/daemon", h_daemon_info)
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
@@ -457,6 +473,51 @@ async def h_auth_session(request: web.Request) -> web.Response:
         COOKIE_NAME, session_id, httponly=True, samesite="Strict", path="/"
     )
     return resp
+
+
+async def h_window_status(request: web.Request) -> web.Response:
+    """The measurement window as state: holders, queue, caps.
+
+    This read is the protocol's replacement for the process scan: the answer
+    comes from the arbiter, so it has no blind spot and no staleness, and it
+    reaches sessions that no mesh message would (board claunch-fnhu).
+    """
+    return web.json_response(request.app["window"].status())
+
+
+async def h_window_acquire(request: web.Request) -> web.Response:
+    """Ask for the window. ``wait`` seconds > 0 queues and long-polls."""
+    body = await _json_body(request)
+    cls = body.get("class") or body.get("cls") or ""
+    result = await request.app["window"].acquire(
+        cls,
+        session=body.get("session"),
+        pid=int(body.get("pid") or 0),
+        label=str(body.get("label") or ""),
+        wait=float(body.get("wait") or 0),
+    )
+    if result.get("error"):
+        return web.json_response(result, status=400)
+    return web.json_response(result)
+
+
+async def h_window_release(request: web.Request) -> web.Response:
+    """Hand a grant back. ``grant_id`` picks one; ``session`` releases all of
+    that session's, which is how a caller that lost its grant id (a compacted
+    context) can still do the honest thing."""
+    body = await _json_body(request)
+    window = request.app["window"]
+    grant_id = body.get("grant_id")
+    if grant_id:
+        ok = window.release(str(grant_id))
+        return web.json_response({"released": 1 if ok else 0})
+    session = body.get("session")
+    if session:
+        return web.json_response({"released": window.release_session(str(session))})
+    return web.json_response(
+        {"released": 0, "error": "release wants a grant_id or a session"},
+        status=400,
+    )
 
 
 async def h_daemon_info(request: web.Request) -> web.Response:
