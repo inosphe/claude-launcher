@@ -2733,7 +2733,51 @@ def _run_verify(step: Step, cwd: Optional[str]) -> Optional[dict]:
     }
 
 
-def run_probe(command: str, cwd: Optional[str], timeout: float) -> Optional[dict]:
+def probe_env(scope: Optional[str]) -> Dict[str, str]:
+    """The environment a probe subprocess runs in, given whose run it is for.
+
+    A probe is launched by the daemon, and the daemon's own environment is not
+    the run's. It carries whatever ``CLAUNCH_SESSION`` the daemon inherited
+    from the terminal it was started in -- one session's name, for every run
+    on the machine -- read out of the live daemon's process environment while
+    this was being fixed: ``CLAUNCH_SESSION=s127``, ``PWD`` the repository
+    root, unchanged for that daemon's whole lifetime. Anything the probe calls
+    that resolves "which session am I" then answers with that one name: :func:`.checkout.own_checkout` looks it
+    up, gets that session's recorded directory, and returns it *instead of* the
+    run's own -- so a gate under ``tools/`` measures a checkout the run never
+    touched. Measured on this machine (issue ``claunch-04ru``): a worker's
+    ``await-landing`` probe reported on the repository root, printing its basis
+    as ``session``, while the same command in the worker's own worktree
+    answered about the worker's branch.
+
+    Writing the run's scope in is chosen over deleting the variable, and the
+    difference matters because the answer must not depend on the lookup
+    succeeding. ``own_checkout`` falls back to the run's ``cwd`` whenever the
+    daemon cannot be asked, so with the right name loaded BOTH of its branches
+    name the same checkout: the lookup answers with that session's directory,
+    or it fails and the ``cwd`` the clock already chose stands. A probe that
+    flips between the two therefore flips between two identical answers. That
+    property is the point -- the flipping itself was observed (a worker saw the
+    probe's exit code move 2 -> 1 -> 2 -> 1 over three minutes) and its cause
+    was never measured, so the fix is built not to need it.
+
+    An unmanaged run (``scope`` is :data:`.state.DEFAULT_SCOPE`, or empty) has
+    no session to name, and there the variable is REMOVED rather than left:
+    inheriting it would be the original defect with an extra step, and its
+    absence is exactly what ``own_checkout`` reads as "fall back to cwd".
+    """
+    env = dict(os.environ)
+    who = (scope or "").strip()
+    if who and who != state_mod.DEFAULT_SCOPE:
+        env[state_mod.SESSION_ENV] = who
+    else:
+        env.pop(state_mod.SESSION_ENV, None)
+    return env
+
+
+def run_probe(
+    command: str, cwd: Optional[str], timeout: float, *, scope: Optional[str]
+) -> Optional[dict]:
     """Measure a step's awaited condition once. ``None`` = could not measure.
 
     Called by the daemon's reminder clock, not by the run — nothing in a run's
@@ -2758,6 +2802,10 @@ def run_probe(command: str, cwd: Optional[str], timeout: float) -> Optional[dict
     ``awaits: verify`` runs under the probe's budget, so a heavy command
     nominated by mistake times out into ``None`` instead of being re-run on a
     loop.
+
+    ``scope`` says whose run this probe is for and has no default, because
+    every caller knows it and a wrong answer here is silent: see
+    :func:`probe_env` for what it decides and why it is not optional.
     """
     kwargs = (
         {"start_new_session": True}
@@ -2774,6 +2822,7 @@ def run_probe(command: str, cwd: Optional[str], timeout: float) -> Optional[dict
             text=True,
             encoding="utf-8",
             errors="replace",
+            env=probe_env(scope),
             **kwargs,
         )
     except (OSError, ValueError):
@@ -3101,7 +3150,13 @@ def check_checklist(*, cwd: Optional[str] = None) -> Optional[dict]:
 
     measured: Dict[str, dict] = {}
     for item in checklist.items:
-        probe = run_probe(item.check, cwd, checklist.timeout)
+        # The scope is read here rather than defaulted inside `run_probe`: the
+        # ambient one is right only because `_scoped_op` installed this run's
+        # scope for the duration of the call, and that is a fact about THIS
+        # function, not about probes.
+        probe = run_probe(
+            item.check, cwd, checklist.timeout, scope=state_mod.current_scope()
+        )
         measured[item.id] = {
             # `run_probe` returns None when the command could not be run at
             # all, which is no answer rather than the answer "false". It is

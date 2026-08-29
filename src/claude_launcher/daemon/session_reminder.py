@@ -385,8 +385,16 @@ class SessionReminderService:
             )
         return sources
 
-    def _measure(self, cwd: str, awaits: dict, entry: dict, now: float):
-        return self.cflow._measure(cwd, awaits, entry, now)
+    def _measure(self, cwd: str, scope: str, awaits: dict, entry: dict, now: float):
+        # ``scope`` is forwarded, not defaulted, and this wrapper is the reason
+        # to say so. A probe subprocess resolves "which checkout am I" from
+        # ``CLAUNCH_SESSION``, and in the daemon that variable names whichever
+        # session started the daemon -- so the run's own scope has to travel
+        # from the registry all the way to ``Popen(env=...)`` or the probe
+        # measures a tree it was never about (:func:`cflow.engine.probe_env`,
+        # issue ``claunch-04ru``). A compatibility shim that quietly dropped it
+        # would put that defect back at exactly the layer nobody re-reads.
+        return self.cflow._measure(cwd, scope, awaits, entry, now)
 
     def _session_for(self, cwd: str, scope: str):
         return self.cflow._session_for(cwd, scope)

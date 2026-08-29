@@ -524,5 +524,5 @@ def test_a_hung_probe_is_cut_at_its_timeout_and_not_at_its_own_pace(tmp_path):
         """,
     )
     started = time.monotonic()
-    assert cflow_engine.run_probe(probe, str(tmp_path), 1.0) is None
+    assert cflow_engine.run_probe(probe, str(tmp_path), 1.0, scope="w1") is None
     assert time.monotonic() - started < 20     # generous; the bug took 60s
