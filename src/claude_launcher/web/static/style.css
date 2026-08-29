@@ -693,6 +693,17 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
 #cwd-hint {
   margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #d29922;
 }
+#new-worktree {
+  margin: 12px 0 4px; padding: 10px 12px 4px;
+  border: 1px solid #2a2e36; border-radius: 6px;
+}
+#new-worktree legend {
+  padding: 0 6px; font-size: 11px; text-transform: uppercase; color: #7d8590;
+}
+#new-worktree-existing-row, #new-worktree-rebase-row { margin-left: 22px; }
+#worktree-hint {
+  margin: -2px 0 8px; font-size: 11px; line-height: 1.45; color: #d29922;
+}
 /* WHO it runs as. Fenced like the two fieldsets below it so the form reads
    as three questions and a fold, not as a pile of rows — and placed with the
    parent and the name because whose credentials a session holds belongs with

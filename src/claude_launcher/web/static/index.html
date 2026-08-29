@@ -421,6 +421,23 @@
           </div>
         </details>
 
+        <fieldset id="new-worktree" class="new-worktree">
+          <legend>Worktree</legend>
+          <label class="check"><input type="radio" name="worktree_mode" value="" checked>
+            <span>no worktree — use the selected directory</span></label>
+          <label class="check"><input type="radio" name="worktree_mode" value="new">
+            <span>new worktree</span></label>
+          <label id="new-worktree-name-row">Name
+            <input name="worktree_name" placeholder="(auto: session-time)"></label>
+          <label class="check"><input type="radio" name="worktree_mode" value="existing">
+            <span>existing worktree</span></label>
+          <label id="new-worktree-existing-row">Reuse
+            <select name="worktree_existing"></select></label>
+          <label id="new-worktree-rebase-row">Rebase onto
+            <input name="worktree_rebase" placeholder="branch (optional)"></label>
+          <p id="worktree-hint" class="hidden"></p>
+        </fieldset>
+
         <!-- The first thing it is told, last thing on the form: it is the
              only row whose right answer depends on every row above it. -->
         <fieldset id="new-task">
