@@ -129,6 +129,9 @@ function railMeshTags(name) { return []; }
    (sesshandle_check's subject); here it is only a call that has to
    resolve. */
 function handleTag(name) { return null; }
+/* The mesh memberships a row's role chip consults (meshrole_check's
+   subject); here it is only a call that has to resolve. */
+function sessMeshes(name) { return []; }
 function openSpawnModal() {}
 function openDetail() {}
 function $(id) { return list; }
