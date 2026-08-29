@@ -10480,7 +10480,14 @@ function wfStepOrder(wf) {
   const steps = (wf && wf.steps) || [];
   const byId = {};
   for (const s of steps) byId[s.id] = s;
-  const outs = (s) => (s.select ? s.select.options.map((o) => o.next) : [s.next]);
+  const outs = (s) => {
+    const out = s.select ? s.select.options.map((o) => o.next) : [s.next];
+    // A delegated ask has an ordinary exit (`next`) and, when refused, a
+    // second declared edge. Keep the refusal route in the graph so a step
+    // such as end-hold is placed in the same connected flow.
+    if (s.ask && s.ask.on_decline != null) out.push(s.ask.on_decline);
+    return out;
+  };
 
   /* Walk every step (one DFS per island, siblings in option order) and mark
      the cycle-closing edge of each loop: u->v with v still on the stack.
@@ -10607,10 +10614,16 @@ function wfDiagramSvg(wf, run, selected) {
   // option may be PACED (`interval`), and pacing is a property of the branch
   // — this edge is passable at most once per interval — so the drawing has
   // to reach the option itself to draw it.
-  const outsOf = (s) =>
-    s.select
+  const outsOf = (s) => {
+    const out = s.select
       ? s.select.options.map((o) => [o.next, o.name, o])
       : [[s.next, null, null]];
+    // Keep the ask's refusal target visible as a real route. Without this,
+    // the target is rendered as an orphan even though the engine follows it.
+    if (s.ask && s.ask.on_decline != null)
+      out.push([s.ask.on_decline, "decline", null]);
+    return out;
+  };
 
   // Shared with the timing diagram under this graph: the two pictures have
   // to put a step on the same row, or the lane is one the reader must hunt

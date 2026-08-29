@@ -299,6 +299,28 @@ const WORKER = {
         { endY: yOf("end"), steps: order.map((id) => yOf(id)) });
 }
 
+/* A delegated ask has two graph exits: approval follows `next`, while a
+   refusal follows `on_decline`. The refusal target must stay in the same
+   component so end-hold is drawn beside the ending gate rather than as an
+   orphaned island. */
+{
+  const ASK_END = {
+    name: "ask-end", start: "landed",
+    steps: [
+      { id: "landed", next: "end-gate" },
+      { id: "end-gate", ask: { on_decline: "end-hold" }, next: "end" },
+      { id: "end-hold" },
+    ],
+  };
+  const order = wfStepOrder(ASK_END);
+  check("an ask refusal target is connected to the graph",
+        order.indexOf("end-hold") > order.indexOf("end-gate"), order);
+  const svg = wfDiagramSvg(ASK_END, {}, null);
+  check("the graph draws the refusal edge",
+        svg.includes(">decline</text>") &&
+          (svg.match(/class="wfd-edge/g) || []).length === 4, svg);
+}
+
 /* --- one route, one arc, one label to a coordinate --------------------- */
 /* The real improv-worker has two things the fixture above leaves out, and
    both of them broke the drawing rather than the order.
