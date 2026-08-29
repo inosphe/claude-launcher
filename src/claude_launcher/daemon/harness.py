@@ -368,8 +368,8 @@ def _normalize_role(sdef: SessionDef) -> SessionDef:
     """Resolve the role name through the packaged vocabulary, or refuse it.
 
     Aliases are accepted (``--role mod`` stores ``leader``); an unknown name
-    is an error rather than a silent no-role, so a typo cannot hand a session
-    a blank stance nobody notices.
+    is an error rather than a silent fall to the free-role default, so a typo
+    cannot hand a session a role it never asked for.
     """
     if not sdef.role:
         return sdef

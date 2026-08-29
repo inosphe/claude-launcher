@@ -250,8 +250,9 @@ waiting on rather than assuming they carried on where they stopped.
 
 Your handle's leading word picks your role (`worker_1`/`coder2` -> worker,
 `moderator`/`lead` -> leader, `qa` -> reviewer; anything unrecognised ->
-no-role, a member with nothing assigned until a human or the leader says
-otherwise). The join briefing names your role and points you at your
+free-role, a member with no role's powers but free to carry out the task
+its creator gave it — asking that creator, not the leader, when unsure).
+The join briefing names your role and points you at your
 **stance** — run `claunch mesh stance MESH`, and treat what it prints as
 binding.
 
