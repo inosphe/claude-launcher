@@ -4091,7 +4091,12 @@ async def h_session_keys(request: web.Request) -> web.Response:
     keys = body.get("keys")
     if not isinstance(keys, list) or not all(isinstance(k, str) for k in keys):
         return json_error(400, "'keys' must be a list of strings")
-    data = await session.send_keys(keys, literal=bool(body.get("literal")))
+    force = body.get("force", False)
+    if not isinstance(force, bool):
+        return json_error(400, "'force' must be a boolean")
+    data = await session.send_keys(
+        keys, literal=bool(body.get("literal")), force=force
+    )
     return web.json_response({"ok": True, "bytes": len(data)})
 
 

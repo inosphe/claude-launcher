@@ -289,6 +289,20 @@ def test_send_keys_text_is_refused_rather_than_spliced(monkeypatch):
     assert writes == []
 
 
+def test_forced_send_keys_submits_open_draft_and_sends_prompt(monkeypatch):
+    """The operator's explicit web send preserves an open prompt and is
+    bounded by the short forced grace instead of the background 30s hold."""
+    monkeypatch.setattr(session_mod, "FORCE_TYPING_GRACE", 0.01)
+    monkeypatch.setattr(session_mod, "FORCE_DRAFT_SETTLE", 0.0)
+    s, writes = _fake_session()
+    s.note_human_input(at_terminal=True, data=b"half a prompt")
+
+    asyncio.run(s.send_keys(["do X", "Enter"], force=True))
+
+    assert writes == [b"\r", b"do X", b"\r"]
+    assert s.draft_open() is False
+
+
 @pytest.mark.parametrize("args", [["Enter"], ["C-c"], ["Escape"], ["Up"]])
 def test_bare_keys_still_go_through_an_open_draft(monkeypatch, args):
     """Unchanged, and deliberately: an interrupt is wanted the instant it was

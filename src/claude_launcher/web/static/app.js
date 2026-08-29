@@ -4965,7 +4965,10 @@ async function sendKeyLine(field, btn, note) {
       `/api/sessions/${encodeURIComponent(currentName)}/keys`,
       { method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ keys: [text, "Enter"] }) }
+        // This is an explicit operator action. The daemon uses the short
+        // forced grace and submits an existing draft first, so a busy
+        // session does not turn a deliberate send into a 30s wait/409.
+        body: JSON.stringify({ keys: [text, "Enter"], force: true }) }
     );
     const doc = await resp.json().catch(() => ({}));
     if (resp.ok) {
