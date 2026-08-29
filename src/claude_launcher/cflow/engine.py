@@ -470,6 +470,7 @@ def _awaits_human(ask: dict) -> bool:
 
 
 def _proceed_alone(
+    workflow: Workflow,
     state: dict,
     step: Step,
     *,
@@ -483,9 +484,17 @@ def _proceed_alone(
     The escape hatch of ``otherwise: self``, and the one place a decision goes
     unmade without the run stopping. It is journaled as *unanswered*, never as
     an approval: an entry saying a step was approved must always name who
-    approved it, and here nobody did. For a branch there is nothing to record
-    at all — the select simply becomes the ordinary agent-chooses decision it
-    would have been without a ``from``.
+    approved it, and here nobody did. What "carry on" means is the workflow's
+    declaration, read per kind:
+
+    * an **approval** opens its gate unapproved, and the step is entered;
+    * a **branch** with no declared default (bare ``self``) becomes the
+      ordinary agent-chooses select it would have been without a ``from``;
+    * a **branch** with ``self:<option>`` takes the named option here, by
+      nobody — for the decision the driver is the one party who must not
+      make. The take is journaled as a ``select_confirmed`` whose ``by`` is
+      ``unanswered``, so the record says the branch was chosen and that
+      nobody chose it.
     """
     state["ask"] = None
     # Keyed like a report, and kept for the same reason: this is a fact about
@@ -513,6 +522,21 @@ def _proceed_alone(
         },
         cwd,
     )
+    default = None
+    if kind == "branch" and step.select is not None and step.select.delegate:
+        default = step.select.delegate.default_option
+    if default is not None:
+        now = _utc_now()
+        state_mod.journal(
+            "select_confirmed",
+            {"run": state["run_id"], "step": step.id, "option": default,
+             "reason": "declared default, taken unanswered", "by": "unanswered",
+             "visit": _visits(state, step.id)},
+            cwd,
+        )
+        _take(state, step, default, cwd, now)
+        state["completed"] += 1  # the decision itself counts as a completed step
+        _move_to(workflow, state, step.select.options[default].next, cwd)
 
 
 def _live_chooser(state: dict, step: Step) -> str:
@@ -537,6 +561,7 @@ def _live_chooser(state: dict, step: Step) -> str:
 
 
 def _open_ask(
+    workflow: Workflow,
     state: dict,
     step: Step,
     *,
@@ -557,7 +582,10 @@ def _open_ask(
     groups is not an error — it is where the second axis takes over:
     ``otherwise: human`` leaves the ask open with nobody in it (the hold state
     the CLI has always answered), and ``otherwise: self`` returns ``None``,
-    having let the run carry on alone.
+    having let the run carry on alone. On a branch whose ``self`` names an
+    option, "carry on" has already happened: the run took the declared default
+    and MOVED, so the caller must re-read the position rather than present
+    the step it was on.
 
     ``ask_id`` is carried across an escalation on purpose — the decision is
     the same one, so a responder from an earlier group that answers late is
@@ -600,7 +628,8 @@ def _open_ask(
 
     if not asked and delegate.otherwise == model.OTHERWISE_SELF:
         _proceed_alone(
-            state, step, kind=kind, prompt=prompt, skipped=skipped, cwd=cwd
+            workflow, state, step, kind=kind, prompt=prompt, skipped=skipped,
+            cwd=cwd,
         )
         return None
 
@@ -662,7 +691,9 @@ def _open_ask(
     return ask
 
 
-def _escalate(state: dict, step: Step, ask: dict, cwd, why: str) -> Optional[dict]:
+def _escalate(
+    workflow: Workflow, state: dict, step: Step, ask: dict, cwd, why: str
+) -> Optional[dict]:
     """Hand the same decision to the next candidate group.
 
     The one path that serves all three ways a group can fail to produce an
@@ -672,7 +703,9 @@ def _escalate(state: dict, step: Step, ask: dict, cwd, why: str) -> Optional[dic
     same list read on different triggers.
 
     ``None`` back means the list ran out under ``otherwise: self`` and the run
-    has already moved past the question.
+    has already moved past the question — and on a branch whose ``self`` named
+    an option, "moved past" is literal: the declared default was taken and the
+    run is on another step.
     """
     state_mod.journal(
         "ask_escalated",
@@ -697,6 +730,7 @@ def _escalate(state: dict, step: Step, ask: dict, cwd, why: str) -> Optional[dic
         }
     )
     return _open_ask(
+        workflow,
         state,
         step,
         kind=ask["kind"],
@@ -1602,6 +1636,7 @@ def _position_payload(
                     "note": "this approval has not been put to anyone yet",
                 }
             ask = _open_ask(
+                workflow,
                 state,
                 step,
                 kind="approval",
@@ -1739,6 +1774,7 @@ def _position_payload(
                         "note": "this decision has not been put to anyone yet",
                     }
                 ask = _open_ask(
+                    workflow,
                     state,
                     step,
                     kind="branch",
@@ -1749,6 +1785,13 @@ def _position_payload(
                 )
             if ask is not None:
                 return _ask_payload(base, ask)
+            if state["current"] != step.id or state["status"] in ("done", "aborted"):
+                # `otherwise: self:<option>`: nobody could be asked, and the
+                # workflow's declared default was just taken unanswered — the
+                # run is on another step (or done). Describe THAT position;
+                # presenting the select it left behind would ask the driver
+                # to re-decide a decision the journal says is made.
+                return _payload(workflow, state, cwd, mutate=True)
             chooser = "agent"  # nobody to ask; this run decides it after all
         held = _current_window(state, step.id, visit)
         if held:
@@ -2023,7 +2066,9 @@ def delegation_check(
             "decision": kind,
             "from": " -> ".join(c.describe() for c in delegate.candidates),
             "resolves": [],
-            "otherwise": delegate.otherwise,
+            "otherwise": delegate.otherwise + (
+                f":{delegate.default_option}" if delegate.default_option else ""
+            ),
         }
         reasons = []
         for candidate in delegate.candidates:
@@ -3294,8 +3339,16 @@ def expire_ask(*, now: Optional[datetime] = None, cwd: Optional[str] = None) -> 
         return None
     who = ", ".join(e.get("handle") or e["kind"] for e in ask.get("asked") or [])
     reopened = _escalate(
-        state, step, ask, cwd, why=f"{who or 'nobody'} did not answer by {deadline}"
+        workflow, state, step, ask, cwd,
+        why=f"{who or 'nobody'} did not answer by {deadline}",
     )
+    moved_to = None
+    if reopened is None and state.get("current") != step.id:
+        # `otherwise: self:<option>`: the declared default took the decision
+        # unanswered and the run is already elsewhere — the clock's caller
+        # needs to know there is nobody to wait on because there is nothing
+        # left to wait for.
+        moved_to = state.get("current") or "end"
     return {
         "run": state["run_id"],
         "ask": ask["id"],
@@ -3307,6 +3360,7 @@ def expire_ask(*, now: Optional[datetime] = None, cwd: Optional[str] = None) -> 
         "now_with": [
             e.get("handle") or e["kind"] for e in (reopened or {}).get("asked") or []
         ],
+        **({"moved_to": moved_to} if moved_to else {}),
     }
 
 
@@ -3525,17 +3579,28 @@ def answer(
             cwd,
         )
         reopened = _escalate(
-            state, step, ask, cwd,
+            workflow, state, step, ask, cwd,
             why=f"{handle} abstained" + (f": {note}" if note else ""),
         )
-        receipt["note"] = (
-            "recorded as an abstention; the decision moved on to the next "
-            "candidate group (or to a human if there is none)"
-            if reopened is not None
-            else "recorded as an abstention; nobody else was left to ask, and "
-            "this workflow says to carry on without an answer — the run has "
-            "moved past it unapproved"
-        )
+        if reopened is not None:
+            receipt["note"] = (
+                "recorded as an abstention; the decision moved on to the next "
+                "candidate group (or to a human if there is none)"
+            )
+        elif state.get("current") != step.id or state["status"] in ("done", "aborted"):
+            # The branch's `otherwise: self:<option>` fired on this
+            # abstention: the declared default took it, by nobody.
+            receipt["note"] = (
+                "recorded as an abstention; nobody else was left to ask, and "
+                "the workflow's declared default took the decision unanswered "
+                f"— the run moved to {state.get('current') or 'end'}"
+            )
+        else:
+            receipt["note"] = (
+                "recorded as an abstention; nobody else was left to ask, and "
+                "this workflow says to carry on without an answer — the run has "
+                "moved past it unapproved"
+            )
         return receipt
 
     state["ask"] = None

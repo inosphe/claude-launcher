@@ -147,7 +147,9 @@ workflow to be started here), that is the answer; otherwise list candidates
      meant to be somebody else's — the workflow declared `otherwise: self`
      and nobody could be reached, so it is yours by default. Say so plainly
      when you report: nobody approved this, and reporting it as approved
-     would be false.
+     would be false. (A workflow that declares `otherwise: self:<option>`
+     instead never reaches you here — the run takes the named option itself,
+     journaled as unanswered, and you resume at the step after it.)
    - `waiting_approval` with `reason: declined` — a responder refused, and
      the workflow declared nowhere for a refusal to go. Relay the refusal
      and its reason (`declined.by`, `declined.reason`) in the responder's

@@ -298,7 +298,10 @@ take) both accept the same declaration, and it has **two independent axes**:
 ``otherwise``
     What happens when that list runs out: ``human`` (default — hold the run
     for ``claunch cflow approve|select``) or ``self`` (the driving agent
-    decides alone, journaled as unanswered and never as an approval).
+    decides alone, journaled as unanswered and never as an approval). On a
+    select's chooser, ``self:<option>`` is the third spelling: the run takes
+    the named option itself, journaled as unanswered — for the decision the
+    driver must not be handed back.
 
 A human is never an entry in ``from``: nothing resolves them, nothing notifies
 them, and they answer through a different door. Keeping them on the other axis
@@ -428,6 +431,11 @@ EXTENDS_KEY = "extends"
 #: Hold the run for a human, through the CLI or the dashboard...
 OTHERWISE_HUMAN = "human"
 #: ...or let the driving agent carry on alone. Never called an approval.
+#: On a select's chooser the spelling ``self:<option>`` narrows it further:
+#: rather than handing the choice back to the driver (who may be the one
+#: party that must not make it), the run takes the named option itself,
+#: journaled as unanswered — the workflow's declared default, taken by
+#: nobody.
 OTHERWISE_SELF = "self"
 OTHERWISE = (OTHERWISE_HUMAN, OTHERWISE_SELF)
 
@@ -550,15 +558,24 @@ class Delegate:
     the three reviewers I can reach" are the same declaration read two ways.
     ``timeout`` is per group, not for the whole list. An empty list is legal
     and means no agent is asked: ``otherwise`` decides straight away.
+
+    ``default_option`` is the parsed half of ``otherwise: self:<option>`` —
+    the branch a select takes itself when every candidate group has run out,
+    where bare ``self`` would hand the choice back to the driver. It is only
+    meaningful on a select's chooser; an approval has no options to take.
     """
 
     candidates: List[Candidate] = field(default_factory=list)
     otherwise: str = OTHERWISE_HUMAN
     timeout: Optional[float] = None
+    default_option: Optional[str] = None
 
     def describe(self) -> str:
         """The preference list as one line, ending in the fallback."""
-        return " -> ".join([c.describe() for c in self.candidates] + [self.otherwise])
+        fallback = self.otherwise + (
+            f":{self.default_option}" if self.default_option else ""
+        )
+        return " -> ".join([c.describe() for c in self.candidates] + [fallback])
 
 
 @dataclass(frozen=True)
@@ -1550,13 +1567,30 @@ def _parse_delegate(raw, where: str) -> Delegate:
         _parse_candidate(c, f"{where} from[{i}]")
         for i, c in enumerate(candidates_raw)
     ]
-    otherwise = str(raw.get("otherwise") or OTHERWISE_HUMAN).strip().lower()
-    if otherwise not in OTHERWISE:
+    otherwise_raw = str(raw.get("otherwise") or OTHERWISE_HUMAN).strip()
+    base, sep, default_option = otherwise_raw.partition(":")
+    base = base.lower()
+    if base not in OTHERWISE:
         raise WorkflowError(
             f"{where}: 'otherwise' must be one of {', '.join(OTHERWISE)}, got "
-            f"{otherwise!r} (what happens once every candidate has been tried: "
-            f"{OTHERWISE_HUMAN} = hold for a person, {OTHERWISE_SELF} = the "
-            f"running agent decides alone)"
+            f"{otherwise_raw!r} (what happens once every candidate has been "
+            f"tried: {OTHERWISE_HUMAN} = hold for a person, {OTHERWISE_SELF} = "
+            f"the running agent decides alone; on a select's chooser, "
+            f"{OTHERWISE_SELF}:<option> = the run takes that option, journaled "
+            f"as unanswered)"
+        )
+    default_option = default_option.strip()
+    if sep and not default_option:
+        raise WorkflowError(
+            f"{where}: 'otherwise: {base}:' names no option — write "
+            f"'{base}:<option>' with one of the select's option names, or "
+            f"bare '{base}'"
+        )
+    if base == OTHERWISE_HUMAN and sep:
+        raise WorkflowError(
+            f"{where}: 'otherwise: human:<option>' means nothing — a person "
+            f"answers for themselves; the default a run takes itself belongs "
+            f"to '{OTHERWISE_SELF}:<option>'"
         )
     timeout = raw.get("timeout")
     if timeout is not None:
@@ -1566,7 +1600,12 @@ def _parse_delegate(raw, where: str) -> Delegate:
             raise WorkflowError(f"{where}: 'timeout' must be a number of seconds") from None
         if timeout <= 0:
             raise WorkflowError(f"{where}: 'timeout' must be greater than 0")
-    return Delegate(candidates=candidates, otherwise=otherwise, timeout=timeout)
+    return Delegate(
+        candidates=candidates,
+        otherwise=base,
+        timeout=timeout,
+        default_option=default_option or None,
+    )
 
 
 def _parse_ask(raw, step_id: str) -> Optional[Ask]:
@@ -1590,9 +1629,16 @@ def _parse_ask(raw, step_id: str) -> Optional[Ask]:
     # are different answers, where for `next` they are the same one.
     if on_decline is not None:
         on_decline = str(on_decline)
+    delegate = _parse_delegate(raw, where)
+    if delegate.default_option is not None:
+        raise WorkflowError(
+            f"{where}: 'otherwise: self:{delegate.default_option}' names a "
+            f"branch to take, and an approval has no branches — use bare "
+            f"'self' (enter unapproved, journaled as unanswered) or 'human'"
+        )
     return Ask(
         prompt=str(prompt),
-        delegate=_parse_delegate(raw, where),
+        delegate=delegate,
         on_decline=on_decline,
     )
 
@@ -1945,6 +1991,14 @@ def _parse_select(raw, step_id: str) -> Optional[Select]:
             next=_parse_next(spec.get("next"), f"{step_id}.{name}"),
             interval=_parse_interval(spec.get("interval"), f"{step_id}.{name}"),
         )
+    if delegate is not None and delegate.default_option is not None:
+        if delegate.default_option not in options:
+            raise WorkflowError(
+                f"step {step_id!r}: select chooser 'otherwise: "
+                f"self:{delegate.default_option}' names no option of this "
+                f"select (options: {', '.join(options)}) — the run would have "
+                f"nothing to take when every candidate runs out"
+            )
     return Select(
         prompt=str(prompt), chooser=chooser, options=options, delegate=delegate
     )

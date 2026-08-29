@@ -1010,14 +1010,21 @@ steps:
       # 결정이라 「누구든 그 역할을 든 형제」가 정상 답변자다.
       #
       # 이 선언이 덮지 못하는 구멍이 하나 남는다: 배선이 있어도 responder가
-      # 죽거나 마감을 넘기면 otherwise: self로 같은 자리에 온다. 그 통과가
+      # 죽거나 마감을 넘기면 otherwise: self:pass로 같은 자리에 온다. 그 통과가
       # 「승인 없이 진행」으로 남는 것은 엔진의 저널이고 워커·리더의 표에는
       # 표시가 없다 — 별도 이슈 claunch-p5z7이다(s127 제기).
       #
       # otherwise: human을 쓰지 않는다 — 리뷰어가 없는 편성에서 워커 수만큼
-      # 사용자를 세운다. otherwise: self는 리더까지 기권했을 때의 밸브다.
-      # 그 통과는 승인이 아니라 무응답으로 저널에 남고(엔진이 그렇게
-      # 적는다), master를 지키는 것은 이 문이 아니라 리더의 머지 전권과
+      # 사용자를 세운다. otherwise: self:pass는 리더까지 기권했을 때의 밸브다.
+      # 옵션 이름이 붙지 않은 bare self와의 차이가 요점이다:
+      # bare self는 선택을 워커에게 돌려주고, 이 단계는 워커가 답하는 자리가
+      # 아니라고 위에서 선언했으므로 둘이 만나면 교착이다(실측: s313
+      # run-07d11afe, 사람이 손으로 select를 칠 때까지 6시간 정지 —
+      # claunch-wdzd). self:pass는 선택을 아무에게도 돌려주지 않는다 —
+      # 엔진이 선언된 기본 옵션 pass를 아무도 고르지 않은 채로 집행하고,
+      # 그 통과는 승인이 아니라 무응답으로 저널에 남는다
+      # (ask_unanswered_proceeded와 select_confirmed by: unanswered).
+      # master를 지키는 것은 이 문이 아니라 리더의 머지 전권과
       # 통합 후 전체 스윕이다 — 착지 결정이 사람 문을 폐지할 때 쓴 것과
       # 같은 판정이다. 이 문은 게이트가 아니라 문이다.
       #
@@ -1056,7 +1063,7 @@ steps:
         from:
           - {role: reviewer, connect: true}
           - {role: leader, scope: ancestor}
-        otherwise: self
+        otherwise: self:pass
         timeout: 900
       options:
         pass:

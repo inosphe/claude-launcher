@@ -85,13 +85,23 @@ class AskClock:
             try:
                 await asyncio.sleep(self.interval)
                 for moved in await asyncio.to_thread(tick):
-                    log.info(
-                        "cflow ask %s at step %s expired with %s; now with %s",
-                        moved.get("ask"),
-                        moved.get("step"),
-                        moved.get("expired") or "nobody",
-                        ", ".join(moved.get("now_with") or []) or "nobody",
-                    )
+                    if moved.get("moved_to"):
+                        log.info(
+                            "cflow ask %s at step %s expired with %s; the "
+                            "declared default took it and the run moved to %s",
+                            moved.get("ask"),
+                            moved.get("step"),
+                            moved.get("expired") or "nobody",
+                            moved["moved_to"],
+                        )
+                    else:
+                        log.info(
+                            "cflow ask %s at step %s expired with %s; now with %s",
+                            moved.get("ask"),
+                            moved.get("step"),
+                            moved.get("expired") or "nobody",
+                            ", ".join(moved.get("now_with") or []) or "nobody",
+                        )
             except asyncio.CancelledError:
                 raise
             except Exception:
