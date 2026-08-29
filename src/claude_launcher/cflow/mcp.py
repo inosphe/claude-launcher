@@ -8,8 +8,10 @@ before the servers were merged.
 
 Exposed tools: ``start``, ``report``, ``next``, ``select``, ``status`` for the
 run this session drives, ``request_goto`` to ask a person for a position the
-workflow declares no route to, plus ``asks`` and ``answer`` for decisions
-*other* sessions' runs are waiting on it for.
+workflow declares no route to, ``request_child_goto`` for a leader asking the
+same of a DESCENDANT's run (routed through the daemon's approval gate — a
+person answers it, or its deadline does), plus ``asks`` and ``answer`` for
+decisions *other* sessions' runs are waiting on it for.
 
 ``request_goto`` is the one that most needs its name read carefully: it files
 a REQUEST and moves nothing. The move it asks for is ``engine.goto``, which
@@ -291,6 +293,66 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "request_child_goto",
+        "description": (
+            "Ask a HUMAN to move a CHILD session's run to a step its "
+            "workflow declares no transition to — the leader's half of "
+            "'request_goto', for when you have verified a descendant's run "
+            "is parked somewhere wrong (a gate defect, an abandoned branch) "
+            "and moving it is not yours to do unilaterally. The request is "
+            "filed on the child's run (which then holds, waiting_goto) AND "
+            "opened as an approval card in the web UI; an unanswered card "
+            "counts as approved after its deadline (5 minutes by default) "
+            "and the move is applied. You are told the outcome in your "
+            "terminal; the child is nudged. Authority is checked by the "
+            "daemon: the target must be a session you spawned or one of its "
+            "descendants — never a peer, never your parent, never your own "
+            "run (that is plain 'request_goto'). State 'session', 'step' "
+            "and 'reason' — the reason is the whole basis the person "
+            "answering has: what you verified and how (the git command and "
+            "its output, the journal line), not adjectives. To take a "
+            "pending request back, pass 'withdraw' with the request id this "
+            "tool returned."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "session": {
+                    "type": "string",
+                    "description": (
+                        "the child session whose run should move (must be in "
+                        "your subtree)"
+                    ),
+                },
+                "step": {
+                    "type": "string",
+                    "description": (
+                        "the step id to move the child's run to ('end' "
+                        "force-finishes it)"
+                    ),
+                },
+                "reason": {
+                    "type": "string",
+                    "description": (
+                        "why this run must leave the route its workflow "
+                        "declares — journaled, shown on the approval card, "
+                        "and the whole basis the person answering has. "
+                        "Required"
+                    ),
+                },
+                "withdraw": {
+                    "type": "string",
+                    "description": (
+                        "the id of your pending request to take back instead "
+                        "of filing a new one ('session'/'step'/'reason' are "
+                        "then ignored)"
+                    ),
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 #: Tools that write to the run, and so must be fenced against a replacement.
@@ -299,7 +361,7 @@ _MUTATING = ("report", "next", "select", "request_goto")
 #: Tools that act on ANOTHER session's run. They are outside the fence in
 #: both directions: they are not refused when this slot was replaced (they
 #: were never about this slot), and their payloads never re-arm it.
-_FOREIGN = ("asks", "answer")
+_FOREIGN = ("asks", "answer", "request_child_goto")
 
 #: The run id last handed to this agent. ``None`` = nothing read yet, so the
 #: next call adopts whatever is on disk.
@@ -342,6 +404,74 @@ def _session() -> str:
     return str(os.environ.get(state_mod.SESSION_ENV) or "").strip()
 
 
+def _request_child_goto(args: dict) -> dict:
+    """The leader's ask, handed to the daemon's goto gate.
+
+    The run to move lives in the CHILD's directory, not this one, and the
+    two things that make the request legitimate — that the target is this
+    session's descendant, and that a person answered (or let the deadline
+    answer) — are both the daemon's to own (daemon/goto_gate.py). So this
+    tool is a courier: it names the asker from the environment, posts the
+    request, and hands back the gate's record. A daemon that is not running
+    is a clear error, not a fabricated hold.
+    """
+    from .. import daemon_client
+
+    session = _session()
+    if not session:
+        raise engine.CflowError(
+            "this tool runs inside a managed session, and none is named in "
+            "this environment — there is no 'who is asking' to file under"
+        )
+    client = daemon_client.connect()
+    if client is None:
+        raise engine.CflowError(
+            "the daemon is not running, and the goto gate lives in it — "
+            "start it ('claunch daemon start') or ask a human to run "
+            "'claunch cflow goto <step> -t <child session>' directly"
+        )
+    withdraw = str(args.get("withdraw") or "").strip()
+    try:
+        if withdraw:
+            resp = client.post(
+                f"/api/cflow/goto-requests/{withdraw}/withdraw",
+                {"session": session},
+            )
+            record = (resp or {}).get("request") or {}
+            return {
+                "status": "child_goto_withdrawn",
+                "request": record,
+                "note": (
+                    "withdrawn; the child's run continues from where it "
+                    "stands and is nudged"
+                ),
+            }
+        resp = client.post(
+            "/api/cflow/goto-requests",
+            {
+                "session": session,
+                "target_session": str(args.get("session") or ""),
+                "step": str(args.get("step") or ""),
+                "reason": str(args.get("reason") or ""),
+            },
+        )
+    except daemon_client.DaemonClientError as exc:
+        raise engine.CflowError(str(exc))
+    record = (resp or {}).get("request") or {}
+    return {
+        "status": "child_goto_requested",
+        "request": record,
+        "note": (
+            f"filed; the web UI decides for {record.get('target_session')!r}'s "
+            f"run, and an unanswered request counts as approved at "
+            f"{record.get('deadline') or 'its deadline'}. The child's run is "
+            f"held until then. You are told the outcome in this terminal — "
+            f"carry on with other work rather than polling, and take the "
+            f"request back with 'withdraw' if the reason stops being true"
+        ),
+    }
+
+
 def call_tool(name: str, args: dict) -> dict:
     global _seen_run
     _check_fence(name)
@@ -373,6 +503,8 @@ def call_tool(name: str, args: dict) -> dict:
                 str(args.get("reason") or ""),
                 by=_session() or "agent",
             )
+    elif name == "request_child_goto":
+        payload = _request_child_goto(args)
     elif name == "recall":
         payload = engine.recall(str(args.get("id") or ""))
     elif name == "asks":

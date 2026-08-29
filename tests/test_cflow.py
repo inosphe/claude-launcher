@@ -1254,12 +1254,18 @@ def test_mcp_initialize_and_tools():
         "recall",
         # asking a person for a position the graph declares no route to
         "request_goto",
+        # a leader asking the same for a DESCENDANT's run — a request, not a
+        # move: the daemon's goto gate holds it for a person (or its
+        # deadline), and the daemon checks the subtree authority
+        "request_child_goto",
         # decisions other sessions' runs are waiting on it for
         "asks", "answer",
     }
     # still no approve, by design: `answer` decides somebody ELSE's run, and
     # a tool that could unblock this one would put the gate back in the hands
-    # of the agent it is a gate on.
+    # of the agent it is a gate on. `request_child_goto` is no way around it
+    # either: it only ever FILES, the person (or the deadline) settles, and a
+    # run this session does not command is refused by the daemon.
     assert "approve" not in names
 
 

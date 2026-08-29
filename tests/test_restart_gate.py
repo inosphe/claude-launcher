@@ -530,6 +530,9 @@ def test_the_configured_timeout_reaches_the_gate_deadline(home, monkeypatch):
         "scrollback_lines": 200,
         "restore": False,
         "restart_approval_timeout": 7,
+        # _serve wires both approval gates by strict indexing; a hand-built
+        # cfg must carry the goto gate's timeout too.
+        "goto_approval_timeout": 7,
     }
     bound: dict = {}
 

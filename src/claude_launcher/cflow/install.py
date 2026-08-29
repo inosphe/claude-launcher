@@ -310,6 +310,29 @@ asks nobody. `request_goto` is the door that exists instead.
   for a step you are already on. Not a way around a gate: a gate you jump
   is a gate nobody approved, and the journal records who asked for the jump.
 
+## Moving a child's run (leaders)
+
+A run you have verified as parked somewhere wrong — a gate defect, work that
+landed under a step the graph will not leave — and that belongs to a session
+in YOUR subtree is `request_child_goto`, never your own `request_goto` and
+never the human's `claunch cflow goto -t <session>` retyped by you.
+
+- Call it with `session` (the child), `step`, and a `reason` that carries
+  your verification: the git command and its output, the journal line. The
+  reason is the whole basis the person answering has — they did not watch
+  the child's run.
+- It files a request on the CHILD's run (which then holds at
+  `waiting_goto`) and opens an approval card in the web UI. The person
+  approves or denies there; an unanswered card counts as approved after its
+  deadline (5 minutes by default) and the move is applied.
+- You are told the outcome in your terminal; the child is nudged. Do not
+  poll — carry on with other work, and take the request back with
+  `withdraw: <request id>` if the reason stops being true.
+- The daemon checks the authority: the target must be a session you spawned
+  or one of its descendants. A peer's run, your parent's, and your own are
+  all refused — the first two are nobody's to move but a person's, the last
+  is plain `request_goto`'s job.
+
 ## Answering for someone else
 
 Other sessions' runs may delegate a decision to your role — anything you are

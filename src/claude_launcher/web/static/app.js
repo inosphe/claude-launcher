@@ -18756,6 +18756,103 @@ async function refreshRestartGate() {
 }
 
 /* ------------------------------------------------------------------ */
+/* the goto gate: a leader moving a child's run, waiting on a person   */
+/* ------------------------------------------------------------------ */
+/* A leader session's request to move a descendant's cflow run (daemon/
+   goto_gate.py) lands here as one card per request: who asked, which run,
+   from where to where, and why — the reason is the whole basis for the
+   click, so it is printed in full rather than behind a tooltip. An
+   unanswered card counts as approved at its deadline; approving applies
+   the move through the engine's ordinary grant path, denying leaves the
+   run where it stands. Several runs can be gated at once, so cards are
+   keyed by request id and each poll reconciles the set. */
+const GOTO_GATE_PREFIX = "goto-gate-";
+
+async function refreshGotoGate() {
+  const host = $("notices");
+  if (!host) return;
+  let body;
+  try {
+    body = await (await api("/api/cflow/goto-requests")).json();
+  } catch {
+    return; // daemon down or auth up — pollOnce's own channels own both
+  }
+  const pending = (body && body.requests ? body.requests : []).filter(
+    (r) => r.status === "pending"
+  );
+  const seen = new Set();
+  for (const rec of pending) {
+    const key = GOTO_GATE_PREFIX + rec.id;
+    seen.add(key);
+    let card = notices.get(key);
+    if (!card || !card.node.isConnected) {
+      dismissNotice(key);
+      const node = el("div", "notice warn gate");
+      const title = el(
+        "div",
+        "notice-title",
+        `run move requested: ${rec.target_session || "?"}`
+      );
+      const sub = el("div", "notice-sub");
+      const why = el(
+        "div",
+        "notice-sub",
+        `${rec.session || "?"}: ${rec.reason || "(no reason given)"}`
+      );
+      const actions = el("div", "gate-actions");
+      const approve = el("button", "wf-btn approve", "Approve");
+      const deny = el("button", "wf-btn clear", "Deny");
+      approve.title =
+        `move this run to '${rec.step}' now — or the timeout counts the ` +
+        "request as approved on its own";
+      deny.title =
+        "nothing moves; the refusal is handed to the run's driver";
+      approve.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        if (
+          await gatePost(
+            `/api/cflow/goto-requests/${rec.id}/approve`,
+            approve
+          )
+        ) {
+          dismissNotice(key);
+        }
+      });
+      deny.addEventListener("click", async (ev) => {
+        ev.stopPropagation();
+        if (
+          await gatePost(`/api/cflow/goto-requests/${rec.id}/deny`, deny)
+        ) {
+          dismissNotice(key);
+        }
+      });
+      actions.appendChild(approve);
+      actions.appendChild(deny);
+      node.appendChild(title);
+      node.appendChild(sub);
+      node.appendChild(why);
+      node.appendChild(actions);
+      host.appendChild(node);
+      notices.set(key, { node, timer: null });
+      card = notices.get(key);
+    }
+    const sub = card.node.querySelector(".notice-sub");
+    if (sub) {
+      sub.textContent =
+        `${rec.session || "?"} asks to move ${rec.target_session || "?"}'s ` +
+        `run ${rec.from || "?"} → ${rec.step || "?"}` +
+        ` — auto-approves in ${gateCountdown(rec.deadline)}`;
+    }
+  }
+  // Settled or vanished requests lose their card on this pass.
+  for (const key of [...notices.keys()]) {
+    if (key.startsWith(GOTO_GATE_PREFIX) && !seen.has(key)) {
+      dismissNotice(key);
+    }
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* boot                                                               */
 /* ------------------------------------------------------------------ */
 /* The poll is installed here rather than at the end of boot(), and is never
@@ -18919,9 +19016,10 @@ async function pollOnce() {
   // it redraws only when the list really changed (see refreshWorkspaces).
   refreshes.push(refreshWorkspaces());
   // The restart gate can be opened from any session's terminal, so the card
-  // is fed by the same heartbeat as the registry.
+  // is fed by the same heartbeat as the registry — and the goto gate beside
+  // it: a leader files from its own terminal, the person answers here.
   const gateRefresh = refreshRestartGate();
-  refreshes.push(gateRefresh);
+  refreshes.push(gateRefresh, refreshGotoGate());
   await Promise.all(refreshes);
 }
 
