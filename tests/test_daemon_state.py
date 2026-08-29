@@ -84,7 +84,7 @@ def test_acquire_with_grace_waits_for_predecessor(home):
 def test_daemon_config_defaults(home):
     cfg = store.daemon_config()
     assert cfg["host"] == "127.0.0.1"
-    assert cfg["port"] == 8377
+    assert cfg["port"] == 8378
     assert cfg["restore"] is True
 
 

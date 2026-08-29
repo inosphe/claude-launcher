@@ -201,7 +201,7 @@ def remove_profile(name: str) -> None:
 #: user opts into LAN exposure; auth is mandatory either way.
 DAEMON_DEFAULTS = {
     "host": "127.0.0.1",
-    "port": 8377,
+    "port": 8378,
     "idle_threshold": 2.0,
     "scrollback_lines": 5000,
     "restore": True,
