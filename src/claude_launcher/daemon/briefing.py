@@ -3,8 +3,8 @@
 The web UI wants 3-4 sentences per session: the goal, what is happening now,
 and a coarse state. No single registry holds that, so this module gathers the
 hybrid evidence that exists — the session's own record (cwd, opening task),
-its cflow run position (read-only), and the tail of its claude transcript
-(``<config>/projects/<slug>/<conversation-id>.jsonl``) — and asks an
+its cflow run position (read-only), and the tail of its harness transcript
+(Claude's project jsonl or Codex's rollout jsonl) — and asks an
 OpenAI-compatible ``chat/completions`` endpoint to compress it into a fixed
 JSON shape.
 
@@ -31,12 +31,14 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import aiohttp
 
+from .. import harnesses as harness_registry
 from .. import profile as profile_mod, store, transcripts
 from ..cflow import engine as cflow_engine, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
+from . import codex_sessions
 
 #: Defaults for the ``llm`` config block. ``max_tokens`` bounds the *whole*
 #: completion, and on a reasoning model the reasoning tokens are billed to it
@@ -138,6 +140,19 @@ def locate_transcript(sdef) -> Optional[Path]:
     cid = getattr(sdef, "conversation_id", None)
     if not cid:
         return None
+    if getattr(sdef, "harness", None) == "codex":
+        try:
+            profile = profile_mod.require_selector(
+                str(getattr(sdef, "profile", "") or "")
+            )
+            harness = harness_registry.get("codex")
+            if harness is None:
+                return None
+            return codex_sessions.find(
+                harness.profile_home(profile.config_dir), str(cid)
+            )
+        except (harness_registry.HarnessConfigError, ProfileError, OSError, ValueError):
+            return None
     cdir = _config_dir(sdef)
     if cdir is None:
         return None
@@ -162,7 +177,21 @@ def _entry_events(entry: dict, text_limit: int) -> List[str]:
     3-sentence summary and is dropped here rather than truncated later.
     """
     msg = entry.get("message")
+    codex = entry.get("payload")
+    if (
+        entry.get("type") == "response_item"
+        and isinstance(codex, dict)
+        and codex.get("type") == "message"
+    ):
+        msg = codex
     if not isinstance(msg, dict):
+        if (
+            entry.get("type") == "response_item"
+            and isinstance(codex, dict)
+            and codex.get("type") in ("function_call", "custom_tool_call")
+            and codex.get("name")
+        ):
+            return [f"assistant tool_use: {codex['name']}"]
         return []
     role = msg.get("role") or entry.get("type")
     if role not in ("user", "assistant"):
@@ -178,7 +207,10 @@ def _entry_events(entry: dict, text_limit: int) -> List[str]:
             if not isinstance(block, dict):
                 continue
             kind = block.get("type")
-            if kind == "text" and str(block.get("text") or "").strip():
+            if (
+                kind in ("text", "input_text", "output_text")
+                and str(block.get("text") or "").strip()
+            ):
                 texts.append(str(block["text"]))
             elif kind == "tool_use" and block.get("name"):
                 tools.append(str(block["name"]))

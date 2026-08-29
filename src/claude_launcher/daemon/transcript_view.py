@@ -9,10 +9,11 @@ the byte stream does not work either — a grid-diff recorder run over those sam
 logs recovers zero rows, because successive grids share no prefix or suffix to
 exploit. The content simply is not in the pipe.
 
-It is on disk, though, in the form claude itself keeps: the conversation jsonl
-under ``<config>/projects/<slug>/<id>.jsonl``. That file is append-only, holds
-the whole conversation rather than the last screenful, survives every daemon
-restart, and is already located for other features (:mod:`briefing`,
+It is on disk, though, in the form each harness keeps: Claude's conversation
+jsonl under ``<config>/projects/<slug>/<id>.jsonl`` or Codex's rollout jsonl
+under its profile home. These files are append-only, hold the whole
+conversation rather than the last screenful, survive every daemon
+restart, and are already located for other features (:mod:`briefing`,
 :mod:`ctxsize`). This module turns it into pages a browser can scroll natively
 — which is the point: a DOM scroller has a scrollbar, momentum, touch, PgUp,
 find-in-page and selection, none of which a wheel-to-RPC control ever had.
@@ -40,10 +41,19 @@ from .briefing import locate_transcript
 
 log = logging.getLogger(__name__)
 
-#: Record types that carry conversation. The rest of the jsonl is claude's own
-#: bookkeeping — mode flips, titles, queue operations, file-history snapshots —
-#: which is noise to a reader and would triple the page for nothing.
-CONTENT_TYPES = ("user", "assistant")
+#: Record types that carry conversation. The rest of the jsonl is harness
+#: bookkeeping — mode flips, titles, queue operations, usage snapshots — which
+#: is noise to a reader and would triple the page for nothing.
+CONTENT_TYPES = ("user", "assistant", "response_item")
+CODEX_CONTENT_TYPES = frozenset(
+    {
+        "message",
+        "function_call",
+        "function_call_output",
+        "custom_tool_call",
+        "custom_tool_call_output",
+    }
+)
 
 #: How many records a page holds by default. Small enough that the first page
 #: paints immediately, large enough that a reader flicking upward is not
@@ -147,7 +157,20 @@ def _peek_type(raw: bytes) -> str:
         doc = json.loads(raw)
     except ValueError:
         return ""
-    return doc.get("type") or "" if isinstance(doc, dict) else ""
+    if not isinstance(doc, dict):
+        return ""
+    kind = doc.get("type") or ""
+    if kind != "response_item":
+        return kind
+    payload = doc.get("payload")
+    if not isinstance(payload, dict) or payload.get("type") not in CODEX_CONTENT_TYPES:
+        return ""
+    if payload.get("type") == "message" and payload.get("role") not in (
+        "user",
+        "assistant",
+    ):
+        return ""
+    return kind
 
 
 # --------------------------------------------------------------------------- #
@@ -218,6 +241,8 @@ def _project(raw: bytes, seq: int) -> Optional[Dict[str, Any]]:
         return None
     if not isinstance(doc, dict):
         return None
+    if doc.get("type") == "response_item":
+        return _project_codex(doc, seq)
     msg = doc.get("message")
     content = msg.get("content") if isinstance(msg, dict) else None
     blocks = _blocks(content)
@@ -228,6 +253,53 @@ def _project(raw: bytes, seq: int) -> Optional[Dict[str, Any]]:
         "role": (msg or {}).get("role") or doc.get("type") or "?",
         "ts": doc.get("timestamp") or "",
         "sidechain": bool(doc.get("isSidechain")),
+        "blocks": blocks,
+    }
+
+
+def _project_codex(doc: dict, seq: int) -> Optional[Dict[str, Any]]:
+    """Project one Codex rollout ``response_item`` into the shared UI shape."""
+    payload = doc.get("payload")
+    if not isinstance(payload, dict):
+        return None
+    kind = payload.get("type")
+    blocks: List[Dict[str, Any]] = []
+    role = "assistant"
+    if kind == "message":
+        role = str(payload.get("role") or "?")
+        for block in payload.get("content") or []:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") in ("text", "input_text", "output_text"):
+                value = str(block.get("text") or "")
+                if value.strip():
+                    blocks.append({"type": "text", "text": value})
+    elif kind in ("function_call", "custom_tool_call"):
+        body = payload.get("arguments", payload.get("input", ""))
+        blocks.append(
+            {
+                "type": "tool_use",
+                "name": str(payload.get("name") or "?"),
+                "id": str(payload.get("call_id") or ""),
+                **_clip("" if body is None else str(body)),
+            }
+        )
+    elif kind in ("function_call_output", "custom_tool_call_output"):
+        blocks.append(
+            {
+                "type": "tool_result",
+                "id": str(payload.get("call_id") or ""),
+                "error": False,
+                **_clip(str(payload.get("output") or "")),
+            }
+        )
+    if not blocks:
+        return None
+    return {
+        "seq": seq,
+        "role": role,
+        "ts": doc.get("timestamp") or "",
+        "sidechain": False,
         "blocks": blocks,
     }
 
