@@ -5,6 +5,8 @@ from __future__ import annotations
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from claude_launcher import (
     cli,
     config,
@@ -101,6 +103,32 @@ def test_install_all_routes_each_profile_to_its_harness_home(home, capsys):
         root / "codex-work" / "codex" / "skills" / "mesh" / "SKILL.md"
     ).is_file()
     assert (root / "codex-work" / "codex" / "config.toml").is_file()
+
+
+@pytest.mark.parametrize("harness", ["pi", "kimi", "agent"])
+def test_install_other_harnesses_use_their_native_home(home, capsys, harness):
+    run("create", "work", "--no-seed", "--harness", harness)
+    capsys.readouterr()
+    assert run("install", "--profile", "work") == 0
+    pdir = config.profiles_dir() / "work" / harness
+    assert (pdir / "skills" / "cflow" / "SKILL.md").is_file()
+    if harness == "pi":
+        assert "does not support MCP" in capsys.readouterr().out
+        assert not (pdir / "mcp.json").exists()
+    else:
+        import json
+
+        assert "claunch" in json.loads(
+            (pdir / "mcp.json").read_text(encoding="utf-8")
+        )["mcpServers"]
+        assert not (config.profiles_dir() / "work" / ".claude.json").exists()
+
+
+def test_install_profile_accepts_a_harness_selector(home, capsys):
+    run("create", "work", "--no-seed")
+    capsys.readouterr()
+    assert run("install", "--profile", "work:kimi") == 0
+    assert (config.profiles_dir() / "work" / "kimi" / "mcp.json").is_file()
 
 
 def test_install_all_is_an_alias_of_all_profile(home, capsys, tmp_path, monkeypatch):

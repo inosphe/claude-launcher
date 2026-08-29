@@ -169,6 +169,21 @@ def _codex_mcp_lines(home: Path) -> List[str]:
     return [f"mcp server {MCP_NAME!r} -> {path}"]
 
 
+def _json_mcp_lines(home: Path) -> List[str]:
+    """Register the merged server in a harness-owned JSON home.
+
+    Kimi Code and Cursor Agent both use the Claude-compatible ``mcpServers``
+    document, while keeping it under their own profile home.  Their native
+    permission files are different, so this helper deliberately touches only
+    the MCP file.
+    """
+    path = home / "mcp.json"
+    settings.merge_mcp_servers_into(
+        path, {MCP_NAME: mcp_server_def()}, remove=LEGACY_MCP_NAMES
+    )
+    return [f"mcp server {MCP_NAME!r} -> {path}"]
+
+
 def _workflow_lines() -> List[str]:
     """Report the global-layer seeding, in the same voice as the rest.
 
@@ -258,6 +273,15 @@ def _profile_lines(profile: Profile) -> List[str]:
     if harness_name == "codex":
         mcp_lines = _codex_mcp_lines(home)
         guard_lines: List[str] = []
+    elif harness_name in {"kimi", "agent"}:
+        mcp_lines = _json_mcp_lines(home)
+        guard_lines = []
+    elif harness_name == "pi":
+        # Pi intentionally has no MCP client.  Skills remain useful for the
+        # protocol text, but claiming that its MCP tools were installed would
+        # make a successful install misleading.
+        mcp_lines = ["mcp server skipped (Pi does not support MCP)"]
+        guard_lines = []
     else:
         # Claude Code is the native installer target. Other declared
         # harnesses retain its historical profile-root configuration until

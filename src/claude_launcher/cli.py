@@ -795,7 +795,9 @@ def run_install(
     elif global_:
         done = install_mod.install_into_user()
     elif profile_name:
-        done = install_mod.install_into_profile(profile.require(profile_name))
+        # Installation follows the same PROFILE[:HARNESS] selector contract
+        # as run, validate, usage, and the daemon APIs.
+        done = install_mod.install_into_profile(profile.require_selector(profile_name))
     else:
         done = install_mod.install_into_project(Path(project or ".").resolve())
     for line in done:
