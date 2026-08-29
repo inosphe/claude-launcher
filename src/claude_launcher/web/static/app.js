@@ -3287,7 +3287,11 @@ function syncNewWorktree() {
   const box = $("new-worktree");
   if (!f || !box) return;
   const mode = newWorktreeMode();
-  const usable = !!newWorktreeGit.repo && !spawnParent();
+  const parent = spawnParent();
+  const report = parent && newSpawnReportFor === parent.name
+    ? newSpawnReport : null;
+  const usable = !!newWorktreeGit.repo &&
+    (!parent || !!(report && (report.may_choose || []).includes("worktree")));
   box.disabled = !usable;
   for (const radio of f.worktree_mode || []) radio.disabled = !usable;
   f.worktree_name.disabled = !usable || mode !== "new";
@@ -3297,8 +3301,8 @@ function syncNewWorktree() {
   $("new-worktree-existing-row").classList.toggle("hidden", mode !== "existing");
   $("new-worktree-rebase-row").classList.toggle("hidden", mode === "");
   const hint = $("worktree-hint");
-  hint.textContent = usable ? "" : spawnParent()
-    ? "worktree selection is available from the spawn controls"
+  hint.textContent = usable ? "" : parent
+    ? "worktree selection is locked by spawn.allow_worktree"
     : "the selected directory is not a git repository";
   hint.classList.toggle("hidden", usable);
 }
@@ -3306,7 +3310,7 @@ function syncNewWorktree() {
 async function refreshNewWorktree() {
   const f = $("new-session");
   if (!f || !f.worktree_mode) return;
-  const cwd = f.cwd.value || "";
+  const cwd = newSessionCwd();
   if (cwd === newWorktreeFor) return;
   newWorktreeFor = cwd;
   try {
@@ -4153,6 +4157,8 @@ function spawnChildFields(f, body) {
 document
   .querySelector("#new-session select[name=parent]")
   .addEventListener("change", () => {
+    newWorktreeFor = null;
+    refreshNewWorktree();
     syncSpawnMode();
     refreshSpawnPolicy();
     // A child is created on the board of ITS directory, which the parent
@@ -4225,14 +4231,12 @@ $("new-session").addEventListener("submit", async (e) => {
   // provokes a 403 naming a field nobody in this form could still choose.
   if (parent) spawnChildFields(f, body);
   if (parent && f.fork_parent.checked) body.fork = true;
-  if (!parent) {
-    const mode = newWorktreeMode();
-    if (mode === "new") body.worktree = f.worktree_name.value.trim();
-    else if (mode === "existing" && f.worktree_existing.value)
-      body.worktree = f.worktree_existing.value;
-    if (mode !== "" && f.worktree_rebase.value.trim())
-      body.rebase_onto = f.worktree_rebase.value.trim();
-  }
+  const worktreeMode = newWorktreeMode();
+  if (worktreeMode === "new") body.worktree = f.worktree_name.value.trim();
+  else if (worktreeMode === "existing" && f.worktree_existing.value)
+    body.worktree = f.worktree_existing.value;
+  if (worktreeMode !== "" && f.worktree_rebase.value.trim())
+    body.rebase_onto = f.worktree_rebase.value.trim();
   if (f.role.value) body.role = f.role.value;
   if (!parent && f.borrow.value) body.borrow = f.borrow.value;
   if (!parent && f.null_token.checked) body.null_token = true;
