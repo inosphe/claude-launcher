@@ -959,6 +959,21 @@ def test_the_worker_review_says_what_a_number_is_a_verdict_about():
         assert anchor in review.instructions, f"review lost its {anchor!r} rule"
 
 
+def test_the_worker_may_skip_targeted_tests_only_with_a_recorded_reason():
+    for label, wf in (
+        ("bundled", _bundled("improv-worker")),
+        ("project", model.load(PROJECT_OVERRIDES / "improv-worker.yaml")),
+    ):
+        decision = wf.steps["test-decision"]
+        assert decision.is_select, label
+        assert decision.select.chooser == "agent"
+        assert decision.select.require_reason is True
+        assert decision.select.options["run"].next == "review"
+        assert decision.select.options["skip"].next == "test-skipped"
+        assert "reason" in decision.select.prompt
+        assert "검증 범위" in wf.steps["test-skipped"].instructions
+
+
 def test_the_worker_review_does_not_ship_the_retired_bare_probe():
     """The retired probe is kept out of the prose by a check, not by memory.
 

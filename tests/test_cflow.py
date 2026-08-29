@@ -65,6 +65,20 @@ steps:
     instructions: continue
 """
 
+REASON_BRANCH = """
+steps:
+  decide:
+    select:
+      prompt: decide
+      chooser: agent
+      require_reason: true
+      options:
+        run: {description: run, next: done}
+        skip: {description: skip, next: done}
+  done:
+    instructions: done
+"""
+
 
 def test_run_state_cache_is_reused_without_sharing_mutations(
     home, tmp_path, monkeypatch
@@ -260,6 +274,21 @@ def _advance(summary, details=None):
 def _driving_session(monkeypatch, name="driver"):
     """Run as a managed session, so the run has an identity to delegate FROM."""
     monkeypatch.setenv(state_mod.SESSION_ENV, name)
+
+
+def test_agent_select_with_required_reason_is_rejected_when_missing(
+    flow_dir, monkeypatch
+):
+    _driving_session(monkeypatch)
+    _write(flow_dir, "reason", REASON_BRANCH)
+    engine.start("reason")
+    with pytest.raises(CflowError, match="requires a reason"):
+        engine.select("skip")
+    engine.select("skip", "changed files are documentation only")
+    event = next(
+        e for e in state_mod.read_journal() if e["event"] == "select_confirmed"
+    )
+    assert event["reason"] == "changed files are documentation only"
 
 
 def _mesh(monkeypatch, *members, parent=None, cut=(), local=True, patched=None):

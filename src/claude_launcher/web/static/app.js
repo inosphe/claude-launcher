@@ -9685,7 +9685,8 @@ function renderWfInto(view, data, ui) {
   for (const e of (data.journal || []).slice().reverse()) {
     const line =
       `${(e.at || "").replace("T", " ")}  ${e.event || ""}` +
-      `${e.step ? "  " + e.step : ""}${e.option ? "  -> " + e.option : ""}`;
+      `${e.step ? "  " + e.step : ""}${e.option ? "  -> " + e.option : ""}` +
+      `${e.reason ? "  — reason: " + e.reason : ""}`;
     journal.appendChild(el("div", "wf-journal-line mono", line));
   }
   side.appendChild(journal);
