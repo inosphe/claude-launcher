@@ -183,9 +183,12 @@ served = { sessions: [
   { name: "s21", status: "busy", role: "worker", profile: "nc", parent: "s20" },
   { name: "s25", status: "idle", role: "worker", profile: "nc", parent: "s21" },
   { name: "loner", status: "idle", profile: "nc", parent: null },
+  { name: "mesh-reviewer", status: "idle", profile: "nc", parent: null },
 ] };
 ctx.setMeshes([
   { name: "mesh0", members: ["s20", "s21", "s25"].map(member) },
+  { name: "review", members: [{ session: "mesh-reviewer", handle: "mesh-reviewer",
+                                 role: "reviewer", local: true, machine: "" }] },
   { name: "gds", members: [member("s21")] },
 ]);
 
@@ -194,7 +197,7 @@ ctx.setMeshes([
 
   const rows = list.kids;
   check("every session gets a row", rows.map((r) => r.dataset.name),
-        ["s20", "s21", "s25", "loner"]);
+        ["s20", "s21", "s25", "loner", "mesh-reviewer"]);
 
   const row = (name) => rows.find((r) => r.dataset.name === name);
   const kidClasses = (r) => r.kids.map((k) => k.className);
@@ -211,6 +214,13 @@ ctx.setMeshes([
         kidClasses(row("loner")),
         ["dot idle", "rail-head", "meta", "rail-cwd", "rail-ctx-line unknown",
          "rail-seen", "sess-plus", "sess-info"]);
+
+  /* New sessions store their role on mesh membership. The rail must use that
+     authoritative value even when /api/sessions intentionally returns no
+     duplicated role field. */
+  check("the rail reads a new session's role from mesh membership",
+        row("mesh-reviewer").querySelectorAll(".mesh-role").map((t) => t.text),
+        ["reviewer"]);
 
   /* The point of the change: role and rooms are siblings inside one box, not
      loose on the row where they wrapped. */

@@ -570,7 +570,14 @@ async function refreshSessions() {
     // silently blanked pill.
     const role = document.createElement("span");
     role.className = "mesh-role";
-    role.textContent = s.role || "free-role";
+    // New sessions keep their role on mesh membership rather than duplicating
+    // it in SessionDef. Use that authoritative membership when the mesh poll
+    // has arrived; retain the session field for legacy records and the brief
+    // interval before the first mesh poll completes.
+    const meshRoles = [...new Set(
+      sessMeshes(s.name).map((m) => m.role).filter(Boolean),
+    )];
+    role.textContent = s.role || meshRoles[0] || "free-role";
     // And the name the mesh calls it by, when that is not the name above.
     // First of the qualifiers, before the role, because it is another way of
     // saying WHO this row is — the role and the rooms are both properties of
