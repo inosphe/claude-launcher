@@ -704,6 +704,11 @@ class SessionReminderService:
         entry["held_at"] = None
         if kind == "reminder":
             entry["restated"] = True
+        # Anchor the no-progress suppression baseline to the screen state the
+        # delivery actually landed on, so a later scan compares like with like.
+        session = self.cflow._session_for(cwd, scope)
+        if session is not None:
+            entry["activity"] = self._session_activity(session)
 
     def _mark_role(self, name: str) -> None:
         entry = self._roles.get(name)
