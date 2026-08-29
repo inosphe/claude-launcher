@@ -1266,7 +1266,12 @@ class MeshManager:
             session = self.manager.get(member.session)
         except ManagerError:
             return False
-        return not session.exited and session.delivery_held()
+        held = getattr(session, "delivery_held", None)
+        return bool(
+            not getattr(session, "exited", False)
+            and callable(held)
+            and held()
+        )
 
     def congested_recipients(
         self, mesh: Mesh, recipients: Iterable[str]
@@ -5004,7 +5009,10 @@ class MeshManager:
             first_pending = mesh._first_pending.get(handle)
             report[handle] = {
                 "idle": session.status() == STATUS_IDLE,
-                "delivery_hold": session.delivery_held(),
+                "delivery_hold": bool(
+                    callable(getattr(session, "delivery_held", None))
+                    and session.delivery_held()
+                ),
                 "caught_up": (not unanswered and pending == 0),
                 "unanswered": unanswered,
                 "pending": pending,
