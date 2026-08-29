@@ -839,6 +839,7 @@ _CFLOW_REPORT_TAIL = 10
 #: the details clipped to a tooltip's worth -- everything the whole run holds
 #: is one click away on /api/cflow/run, which is not polled.
 _CFLOW_LIST_REPORTS = 3
+_CFLOW_LIST_SUMMARY = 240
 _CFLOW_LIST_DETAILS = 400
 
 #: Free text no card in the list draws: a finished run's replayed journal, the
@@ -945,8 +946,16 @@ def _branch_of(cwd: str) -> str:
     return hit[0] if hit is not None else ""
 
 
-def _scope_sessions(manager: SessionManager, cwd: str, scope: str) -> list:
+def _scope_sessions(
+    manager: SessionManager,
+    cwd: str,
+    scope: str,
+    *,
+    live_sessions: Optional[Dict[Tuple[str, str], object]] = None,
+) -> list:
     """The session this run maps 1:1 to (scope == session name), if alive."""
+    if live_sessions is not None:
+        return [scope] if (cwd, scope) in live_sessions else []
     for session in manager.list():
         if (
             session.sdef.name == scope
@@ -997,7 +1006,8 @@ def _clock_snapshots(app) -> dict:
 
 def _cflow_timers(
     manager: SessionManager, snaps: dict, cfg: Optional[dict],
-    cwd: str, scope: str, payload: dict,
+    cwd: str, scope: str, payload: dict, *,
+    live_sessions: Optional[Dict[Tuple[str, str], object]] = None,
 ) -> dict:
     """The two clocks' standing with one run, as the dashboard states it.
 
@@ -1019,7 +1029,11 @@ def _cflow_timers(
     cfg = cfg or {}
     key = (cwd, scope)
     actionable = cflow_clock._actionable(payload)
-    session = cflow_clock.session_for(manager, cwd, scope)
+    session = (
+        live_sessions.get((cwd, scope))
+        if live_sessions is not None
+        else cflow_clock.session_for(manager, cwd, scope)
+    )
     try:
         busy = session is not None and session.status() != STATUS_IDLE
     except Exception:  # noqa: BLE001 — raced with an exit
@@ -1101,8 +1115,23 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
     session it belongs to (``default`` = started outside any session).
     """
     manager: SessionManager = request.app["manager"]
+    # Resolve the session registry once for the whole sweep.  The old path
+    # called ``manager.list()`` once per run to bind a scope, then ``get()``
+    # once more per run for its timers.  A busy machine has hundreds of run
+    # slots, so that repeated sorting and delayed-Codex discovery dominated
+    # the endpoint even when every run file was cached.
+    live_sessions = {
+        (_session_cwd(session), session.sdef.name): session
+        for session in manager.list()
+        if not session.exited and _session_cwd(session)
+    }
+    rail_view = request.query.get("view") == "rail"
+
     keys: list = []
-    for cwd, scope in cflow_state.known_runs():
+    # Registry and run-state reads are filesystem operations.  The complete
+    # Flows view can include hundreds of slots and takes seconds on a cold
+    # cache, so keep that work off the event loop that also pumps terminals.
+    for cwd, scope in await asyncio.to_thread(cflow_state.known_runs):
         if (cwd, scope) not in keys:
             keys.append((cwd, scope))
     explicit = request.query.get("cwd")
@@ -1116,6 +1145,13 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
             if (explicit, scope) not in keys:
                 keys.append((explicit, scope))
 
+    # The background poll only annotates live session rows.  Historical and
+    # unbound runs remain available from the Flows page through the default
+    # response, but they no longer require state/journal reads or network
+    # transfer in every tab every two seconds.
+    if rail_view and not explicit:
+        keys = [key for key in keys if key in live_sessions]
+
     # Read once for the whole sweep, not per run: the config is one file and
     # the clocks are two tables, and this handler is on a two-second poll.
     snaps = _clock_snapshots(request.app)
@@ -1124,26 +1160,41 @@ async def h_cflow_runs(request: web.Request) -> web.Response:
     except store.StoreError:
         cfg = None  # unreadable config: the clocks read "off", never a guess
 
-    runs = []
-    for cwd, scope in keys:
-        entry = _cflow_entry(manager, cwd, scope, slim=True)
-        # An idle slot is only interesting when it was asked about explicitly,
-        # or when a human's start request is waiting to be picked up there.
-        if (
-            entry.get("status") == "idle"
-            and cwd != explicit
-            and not entry.get("pending_start")
-        ):
-            continue
-        if entry.get("status") not in ("idle", "error"):
-            entry["timers"] = _cflow_timers(manager, snaps, cfg, cwd, scope, entry)
-        runs.append(entry)
+    def build_entries() -> list:
+        runs = []
+        for cwd, scope in keys:
+            entry = _cflow_entry(
+                manager,
+                cwd,
+                scope,
+                reports=not rail_view,
+                slim=True,
+                live_sessions=live_sessions,
+            )
+            # An idle slot is only interesting when it was asked about explicitly,
+            # or when a human's start request is waiting to be picked up there.
+            if (
+                entry.get("status") == "idle"
+                and cwd != explicit
+                and not entry.get("pending_start")
+            ):
+                continue
+            if entry.get("status") not in ("idle", "error"):
+                entry["timers"] = _cflow_timers(
+                    manager, snaps, cfg, cwd, scope, entry,
+                    live_sessions=live_sessions,
+                )
+            runs.append(entry)
+        return runs
+
+    runs = await asyncio.to_thread(build_entries)
     return web.json_response({"runs": runs})
 
 
 def _cflow_entry(
     manager: SessionManager, cwd: str, scope: str, *, reports: bool = True,
     slim: bool = False,
+    live_sessions: Optional[Dict[Tuple[str, str], object]] = None,
 ) -> dict:
     """One (cwd, scope) slot as the dashboard sees it: live status, the recent
     step reports, and any pending start request.
@@ -1157,12 +1208,16 @@ def _cflow_entry(
     entry = {
         "cwd": cwd,
         "scope": scope,
-        "sessions": _scope_sessions(manager, cwd, scope),
+        "sessions": _scope_sessions(
+            manager, cwd, scope, live_sessions=live_sessions,
+        ),
     }
     try:
         payload = cflow_engine.status(cwd, scope=scope)
     except (CflowError, WorkflowError, StateError, OSError) as exc:
         return {**entry, "status": "error", "error": str(exc)}
+    if slim:
+        payload = _slim_cflow_payload(payload)
     if not reports:
         return {**entry, **payload}
     recent = [
@@ -1177,15 +1232,24 @@ def _cflow_entry(
         if e.get("event") == "step_report"
     ]
     if slim:
-        payload = {k: v for k, v in payload.items() if k not in _CFLOW_LIST_DROP}
-        if payload.get("checklist"):
-            payload["checklist"] = _slim_checklist(payload["checklist"])
         recent = [
-            {**r, "details": _clip(r.get("details"), _CFLOW_LIST_DETAILS)}
+            {
+                **r,
+                "summary": _clip(r.get("summary"), _CFLOW_LIST_SUMMARY),
+                "details": _clip(r.get("details"), _CFLOW_LIST_DETAILS),
+            }
             for r in recent[-_CFLOW_LIST_REPORTS:]
         ]
         return {**entry, **payload, "reports": recent}
     return {**entry, **payload, "reports": recent[-_CFLOW_REPORT_TAIL:]}
+
+
+def _slim_cflow_payload(payload: dict) -> dict:
+    """Fields a run-list card or rail badge can render."""
+    payload = {k: v for k, v in payload.items() if k not in _CFLOW_LIST_DROP}
+    if payload.get("checklist"):
+        payload["checklist"] = _slim_checklist(payload["checklist"])
+    return payload
 
 
 #: Per-item fields the list poll does not carry. The card draws a checkbox, a
@@ -2599,7 +2663,7 @@ async def h_sessions_list(request: web.Request) -> web.Response:
             info["winddown"] = wd
         if reminder_service is not None:
             info["session_reminder"] = reminder_service.status(
-                info.get("name") or "", cfg=reminder_cfg
+                info.get("name") or "", cfg=reminder_cfg, session=s,
             )
         attached.append(info)
     # A config file that cannot be read must not cost the caller the session

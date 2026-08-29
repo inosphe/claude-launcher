@@ -101,9 +101,9 @@ check("and the mark lands on that same row",
 check("the row the rail had lit is left alone",
       rail[1].classes.has("active") && !rail[1].classes.has("goto-flash"));
 
-/* ---- the mark survives the poll that rebuilds the rail ----
-   The rail is rebuilt whole every 2s: a class written onto the node itself
-   would be gone before a smooth scroll finished. */
+/* ---- the mark survives a changed poll that rebuilds the rail ----
+   A class written only onto the old node could be gone before a smooth
+   scroll finished. */
 const marked = only();
 rail = [row("s127"), row("s191"), row("s193"), row("s192")];   // as a rebuild leaves it
 check("a rebuilt rail has no mark until it is repainted", flashed().length === 0);

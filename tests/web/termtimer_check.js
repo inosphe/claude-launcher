@@ -636,7 +636,7 @@ check("...and never both at once",
 /* ---- the wirings ----------------------------------------------------- */
 /* Correct arithmetic that nothing calls is a chip that never moves. */
 check("the 2s cflow poll feeds it",
-      /renderTermTimer\(\);[^\n]*\n\s*if \(currentPage === "home"\) renderHome\(\);/
+      /renderTermTimer\(\);[\s\S]{0,120}?repaintRail[\s\S]{0,80}?renderHome\(\);/
         .test(src), true);
 /* setStatusBadge is the one point every attach path passes through
    (freshAttach and restoreTerminal both seed the header with it), which is

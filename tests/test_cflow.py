@@ -65,6 +65,31 @@ steps:
     instructions: continue
 """
 
+
+def test_run_state_cache_is_reused_without_sharing_mutations(
+    home, tmp_path, monkeypatch
+):
+    state_mod.save_state({"status": "step", "nested": {"visit": 1}}, str(tmp_path))
+    loads = 0
+    real_loads = state_mod.json.loads
+
+    def counted_loads(text):
+        nonlocal loads
+        loads += 1
+        return real_loads(text)
+
+    monkeypatch.setattr(state_mod.json, "loads", counted_loads)
+    first = state_mod.load_state(str(tmp_path))
+    first["nested"]["visit"] = 99
+    second = state_mod.load_state(str(tmp_path))
+
+    assert loads == 1
+    assert second["nested"]["visit"] == 1
+
+    state_mod.save_state({"status": "done", "nested": {"visit": 2}}, str(tmp_path))
+    assert state_mod.load_state(str(tmp_path))["nested"]["visit"] == 2
+    assert loads == 2
+
 LOOP = """
 max_visits: 2
 steps:

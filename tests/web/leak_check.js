@@ -42,6 +42,7 @@ function check(name, cond, extra) {
    is not a leak, and counting registrations would flag every rebuild. What
    matters is what is still hanging off something the page can reach. */
 const live = { sockets: 0, terminals: 0, timers: 0 };
+let createdNodes = 0;
 
 /* ---- stub DOM ---------------------------------------------------------- */
 /* A style object that answers to both spellings the page uses: assignment
@@ -62,6 +63,7 @@ function makeStyle() {
 }
 
 function makeEl(tag, ns) {
+  createdNodes += 1;
   const n = {
     tagName: String(tag).toUpperCase(),
     localName: String(tag).toLowerCase(),
@@ -582,6 +584,7 @@ function census() {
     rows: query(docRoot, "#session-list li").length,
     nodes: nodes(),
     listeners: listeners(),
+    createdNodes,
     sockets: live.sockets,
     terminals: live.terminals,
     timers: live.timers,

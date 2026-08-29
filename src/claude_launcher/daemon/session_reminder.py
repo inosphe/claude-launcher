@@ -44,7 +44,7 @@ def role_reminder_policy(cfg: dict) -> Tuple[bool, float]:
     return enabled and interval > 0, interval
 
 
-def role_entries(name: str, manager, mesh_mgr) -> List[dict]:
+def role_entries(name: str, manager, mesh_mgr, *, session=None) -> List[dict]:
     """Resolved roles currently held by one local session.
 
     Mesh membership is the authoritative role.  ``SessionDef.role`` is read
@@ -82,7 +82,8 @@ def role_entries(name: str, manager, mesh_mgr) -> List[dict]:
         return sorted(out, key=lambda e: (e["mesh"], e["name"]))
 
     try:
-        raw = (manager.get(name).sdef.role or "").strip()
+        current = session if session is not None else manager.get(name)
+        raw = (current.sdef.role or "").strip()
     except Exception:  # noqa: BLE001 - an unknown session has no role
         raw = ""
     role = mesh_roles.resolve().get(raw) if raw else None
@@ -486,19 +487,24 @@ class SessionReminderService:
         }
 
     def status(
-        self, name: str, *, now: Optional[float] = None, cfg: Optional[dict] = None
+        self, name: str, *, now: Optional[float] = None, cfg: Optional[dict] = None,
+        session=None,
     ) -> dict:
         """Header-facing state for the session-owned part of this service."""
         at = time.monotonic() if now is None else now
-        try:
-            session = self.manager.get(name)
-        except Exception:  # noqa: BLE001 - an absent session has no source
-            return {"paused": False, "role": None}
+        if session is None:
+            try:
+                session = self.manager.get(name)
+            except Exception:  # noqa: BLE001 - an absent session has no source
+                return {"paused": False, "role": None}
         if getattr(session, "exited", False):
             return {"paused": False, "role": None}
 
-        paused = self.session_paused(name)
-        roles = role_entries(name, self.manager, self.mesh)
+        reader = getattr(session, "reminders_paused", None)
+        paused = bool(reader()) if callable(reader) else bool(
+            getattr(getattr(session, "sdef", None), "reminder_paused", False)
+        )
+        roles = role_entries(name, self.manager, self.mesh, session=session)
         if not roles:
             return {"paused": paused, "role": None}
         if cfg is None:

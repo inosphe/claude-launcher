@@ -524,10 +524,19 @@ async function refreshSessions() {
   briefingLLM = data.llm_configured !== false;
   forgetDeadSessions();
   const list = $("session-list");
+  // Role countdown values change on every response, while the rail rows do
+  // not render those numbers.  Exclude only those moving values from the DOM
+  // signature so an unchanged fleet keeps its nodes, focus and listeners.
+  const signature = JSON.stringify(
+    [briefingLLM, sessionsCache],
+    (key, value) => key === "due_in" || key === "fired_ago" ? undefined : value,
+  );
   // See the hold above: a press in flight keeps the rows it started on, and
   // the redraw it postpones is owed back the moment the press ends.
-  const rebuild = !railHeld();
-  railRedrawPending = !rebuild;
+  const changed = signature !== list._sessionsSignature;
+  const rebuild = changed && !railHeld();
+  railRedrawPending = changed && !rebuild;
+  if (rebuild) list._sessionsSignature = signature;
   if (rebuild) list.innerHTML = "";
   for (const [s, depth] of rebuild ? byLineage(sessionsCache) : []) {
     const li = document.createElement("li");
@@ -696,12 +705,12 @@ async function refreshSessions() {
   }
   refreshResumeChoices();  // the spawn form offers these same conversations
   refreshParentChoices();  // ...and the same sessions, as parents to spawn from
-  if (currentPage === "home") renderHome();
-  syncBulkActions(sessionsCache);
+  if (rebuild && currentPage === "home") renderHome();
+  if (rebuild) syncBulkActions(sessionsCache);
   // Some embedded consumers reuse refreshSessions with a reduced rail DOM;
   // the shipped page has the control, while those consumers keep the list
   // behaviour they had before this optional view was added.
-  if (typeof syncSessionFilters === "function") {
+  if (rebuild && typeof syncSessionFilters === "function") {
     syncSessionFilters(sessionsCache);
   }
 
@@ -727,20 +736,22 @@ async function refreshSessions() {
   }
   // The mobile bottom bar carries this session's harness/profile, which only
   // the list knows.
-  syncMobileBars();
+  if (rebuild) syncMobileBars();
   // The rail rows above were rebuilt with the handles the mesh poll last
   // knew; the header beside them is repainted from the same value here.
-  renderTermHandle();
+  if (rebuild) renderTermHandle();
   // The rows and the runs arrive on separate polls; whichever lands last
   // paints the cflow badges over the rows that exist now. The session poll
   // also carries the independent Role reminder and the session-level pause.
-  applyCflowBadges();
-  applyRailQuiet();
   if (typeof renderTermTimer === "function") renderTermTimer();
-  applyBriefingCards();
-  // A rebuild throws away the class the goto press wrote onto its row; this
-  // puts it back, so the mark outlives the poll that lands mid-scroll.
-  applyGotoFlash();
+  if (rebuild) {
+    applyCflowBadges();
+    applyRailQuiet();
+    applyBriefingCards();
+    // A rebuild throws away the class the goto press wrote onto its row; this
+    // puts it back, so the mark outlives the poll that lands mid-scroll.
+    applyGotoFlash();
+  }
 }
 
 /* The meshes a rail row speaks for — the rooms that session is in.
@@ -899,7 +910,7 @@ function fmtOpensAt(iso) {
 
 /* One line under each rail row: which workflow the session is on and where it
    stands, amber-flagged when it is the reader's move. Applied idempotently
-   from both refreshSessions (rows rebuilt) and refreshCflow (runs updated),
+   from both refreshSessions (rows updated) and refreshCflow (runs updated),
    because the two caches fill on independent requests. */
 function applyCflowBadges() {
   const list = $("session-list");
@@ -1933,8 +1944,8 @@ function railCwdLine(s) {
    shift the two beside it and make the column unreadable at the moment it is
    most worth reading.
 
-   No timer runs for this. The session poll rebuilds these rows every couple
-   of seconds and the labels are recomputed from the stamps then — which is
+   No timer runs for this. A changed session poll rebuilds these rows and the
+   labels are recomputed from the stamps then — which is
    also the whole of what "does not need to be real time" buys: nothing in
    the browser and nothing in the daemon ticks on this line's behalf. */
 
@@ -2048,7 +2059,7 @@ function railSeenLine(s) {
 /* ------------------------------------------------------------------ */
 /* A row can fold open a card summarising what its session is up to: the
    daemon reads the session's own record and has the configured LLM compress
-   it to goal / now / state / progress. Rows are rebuilt on every poll, so
+   it to goal / now / state / progress. Rows are rebuilt when data changes, so
    which cards are open and what each one knows live here, and
    applyBriefingCards() repaints them onto whatever rows exist now — the
    same idempotent shape as the cflow badge above. */
@@ -2693,17 +2704,30 @@ async function refreshCflow() {
   renderStallPingDefaults(); // once; guarded inside
   let data;
   try {
-    const resp = await api("/api/cflow");
+    // Outside the Flows page only live session badges and the attached
+    // session's timer are consumed.  The compact view avoids transferring and
+    // parsing every historical run and report on the global two-second poll.
+    const endpoint = currentPage === "flows" ? "/api/cflow" : "/api/cflow?view=rail";
+    const resp = await api(endpoint);
     data = await resp.json();
   } catch {
     return;
   }
   const runs = data.runs || [];
   cflowCache = runs;
-  applyCflowBadges();  // the rail rows may have painted before this cache filled
-  applyRailQuiet();    // one of its two flags is read off this very cache
+  const signature = JSON.stringify(
+    runs,
+    (key, value) => key === "due_in" || key === "fired_ago" ? undefined : value,
+  );
+  const repaintRail = currentPage === "flows" || signature !== cflowRailRendered;
+  if (currentPage === "flows") cflowRailRendered = null;
+  else if (repaintRail) cflowRailRendered = signature;
+  if (repaintRail) {
+    applyCflowBadges();  // the rail rows may have painted before this cache filled
+    applyRailQuiet();    // one of its two flags is read off this very cache
+  }
   renderTermTimer();   // the attached session's own header chip
-  if (currentPage === "home") renderHome();
+  if (repaintRail && currentPage === "home") renderHome();
   // Everything above is what feeds the rail and the header: badges on rows,
   // the attached session's countdown, the home card's count. What follows
   // rebuilds the Flows page's
@@ -3244,6 +3268,7 @@ let workspacesCache = [];
 
 /* Last cflow run list the poll saw, for the home dashboard. */
 let cflowCache = [];
+let cflowRailRendered = null;
 
 /* The declared harnesses. Fetched once: the set is declared in YAML and
    changes when someone edits config or installs a program, neither of which
@@ -6776,10 +6801,10 @@ function markDetailRow() {
    about a press from a minute ago. */
 const GOTO_FLASH_MS = 1600;
 
-/* Which row is marked, if any. Held here and not on the node because the rail
-   is rebuilt whole on every 2s poll — a class written straight onto the row
-   would be thrown away by the next tick, which is well inside the time the
-   scroll itself takes. refreshSessions repaints it from this instead. */
+/* Which row is marked, if any. Held here and not on the node because a changed
+   session poll rebuilds the rail — a class written straight onto the row
+   could be thrown away while the smooth scroll is still running.
+   refreshSessions repaints it from this instead. */
 let gotoFlashName = null;
 let gotoFlashTimer = null;
 
@@ -14889,6 +14914,7 @@ function renderSessKids(bodyEl, doc) {
 let meshName = null;      // mesh open in the detail view
 let meshPollTimer = null;
 let meshCache = [];       // sidebar list payload
+let meshListRendered = null;
 let meshInviteCodes = {}; // mesh -> last minted invite code (survives rerenders)
 
 /* Relay connectivity is surfaced permanently in the header: mesh can only
@@ -14923,6 +14949,10 @@ async function refreshMeshList() {
   }
   renderRelayBadge(data.relay);
   meshCache = data.meshes || [];
+  const outgoing = data.outgoing || [];
+  const signature = JSON.stringify([meshName, meshCache, outgoing]);
+  if (signature === meshListRendered) return;
+  meshListRendered = signature;
   const list = $("mesh-list");
   list.innerHTML = "";
   if (!meshCache.length) {
@@ -14959,7 +14989,7 @@ async function refreshMeshList() {
   // the header's handle chip is repainted on this poll too — it is the mesh
   // that owns the fact, and this is where the fact arrives.
   renderTermHandle();
-  renderOutgoingJoins(data.outgoing || []);
+  renderOutgoingJoins(outgoing);
   syncOnboardPickers();
   if (currentPage === "home") renderHome();
 }
@@ -18804,13 +18834,15 @@ async function boot() {
   badge.classList.remove("off");
   if (info.boot_id) daemonBoot = info.boot_id;
   renderRelayBadge(info.relay);
-  refreshProfiles();
-  refreshHarnesses();
-  refreshRoles();
-  refreshWorkspaces();
-  refreshSessions();
-  refreshMeshList();
-  refreshCflow();
+  await Promise.all([
+    refreshProfiles(),
+    refreshHarnesses(),
+    refreshRoles(),
+    refreshWorkspaces(),
+    refreshSessions(),
+    refreshMeshList(),
+    refreshCflow(),
+  ]);
   // Last, and once. A #/s/<name> link attaches here — which is why a reload
   // puts you back in the session instead of at an empty slot — and it renders
   // against caches the refreshes above have already filled. Re-running it on
@@ -18877,16 +18909,20 @@ async function pollOnce() {
     return;
   }
   if (health.boot_id) daemonBoot = health.boot_id;
-  refreshSessions();
-  refreshMeshList();
-  refreshCflow();
-  refreshTermQueued();
+  const refreshes = [
+    refreshSessions(),
+    refreshMeshList(),
+    refreshCflow(),
+    refreshTermQueued(),
+  ];
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
-  refreshWorkspaces();
+  refreshes.push(refreshWorkspaces());
   // The restart gate can be opened from any session's terminal, so the card
   // is fed by the same heartbeat as the registry.
-  refreshRestartGate();
+  const gateRefresh = refreshRestartGate();
+  refreshes.push(gateRefresh);
+  await Promise.all(refreshes);
 }
 
 pollTimer = setInterval(pollTick, 2000);

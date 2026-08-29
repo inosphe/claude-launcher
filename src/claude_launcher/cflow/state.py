@@ -51,6 +51,7 @@ snapshots the composed result, never the overlay alone.
 from __future__ import annotations
 
 import contextlib
+import copy
 import contextvars
 import json
 import os
@@ -702,6 +703,12 @@ def has_run(cwd: Optional[str] = None) -> bool:
     return _state_path(cwd).is_file()
 
 
+#: Parsed mutable run states, keyed by path and file identity.  Callers mutate
+#: the returned state before saving it, so cache hits are deep copies rather
+#: than the shared object used for immutable workflow snapshots below.
+_states: Dict[str, Tuple[int, int, dict]] = {}
+
+
 def load_state(cwd: Optional[str] = None) -> dict:
     path = _state_path(cwd)
     if not path.is_file():
@@ -710,18 +717,25 @@ def load_state(cwd: Optional[str] = None) -> dict:
             "cflow 'start' tool or see 'claunch cflow ls')"
         )
     try:
+        st = path.stat()
+        key = str(path)
+        hit = _states.get(key)
+        if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+            return copy.deepcopy(hit[2])
         doc = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise StateError(f"corrupt cflow state at {path}: {exc}") from exc
     if not isinstance(doc, dict):
         raise StateError(f"corrupt cflow state at {path}")
-    return doc
+    _states[key] = (st.st_mtime_ns, st.st_size, doc)
+    return copy.deepcopy(doc)
 
 
 def save_state(state: dict, cwd: Optional[str] = None) -> None:
     path = _state_path(cwd)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(state, indent=2), encoding="utf-8")
+    _forget(path)
 
 
 def clear_state(cwd: Optional[str] = None) -> None:
@@ -777,6 +791,7 @@ def _forget(path: Path) -> None:
     this process does and merely eventually-right for anything it does not.
     """
     key = str(path)
+    _states.pop(key, None)
     _snapshots.pop(key, None)
     _journals.pop(key, None)
 

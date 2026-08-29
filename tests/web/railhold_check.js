@@ -1,8 +1,8 @@
 /* The rail holds still while a pointer is down on it — run against the real
    refreshSessions from app.js and a stub DOM.
 
-   The rail is rebuilt from scratch on every poll (`list.innerHTML = ""`,
-   from setInterval(pollTick, 2000)), and a press is not an instant:
+   The rail is rebuilt from scratch when session data changes
+   (`list.innerHTML = ""`), and a press is not an instant:
    pointerdown, pointerup, and only then the click a handler is waiting for.
    A rebuild landing between the first two takes the node the press started
    on out of the document, and the browser has no common ancestor left to
@@ -177,15 +177,15 @@ const TWO = [
 (async () => {
   served = { sessions: TWO, llm_configured: true };
 
-  /* ---- the ordinary poll still rebuilds ------------------------------- */
+  /* ---- an unchanged ordinary poll preserves the rows ------------------ */
   await ctx.refresh();
   check("a poll draws the rows", names(), ["s1", "s2"]);
   const first = [...list.kids];
   check("...each carrying the row's own glyph",
         list.kids.map((li) => !!glyph(li)), [true, true]);
   await ctx.refresh();
-  check("an unheld poll rebuilds — none of the rows is the same object",
-        list.kids.some((li, i) => li === first[i]), false);
+  check("an unchanged unheld poll keeps every row object",
+        list.kids.map((li, i) => li === first[i]), [true, true]);
 
   /* ---- a press freezes the teardown, and only the teardown ------------ */
   const before = [...list.kids];

@@ -10,12 +10,14 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from claude_launcher import credentials, lineage, profile, store
-from claude_launcher.daemon import codex_sessions, paths
+from claude_launcher.daemon import codex_sessions, manager as manager_mod, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import ManagerError, SessionManager
@@ -185,6 +187,42 @@ def test_codex_conversation_id_is_retried_after_a_slow_rollout(
 
         # Once claimed, later polls do not scan for this session again.
         mgr.list()
+        assert attempts == [2.0, 0]
+        await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_pending_codex_claim_is_scanned_once_per_retry_window(
+    home, tmp_path, monkeypatch
+):
+    """Repeated manager reads in one API request do not repeat the same scan."""
+    store.update(lambda doc: doc.update({"harnesses": {"codex": {
+        "command": [sys.executable, "-u", "-c", CHILD],
+        "home_env": "CODEX_HOME",
+        "restore_args": ["resume", "--last"],
+    }}}))
+    lineage.set_harness(profile.create("codex"), "codex")
+    monkeypatch.setattr(codex_sessions, "snapshot", lambda _home: {"old"})
+    attempts = []
+
+    def missing_claim(_home, cwd, known, *, timeout=2.0, poll=0.02):
+        attempts.append(timeout)
+        return None
+
+    monkeypatch.setattr(codex_sessions, "claim_new", missing_claim)
+    monkeypatch.setattr(
+        manager_mod, "time", SimpleNamespace(monotonic=lambda: 100.0)
+    )
+
+    async def run():
+        mgr = _manager()
+        mgr.create(SessionDef(name="cx", profile="codex", cwd=str(tmp_path)))
+        assert attempts == [2.0]
+        mgr.list()
+        for _ in range(100):
+            mgr.get("cx")
+            mgr.list()
         assert attempts == [2.0, 0]
         await mgr.shutdown_all()
 
@@ -507,6 +545,17 @@ def test_api_cflow_monitoring(home, tmp_path, monkeypatch):
     from aiohttp.test_utils import TestClient, TestServer
 
     from claude_launcher.cflow import engine as cflow_engine
+    from claude_launcher.daemon import api as api_mod
+
+    event_thread = threading.get_ident()
+    entry_threads = []
+    original_cflow_entry = api_mod._cflow_entry
+
+    def tracked_cflow_entry(*args, **kwargs):
+        entry_threads.append(threading.get_ident())
+        return original_cflow_entry(*args, **kwargs)
+
+    monkeypatch.setattr(api_mod, "_cflow_entry", tracked_cflow_entry)
 
     (tmp_path / "wf.yaml").write_text(
         "name: demo\nsteps:\n  one:\n    instructions: do one\n    next: two\n"
@@ -538,6 +587,15 @@ def test_api_cflow_monitoring(home, tmp_path, monkeypatch):
             assert runs[0]["sessions"] == []  # its session is not alive yet
             assert runs[0]["reports"][-1]["summary"] == "one is done"
             assert runs[0]["reports"][-1]["details"] == "evidence here"
+            assert entry_threads
+            assert all(thread_id != event_thread for thread_id in entry_threads)
+
+            # The global background poll has no row to annotate yet, so it
+            # transfers none of this historical run or its reports.
+            resp = await client.get(
+                "/api/cflow", params={"view": "rail"}, headers=bearer
+            )
+            assert (await resp.json())["runs"] == []
 
             # explicit ?cwd= inspection also works (and does not duplicate)
             resp = await client.get(
@@ -551,6 +609,14 @@ def test_api_cflow_monitoring(home, tmp_path, monkeypatch):
             runs = (await resp.json())["runs"]
             assert len(runs) == 1
             assert runs[0]["sessions"] == ["wf1"]
+            resp = await client.get(
+                "/api/cflow", params={"view": "rail"}, headers=bearer
+            )
+            rail = (await resp.json())["runs"]
+            assert len(rail) == 1
+            assert rail[0]["sessions"] == ["wf1"]
+            assert "reports" not in rail[0]
+            assert "instructions" not in rail[0]
 
             # an unrelated session in that cwd binds to nothing: a second
             # run in ITS scope lists separately, and neither leaks sessions

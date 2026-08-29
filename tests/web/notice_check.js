@@ -38,6 +38,9 @@ function check(name, cond, extra) {
   console.log(`FAIL ${name}${extra === undefined ? "" : ` — ${JSON.stringify(extra)}`}`);
 }
 
+check("the global poll waits for its refresh batch before releasing the tick",
+      /await Promise\.all\(refreshes\)/.test(src), true);
+
 /* ---- stub world ------------------------------------------------------- */
 function build(opts) {
   const o = opts || {};

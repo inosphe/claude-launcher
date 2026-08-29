@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import shutil
+import time
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -44,6 +45,12 @@ class ManagerError(Exception):
 
 
 class SessionManager:
+    #: Filesystem discovery for a rollout that Codex has not written yet is
+    #: retried from ordinary manager reads.  One dashboard request can perform
+    #: hundreds of those reads, so retries are rate-limited per manager rather
+    #: than repeated once per ``get()`` call.
+    _CODEX_CLAIM_RETRY_INTERVAL = 1.0
+
     def __init__(self, *, idle_threshold: float, scrollback: int, restore_default: bool) -> None:
         self.idle_threshold = idle_threshold
         self.scrollback = scrollback
@@ -77,6 +84,7 @@ class SessionManager:
         self._pending_codex_claims: Dict[
             str, Tuple[Session, Path, str, Set[str]]
         ] = {}
+        self._next_codex_claim_retry = 0.0
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -213,6 +221,13 @@ class SessionManager:
         the session object identity prevents a stale claim from attaching to
         a later process that reused the same name.
         """
+        if not self._pending_codex_claims:
+            return
+        now = time.monotonic()
+        if now < self._next_codex_claim_retry:
+            return
+        self._next_codex_claim_retry = now + self._CODEX_CLAIM_RETRY_INTERVAL
+
         changed = False
         for name, pending in list(self._pending_codex_claims.items()):
             launched, codex_home, cwd, known = pending
@@ -236,6 +251,8 @@ class SessionManager:
             )
         if changed:
             self.persist()
+        if not self._pending_codex_claims:
+            self._next_codex_claim_retry = 0.0
 
     def discard(self, name: str) -> None:
         """Drop a staged session that will never start."""
