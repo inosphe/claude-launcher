@@ -240,9 +240,9 @@ ctx.setMeshes([
         "mesh mesh0 — joined as s25 (worker)");
   check("a session in no mesh grows no tag box",
         row("loner").querySelectorAll(".rail-meshes").length, 0);
-  check("a session with no role still says so — 'no-role', the packaged default",
+  check("a session with no role still says so — 'free-role', the packaged default",
         row("loner").querySelectorAll(".mesh-role").map((t) => t.text),
-        ["no-role"]);
+        ["free-role"]);
 
   /* An ellipsised name is only acceptable because the whole one is a hover
      away — the row's own title is about lineage, so the label carries it.

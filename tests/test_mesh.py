@@ -151,9 +151,9 @@ def test_infer_role():
     assert infer_role("dev-2") == "worker"
     assert infer_role("qa") == "reviewer"
     assert infer_role("mod") == "leader"
-    # An unlabelled member is assigned NOTHING — no-role, the packaged
-    # default — rather than quietly becoming a worker or an auditor.
-    assert infer_role("alice") == "no-role"
+    # An unlabelled member falls to free-role, the packaged default — no
+    # role's powers, but free to carry out whatever its creator gave it.
+    assert infer_role("alice") == "free-role"
 
 
 def test_message_intents():

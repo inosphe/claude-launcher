@@ -2075,9 +2075,9 @@ claunch install                   # MCP tools + the /mesh and /cflow skills
 - **Roles**: a role is what a member **is** — its stance, who hears about a
   stall (`stall_watch`), its task-poll wording. The packaged vocabulary is
   interconnect's (`leader`/`operator`/`worker`/`reviewer`/`specialist`, plus
-  `no-role`; aliases work, so `coder1` is a worker and `mod` leads, and
-  anything unrecognised defaults to `no-role` — a member with nothing
-  assigned until a human or the leader says otherwise). Each mesh
+  `free-role`; aliases work, so `coder1` is a worker and `mod` leads, and
+  anything unrecognised defaults to `free-role` — no role's powers, but free
+  to carry out the task its creator gave it). Each mesh
   may upload its own YAML — `claunch mesh roles <mesh> --file roles.yaml`,
   `PUT /api/mesh/{mesh}/roles`, or the web panel. A role in the upload
   replaces that role whole, `<name>: null` deletes one, `replace: true`

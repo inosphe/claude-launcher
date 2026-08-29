@@ -961,12 +961,14 @@ behaviours the daemon keys off it. The vocabulary is a **document**, not a
 table in the source.
 
 **The packaged set.** `leader` / `operator` / `worker` / `reviewer` /
-`specialist`, plus `no-role`, with interconnect's aliases (`coder`, `dev`,
+`specialist`, plus `free-role`, with interconnect's aliases (`coder`, `dev`,
 `engineer`, … -> worker; `mod`, `lead`, `chair` -> leader; `qa`, `critic`,
-`peer` -> reviewer). `no-role` is the default: an unlabelled member is a
-member with **nothing assigned** — not a worker, and not (as under the old
-`reviewer` default) an auditor either — until a human or the leader gives it
-a role. It ships as YAML in `mesh_roles.DEFAULT_YAML` — parsed by the
+`peer` -> reviewer). `free-role` is the default: an unlabelled member holds
+**none of a role's powers** (integration, audit, exclusivity) but is free to
+carry out the task its creator gave it, asking that creator — not the leader,
+who does not know the task — when unsure. It keeps `no-role` as an alias so a
+stored role or re-join that still spells the old name resolves here. It ships
+as YAML in `mesh_roles.DEFAULT_YAML` — parsed by the
 same code every upload goes through, so the default is proven by the parser
 it depends on. Aliases matter more than they look: before this, a fleet named
 with interconnect's usual handles (`coder1`…`coder5`) resolved every member
@@ -984,7 +986,7 @@ document) keep it small enough to cross a link without thought.
 
 ```yaml
 version: 1
-default: no-role
+default: free-role
 roles:
   leader:
     aliases: [lead, moderator, mod, chair]

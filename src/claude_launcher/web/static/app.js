@@ -565,12 +565,12 @@ async function refreshSessions() {
     label.title = s.name;
     // The session's role, next to the name it is part of — same tag the mesh
     // roster draws, so "worker" reads as the same fact in both places. A
-    // session without one reads as "no-role" — the packaged vocabulary's
+    // session without one reads as "free-role" — the packaged vocabulary's
     // default, and the label its membership would carry too — instead of a
     // silently blanked pill.
     const role = document.createElement("span");
     role.className = "mesh-role";
-    role.textContent = s.role || "no-role";
+    role.textContent = s.role || "free-role";
     // And the name the mesh calls it by, when that is not the name above.
     // First of the qualifiers, before the role, because it is another way of
     // saying WHO this row is — the role and the rooms are both properties of
@@ -11714,7 +11714,7 @@ function renderSession(data) {
   // arrangement, not choices this session made.
   metaRow(dl, "spawned by", s.parent, "the session that created this one");
   metaRow(
-    dl, "role", data.role ? data.role.name : (s.role || "no-role"),
+    dl, "role", data.role ? data.role.name : (s.role || "free-role"),
     data.role ? data.role.stance : ""
   );
   // Beside the role, because the two are one fact between them: what this

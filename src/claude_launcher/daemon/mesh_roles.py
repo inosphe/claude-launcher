@@ -7,10 +7,11 @@ handle like ``coder1`` fell through to ``"member"``, a value nothing acts on.
 
 The vocabulary now ships as a **document**. The packaged default carries
 interconnect's proven set — ``leader``/``operator``/``worker``/``reviewer``/
-``specialist``, their aliases, plus ``no-role`` as the default so an
-unlabelled member is a member with nothing — assigned no work, authorized
-no audit — until a human or the leader says otherwise, and a mesh may
-**override** it by uploading its own YAML through the daemon.
+``specialist``, their aliases, plus ``free-role`` as the default so an
+unlabelled member may carry out the task its creator gave it without holding
+any role's powers — no work, no audit and no authority are *granted*, but
+nothing is *blocked* either — and a mesh may **override** it by uploading its
+own YAML through the daemon.
 
 Scope is the mesh, not the machine: a mesh is the unit a team actually is,
 one machine hosts members of several meshes at once, and the authority owns
@@ -340,11 +341,13 @@ DEFAULT_YAML = """\
 version: 1
 
 # The role a handle gets when its leading word names none of the roles below.
-# no-role on purpose: an unlabelled member is assigned NOTHING — not a
-# worker, and (unlike the old reviewer default) not an auditor either. It
-# stays a member with no stance of its own until a human or the leader
-# gives it one; see the no-role role below.
-default: no-role
+# free-role on purpose: an unlabelled member has none of the powers a role
+# grants (integration, audit, exclusivity...), but is NOT told to sit idle —
+# a session a user started with one instruction must be able to carry it
+# out without first being "assigned" a role. The old name "no-role" is kept
+# as an alias on the role below, so state or a re-join that still spells it
+# resolves here instead of dangling.
+default: free-role
 
 # What a join wires up. A child is ALWAYS connected to its parent — that is
 # the join, not a rule — so everything here is about the edges beyond it.
@@ -379,17 +382,28 @@ auto_link:
 
 roles:
 
-  no-role:
-    # The default — and the description of having no description. A member
-    # the mesh assigned nothing is TOLD so, and sent to the leader for an
-    # assignment, instead of quietly becoming a worker or an auditor.
-    # Deliberately no aliases: nothing else should land a handle here.
+  free-role:
+    # The default. No role assigned you work and you hold none of a role's
+    # powers, but that is freedom, not a block: carry out the task your
+    # creator (a person or the session that made you) gave you, and ask that
+    # creator — not the leader, who does not know the task — when unsure.
+    # "no-role" is an alias on purpose. Before this rename the default was a
+    # *nothing* role, and "Deliberately no aliases" existed so nobody could
+    # opt into having nothing; things still holding the old spelling (a
+    # stored member role, a persisted vocabulary, a re-join) must resolve to
+    # this role rather than dangling, and opting into the FREE default is a
+    # normal request anyway.
+    aliases: [no-role]
     stance: |
-      You are a member of this mesh and hold no role: nothing is assigned
-      to you, and you are authorized for nothing a role would have to give
-      you. Produce no work and review none — an unassigned member is not a
-      reviewer by default. Ask the leader for an assignment before doing
-      anything else; if the leader has nothing for you, leave the mesh.
+      You are a member of this mesh in the free role: no role has assigned
+      you work, and you hold none of the powers a role grants — a leader's
+      integration authority, a reviewer's audit duty, an operator's relay.
+      What you do have is the task your creator (the person or session that
+      made you) gave you: carry it out directly instead of stalling to be
+      assigned. If you are not sure what to do, ask the one who made or
+      briefed you, not the leader — the leader does not know that task. If
+      nobody has given you anything to do, say so and stand by; a creator
+      that assigns nothing has no work for you here.
 
   leader:
     aliases: [lead, moderator, mod, chair]

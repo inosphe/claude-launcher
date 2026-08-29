@@ -5,8 +5,8 @@ Scenario matrix, derived from docs/mesh-design.md "Roles":
 A. The vocabulary
    A1 the packaged set carries interconnect's roles AND their aliases, so a
       handle like `coder1` resolves to worker instead of a dead label
-   A2 an unlabelled handle defaults to no-role (assigned nothing, and
-      not an auditor either)
+   A2 an unlabelled handle defaults to free-role (no role's powers, but
+      free to carry out the task its creator gave it)
    A3 an explicit --role is normalised through the aliases; an unknown one
       is refused rather than silently stored
 
@@ -105,13 +105,16 @@ def test_packaged_vocabulary_resolves_the_handles_people_actually_use():
     assert rs.infer("gatekeeper") == "specialist"
     assert rs.infer("op1") == "operator"
 
-    # A2: the default is NOTHING — an unlabelled member is assigned no
-    # work and audits nothing until a human or the leader gives it a role.
-    assert rs.default == "no-role"
-    assert rs.infer("alice") == "no-role"
+    # A2: the default is free-role — no role's powers, but free to carry out
+    # the task its creator gave it (asking that creator, not the leader,
+    # when unsure).
+    assert rs.default == "free-role"
+    assert rs.infer("alice") == "free-role"
     # It is a real role: an explicit --role lands there, and the all(stance)
-    # check below would catch a default that declared no stance.
-    assert rs.resolve("w1", "no-role") == "no-role"
+    # check below would catch a default that declared no stance. The old
+    # "no-role" spelling still resolves, as the alias.
+    assert rs.resolve("w1", "free-role") == "free-role"
+    assert rs.resolve("w1", "no-role") == "free-role"
 
     # A3: an explicit role is normalised, and a wrong one is refused.
     assert rs.resolve("w1", "mod") == "leader"
@@ -136,17 +139,17 @@ def test_an_upload_replaces_roles_one_at_a_time():
             stance: build the thing
     """))
     assert sorted(rs.roles) == [
-        "leader", "no-role", "operator", "reviewer", "specialist", "worker"
+        "free-role", "leader", "operator", "reviewer", "specialist", "worker"
     ]
     assert rs.infer("hacker2") == "worker"
     assert rs.get("worker").stance == "build the thing"
-    assert rs.infer("coder1") == "no-role"      # the packaged alias went away
+    assert rs.infer("coder1") == "free-role"    # the packaged alias went away
     assert rs.get("leader").stall_watch is True  # untouched role kept whole
     assert rs.get("leader").stance
 
     # B2: a tombstone deletes.
     rs = mesh_roles.resolve(_yaml("roles: {specialist: null, operator: null}"))
-    assert sorted(rs.roles) == ["leader", "no-role", "reviewer", "worker"]
+    assert sorted(rs.roles) == ["free-role", "leader", "reviewer", "worker"]
 
     # B3: replace:true is the whole vocabulary.
     rs = mesh_roles.resolve(_yaml("""
@@ -181,7 +184,7 @@ def test_a_bad_upload_is_refused_whole():
         mesh_roles.resolve(_yaml("replace: true\nroles: {a: {}}"))
     # Tombstoning the role that IS the default is caught too.
     with pytest.raises(mesh_roles.RoleError, match="not defined"):
-        mesh_roles.resolve(_yaml("roles: {no-role: null}"))
+        mesh_roles.resolve(_yaml("roles: {free-role: null}"))
 
     # B5: every other way to get it wrong, refused at parse/resolve rather
     # than half-applied.
@@ -388,7 +391,7 @@ def test_the_authority_owns_the_vocabulary_and_a_peer_upload_is_forwarded(
 
         # D2: the grant carried the vocabulary, so the guest reads the roster
         # correctly from its first render rather than one sync later.
-        assert b.roleset.default == "no-role"
+        assert b.roleset.default == "free-role"
         assert b.roles_version == a.roles_version
 
         # D1: the MIRROR uploads. It is forwarded to the authority, adopted
@@ -619,9 +622,9 @@ def test_the_http_surface_uploads_reads_and_resets_the_role_set(home, tmp_path):
             resp = await client.get("/api/mesh/web/roles", headers=auth)
             doc = await resp.json()
             assert resp.status == 200 and doc["custom"] is False
-            assert doc["default"] == "no-role"
+            assert doc["default"] == "free-role"
             assert [r["name"] for r in doc["roles"]] == [
-                "leader", "no-role", "operator", "reviewer", "specialist",
+                "free-role", "leader", "operator", "reviewer", "specialist",
                 "worker"
             ]
             # The roster is where the vocabulary meets reality.
@@ -743,19 +746,19 @@ def test_the_packaged_rules_connect_roots_and_every_reviewer_to_every_worker():
     ) is False
     assert auto.decide(_facts("worker", 1, "a"), _facts("leader", 2, "b")) is False
 
-    # no-role (the packaged default) matches no ROLE rule: the reviewer rule
-    # names only worker/reviewer, so an unlabelled member is handed no extra
-    # edge by a rule — its connections are the parent edge a join always
-    # makes, and the root rule below when it is a root.
+    # free-role (the packaged default) matches no ROLE rule: the reviewer
+    # rule names only worker/reviewer, so an unlabelled member is handed no
+    # extra edge by a rule — its connections are the parent edge a join
+    # always makes, and the root rule below when it is a root.
     assert auto.decide(
-        _facts("no-role", 1, "a"), _facts("reviewer", 2, "b")
+        _facts("free-role", 1, "a"), _facts("reviewer", 2, "b")
     ) is False
     assert auto.decide(
-        _facts("no-role", 1, "a"), _facts("worker", 3, "b")
+        _facts("free-role", 1, "a"), _facts("worker", 3, "b")
     ) is False
-    # ...while two no-role ROOTS still reach each other, like any roots.
+    # ...while two free-role ROOTS still reach each other, like any roots.
     assert auto.decide(
-        _facts("no-role", 0, "a"), _facts("no-role", 0, "b")
+        _facts("free-role", 0, "a"), _facts("free-role", 0, "b")
     ) is True
 
 
