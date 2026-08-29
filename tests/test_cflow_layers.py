@@ -947,12 +947,14 @@ def test_the_worker_review_says_what_a_number_is_a_verdict_about():
         "claunch-v5yp",                    # ...and the retired bare probe, named so it stays retired
         "트리 해시",                        # numbers carry their tree
         "--collect-only",                  # baselines cost nothing
-        "Get-CimInstance",                 # the literal probe, not a description
-        "distinct basetemp",               # concurrent sweeps
-        "1~3초",                           # the startup blind spot
-        "지금 시작한다",                    # ...and the only defence there is
+        "claunch window status",            # the daemon-owned queue is readable
+        "tools/changed_tests.py",           # targeted acquisition point
+        "tools/sweep.py run",               # exclusive sweep acquisition point
+        "wait_seconds",                     # the receipt records queue delay
+        "advisory_n",                       # and the granted xdist width
+        "CLAUNCH_WINDOW=off",               # the operator escape hatch is loud
+        "파일 잠금",                          # sweep fallback remains exclusive
         "popen-gw",                        # a dead run's numbers are on disk
-        "verify` 필드가 있으면",            # ...and leaving such a step is a sweep
     ):
         assert anchor in review.instructions, f"review lost its {anchor!r} rule"
 
@@ -994,11 +996,11 @@ def test_the_worker_review_does_not_ship_the_retired_bare_probe():
         )
 
 
-def test_the_worker_review_admits_what_the_scan_cannot_see():
-    """A check whose blind spots are undocumented gets built upon."""
+def test_the_worker_review_names_the_fallback_limit():
+    """A deployment fallback reports the capacity it cannot enforce."""
     review = _bundled("improv-worker").steps["review"]
-    assert "로컬 프로세스만" in review.instructions
-    assert "Name 제한을 없애지 마라" in review.instructions
+    assert "데몬 또는 창 API를 사용할 수 없으면" in review.instructions
+    assert "targeted는 용량 제한을 적용할 수 없다는" in review.instructions
 
 
 def test_the_leader_checks_who_else_stands_in_the_tree_before_merging():

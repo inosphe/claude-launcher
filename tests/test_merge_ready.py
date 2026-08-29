@@ -29,6 +29,7 @@ suite runs inside a sweep the whole fleet queues for.
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 from pathlib import Path
 
@@ -381,6 +382,106 @@ def test_a_ref_that_is_not_a_merge_of_the_pair_is_ignored(repo, capsys):
         "clean-target",
         "--preview-ref",
         ref,
+    )
+    assert code == merge_ready.REMEASURE, out
+
+
+# --------------------------------------------------------------------------- #
+# the sweep receipt: the re-measurement was already run
+# --------------------------------------------------------------------------- #
+def _landing_tree(repo, branch: str, target: str) -> str:
+    """The tree ``git merge-tree --write-tree`` says the merge would write."""
+    out = _git(repo, "merge-tree", "--write-tree", branch, target)
+    return out.strip().splitlines()[0]
+
+
+def _file_receipt(repo, sha_name: str, **fields) -> Path:
+    """A receipt the way ``sweep.py run`` files it, under the test's home.
+
+    The name has to be a full sha plus ``.json``: any other name is refused
+    on sight as hand-written, which is the property being borrowed here.
+    """
+    sweep = merge_ready.sweep
+    directory = sweep.receipts_dir(Path(repo))
+    directory.mkdir(parents=True, exist_ok=True)
+    receipt = {
+        "commit": sha_name,
+        "tree": fields.pop("tree"),
+        "code_tree": fields.pop("code_tree", None),
+        "branch": "preview",
+        "exit_code": 0,
+        "counts": {"passed": 12, "skipped": 1},
+        "failures": [],
+        "dirty": False,
+        "session": "t",
+        "finished_at": "2026-08-29T00:00:00+00:00",
+        **fields,
+    }
+    path = directory / f"{sha_name}.json"
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    return path
+
+
+def test_a_green_sweep_receipt_for_the_landing_tree_clears_the_re_measurement(
+    repo, capsys
+):
+    """Board ``claunch-ol3b``: wide answers narrow.
+
+    The leader's preview sweep ran the full suite on the merge commit's tree;
+    the branch's targeted selection is a subset of that suite, so the moved
+    baseline's question is already answered and asking for it again burns a
+    measurement window on a number nobody needs.
+    """
+    tree = _landing_tree(repo, "clean-branch", "clean-target")
+    sha = "a" * 40
+    _file_receipt(repo, sha, tree=tree)
+    code, out = _verdict(
+        repo, capsys, "--branch", "clean-branch", "--target", "clean-target"
+    )
+    assert code == merge_ready.READY, out
+    assert "swept green" in out
+    assert f"via the receipt for {sha[:12]}" in out
+    assert f"same tree {tree[:12]}" in out
+
+
+def test_a_receipt_for_a_board_only_difference_still_answers(repo, capsys):
+    """The weaker rung: the trees differ, but only in ``.beads``.
+
+    The board commit lands after the sweep every round by construction, so a
+    gate that demanded byte-identical trees would send the fleet to re-measure
+    over a file the suite never reads (the ``claunch-etr7`` instance).
+    """
+    sweep = merge_ready.sweep
+    tree = _landing_tree(repo, "clean-branch", "clean-target")
+    code = sweep.code_tree(Path(repo), tree)
+    sha = "b" * 40
+    _file_receipt(repo, sha, tree="c" * 40, code_tree=code)
+    code_, out = _verdict(
+        repo, capsys, "--branch", "clean-branch", "--target", "clean-target"
+    )
+    assert code_ == merge_ready.READY, out
+    assert "identical outside" in out
+
+
+def test_a_receipt_for_another_tree_does_not_answer(repo, capsys):
+    """A green run of some other content is not evidence about this landing."""
+    _file_receipt(repo, "d" * 40, tree="e" * 40, code_tree="f" * 40)
+    code, out = _verdict(
+        repo, capsys, "--branch", "clean-branch", "--target", "clean-target"
+    )
+    assert code == merge_ready.REMEASURE, out
+    # The empty answer prints its denominator (claunch-peyn).
+    assert "no green sweep receipt for the landing tree" in out
+
+
+def test_a_red_receipt_does_not_answer(repo, capsys):
+    """A receipt that found failures is a verdict, and the verdict is red --
+    not a pass for the branch side.
+    """
+    tree = _landing_tree(repo, "clean-branch", "clean-target")
+    _file_receipt(repo, "1" * 40, tree=tree, counts={"passed": 11, "failed": 1})
+    code, out = _verdict(
+        repo, capsys, "--branch", "clean-branch", "--target", "clean-target"
     )
     assert code == merge_ready.REMEASURE, out
 

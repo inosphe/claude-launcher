@@ -209,6 +209,8 @@ from typing import List, Optional
 # Pinned by tests/test_gates_run_this_checkout.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from claude_launcher import test_window
+
 
 def _load_sweep():
     """``tools/sweep.py``, by path -- ``tools`` is not on ``pythonpath``.
@@ -1132,14 +1134,29 @@ def describe(receipt: dict) -> str:
     )
 
 
-def build_command(files: List[str], *, basetemp: Optional[str] = None) -> List[str]:
+def build_command(
+    files: List[str],
+    *,
+    basetemp: Optional[str] = None,
+    workers: Optional[int] = None,
+) -> List[str]:
     """pytest over exactly ``files``, parallel only when it pays."""
     session = os.environ.get("CLAUNCH_SESSION", "worker")
     cmd = ["uv", "run", "--no-sync", "pytest", *files, "-q"]
     if len(files) > 1:
-        cmd += ["-n", str(min(MAX_WORKERS, len(files)))]
+        width = MAX_WORKERS if workers is None else max(1, workers)
+        cmd += ["-n", str(min(width, len(files)))]
     cmd += [f"--basetemp={basetemp or session_basetemp(session)}"]
     return cmd
+
+
+def apply_worker_advice(cmd: List[str], workers: int) -> List[str]:
+    """Adjust an xdist command without changing commands that run serially."""
+    adjusted = list(cmd)
+    if "-n" in adjusted:
+        pos = adjusted.index("-n") + 1
+        adjusted[pos] = str(max(1, workers))
+    return adjusted
 
 
 def run_and_record(
@@ -1149,6 +1166,9 @@ def run_and_record(
     tree: Optional[str],
     base: str,
     override: Optional[Path] = None,
+    *,
+    environment: Optional[dict[str, str]] = None,
+    window: Optional[dict] = None,
 ) -> int:
     """Run the selection, and leave a receipt whatever the outcome.
 
@@ -1174,6 +1194,7 @@ def run_and_record(
         text=True,
         errors="replace",
         bufsize=1,
+        env=environment,
     )
     assert proc.stdout is not None
     for line in proc.stdout:
@@ -1198,6 +1219,7 @@ def run_and_record(
         "counts": sweep.parse_counts(output),
         "failures": sweep._failure_lines(output),
         "session": os.environ.get("CLAUNCH_SESSION", "worker"),
+        "window": window,
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "seconds": round((finished - started).total_seconds(), 1),
@@ -1465,8 +1487,32 @@ def main(argv: Optional[list] = None) -> int:
     for gone in prune_basetemps(session):
         print(f"pruned old basetemp: {gone}", file=sys.stderr)
 
+    try:
+        grant = test_window.acquire(
+            test_window.TARGETED,
+            label=f"changed_tests.py ({len(files)} modules)",
+        )
+    except test_window.WindowUnavailable as exc:
+        print(f"cannot run selected tests: {exc}", file=sys.stderr)
+        return CANNOT_TELL
+
+    cmd = apply_worker_advice(
+        build_command(files, basetemp=args.basetemp), grant.advisory_n
+    )
     print(f"$ {' '.join(cmd)}", flush=True)
-    return run_and_record(repo, files, cmd, tree, args.base, args.receipts)
+    try:
+        return run_and_record(
+            repo,
+            files,
+            cmd,
+            tree,
+            args.base,
+            args.receipts,
+            environment=grant.child_env(),
+            window=grant.receipt(),
+        )
+    finally:
+        grant.release()
 
 
 if __name__ == "__main__":

@@ -261,6 +261,16 @@ DAEMON_DEFAULTS = {
         "This run has not moved in a long time and nothing is holding it. "
         "Pick it back up, or say what you are waiting for."
     ),
+    # The measurement window (daemon/window.py): how many test runs of each
+    # class may hold the window at once. "sweep" (a full suite) is exclusive
+    # against everything regardless of this number; "targeted" (a
+    # nodeid-selected run) shares up to the cap. Interim values set by the
+    # operator 2026-08-29 (board claunch-8y5j); the measured revision belongs
+    # to claunch-bl0e. Deliberately not CPU-derived — this suite's cost axes
+    # are process spawn and PTY/daemon waits, not cores (claunch-95fa, s159:
+    # 32 cores at 15% under 22 pytest processes). Read LIVE on every acquire.
+    "window_sweep_cap": 1,
+    "window_targeted_cap": 5,
     # The resume nudge's machine switch: after a daemon restart, whether the
     # sessions that were mid-turn when it went down are told to carry on.
     # Restored sessions come back alive but idle — nothing is driving them —

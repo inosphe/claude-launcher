@@ -155,6 +155,8 @@ from typing import Optional
 # Pinned by tests/test_gates_run_this_checkout.py.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from claude_launcher import test_window
+
 CANNOT_TELL = 2
 
 #: This repository's sweep: the whole suite, no marker filter. The worker's
@@ -179,6 +181,12 @@ CANNOT_TELL = 2
 #: 258, 49 fails at 260. And pytest empties its basetemp at startup, so two
 #: concurrent runs sharing one path delete each other's temp trees mid-run.
 DEFAULT_COMMAND = 'uv run --no-sync pytest tests -q -n 8 --basetemp="C:/t/{session}w"'
+
+
+def default_command(session: str, workers: int = 8) -> str:
+    """The repository sweep command at the width granted by the arbiter."""
+    command = DEFAULT_COMMAND.format(session=session)
+    return re.sub(r"(?<!\S)-n\s+8(?=\s|$)", f"-n {max(1, workers)}", command, count=1)
 
 #: ``123 passed``, ``2 failed``, ``1 skipped`` ... from pytest's summary line.
 _COUNT_RE = re.compile(r"(\d+)\s+(passed|failed|skipped|error|errors|xfailed|xpassed)")
@@ -598,7 +606,16 @@ def cmd_run(args) -> int:
         return CANNOT_TELL
 
     session = os.environ.get("CLAUNCH_SESSION", "sweep")
-    command = args.command or DEFAULT_COMMAND.format(session=session)
+    try:
+        grant = test_window.acquire(
+            test_window.SWEEP,
+            label=f"sweep.py run --branch {args.branch}",
+        )
+    except test_window.WindowUnavailable as exc:
+        print(f"cannot sweep: {exc}", file=sys.stderr)
+        return CANNOT_TELL
+
+    command = args.command or default_command(session, grant.advisory_n)
 
     started = datetime.now(timezone.utc)
     print(f"sweep: {command}\n  repo={repo}\n  {args.branch}={commit}", flush=True)
@@ -617,15 +634,19 @@ def cmd_run(args) -> int:
     # ``PYTHONIOENCODING``/``PYTHONUTF8`` would make the sweep judge a process
     # the operator's own ``pytest`` never runs, which is how a sweep goes green
     # over a tip that is red in the default environment.
-    proc = subprocess.run(
-        command,
-        shell=True,
-        cwd=str(repo),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        proc = subprocess.run(
+            command,
+            shell=True,
+            cwd=str(repo),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=grant.child_env(),
+        )
+    finally:
+        grant.release()
     finished = datetime.now(timezone.utc)
     # A stream that came back as ``None`` is not an empty stream: the reader
     # died and took the output with it. Both states parse to ``counts {}``, and
@@ -648,6 +669,7 @@ def cmd_run(args) -> int:
         "failures": _failure_lines(output),
         "dirty": bool(dirty),
         "session": session,
+        "window": grant.receipt(),
         "started_at": started.isoformat(),
         "finished_at": finished.isoformat(),
         "seconds": round((finished - started).total_seconds(), 1),

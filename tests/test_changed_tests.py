@@ -583,6 +583,13 @@ def test_several_modules_run_parallel_but_bounded(repo):
     assert changed_tests.MAX_WORKERS <= 4
 
 
+def test_a_window_grant_sets_the_parallel_width(repo):
+    cmd = changed_tests.apply_worker_advice(
+        changed_tests.build_command([f"tests/test_{i}.py" for i in range(10)]), 6
+    )
+    assert cmd[cmd.index("-n") + 1] == "6"
+
+
 def test_the_command_never_names_the_whole_test_directory():
     """The regression this whole file guards.
 

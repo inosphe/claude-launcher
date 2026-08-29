@@ -65,14 +65,32 @@ verdict goes back to ``1`` by itself -- which is the property the whole design
 turns on, because that is the moment a stale baseline is created and nobody is
 looking.
 
+The same answer, already filed
+------------------------------
+Sometimes the re-measurement being demanded has already run: the leader's
+preview sweep subagent swept the merge commit's tree green, the receipt is on
+disk, and the branch's targeted question is a subset of that suite. Wide
+answers narrow (board ``claunch-ol3b`` -- the reverse direction, a targeted
+green standing in for the suite, stays refused; ``sweep.py`` keeps the two
+receipt kinds apart and this gate only ever reads the suite side). So before
+asking for a re-measurement this asks ``sweep.find_receipt_by_tree`` for the
+tree the merge will write -- computed with the same ``merge-tree
+--write-tree`` the conflict check already ran -- falling back to
+``find_receipt_by_code_tree``, the weaker rung ``sweep.py check`` already
+stands on: the trees differ, but only in the board. A green receipt there is
+exit ``0`` with the receipt named. Like the preview ref, it goes stale by
+itself: the target moving again writes a different landing tree, and the
+lookup finds nothing.
+
 What it does not prove, kept honest in the same spirit as
-``landed_check.py``: that anyone actually ran the tests on that preview. It
-proves the tree existed and which two commits it merged. The numbers in the
-report remain the worker's word, judged by the leader, as they always were.
-Nor does it know whether the merged tree runs -- ``git`` being quiet means the
-lines did not collide. The leader's post-merge sweep is the authority there,
-and ``mergecheck.py`` covers the one silent case in between (one side deletes
-a symbol the other started calling).
+``landed_check.py``: for a preview ref, that anyone actually ran the tests on
+it. It proves the tree existed and which two commits it merged. The numbers
+in the report remain the worker's word, judged by the leader, as they always
+were. (The receipt path is the stronger one here: it names a run that
+happened and its counts.) Nor does it know whether the merged tree runs --
+``git`` being quiet means the lines did not collide. The leader's post-merge
+sweep is the authority there, and ``mergecheck.py`` covers the one silent
+case in between (one side deletes a symbol the other started calling).
 
 Ready on the branch side is not "the merge can run"
 ---------------------------------------------------
@@ -117,17 +135,32 @@ raises rather than garbles.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import subprocess
 import sys
 from pathlib import Path
 from typing import List, Optional, Tuple
 
-# Every gate script under tools/ puts this checkout first. This one imports
-# nothing from the package -- it asks git and nothing else -- and keeps the
-# rule anyway, for the reason landed_check.py gives: the line that makes an
-# import resolve against the tree being checked is worth more sitting here
-# than remembered. tests/test_gates_run_this_checkout.py holds them all to it.
+# Every gate script under tools/ puts this checkout first, so what imports
+# below resolve HERE rather than against whatever an installed copy holds.
+# tests/test_gates_run_this_checkout.py holds them all to it. This one still
+# asks the *package* nothing -- the receipt format is borrowed from
+# tools/sweep.py by path, the way changed_tests.py borrows it: a receipt is a
+# format, and a format split across files drifts.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+
+def _load_sweep():
+    """``tools/sweep.py``, by path -- ``tools`` is not on ``pythonpath``."""
+    spec = importlib.util.spec_from_file_location(
+        "sweep", Path(__file__).resolve().parent / "sweep.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+sweep = _load_sweep()
 
 READY = 0
 REMEASURE = 1
@@ -293,6 +326,62 @@ def _preview_covers(repo: Path, ref: str, tip: str, target_tip: str) -> Optional
     if len(parents) == 2 and set(parents) == {tip, target_tip}:
         return head
     return None
+
+
+def _landing_tree(repo: Path, tip: str, target_tip: str) -> Tuple[Optional[str], str]:
+    """The tree the merge would write, when this git can compute it.
+
+    Only called after the merge is known clean, so a nonzero exit here means
+    the tool is missing (old git), not that the trees collide.
+    """
+    proc = _git(repo, "merge-tree", "--write-tree", tip, target_tip)
+    if proc.returncode != 0:
+        return None, "this git cannot compute the merge tree"
+    lines = proc.stdout.strip().splitlines()
+    if not lines:
+        return None, "merge-tree --write-tree returned no tree"
+    return lines[0].strip(), "merge-tree --write-tree"
+
+
+def _swept_green(repo: Path, tip: str, target_tip: str):
+    """A green full-suite receipt for the tree this merge lands, if filed.
+
+    The re-measurement this gate demands is already answered when the exact
+    tree that lands was swept green -- the preview sweep answering for the
+    merge that lands the same candidates is the case
+    ``sweep.find_receipt_by_tree`` was written for, and the targeted selection
+    is a subset of that suite (board ``claunch-ol3b``: wide answers narrow;
+    the reverse stays refused, and this only reads the suite side).
+
+    Returns ``(tree, matched, path, receipt)`` on a hit -- ``matched`` is
+    ``"tree"`` or ``"code"``, the same two rungs ``sweep.py check`` climbs,
+    in the same order -- and ``None`` otherwise, with the second return
+    saying what was looked for, so the re-measure verdict carries its
+    denominator (board ``claunch-peyn``: an empty answer says how much it
+    could not find, and a check that did not run says it did not run).
+    """
+    tree, how = _landing_tree(repo, tip, target_tip)
+    if tree is None:
+        return None, f"receipt lookup not run: {how}"
+    try:
+        found = sweep.find_receipt_by_tree(repo, tree)
+        matched = "tree"
+        code = None
+        if found is None:
+            code = sweep.code_tree(repo, tree)
+            found = sweep.find_receipt_by_code_tree(repo, code)
+            matched = "code"
+    except Exception as exc:
+        # This path is a bonus answer to a question the old verdict already
+        # asks correctly; a broken lookup must not break the gate.
+        return None, f"receipt lookup failed ({exc}) -- asking for the re-measurement instead"
+    if found is None:
+        return None, (
+            f"and no green sweep receipt for the landing tree {tree[:12]} "
+            f"(or its code tree {(code or '?')[:12]})"
+        )
+    path, receipt = found
+    return (tree, matched, path, receipt), ""
 
 
 def _worktrees(repo: Path) -> Optional[List[Tuple[Path, Optional[str], str]]]:
@@ -826,11 +915,38 @@ def main(argv: Optional[List[str]] = None) -> int:
         )
         return _ready(repo, args.checkout, branch_name, target, tip)
 
+    swept, note = _swept_green(repo, tip, target_tip)
+    if swept is not None:
+        tree, matched, path, receipt = swept
+        sha = receipt.get("commit") or path.stem
+        counts = receipt.get("counts") or {}
+        summary = ", ".join(f"{v} {k}" for k, v in sorted(counts.items())) or "no counts"
+        if matched == "tree":
+            via = (
+                f"via the receipt for {sha[:12]}: a different commit, the "
+                f"same tree {tree[:12]}"
+            )
+        else:
+            via = (
+                f"via the receipt for {sha[:12]}: a different tree "
+                f"({(receipt.get('tree') or '?')[:12]}), identical outside "
+                f"{', '.join(sorted(sweep.NON_CODE_ENTRIES))}"
+            )
+        print(f"ready: the landing tree was swept green -- {where} [{asked_by}]")
+        print(f"  {via}")
+        print(
+            f"  {summary} -- swept by {receipt.get('session', '?')} "
+            f"at {receipt.get('finished_at', '?')}"
+        )
+        return _ready(repo, args.checkout, branch_name, target, tip)
+
     print(f"re-measure: baseline moved, merge is clean -- {where} [{asked_by}]")
     print(
         f"  the targeted numbers were taken on a base {behind} commit(s) "
         f"behind {target}, so they do not describe the tree that will land"
     )
+    if note:
+        print(f"  {note}")
     print(_recipe(branch_name, target, ref))
     _checkout_note(repo, args.checkout, branch_name, target, tip)
     return REMEASURE

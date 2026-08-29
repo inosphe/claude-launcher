@@ -2,9 +2,67 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
+
+from claude_launcher import test_window
+
+
+_test_window_grant = None
+
+
+def _pytest_window_class(args) -> str:
+    """Classify pytest's collected scope before collection starts."""
+    selected = [str(arg).replace("\\", "/").rstrip("/") for arg in args]
+    if not selected or all(arg in (".", "tests") for arg in selected):
+        return test_window.SWEEP
+    return test_window.TARGETED
+
+
+def pytest_sessionstart(session):
+    """Guard every direct pytest entry point, including unwrapped commands."""
+    global _test_window_grant
+    if os.environ.get("PYTEST_XDIST_WORKER"):
+        return
+    cls = _pytest_window_class(session.config.args)
+    inherited = test_window.inherited_grant()
+    if inherited is not None:
+        if cls == test_window.SWEEP and inherited.cls != test_window.SWEEP:
+            raise pytest.UsageError(
+                "a targeted parent grant cannot cover an exclusive sweep"
+            )
+        return
+    label = "pytest " + " ".join(str(arg) for arg in session.config.args)
+    try:
+        _test_window_grant = test_window.acquire(cls, label=label)
+    except test_window.WindowUnavailable as exc:
+        raise pytest.UsageError(str(exc)) from exc
+    _test_window_grant.install_environment()
+
+
+def _release_test_window() -> None:
+    global _test_window_grant
+    grant = _test_window_grant
+    if grant is None:
+        return
+    _test_window_grant = None
+    grant.release()
+    if os.environ.get(test_window.WINDOW_GRANT_ENV) == grant.grant_id:
+        os.environ.pop(test_window.WINDOW_GRANT_ENV, None)
+        os.environ.pop(test_window.WINDOW_CLASS_ENV, None)
+        os.environ.pop(test_window.WINDOW_WORKERS_ENV, None)
+
+
+def pytest_sessionfinish(session, exitstatus):
+    _release_test_window()
+
+
+def pytest_unconfigure(config):
+    # Sessionfinish is skipped by some early pytest failures. Release is
+    # idempotent, so this is the process-exit backstop.
+    _release_test_window()
 
 
 @pytest.fixture(autouse=True)
