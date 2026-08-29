@@ -2846,6 +2846,25 @@ async def h_sessions_create(request: web.Request) -> web.Response:
     """
     manager: SessionManager = request.app["manager"]
     body = await _json_body(request)
+    # The browser sends a worktree name separately from the session directory.
+    # Resolve it before SessionDef is built so the persistent definition keeps
+    # the actual checkout path, just like the CLI launch path does. An empty
+    # name means the standard generated name; omitting the key means no
+    # worktree.
+    if "worktree" in body:
+        choice = body.pop("worktree")
+        if choice is True or choice is None:
+            choice = ""
+        try:
+            base = cflow_state.resolve_cwd(body.get("cwd") or None)
+            tree = worktree_mod.resolve(
+                base, str(choice), rebase_onto=str(body.pop("rebase_onto", "") or "")
+            )
+        except worktree_mod.WorktreeError as exc:
+            return json_error(400, str(exc))
+        if tree is None:
+            return json_error(400, "worktree selection did not produce a checkout")
+        body["cwd"] = str(tree.path)
     if "harness" in body:
         return json_error(
             400,

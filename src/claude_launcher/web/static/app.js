@@ -3273,6 +3273,56 @@ let parentsRendered = null;
 /* Last workspace list the poll saw, for the manage page (#/workspaces). */
 let workspacesCache = [];
 
+let newWorktreeFor = null;
+let newWorktreeGit = { repo: false, worktrees: [] };
+
+function newWorktreeMode() {
+  const f = $("new-session");
+  const picked = f && f.worktree_mode;
+  return picked ? picked.value : "";
+}
+
+function syncNewWorktree() {
+  const f = $("new-session");
+  const box = $("new-worktree");
+  if (!f || !box) return;
+  const mode = newWorktreeMode();
+  const usable = !!newWorktreeGit.repo && !spawnParent();
+  box.disabled = !usable;
+  for (const radio of f.worktree_mode || []) radio.disabled = !usable;
+  f.worktree_name.disabled = !usable || mode !== "new";
+  f.worktree_existing.disabled = !usable || mode !== "existing";
+  f.worktree_rebase.disabled = !usable || mode === "";
+  $("new-worktree-name-row").classList.toggle("hidden", mode !== "new");
+  $("new-worktree-existing-row").classList.toggle("hidden", mode !== "existing");
+  $("new-worktree-rebase-row").classList.toggle("hidden", mode === "");
+  const hint = $("worktree-hint");
+  hint.textContent = usable ? "" : spawnParent()
+    ? "worktree selection is available from the spawn controls"
+    : "the selected directory is not a git repository";
+  hint.classList.toggle("hidden", usable);
+}
+
+async function refreshNewWorktree() {
+  const f = $("new-session");
+  if (!f || !f.worktree_mode) return;
+  const cwd = f.cwd.value || "";
+  if (cwd === newWorktreeFor) return;
+  newWorktreeFor = cwd;
+  try {
+    const resp = await api(`/api/git?cwd=${encodeURIComponent(cwd)}`);
+    newWorktreeGit = resp.ok ? await resp.json() : { repo: false, worktrees: [] };
+  } catch { newWorktreeGit = { repo: false, worktrees: [] }; }
+  const keep = f.worktree_existing.value;
+  f.worktree_existing.innerHTML = "";
+  f.worktree_existing.appendChild(new Option("(pick a worktree)", ""));
+  for (const name of newWorktreeGit.worktrees || [])
+    f.worktree_existing.appendChild(new Option(name, name));
+  f.worktree_existing.value = [...f.worktree_existing.options]
+    .some((o) => o.value === keep) ? keep : "";
+  syncNewWorktree();
+}
+
 /* Last cflow run list the poll saw, for the home dashboard. */
 let cflowCache = [];
 let cflowRailRendered = null;
@@ -3960,6 +4010,7 @@ function syncSpawnMode() {
   // where the fold can tell whether anything inside is the operator's.
   syncRuntimeFold(f, parent);
   syncSpawnOverRow(f, report);
+  syncNewWorktree();
   const row = $("new-fork-row");
   row.classList.toggle("hidden", !parent);
   const forkable =
@@ -4174,6 +4225,14 @@ $("new-session").addEventListener("submit", async (e) => {
   // provokes a 403 naming a field nobody in this form could still choose.
   if (parent) spawnChildFields(f, body);
   if (parent && f.fork_parent.checked) body.fork = true;
+  if (!parent) {
+    const mode = newWorktreeMode();
+    if (mode === "new") body.worktree = f.worktree_name.value.trim();
+    else if (mode === "existing" && f.worktree_existing.value)
+      body.worktree = f.worktree_existing.value;
+    if (mode !== "" && f.worktree_rebase.value.trim())
+      body.rebase_onto = f.worktree_rebase.value.trim();
+  }
   if (f.role.value) body.role = f.role.value;
   if (!parent && f.borrow.value) body.borrow = f.borrow.value;
   if (!parent && f.null_token.checked) body.null_token = true;
@@ -7725,6 +7784,8 @@ $("new-session").workflow.addEventListener("change", () => {
 document
   .querySelector("#new-session select[name=cwd]")
   .addEventListener("change", () => {
+    newWorktreeFor = null;
+    refreshNewWorktree();
     refreshWorkflowChoices();
     // The board moves with the directory too — but only while it is being
     // looked at; the memo below makes the next open re-read it regardless.
@@ -7735,6 +7796,10 @@ document
     issueFilter = "";
     if (beadsMode() === "existing") refreshIssueChoices();
   });
+
+for (const radio of document.querySelectorAll('#new-worktree input[name="worktree_mode"]')) {
+  radio.addEventListener("change", syncNewWorktree);
+}
 
 
 function el(tag, cls, text) {
@@ -19036,6 +19101,7 @@ async function pollOnce() {
   // Polled because the registry is edited from the CLI, in another window;
   // it redraws only when the list really changed (see refreshWorkspaces).
   refreshes.push(refreshWorkspaces());
+  refreshes.push(refreshNewWorktree());
   // The restart gate can be opened from any session's terminal, so the card
   // is fed by the same heartbeat as the registry — and the goto gate beside
   // it: a leader files from its own terminal, the person answers here.
