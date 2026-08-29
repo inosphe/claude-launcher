@@ -3649,6 +3649,7 @@ def request_goto(
     reason: str,
     *,
     by: str = "agent",
+    via: Optional[str] = None,
     cwd: Optional[str] = None,
 ) -> dict:
     """The agent's side of an off-graph move: ask for a position the workflow
@@ -3669,6 +3670,12 @@ def request_goto(
     content on entry, while this holds a run whose step has already been
     delivered and reported on. Conflating the two would re-deliver the step on
     every poll and drop the report already filed against it.
+
+    ``via`` names the door the request came through when it is not the
+    driving agent's own: ``"leader"`` is a parent session asking for this
+    run to move (see daemon/goto_gate.py), filed here so the record, the
+    hold, and the settlement reuse this one path. It rides on the request
+    and the journal, and changes what the held run tells its driver.
     """
     workflow, state = _load(cwd)
     if state["status"] in ("done", "aborted"):
@@ -3698,6 +3705,7 @@ def request_goto(
         "from": state.get("current"),
         "visit": _visits(state, state["current"]) if state.get("current") else 0,
         "at": state_mod.utcnow(),
+        **({"via": via} if via else {}),
     }
     state["goto_request"] = request
     state_mod.save_state(state, cwd)
@@ -3710,6 +3718,7 @@ def request_goto(
             "from": request["from"],
             "by": by,
             "reason": note,
+            **({"via": via} if via else {}),
             **(
                 {"replaces": previous.get("id")}
                 if previous and not previous.get("decision")
@@ -3858,18 +3867,34 @@ def _pending_goto(state: dict) -> Optional[dict]:
 
 def _goto_payload(state: dict, request: dict) -> dict:
     """The stop a pending request puts the run in."""
-    return {
-        **_base(state),
-        "status": "waiting_goto",
-        "step_id": state.get("current"),
-        "goto_request": request,
-        "note": (
+    if request.get("via") == "leader":
+        # Filed by a parent session through the daemon's goto gate, not by
+        # this run's driver: the note names who asked, and withdrawal is the
+        # driver's visible act (journaled, attributed), not a quiet escape.
+        asker = request.get("by") or "your leader"
+        reason = request.get("reason") or "no reason recorded"
+        note = (
+            f"{asker} asked for this run to be moved to "
+            f"{request.get('step')!r} ({reason}) and a person has not "
+            f"answered yet; the run does not advance until they do. Stop "
+            f"your turn. If the reason stopped being true, answer {asker} "
+            f"— withdrawing the request yourself is journaled under your "
+            f"name, and it is their call to re-file"
+        )
+    else:
+        note = (
             f"you asked for this run to be moved to {request.get('step')!r} and "
             f"nobody has answered yet; it does not advance until they do. Stop "
             f"your turn. If the reason stopped being true, withdraw the request "
             f"('request_goto' with cancel) rather than leaving a question no "
             f"answer helps"
-        ),
+        )
+    return {
+        **_base(state),
+        "status": "waiting_goto",
+        "step_id": state.get("current"),
+        "goto_request": request,
+        "note": note,
         "how_to_unblock": _asking_well(
             f"They are being asked to let this run leave the route its "
             f"workflow declares, for {request.get('step')!r}."

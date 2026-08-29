@@ -210,6 +210,11 @@ DAEMON_DEFAULTS = {
     # daemon/restart_gate.py). Seconds. Read when the daemon constructs its
     # gate, i.e. at daemon start, like 'shell' below.
     "restart_approval_timeout": 300.0,
+    # How long a leader's request to move a child session's cflow run waits
+    # on the web UI's approval before it counts as approved and the move is
+    # applied (see daemon/goto_gate.py). Seconds; same start-time wiring as
+    # the restart gate's timeout above.
+    "goto_approval_timeout": 300.0,
     # The cflow reminder clock's machine defaults: whether runs get their
     # current step's instructions re-typed into the driving session, and
     # after how many seconds without progress. Per-run overrides live in run

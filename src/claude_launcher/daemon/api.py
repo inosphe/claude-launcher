@@ -10,6 +10,7 @@ browser history.
 from __future__ import annotations
 
 import asyncio
+import functools
 import json
 import os
 import secrets
@@ -35,6 +36,7 @@ from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
+from . import goto_gate
 from . import mesh_roles
 from . import restart_gate
 from . import restart_notice
@@ -105,7 +107,7 @@ async def error_middleware(request: web.Request, handler):
         if exc.retry_after:
             resp.headers["Retry-After"] = str(int(exc.retry_after))
         return resp
-    except (SessionGone, MeshConflict, LockBusy, KeyboardHeld, restart_gate.GateBusy) as exc:
+    except (SessionGone, MeshConflict, LockBusy, KeyboardHeld, restart_gate.GateBusy, goto_gate.GateBusy) as exc:
         # LockBusy is transient by construction (the other writer is mid-
         # transition), so it gets a retryable status, not a flat 400.
         # KeyboardHeld is transient in the same way, and for the most human
@@ -160,6 +162,7 @@ def build_app(
     shell: "clipty.ShellPty | None" = None,
     beads: "beads_mod.Board | None" = None,
     gate_timeout: float = restart_gate.GATE_TIMEOUT,
+    goto_timeout: float = goto_gate.GATE_TIMEOUT,
 ) -> web.Application:
     cookie_sessions: set = set()
     # Identifies this daemon *process*, and is handed out by /api/health (which
@@ -197,6 +200,15 @@ def build_app(
     app["restart_requested"] = False
     #: The approval gate the agent path waits behind; see restart_gate.
     app["restart_gate"] = restart_gate.RestartGate(app, timeout=gate_timeout)
+    #: The approval gate a leader's child-run goto waits behind; see
+    #: goto_gate. Its nudge is the cflow action handlers' own helper, so the
+    #: settled move reaches the child driver the same way a human's goto does.
+    app["goto_gate"] = goto_gate.GotoGate(
+        app,
+        manager=manager,
+        timeout=goto_timeout,
+        nudge=functools.partial(_nudge_sessions, manager),
+    )
     app["websockets"] = set()
     # Open terminal sockets never close on their own; without this, runner
     # cleanup waits its shutdown timeout for every browser tab left open.
@@ -244,6 +256,14 @@ def build_app(
     r.add_post("/api/cflow/nudge", h_cflow_nudge)
     r.add_post("/api/cflow/goto", h_cflow_goto)
     r.add_post("/api/cflow/goto/resolve", h_cflow_goto_resolve)
+    # A leader session's request to move a CHILD session's run (see
+    # :mod:`goto_gate`): submit, watch, and the three settlements — the web
+    # UI's approve/deny and the filing leader's withdraw.
+    r.add_get("/api/cflow/goto-requests", h_goto_requests_list)
+    r.add_post("/api/cflow/goto-requests", h_goto_request_submit)
+    r.add_post("/api/cflow/goto-requests/{rid}/approve", h_goto_request_approve)
+    r.add_post("/api/cflow/goto-requests/{rid}/deny", h_goto_request_deny)
+    r.add_post("/api/cflow/goto-requests/{rid}/withdraw", h_goto_request_withdraw)
     # One resource, three verbs: GET/PUT are the machine defaults (the config
     # file, read live by the reminder clock, so a PUT applies by its next
     # tick); POST is one run's override, stored in that run's state.
@@ -1775,6 +1795,76 @@ async def h_cflow_goto_resolve(request: web.Request) -> web.Response:
         else cflow_engine.nudge_for_state(str(asked)),
     )
     return web.json_response(payload)
+
+
+async def h_goto_request_submit(request: web.Request) -> web.Response:
+    """Open the goto gate on a leader's request to move a child's run.
+
+    Same caller model as the restart gate: the daemon cannot see the
+    caller's environment, so the session travels in the body and the
+    leader's side (the cflow MCP tool) is the one that decided who is
+    asking. What the daemon DOES verify is the part only it can: that the
+    named session actually commands the target (its own subtree), that the
+    target owns exactly one registered run, and — inside the engine — that
+    the named step exists and is not where the run already stands. Those
+    failures come back as 400; a second pending request on the same run is
+    a 409 (GateBusy).
+    """
+    body = await _json_body(request)
+    record = request.app["goto_gate"].submit(
+        session=str(body.get("session") or ""),
+        target_session=str(body.get("target_session") or ""),
+        step=str(body.get("step") or ""),
+        reason=str(body.get("reason") or ""),
+    )
+    return web.json_response({"ok": True, "request": record})
+
+
+async def h_goto_requests_list(request: web.Request) -> web.Response:
+    """Every live request, then the recently settled ones — the web UI's
+    notification cards and a leader checking on its own ask read here."""
+    return web.json_response({"requests": request.app["goto_gate"].list()})
+
+
+async def h_goto_request_approve(request: web.Request) -> web.Response:
+    """The web UI's Approve: settle and apply the move through the engine's
+    ordinary grant path, so the child run's journal keeps request and move
+    attached to each other."""
+    record = request.app["goto_gate"].approve(
+        request.match_info["rid"], decided_by="web"
+    )
+    if record is None:
+        return json_error(409, "no pending goto request with that id")
+    return web.json_response({"ok": True, "request": record})
+
+
+async def h_goto_request_deny(request: web.Request) -> web.Response:
+    """The web UI's Deny: settle and move nothing. The refusal waits in the
+    child run's state for its driver, exactly as when the driver itself had
+    asked."""
+    body = await _json_body(request)
+    record = request.app["goto_gate"].deny(
+        request.match_info["rid"],
+        decided_by="web",
+        reason=str(body.get("reason") or "") or None,
+    )
+    if record is None:
+        return json_error(409, "no pending goto request with that id")
+    return web.json_response({"ok": True, "denied": True, "request": record})
+
+
+async def h_goto_request_withdraw(request: web.Request) -> web.Response:
+    """The filing leader takes its question back. Only the asker may — the
+    person's answer to a request they hold is approve or deny, and anyone
+    else's withdrawal would settle a question that was not theirs."""
+    body = await _json_body(request)
+    actor = str(body.get("session") or "").strip()
+    if not actor:
+        return json_error(400, "session (the withdrawing leader) is required")
+    record = request.app["goto_gate"].withdraw(request.match_info["rid"], actor=actor)
+    if record is None:
+        return json_error(409, "no pending goto request with that id")
+    return web.json_response({"ok": True, "withdrawn": True, "request": record})
 
 
 def _reminder_defaults() -> dict:

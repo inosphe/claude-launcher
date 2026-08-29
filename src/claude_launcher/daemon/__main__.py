@@ -120,6 +120,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         mesh=mesh_manager,
         relay_state=_relay_state,
         gate_timeout=float(cfg["restart_approval_timeout"]),
+        goto_timeout=float(cfg["goto_approval_timeout"]),
     )
 
     runner = web.AppRunner(app, access_log=None)
