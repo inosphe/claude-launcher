@@ -1,10 +1,13 @@
 """Session reminder delivery, its cflow source, and the API doors.
 
-The clock's contract is *no progress, then repeat*: a run sitting on the same
-agent-actionable position for its interval gets that position's instructions
-re-typed into its session, and a run that moves hears nothing. Configuration
-is layered — machine defaults in the config file (read live), one run's
-override in its own state — and both layers are exercised here.
+The clock's contract: a run sitting on the same agent-actionable position for
+its interval gets that position's instructions typed into its session, and a
+run that moves hears nothing. The first reminder at a position restates the
+step; a repeat at that same position is delivered only while the session's
+meaningful screen activity shows it is still working, and a terminal that has
+not moved since the last reminder is re-armed instead. Configuration is
+layered — machine defaults in the config file (read live), one run's override
+in its own state — and both layers are exercised here.
 """
 
 from __future__ import annotations
@@ -132,23 +135,42 @@ def test_set_reminder_merges_clears_and_validates(proj):
 # --------------------------------------------------------------------------- #
 # the clock's scan
 # --------------------------------------------------------------------------- #
-def test_no_progress_then_repeat(proj):
-    """First sight arms; the interval elapsing fires; progress re-arms."""
+def test_no_screen_progress_suppresses_the_repeat(proj):
+    """First sight arms; the interval fires; a still screen stays quiet.
+
+    The run is stalled at the same position, so the first reminder fires —
+    but with the session's meaningful screen marker unchanged, the next
+    interval re-arms instead of repeating. Only screen progress or a
+    position move lets the timer speak again.
+    """
     cwd = str(proj)
     cflow_engine.start("linear", cwd=cwd, scope="w1")
-    clock = cflow_clock.ReminderClock(_FakeManager({}))
-    t = 1000.0
+    sess = _ActivitySession("w1", cwd)
+    clock = cflow_clock.ReminderClock(_FakeManager({"w1": sess}))
+    t = time.monotonic()
     assert clock.scan(t) == []                      # armed, not fired
     assert clock.scan(t + 599) == []                # default 600 not yet up
     due = clock.scan(t + 601)
     assert [(c, s) for c, s, _, _ in due] == [(cwd, "w1")]
     assert "do one" in due[0][2]                    # the step's instructions
     assert "step 'one'" in due[0][2]
-    # the run moves: the new position re-arms instead of firing
+    asyncio.run(clock._deliver(*due[0]))            # the first reminder lands
+    assert len(sess.delivered) == 1
+
+    # neither the run nor its screen has moved: nothing repeats
+    assert clock.scan(t + 1202) == []
+
+    # meaningful screen progress re-activates the timer
+    sess.activity = "second"
+    due = clock.scan(t + 1803)
+    assert [(c, s) for c, s, _, _ in due] == [(cwd, "w1")]
+
+    # and the run moving re-arms the next position fresh
     cflow_engine.report("did one", cwd=cwd, scope="w1")
     cflow_engine.next_step(cwd=cwd, scope="w1")
-    assert clock.scan(t + 700) == []
-    due = clock.scan(t + 700 + 601)
+    assert clock.scan(t + 1900) == []
+    due = clock.scan(t + 1900 + 601)
+    assert [(c, s) for c, s, _, _ in due] == [(cwd, "w1")]
     assert "do two" in due[0][2]
 
 
@@ -1151,6 +1173,33 @@ def test_role_source_skips_repeats_when_session_has_not_moved(proj):
 
     # The timer reaches its next interval, but the terminal's meaningful
     # screen marker is unchanged, so no second pending reminder is produced.
+    asyncio.run(service.tick(base + 1202.0))
+    assert len(sess.delivered) == 1
+
+    sess.activity = "second"
+    asyncio.run(service.tick(base + 1803.0))
+    assert len(sess.delivered) == 2
+
+
+def test_cflow_source_skips_repeats_when_session_has_not_moved(proj):
+    """The cflow reminder applies the same no-progress rule as Role.
+
+    A session stalled at the same position hears the first reminder, but a
+    static screen is re-armed rather than typed into every interval; the
+    timer speaks again only once the screen moves.
+    """
+    cwd = str(proj)
+    cflow_engine.start("linear", cwd=cwd, scope="w1")
+    sess = _ActivitySession("w1", cwd)
+    service = session_reminder.SessionReminderService(_KinManager({"w1": sess}))
+
+    base = time.monotonic()
+    asyncio.run(service.tick(base))
+    asyncio.run(service.tick(base + 601.0))
+    assert len(sess.delivered) == 1
+
+    # The interval elapses again, but the meaningful screen marker is
+    # unchanged, so no second pending reminder is produced.
     asyncio.run(service.tick(base + 1202.0))
     assert len(sess.delivered) == 1
 

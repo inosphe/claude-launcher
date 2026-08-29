@@ -200,8 +200,12 @@ class CflowReminderSource:
 
     *No progress* is the trigger, not the calendar: the position key
     (run, status, step, visit) resets the timer whenever it changes, so an
-    an advancing run yields nothing, while a stalled position becomes due
-    every interval until it moves.
+    advancing run yields nothing, while a stalled position becomes due once
+    its interval elapses.  Repeats at that same position are not automatic:
+    a repeat is delivered only while the session's meaningful screen
+    activity proves it is still working, and a terminal that has not moved
+    since the last reminder is re-armed instead — the same no-progress rule
+    the Role source applies.
 
     It does not hear the same thing every time. The FIRST reminder at a
     position restates the step in full (:func:`reminder_block`), because an
@@ -230,10 +234,11 @@ class CflowReminderSource:
 
     def __init__(self, manager) -> None:
         self.manager = manager
-        #: (cwd, scope) -> {"pos": position key, "at": monotonic seconds} —
-        #: in memory only. A daemon restart forgets the timers, which merely
-        #: delays each run's next reminder by one interval; persisting them
-        #: would buy nothing worth a state write per tick.
+        #: (cwd, scope) -> {"pos": position key, "at": monotonic seconds,
+        #: "activity": meaningful-screen marker or None} — in memory only.
+        #: A daemon restart forgets the timers, which merely delays each
+        #: run's next reminder by one interval; persisting them would buy
+        #: nothing worth a state write per tick.
         self._seen: Dict[Tuple[str, str], dict] = {}
 
     def scan(self, now: float) -> List[Tuple[str, str, str, str]]:
@@ -287,6 +292,7 @@ class CflowReminderSource:
                 # instructions already — and, for the same reason, the first
                 # probe below is a baseline and never a signal: the state a
                 # step arrives in is not news about it.
+                session = self._session_for(cwd, scope)
                 entry = {
                     "pos": pos, "at": now, "probed_at": None, "probe": None,
                     # When this position was reached, as opposed to when the
@@ -308,6 +314,13 @@ class CflowReminderSource:
                     "fired_at": (entry or {}).get("fired_at"),
                     "fired_kind": (entry or {}).get("fired_kind"),
                     "held_at": (entry or {}).get("held_at"),
+                    # The meaningful-screen marker when this position was
+                    # reached — the baseline the no-progress suppression
+                    # compares against. ``None`` when the session does not
+                    # expose the activity API, which disables suppression.
+                    "activity": (
+                        None if session is None else self._session_activity(session)
+                    ),
                 }
                 self._seen[key] = entry
             if awaits.get("probe"):
@@ -334,6 +347,23 @@ class CflowReminderSource:
             if arrived:
                 continue
             if interval > 0 and now - entry["at"] >= interval:
+                # A repeat is useful after the session has made progress, but
+                # restating a position a second time on a terminal that has
+                # not moved since the last reminder only feeds the pending
+                # queue (the same no-progress rule the Role source applies).
+                # Re-arm the timer when the screen marker proves nothing
+                # changed. ``None`` here means the session does not expose
+                # the activity API (older/fake implementations), and those
+                # retain the original repeat cadence.
+                if entry.get("restated"):
+                    session = self._session_for(cwd, scope)
+                    activity = (
+                        None if session is None else self._session_activity(session)
+                    )
+                    if activity is not None and activity == entry.get("activity"):
+                        entry["at"] = now
+                        entry["held_at"] = None
+                        continue
                 # First time at this position, the step is restated in full;
                 # after that it is not. The full block is what an agent that
                 # has genuinely lost the step needs, and it is worth its size
@@ -404,6 +434,22 @@ class CflowReminderSource:
             awaits["probe"], cwd, min(timeout, cflow_model.MAX_AWAITS_TIMEOUT)
         )
 
+    @staticmethod
+    def _session_activity(session) -> Optional[str]:
+        """The session's meaningful-screen activity marker, or ``None``.
+
+        Mirrors the Role source's reader.  ``None`` means the session does
+        not expose the API (older/fake session implementations), and there
+        the no-progress suppression is disabled rather than guessing.
+        """
+        reader = getattr(session, "last_activity_at", None)
+        if not callable(reader):
+            return None
+        try:
+            return reader()
+        except Exception:  # noqa: BLE001 - activity is decoration only
+            return None
+
     def skip(self, cwd: str, scope: str) -> bool:
         """Let ONE of a run's reminders go by, without switching the clock off.
 
@@ -431,8 +477,8 @@ class CflowReminderSource:
         landing after :meth:`scan` has already put this run in its due list
         loses, and one more reminder is typed. Guarding that would put a lock
         between this call and the poll's whole worker thread, to win a race
-        whose entire prize is one repetition of a message whose contract is
-        already "again every interval until it moves".
+        whose entire prize is one extra reminder at a position that has
+        already been reminded.
         """
         entry = self._seen.get((cwd, scope))
         if entry is None:
