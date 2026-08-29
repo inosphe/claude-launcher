@@ -45,6 +45,20 @@ def _noise(kind="mode"):
     return json.dumps({"type": kind, "sessionId": "x"}) + "\n"
 
 
+def _codex(kind, **payload):
+    return (
+        json.dumps(
+            {
+                "type": "response_item",
+                "timestamp": "2026-08-29T00:00:00Z",
+                "payload": {"type": kind, **payload},
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+    )
+
+
 def _write(src, records):
     src.write_text("".join(records), encoding="utf-8")
 
@@ -133,6 +147,53 @@ def test_thinking_is_carried_but_an_empty_one_is_not(transcript):
     recs = tv.page("s1", FakeDef())["records"]
     assert len(recs) == 1
     assert recs[0]["blocks"] == [{"type": "thinking", "text": "weighing it"}]
+
+
+def test_codex_messages_and_tool_traffic_use_the_shared_page_shape(transcript):
+    _write(
+        transcript,
+        [
+            _noise("session_meta"),
+            _codex(
+                "message",
+                role="developer",
+                content=[
+                    {"type": "input_text", "text": "internal instructions"},
+                ],
+            ),
+            _codex(
+                "message",
+                role="user",
+                content=[
+                    {"type": "input_text", "text": "inspect the session"},
+                ],
+            ),
+            _codex("custom_tool_call", name="exec", call_id="c1", input="status"),
+            _codex("custom_tool_call_output", call_id="c1", output="working"),
+            _codex(
+                "message",
+                role="assistant",
+                content=[
+                    {"type": "output_text", "text": "the rollout is readable"},
+                ],
+            ),
+        ],
+    )
+
+    page = tv.page("s1", FakeDef())
+    assert page["total"] == 4
+    assert [r["role"] for r in page["records"]] == [
+        "user",
+        "assistant",
+        "assistant",
+        "assistant",
+    ]
+    assert page["records"][0]["blocks"] == [
+        {"type": "text", "text": "inspect the session"},
+    ]
+    assert page["records"][1]["blocks"][0]["type"] == "tool_use"
+    assert page["records"][2]["blocks"][0]["type"] == "tool_result"
+    assert page["records"][3]["blocks"][0]["text"] == "the rollout is readable"
 
 
 # --------------------------------------------------------------------------- #

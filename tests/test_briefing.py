@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from claude_launcher import store, transcripts
+from claude_launcher import harnesses, profile, store, transcripts
 from claude_launcher.daemon import briefing
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
@@ -144,6 +144,63 @@ def test_tail_events_caps_events_text_and_total(tmp_path):
 
 def test_tail_events_missing_file_is_empty(tmp_path):
     assert briefing.tail_events(tmp_path / "absent.jsonl") == []
+
+
+def test_codex_rollout_is_located_and_its_messages_are_extracted(tmp_path):
+    prof = profile.create("codex-brief")
+    codex = harnesses.get("codex")
+    assert codex is not None
+    rollout = (
+        codex.profile_home(prof.config_dir)
+        / "sessions"
+        / "2026"
+        / "08"
+        / "29"
+        / "rollout.jsonl"
+    )
+    rollout.parent.mkdir(parents=True)
+    rows = [
+        _jl(type="session_meta", payload={"id": "codex-id", "cwd": str(tmp_path)}),
+        _jl(
+            type="response_item",
+            payload={
+                "type": "message",
+                "role": "user",
+                "content": [{"type": "input_text", "text": "fix the Codex briefing"}],
+            },
+        ),
+        _jl(
+            type="response_item",
+            payload={
+                "type": "custom_tool_call",
+                "name": "exec",
+                "call_id": "c1",
+            },
+        ),
+        _jl(
+            type="response_item",
+            payload={
+                "type": "message",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": "reading the rollout"}],
+            },
+        ),
+    ]
+    rollout.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    sdef = SessionDef(
+        name="codex-session",
+        harness="codex",
+        profile=prof.name,
+        cwd=str(tmp_path),
+        conversation_id="codex-id",
+    )
+
+    assert briefing.locate_transcript(sdef) == rollout
+    assert briefing.tail_events(rollout) == [
+        "user: fix the Codex briefing",
+        "assistant tool_use: exec",
+        "assistant: reading the rollout",
+    ]
 
 
 # --------------------------------------------------------------------------- #
