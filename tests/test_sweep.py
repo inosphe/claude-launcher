@@ -1260,6 +1260,12 @@ def test_the_sweep_runs_bounded_parallel():
     assert 2 <= int(width.group(1)) <= MAX_USEFUL_WORKERS
 
 
+def test_the_sweep_uses_the_window_worker_advice():
+    command = sweep.default_command("s9", workers=5)
+    assert " -n 5 " in command
+    assert 'C:/t/s9w' in command
+
+
 def test_the_sweep_basetemp_leaves_room_for_xdist():
     """A short basetemp is a correctness requirement here, not tidiness.
 

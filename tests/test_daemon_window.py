@@ -13,6 +13,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -186,6 +187,42 @@ def test_a_session_the_daemon_never_had_is_reaped(tmp_path):
     asyncio.run(run())
 
 
+def test_reaping_a_dead_holder_advances_an_existing_waiter(tmp_path):
+    async def run():
+        manager = _Manager()
+        for name in ("a", "b", "c"):
+            manager.set(name, exited=False)
+        w = _make(tmp_path, manager=manager)
+        await w.acquire("sweep", session="a", pid=os.getpid())
+        waiter = asyncio.create_task(
+            w.acquire("sweep", session="b", pid=os.getpid(), wait=5)
+        )
+        await asyncio.sleep(0.05)
+        manager.set("a", exited=True)
+        newcomer = await w.acquire("targeted", session="c", pid=os.getpid())
+        assert not newcomer["granted"]
+        assert (await waiter)["granted"]
+        assert [h["session"] for h in w.status()["holders"]] == ["b"]
+
+    asyncio.run(run())
+
+
+def test_a_cancelled_long_poll_leaves_no_orphan_queue_entry(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        await w.acquire("sweep", session="a", pid=os.getpid())
+        waiter = asyncio.create_task(
+            w.acquire("sweep", session="b", pid=os.getpid(), wait=5)
+        )
+        await asyncio.sleep(0.05)
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+        assert w.status()["queue"] == []
+
+    asyncio.run(run())
+
+
 # --------------------------------------------------------------------------- #
 # advisory_n: the fair share the arbiter is positioned to compute
 # --------------------------------------------------------------------------- #
@@ -255,5 +292,57 @@ def test_a_wait_that_times_out_leaves_no_queue_entry(tmp_path):
         assert not result["granted"]
         assert result["timeout"]
         assert w.status()["queue"] == []
+
+    asyncio.run(run())
+
+
+def test_window_api_status_acquire_and_release(home, tmp_path):
+    from aiohttp.test_utils import TestClient, TestServer
+
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+
+    async def run():
+        manager = SessionManager(
+            idle_threshold=0.5, scrollback=100, restore_default=False
+        )
+        window = _make(tmp_path)
+        app = build_app(
+            manager,
+            "secret",
+            started_at=time.monotonic(),
+            window=window,
+        )
+        client = TestClient(TestServer(app))
+        await client.start_server()
+        headers = {"Authorization": "Bearer secret"}
+        try:
+            assert (await client.get("/api/window")).status == 401
+            status = await (await client.get("/api/window", headers=headers)).json()
+            assert status["caps"] == {"sweep": 1, "targeted": 5}
+
+            acquired = await (
+                await client.post(
+                    "/api/window/acquire",
+                    json={
+                        "class": "targeted",
+                        "pid": os.getpid(),
+                        "label": "api test",
+                    },
+                    headers=headers,
+                )
+            ).json()
+            assert acquired["granted"]
+            released = await (
+                await client.post(
+                    "/api/window/release",
+                    json={"grant_id": acquired["grant_id"]},
+                    headers=headers,
+                )
+            ).json()
+            assert released == {"released": 1}
+        finally:
+            await client.close()
+            await manager.shutdown_all()
 
     asyncio.run(run())

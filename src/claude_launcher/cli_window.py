@@ -75,7 +75,9 @@ def _cmd_acquire(args) -> int:
         "label": args.label or "",
         "wait": args.wait,
     }
-    result = client.post("/api/window/acquire", body)
+    result = client.post(
+        "/api/window/acquire", body, timeout=max(5.0, float(args.wait) + 5.0)
+    )
     if result.get("granted"):
         print(
             f"granted: {result['grant_id']} (advisory -n {result.get('advisory_n', '?')})"
@@ -151,9 +153,11 @@ def register(sub) -> None:
     p.add_argument(
         "--wait",
         type=float,
+        nargs="?",
+        const=3600.0,
         default=0.0,
         metavar="SECONDS",
-        help="queue and wait up to this long for a grant (default: ask once)",
+        help="queue and wait (default with no value: up to one hour; omitted: ask once)",
     )
     p.add_argument("--label", help="what the window is being used for")
     p.add_argument(

@@ -311,6 +311,12 @@ class WindowManager:
         if cls not in CLASSES:
             return {"granted": False, "error": f"unknown window class {cls!r}"}
         changed = self._reap()
+        advanced = self._process_queue() if changed else []
+        if changed:
+            self._save()
+            for granted in advanced:
+                who = granted.get("session") or f"pid {granted.get('pid')}"
+                self._notify(f"window: {granted['cls']} granted to {who}")
         entry = {
             "grant_id": secrets.token_hex(6),
             "cls": cls,
@@ -351,6 +357,13 @@ class WindowManager:
                 "timeout": True,
                 "window": self.status(),
             }
+        except asyncio.CancelledError:
+            # A disconnected long-poll must not leave an orphan that can be
+            # granted later without a client to receive the grant id.
+            if entry in self._queue:
+                self._queue.remove(entry)
+                self._save()
+            raise
         finally:
             self._granted_events.pop(entry["grant_id"], None)
         return {
