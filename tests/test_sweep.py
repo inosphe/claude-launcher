@@ -47,6 +47,17 @@ import pytest
 SWEEP = Path(__file__).resolve().parents[1] / "tools" / "sweep.py"
 
 
+@pytest.fixture(autouse=True)
+def no_outer_test_window(monkeypatch):
+    """Each cmd_run case acquires the class it is testing."""
+    for key in (
+        sweep.test_window.WINDOW_GRANT_ENV,
+        sweep.test_window.WINDOW_CLASS_ENV,
+        sweep.test_window.WINDOW_WORKERS_ENV,
+    ):
+        monkeypatch.delenv(key, raising=False)
+
+
 def _load():
     """``tools/`` is not a package -- load the script the way a script is."""
     spec = importlib.util.spec_from_file_location("sweep", SWEEP)

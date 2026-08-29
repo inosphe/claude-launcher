@@ -128,6 +128,10 @@ def acquire(
         raise ValueError(f"unknown test window class {cls!r}")
     inherited = inherited_grant()
     if inherited is not None:
+        if cls == SWEEP and inherited.cls != SWEEP:
+            raise WindowUnavailable(
+                "a targeted parent grant cannot cover an exclusive sweep"
+            )
         return inherited
 
     owner = session or os.environ.get("CLAUNCH_SESSION")

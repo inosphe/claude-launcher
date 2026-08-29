@@ -24,9 +24,16 @@ def _pytest_window_class(args) -> str:
 def pytest_sessionstart(session):
     """Guard every direct pytest entry point, including unwrapped commands."""
     global _test_window_grant
-    if os.environ.get("PYTEST_XDIST_WORKER") or test_window.inherited_grant():
+    if os.environ.get("PYTEST_XDIST_WORKER"):
         return
     cls = _pytest_window_class(session.config.args)
+    inherited = test_window.inherited_grant()
+    if inherited is not None:
+        if cls == test_window.SWEEP and inherited.cls != test_window.SWEEP:
+            raise pytest.UsageError(
+                "a targeted parent grant cannot cover an exclusive sweep"
+            )
+        return
     label = "pytest " + " ".join(str(arg) for arg in session.config.args)
     try:
         _test_window_grant = test_window.acquire(cls, label=label)

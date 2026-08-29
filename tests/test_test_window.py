@@ -55,6 +55,13 @@ def test_an_inherited_grant_does_not_contact_the_daemon(monkeypatch):
     grant.release()
 
 
+def test_a_targeted_parent_grant_cannot_cover_a_sweep(monkeypatch):
+    monkeypatch.setenv(test_window.WINDOW_GRANT_ENV, "parent")
+    monkeypatch.setenv(test_window.WINDOW_CLASS_ENV, "targeted")
+    with pytest.raises(test_window.WindowUnavailable, match="exclusive sweep"):
+        test_window.acquire("sweep")
+
+
 def test_targeted_fallback_is_explicit_and_nonblocking(monkeypatch, capsys):
     monkeypatch.setattr(test_window.daemon_client, "connect", lambda: None)
     grant = test_window.acquire("targeted")
