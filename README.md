@@ -1946,6 +1946,13 @@ claunch install --profile work     # or a profile's config dir
 claunch install --all-profile      # every existing profile (alias: --all)
 ```
 
+Profile installation follows the selected harness. Claude uses the profile
+root, Codex uses `codex/config.toml`, Kimi Code uses `kimi/mcp.json`, and
+Cursor Agent uses `agent/mcp.json`; skills are written below each harness
+home. Pi receives the skills, but its install reports that MCP is unavailable
+because Pi does not provide an MCP client. A one-off harness selection is also
+supported, for example `claunch install --profile work:kimi`.
+
 | Command | Description |
 | ------- | ----------- |
 | `install [--project [DIR] \| --global \| --profile P \| --all-profile]` | Register the MCP server and write the `/cflow`, `/cflow-author`, `/mesh` and `commit-stamp` skills into one scope: a project (the default), the user globally, or a profile. `--all-profile` (alias `--all`) is a profile install into every profile that exists — profiles are isolated config dirs, so a global install never reaches them; it does not touch the user's global setup. `--global`, `--profile` and `--all-profile` also seed the global workflow layer. Supersedes the separate `cflow`/`mesh` server entries an earlier version registered — they are removed, not left running alongside. Restart claude afterwards. |
