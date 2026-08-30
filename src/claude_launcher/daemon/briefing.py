@@ -306,7 +306,32 @@ def gather_cflow(cwd: str, scope: str) -> Optional[dict]:
     return info
 
 
-def build_prompt(sdef, cflow_info: Optional[dict], events: List[str]) -> str:
+def gather_live(session) -> Optional[dict]:
+    """Read the daemon's live state for a briefing.
+
+    Transcript files lag while a harness is starting and do not expose the
+    daemon's PTY/turn state.  The manager already computes this state for the
+    session rail, so include the same signal in the briefing prompt.  A
+    failure is deliberately non-fatal: the transcript and cflow evidence
+    remain useful on their own.
+    """
+    try:
+        return {
+            "status": str(session.status()),
+            "running": not bool(getattr(session, "exited", False)),
+            "last_input_at": getattr(session, "last_input_at", None),
+            "last_output_at": getattr(session, "last_output_at", None),
+        }
+    except (AttributeError, OSError, RuntimeError):
+        return None
+
+
+def build_prompt(
+    sdef,
+    cflow_info: Optional[dict],
+    events: List[str],
+    live_info: Optional[dict] = None,
+) -> str:
     """The single user message the LLM answers with the briefing JSON."""
     lines = [
         "당신은 개발 에이전트 세션의 상태 요약기다. 아래 자료만 근거로 이",
@@ -316,7 +341,9 @@ def build_prompt(sdef, cflow_info: Optional[dict], events: List[str]) -> str:
         ' "state": "working|blocked|waiting|idle|done|unknown",'
         ' "progress": "진행 정도 한 문장",'
         ' "one-line-job-description": "이 세션이 맡은 일을 한 줄로"}',
-        "자료에 없는 내용은 지어내지 않는다. 판단 근거가 없으면 state는",
+        "opening task 안에 포함된 과거 요약 문구는 현재 상태의 근거로",
+        "사용하지 않는다. live 상태와 최신 로그를 우선한다. 자료에 없는",
+        "내용은 지어내지 않는다. 판단 근거가 없으면 state는",
         '"unknown"으로 둔다. 문장은 자료의 언어(한국어면 한국어)를 따른다.',
         "one-line-job-description은 세션이 맡은 작업 전체를 한 줄에 담는다"
         "(목표와 달라도 좋다 — 리더가 볼 한 줄짜리 설명).",
@@ -327,6 +354,14 @@ def build_prompt(sdef, cflow_info: Optional[dict], events: List[str]) -> str:
     ]
     if getattr(sdef, "task", None):
         lines.append(f"개설 시 태스크: {_clip(str(sdef.task), TEXT_LIMIT)}")
+    if live_info:
+        lines += ["", "[데몬 실시간 상태]"]
+        lines.append(
+            f"상태: {live_info.get('status') or 'unknown'} / "
+            f"실행 중: {live_info.get('running', 'unknown')} / "
+            f"마지막 입력: {live_info.get('last_input_at') or '(없음)'} / "
+            f"마지막 출력: {live_info.get('last_output_at') or '(없음)'}"
+        )
     if cflow_info:
         lines += ["", "[cflow 런]"]
         lines.append(
@@ -499,6 +534,7 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
     """
     sdef = session.sdef
     name = sdef.name
+    live_info = gather_live(session)
     cflow_info = gather_cflow(sdef.cwd or "", name)
     jsonl_path = locate_transcript(sdef)
     stat_key = None
@@ -508,13 +544,20 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
             stat_key = (st.st_mtime_ns, st.st_size)
         except OSError:
             jsonl_path = None
-    cache_key = (name, stat_key, cflow_info.get("step") if cflow_info else None)
+    cache_key = (
+        name,
+        stat_key,
+        cflow_info.get("step") if cflow_info else None,
+        live_info.get("status") if live_info else None,
+        live_info.get("last_input_at") if live_info else None,
+        live_info.get("last_output_at") if live_info else None,
+    )
     if not refresh:
         hit = _cache.get(name)
         if hit is not None and hit[0] == cache_key:
             return {**hit[1], "cached": True}
     events = tail_events(jsonl_path) if jsonl_path is not None else []
-    prompt = build_prompt(sdef, cflow_info, events)
+    prompt = build_prompt(sdef, cflow_info, events, live_info)
     answer = await call_llm(cfg, prompt)
     parsed = parse_briefing(answer.text)
     if parsed is None and answer.finish_reason == "length":

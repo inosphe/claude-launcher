@@ -215,7 +215,17 @@ def test_build_prompt_carries_all_signals():
         "title": "작업 실행",
         "last_report": "intake done",
     }
-    prompt = briefing.build_prompt(sdef, cflow_info, ["user: hello", "assistant: hi"])
+    prompt = briefing.build_prompt(
+        sdef,
+        cflow_info,
+        ["user: hello", "assistant: hi"],
+        {
+            "status": "busy",
+            "running": True,
+            "last_input_at": "2026-08-30T12:00:00+00:00",
+            "last_output_at": "2026-08-30T12:00:01+00:00",
+        },
+    )
     for needle in (
         '"state": "working|blocked|waiting|idle|done|unknown"',
         "이름: s9",
@@ -224,8 +234,29 @@ def test_build_prompt_carries_all_signals():
         "작업 실행",
         "intake done",
         "user: hello",
+        "[데몬 실시간 상태]",
+        "상태: busy",
+        "opening task 안에 포함된 과거 요약 문구",
     ):
         assert needle in prompt
+
+
+def test_gather_live_reads_the_same_state_as_the_session_rail():
+    class Session:
+        exited = False
+        last_input_at = "in"
+        last_output_at = "out"
+
+        @staticmethod
+        def status():
+            return "busy"
+
+    assert briefing.gather_live(Session()) == {
+        "status": "busy",
+        "running": True,
+        "last_input_at": "in",
+        "last_output_at": "out",
+    }
     # absent signals leave no dangling sections
     bare = briefing.build_prompt(SessionDef(name="s0"), None, [])
     assert "[cflow 런]" not in bare and "[대화 로그 꼬리" not in bare
