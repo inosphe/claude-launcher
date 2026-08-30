@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from .. import config
+from .. import journal as journal_mod
 from . import model
 
 #: Directory (relative to a project) holding its workflow declarations.
@@ -825,13 +826,7 @@ def load_snapshot(cwd: Optional[str] = None, scope: Optional[str] = None) -> mod
 
 
 def journal(event: str, data: Optional[Dict] = None, cwd: Optional[str] = None) -> None:
-    entry = {"at": utcnow(), "event": event}
-    if data:
-        entry.update(data)
-    path = journal_path(cwd)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with open(path, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    journal_mod.append(journal_path(cwd), event, data, at=utcnow())
 
 
 #: Parsed journals, keyed by path -> (mtime, size, entries). Same bargain as
@@ -853,20 +848,7 @@ def _journal_entries(path: Path) -> List[dict]:
     hit = _journals.get(key)
     if hit is not None and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
         return hit[2]
-    out: List[dict] = []
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError:
-        return []
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            entry = json.loads(line)
-        except ValueError:
-            continue
-        out.append(entry)
+    out = journal_mod.read(path)
     _journals[key] = (st.st_mtime_ns, st.st_size, out)
     return out
 
@@ -876,11 +858,16 @@ def read_journal(
     scope: Optional[str] = None,
     *,
     run_id: Optional[str] = None,
+    events: Optional[List[str]] = None,
 ) -> List[dict]:
     path = journal_path(cwd, scope)
     if not path.is_file():
         return []
     entries = _journal_entries(path)
     if run_id is None:
-        return list(entries)
-    return [e for e in entries if e.get("run") == run_id]
+        selected = list(entries)
+    else:
+        selected = [e for e in entries if e.get("run") == run_id]
+    if events is not None:
+        selected = [e for e in selected if e.get("event") in set(events)]
+    return selected

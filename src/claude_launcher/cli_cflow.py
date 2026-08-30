@@ -665,7 +665,7 @@ def _cmd_reset(args: argparse.Namespace) -> int:
 
 def _cmd_journal(args: argparse.Namespace) -> int:
     scope, cwd = _resolve_run(args)
-    entries = state_mod.read_journal(cwd, scope=scope)
+    entries = state_mod.read_journal(cwd, scope=scope, events=args.event)
     for entry in entries[-args.tail :] if args.tail else entries:
         print(json.dumps(entry, ensure_ascii=False))
     return 0
@@ -1004,6 +1004,7 @@ def register(sub) -> None:
 
     q = _scoped(csub.add_parser("journal", help="print the run journal (JSONL)"))
     q.add_argument("-n", "--tail", type=int, default=0, help="only the last N entries")
+    q.add_argument("-e", "--event", action="append", help="filter by event name (repeatable)")
     q.set_defaults(func=_cmd_journal)
 
     q = csub.add_parser(
