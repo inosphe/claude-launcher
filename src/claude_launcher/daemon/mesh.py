@@ -297,12 +297,19 @@ def _busy_notice(entries: List[dict]) -> str:
         f"{e['handle']} ({e['queued']} waiting, cap {e['inbox_max']})"
         for e in entries
     )
-    wait = max((e.get("retry_after") or 0.0 for e in entries), default=0.0)
-    when = f" Wait about {int(wait)}s before sending there again" if wait else ""
+    held = [e for e in entries if e.get("reason") == "delivery_hold"]
+    timed = [e for e in entries if e.get("reason") != "delivery_hold"]
+    wait = max((e.get("retry_after") or 0.0 for e in timed), default=0.0)
+    actions = []
+    if held:
+        actions.append("wait until delivery resumes for held receivers")
+    if wait:
+        actions.append(f"wait about {int(wait)}s for other receivers")
+    action = "; ".join(actions) or "wait before sending there again"
     return (
         f"NOT DELIVERED to {who}: that terminal has not read what it already "
-        f"has, so the mesh is not accepting more for it.{when} — do other "
-        "work meanwhile, and re-send then. Nothing was queued: this message "
+        f"has, so the mesh is not accepting more for it. {action.capitalize()}, "
+        "then re-send. Nothing was queued: this message "
         "does not exist anywhere and will not arrive on its own."
     )
 
@@ -385,6 +392,12 @@ _INLINE_STANCE = 4000
 
 #: Worker rescan cadence while messages are pending (seconds).
 _POLL = 1.0
+
+#: Maximum undelivered messages accepted for a session whose operator has
+#: explicitly held delivery.  The policy inbox is a recent-traffic limit and
+#: may reopen as messages age; an explicit hold has no timer, so its queue
+#: needs an absolute bound of its own.
+DELIVERY_HOLD_INBOX_MAX = 4
 
 #: Peer flush retry backoff after a failure (seconds, doubling to the cap).
 _PEER_BACKOFF_BASE = 5.0
@@ -1235,40 +1248,90 @@ class MeshManager:
                 fresh += 1
         return fresh
 
+    def receiver_delivery_held(self, mesh: Mesh, handle: str) -> bool:
+        """Whether ``handle``'s receiver has explicitly held delivery.
+
+        Local state is authoritative.  For a remote receiver, the primary
+        uses the latest activity report, with the same sync-delay limitation
+        as :meth:`inbox_depth`.
+        """
+        member = mesh.members.get(handle)
+        if member is None:
+            return False
+        if not self._is_local(mesh, member):
+            return bool(
+                (mesh.remote_activity.get(handle) or {}).get("delivery_hold")
+            )
+        try:
+            session = self.manager.get(member.session)
+        except ManagerError:
+            return False
+        held = getattr(session, "delivery_held", None)
+        return bool(
+            not getattr(session, "exited", False)
+            and callable(held)
+            and held()
+        )
+
     def congested_recipients(
         self, mesh: Mesh, recipients: Iterable[str]
     ) -> List[dict]:
         """Which of ``recipients`` are too far behind to accept another
         message, as ``{handle, queued, inbox_max, retry_after, remote}``.
 
-        Empty whenever backpressure is off or uncapped — the caller then
-        behaves exactly as it did before the gate existed.
+        The policy limit weighs recent traffic.  A receiver under an explicit
+        delivery hold additionally has an absolute limit of
+        :data:`DELIVERY_HOLD_INBOX_MAX`, including messages that have aged out
+        of the traffic window.
         """
         bp = self.backpressure(mesh)
-        if not bp["enabled"] or not bp["inbox_max"]:
-            return []
+        traffic_limited = bool(bp["enabled"] and bp["inbox_max"])
         out: List[dict] = []
         for handle in recipients:
             # Weighed on the countable depth, REPORTED on the true one: the
             # sender is refused because of recent pressure, but what is
             # actually waiting for that terminal is the number it needs to
             # see. They differ only once mail has aged past the door.
-            countable = self.countable_inbox(mesh, handle)
-            if countable is None or countable < bp["inbox_max"]:
-                continue
             depth = self.inbox_depth(mesh, handle)
-            member = mesh.members.get(handle)
-            out.append(
-                {
-                    "handle": handle,
-                    "queued": depth if depth is not None else countable,
-                    "inbox_max": bp["inbox_max"],
-                    "retry_after": bp["retry_after"],
-                    "remote": bool(
-                        member is not None and not self._is_local(mesh, member)
-                    ),
-                }
+            held = self.receiver_delivery_held(mesh, handle)
+            hold_full = bool(
+                held
+                and depth is not None
+                and depth >= DELIVERY_HOLD_INBOX_MAX
             )
+            countable = self.countable_inbox(mesh, handle)
+            traffic_full = bool(
+                traffic_limited
+                and countable is not None
+                and countable >= bp["inbox_max"]
+            )
+            if not hold_full and not traffic_full:
+                continue
+
+            # When both limits apply, report the first limit the sender can
+            # act on.  A smaller traffic cap remains the effective cap;
+            # otherwise the explicit hold is the limiting condition and has
+            # no time-based retry recommendation.
+            held_is_limit = hold_full and (
+                not traffic_full
+                or DELIVERY_HOLD_INBOX_MAX <= bp["inbox_max"]
+            )
+            limit = (
+                DELIVERY_HOLD_INBOX_MAX if held_is_limit else bp["inbox_max"]
+            )
+            member = mesh.members.get(handle)
+            entry = {
+                "handle": handle,
+                "queued": depth if depth is not None else countable,
+                "inbox_max": limit,
+                "retry_after": 0.0 if held_is_limit else bp["retry_after"],
+                "remote": bool(
+                    member is not None and not self._is_local(mesh, member)
+                ),
+            }
+            if held_is_limit:
+                entry["reason"] = "delivery_hold"
+            out.append(entry)
         return out
 
     def _record_refusal(self, mesh: Mesh, handle: str, sender: str) -> None:
@@ -4946,6 +5009,10 @@ class MeshManager:
             first_pending = mesh._first_pending.get(handle)
             report[handle] = {
                 "idle": session.status() == STATUS_IDLE,
+                "delivery_hold": bool(
+                    callable(getattr(session, "delivery_held", None))
+                    and session.delivery_held()
+                ),
                 "caught_up": (not unanswered and pending == 0),
                 "unanswered": unanswered,
                 "pending": pending,

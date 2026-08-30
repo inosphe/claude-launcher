@@ -711,11 +711,13 @@ def test_guest_ack_piggybacks_activity(home, tmp_path):
         await _wait_for(
             lambda: mgr.get("sb").status() == "idle", "bob's session to go idle"
         )
+        mgr.get("sb").set_delivery_hold(True)
         await mm_a._flush_guest(mesh_a, "pcB")
         # E2: the primary now knows bob's observed state
         act = mesh_a.remote_activity.get("bob")
         assert act is not None
         assert act["idle"] is True
+        assert act["delivery_hold"] is True
         assert act["caught_up"] is True
         assert act["unanswered"] is False
 

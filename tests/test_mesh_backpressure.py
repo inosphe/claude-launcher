@@ -189,6 +189,64 @@ def test_a_full_inbox_refuses_the_send_and_queues_nothing(home, tmp_path):
     asyncio.run(run())
 
 
+def test_an_explicit_hold_caps_the_full_queue_at_four(home, tmp_path):
+    """A delivery hold has no time limit, so its queue limit uses full depth.
+
+    The traffic limit stops counting messages after ``door_secs``.  That
+    relaxation remains valid for ordinary delivery, while a receiver held by
+    its operator must still reject a fifth queued message.
+    """
+    _register_py_harness()
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        try:
+            mm.create("team")
+            for name in ("s1", "s2"):
+                mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+            await mm.join("team", "s1", handle="lead")
+            await mm.join("team", "s2", handle="w1")
+            _cap(mm, "team", inbox_max=4, retry_after=45.0)
+            mm.set_policy("team", {"ack_timeout": {"door_secs": 1.0}})
+            lead = mgr.get("s1")
+            lead.set_delivery_hold(True)
+
+            for n in range(4):
+                await mm.send("team", "w1", "lead", f"report {n}")
+            mesh = mm.get("team")
+            for msg in mesh.pending("lead"):
+                msg["ts"] = "2000-01-01T00:00:00+00:00"
+
+            assert mm.countable_inbox(mesh, "lead") == 0
+            assert len(mesh.pending("lead")) == 4
+            with pytest.raises(MeshBusy) as caught:
+                await mm.send("team", "w1", "lead", "report 4")
+
+            assert caught.value.entries == [{
+                "handle": "lead",
+                "queued": 4,
+                "inbox_max": 4,
+                "retry_after": 0.0,
+                "remote": False,
+                "reason": "delivery_hold",
+            }]
+            assert caught.value.retry_after == 0.0
+            assert "delivery resumes" in str(caught.value)
+            assert len(mesh.pending("lead")) == 4
+
+            lead.set_delivery_hold(False)
+            result = await mm.send("team", "w1", "lead", "report 4")
+            assert result["recipients"] == ["lead"]
+            assert len(mesh.pending("lead")) == 5
+
+            await mgr.shutdown_all()
+        finally:
+            pass
+
+    asyncio.run(run())
+
+
 def test_a_partial_refusal_narrows_the_address_it_stores(home, tmp_path):
     """A broadcast where one recipient is full is still a send — to the
     others.
