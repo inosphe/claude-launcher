@@ -446,9 +446,22 @@ function railMetaText(s) {
    remembers the choice so repeated monitoring does not require resetting it
    after every two-second poll. */
 const SESSION_FILTER_KEY = `claunch_session_filter:${BASE}`;
+const SESSION_GROUP_KEY = `claunch_session_group:${BASE}`;
 const SESSION_FILTERS = ["current", "running", "killed", "archived"];
 let sessionFilter = localStorage.getItem(SESSION_FILTER_KEY) || "current";
 if (!SESSION_FILTERS.includes(sessionFilter)) sessionFilter = "current";
+let sessionGroupByMesh = localStorage.getItem(SESSION_GROUP_KEY) === "true";
+
+function sessionMeshGroup(s) {
+  const memberships = sessMeshes(s.name);
+  return memberships.length ? memberships[0].mesh : "(no mesh)";
+}
+
+function setSessionGroupByMesh(enabled, remember = true) {
+  sessionGroupByMesh = !!enabled;
+  if (remember) localStorage.setItem(SESSION_GROUP_KEY, String(sessionGroupByMesh));
+  refreshSessions();
+}
 
 function sessionCategory(s) {
   if (s && s.archived_at) return "archived";
@@ -528,7 +541,7 @@ async function refreshSessions() {
   // not render those numbers.  Exclude only those moving values from the DOM
   // signature so an unchanged fleet keeps its nodes, focus and listeners.
   const signature = JSON.stringify(
-    [briefingLLM, sessionsCache],
+    [briefingLLM, sessionsCache, sessionGroupByMesh, meshCache],
     (key, value) => key === "due_in" || key === "fired_ago" ? undefined : value,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -538,7 +551,29 @@ async function refreshSessions() {
   railRedrawPending = changed && !rebuild;
   if (rebuild) list._sessionsSignature = signature;
   if (rebuild) list.innerHTML = "";
-  for (const [s, depth] of rebuild ? byLineage(sessionsCache) : []) {
+  let previousGroup = null;
+  let entries = rebuild ? byLineage(sessionsCache) : [];
+  if (sessionGroupByMesh) {
+    const groups = new Map();
+    for (const entry of entries) {
+      const group = sessionMeshGroup(entry[0]);
+      if (!groups.has(group)) groups.set(group, []);
+      groups.get(group).push(entry);
+    }
+    entries = [...groups.keys()].sort((a, b) =>
+      a.localeCompare(b, undefined, { sensitivity: "base" }),
+    ).flatMap((group) => groups.get(group));
+  }
+  for (const [s, depth] of entries) {
+    const group = sessionGroupByMesh ? sessionMeshGroup(s) : null;
+    if (group && group !== previousGroup) {
+      const heading = document.createElement("li");
+      heading.className = "session-group-heading";
+      heading.textContent = group;
+      heading.setAttribute("aria-label", `mesh group ${group}`);
+      list.appendChild(heading);
+      previousGroup = group;
+    }
     const li = document.createElement("li");
     li.dataset.name = s.name;
     if (s.name === currentName) li.classList.add("active");
@@ -4547,6 +4582,12 @@ $("archive-exited").addEventListener("click", async () => {
 for (const filter of SESSION_FILTERS) {
   const button = $(`session-filter-${filter}`);
   if (button) button.addEventListener("click", () => setSessionFilter(filter));
+}
+const meshGroupToggle = $("session-group-mesh");
+if (meshGroupToggle) {
+  meshGroupToggle.checked = sessionGroupByMesh;
+  meshGroupToggle.addEventListener("change", () =>
+    setSessionGroupByMesh(meshGroupToggle.checked));
 }
 
 /* The rail polls, but a poll is a tick behind at best: a session spawned from
@@ -15231,7 +15272,11 @@ async function refreshMeshList() {
     return;
   }
   renderRelayBadge(data.relay);
+  const oldMeshSignature = JSON.stringify(meshCache);
   meshCache = data.meshes || [];
+  if (sessionGroupByMesh && oldMeshSignature !== JSON.stringify(meshCache)) {
+    refreshSessions();
+  }
   const outgoing = data.outgoing || [];
   const signature = JSON.stringify([meshName, meshCache, outgoing]);
   if (signature === meshListRendered) return;
