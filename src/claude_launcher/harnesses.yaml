@@ -4,6 +4,7 @@ harnesses:
 
   claude:
     builtin: true
+    models: [haiku, sonnet, opus, fable]
     auth: claude
     token_env: ANTHROPIC_AUTH_TOKEN
     empty_env: [ANTHROPIC_API_KEY]
@@ -16,6 +17,7 @@ harnesses:
 
   codex:
     command: codex
+    models: [luna, terra, sol]
     args: [--dangerously-bypass-approvals-and-sandbox]
     restore_args: [resume, --last]
     home_env: CODEX_HOME

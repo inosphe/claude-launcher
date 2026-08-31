@@ -146,9 +146,10 @@ let sessionsCache = [];
 let spawnModal = null;
 let BASE = "/";
 let harnessDetails = {
-  claude: { auth: "claude" },
+  claude: { auth: "claude", models: ["haiku", "sonnet", "opus", "fable"] },
   codex: {
     auth: "oauth",
+    models: ["luna", "terra", "sol"],
     args: ["--dangerously-bypass-approvals-and-sandbox"],
     mode_conflict_args: ["--dangerously-bypass-approvals-and-sandbox"],
     skip_permissions_args: ["--approval-mode", "full-auto"],
@@ -185,7 +186,8 @@ new Function(
   + slice("spawnWorkflowEntry") + slice("spawnWorkflowAdmits") + slice("spawnRankWorkflows")
   + slice("baseProfileName") + slice("profileBorrowCapability")
   + slice("profileOwnAuthLabel") + slice("readBorrowOptions")
-  + slice("fillValidatedBorrow") + slice("syncSpawnGates") + slice("syncSpawnBeads")
+  + slice("fillValidatedBorrow") + slice("syncSpawnModel")
+  + slice("syncSpawnGates") + slice("syncSpawnBeads")
   + slice("syncSpawnCodexRuntime")
   + slice("spawnPayload")
   + slice("spawnReport") + slice("spawnPreflightNote")
@@ -265,6 +267,7 @@ function uiStub(over = {}) {
     name: ctl(), role: ctl(), workflow: ctl(), context: ctl(), contextRow: ctl(),
     mesh: ctl(), handle: ctl(), task: ctl(), args: ctl(),
     profile: ctl(), harness: ctl(), borrow: ctl(),
+    model: node("select"), modelRow: ctl(), modelNote: ctl(),
     nullTok: ctl(), fork: ctl(), over: ctl(), overRow: ctl(),
     codexPanel: ctl({ hidden: true }), codexYolo: ctl({ checked: true }),
     codexSandbox: ctl(), codexYoloNote: ctl({ hidden: true }),
@@ -429,12 +432,13 @@ async function main() {
 
   /* ---- the brain: payload reads THROUGH the disables -------------------- */
   const full = uiStub({
-    report: { may_choose: ["profile", "args", "worktree", "fork", "borrow"] },
+    report: { may_choose: ["profile", "args", "model", "worktree", "fork", "borrow"] },
     name: ctl({ value: "  c7 " }),
     role: ctl({ value: "worker" }), workflow: ctl({ value: "improv-worker" }),
     mesh: ctl({ value: "m0" }), handle: ctl({ value: "c7" }),
     connect: () => ["w2", ""],
     harness: ctl({ value: "claude" }), profile: ctl({ value: "p1" }),
+    model: ctl({ value: "sonnet" }), _modelOriginal: "opus",
     borrow: ctl({ value: "p2" }), nullTok: ctl({ checked: true }),
     args: ctl({ value: "--verbose --json" }),
     workspace: ctl({ value: "ws" }),
@@ -451,6 +455,13 @@ async function main() {
   check("payload splits args", body.args.join(" ") === "--verbose --json", body.args);
   check("payload recombines Profile and Harness",
     body.profile === "p1:claude", body.profile);
+  check("payload sends a changed model", body.model === "sonnet", body.model);
+  full.model.value = "";
+  const clearedModel = ctx.spawnPayload(full);
+  check("the harness default clears an inherited model",
+    Object.prototype.hasOwnProperty.call(clearedModel, "model") &&
+      clearedModel.model === "", clearedModel);
+  full.model.value = "sonnet";
   check("a named new worktree sends that name", body.worktree === "my-wt", body.worktree);
   check("a hidden over-limit row is not asked",
     body.over_limit === undefined, body);
@@ -460,6 +471,7 @@ async function main() {
     report: { may_choose: [] },
     harness: ctl({ value: "pi", disabled: true }),
     profile: ctl({ value: "p1", disabled: true }),
+    model: ctl({ value: "sonnet", disabled: true }), _modelOriginal: "opus",
     borrow: ctl({ value: "p2", disabled: true }),
     nullTok: ctl({ checked: true, disabled: true }),
     args: ctl({ value: "-x", disabled: true }),
@@ -471,6 +483,7 @@ async function main() {
   });
   const greyBody = ctx.spawnPayload(greyed);
   check("a greyed profile is not sent", greyBody.profile === undefined);
+  check("a greyed model is not sent", greyBody.model === undefined);
   check("a greyed --null is not sent", greyBody.null_token === undefined);
   check("a greyed fork is not sent", greyBody.fork === undefined);
   check("a greyed worktree is not sent", greyBody.worktree === undefined);
@@ -621,6 +634,8 @@ async function main() {
   ctx.syncSpawnGates(g);
   check("locked profile names its key",
     g.profile.disabled === true && /spawn\.allow_profile/.test(g.profileNote.textContent));
+  check("locked model inherits and names the args policy",
+    g.model.disabled === true && /spawn\.allow_args/.test(g.modelNote.textContent));
   check("no workspaces list locks the directory row",
     g.workspace.disabled === true && /spawn\.allow_workspace/.test(g.workspaceNote.textContent));
   check("worktree not in may_choose locks every mode",
@@ -908,7 +923,7 @@ async function main() {
   const built = ctx.buildSpawnForm("lead1", { quick: true, task: "fix the tab", name: "w7" });
   const bui = built.ui;
   for (const k of ["name", "role", "workflow", "context", "mesh", "handle", "task",
-                   "profile", "harness", "borrow", "args", "workspace", "wtMode",
+                   "profile", "harness", "model", "borrow", "args", "workspace", "wtMode",
                    "wtPick", "wtName", "update", "rebase", "fork", "over",
                    "beads", "issueText", "issueTextRow", "issuePick", "issueRow",
                    "issueHint"]) {

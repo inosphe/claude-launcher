@@ -108,6 +108,15 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         return 1
+    chosen_model = getattr(args, "model", None)
+    if chosen_model and selected_entry and chosen_model not in selected_entry.models:
+        known = ", ".join(selected_entry.models) or "(none)"
+        print(
+            f"error: unknown model {chosen_model!r} for harness {selected!r} "
+            f"(known: {known})",
+            file=sys.stderr,
+        )
+        return 1
     if args.borrow:
         try:
             lender_name, lender_harness = profile_mod.split_selector(args.borrow)
@@ -177,6 +186,8 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["borrow"] = args.borrow
     if args.null_token:
         body["null_token"] = True
+    if chosen_model:
+        body["model"] = chosen_model
     # (the daemon echoes both back; _warn_dropped_auth reads that echo)
     # Decided at creation because they are what the session is FOR: a mesh it
     # is not in and a run it does not drive have to be arranged afterwards,
@@ -216,6 +227,7 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         + f", pid: {info.get('pid')})"
     )
     _warn_dropped_auth(args, info)
+    _warn_dropped_model(args, info)
     _print_onboarding(info)
     if args.attach:
         from . import attach as attach_mod
@@ -279,6 +291,21 @@ def _warn_dropped_auth(args: argparse.Namespace, info: dict) -> None:
         )
 
 
+def _warn_dropped_model(args: argparse.Namespace, info: dict) -> None:
+    """Report an old daemon that created the session without its model."""
+    selected = getattr(args, "model", None)
+    if selected is None:
+        return
+    wanted = str(selected).strip() or None
+    if (info.get("model") or None) != wanted:
+        print(
+            "  warning: this daemon ignored the model choice and the session "
+            "uses its harness default -- restart the daemon before relying on "
+            "--model",
+            file=sys.stderr,
+        )
+
+
 def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
     """The refusal ``new-session`` gives when an agent runs it.
 
@@ -337,6 +364,9 @@ def _use_spawn_instead(args: argparse.Namespace, parent: str) -> str:
         )
     if args.null_token:
         out.append("--null")
+    if getattr(args, "model", None):
+        out.append(f"--model {args.model}")
+        notes.append("--model needs spawn.allow_args")
     for item in args.env or []:
         out.append(f"--env {item!r}" if " " in item else f"--env {item}")
     if args.env:
@@ -458,6 +488,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("profile", args.profile),
             ("borrow", args.borrow),
             ("null_token", args.null_token),
+            ("model", getattr(args, "model", None)),
             ("args", extra),
             ("env", env),
             ("workspace", args.workspace),
@@ -481,6 +512,11 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     # "you did not say" and cross it.
     if getattr(args, "over_limit", None) is False:
         payload["over_limit"] = False
+    # The wizard uses an explicit empty model to remove the parent's pin and
+    # return to the selected harness default.  Keep that distinct from an
+    # omitted value, which inherits the parent.
+    if getattr(args, "model", None) == "":
+        payload["model"] = ""
     try:
         result = client.post(f"/api/sessions/{parent}/children", payload)
     except daemon_client.DaemonClientError as exc:
@@ -511,6 +547,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
         # printing it is how the caller sees the registry resolved.
         print(f"  in {child['cwd']}")
     _warn_dropped_auth(args, child)
+    _warn_dropped_model(args, child)
     _print_onboarding(result)
     if args.attach and child.get("name"):
         from . import attach as attach_mod
@@ -1825,6 +1862,11 @@ def register(sub) -> None:
     )
     p_new.add_argument("-s", "--name", help="session name (auto-generated if omitted)")
     p_new.add_argument("--profile", help="claunch profile (required; selects the harness)")
+    p_new.add_argument(
+        "--model",
+        help="model alias for the selected profile harness (Claude: "
+        "haiku/sonnet/opus/fable; Codex: luna/terra/sol)",
+    )
     auth = p_new.add_mutually_exclusive_group()
     auth.add_argument(
         "--borrow", metavar="NAME",
@@ -2019,6 +2061,11 @@ def register(sub) -> None:
         "--profile",
         help="a different profile for the child (needs spawn.allow_profile; "
              "inherited from the parent otherwise)",
+    )
+    p_spawn.add_argument(
+        "--model",
+        help="model alias for the child; inherited when omitted and governed "
+        "by spawn.allow_args when changed",
     )
     s_auth = p_spawn.add_mutually_exclusive_group()
     s_auth.add_argument(

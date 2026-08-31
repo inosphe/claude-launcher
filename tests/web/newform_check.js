@@ -97,7 +97,7 @@ check("the form's controls read in the new order", named(form.text), [
   // who it is
   "parent", "fork_parent", "over_limit", "name",
   // whose credentials it holds — promoted out of the fold
-  "profile", "harness",
+  "profile", "harness", "model",
   // what it joins, and what it drives
   "mesh", "handle", "role", "workflow", "context",
   // how it runs — folded
@@ -124,8 +124,8 @@ check("the profile is asked above the fold, not inside it",
       [form.text.indexOf("new-runs-on") < form.text.indexOf("new-runtime"),
        named(fold.text).includes("profile")],
       [true, false]);
-check("Profile and Harness are separate runtime choices",
-      named(runsOn.text), ["profile", "harness"]);
+check("Profile, Harness and Model are separate runtime choices",
+      named(runsOn.text), ["profile", "harness", "model"]);
 check("the credential hint travels with the profile it qualifies",
       ids(runsOn.text).includes("profile-hint"), true);
 const BOARD_ROWS = ["beads", "issue_text", "issue_filter", "issue"];
@@ -241,6 +241,8 @@ check("Create reads nothing the form does not offer",
 check("...and it does read a fair few of them", read.length > 8, true);
 check("standalone Create recombines Profile and Harness for the API",
       /profile:\s*newProfileSelector\(f\)/.test(submit), true);
+check("standalone Create sends the selected model",
+      /body\.model = f\.model\.value/.test(submit), true);
 check("standalone Codex Create serializes its specialised checkboxes",
       /harnessName === "codex"/.test(submit) &&
         /codexRuntimeArgs\(/.test(submit) &&
@@ -413,7 +415,7 @@ check("the issue text is sent only under the answer that mints",
 const sumBox = { textContent: "" };
 function ctl(v) { return { value: v, checked: false, disabled: false }; }
 const f = {
-  profile: ctl(""), borrow: ctl(""),
+  profile: ctl(""), model: ctl(""), borrow: ctl(""),
   null_token: ctl(""), args: ctl(""), resume: ctl(""), parent: ctl(""),
   cwd: { value: "", disabled: false, selectedIndex: 0,
          options: [{ text: "(daemon cwd)" }] },

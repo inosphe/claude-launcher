@@ -26,6 +26,7 @@ CODEX_RUNTIME = {
     "skip_permissions_args": ["--approval-mode", "full-auto"],
     "full_access_args": ["--sandbox", "danger-full-access"],
     "full_access_off_args": ["--sandbox", "workspace-write"],
+    "models": ["luna", "terra", "sol"],
 }
 
 
@@ -50,7 +51,8 @@ class FakeSources(wizard.Sources):
     def harnesses(self):
         return [
             {"name": "claude", "available": True, "auth": "claude",
-             "description": "Claude Code"},
+             "description": "Claude Code",
+             "models": ["haiku", "sonnet", "opus", "fable"]},
             {"name": "codex", "available": False, "auth": "oauth",
              "description": "Codex"},
         ]
@@ -105,7 +107,8 @@ class CodexSources(FakeSources):
 
     def harnesses(self):
         return [
-            {"name": "claude", "available": True, "auth": "claude"},
+            {"name": "claude", "available": True, "auth": "claude",
+             "models": ["haiku", "sonnet", "opus", "fable"]},
             dict(CODEX_RUNTIME),
         ]
 
@@ -203,7 +206,7 @@ def test_width_counts_wide_cells_twice():
 # --------------------------------------------------------------------------- #
 def test_every_closed_set_is_a_picker_not_a_text_box():
     wiz = form()
-    for key in ("profile", "cwd", "worktree", "role", "resume",
+    for key in ("profile", "model", "cwd", "worktree", "role", "resume",
                 "mesh", "workflow", "restore", "attach"):
         assert isinstance(wiz.field(key), wizard.ChoiceField), key
     for key in ("name", "task", "args", "handle", "context", "worktree_name"):
@@ -234,6 +237,27 @@ def test_the_form_defaults_to_a_real_profile():
     wiz = form()
     assert wiz.value("profile") == "work"
     assert wiz.field("profile").options[0].value == ""  # empty placeholder
+
+
+def test_new_session_model_picker_follows_the_profile_harness():
+    wiz = form(sources=CodexSources())
+    assert [option.value for option in wiz.field("model").options] == [
+        "", "haiku", "sonnet", "opus", "fable",
+    ]
+    pick(wiz, "model", "opus")
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    assert answers.model == "opus"
+
+    pick(wiz, "profile", "codex/codex")
+    assert [option.value for option in wiz.field("model").options] == [
+        "", "luna", "terra", "sol",
+    ]
+    pick(wiz, "model", "terra")
+    answers = argparse.Namespace()
+    wiz.apply(answers)
+    assert answers.profile == "codex:codex"
+    assert answers.model == "terra"
 
 
 def test_profile_picker_labels_the_default_and_omits_denied_selectors():
@@ -1413,6 +1437,8 @@ def test_the_policy_keeps_profile_borrow_and_args_locked_by_default():
     assert "spawn.allow_profile" in wiz.field("borrow").disabled_note
     assert not wiz.field("args").selectable
     assert "spawn.allow_args" in wiz.field("args").disabled_note
+    assert not wiz.field("model").selectable
+    assert "spawn.allow_args" in wiz.field("model").disabled_note
     # --null is never gated: it takes a credential away, not grants one
     assert wiz.field("null_token").selectable
 
@@ -1421,11 +1447,41 @@ def _open_report(**extra):
     return {
         "can_spawn": True, "blocked_by": [], "depth": 0, "max_depth": 3,
         "children_used": 0, "children_remaining": 4,
-        "may_choose": ["args", "borrow", "null_token", "profile"],
+        "may_choose": ["args", "model", "borrow", "null_token", "profile"],
         "spawnable_harnesses": [],
         "profiles": ["other", "work"],
         **extra,
     }
+
+
+def test_spawn_model_inherits_changes_and_can_return_to_harness_default():
+    sessions = [
+        {"name": "lead", "status": "idle", "harness": "claude",
+         "profile": "work", "model": "opus", "cwd": "/work/repo"},
+    ]
+    locked = spawn_form(sources=FakeSpawnSources(sessions=sessions))
+    assert locked.value("model") == "opus"
+    assert not locked.field("model").selectable
+    inherited = argparse.Namespace()
+    locked.apply(inherited)
+    assert inherited.model is None
+
+    report = {
+        **_open_report(),
+        "may_choose": ["args", "model", "borrow", "null_token", "profile"],
+    }
+    open_form = spawn_form(
+        sources=FakeSpawnSources(sessions=sessions, report=report)
+    )
+    pick(open_form, "model", "sonnet")
+    changed = argparse.Namespace()
+    open_form.apply(changed)
+    assert changed.model == "sonnet"
+
+    pick(open_form, "model", "(harness default)")
+    cleared = argparse.Namespace()
+    open_form.apply(cleared)
+    assert cleared.model == ""
 
 
 def test_spawn_codex_runtime_is_visible_but_inherited_when_args_are_locked():

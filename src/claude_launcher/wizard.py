@@ -1639,7 +1639,7 @@ class Wizard(Form):
     # directory and the role, and takes no preset -- remembering it would
     # promise a default the form never applies.
     recall_fields = (
-        "profile", "borrow", "null_token", "role", "args",
+        "profile", "model", "borrow", "null_token", "role", "args",
         "mesh", "restore", "attach", "skip_permissions",
         "codex_yolo", "codex_sandbox",
     )
@@ -1659,6 +1659,8 @@ class Wizard(Form):
         self._issues_for: Optional[tuple] = None
         self._borrow_for: Optional[str] = None
         self._preset_borrow: str = get("borrow") or ""
+        self._models_for: Optional[str] = None
+        self._preset_model: str = get("model") or ""
 
         profile_defs = self.sources.profile_options() or [
             {"value": p, "label": p}
@@ -1685,6 +1687,12 @@ class Wizard(Form):
             profile.index = 1
         if get("profile"):
             profile.select(get("profile"))
+
+        model = ChoiceField(
+            key="model", label="Model",
+            hint="model alias handed to the selected harness at launch",
+            options=[Option("(harness default)", "")],
+        )
 
         borrow = ChoiceField(
             key="borrow", label="Borrow",
@@ -1872,7 +1880,7 @@ class Wizard(Form):
         )
 
         return [
-            name, profile, borrow, null, directory,
+            name, profile, model, borrow, null, directory,
             *worktree_fields(""), role,
             resume, fork, skip_permissions, codex_yolo, codex_sandbox,
             args_field, mesh, handle, connect, workflow, context, task,
@@ -1959,6 +1967,18 @@ class Wizard(Form):
             (h for h in self.sources.harnesses()
              if h.get("name") == harness_name), {}
         )
+        if self._models_for != harness_name:
+            self._models_for = harness_name
+            model = self.field("model")
+            keep = self._preset_model or model.value or ""
+            choices = [str(value) for value in capabilities.get("models") or []]
+            model.options = [Option("(harness default)", "")] + [
+                Option(value, value) for value in choices
+            ]
+            model.index = 0
+            model.select(keep)
+            self._preset_model = ""
+        self.field("model").hidden = not bool(capabilities.get("models"))
         borrow_allowed = bool(detail.get("borrow_allowed", claude))
         self._sync_borrow_options(
             self.value("profile") or "",
@@ -2074,6 +2094,9 @@ class Wizard(Form):
         args.name = self.value("name")
         args.harness = None
         args.profile = self.value("profile") or None
+        args.model = (
+            None if self.field("model").hidden else self.value("model") or None
+        )
         detail = self.sources.profile_harness(self.value("profile") or "")
         claude = detail.get("harness") == "claude"
         borrow_allowed = bool(detail.get("borrow_allowed", claude))
@@ -2133,6 +2156,8 @@ class Wizard(Form):
             "profile " + str(self.value("profile") or "(none)"),
             "in " + str(self.value("cwd")),
         ]
+        if not self.field("model").hidden and self.value("model"):
+            parts.append("model " + str(self.value("model")))
         if self.value("borrow"):
             parts.append("borrowing " + str(self.value("borrow")))
         detail = self.sources.profile_harness(self.value("profile") or "")
@@ -2306,6 +2331,8 @@ class SpawnWizard(Form):
         self._codex_mode_for: Optional[tuple] = None
         self._codex_mode_original: "tuple[bool, bool]" = (True, False)
         self._codex_base_args: List[str] = []
+        self._model_for: Optional[tuple] = None
+        self._model_original: str = ""
         # Fixed once, not per render: a name that ticked over between the
         # picker showing it and Create sending it would cut a worktree under
         # a name nobody read.
@@ -2363,6 +2390,7 @@ class SpawnWizard(Form):
         # remembered here and consumed on the first rebuild.
         self._preset_profile: str = get("profile") or ""
         self._preset_borrow: str = get("borrow") or ""
+        self._preset_model: Optional[str] = get("model", None)
         self._borrow_for: Optional[str] = None
         #: The same flag, kept rather than consumed: `_preset_profile` is
         #: spent seeding the row on the first rebuild, and after that
@@ -2376,11 +2404,20 @@ class SpawnWizard(Form):
         self._typed_profile: str = (
             "" if d is None else str(wizard_recall.typed(d, "profile") or "")
         )
+        self._typed_model: Optional[str] = (
+            None if d is None or wizard_recall.typed(d, "model") is None
+            else str(wizard_recall.typed(d, "model"))
+        )
         profile = ChoiceField(
             key="profile", label="Profile : Harness",
             hint="a different profile for the child (spawn.allow_profile "
                  "decides whether it may be one)",
             options=[],
+        )
+        model = ChoiceField(
+            key="model", label="Model",
+            hint="model alias for the child (spawn.allow_args decides whether it may change)",
+            options=[Option("(harness default)", "")],
         )
         borrow = ChoiceField(
             key="borrow", label="Borrow",
@@ -2510,7 +2547,7 @@ class SpawnWizard(Form):
         )
         attach.select(bool(get("attach")))
         return [
-            parent, over_limit, name, profile, borrow, null, fork,
+            parent, over_limit, name, profile, model, borrow, null, fork,
             workspace,
             *worktree_fields(""), codex_yolo, codex_sandbox, args_field,
             mesh, handle, role, connect, workflow, context, task,
@@ -2634,6 +2671,39 @@ class SpawnWizard(Form):
             (h for h in self.sources.harnesses()
              if h.get("name") == child_harness), {}
         )
+        model_for = (
+            parent, effective_selector, child_harness,
+            str(parent_info.get("model") or ""),
+        )
+        if model_for != self._model_for:
+            self._model_for = model_for
+            inherited_model = (
+                str(parent_info.get("model") or "")
+                if child_harness == parent_info.get("harness") else ""
+            )
+            choices = [str(value) for value in capabilities.get("models") or []]
+            model_f = self.field("model")
+            model_f.options = [Option("(harness default)", "")] + [
+                Option(value, value) for value in choices
+            ]
+            model_f.index = 0
+            wanted = (
+                self._preset_model
+                if self._preset_model is not None else inherited_model
+            )
+            model_f.select(wanted)
+            self._preset_model = None
+            self._model_original = inherited_model
+        model_f = self.field("model")
+        model_f.hidden = not bool(capabilities.get("models"))
+        model_f.disabled = not model_f.hidden and "model" not in may
+        if model_f.disabled:
+            inherited_label = self._model_original or "harness default"
+            model_f.disabled_note = (
+                f"inherited from the parent: {inherited_label} (spawn.allow_args)"
+            )
+        else:
+            model_f.disabled_note = ""
         mode_for = (parent, effective_selector, child_harness)
         if mode_for != self._codex_mode_for:
             self._codex_mode_for = mode_for
@@ -2995,6 +3065,19 @@ class SpawnWizard(Form):
             if self.field("profile").disabled
             else self.value("profile") or None
         )
+        model_f = self.field("model")
+        selected_model = str(model_f.value or "")
+        if model_f.hidden:
+            args.model = None
+        elif model_f.disabled:
+            args.model = self._typed_model
+        else:
+            # ``None`` means inherit.  An explicit empty string is retained
+            # when the picker changed from the parent's model to the harness
+            # default so the spawn request can clear that inherited pin.
+            args.model = (
+                None if selected_model == self._model_original else selected_model
+            )
         # Read through the disable, like the other form: a borrow picked and
         # then greyed out (harness flipped, null said yes) must not travel.
         args.borrow = (
@@ -3077,6 +3160,8 @@ class SpawnWizard(Form):
             parts.append("held to the child cap")
         if self.value("profile"):
             parts.append("profile " + str(self.value("profile")))
+        if not self.field("model").hidden and self.value("model"):
+            parts.append("model " + str(self.value("model")))
         if not self.field("borrow").disabled and self.value("borrow"):
             parts.append("borrowing " + str(self.value("borrow")))
         if not self.field("null_token").disabled and self.value("null_token"):

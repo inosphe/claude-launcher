@@ -2994,6 +2994,32 @@ function newProfileHarnessName(f, selector = "") {
     (spawnParent() || {}).harness || "";
 }
 
+/* Model aliases belong to the harness declaration.  The selected alias stays
+   separate from free Args so a child can inherit it, replace it, or return to
+   the harness default without parsing an arbitrary command line. */
+function syncNewModelOptions(f, harnessName, capabilities, parent = null) {
+  if (!f.model) return;
+  const choices = (capabilities.models || []).map(String);
+  const selector = newProfileSelector(f);
+  const parentKey = parent ? `${parent.name}:${parent.model || ""}` : "new";
+  const key = `${parentKey}:${selector}:${harnessName}:` + choices.join("\u0000");
+  if (f._modelFor !== key) {
+    const inherited = parent && harnessName === parent.harness
+      ? String(parent.model || "") : "";
+    f.model.innerHTML = "";
+    f.model.appendChild(new Option("(harness default)", ""));
+    for (const value of choices) f.model.appendChild(new Option(value, value));
+    if (inherited && !choices.includes(inherited)) {
+      f.model.appendChild(new Option(inherited, inherited));
+    }
+    f.model.value = inherited;
+    f._modelOriginal = inherited;
+    f._modelFor = key;
+  }
+  const row = $("new-model-row");
+  if (row) row.classList.toggle("hidden", !choices.length);
+}
+
 /* ---- Codex's harness-specific runtime panel ----------------------------
    Approval and file isolation are independent Codex settings.  They are not
    rendered from generic capability flags: a different harness that happens
@@ -3568,6 +3594,7 @@ function syncForkAvailability() {
   const claude = harnessName === "claude";
   const capabilities = (typeof harnessDetails !== "undefined"
     ? harnessDetails[harnessName] : null) || {};
+  syncNewModelOptions(f, harnessName, capabilities, parent);
   const borrowCap = profileBorrowCapability(
     newProfileDetail(f, selector), harnessName
   );
@@ -3780,11 +3807,11 @@ $("new-session").addEventListener("input", () => {
    spawn modal. A form that offers what it cannot send teaches the policy
    wrong; one that withholds what the policy opened teaches it just as
    wrong, and lies to the person who set 'allow_profile: true'. */
-const SPAWN_INHERITS = ["profile", "harness", "borrow", "null_token", "cwd",
+const SPAWN_INHERITS = ["profile", "harness", "model", "borrow", "null_token", "cwd",
                         "args", "resume", "fork", "skip_permissions", "codex_yolo",
                         "codex_sandbox"];
 
-/* Of those, the two that no longer live in the fold. They are still
+/* Of those, the rows that no longer live in the fold. They are still
    inherited — the spawn policy governs them exactly as before, and
    spawnChildFields still reads them through their disables — but they are
    asked on the face of the form, because what they decide is WHOSE
@@ -3798,7 +3825,7 @@ const SPAWN_INHERITS = ["profile", "harness", "borrow", "null_token", "cwd",
    held to the same partition by tests/web/newform_check.js: the fold's rows
    plus these must be exactly SPAWN_INHERITS, so promoting a row means moving
    it, never copying it. */
-const RUNTIME_PROMOTED = ["profile", "harness"];
+const RUNTIME_PROMOTED = ["profile", "harness", "model"];
 
 /* The picked parent's spawn capabilities, and which parent they are about:
    one report per parent, kept until the pick moves. */
@@ -3818,6 +3845,7 @@ function spawnUnlocked(report) {
   return {
     harness: may.includes("profile"),
     profile: may.includes("profile"),
+    model: may.includes("model"),
     borrow: may.includes("borrow"),
     // Ungated by the policy — it takes a credential away rather than
     // granting one — but still claude-only machinery (see syncSpawnMode).
@@ -3891,7 +3919,8 @@ function refreshParentChoices() {
   // Create would send.
   const offered = sessionsCache
     .filter((s) => s.status !== "exited")
-    .map((s) => [s.name, s.status, s.harness || "", !!s.conversation_id]);
+    .map((s) => [s.name, s.status, s.harness || "", !!s.conversation_id,
+                 s.model || ""]);
   const signature = JSON.stringify(offered);
   if (signature === parentsRendered) return;
   parentsRendered = signature;
@@ -3953,6 +3982,7 @@ function syncSpawnMode() {
     const claude = !childHarness || childHarness === "claude";
     const childCapabilities = (typeof harnessDetails !== "undefined"
       ? harnessDetails[childHarness] : null) || {};
+    syncNewModelOptions(f, childHarness, childCapabilities, parent);
     const modeBase = childHarness === parent.harness ? (parent.args || []) : [];
     seedNewCodexRuntime(
       f, childCapabilities, modeBase,
@@ -4097,6 +4127,12 @@ function spawnChildFields(f, body) {
   }
   if (!f.borrow.disabled) put("borrow", f.borrow.value);
   if (!f.null_token.disabled && f.null_token.checked) body.null_token = true;
+  if (f.model && !f.model.disabled &&
+      f.model.value !== String(f._modelOriginal || "")) {
+    // The empty value is meaningful here: it removes the parent's selection
+    // and returns the child to the selected harness's default.
+    body.model = f.model.value;
+  }
   const selector = newProfileSelector(f);
   const harnessName = newProfileHarnessName(f, selector);
   const capabilities = (typeof harnessDetails !== "undefined"
@@ -4209,6 +4245,7 @@ $("new-session").addEventListener("submit", async (e) => {
     cwd: f.cwd.value,  // a registered workspace path, or "" = the daemon's cwd
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
+  if (!parent && f.model && f.model.value) body.model = f.model.value;
   if (!parent) {
     const selector = newProfileSelector(f);
     const harnessName = newProfileHarnessName(f, selector) || "claude";
@@ -13420,6 +13457,37 @@ function syncSpawnCodexRuntime(ui, childHarness, capabilities, may) {
   }
 }
 
+function syncSpawnModel(ui, childHarness, capabilities, may) {
+  if (!ui.model) return;
+  const parent = ui.parentSess || {};
+  const choices = (capabilities.models || []).map(String);
+  const key = `${spawnProfileSelector(ui)}:${childHarness}:${parent.model || ""}:` +
+    choices.join("\u0000");
+  if (ui._modelFor !== key) {
+    const inherited = childHarness === parent.harness
+      ? String(parent.model || "") : "";
+    const wanted = ui._modelPreset !== undefined
+      ? String(ui._modelPreset || "") : inherited;
+    fillSpawnSelect(
+      ui.model, choices.map((value) => [value, value]),
+      "(harness default)", wanted
+    );
+    ui._modelFor = key;
+    ui._modelOriginal = inherited;
+    ui._modelPreset = undefined;
+  }
+  if (ui.modelRow) ui.modelRow.hidden = !choices.length;
+  const inherited = !may.includes("model");
+  ui.model.disabled = inherited;
+  if (ui.modelNote) {
+    ui.modelNote.hidden = !inherited;
+    ui.modelNote.textContent = inherited
+      ? `inherited from the parent: ${ui._modelOriginal || "harness default"} ` +
+        "(spawn.allow_args)"
+      : "";
+  }
+}
+
 /* The wizard's _sync: every dependency between rows, re-derived on every
    change. Locks carry the wizard's own wording — a greyed row says which
    policy key opens it, not just that it is shut. */
@@ -13475,6 +13543,7 @@ function syncSpawnGates(ui) {
     (pickedDetail ? pickedDetail.harness : (ui.parentSess || {}).harness || "");
   const childCapabilities = (typeof harnessDetails !== "undefined"
     ? harnessDetails[childHarness] : null) || {};
+  syncSpawnModel(ui, childHarness, childCapabilities, may);
   syncSpawnCodexRuntime(ui, childHarness, childCapabilities, may);
   lock(ui.profile, ui.profileNote, may.includes("profile") ? "" :
     "the child runs under its parent's profile (spawn.allow_profile)");
@@ -13657,6 +13726,10 @@ function spawnPayload(ui) {
   if (!ui.borrow.disabled) put("borrow", ui.borrow.value);
   if (!ui.nullTok.disabled && ui.nullTok.checked) body.null_token = true;
   if (!ui.fork.disabled && ui.fork.checked) body.fork = true;
+  if (ui.model && !ui.model.disabled &&
+      ui.model.value !== String(ui._modelOriginal || "")) {
+    body.model = ui.model.value;
+  }
   const typedArgs = !ui.args.disabled && (ui.args.value || "").trim()
     ? ui.args.value.trim().split(/\s+/) : [];
   const codexOpen = ui.codexPanel && !ui.codexPanel.hidden &&
@@ -14035,6 +14108,12 @@ function buildSpawnForm(parentName, seed) {
   box.appendChild(spawnRow("Profile", ui.profile, (ui.profileNote = el("span", "sess-spawn-note"))));
   ui.harness = document.createElement("select");
   box.appendChild(spawnRow("Harness", ui.harness, (ui.harnessNote = el("span", "sess-spawn-note"))));
+  ui.model = document.createElement("select");
+  ui.modelRow = spawnRow(
+    "Model", ui.model, (ui.modelNote = el("span", "sess-spawn-note"))
+  );
+  ui.modelRow.hidden = true;
+  box.appendChild(ui.modelRow);
   ui.borrow = document.createElement("select");
   box.appendChild(spawnRow("Borrow", ui.borrow, (ui.borrowNote = el("span", "sess-spawn-note"))));
   ui.nullTok = null; ui.nullNote = null;
@@ -14143,6 +14222,7 @@ function buildSpawnForm(parentName, seed) {
   ui.name.value = seed.name || "";
   ui.task.value = seed.task || "";
   ui.args.value = (seed.args || []).join(" ");
+  ui._modelPreset = seed.model;
   ui.nullTok.checked = !!(seed.null_token ?? rec.null_token);
   return { box, ui, noteShow };
 }

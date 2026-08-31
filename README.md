@@ -1351,8 +1351,8 @@ and a form painted into its PTY would hang the session it was creating.
 
 | Command | Description |
 | ------- | ----------- |
-| `new-session` (`new`) | Spawn the harness owned by required `--profile P` in a managed PTY. `--wizard` uses one `Profile : Harness` picker and picks every other field (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R` with `--mesh`, Claude-only `--resume [S]`/`--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH`, `-a/--attach`; trailing args pass through). Also **what it is for**: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."`. `--harness` remains only as a deprecated, refused compatibility flag. **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
-| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` uses the inherited or allowed replacement `Profile : Harness`; by flag: (`--parent S`, `-s NAME`, `--profile P` when allowed, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `-w/--workspace NAME`, `--worktree NAME --rebase-onto BRANCH`). `--harness` is refused; changing an allowed profile is the only way to change the child harness. `--mesh` defaults to the parent's own. |
+| `new-session` (`new`) | Spawn the harness owned by required `--profile P` in a managed PTY. `--wizard` uses one `Profile : Harness` picker and picks every other field (see [Building one from a form](#building-one-from-a-form---wizard)); by flag: (`-s NAME`, `--profile P`, `--model M`, `-c CWD`, `--cols/--rows`, `--env K=V`, `--restore/--no-restore`, `--role R` with `--mesh`, Claude-only `--resume [S]`/`--fork-session`, `--worktree[=NAME]`/`--no-worktree`, `--rebase-onto BRANCH`, `-a/--attach`; trailing args pass through). Also **what it is for**: `--mesh M --as HANDLE --connect H`, `--workflow W --context C`, `--task "..."`. `--harness` remains only as a deprecated, refused compatibility flag. **Yours, not an agent's**: refused from inside a managed session, which should use `spawn` (`--detached` overrides). |
+| `spawn`               | Create a **child** of a session by hand, exactly as its agent would — same endpoint, same policy. `--wizard` uses the inherited or allowed replacement `Profile : Harness`; by flag: (`--parent S`, `-s NAME`, `--profile P` when allowed, `--model M` when `spawn.allow_args` permits it, `--mesh M`, `--as HANDLE`, `--role R`, `--connect HANDLE`, `--workflow W`, `--task "..."`, `-w/--workspace NAME`, `--worktree NAME --rebase-onto BRANCH`). `--harness` is refused; changing an allowed profile is the only way to change the child harness. `--mesh` defaults to the parent's own. |
 | `sessions` (`lss`)    | List sessions: name, status (`starting/busy/idle/exited`), harness, profile, size, cwd. Children are indented under the session that spawned them. |
 | `attach [S]` (`a`, `attach-session`) | Mirror a session into this terminal, tmux-style; detach with `Ctrl+]` (session keeps running). Omit `S` when exactly one session is running. `-t S` also accepted. |
 | `respawn S [-a]`      | Relaunch an exited session under its own name — claude comes back with `--resume` of its pinned conversation, so quitting it by accident (double `Ctrl+C` while attached) is recoverable. `-a` attaches right away. Also a **resume** button in the [web UI](#web-ui--http-api). |
@@ -1877,6 +1877,15 @@ rejected. A session saves the canonical selector, so
 `ds4:pi` restores as Pi even if `profiles.ds4.harness` later changes.
 The colon is logical only and never becomes part of a Windows path.
 
+The same creation surfaces offer a **Model** picker. Claude declares
+`haiku`, `sonnet`, `opus`, and `fable`; Codex declares `luna`, `terra`, and
+`sol`. The selected alias is saved with the session and launched as
+`--model=<alias>`. A profile's `.claunch.yaml` `env` remains authoritative,
+so Claude aliases can continue to resolve through values such as
+`ANTHROPIC_DEFAULT_OPUS_MODEL`. Omitting Model uses the harness default. A
+child inherits its parent's selection; changing or clearing it is governed
+by `spawn.allow_args`.
+
 `claude` is the one harness whose executable is `CLAUDE_LAUNCHER_BIN`; it uses
 the profile root as `CLAUDE_CONFIG_DIR` for backwards compatibility. Other
 packaged harnesses receive a namespaced home/config path below that root when
@@ -2215,8 +2224,8 @@ workflow).
   **authenticates the way its parent does**, a parent's borrow included.
   Harness itself has no spawn unlock: it is derived from the inherited or
   allowed replacement profile. If that profile changes the harness, inherited
-  args and Claude-only auth choices are dropped because they belonged to the
-  parent's program.
+  args, model selection and Claude-only auth choices are dropped because they
+  belonged to the parent's program.
 - **A child may be sent to another directory — by name, not by path.**
   `allow_workspace` lets the agent pass a `workspace` from your
   [registry](#workspaces-where-a-session-may-be-spawned); `allow_cwd` lets it
@@ -2426,7 +2435,8 @@ Spawn forms. Profile lists each base name once; Harness reflects its default
 and allowed explicit alternatives. The browser combines them into the API's
 single canonical profile selector. Configure the default with
 `claunch set-harness`. The terminal wizards present the same source as one
-`Profile : Harness` picker.
+`Profile : Harness` picker. The adjacent **Model** picker follows the selected
+harness and is available in the create form and both Spawn forms.
 
 The create form's **Directory** is a picker over your
 [workspaces](#workspaces-where-a-session-may-be-spawned) — free-text paths are

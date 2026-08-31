@@ -194,7 +194,7 @@ def test_spawn_remembers_its_own_shorter_list(home):
     # to offer, so they are not carried across parents; its mesh is the
     # parent's answer, not last launch's
     assert not spawn_fields & {
-        "harness", "args", "workspace", "name", "mesh",
+        "harness", "model", "args", "workspace", "name", "mesh",
         "codex_yolo", "codex_sandbox",
     }
     # the PARENT is carried: it is the answer every other row is re-read

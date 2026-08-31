@@ -35,8 +35,11 @@ def test_packaged_set_declares_supported_harnesses(home):
     assert reg["claude"].token_env == "ANTHROPIC_AUTH_TOKEN"
     assert reg["claude"].borrow_mode == "provider-token"
     assert reg["claude"].empty_env == ["ANTHROPIC_API_KEY"]
+    assert reg["claude"].models == ["haiku", "sonnet", "opus", "fable"]
     assert "OPENAI_API_KEY" in reg["codex"].clear_env
     assert reg["codex"].borrowable is False
+    assert reg["codex"].models == ["luna", "terra", "sol"]
+    assert reg["codex"].to_dict()["models"] == ["luna", "terra", "sol"]
     # Claude leads displays; it is the default and the only builtin one.
     assert harnesses.names()[0] == "claude"
 
