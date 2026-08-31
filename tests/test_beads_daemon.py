@@ -214,12 +214,14 @@ def test_match_explains_each_link_and_orders_the_linked_issue_first():
         {"id": "c", "status": "closed", "assignee": "s1", "updated_at": "2026-01-03T00:00:00Z"},
         {"id": "d", "status": "open", "assignee": "s2"},
         {"id": "e", "status": "open"},
+        {"id": "f", "status": "in_ready", "created_by": "s1", "updated_at": "2026-01-04T00:00:00Z"},
     ]
     got = beads_mod.match(rows, "s1", issue="c", task="see issue: e")
-    assert [i["id"] for i in got] == ["c", "b", "a", "e"]
+    assert [i["id"] for i in got] == ["c", "b", "f", "a", "e"]
     via = {i["id"]: i["via"] for i in got}
     assert via["c"] == ["link", "assignee"]
     assert via["b"] == ["created_by"]
+    assert via["f"] == ["created_by"]
     assert via["e"] == ["task"]
     assert "d" not in via
 
@@ -235,6 +237,7 @@ def test_sweep_plan_returns_in_progress_to_open_and_closes_untouched_placeholder
     mine = [
         {"id": "w", "status": "in_progress", "assignee": "s1"},
         {"id": "r", "status": "in_review", "assignee": "s1"},
+        {"id": "q", "status": "in_ready", "assignee": "s1"},
         {"id": "p", "status": "open", "assignee": "s1", "created_by": "s1",
          "labels": ["session", "user"]},
         {"id": "h", "status": "open", "assignee": "s1", "created_by": "lead",
@@ -249,6 +252,7 @@ def test_sweep_plan_returns_in_progress_to_open_and_closes_untouched_placeholder
         ["update", "w", "--status", "open"],
         ["close", "p", "--reason", "session s1 ended (code 0) before taking this up"],
     ]
+    assert not any("q" in step for step in plan)
 
 
 def test_a_joiners_exit_does_not_return_the_holders_issue_to_open():
@@ -562,9 +566,10 @@ def test_the_link_note_tells_a_joiner_it_is_not_the_assignee():
     assert "mesh send" not in alone and "s9" in alone
 
 
-def test_candidates_offer_open_issues_with_the_verdict_the_creation_path_will_take(repo):
+def test_candidates_offer_active_issues_with_the_verdict_the_creation_path_will_take(repo):
     br = FakeBr()
     br.add(id="free", title="nobody's", status="open", priority=2)
+    br.add(id="ready", title="triaged", status="in_ready", priority=1)
     br.add(id="held", title="the leader's", status="in_progress", assignee="lead")
     br.add(id="dead", title="orphaned", status="open", assignee="old")
     br.add(id="done", title="finished", status="closed")
@@ -580,11 +585,15 @@ def test_candidates_offer_open_issues_with_the_verdict_the_creation_path_will_ta
         by_id = {i["id"]: i for i in view["issues"]}
         assert "done" not in by_id  # closed issues are not on offer
         assert by_id["free"]["mode"] == beads_mod.TAKE
+        assert by_id["ready"]["mode"] == beads_mod.TAKE
         assert by_id["held"]["mode"] == beads_mod.JOIN
         assert by_id["held"]["held_by"] == "lead"
         assert by_id["dead"]["mode"] == beads_mod.TAKE
-        # in_progress ranks above open, so the held one leads the list
+        # in_progress ranks above in_ready and open, so the held one leads the list
         assert view["issues"][0]["id"] == "held"
+        assert [i["id"] for i in view["issues"]].index("ready") < [
+            i["id"] for i in view["issues"]
+        ].index("free")
 
         bare = beads_mod.Board(br, root_for=lambda cwd: None)
         blind = await bare.candidates("nowhere")

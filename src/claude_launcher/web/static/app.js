@@ -8478,8 +8478,8 @@ let beadsFilter = "active";  // status filter: active | <status> | all
 let beadsSession = "";     // session filter: "" = everybody
 let beadsLayout = "board"; // "board" = status lanes, "tree" = the forest
 
-const BEADS_STATUSES = ["open", "in_progress", "in_review", "blocked", "closed"];
-const BEADS_ACTIVE = new Set(["open", "in_progress", "in_review", "blocked"]);
+const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked", "closed"];
+const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
 
 function openBeads(id) {
   beadsOpen = true;
@@ -8563,7 +8563,9 @@ function beadsFilterIssues(issues, filter, session) {
 /* Sort for reading: what is being worked first, then by priority, then the
    most recently touched. */
 function beadsSortIssues(issues) {
-  const rank = { in_progress: 0, in_review: 1, blocked: 2, open: 3, closed: 9 };
+  const rank = {
+    in_progress: 0, in_review: 1, blocked: 2, in_ready: 3, open: 4, closed: 9,
+  };
   return [...issues].sort((a, b) =>
     (rank[a.status] ?? 8) - (rank[b.status] ?? 8) ||
     (a.priority ?? 9) - (b.priority ?? 9) ||
@@ -8571,7 +8573,7 @@ function beadsSortIssues(issues) {
 }
 
 function beadsStatusBadge(status) {
-  const cls = { in_progress: "busy", in_review: "review", blocked: "blocked",
+  const cls = { in_ready: "ready", in_progress: "busy", in_review: "review", blocked: "blocked",
                 open: "open", closed: "exited" }[status] || "";
   return el("span", `badge beads-status ${cls}`, status || "?");
 }
@@ -8814,7 +8816,7 @@ function beadsCard(row) {
   return card;
 }
 
-/* Which lanes a board draws, from the status filter. `active` is the four
+/* Which lanes a board draws, from the status filter. `active` is the five
    that are still work and `all` adds closed; picking one status is a board of
    one lane, which is the honest drawing of that filter rather than four lanes
    with three of them empty. */

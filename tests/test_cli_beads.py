@@ -227,6 +227,7 @@ def test_the_cli_registers_the_subcommand():
 # question" and "there is nothing" arrive identical (claunch-6s1h).
 # --------------------------------------------------------------------------- #
 STATUS_ARG_FORMS = [
+    (["list", "--status", "in_ready"], ["in_ready"]),
     (["list", "--status", "in_review"], ["in_review"]),
     (["list", "--status=in_review"], ["in_review"]),
     (["list", "-s", "in_review"], ["in_review"]),

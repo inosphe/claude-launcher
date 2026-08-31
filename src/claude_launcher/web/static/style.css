@@ -1526,6 +1526,7 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .beads-sess.exited { background: #30363d; color: #8b949e; }
 .badge.beads-status { white-space: nowrap; }
 .badge.beads-status.open { background: #1c2a3a; color: #79c0ff; }
+.badge.beads-status.ready { background: #173b2b; color: #56d364; }
 .badge.beads-status.review { background: #2b1d4d; color: #d2a8ff; }
 .badge.beads-status.blocked { background: #4a1d1d; color: #ff7b72; }
 .beads-detail {
@@ -1570,6 +1571,7 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .beads-lane-name { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: #8b949e; }
 .beads-lane-count { margin-left: auto; font-size: 11px; color: #6e7681; font-variant-numeric: tabular-nums; }
 .beads-lane.open .beads-lane-name { color: #79c0ff; }
+.beads-lane.in_ready .beads-lane-name { color: #56d364; }
 .beads-lane.in_progress .beads-lane-name { color: #d29922; }
 .beads-lane.in_review .beads-lane-name { color: #d2a8ff; }
 .beads-lane.blocked .beads-lane-name { color: #ff7b72; }
