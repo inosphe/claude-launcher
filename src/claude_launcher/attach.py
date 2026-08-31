@@ -109,19 +109,22 @@ def _read_stdin() -> bytes:
 
 
 def _read_stdin_windows() -> bytes:
-    # ReadConsoleW (not os.read/ReadFile) so non-ASCII input survives: it
-    # returns UTF-16 characters, and with ENABLE_VIRTUAL_TERMINAL_INPUT set
-    # arrows/function keys arrive as VT escape sequences in the same stream.
+    # With ENABLE_VIRTUAL_TERMINAL_INPUT, the console exposes a UTF-8 byte
+    # stream. ReadFile keeps that stream intact. ReadConsoleW first converts
+    # the stream to UTF-16 and can split/drop IME commits when input arrives
+    # quickly (especially CJK); it also makes VT bytes pass through a second
+    # encoding boundary. Reading bytes is safe here because the PTY bridge is
+    # bytes-based and its consumer already handles UTF-8 incrementally.
     import ctypes
 
     k32 = ctypes.windll.kernel32
     handle = k32.GetStdHandle(-10)  # STD_INPUT_HANDLE
-    buf = ctypes.create_unicode_buffer(_STDIN_CHUNK)
+    buf = ctypes.create_string_buffer(_STDIN_CHUNK)
     n = ctypes.c_uint32()
-    ok = k32.ReadConsoleW(handle, buf, _STDIN_CHUNK, ctypes.byref(n), None)
+    ok = k32.ReadFile(handle, buf, _STDIN_CHUNK, ctypes.byref(n), None)
     if not ok or n.value == 0:
         return b""
-    return buf[: n.value].encode("utf-8", errors="replace")
+    return buf.raw[: n.value]
 
 
 class _RawTerminal:
