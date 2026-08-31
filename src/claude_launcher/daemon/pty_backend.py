@@ -59,6 +59,47 @@ def spawn(
     return _UnixPty(argv, env=env, cwd=cwd, cols=cols, rows=rows)
 
 
+#: ``FORCE_COLOR`` values that mean "off". The variable is the one member of
+#: this family whose presence can also mean *on*, so only the negative
+#: readings are dropped -- an operator who exported ``FORCE_COLOR=1`` is
+#: answering for the child, not about a pipe they own.
+_FORCE_COLOR_OFF = ("", "0", "false")
+
+#: ``TERM`` values that say "there is no terminal here".
+_TERM_NOT_A_TERMINAL = ("", "dumb")
+
+
+def strip_inherited_color_answers(env: Dict[str, str]) -> Dict[str, str]:
+    """``env`` minus the "do not colour your output" answers it inherited.
+
+    The daemon is routinely started from inside an agent session's tool shell
+    (that is where ``claunch daemon start``, ``claunch web`` and every command
+    that autostarts the daemon get run), and such a shell exports
+    ``NO_COLOR=1`` / ``FORCE_COLOR=0`` / ``TERM=dumb`` so that *its own*
+    subprocess prints plain text for a transcript. The daemon then hands its
+    environment to every PTY child it spawns, and those answers are wrong
+    there: a session's child draws a TUI into a real PTY that a terminal
+    renders -- xterm.js in the web UI, or the terminal behind ``claunch
+    attach``. Claude Code honours ``NO_COLOR`` and ``TERM=dumb`` (each alone
+    is enough, measured), so an inherited pair turns the whole interface
+    monochrome for the life of the daemon, while a harness that consults
+    neither (codex) keeps its colours -- which is what the split looks like
+    from the outside.
+
+    Dropped rather than replaced, so nothing is asserted that the operator did
+    not ask for: on Unix the caller's ``TERM`` default fills the hole, and a
+    session that really wants plain output still sets ``NO_COLOR`` through its
+    own ``--env`` or its profile's, both of which are applied after this.
+    """
+    out = dict(env)
+    out.pop("NO_COLOR", None)
+    if out.get("FORCE_COLOR", "").strip().lower() in _FORCE_COLOR_OFF:
+        out.pop("FORCE_COLOR", None)
+    if out.get("TERM", "").strip().lower() in _TERM_NOT_A_TERMINAL:
+        out.pop("TERM", None)
+    return out
+
+
 class _WinPty(PtyHandle):
     """ConPTY via pywinpty's ptyprocess-style ``PtyProcess``.
 

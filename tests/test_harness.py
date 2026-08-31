@@ -223,6 +223,60 @@ def test_session_identity_env_exported(home, tmp_path):
     assert env["CLAUNCH_SESSION"] == "hx"
 
 
+def test_inherited_no_colour_answers_do_not_reach_the_session(
+    home, monkeypatch, tmp_path
+):
+    """A daemon started from an agent's tool shell must not pass that shell's
+    "print plain text" answers on to a PTY child.
+
+    ``NO_COLOR=1`` and ``TERM=dumb`` each turn Claude Code's whole interface
+    monochrome on their own, and the daemon hands its own environment to every
+    session it spawns -- which is how one daemon restart made every claude
+    session render black and white in the web UI while codex sessions, which
+    consult neither variable, kept their colours.
+    """
+    profile.create("work")
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("FORCE_COLOR", "0")
+    monkeypatch.setenv("TERM", "dumb")
+
+    sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+    _, env, _ = harness.build_command(sdef)
+
+    assert "NO_COLOR" not in env
+    assert "FORCE_COLOR" not in env
+    assert env.get("TERM") != "dumb"
+
+
+def test_a_session_can_still_ask_for_plain_output_itself(home, monkeypatch, tmp_path):
+    """The strip is about what was *inherited*. A session that says so in its
+    own env keeps the answer -- ``sdef.env`` is applied after the base."""
+    profile.create("work")
+    monkeypatch.setenv("NO_COLOR", "1")
+
+    sdef = harness.normalize(
+        SessionDef(
+            name="x", profile="work", cwd=str(tmp_path), env={"NO_COLOR": "1"}
+        )
+    )
+    _, env, _ = harness.build_command(sdef)
+
+    assert env["NO_COLOR"] == "1"
+
+
+def test_a_real_terminal_answer_survives(home, monkeypatch, tmp_path):
+    """Only the readings that mean "no terminal" / "no colour" are dropped."""
+    profile.create("work")
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.setenv("FORCE_COLOR", "1")
+
+    sdef = harness.normalize(SessionDef(name="x", profile="work", cwd=str(tmp_path)))
+    _, env, _ = harness.build_command(sdef)
+
+    assert env["TERM"] == "xterm-256color"
+    assert env["FORCE_COLOR"] == "1"
+
+
 def test_claude_fresh_start_pins_conversation_id(home, tmp_path):
     import uuid
 

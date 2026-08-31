@@ -85,6 +85,45 @@ def test_default_shell_argv():
     assert _config_argv(["pwsh", "-NoLogo"]) == ["pwsh", "-NoLogo"]
 
 
+def test_cli_shell_does_not_inherit_the_daemons_no_colour_answers(
+    home, monkeypatch, tmp_path
+):
+    """The CLI tab is a terminal too, so the daemon's inherited ``NO_COLOR`` /
+    ``TERM=dumb`` must not follow the shell in."""
+    from claude_launcher.daemon import clipty, pty_backend
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setenv("TERM", "dumb")
+    seen = {}
+
+    class _Fake:
+        pid = 1
+
+        def read(self):
+            return b""
+
+        def terminate(self, force=False):
+            pass
+
+        def close(self):
+            pass
+
+    def fake_spawn(argv, *, env, cwd, cols, rows):
+        seen.update(env)
+        return _Fake()
+
+    monkeypatch.setattr(pty_backend, "spawn", fake_spawn)
+
+    async def run():
+        shell = clipty.ShellPty(argv=REPL, cwd=str(tmp_path))
+        assert shell.restart()
+
+    asyncio.run(run())
+
+    assert "NO_COLOR" not in seen
+    assert seen.get("TERM") != "dumb"
+
+
 def test_cli_terminal_roundtrip_and_persistence(home, tmp_path):
     """Typed bytes reach the shell, output streams back, and the shell —
     and its output ring — survive the viewer leaving."""
