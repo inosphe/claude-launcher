@@ -368,6 +368,54 @@ def test_a_preview_merge_of_the_old_pair_does_not(repo, capsys):
     assert code == merge_ready.REMEASURE, out
 
 
+def test_a_green_preview_accepts_an_additive_target_advance(repo, capsys):
+    """A target commit may land during a window without spending it twice."""
+    ref = "refs/claunch/preview/preview-branch"
+    preview = _preview(repo, "preview-branch", "preview-target", ref)
+    preview_tree = _git(repo, "rev-parse", f"{preview}^{{tree}}").strip()
+    _git(repo, "checkout", "-q", "preview-target")
+    _write(repo, "accepted_advance.py", "w = 3\n")
+    _commit(repo, "preview: target moved again")
+    _git(repo, "checkout", "-q", "master")
+
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "preview-branch",
+        "--target",
+        "preview-target",
+        "--preview-ref",
+        ref,
+        "--allow-target-advance",
+    )
+    assert code == merge_ready.READY, out
+    assert "target advance is additive" in out
+
+
+def test_an_interacting_target_advance_still_requires_a_rebase(repo, capsys):
+    ref = "refs/claunch/preview/preview-branch"
+    preview = _preview(repo, "preview-branch", "preview-target", ref)
+    preview_tree = _git(repo, "rev-parse", f"{preview}^{{tree}}").strip()
+    _git(repo, "checkout", "-q", "preview-target")
+    _write(repo, "mine.py", "changed = True\n")
+    _commit(repo, "preview: target changes branch file")
+    _git(repo, "checkout", "-q", "master")
+
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "preview-branch",
+        "--target",
+        "preview-target",
+        "--preview-ref",
+        ref,
+        "--allow-target-advance",
+    )
+    assert code == merge_ready.REBASE, out
+
+
 def test_a_ref_that_is_not_a_merge_of_the_pair_is_ignored(repo, capsys):
     """A gate satisfied by any ref at the right name would be no gate at all."""
     ref = "refs/claunch/preview/decoy"

@@ -969,7 +969,7 @@ steps:
       판정은 손으로 하지 않는다 — 상위와 내가 같은 명령으로 같은 답을
       얻어야 왕복이 사라진다. 리더의 preflight가 부르는 것과 같은
       스크립트다:
-        uv run --no-sync python tools/merge_ready.py
+        uv run --no-sync python tools/merge_ready.py --allow-target-advance
       대상은 이 브랜치의 git upstream이고, 없으면 master다. 부모가 중간
       워커여서 대상이 master가 아니면 지금 한 번 적어 둔다 —
       `git branch --set-upstream-to=<기준>` — 이 한 줄이 없으면 게이트는
@@ -979,7 +979,10 @@ steps:
 
       ── 답은 넷이고, 셋만 내 일이다 ──
       · ready(0) — 대상이 이미 내 브랜치에 들어 있거나(behind=0), 재측정이
-        끝나 있다. 그 사실을 보고에 한 줄 남기고 넘어간다.
+        끝났거나, 내 프리뷰가 남아 있고 프리뷰→현재 착지 diff의 파일 목록과
+        stable patch-id가 이전 대상→현재 대상 diff와 같다. 마지막 경우는
+        기준선 이동을 정상으로 받아들이며 프리뷰가 없으면 이 예외를 쓰지
+        않는다.
       · rebase(3) — 미리 병합이 텍스트로 충돌한다. 이것만이 재정렬을
         강제하는 근거다:
           git rebase <대상>

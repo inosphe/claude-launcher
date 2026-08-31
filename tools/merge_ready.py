@@ -288,6 +288,11 @@ def _resolve(repo: Path, rev: str) -> Optional[str]:
     return proc.stdout.strip() or None
 
 
+def _tree(repo: Path, rev: str) -> Optional[str]:
+    proc = _git(repo, "rev-parse", "--verify", "--quiet", f"{rev}^{{tree}}")
+    return proc.stdout.strip() if proc.returncode == 0 and proc.stdout.strip() else None
+
+
 def _conflicts(repo: Path, branch: str, target: str) -> Tuple[Optional[bool], str]:
     """Does merging the two collide? (``None`` = could not ask.)
 
@@ -326,6 +331,60 @@ def _preview_covers(repo: Path, ref: str, tip: str, target_tip: str) -> Optional
     if len(parents) == 2 and set(parents) == {tip, target_tip}:
         return head
     return None
+
+
+def _patch_id(repo: Path, before: str, after: str) -> Optional[str]:
+    """Return Git's stable patch id for a tree diff.
+
+    ``patch-id --stable`` deliberately ignores hunk line numbers.  A candidate
+    can edit a different part of a file whose line numbers moved in the
+    target advance; hashing raw diff text would reject that additive case.
+    """
+    diff = _git(repo, "diff", "--no-ext-diff", "--binary", before, after)
+    if diff.returncode:
+        return None
+    proc = subprocess.run(
+        ["git", "patch-id", "--stable"], input=diff.stdout, capture_output=True, text=True
+    )
+    if proc.returncode or not proc.stdout.split():
+        return None
+    return proc.stdout.split()[0]
+
+
+def _advanced_target_is_covered(
+    repo: Path, ref: str, tip: str, target_tip: str
+) -> Optional[str]:
+    """Accept a target advance only when its diff is additive to a preview.
+
+    The preview must merge this exact branch tip with its then-target.  A
+    later target is acceptable when adding the branch to it changes the old
+    preview by exactly the target's own intervening diff.  Both the changed
+    paths and stable patch ids must agree; a preview that is absent or was
+    built for another branch never grants this exception.
+    """
+    preview = _resolve(repo, ref)
+    if preview is None:
+        return None
+    proc = _git(repo, "rev-list", "--parents", "--max-count=1", preview)
+    parents = proc.stdout.split()[1:] if proc.returncode == 0 else []
+    if len(parents) != 2 or tip not in parents:
+        return None
+    old_target = next(parent for parent in parents if parent != tip)
+    if old_target == target_tip:
+        return None
+    preview_tree = _tree(repo, preview)
+    old_target_tree = _tree(repo, old_target)
+    target_tree = _tree(repo, target_tip)
+    landing_tree, _ = _landing_tree(repo, tip, target_tip)
+    if None in (preview_tree, old_target_tree, target_tree, landing_tree):
+        return None
+    paths_a = _git(repo, "diff", "--name-status", preview_tree, landing_tree)
+    paths_b = _git(repo, "diff", "--name-status", old_target_tree, target_tree)
+    if paths_a.returncode or paths_b.returncode or paths_a.stdout != paths_b.stdout:
+        return None
+    if _patch_id(repo, preview_tree, landing_tree) != _patch_id(repo, old_target_tree, target_tree):
+        return None
+    return preview
 
 
 def _landing_tree(repo: Path, tip: str, target_tip: str) -> Tuple[Optional[str], str]:
@@ -781,6 +840,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         ),
     )
     parser.add_argument(
+        "--allow-target-advance",
+        action="store_true",
+        help=(
+            "accept a moved target when --preview-ref is a preview of this "
+            "tip and the new landing has the same paths and stable patch id "
+            "as the target's intervening diff"
+        ),
+    )
+    parser.add_argument(
         "--checkout",
         nargs="?",
         const=DERIVE_FROM_TARGET,
@@ -914,6 +982,15 @@ def main(argv: Optional[List[str]] = None) -> int:
             f"preview {ref}]"
         )
         return _ready(repo, args.checkout, branch_name, target, tip)
+
+    if args.allow_target_advance:
+        covered = _advanced_target_is_covered(repo, ref, tip, target_tip)
+        if covered:
+            print(
+                f"ready: target advance is additive to green preview {covered[:12]} "
+                f"-- {where} [{asked_by}]"
+            )
+            return _ready(repo, args.checkout, branch_name, target, tip)
 
     swept, note = _swept_green(repo, tip, target_tip)
     if swept is not None:
