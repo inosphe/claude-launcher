@@ -14,7 +14,23 @@ def _define_provider(name, env):
 
 
 def test_registry_includes_default(home):
-    assert providers.registry() == {"default": {}}
+    assert providers.registry() == {"default": {}, "claude": {}}
+
+
+def test_claude_is_an_explicit_anthropic_provider(home):
+    assert providers.service("default") == "anthropic"
+    assert providers.service("claude") == "anthropic"
+    assert providers.uses_anthropic_oauth("claude")
+
+
+def test_provider_service_is_independent_of_harness(home):
+    _define_provider("openai", {"OPENAI_BASE_URL": "https://api.openai.com/v1"})
+    doc = store.load()
+    doc["providers"]["openai"]["service"] = "openai"
+    store.save(doc)
+
+    assert providers.service("openai") == "openai"
+    assert not providers.uses_anthropic_oauth("openai")
 
 
 def test_provider_env_known_and_unknown(home):

@@ -59,6 +59,17 @@ def test_default_provider_still_injects_oauth(home):
     assert "ANTHROPIC_AUTH_TOKEN" not in env
 
 
+def test_named_claude_provider_still_injects_oauth(home):
+    p = profile.create("work")
+    providers.set_profile_selection(p, "claude")
+    credentials.save_token(p, "sk-ant-oat01-abc")
+
+    env = runner.child_env(p, with_token=True)
+
+    assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "sk-ant-oat01-abc"
+    assert "ANTHROPIC_AUTH_TOKEN" not in env
+
+
 def test_claude_always_blanks_anthropic_api_key(home):
     p = profile.create("console-api")
     settings.set_env(p, {"ANTHROPIC_API_KEY": "console-key"})

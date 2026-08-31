@@ -181,10 +181,11 @@ def _windows_from_headers(headers: dict) -> List[UsageWindow]:
 def _fetch_claude(profile: Profile) -> UsageReport:
     """Claude usage (token may be inherited from a parent)."""
     provider = providers.resolve_name(profile)
-    if provider != providers.DEFAULT_PROVIDER:
+    if not providers.uses_anthropic_oauth(provider):
         raise UsageError(
-            f"Claude usage reporting only supports the default Anthropic "
-            f"provider; profile {profile.selector!r} selects provider {provider!r}"
+            "Claude harness usage reporting requires an Anthropic service "
+            f"provider; profile {profile.selector!r} selects provider {provider!r} "
+            f"(service {providers.service(provider)!r})"
         )
     token, profile_scoped = lineage.resolve_token(profile)
     if not token:
@@ -692,7 +693,7 @@ def _default_usage_has_credentials(profile: Profile) -> bool:
     kimi = _kimi_provider_context(profile)
     if kimi is not None:
         return bool(kimi[1])
-    if providers.resolve_name(profile) != providers.DEFAULT_PROVIDER:
+    if not providers.uses_anthropic_oauth(providers.resolve_name(profile)):
         return False
     token, _profile_scoped = lineage.resolve_token(profile)
     return bool(token)

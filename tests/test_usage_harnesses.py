@@ -359,5 +359,23 @@ def test_claude_usage_refuses_a_third_party_provider(home):
     )
     providers.set_profile_selection(p, "kimi")
 
-    with pytest.raises(usage.UsageError, match="default Anthropic provider"):
+    with pytest.raises(usage.UsageError, match="Anthropic service provider"):
         usage.fetch(profile.require_selector(f"{p.name}:claude"))
+
+
+def test_claude_provider_uses_anthropic_usage_api(home, monkeypatch):
+    p = profile.create("work")
+    providers.set_profile_selection(p, "claude")
+    credentials.save_token(p, "oauth-token")
+    reached = {}
+
+    def fake_usage(url, token):
+        reached.update(url=url, token=token)
+        return {"five_hour": {"utilization": 0.25}}
+
+    monkeypatch.setattr(usage, "_oauth_usage", fake_usage)
+
+    report = usage.fetch(profile.require_selector("work:claude"))
+
+    assert reached == {"url": usage.config.usage_url(), "token": "oauth-token"}
+    assert report.source == "oauth-usage"

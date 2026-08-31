@@ -17,6 +17,7 @@ Schema::
     provider: <name>            # global default provider (optional)
     providers:
       <name>:
+        service: <name>        # optional; authentication/usage service identity
         env: {KEY: VALUE, ...}
         allowed_harnesses: [claude, ...]  # optional; missing = unrestricted
     profiles:

@@ -285,7 +285,7 @@ def validate(
             )
 
         provider = provider_override or providers.resolve_name(lender)
-        if provider == providers.DEFAULT_PROVIDER:
+        if providers.uses_anthropic_oauth(provider):
             kind, source = _claude_default_credential(lender)
             if kind == "missing":
                 return BorrowValidation(
