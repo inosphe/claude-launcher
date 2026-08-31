@@ -571,12 +571,27 @@ class DaemonSources(Sources):
         return ""
 
     def members(self, mesh: str) -> List[str]:
+        sessions = {str(s.get("name") or ""): s for s in self.sessions()}
+
+        def connectable(member: dict) -> bool:
+            # A remote daemon owns its session lifecycle, so this daemon has
+            # no local status record on which to reject it.  Local dead or
+            # archived sessions cannot receive a newly-created child's mesh
+            # messages and therefore do not belong in this picker.
+            if member.get("local") is False:
+                return True
+            session = sessions.get(str(member.get("session") or ""))
+            return session is None or (
+                session.get("status") != "exited"
+                and not session.get("archived_at")
+            )
+
         for m in self.meshes():
             if m.get("name") == mesh:
                 return [
                     str(x.get("handle") or "")
                     for x in (m.get("members") or [])
-                    if x.get("handle")
+                    if x.get("handle") and connectable(x)
                 ]
         return []
 

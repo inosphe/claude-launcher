@@ -207,6 +207,23 @@ function check(what, got, want) {
     failures++;
   }
 }
+
+/* Local dead and archived members cannot receive a new child's messages.
+   Remote lifecycle data belongs to the remote daemon, so those rows remain
+   candidates without a local session record. */
+const connectCandidate = new Function(
+  "sessionsCache", `${slice("connectCandidate")}; return connectCandidate;`
+)([
+  { name: "live", status: "idle" },
+  { name: "killed", status: "exited" },
+  { name: "archived", status: "exited", archived_at: "2026-08-31" },
+]);
+check("connect candidates exclude dead local members", [
+  connectCandidate({ handle: "live", session: "live", local: true }),
+  connectCandidate({ handle: "killed", session: "killed", local: true }),
+  connectCandidate({ handle: "archived", session: "archived", local: true }),
+  connectCandidate({ handle: "remote", session: "remote", local: false }),
+], [true, false, false, true]);
 const INHERITED = ["profile", "harness", "model", "borrow", "null_token", "cwd", "args",
                    "resume", "fork", "skip_permissions",
                    "codex_yolo", "codex_sandbox"];
