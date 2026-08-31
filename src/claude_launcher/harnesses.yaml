@@ -18,6 +18,9 @@ harnesses:
   codex:
     command: codex
     models: [luna, terra, sol]
+    efforts: [low, medium, high]
+    model_args: [-c, "model=gpt-5.6-{model}"]
+    effort_args: [-c, "model_reasoning_effort={effort}"]
     args: [--dangerously-bypass-approvals-and-sandbox]
     restore_args: [resume, --last]
     home_env: CODEX_HOME

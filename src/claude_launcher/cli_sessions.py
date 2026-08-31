@@ -188,6 +188,8 @@ def _cmd_new_session(args: argparse.Namespace) -> int:
         body["null_token"] = True
     if chosen_model:
         body["model"] = chosen_model
+    if getattr(args, "effort", None):
+        body["effort"] = args.effort
     # (the daemon echoes both back; _warn_dropped_auth reads that echo)
     # Decided at creation because they are what the session is FOR: a mesh it
     # is not in and a run it does not drive have to be arranged afterwards,
@@ -489,6 +491,7 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
             ("borrow", args.borrow),
             ("null_token", args.null_token),
             ("model", getattr(args, "model", None)),
+            ("effort", getattr(args, "effort", None)),
             ("args", extra),
             ("env", env),
             ("workspace", args.workspace),
@@ -517,6 +520,8 @@ def _cmd_spawn(args: argparse.Namespace) -> int:
     # omitted value, which inherits the parent.
     if getattr(args, "model", None) == "":
         payload["model"] = ""
+    if getattr(args, "effort", None) == "":
+        payload["effort"] = ""
     try:
         result = client.post(f"/api/sessions/{parent}/children", payload)
     except daemon_client.DaemonClientError as exc:
@@ -1867,6 +1872,7 @@ def register(sub) -> None:
         help="model alias for the selected profile harness (Claude: "
         "haiku/sonnet/opus/fable; Codex: luna/terra/sol)",
     )
+    p_new.add_argument("--effort", help="reasoning effort for the selected harness")
     auth = p_new.add_mutually_exclusive_group()
     auth.add_argument(
         "--borrow", metavar="NAME",
@@ -2067,6 +2073,7 @@ def register(sub) -> None:
         help="model alias for the child; inherited when omitted and governed "
         "by spawn.allow_args when changed",
     )
+    p_spawn.add_argument("--effort", help="reasoning effort for the child")
     s_auth = p_spawn.add_mutually_exclusive_group()
     s_auth.add_argument(
         "--borrow", metavar="NAME",
