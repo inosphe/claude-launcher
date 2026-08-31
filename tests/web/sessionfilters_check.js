@@ -105,6 +105,17 @@ check("the shipped page contains all four state controls",
         html.includes(`id="session-filter-${name}"`)), true);
 check("filtered rows leave the layout",
       /#session-list\s*>\s*li\.session-filtered\s*\{[^}]*display:\s*none/.test(css), true);
+check("the shipped page contains the mesh grouping checkbox",
+      html.includes('id="session-group-mesh"') &&
+      html.includes("Group by mesh"), true);
+check("mesh grouping persists and rebuilds the rail",
+      src.includes("const SESSION_GROUP_KEY") &&
+      src.includes("sessionGroupByMesh") &&
+      src.includes("session-group-heading") &&
+      src.includes("setSessionGroupByMesh"), true);
+check("mesh group headings have dedicated styling",
+      /\.session-group-toggle\s*\{/.test(css) &&
+      /#session-list \.session-group-heading\s*\{/.test(css), true);
 
 const killStart = src.indexOf("async function killCurrentSession(");
 const killEnd = src.indexOf("async function archiveExitedSession(", killStart);
