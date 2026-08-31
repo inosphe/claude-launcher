@@ -94,6 +94,7 @@ const api = async () => ({ ok: true, json: async () => served });
 
 /* Everything refreshSessions leans on that is not the row itself. */
 const stubs = `
+function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null;
 // refreshSessions prunes the keep-alive cache of vanished sessions; the

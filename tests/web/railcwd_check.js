@@ -100,6 +100,7 @@ const api = async () => ({ ok: true, json: async () => served });
    gauge is fixed (its wording is railctx_check's and railmodel_check's);
    the rest are the same no-ops the other rail harnesses carry. */
 const stubs = `
+function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null;
 /* The rail hold's state, which refreshSessions now consults before it tears

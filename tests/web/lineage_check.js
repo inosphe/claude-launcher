@@ -68,6 +68,19 @@ check(
   ["keep", "orphan"]
 );
 
+/* The current rail hides archived records. A live child of an archived
+   parent must be laid out against the visible tree, or it appears nested
+   under whichever visible row happens to precede it. */
+check(
+  "an archived parent does not provide hidden indentation",
+  shape(byLineage(
+    sessions("lead", { name: "archived", parent: "lead", archived_at: "now" },
+      { name: "child", parent: "archived" }),
+    sessions("lead", { name: "child", parent: "archived" }),
+  )),
+  ["lead", "archived", "child"]
+);
+
 /* self-parenthood and cycles: only sessions.json can produce these, and the
    listing still has to account for every session it was given */
 check(

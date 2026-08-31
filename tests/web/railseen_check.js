@@ -101,6 +101,7 @@ const api = async () => ({ ok: true, json: async () => served });
    reads like a defect and is not one. Point RAILSEEN_APP_JS at the merged
    tree before believing a green here. */
 const stubs = `
+function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null;
 let keptTerms = new Map();

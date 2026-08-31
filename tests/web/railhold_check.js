@@ -95,6 +95,7 @@ const api = async () => ({ ok, json: async () => served });
    the ⟳ the real one builds, so "the row survived" can be checked as "the node
    the finger was on survived" rather than only as a row count. */
 const stubs = `
+function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null, briefingLLM = true;
 function forgetDeadSessions() {}

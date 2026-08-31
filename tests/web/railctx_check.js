@@ -93,6 +93,7 @@ const api = async () => ({ ok: true, json: async () => served });
    here and broke someone else's). Point RAILCTX_APP_JS at the merged tree
    before believing a green here. */
 const stubs = `
+function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null;
 let keptTerms = new Map();
