@@ -989,8 +989,8 @@ def _faq_body(body: dict) -> dict:
 
 async def h_briefing_faq(request: web.Request) -> web.Response:
     try:
-        return web.json_response({"faq": store.briefing_faq()})
-    except store.StoreError as exc:
+        return web.json_response({"faq": briefing.faq_entries()})
+    except briefing.FaqError as exc:
         return json_error(500, str(exc))
 
 
@@ -1000,11 +1000,11 @@ async def h_briefing_faq_add(request: web.Request) -> web.Response:
     except ValueError as exc:
         return json_error(400, str(exc))
     try:
-        rows = store.briefing_faq()
+        rows = briefing.faq_entries()
         rows.append(row)
-        saved = store.set_briefing_faq(rows)
+        saved = briefing.set_faq_entries(rows)
         return web.json_response({"faq": saved, "entry": saved[-1]}, status=201)
-    except store.StoreError as exc:
+    except briefing.FaqError as exc:
         return json_error(500, str(exc))
 
 
@@ -1015,28 +1015,28 @@ async def h_briefing_faq_update(request: web.Request) -> web.Response:
     except ValueError as exc:
         return json_error(400, str(exc))
     try:
-        rows = store.briefing_faq()
+        rows = briefing.faq_entries()
         for index, row in enumerate(rows):
             if row.get("id") == faq_id:
                 incoming["id"] = faq_id
                 rows[index] = incoming
-                saved = store.set_briefing_faq(rows)
+                saved = briefing.set_faq_entries(rows)
                 return web.json_response({"faq": saved, "entry": incoming})
         return json_error(404, f"no FAQ named {faq_id!r}")
-    except store.StoreError as exc:
+    except briefing.FaqError as exc:
         return json_error(500, str(exc))
 
 
 async def h_briefing_faq_remove(request: web.Request) -> web.Response:
     faq_id = request.match_info["faq_id"]
     try:
-        rows = store.briefing_faq()
+        rows = briefing.faq_entries()
         kept = [row for row in rows if row.get("id") != faq_id]
         if len(kept) == len(rows):
             return json_error(404, f"no FAQ named {faq_id!r}")
-        saved = store.set_briefing_faq(kept)
+        saved = briefing.set_faq_entries(kept)
         return web.json_response({"faq": saved, "removed": faq_id})
-    except store.StoreError as exc:
+    except briefing.FaqError as exc:
         return json_error(500, str(exc))
 
 

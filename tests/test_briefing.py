@@ -18,7 +18,7 @@ import time
 import pytest
 
 from claude_launcher import harnesses, profile, store, transcripts
-from claude_launcher.daemon import briefing
+from claude_launcher.daemon import briefing, paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -829,27 +829,45 @@ def test_briefing_faq_can_be_managed_and_is_persisted(home, tmp_path):
     asyncio.run(run())
 
 
-def test_briefing_faq_reports_an_unreadable_config(home, tmp_path):
-    """FAQ requests preserve the config-read error in their JSON response."""
+def test_briefing_faq_is_independent_of_the_global_config(home, tmp_path):
+    """FAQ writes do not need to replace the user-wide settings file."""
 
     async def run():
         mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
         client = await _serve(mgr)
         try:
             store.path().write_text("{ this: is: not: valid", encoding="utf-8")
-            for method, path, kwargs in (
-                (client.get, "/api/briefing/faq", {}),
-                (client.post, "/api/briefing/faq", {"json": {"question": "Q"}}),
-                (client.put, "/api/briefing/faq/id", {"json": {"question": "Q"}}),
-                (client.delete, "/api/briefing/faq/id", {}),
-            ):
-                resp = await method(path, headers=BEARER, **kwargs)
-                assert resp.status == 500
-                assert "cannot read config file" in (await resp.json())["error"]
+            resp = await client.get("/api/briefing/faq", headers=BEARER)
+            assert resp.status == 200 and (await resp.json())["faq"] == []
+            resp = await client.post(
+                "/api/briefing/faq", json={"question": "Q"}, headers=BEARER,
+            )
+            assert resp.status == 201
+            row = (await resp.json())["entry"]
+            resp = await client.put(
+                f"/api/briefing/faq/{row['id']}",
+                json={**row, "answer": "A"}, headers=BEARER,
+            )
+            assert resp.status == 200
+            resp = await client.delete(
+                f"/api/briefing/faq/{row['id']}", headers=BEARER,
+            )
+            assert resp.status == 200
         finally:
             await client.close()
 
     asyncio.run(run())
+
+
+def test_briefing_faq_imports_the_legacy_global_setting(home):
+    store.save({"briefing": {"faq": [{"question": "기존 질문"}]}})
+
+    entries = briefing.faq_entries()
+
+    assert entries[0]["question"] == "기존 질문"
+    assert json.loads(paths.briefing_faq_json().read_text(encoding="utf-8")) == {
+        "faq": entries
+    }
 
 
 def test_briefing_endpoint_unconfigured_unknown_and_raw(home, tmp_path):

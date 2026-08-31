@@ -31,7 +31,7 @@ Schema::
       marketplaces: [<source>, ...]
       plugins: [<plugin@marketplace>, ...]
       settings: {<settings.json key>: <value>, ...}
-    briefing:
+    briefing:                  # legacy FAQ source; imported by the daemon
       faq: [{id: <id>, question: <text>, answer: <optional reference>, enabled: true}, ...]
     workspaces:                 # machine-local; see :mod:`workspaces`
       <name>: <absolute path>
@@ -368,7 +368,7 @@ def set_daemon_field(key: str, value) -> None:
 # briefing FAQ
 # --------------------------------------------------------------------------- #
 def briefing_faq(doc: Optional[dict] = None) -> List[dict]:
-    """Return the user-maintained FAQ entries used by briefing summaries."""
+    """Return legacy global FAQ entries for one-time daemon import."""
     doc = load() if doc is None else doc
     block = doc.get("briefing")
     rows = block.get("faq") if isinstance(block, dict) else None

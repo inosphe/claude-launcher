@@ -25,6 +25,7 @@ import asyncio
 import json
 import os
 import re
+import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, NamedTuple, Optional, Tuple
@@ -82,6 +83,10 @@ _STATES = frozenset({"working", "blocked", "waiting", "idle", "done", "unknown"}
 
 class BriefingError(Exception):
     """The LLM call failed (transport, HTTP status, or an unusable body)."""
+
+
+class FaqError(Exception):
+    """The daemon-local briefing FAQ could not be read or written."""
 
 
 # --------------------------------------------------------------------------- #
@@ -326,11 +331,72 @@ def gather_live(session) -> Optional[dict]:
         return None
 
 
-def gather_faq() -> List[dict]:
-    """Read enabled user FAQ entries for the summariser prompt."""
+def _clean_faq(rows) -> List[dict]:
+    """Normalize the persisted FAQ representation."""
+    if not isinstance(rows, list):
+        return []
+    clean = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        question = str(row.get("question") or "").strip()
+        if question:
+            clean.append({
+                "id": str(row.get("id") or uuid.uuid4()),
+                "question": question,
+                "answer": str(row.get("answer") or "").strip(),
+                "enabled": row.get("enabled", True) is not False,
+            })
+    return clean
+
+
+def faq_entries() -> List[dict]:
+    """Read this daemon instance's briefing FAQ.
+
+    The old global setting is imported on first access, then the daemon-local
+    copy is authoritative.  The legacy source is left untouched so migration
+    never needs to rewrite a configuration file that may be open in an editor.
+    """
+    path = paths.briefing_faq_json()
     try:
-        return [row for row in store.briefing_faq() if row.get("enabled", True)]
+        if path.is_file():
+            data = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
+                raise ValueError("the FAQ file must contain an object")
+            return _clean_faq(data.get("faq"))
+    except (OSError, ValueError) as exc:
+        raise FaqError(f"cannot read briefing FAQ {path}: {exc}") from exc
+    try:
+        legacy = store.briefing_faq()
     except store.StoreError:
+        legacy = []
+    if legacy:
+        return set_faq_entries(legacy)
+    return []
+
+
+def set_faq_entries(rows) -> List[dict]:
+    """Persist user-defined FAQ entries in this daemon instance's state."""
+    clean = _clean_faq(rows)
+    path = paths.briefing_faq_json()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with atomic.scratch(path) as tmp:
+            tmp.write_text(
+                json.dumps({"faq": clean}, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            atomic.replace(tmp, path)
+    except OSError as exc:
+        raise FaqError(f"cannot write briefing FAQ {path}: {exc}") from exc
+    return clean
+
+
+def gather_faq() -> List[dict]:
+    """Read enabled FAQ entries for the summariser prompt."""
+    try:
+        return [row for row in faq_entries() if row.get("enabled", True)]
+    except FaqError:
         return []
 
 

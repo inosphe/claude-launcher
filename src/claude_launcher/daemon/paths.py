@@ -106,6 +106,11 @@ def briefings_json() -> Path:
     return daemon_dir() / "briefings.json"
 
 
+def briefing_faq_json() -> Path:
+    """User-defined briefing questions for this daemon instance."""
+    return daemon_dir() / "briefing-faq.json"
+
+
 def session_dir(name: str) -> Path:
     """Per-session directory holding its raw output log and metadata."""
     return daemon_dir() / "sessions" / name
