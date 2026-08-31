@@ -345,3 +345,144 @@ def test_an_unmanaged_session_falls_back_to_the_run_directory(
         state_mod.resolve_cwd(str(flow_dir)),
         checkout.RUN_CWD,
     )
+
+
+# --------------------------------------------------------------------------- #
+# own_checkout: the answer follows the NAME, and nothing else does
+# --------------------------------------------------------------------------- #
+# The tests above pin which of the two directories wins. None of them pins
+# what happens when the *name* handed in is not the run's own, and that gap
+# is where a defect lived: the daemon's clock runs a checklist item through
+# `engine.run_probe`, which launched it with no `env=`, so the subprocess
+# inherited the daemon's `CLAUNCH_SESSION` -- one session's name for every
+# run on the machine. `own_checkout` then answered about that session, and
+# the gate measured a checkout the run had never touched.
+#
+# Measured on this machine (issues `claunch-04ru`, `claunch-mmvm`), with
+# `checkout.py` unmodified and `CLAUNCH_SESSION` the only variable changed,
+# running `tools/landed_check.py` by hand inside three worker worktrees:
+#
+#     worktree   asked as its own session      asked as the daemon's (s127)
+#     s250       landed: 7e859434ea5d, exit 0  cannot tell ... is on master, exit 2
+#     s267       landed: a4e568320186, exit 0  cannot tell ... is on master, exit 2
+#     s268       landed: b63b1ab6e488, exit 0  cannot tell ... is on master, exit 2
+#
+# The daemon's recorded directory for all three was already their own
+# worktree, so no priority between `session_cwd` and `run_cwd` could have
+# changed those answers -- both named the same place. Only the name did.
+#
+# So the fix belongs at the caller (`engine.probe_env` writes the run's own
+# scope into the probe's environment), and what is pinned HERE is the reason
+# that caller has to exist: this function is a lookup keyed by a name, and it
+# is faithful to whatever name it is given. Nothing below asserts that a
+# wrong name produces a right answer; a test that let it would be describing
+# a `own_checkout` that ignores its own argument.
+def test_the_answer_follows_the_name_it_is_asked_under(flow_dir, monkeypatch):
+    """One run directory, two names, two answers.
+
+    This is the whole mechanism in one assertion. A caller that cannot
+    guarantee the name is the run's own cannot use this function's answer,
+    and there is no defence inside it -- being faithful to the name IS the
+    contract.
+    """
+    mine = flow_dir / "worktrees" / "feature"
+    theirs = flow_dir / "worktrees" / "somebody-else"
+    _sessions(monkeypatch, _row("mine", mine), _row("theirs", theirs))
+    monkeypatch.setenv(state_mod.SESSION_ENV, "mine")
+
+    asked_as_mine = checkout.own_checkout(session="mine", cwd=str(flow_dir))
+    asked_as_theirs = checkout.own_checkout(session="theirs", cwd=str(flow_dir))
+
+    assert asked_as_mine == (state_mod.resolve_cwd(str(mine)), checkout.SESSION)
+    assert asked_as_theirs == (state_mod.resolve_cwd(str(theirs)), checkout.SESSION)
+    assert asked_as_mine != asked_as_theirs
+
+
+def test_the_daemons_name_answers_with_the_daemons_checkout(flow_dir, monkeypatch):
+    """The measured defect, at this layer, with the run standing in its own tree.
+
+    The run is keyed to the worker's worktree and the daemon records the
+    worker there too -- so `session_cwd` and `run_cwd` agree and the priority
+    between them is not in play. Asked under the daemon's own session, this
+    still answers the repository root, because that is where the daemon
+    stands. Downstream, `tools/landed_check.py` reads that root's HEAD, finds
+    the integration target, and reports "cannot tell" for a branch that had
+    in fact landed.
+
+    If this test ever goes red, read the change carefully before accepting
+    it: making a wrong name produce a right answer would hide the caller-side
+    defect rather than fix it, and it was measured that the two are separate
+    (the wrong name is claunch-04ru; no priority change reaches it).
+    """
+    root = flow_dir
+    worktree = flow_dir / "worktrees" / "s267-open-triage"
+    _sessions(
+        monkeypatch,
+        _row("s267", worktree),
+        _row("s127", root),
+    )
+    monkeypatch.setenv(state_mod.SESSION_ENV, "s267")
+
+    # The name the probe inherited from the daemon, not the run's own.
+    assert checkout.own_checkout(session="s127", cwd=str(worktree)) == (
+        state_mod.resolve_cwd(str(root)),
+        checkout.SESSION,
+    )
+
+
+def test_the_runs_own_scope_answers_with_the_runs_own_tree(flow_dir, monkeypatch):
+    """The contract a correctly-named caller gets, and it holds twice over.
+
+    With the run's own scope loaded, both of this function's branches name
+    the same checkout: the lookup answers with that session's recorded
+    directory, or it fails and the run's ``cwd`` stands. That property is
+    what makes writing the name in (rather than deleting the variable) the
+    right shape for the caller-side fix -- the answer does not depend on the
+    daemon being reachable.
+    """
+    worktree = flow_dir / "worktrees" / "s267-open-triage"
+    _sessions(monkeypatch, _row("s267", worktree), _row("s127", flow_dir))
+    monkeypatch.setenv(state_mod.SESSION_ENV, "s267")
+    with_daemon = checkout.own_checkout(cwd=str(worktree))
+    assert with_daemon == (state_mod.resolve_cwd(str(worktree)), checkout.SESSION)
+
+    # Same question, no daemon to answer it: the fallback names the same tree.
+    _stub_connect(monkeypatch, daemon_client, lambda: None)
+    without_daemon = checkout.own_checkout(cwd=str(worktree))
+    assert without_daemon == (state_mod.resolve_cwd(str(worktree)), checkout.RUN_CWD)
+    assert with_daemon[0] == without_daemon[0]
+
+
+def test_a_name_standing_in_another_repository_is_answered_with_that_repository(
+    flow_dir, tmp_path, monkeypatch
+):
+    r"""The sharpest form of the same contract: the answer leaves the repository.
+
+    Nothing here compares the looked-up directory against the run's own, so a
+    name belonging to a session that works in a DIFFERENT repository is
+    answered with that repository. The gate downstream does not get a wrong
+    verdict about this branch -- it gets no verdict at all.
+
+    Measured on this machine, same procedure as the block above (``checkout.py``
+    unmodified, ``--repo`` omitted, ``CLAUNCH_SESSION`` the only variable):
+
+        asked as   answer                                  landed_check says
+        s265       ...\worktrees\s127-04ru-probe-env       not yet, exit 1
+        s127       F:\works\claude-launcher                cannot tell ... on master, exit 2
+        s264       F:\works\report-kanban                  could not read HEAD in ..., exit 2
+
+    The third row is a different failure from the second and worth keeping
+    apart: one names a checkout of this repository that cannot answer the
+    question, the other names a checkout that is not of this repository at
+    all. Both reach the same exit code, so the exit code does not tell them
+    apart -- this test does.
+    """
+    elsewhere = tmp_path / "another-repository"
+    worktree = flow_dir / "worktrees" / "feature"
+    _sessions(monkeypatch, _row("mine", worktree), _row("stranger", elsewhere))
+    monkeypatch.setenv(state_mod.SESSION_ENV, "mine")
+
+    where, how = checkout.own_checkout(session="stranger", cwd=str(worktree))
+    assert (where, how) == (state_mod.resolve_cwd(str(elsewhere)), checkout.SESSION)
+    # Not merely a different directory: outside the run's tree entirely.
+    assert not where.startswith(state_mod.resolve_cwd(str(flow_dir)))
