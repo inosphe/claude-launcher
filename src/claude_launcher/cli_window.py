@@ -53,7 +53,8 @@ def _cmd_status(args) -> int:
     print(
         f"window: {len(holders)} holder(s), {len(queue)} waiting "
         f"(caps: sweep {caps.get('sweep', '?')}, targeted {caps.get('targeted', '?')}; "
-        f"advisory -n {status.get('advisory_n_now', '?')})"
+        f"advisory -n {status.get('advisory_n_now', '?')}; "
+        f"max wait {status.get('max_wait', '?')}s)"
     )
     for entry in holders:
         print(f"  held: {_fmt_holder(entry)}")
@@ -179,10 +180,10 @@ def register(sub) -> None:
         "--wait",
         type=float,
         nargs="?",
-        const=3600.0,
+        const=1800.0,
         default=0.0,
         metavar="SECONDS",
-        help="queue and wait (default with no value: up to one hour; omitted: ask once)",
+        help="queue and wait (default with no value: up to 30 minutes; omitted: ask once)",
     )
     p.add_argument("--label", help="what the window is being used for")
     p.add_argument(

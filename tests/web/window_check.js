@@ -135,7 +135,8 @@ const snapshot = {
     { grant_id: "q2", cls: "sweep", session: null, pid: 55,
       label: "release sweep", enqueued_at: "2026-08-31T06:03:00Z" },
   ],
-  caps: { targeted: 5, sweep: 1 }, cores: 32, advisory_n_now: 6,
+  caps: { targeted: 5, sweep: 1 }, max_wait: 1800, reminder_interval: 180,
+  cores: 32, advisory_n_now: 6,
 };
 
 (async () => {
@@ -163,6 +164,10 @@ const snapshot = {
   check("capacity, queue depth and recommended workers are visible",
         view.words().includes("1 / 5") && view.words().includes("1 waiting") &&
         view.words().includes("Recommended workers") && view.words().includes("6"),
+        view.words());
+  check("the 30-minute queue limit and release reminder are visible",
+        view.words().includes("Maximum queue wait") && view.words().includes("30m") &&
+        view.words().includes("Release reminder") && view.words().includes("every 3m"),
         view.words());
   check("a live session owner links to its session",
         withClass("window-owner").some((n) => n.tag === "a" && n.href === "#/s/s1"));
@@ -196,7 +201,7 @@ const snapshot = {
   ctx.stop();
 
   ctx.setCache({ holders: [], queue: [], caps: { targeted: 5, sweep: 1 },
-                 cores: 8, advisory_n_now: 8 });
+                 max_wait: 1800, reminder_interval: 180, cores: 8, advisory_n_now: 8 });
   ctx.render();
   check("an idle arbiter states both empty sections",
         view.words().includes("no grants are held") &&
