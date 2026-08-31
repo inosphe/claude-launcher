@@ -76,8 +76,10 @@ function el(tag, cls, text) {
 const stubs = `
 let beadsFocus = "";
 let beadsDetail = null;
+let beadsSection = "board";
 function setDetail(d) { beadsDetail = d; }
 function setFocus(f) { beadsFocus = f; }
+function setSection(s) { beadsSection = s; }
 let sessBeadsBox = null;
 let sessionsCache = [];
 let beadsCache = null;
@@ -107,11 +109,12 @@ new Function(
   + slice("fmtReportSize") + slice("reportWhen")
   + slice("beadsHierarchy") + slice("beadsRelationBlock")
   + slice("beadsDetailPane")
+  + slice("beadsPageTabs")
   + `
 Object.assign(exports, {
   filter: beadsFilterIssues, sort: beadsSortIssues, row: beadsIssueRow,
   rail: sessBeads, reports: sessReports, pane: beadsDetailPane,
-  setDetail, setFocus, setBoards, gone, setBase,
+  tabs: beadsPageTabs, setDetail, setFocus, setSection, setBoards, gone, setBase,
 });`)(ctx, document, el);
 
 let failures = 0;
@@ -122,6 +125,19 @@ function check(what, got, want) {
     failures++;
   }
 }
+
+/* ---- the merged page -------------------------------------------------- */
+let tabs = ctx.tabs();
+check("the combined page names both readings", tabs.kids.map((n) => n.text),
+      ["Board", "Reports"]);
+check("the reports reading has its Beads route", tabs.kids.map((n) => n.href),
+      ["#/beads", "#/beads/reports"]);
+check("the board reading starts selected", tabs.kids.map((n) => n.classes.has("on")),
+      [true, false]);
+ctx.setSection("reports");
+tabs = ctx.tabs();
+check("the reports reading becomes selected", tabs.kids.map((n) => n.classes.has("on")),
+      [false, true]);
 
 /* ---- filters ---------------------------------------------------------- */
 const issues = [

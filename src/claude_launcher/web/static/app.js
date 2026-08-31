@@ -7070,7 +7070,7 @@ function mobileTitle() {
     case "flows": return "workflows";
     case "window": return "measurement window";
     case "settings": return "settings";
-    case "reports": return "reports";
+    case "beads": return beadsSection === "reports" ? "reports" : "beads";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
     // The session first, for the reason the head carries it (wfOwnerChip):
@@ -7193,7 +7193,6 @@ const VIEWS = {
   window: "window-view",
   cli: "cli-view",
   beads: "beads-view",
-  reports: "reports-view",
   wf: "wf-view",
   // The session's conversation — the fourth reading of it, beside the
   // terminal (what it is doing), the run page (where it has got to) and the
@@ -7617,9 +7616,13 @@ function parseHash(h) {
   // One page, one shell: nothing else about the CLI tab is addressable, so
   // anything past "#/cli" is still the same terminal.
   if (parts[0] === "cli") return { page: "cli" };
-  // #/beads is the board; #/beads/<id> the board with one issue opened.
-  if (parts[0] === "beads") return { page: "beads", id: parts[1] || "" };
-  if (parts[0] === "reports") return { page: "reports" };
+  // #/beads is the board; #/beads/reports its reports reading; and
+  // #/beads/<id> the board with one issue opened. Keep #/reports as a
+  // bookmark-compatible spelling of the merged page's Reports tab.
+  if (parts[0] === "beads") return parts[1] === "reports"
+    ? { page: "beads", section: "reports" }
+    : { page: "beads", id: parts[1] || "" };
+  if (parts[0] === "reports") return { page: "beads", section: "reports" };
   if (parts[0] === "settings" || parts[0] === "workspaces") return { page: "settings" };
   return { page: "home" };   // an unknown link is a wrong turn, not an error
 }
@@ -7634,8 +7637,7 @@ function route() {
   if (r.page !== "flow") stopFlowPoll();
   if (r.page !== "settings") closeWorkspaces();
   if (r.page !== "window") stopWindowPoll();
-  if (r.page !== "beads") stopBeadsPoll();
-  if (r.page !== "reports") stopReportsPoll();
+  if (r.page !== "beads") { stopBeadsPoll(); stopReportsPoll(); }
   if (r.page !== "log") closeTranscript();
 
   switch (r.page) {
@@ -7670,8 +7672,7 @@ function route() {
     case "window": openWindowPage(); break;
     case "cli": openCli(); break;
     case "settings": openSettings(); break;
-    case "beads": openBeads(r.id); break;
-    case "reports": openReports(); break;
+    case "beads": openBeads(r.id, r.section); break;
     default: openHome();
   }
 }
@@ -8485,19 +8486,27 @@ let beadsDetail = null;    // its /api/beads/<id> payload
 let beadsFilter = "active";  // status filter: active | <status> | all
 let beadsSession = "";     // session filter: "" = everybody
 let beadsLayout = "board"; // "board" = status lanes, "tree" = the forest
+let beadsSection = "board"; // board | reports
 
 const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked", "closed"];
 const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
 
-function openBeads(id) {
-  beadsOpen = true;
+function openBeads(id, section) {
+  beadsSection = section === "reports" ? "reports" : "board";
   const focus = id || "";
   if (focus !== beadsFocus) beadsDetail = null;
   beadsFocus = focus;
   showView("beads");
-  renderBeads();
-  refreshBeads();
-  if (!beadsTimer) beadsTimer = setInterval(refreshBeads, 5000);
+  if (beadsSection === "reports") {
+    stopBeadsPoll();
+    openReports();
+  } else {
+    stopReportsPoll();
+    beadsOpen = true;
+    renderBeads();
+    refreshBeads();
+    if (!beadsTimer) beadsTimer = setInterval(refreshBeads, 5000);
+  }
 }
 
 function stopBeadsPoll() {
@@ -8997,6 +9006,11 @@ function renderBeads() {
   back.addEventListener("click", () => { location.hash = "#"; });
   head.appendChild(back);
   view.appendChild(head);
+  view.appendChild(beadsPageTabs());
+  if (beadsSection === "reports") {
+    renderReports(view, false);
+    return;
+  }
   view.appendChild(el("p", "wf-note",
     "The repository board (beads), by session: each issue carries the " +
     "sessions the daemon ties it to — the recorded link, assignee, " +
@@ -9022,6 +9036,19 @@ function renderBeads() {
   body.appendChild(list);
   if (beadsFocus) body.appendChild(beadsDetailPane());
   view.appendChild(body);
+}
+
+function beadsPageTabs() {
+  const tabs = el("div", "seq-tabs beads-page-tabs");
+  for (const [section, label, href] of [
+    ["board", "Board", "#/beads"],
+    ["reports", "Reports", "#/beads/reports"],
+  ]) {
+    const tab = el("a", "seq-tab" + (beadsSection === section ? " on" : ""), label);
+    tab.href = href;
+    tabs.appendChild(tab);
+  }
+  return tabs;
 }
 
 /* ---- the rail's block: one session's slice of its board ---- */
@@ -9396,7 +9423,7 @@ function renderWindow() {
 }
 
 /* ------------------------------------------------------------------ */
-/* the Reports page: every round report on this machine               */
+/* the Reports tab in the Beads page: every round report on this machine */
 /* ------------------------------------------------------------------ */
 /* The third reading of these pages, beside the two that already exist: a
    session's rail block ("what did this one leave?") and an issue's detail
@@ -9423,8 +9450,7 @@ let reportsOldest = false;
 
 function openReports() {
   reportsOpen = true;
-  showView("reports");
-  renderReports();
+  renderBeads();
   refreshReports();
   // 30 s, not the rail's 2. A report is written once per round — tens of
   // minutes apart at the very best — and each tick costs the daemon a
@@ -9453,7 +9479,7 @@ async function refreshReports() {
       else { reportsCache = data.reports || []; reportsError = ""; }
     }
   } catch { return; }   // auth overlay is up, or the daemon is away
-  if (reportsOpen) renderReports();
+  if (reportsOpen) renderBeads();
 }
 
 /* What the daemon still knows about the session that wrote a row. Three
@@ -9599,15 +9625,16 @@ function reportsRow(r) {
   return row;
 }
 
-function renderReports() {
-  const view = $("reports-view");
-  view.innerHTML = "";
-  const head = el("div", "wf-head");
-  head.appendChild(el("h2", null, "Reports"));
-  const back = el("button", "wf-btn clear", "Back");
-  back.addEventListener("click", () => { location.hash = "#"; });
-  head.appendChild(back);
-  view.appendChild(head);
+function renderReports(view = $("beads-view"), withHead = true) {
+  if (withHead) {
+    view.innerHTML = "";
+    const head = el("div", "wf-head");
+    head.appendChild(el("h2", null, "Reports"));
+    const back = el("button", "wf-btn clear", "Back");
+    back.addEventListener("click", () => { location.hash = "#"; });
+    head.appendChild(back);
+    view.appendChild(head);
+  }
   view.appendChild(el("p", "wf-note",
     "Every round report on this machine, newest first. One HTML page per " +
     "round, written by the session that ran it and kept outside that " +
