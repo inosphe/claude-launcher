@@ -9239,15 +9239,15 @@ function sessCommits(data) {
 /* ------------------------------------------------------------------ */
 /* measurement window (#/window) — grants and the FIFO queue           */
 /* ------------------------------------------------------------------ */
-/* This is deliberately a reading surface. A grant belongs to the process
-   that acquired it, so releasing one from an unrelated browser tab would
-   let tests overlap while the original process was still running. The page
-   therefore draws the arbiter's existing GET /api/window answer and offers
-   no mutation controls. */
+/* A grant belongs to the process that acquired it, so releasing one from an
+   unrelated browser tab would let tests overlap while the original process
+   was still running. Waiting requests are different: cancelling one only
+   removes it from the FIFO queue, so the page can safely offer that action. */
 let windowCache = null;
 let windowError = "";
 let windowTimer = null;
 let windowPageOpen = false;
+let windowCancelBusy = new Set();
 
 function openWindowPage() {
   windowPageOpen = true;
@@ -9301,7 +9301,7 @@ function windowAge(entry, now = Date.now()) {
   return `${fmtAge(Math.max(0, (now - at) / 1000))} ago`;
 }
 
-function windowEntry(entry, position = null) {
+function windowEntry(entry, position = null, queued = false) {
   const row = el("div", "window-row " + (entry.cls || "unknown"));
   row.appendChild(el(
     "span", "window-rank", position === null ? "held" : `#${position}`));
@@ -9319,7 +9319,42 @@ function windowEntry(entry, position = null) {
   const age = el("span", "window-age", windowAge(entry));
   age.title = entry.acquired_at || entry.enqueued_at || "timestamp unavailable";
   row.appendChild(age);
+  if (queued) {
+    const cancel = el("button", "wf-btn clear window-cancel", "Cancel");
+    cancel.type = "button";
+    cancel.disabled = windowCancelBusy.has(entry.grant_id);
+    cancel.addEventListener("click", () => cancelWindow(entry, cancel));
+    row.appendChild(cancel);
+  }
   return row;
+}
+
+async function cancelWindow(entry, button) {
+  const grantId = entry && entry.grant_id;
+  if (!grantId || windowCancelBusy.has(grantId)) return;
+  windowCancelBusy.add(grantId);
+  if (button) button.disabled = true;
+  try {
+    const resp = await api("/api/window/cancel", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ grant_id: grantId }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) {
+      windowError = data.error || `HTTP ${resp.status}`;
+    } else if (!data.cancelled) {
+      windowError = "the waiting request was already cancelled or granted";
+    } else {
+      windowError = "";
+      await refreshWindow();
+    }
+  } catch { /* api() owns auth and connection recovery */
+    windowError = "unable to cancel the waiting request";
+  } finally {
+    windowCancelBusy.delete(grantId);
+  }
+  if (windowPageOpen) renderWindow();
 }
 
 function windowSummary(title, used, cap, detail) {
@@ -9342,8 +9377,8 @@ function renderWindow() {
   view.appendChild(head);
   view.appendChild(el("p", "wf-note",
     "Test grants currently held by this daemon and the FIFO queue waiting " +
-    "behind them. This page is read-only; the process that acquired a grant " +
-    "is responsible for releasing it."));
+    "behind them. Waiting requests can be cancelled here; the process that " +
+    "acquired a grant is responsible for releasing it."));
   if (windowError) view.appendChild(el("p", "wf-warning", windowError));
   if (!windowCache) {
     if (!windowError) view.appendChild(el("p", "wf-note", "loading…"));
@@ -9385,7 +9420,7 @@ function renderWindow() {
     box.appendChild(boxHead);
     if (!rows.length) box.appendChild(el("p", "wf-note", empty));
     rows.forEach((entry, i) => box.appendChild(
-      windowEntry(entry, queued ? i + 1 : null)));
+      windowEntry(entry, queued ? i + 1 : null, queued)));
     return box;
   };
   view.appendChild(section("Holders", holders, "no grants are held", false));

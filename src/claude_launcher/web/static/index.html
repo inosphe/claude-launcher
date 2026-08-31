@@ -582,8 +582,8 @@
     <div id="flow-view" class="hidden"></div>
     <div id="ws-view" class="hidden"></div>
     <!-- The daemon-owned measurement window: active test grants and the
-         FIFO queue waiting behind them. Read-only here; acquire/release stay
-         with the processes whose test runs own those grants. -->
+         FIFO queue waiting behind them. Queue entries may be cancelled here;
+         acquire/release stay with the processes whose test runs own grants. -->
     <div id="window-view" class="hidden"></div>
     <!-- The board: every beads issue the fleet's repositories hold, each
          tagged with the sessions it belongs to. Data only — the writes stay
