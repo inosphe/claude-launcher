@@ -225,6 +225,7 @@ def test_build_prompt_carries_all_signals():
             "last_input_at": "2026-08-30T12:00:00+00:00",
             "last_output_at": "2026-08-30T12:00:01+00:00",
         },
+        faq=[{"question": "어떤 브랜치인가?"}],
     )
     for needle in (
         '"state": "working|blocked|waiting|idle|done|unknown"',
@@ -240,6 +241,9 @@ def test_build_prompt_carries_all_signals():
         "모든 필드 값은 자료의 언어와",
         "자연스럽고 정확한 한국어",
         "변경하면 안 되는 기술적 값은 원문을 유지한다",
+        '"faq": [{"question": "사용자 FAQ 질문"',
+        "어떤 브랜치인가?",
+        "각 질문에 대해 현재 세션 자료에 근거한 답변",
     ):
         assert needle in prompt
 

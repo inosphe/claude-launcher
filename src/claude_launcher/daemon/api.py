@@ -889,8 +889,8 @@ async def h_workspace_remove(request: web.Request) -> web.Response:
 def _faq_body(body: dict) -> dict:
     question = str(body.get("question") or "").strip()
     answer = str(body.get("answer") or "").strip()
-    if not question or not answer:
-        raise ValueError("an FAQ needs both a question and an answer")
+    if not question:
+        raise ValueError("an FAQ needs a question")
     if len(question) > 1000 or len(answer) > 5000:
         raise ValueError("FAQ question or answer is too long")
     return {

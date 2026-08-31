@@ -2191,6 +2191,17 @@ function renderBriefingCard(name, entry) {
       row.append(el("span", "sess-brief-k", key), el("span", "sess-brief-v", String(val)));
       card.appendChild(row);
     }
+    if (Array.isArray(brief.faq)) {
+      for (const item of brief.faq) {
+        if (!item || !item.question || item.answer === undefined) continue;
+        const row = el("div", "sess-brief-row sess-brief-faq");
+        row.append(
+          el("span", "sess-brief-k", String(item.question)),
+          el("span", "sess-brief-v", String(item.answer)),
+        );
+        card.appendChild(row);
+      }
+    }
   } else if (data && data.raw) {
     // The summariser answered but not in the agreed shape — its words are
     // still the best available summary, so show them as they came.
@@ -9448,17 +9459,14 @@ function faqCard() {
   card.appendChild(el("h3", null, "Briefing FAQ"));
   card.appendChild(el(
     "p", "wf-note",
-    "Register stable answers the briefing summariser may use as user-provided context."
+      "Add questions that every briefing should answer from the session's current evidence."
   ));
   const form = el("form", "faq-add");
   const q = document.createElement("input");
   q.placeholder = "Question"; q.value = faqDraft.question;
   q.addEventListener("input", () => { faqDraft.question = q.value; });
-  const a = document.createElement("textarea");
-  a.rows = 3; a.placeholder = "Answer"; a.value = faqDraft.answer;
-  a.addEventListener("input", () => { faqDraft.answer = a.value; });
-  const submit = el("button", "wf-btn approve", "Add FAQ"); submit.type = "submit";
-  form.append(q, a, submit);
+  const submit = el("button", "wf-btn approve", "Add question"); submit.type = "submit";
+  form.append(q, submit);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
@@ -9482,18 +9490,14 @@ function faqCard() {
     if (faqEdit === row.id) {
       const eq = document.createElement("input");
       eq.value = row.question; eq.className = "faq-edit-question";
-      const ea = document.createElement("textarea");
-      ea.rows = 3; ea.value = row.answer; ea.className = "faq-edit-answer";
-      text.append(eq, ea);
+      text.append(eq);
       const save = el("button", "wf-btn approve", "Save"); save.type = "button";
-      save.addEventListener("click", () => faqSave(row, {
-        question: eq.value, answer: ea.value,
-      }));
+      save.addEventListener("click", () => faqSave(row, { question: eq.value }));
       const cancel = el("button", "wf-btn clear", "Cancel"); cancel.type = "button";
       cancel.addEventListener("click", () => { faqEdit = null; renderWorkspaces(); });
       item.append(text, save, cancel); list.appendChild(item); continue;
     }
-    text.append(el("strong", null, row.question), el("p", null, row.answer));
+    text.append(el("strong", null, row.question));
     item.appendChild(text);
     const edit = el("button", "wf-btn clear", "Edit");
     edit.type = "button"; edit.addEventListener("click", () => { faqEdit = row.id; renderWorkspaces(); });
