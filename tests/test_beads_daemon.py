@@ -1354,6 +1354,86 @@ def test_a_daemon_shutdown_is_not_an_exit_and_sweeps_nothing(home, tmp_path, rep
     asyncio.run(run())
 
 
+def test_a_restart_sweeps_what_retiring_leaves_behind(home, tmp_path, repo):
+    """The complement of the shutdown test above.
+
+    A restart retires what it cannot relaunch — a running ``--no-restore``
+    session, a relaunch that failed — and that ending never reaches the
+    exit hook: the board does not even exist when restore runs. The retired
+    record's in_progress issues are swept at boot instead, once the board
+    does exist.
+    """
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="w", assignee="w1", status="in_progress")
+    board = _board(br, repo)
+
+    async def run():
+        old = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        old.create(SessionDef(name="w1", harness="py", cwd=str(repo), restore=False))
+        await old.shutdown_all()  # the record says w1 was running
+
+        fresh = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        # Retire first, the way the daemon boots (restore_all runs before
+        # the app — and with it the board — is built).
+        fresh.restore_all()
+        assert fresh.get("w1").exited  # retired, not relaunched
+        mm = MeshManager(fresh, root=tmp_path / "mesh")
+        client = await _serve(fresh, mm, board)
+        try:
+            await _wait_for(
+                lambda: br.issues["w"]["status"] == "open", "the boot sweep"
+            )
+            assert any(
+                "SESSION ENDED" in " ".join(c) and "comments" in c
+                for c in br.calls
+            )
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+def test_an_archived_record_gets_the_boot_sweep_too(home, tmp_path, repo):
+    """Archive keeps a record, and the boot sweep keeps the record honest.
+
+    An archived record may still hold an in_progress issue a pre-fix daemon
+    left behind. Archive is only reachable while a daemon is up, so that
+    hole closes at the next boot's retire sweep — restore_all retires an
+    archived entry like any other (the archive flag rides along).
+    """
+    _register_py_harness()
+    br = FakeBr()
+    br.add(id="w", assignee="w1", status="in_progress")
+    board = _board(br, repo)
+
+    async def run():
+        old = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        old.create(SessionDef(name="w1", harness="py", cwd=str(repo)))
+        await old.shutdown_all()
+        old.archive("w1")  # exited only; persists was_running False
+        old.persist()  # and the archived_at stamp
+
+        fresh = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        fresh.restore_all()
+        assert fresh.get("w1").exited
+        assert fresh.get("w1").archived_at  # the archive flag rode along
+        mm = MeshManager(fresh, root=tmp_path / "mesh")
+        client = await _serve(fresh, mm, board)
+        try:
+            await _wait_for(
+                lambda: br.issues["w"]["status"] == "open", "the archived sweep"
+            )
+            assert any(
+                "SESSION ENDED" in " ".join(c) and "comments" in c
+                for c in br.calls
+            )
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_the_rail_can_register_an_issue_after_the_fact(home, tmp_path, repo):
     _register_py_harness()
     br = FakeBr()

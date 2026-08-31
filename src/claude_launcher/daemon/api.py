@@ -238,6 +238,12 @@ def build_app(
     window = window if window is not None else window_mod.WindowManager(manager)
     app["window"] = window
     manager.exit_hooks.append(window.session_exited)
+    # A restart never lets some endings reach the hook above: restore_all
+    # retires what it does not relaunch before this board exists, so each
+    # retired record's in_progress issues would keep claiming a dead session
+    # is working. Sweep the board for them here, where board and loop exist.
+    for dead in manager.take_retired_for_sweep():
+        board.session_exited(dead)
 
     r = app.router
     r.add_get("/api/health", h_health)

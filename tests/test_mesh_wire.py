@@ -77,6 +77,10 @@ class _Manager:
     #: test can mount the real app over this stand-in.
     exit_hooks: list = []
 
+    def take_retired_for_sweep(self):
+        """build_app sweeps what restore_all retired — this stand-in retires none."""
+        return []
+
 
 def _mesh(mgr, name="m"):
     mm = MeshManager(mgr, settle=0.01)
