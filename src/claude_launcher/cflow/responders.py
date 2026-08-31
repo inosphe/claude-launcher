@@ -102,6 +102,16 @@ class Pool:
     membership, an ambiguous mesh. That is not an error: every group then fails
     to match for that stated reason and the ask runs out of candidates, which
     hands it to ``otherwise`` — where an unanswerable question belongs.
+
+    ``unreadable`` splits that set in two, and the split is the whole reason
+    it exists. Most problems here are *answers*: this session is in no mesh,
+    or in several, or no daemon is running at all — facts read off the record,
+    which will not be different a minute from now. One is not an answer: a
+    daemon that is announced and alive and did not reply inside a short budget
+    (:data:`.daemon_client.UNRESPONSIVE`). From out here busy and stuck look
+    identical, which is why :func:`.daemon_client.unreachable_reason` refuses
+    to phrase that silence as an absence — and a caller that spends something
+    irreversible on the pool must refuse it too.
     """
 
     mesh: str = ""
@@ -119,6 +129,12 @@ class Pool:
     #: Handles above it, nearest first.
     ancestors: List[str] = field(default_factory=list)
     problem: str = ""
+    #: The ``problem`` above is silence rather than a fact — the roster could
+    #: not be read this time and may read fine on the next. Callers that spend
+    #: something they cannot get back (the engine spends a candidate group per
+    #: ask, permanently) must wait for an answer instead of treating this as
+    #: one. See the class docstring.
+    unreadable: bool = False
     #: Handles this run wired itself to, because a candidate declared
     #: ``connect: true``. Read by the engine so the ask records that the edge
     #: was made by a workflow's declaration rather than by a person — the
@@ -283,12 +299,20 @@ def pool(*, session: str, mesh: str = "", cwd: Optional[str] = None) -> Pool:
         # slow daemon reported as an absent one sends them to start a second.
         return Pool(
             problem=f"the claunch {daemon_client.unreachable_reason(why)}, "
-            f"so the mesh roster cannot be read"
+            f"so the mesh roster cannot be read",
+            # Absence is established from the record (nothing announced, or a
+            # pid that is gone) and is a fact. Anything else is a live process
+            # that stayed quiet, and `is_absent` is the predicate that already
+            # knows the difference — read it here rather than re-deciding it.
+            unreadable=not daemon_client.is_absent(why),
         )
     try:
         doc = client.get("/api/mesh", timeout=CALL_TIMEOUT)
     except daemon_client.DaemonClientError as exc:
-        return Pool(problem=f"the mesh roster could not be read: {exc}")
+        # The health probe answered, so there IS a daemon; this call did not.
+        return Pool(
+            problem=f"the mesh roster could not be read: {exc}", unreadable=True
+        )
 
     found = [
         info

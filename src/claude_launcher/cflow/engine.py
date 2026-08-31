@@ -419,6 +419,21 @@ def _window_payload(base: dict, step: Step, window: dict, now: datetime) -> dict
 # --------------------------------------------------------------------------- #
 # delegated decisions
 # --------------------------------------------------------------------------- #
+#: How long a deferred ask waits before the daemon's clock re-reads the roster.
+#: Sized against what it is waiting out: an :data:`daemon_client.UNRESPONSIVE`
+#: verdict is one blocked turn of the daemon's single event loop, and the
+#: daemon's own start path grants a slow one :data:`daemon_client.START_TIMEOUT`
+#: (15s) to answer. Two of those is patience enough to outlast a stall without
+#: making a person watch an unmoving run for minutes.
+ROSTER_RETRY = 30.0
+
+#: How many times one ask may be deferred for an unreadable roster before its
+#: candidate groups are spent anyway. The bound is what keeps deferral from
+#: becoming a way for a run to stop forever: after this, the ask lands in front
+#: of a person exactly as it did before, with the same reasons in ``skipped``.
+MAX_ROSTER_DEFERRALS = 4
+
+
 def _deadline(timeout: Optional[float]) -> Optional[str]:
     """When the current group's turn expires, or None for "no clock".
 
@@ -574,6 +589,7 @@ def _open_ask(
     ask_id: Optional[str] = None,
     from_group: int = 0,
     skipped: Optional[List[dict]] = None,
+    deferrals: int = 0,
 ) -> Optional[dict]:
     """Put the decision to the first candidate group that resolves to anyone.
 
@@ -591,6 +607,26 @@ def _open_ask(
     ``ask_id`` is carried across an escalation on purpose — the decision is
     the same one, so a responder from an earlier group that answers late is
     told it is no longer theirs to answer rather than that the id is unknown.
+
+    **Spending a group needs an answer, not silence.** Walking past a group is
+    irreversible: the list only ever runs forward, and running out of it hands
+    the decision to ``otherwise`` for good. So the roster has to have been
+    *read* before any of that happens. When it could not be
+    (:attr:`.responders.Pool.unreadable` — a daemon that is up and did not
+    reply), the ask is DEFERRED instead: recorded at the same group, with
+    nobody asked and a :data:`ROSTER_RETRY` deadline, so the daemon's existing
+    expiry clock comes back and re-resolves the very same question. Measured
+    without this (issue ``claunch-ojci``): one busy moment sent an ``errand``
+    run's ``end-gate`` past both agent groups with ``asked: []`` and
+    ``deadline: null``, where the leader it was meant for could not answer it
+    and a person had to. Five sibling runs in the same hour routed normally.
+
+    A deferral is bounded by :data:`MAX_ROSTER_DEFERRALS` and is never entered
+    when there is no daemon to come back — :attr:`~.responders.Pool.unreadable`
+    is false for the states that establish absence, so a machine with no daemon
+    behaves exactly as it did before. Both halves matter: a run must not be
+    able to wait forever on a question, and a person must not be handed one
+    that was never actually put to anybody.
     """
     session = state_mod.current_scope()
     if session == state_mod.DEFAULT_SCOPE:
@@ -607,7 +643,17 @@ def _open_ask(
     asked: List[dict] = []
     found: List[responders.Responder] = []
     group = from_group
-    while group < len(candidates):
+    # Nothing is spent on silence. `unreadable` is the pool saying it has no
+    # answer yet rather than the answer "nobody", and every group below would
+    # otherwise be skipped for that non-reason -- see the docstring.
+    deferred: Optional[dict] = None
+    if (
+        reach.unreadable
+        and group < len(candidates)
+        and deferrals < MAX_ROSTER_DEFERRALS
+    ):
+        deferred = {"count": deferrals + 1, "reason": reach.problem}
+    while not deferred and group < len(candidates):
         candidate = candidates[group]
         # The one call that passes `autowire`. This is the moment a question
         # is actually being put to somebody, so it is the moment a candidate's
@@ -627,7 +673,9 @@ def _open_ask(
         )
         group += 1
 
-    if not asked and delegate.otherwise == model.OTHERWISE_SELF:
+    if not asked and not deferred and delegate.otherwise == model.OTHERWISE_SELF:
+        # `otherwise: self` is a decision too, and taking it because the
+        # roster went quiet would be the same category error one step over.
         _proceed_alone(
             workflow, state, step, kind=kind, prompt=prompt, skipped=skipped,
             cwd=cwd,
@@ -645,7 +693,15 @@ def _open_ask(
         "asked": asked,
         "skipped": skipped,
         "opened_at": state_mod.utcnow(),
-        "deadline": _deadline(delegate.timeout) if asked else None,
+        # A deferred ask's clock is the retry, not the group's turn: nobody
+        # holds it, so there is no turn to time out.
+        "deadline": _deadline(
+            ROSTER_RETRY if deferred else (delegate.timeout if asked else None)
+        ),
+        # Why this ask is sitting at a group it has not tried, and how many
+        # times it has done so. Its absence is what tells a reader (and
+        # `expire_ask`) that an empty `asked` is settled rather than pending.
+        **({"deferred": deferred} if deferred else {}),
         # Edges this ask made for itself, because a candidate declared
         # `connect: true`. Recorded on the ask rather than left to the mesh:
         # the member graph stores an edge, not who decided it, and a leader
@@ -675,7 +731,7 @@ def _open_ask(
     state["ask"] = ask
     state_mod.save_state(state, cwd)
     state_mod.journal(
-        "ask_unresolved" if not asked else "ask_opened",
+        "ask_deferred" if deferred else ("ask_unresolved" if not asked else "ask_opened"),
         {
             "run": state["run_id"],
             "ask": ask["id"],
@@ -685,6 +741,7 @@ def _open_ask(
             "group": group,
             "asked": [e.get("handle") or e["kind"] for e in asked],
             "skipped": [s["reason"] for s in skipped],
+            **({"deferred": deferred} if deferred else {}),
             **({"undelivered": ask["undelivered"]} if ask.get("undelivered") else {}),
         },
         cwd,
@@ -742,6 +799,51 @@ def _escalate(
         ask_id=ask["id"],
         from_group=ask["group"] + 1,
         skipped=skipped,
+    )
+
+
+def _retry_deferred(
+    workflow: Workflow, state: dict, step: Step, ask: dict, cwd
+) -> Optional[dict]:
+    """Re-read the roster for an ask that was deferred because it was silent.
+
+    The other half of the deferral in :func:`_open_ask`, and deliberately not
+    :func:`_escalate`: escalation moves the question ON to the next group
+    because the group it was with produced no answer, and this question has
+    never been with a group at all. So it re-opens at the SAME
+    ``from_group``, adds nothing to ``skipped``, and carries the deferral
+    count forward — which is what makes :data:`MAX_ROSTER_DEFERRALS` a bound
+    on the whole wait rather than on one attempt.
+
+    Called from :func:`expire_ask`, so the retry rides the clock the daemon
+    already runs over every registered run; there is no second timer.
+    """
+    deferred = ask.get("deferred") or {}
+    state_mod.journal(
+        "ask_retried",
+        {
+            "run": state["run_id"],
+            "ask": ask["id"],
+            "step": step.id,
+            "group": ask["group"],
+            "attempt": int(deferred.get("count") or 0),
+            "why": str(deferred.get("reason") or ""),
+        },
+        cwd,
+    )
+    return _open_ask(
+        workflow,
+        state,
+        step,
+        kind=ask["kind"],
+        prompt=ask["prompt"],
+        options=ask["options"],
+        delegate=_delegate_for(step, ask["kind"]),
+        cwd=cwd,
+        ask_id=ask["id"],
+        from_group=ask["group"],
+        skipped=list(ask.get("skipped") or []),
+        deferrals=int(deferred.get("count") or 0),
     )
 
 
@@ -902,7 +1004,16 @@ def _ask_payload(base: dict, ask: dict) -> dict:
                 "the work it would be approved on."
             )
         )
-    if unresolved:
+    if ask.get("deferred"):
+        payload["note"] = (
+            f"this is meant for another agent and the mesh roster could not be "
+            f"read to find them ({ask['deferred'].get('reason') or 'unknown'}) "
+            f"— the daemon retries shortly (attempt "
+            f"{ask['deferred'].get('count')} of {MAX_ROSTER_DEFERRALS}), and "
+            f"after that it falls to a human. Say so in one line and wait; a "
+            f"person can still settle it now if they want to."
+        )
+    elif unresolved:
         payload["note"] = (
             "this was meant to be answered by another agent, but no candidate "
             "could be reached — it is in front of a human instead. Tell the "
@@ -3344,10 +3455,15 @@ def expire_ask(*, now: Optional[datetime] = None, cwd: Optional[str] = None) -> 
     if (now or datetime.now(timezone.utc)) < due:
         return None
     who = ", ".join(e.get("handle") or e["kind"] for e in ask.get("asked") or [])
-    reopened = _escalate(
-        workflow, state, step, ask, cwd,
-        why=f"{who or 'nobody'} did not answer by {deadline}",
-    )
+    if ask.get("deferred"):
+        # Not an expiry: this ask was never put to anyone, and its deadline is
+        # the retry the deferral asked for. Re-resolve the same group.
+        reopened = _retry_deferred(workflow, state, step, ask, cwd)
+    else:
+        reopened = _escalate(
+            workflow, state, step, ask, cwd,
+            why=f"{who or 'nobody'} did not answer by {deadline}",
+        )
     moved_to = None
     if reopened is None and state.get("current") != step.id:
         # `otherwise: self:<option>`: the declared default took the decision
