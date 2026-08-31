@@ -47,6 +47,8 @@ payload it emits reading through the disables, plus what the modal remembers
 between spawns — ``queued_check`` on
 the queued-deliveries banner — the backlog the daemon is holding for the
 attached session, and whose keyboard it blames for the hold —
+``window_check`` on the read-only measurement Window page — holders, FIFO
+positions, capacity, owner attribution and the two-second poll lifecycle —
 ``backpressure_check`` on the one state none of those three can show:
 past the mesh's cap the daemon stops ACCEPTING mail for a session, so
 the backlog stops growing and every field the page had before reads as
@@ -273,6 +275,7 @@ WEB = Path(__file__).resolve().parent / "web"
         "rolepanel_check.js",
         "spawnmodal_check.js",
         "queued_check.js",
+        "window_check.js",
         "sendinput_check.js",
         "holdchip_check.js",
         "backpressure_check.js",
