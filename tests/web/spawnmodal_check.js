@@ -196,6 +196,12 @@ new Function(
   + slice("qjStamp") + slice("fillSpawnSelect") + slice("spawnRow") + slice("spawnSubRow")
   + slice("spawnCheckRow") + slice("spawnRadioGroup")
   + slice("refillSpawnWorkflows") + slice("spawnConnectNow")
+  /* refreshSpawnConnect strains the mesh roster through this before
+     spawnConnectNow sees it. The real one is taken rather than stubbed:
+     it reads only sessionsCache, which the stubs above already declare
+     and setSessions drives, so the harness stays on the production rule
+     instead of a copy that can drift away from it. */
+  + slice("connectCandidate")
   + slice("buildSpawnForm")
   + slice("spawnModalKey") + slice("spawnModalClose")
   + slice("refreshSpawnBorrowOptions") + slice("openSpawnModal")
