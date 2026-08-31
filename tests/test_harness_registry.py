@@ -36,10 +36,35 @@ def test_packaged_set_declares_supported_harnesses(home):
     assert reg["claude"].borrow_mode == "provider-token"
     assert reg["claude"].empty_env == ["ANTHROPIC_API_KEY"]
     assert reg["claude"].models == ["haiku", "sonnet", "opus", "fable"]
+    assert reg["claude"].btw is not None
+    assert reg["claude"].btw.to_dict() == {
+        "command": "/btw",
+        "aliases": [],
+        "minimum_version": "2.1.73",
+        "requires_started_conversation": False,
+        "available_while_busy": True,
+        "context": "current-conversation",
+        "history": "ephemeral",
+        "tool_access": "none",
+        "response_mode": "single-response",
+    }
     assert "OPENAI_API_KEY" in reg["codex"].clear_env
     assert reg["codex"].borrowable is False
     assert reg["codex"].models == ["luna", "terra", "sol"]
     assert reg["codex"].to_dict()["models"] == ["luna", "terra", "sol"]
+    assert reg["codex"].btw is not None
+    assert reg["codex"].btw.to_dict() == {
+        "command": "/btw",
+        "aliases": ["/side"],
+        "minimum_version": "0.133.0",
+        "requires_started_conversation": True,
+        "available_while_busy": True,
+        "context": "reference-parent",
+        "history": "ephemeral",
+        "tool_access": "restricted",
+        "response_mode": "conversation",
+    }
+    assert all(reg[name].btw is None for name in ("pi", "kimi", "agent"))
     # Claude leads displays; it is the default and the only builtin one.
     assert harnesses.names()[0] == "claude"
 
@@ -169,6 +194,74 @@ def test_parse_rejects_a_malformed_document():
         harnesses.parse(
             {"harnesses": {"x": {"paste_enter_delay": -1}}}
         )
+
+
+@pytest.mark.parametrize(
+    ("btw", "message"),
+    [
+        (True, "btw must be a mapping"),
+        ({"command": "btw"}, "btw command must be a slash command"),
+        (
+            {
+                "command": "/btw",
+                "aliases": ["/btw"],
+                "minimum_version": "1.0.0",
+                "requires_started_conversation": False,
+                "available_while_busy": True,
+                "context": "current-conversation",
+                "history": "ephemeral",
+                "tool_access": "none",
+                "response_mode": "single-response",
+            },
+            "aliases must be unique",
+        ),
+        (
+            {
+                "command": "/btw",
+                "aliases": [],
+                "minimum_version": "latest",
+                "requires_started_conversation": False,
+                "available_while_busy": True,
+                "context": "current-conversation",
+                "history": "ephemeral",
+                "tool_access": "none",
+                "response_mode": "single-response",
+            },
+            "minimum_version must be a version string",
+        ),
+        (
+            {
+                "command": "/btw",
+                "aliases": [],
+                "minimum_version": "1.0.0",
+                "requires_started_conversation": "false",
+                "available_while_busy": True,
+                "context": "current-conversation",
+                "history": "ephemeral",
+                "tool_access": "none",
+                "response_mode": "single-response",
+            },
+            "requires_started_conversation must be true or false",
+        ),
+        (
+            {
+                "command": "/btw",
+                "aliases": [],
+                "minimum_version": "1.0.0",
+                "requires_started_conversation": False,
+                "available_while_busy": True,
+                "context": "unknown",
+                "history": "ephemeral",
+                "tool_access": "none",
+                "response_mode": "single-response",
+            },
+            "btw context must be one of",
+        ),
+    ],
+)
+def test_btw_capability_rejects_an_incomplete_or_invalid_contract(btw, message):
+    with pytest.raises(HarnessConfigError, match=message):
+        harnesses.parse({"harnesses": {"x": {"btw": btw}}})
 
 
 def test_brief_api_key_field_is_an_input_only_compatibility_alias(home):

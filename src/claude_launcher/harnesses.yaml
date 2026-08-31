@@ -11,6 +11,16 @@ harnesses:
     opening_transport: argv
     input_readiness: bracketed-paste
     skip_permissions_args: [--dangerously-skip-permissions]
+    btw:
+      command: /btw
+      aliases: []
+      minimum_version: "2.1.73"
+      requires_started_conversation: false
+      available_while_busy: true
+      context: current-conversation
+      history: ephemeral
+      tool_access: none
+      response_mode: single-response
     description: >-
       Claude Code, run under a claunch profile (isolated config dir, provider
       and token). Needs --profile; the executable is CLAUDE_LAUNCHER_BIN.
@@ -21,6 +31,16 @@ harnesses:
     efforts: [low, medium, high]
     model_args: [-c, "model=gpt-5.6-{model}"]
     effort_args: [-c, "model_reasoning_effort={effort}"]
+    btw:
+      command: /btw
+      aliases: [/side]
+      minimum_version: "0.133.0"
+      requires_started_conversation: true
+      available_while_busy: true
+      context: reference-parent
+      history: ephemeral
+      tool_access: restricted
+      response_mode: conversation
     args: [--dangerously-bypass-approvals-and-sandbox]
     restore_args: [resume, --last]
     home_env: CODEX_HOME
