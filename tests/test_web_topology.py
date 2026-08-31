@@ -332,6 +332,6 @@ def test_topology_diagram_logic(script):
         pytest.skip("node is not installed")
     proc = subprocess.run(
         [node, str(WEB / script)],
-        capture_output=True, text=True, timeout=60,
+        capture_output=True, text=True, encoding="utf-8", timeout=60,
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
