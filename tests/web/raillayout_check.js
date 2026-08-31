@@ -94,7 +94,14 @@ const api = async () => ({ ok: true, json: async () => served });
 
 /* Everything refreshSessions leans on that is not the row itself. */
 const stubs = `
-function sessionMatchesFilter() { return true; }
+/* The rail filter is REAL here (sliced in below), not a stub that always
+   says yes. refreshSessions passes it to Array.filter, which hands a
+   callback the index as its second argument — so a stub that ignores its
+   arguments cannot see the filter being fed an index in place of the
+   rail's filter name. That mistake empties the visible set, and an empty
+   visible set flattens every row to depth 0, which is what the indent
+   assertions below exist to catch. Only the filter name is stubbed. */
+let sessionFilter = "current";
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null;
 // refreshSessions prunes the keep-alive cache of vanished sessions; the
@@ -167,6 +174,7 @@ const ctx = {};
 new Function(
   "exports", "document", "el", "api", "list", "meshCache", "sessionGroupByMesh",
   stubs + capLine[0] + "\n"
+  + slice("sessionCategory") + slice("sessionMatchesFilter")
   + slice("byLineage") + slice("sessionMeshGroup") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
   + slice("profileHarnessLabel") + slice("railMetaText")
   + slice("refreshSessions")

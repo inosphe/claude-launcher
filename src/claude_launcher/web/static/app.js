@@ -558,7 +558,13 @@ async function refreshSessions() {
   if (rebuild) list._sessionsSignature = signature;
   if (rebuild) list.innerHTML = "";
   let previousGroup = null;
-  const visibleSessions = sessionsCache.filter(sessionMatchesFilter);
+  // Wrapped, not passed straight to filter: Array.filter calls its callback
+  // with (element, index, array), and sessionMatchesFilter's second
+  // parameter is the filter name, which defaults to the rail's current
+  // one only when the argument is absent. Handed an index it matches
+  // nothing, the visible set comes back empty, and every row is laid out
+  // as a root with no indent.
+  const visibleSessions = sessionsCache.filter((s) => sessionMatchesFilter(s));
   let entries = rebuild
     ? byLineage(sessionsCache, visibleSessions) : [];
   if (sessionGroupByMesh) {
