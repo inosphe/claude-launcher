@@ -654,6 +654,28 @@ class SessionReminderService:
             log.debug("session reminder held for %r: session is not working", name)
             return
 
+        # A reminder that became due while the session was idle is not useful
+        # when the session starts a new turn.  The input that makes the
+        # session busy is exactly the activity that makes the held reminder
+        # obsolete, so begin a fresh interval instead of delivering it
+        # immediately.  Keep this transition scoped to sources that were
+        # actually held; an unrelated source may still be delivered normally.
+        resumed = False
+        if cflow_entry is not None and cflow_entry.get("held_at") is not None:
+            cflow_entry["at"] = time.monotonic()
+            cflow_entry["held_at"] = None
+            resumed = True
+        role_entry = self._roles.get(name) if role_due else None
+        if role_entry is not None and role_entry.get("held_at") is not None:
+            role_entry["at"] = time.monotonic()
+            role_entry["held_at"] = None
+            resumed = True
+        if resumed:
+            log.debug(
+                "session reminder re-armed for %r after idle session resumed", name
+            )
+            return
+
         try:
             open_asks = len(await asyncio.to_thread(cflow_engine.open_asks, name))
         except Exception:  # noqa: BLE001 - decoration never sinks a delivery
