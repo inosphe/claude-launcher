@@ -291,7 +291,21 @@ MAX_WORKERS = 4
 EXPLICIT_GUARDS = (
     (
         ("src/claude_launcher/workflows/", ".claunch/workflows/"),
-        ("tests/test_sync_project_layer.py",),
+        (
+            "tests/test_sync_project_layer.py",
+            # Same shape as its neighbour and missed for eleven rounds:
+            # test_project_layer_override globs `.claunch/workflows/*.yaml`
+            # (line 382) rather than naming a workflow, so rule 3a has no
+            # reference to grep and rule 2 has no same-named module. It is the
+            # test that decides what an override's `verify:` may be -- that it
+            # calls a file in this checkout rather than a binary off PATH, and
+            # that it does not run a test suite -- so a round that adds or
+            # rewrites an override was landing with that rule unchecked.
+            # Measured on the round that added merge.yaml under both workflow
+            # directories: two changed paths, one module selected, and this
+            # one not among them (claunch-0fqk).
+            "tests/test_project_layer_override.py",
+        ),
     ),
     (
         ("src/claude_launcher/web/static/", "tests/web/"),
