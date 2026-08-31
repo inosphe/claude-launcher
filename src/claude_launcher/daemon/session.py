@@ -389,6 +389,11 @@ class Session:
         #: Latched once the harness has been seen ready to take a message; see
         #: :meth:`_await_readable`.
         self._input_ready = False
+        #: Automated deliveries paste a block and then a separate Enter.  A
+        #: newly created session can receive its mesh briefing and a cflow
+        #: start nudge together; serialising the complete delivery keeps the
+        #: two paste/Enter pairs whole and ordered.
+        self._delivery_lock = asyncio.Lock()
         #: Monotonic time a human last typed here (attach/web keystrokes,
         #: ``claunch send-keys``); 0.0 = never. See :meth:`keyboard_busy`.
         self._last_human_input = 0.0
@@ -767,7 +772,7 @@ class Session:
             return None
         return idle_for
 
-    async def deliver(self, text: str, *, force: bool = False) -> bool:
+    async def _deliver(self, text: str, *, force: bool = False) -> bool:
         """Put ``text`` in front of the agent running here, as a user message.
 
         **The** way anything automated hands an agent something to act on —
@@ -855,6 +860,11 @@ class Session:
             log.debug("deliver to %r failed: %s", self.sdef.name, exc)
             return False
         return True
+
+    async def deliver(self, text: str, *, force: bool = False) -> bool:
+        """Deliver one automated message without interleaving another's input."""
+        async with self._delivery_lock:
+            return await self._deliver(text, force=force)
 
     async def _await_readable(self) -> None:
         """Block until a starting TUI can actually take a message.

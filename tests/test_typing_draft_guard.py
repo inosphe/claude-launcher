@@ -57,6 +57,7 @@ def _fake_session(*, bracketed: bool = True):
         _draft_open = False
         paste = session_mod.Session.paste
         deliver = session_mod.Session.deliver
+        _deliver = session_mod.Session._deliver
         send_keys = session_mod.Session.send_keys
         _await_readable = session_mod.Session._await_readable
         await_keyboard_quiet = session_mod.Session.await_keyboard_quiet
@@ -71,6 +72,7 @@ def _fake_session(*, bracketed: bool = True):
             writes.append(data)
 
     s = FakeSession()
+    s._delivery_lock = asyncio.Lock()
     s._started_mono = time.monotonic()
     s._input_ready = True
     if bracketed:

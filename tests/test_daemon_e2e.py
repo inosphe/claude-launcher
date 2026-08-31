@@ -742,6 +742,7 @@ def test_cflow_nudge_goes_through_deliver(home, tmp_path, monkeypatch):
         screen = ScreenState(80, 24)
         paste = session_mod.Session.paste
         deliver = session_mod.Session.deliver
+        _deliver = session_mod.Session._deliver
         _await_readable = session_mod.Session._await_readable
         await_keyboard_quiet = session_mod.Session.await_keyboard_quiet
         keyboard_busy = session_mod.Session.keyboard_busy
@@ -751,6 +752,7 @@ def test_cflow_nudge_goes_through_deliver(home, tmp_path, monkeypatch):
         _last_human_input = 0.0  # nobody has typed here
         _last_terminal_input = 0.0
         _draft_open = False  # and nothing half-written is sitting in it
+        _delivery_lock = asyncio.Lock()
 
         async def write_bytes(self, data: bytes) -> None:
             writes.append(data)
@@ -782,6 +784,10 @@ def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):
 
     from claude_launcher import workspaces
     from claude_launcher.cflow import engine as cflow_engine
+    from claude_launcher.daemon import session as session_mod
+
+    monkeypatch.setattr(session_mod, "INPUT_READY_TIMEOUT", 0.2)
+    monkeypatch.setattr(session_mod, "INPUT_SETTLE", 0.0)
 
     (tmp_path / ".claunch" / "workflows").mkdir(parents=True)
     (tmp_path / ".claunch" / "workflows" / "demo.yaml").write_text(
@@ -799,8 +805,11 @@ def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):
         await client.start_server()
         try:
             bearer = {"Authorization": "Bearer sekrit"}
-            mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
-            await _wait_screen(mgr.get("s1"), "READY")
+            # A dashboard action can follow session creation before its
+            # harness has accepted input.  The API returns after binding the
+            # nudge to the session; the background delivery waits for
+            # readiness without turning the start into an unscoped run.
+            session = mgr.create(SessionDef(name="s1", harness="py", cwd=str(tmp_path)))
 
             resp = await client.get("/api/sessions/s1/meta")
             assert resp.status == 401  # authed like the rest of /api
@@ -816,12 +825,6 @@ def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):
             assert meta["cflow"]["sessions"] == ["s1"]
             assert [w["name"] for w in meta["workflows"]] == ["demo"]
 
-            # a mesh membership shows up on the session's page
-            app["mesh"].create("dev")
-            await app["mesh"].join("dev", "s1", handle="impl")
-            resp = await client.get("/api/sessions/s1/meta", headers=bearer)
-            assert (await resp.json())["meshes"][0]["mesh"] == "dev"
-
             # path 1: ask the session's agent to start it. Nothing is started;
             # the request is recorded and typed into the session.
             resp = await client.post(
@@ -832,8 +835,14 @@ def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):
             )
             doc = await resp.json()
             assert resp.status == 200
-            assert doc["nudged_sessions"] == ["s1"]
-            await _wait_screen(mgr.get("s1"), "a start of workflow 'demo' was requested")
+            assert doc["nudge_scheduled_sessions"] == ["s1"]
+            await _wait_screen(session, "a start of workflow 'demo' was requested")
+
+            # a mesh membership shows up on the session's page
+            app["mesh"].create("dev")
+            await app["mesh"].join("dev", "s1", handle="impl")
+            resp = await client.get("/api/sessions/s1/meta", headers=bearer)
+            assert (await resp.json())["meshes"][0]["mesh"] == "dev"
 
             resp = await client.get("/api/sessions/s1/meta", headers=bearer)
             flow = (await resp.json())["cflow"]
@@ -873,7 +882,9 @@ def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):
                 headers=bearer,
             )
             assert resp.status == 200
-            assert (await resp.json())["step_id"] == "one"
+            doc = await resp.json()
+            assert doc["step_id"] == "one"
+            assert doc["nudge_scheduled_sessions"] == ["s1"]
             resp = await client.get("/api/sessions/s1/meta", headers=bearer)
             assert (await resp.json())["cflow"]["status"] == "step"
         finally:
@@ -904,7 +915,7 @@ def test_api_cflow_request_can_be_withdrawn(home, tmp_path, monkeypatch):
             assert resp.status == 200
             # no session named 'ghost' is alive: nothing to nudge, but the
             # request stands for whoever attaches next
-            assert (await resp.json())["nudged_sessions"] == []
+            assert (await resp.json())["nudge_scheduled_sessions"] == []
 
             resp = await client.post(
                 "/api/cflow/request/cancel",
@@ -1639,7 +1650,7 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
             doc = await resp.json()
             assert doc["status"] == "step"
             assert doc["step_id"] == "only"
-            assert doc["nudged_sessions"] == []
+            assert doc["nudge_scheduled_sessions"] == []
 
             # for a session-bound run, archive + start nudges the session so
             # its agent picks the new workflow up
@@ -1663,7 +1674,7 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
                 headers=bearer,
             )
             assert resp.status == 200
-            assert (await resp.json())["nudged_sessions"] == ["n1"]
+            assert (await resp.json())["nudge_scheduled_sessions"] == ["n1"]
             await _wait_screen(worker, "echo:cflow: a new workflow run")
         finally:
             await mgr.shutdown_all()
