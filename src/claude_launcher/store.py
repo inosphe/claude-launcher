@@ -30,6 +30,8 @@ Schema::
       marketplaces: [<source>, ...]
       plugins: [<plugin@marketplace>, ...]
       settings: {<settings.json key>: <value>, ...}
+    briefing:
+      faq: [{id: <id>, question: <text>, answer: <text>, enabled: true}, ...]
     workspaces:                 # machine-local; see :mod:`workspaces`
       <name>: <absolute path>
 
@@ -42,6 +44,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
+import uuid
 
 import yaml
 
@@ -358,6 +361,65 @@ def set_daemon_field(key: str, value) -> None:
             block[key] = value
 
     update(_mutate)
+
+
+# --------------------------------------------------------------------------- #
+# briefing FAQ
+# --------------------------------------------------------------------------- #
+def briefing_faq(doc: Optional[dict] = None) -> List[dict]:
+    """Return the user-maintained FAQ entries used by briefing summaries."""
+    doc = load() if doc is None else doc
+    block = doc.get("briefing")
+    rows = block.get("faq") if isinstance(block, dict) else None
+    if not isinstance(rows, list):
+        return []
+    out = []
+    for index, row in enumerate(rows):
+        if not isinstance(row, dict):
+            continue
+        question = str(row.get("question") or "").strip()
+        answer = str(row.get("answer") or "").strip()
+        if question and answer:
+            out.append({
+                "id": str(row.get("id") or f"faq-{index + 1}"),
+                "question": question,
+                "answer": answer,
+                "enabled": row.get("enabled", True) is not False,
+            })
+    return out
+
+
+def set_briefing_faq(rows: List[dict]) -> List[dict]:
+    """Replace the briefing FAQ after validating its persisted shape."""
+    clean = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        question = str(row.get("question") or "").strip()
+        answer = str(row.get("answer") or "").strip()
+        if not question or not answer:
+            continue
+        clean.append({
+            "id": str(row.get("id") or uuid.uuid4()),
+            "question": question,
+            "answer": answer,
+            "enabled": row.get("enabled", True) is not False,
+        })
+
+    def _mutate(doc: dict) -> None:
+        block = doc.get("briefing")
+        if not isinstance(block, dict):
+            block = {}
+            doc["briefing"] = block
+        if clean:
+            block["faq"] = clean
+        else:
+            block.pop("faq", None)
+            if not block:
+                doc.pop("briefing", None)
+
+    update(_mutate)
+    return clean
 
 
 def harnesses(doc: Optional[dict] = None) -> Dict[str, dict]:

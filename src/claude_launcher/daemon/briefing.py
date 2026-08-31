@@ -326,11 +326,20 @@ def gather_live(session) -> Optional[dict]:
         return None
 
 
+def gather_faq() -> List[dict]:
+    """Read enabled user FAQ entries for the summariser prompt."""
+    try:
+        return [row for row in store.briefing_faq() if row.get("enabled", True)]
+    except store.StoreError:
+        return []
+
+
 def build_prompt(
     sdef,
     cflow_info: Optional[dict],
     events: List[str],
     live_info: Optional[dict] = None,
+    faq: Optional[List[dict]] = None,
 ) -> str:
     """The single user message the LLM answers with the briefing JSON."""
     lines = [
@@ -362,6 +371,13 @@ def build_prompt(
             f"마지막 입력: {live_info.get('last_input_at') or '(없음)'} / "
             f"마지막 출력: {live_info.get('last_output_at') or '(없음)'}"
         )
+    if faq:
+        lines += ["", "[사용자 FAQ — 요약 시 참고]"]
+        for row in faq[:50]:
+            lines.append(
+                f"질문: {_clip(str(row.get('question') or ''), 1000)} / "
+                f"답변: {_clip(str(row.get('answer') or ''), 5000)}"
+            )
     if cflow_info:
         lines += ["", "[cflow 런]"]
         lines.append(
@@ -535,6 +551,7 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
     sdef = session.sdef
     name = sdef.name
     live_info = gather_live(session)
+    faq = gather_faq()
     cflow_info = gather_cflow(sdef.cwd or "", name)
     jsonl_path = locate_transcript(sdef)
     stat_key = None
@@ -551,13 +568,17 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
         live_info.get("status") if live_info else None,
         live_info.get("last_input_at") if live_info else None,
         live_info.get("last_output_at") if live_info else None,
+        tuple(
+            (row.get("id"), row.get("question"), row.get("answer"), row.get("enabled"))
+            for row in faq
+        ),
     )
     if not refresh:
         hit = _cache.get(name)
         if hit is not None and hit[0] == cache_key:
             return {**hit[1], "cached": True}
     events = tail_events(jsonl_path) if jsonl_path is not None else []
-    prompt = build_prompt(sdef, cflow_info, events, live_info)
+    prompt = build_prompt(sdef, cflow_info, events, live_info, faq)
     answer = await call_llm(cfg, prompt)
     parsed = parse_briefing(answer.text)
     if parsed is None and answer.finish_reason == "length":

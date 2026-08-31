@@ -6926,7 +6926,7 @@ function mobileTitle() {
     case "new": return "new session";
     case "meshes": return "mesh";
     case "flows": return "workflows";
-    case "ws": return "workspaces";
+    case "settings": return "settings";
     case "reports": return "reports";
     case "mesh": return `mesh · ${meshName}`;
     case "flow": return `flows · ${flowMesh}`;
@@ -7059,7 +7059,7 @@ const VIEWS = {
   msg: "msg-view",
   mesh: "mesh-view",
   flow: "flow-view",
-  ws: "ws-view",
+  settings: "ws-view",
 };
 
 /* The page on screen. Read by the layout and the mobile bars; written only
@@ -7474,7 +7474,7 @@ function parseHash(h) {
   // #/beads is the board; #/beads/<id> the board with one issue opened.
   if (parts[0] === "beads") return { page: "beads", id: parts[1] || "" };
   if (parts[0] === "reports") return { page: "reports" };
-  if (parts[0] === "workspaces") return { page: "ws" };
+  if (parts[0] === "settings" || parts[0] === "workspaces") return { page: "settings" };
   return { page: "home" };   // an unknown link is a wrong turn, not an error
 }
 
@@ -7486,7 +7486,7 @@ function route() {
   if (r.page !== "msg") stopMsgPoll();
   if (r.page !== "mesh") stopMeshPoll();
   if (r.page !== "flow") stopFlowPoll();
-  if (r.page !== "ws") closeWorkspaces();
+  if (r.page !== "settings") closeWorkspaces();
   if (r.page !== "beads") stopBeadsPoll();
   if (r.page !== "reports") stopReportsPoll();
   if (r.page !== "log") closeTranscript();
@@ -7521,7 +7521,7 @@ function route() {
     case "new": showView("new"); refreshWorkflowChoices(); break;
     case "flows": showView("flows"); refreshCflow(); break;
     case "cli": openCli(); break;
-    case "ws": openWorkspaces(); break;
+    case "settings": openSettings(); break;
     case "beads": openBeads(r.id); break;
     case "reports": openReports(); break;
     default: openHome();
@@ -8294,12 +8294,21 @@ function daemonCard() {
 let wsOpen = false;
 let wsError = "";                    // last add/remove failure
 let wsDraft = { path: "", name: "" }; // survives a poll-driven rebuild
+let faqCache = [];
+let faqError = "";
+let faqDraft = { question: "", answer: "" };
+let faqEdit = null;
 
 function openWorkspaces() {
   wsOpen = true;
-  showView("ws");
+  showView("settings");
   renderWorkspaces();
   refreshWorkspaces();  // don't make the user wait out the 2s poll
+}
+
+function openSettings() {
+  openWorkspaces();
+  refreshFaq();
 }
 
 function closeWorkspaces() {
@@ -9340,7 +9349,7 @@ function renderWorkspaces() {
   view.innerHTML = "";
 
   const head = el("div", "wf-head");
-  head.appendChild(el("h2", null, "Workspaces"));
+  head.appendChild(el("h2", null, "Settings"));
   const back = el("button", "wf-btn clear", "Back");
   back.addEventListener("click", () => { location.hash = "#"; });
   head.appendChild(back);
@@ -9353,6 +9362,8 @@ function renderWorkspaces() {
   ));
 
   view.appendChild(wsAddCard());
+
+  view.appendChild(faqCard());
 
   const list = el("div", "ws-list");
   list.appendChild(el("h3", null, `Registered (${workspacesCache.length})`));
@@ -9376,6 +9387,108 @@ function renderWorkspaces() {
       }
     }
   }
+}
+
+async function refreshFaq() {
+  try {
+    const resp = await api("/api/briefing/faq");
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    faqCache = data.faq || [];
+    faqError = "";
+    if (wsOpen) renderWorkspaces();
+  } catch (err) {
+    faqError = String(err);
+    if (wsOpen) renderWorkspaces();
+  }
+}
+
+function faqCard() {
+  const card = el("section", "faq-settings");
+  card.appendChild(el("h3", null, "Briefing FAQ"));
+  card.appendChild(el(
+    "p", "wf-note",
+    "Register stable answers the briefing summariser may use as user-provided context."
+  ));
+  const form = el("form", "faq-add");
+  const q = document.createElement("input");
+  q.placeholder = "Question"; q.value = faqDraft.question;
+  q.addEventListener("input", () => { faqDraft.question = q.value; });
+  const a = document.createElement("textarea");
+  a.rows = 3; a.placeholder = "Answer"; a.value = faqDraft.answer;
+  a.addEventListener("input", () => { faqDraft.answer = a.value; });
+  const submit = el("button", "wf-btn approve", "Add FAQ"); submit.type = "submit";
+  form.append(q, a, submit);
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    try {
+      const resp = await api("/api/briefing/faq", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(faqDraft),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) { faqError = data.error || `HTTP ${resp.status}`; renderWorkspaces(); return; }
+      faqDraft = { question: "", answer: "" };
+      faqCache = data.faq || [];
+      renderWorkspaces();
+    } catch (err) { faqError = String(err); renderWorkspaces(); }
+  });
+  card.appendChild(form);
+  if (faqError) card.appendChild(el("p", "error", faqError));
+  const list = el("div", "faq-list");
+  for (const row of faqCache) {
+    const item = el("div", "faq-row");
+    const text = el("div", "faq-text");
+    if (faqEdit === row.id) {
+      const eq = document.createElement("input");
+      eq.value = row.question; eq.className = "faq-edit-question";
+      const ea = document.createElement("textarea");
+      ea.rows = 3; ea.value = row.answer; ea.className = "faq-edit-answer";
+      text.append(eq, ea);
+      const save = el("button", "wf-btn approve", "Save"); save.type = "button";
+      save.addEventListener("click", () => faqSave(row, {
+        question: eq.value, answer: ea.value,
+      }));
+      const cancel = el("button", "wf-btn clear", "Cancel"); cancel.type = "button";
+      cancel.addEventListener("click", () => { faqEdit = null; renderWorkspaces(); });
+      item.append(text, save, cancel); list.appendChild(item); continue;
+    }
+    text.append(el("strong", null, row.question), el("p", null, row.answer));
+    item.appendChild(text);
+    const edit = el("button", "wf-btn clear", "Edit");
+    edit.type = "button"; edit.addEventListener("click", () => { faqEdit = row.id; renderWorkspaces(); });
+    const toggle = el("button", "wf-btn clear", row.enabled === false ? "Enable" : "Disable");
+    toggle.type = "button";
+    toggle.addEventListener("click", () => faqSave(row, { enabled: row.enabled === false }));
+    const remove = el("button", "wf-btn clear", "Delete");
+    remove.type = "button"; remove.addEventListener("click", () => faqRemove(row));
+    item.append(edit, toggle, remove); list.appendChild(item);
+  }
+  if (!faqCache.length) list.appendChild(el("p", "wf-note", "No FAQ entries registered."));
+  card.appendChild(list);
+  return card;
+}
+
+async function faqSave(row, changes) {
+  try {
+    const resp = await api(`/api/briefing/faq/${encodeURIComponent(row.id)}`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...row, ...changes }),
+    });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    faqCache = data.faq || []; faqEdit = null; faqError = ""; renderWorkspaces();
+  } catch (err) { faqError = String(err); renderWorkspaces(); }
+}
+
+async function faqRemove(row) {
+  if (!confirm(`Delete FAQ '${row.question}'?`)) return;
+  try {
+    const resp = await api(`/api/briefing/faq/${encodeURIComponent(row.id)}`, { method: "DELETE" });
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
+    faqCache = data.faq || []; renderWorkspaces();
+  } catch (err) { faqError = String(err); renderWorkspaces(); }
 }
 
 function wsAddCard() {

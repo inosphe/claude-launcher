@@ -647,6 +647,40 @@ def test_briefing_endpoint_contract_cache_and_refresh(home, tmp_path):
     asyncio.run(run())
 
 
+def test_briefing_faq_can_be_managed_and_is_persisted(home, tmp_path):
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            resp = await client.post(
+                "/api/briefing/faq", json={"question": "Q", "answer": "A"},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            body = await resp.json()
+            row = body["entry"]
+            assert row["question"] == "Q" and row["enabled"] is True
+
+            resp = await client.get("/api/briefing/faq", headers=BEARER)
+            assert (await resp.json())["faq"] == [row]
+            resp = await client.put(
+                f"/api/briefing/faq/{row['id']}",
+                json={**row, "answer": "A2", "enabled": False}, headers=BEARER,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["entry"]["answer"] == "A2"
+            resp = await client.delete(
+                f"/api/briefing/faq/{row['id']}", headers=BEARER
+            )
+            assert resp.status == 200
+            assert (await resp.json())["faq"] == []
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_briefing_endpoint_unconfigured_unknown_and_raw(home, tmp_path):
     from aiohttp import web as aioweb
 

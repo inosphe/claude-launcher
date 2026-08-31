@@ -258,6 +258,10 @@ def build_app(
     r.add_get("/api/git", h_git)
     r.add_post("/api/workspaces", h_workspace_add)
     r.add_delete("/api/workspaces/{name}", h_workspace_remove)
+    r.add_get("/api/briefing/faq", h_briefing_faq)
+    r.add_post("/api/briefing/faq", h_briefing_faq_add)
+    r.add_put("/api/briefing/faq/{faq_id}", h_briefing_faq_update)
+    r.add_delete("/api/briefing/faq/{faq_id}", h_briefing_faq_remove)
     r.add_get("/api/harnesses", h_harnesses)
     r.add_get("/api/cflow", h_cflow_runs)
     r.add_get("/api/cflow/run", h_cflow_run_detail)
@@ -882,6 +886,62 @@ async def h_workspace_remove(request: web.Request) -> web.Response:
     except workspaces.WorkspaceError as exc:
         return json_error(404, str(exc))
     return web.json_response({"workspace": removed.to_dict()})
+
+
+def _faq_body(body: dict) -> dict:
+    question = str(body.get("question") or "").strip()
+    answer = str(body.get("answer") or "").strip()
+    if not question or not answer:
+        raise ValueError("an FAQ needs both a question and an answer")
+    if len(question) > 1000 or len(answer) > 5000:
+        raise ValueError("FAQ question or answer is too long")
+    return {
+        "id": str(body.get("id") or ""),
+        "question": question,
+        "answer": answer,
+        "enabled": body.get("enabled", True) is not False,
+    }
+
+
+async def h_briefing_faq(request: web.Request) -> web.Response:
+    return web.json_response({"faq": store.briefing_faq()})
+
+
+async def h_briefing_faq_add(request: web.Request) -> web.Response:
+    try:
+        row = _faq_body(await _json_body(request))
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    rows = store.briefing_faq()
+    rows.append(row)
+    saved = store.set_briefing_faq(rows)
+    return web.json_response({"faq": saved, "entry": saved[-1]}, status=201)
+
+
+async def h_briefing_faq_update(request: web.Request) -> web.Response:
+    faq_id = request.match_info["faq_id"]
+    try:
+        incoming = _faq_body(await _json_body(request))
+    except ValueError as exc:
+        return json_error(400, str(exc))
+    rows = store.briefing_faq()
+    for index, row in enumerate(rows):
+        if row.get("id") == faq_id:
+            incoming["id"] = faq_id
+            rows[index] = incoming
+            saved = store.set_briefing_faq(rows)
+            return web.json_response({"faq": saved, "entry": incoming})
+    return json_error(404, f"no FAQ named {faq_id!r}")
+
+
+async def h_briefing_faq_remove(request: web.Request) -> web.Response:
+    faq_id = request.match_info["faq_id"]
+    rows = store.briefing_faq()
+    kept = [row for row in rows if row.get("id") != faq_id]
+    if len(kept) == len(rows):
+        return json_error(404, f"no FAQ named {faq_id!r}")
+    saved = store.set_briefing_faq(kept)
+    return web.json_response({"faq": saved, "removed": faq_id})
 
 
 async def h_roles(request: web.Request) -> web.Response:
