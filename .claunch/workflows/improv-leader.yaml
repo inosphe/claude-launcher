@@ -491,6 +491,10 @@ steps:
         없거나 프리뷰→착지 diff의 파일 목록·stable patch-id가 대상 이동분과
         다르다. 프리뷰 체인이 있으며 두 대조가 같으면 대상 이동은 정상이고
         0 ready로 통과한다.
+        대상·후보 변경 파일은 반드시 각 merge-base에서 `git diff --name-only
+        <merge-base>..<tip>`으로 읽는다. 양방향 `target..<branch>`는 후보가
+        만진 파일 목록이 아니다. 전체 스윕 실패가 있으면 실패 테스트가 import
+        하는 모듈과 파일 교집합을 먼저 보고, 겹치면 함수 단위까지 확인한다.
       - 2 cannot tell — 판정 불가. 「아니다」로 읽지 말고 무엇이 안 읽혔는지
         먼저 본다.
       - 4 dirty checkout — 브랜치 쪽은 준비됐는데 **머지가 일어날 워킹
