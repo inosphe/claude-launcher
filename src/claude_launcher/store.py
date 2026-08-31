@@ -371,6 +371,10 @@ def briefing_faq(doc: Optional[dict] = None) -> List[dict]:
     doc = load() if doc is None else doc
     block = doc.get("briefing")
     rows = block.get("faq") if isinstance(block, dict) else None
+    # Accept the original single-entry shape while reading so upgrading the
+    # setting does not discard an FAQ that was already configured.
+    if isinstance(rows, dict):
+        rows = [rows]
     if not isinstance(rows, list):
         return []
     out = []
