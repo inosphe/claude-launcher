@@ -18,7 +18,7 @@ from typing import Optional
 from aiohttp import web
 
 from .. import daemon_client, store
-from . import cflow_clock, paths, restart_notice, resume, runtime_state
+from . import cflow_clock, paths, restart_notice, resume, runtime_state, window as window_mod
 from . import session_reminder
 from .api import build_app, notify_shutdown
 from .manager import SessionManager
@@ -180,6 +180,8 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
     ask_clock.start()
     reminder_clock = session_reminder.SessionReminderService(manager, mesh_manager)
     reminder_clock.start()
+    window_reminder_clock = window_mod.WindowReminderClock(manager, app["window"])
+    window_reminder_clock.start()
     ping_clock = cflow_clock.StallPingClock(manager)
     ping_clock.start()
     window_clock = cflow_clock.WindowClock(manager)
@@ -253,6 +255,7 @@ async def _serve(host: str, port: int, cfg: dict, bound: Optional[dict] = None) 
         await checklist_clock.shutdown()
         await event_clock.shutdown()
         await ping_clock.shutdown()
+        await window_reminder_clock.shutdown()
         await reminder_clock.shutdown()
         await ask_clock.shutdown()
         await mesh_manager.shutdown()

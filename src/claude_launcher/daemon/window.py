@@ -63,11 +63,13 @@ What is deliberately NOT here:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
 import secrets
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
@@ -89,10 +91,16 @@ CLASSES = (SWEEP, TARGETED)
 ADVISORY_MIN = 2
 ADVISORY_MAX = 8
 
-#: Server-side ceiling on an acquire's wait, so a client typo cannot park a
-#: connection forever. One hour covers the slowest observed full suite by an
-#: order of magnitude.
-MAX_WAIT = 3600.0
+#: Server-side ceiling on an acquire's wait.  A client may choose a shorter
+#: wait at assignment time, but no request may keep a daemon connection open
+#: for more than 30 minutes.
+MAX_WAIT = 1800.0
+
+#: A holder reminder is deliberately independent from the session reminder
+#: service.  It concerns a machine-wide resource, including sessions without
+#: a cflow run, and must still reach an idle session after a failed test.
+REMINDER_INTERVAL = 180.0
+REMINDER_POLL = 15.0
 
 _STATE_VERSION = 1
 
@@ -417,6 +425,8 @@ class WindowManager:
             "holders": list(self._holders),
             "queue": list(self._queue),
             "caps": {"sweep": sweep_cap, "targeted": targeted_cap},
+            "max_wait": MAX_WAIT,
+            "reminder_interval": REMINDER_INTERVAL,
             "cores": self._cores,
             "advisory_n_now": self.advisory_n(extra=1),
         }
@@ -442,3 +452,115 @@ class WindowManager:
         self._queue = [q for q in self._queue if q.get("session") != name]
         self._process_queue()
         self._save()
+
+
+def reminder_block(holder: dict) -> str:
+    """The independent reminder sent while a session keeps a test grant."""
+    grant_id = holder.get("grant_id") or "?"
+    cls = holder.get("cls") or "unknown"
+    label = holder.get("label") or "no label"
+    acquired = holder.get("acquired_at") or "unknown time"
+    return "\n".join(
+        [
+            "---",
+            "# claunch window: release reminder -- machine-generated, not typed by "
+            "the user; repeats every 3 minutes while this grant is held",
+            f"grant: {grant_id} ({cls})",
+            f"held since: {acquired}",
+            f"label: {label}",
+            "protocol: this test window is still held. If the test completed or "
+            "failed, release it now with `claunch window release --grant-id "
+            f"{grant_id}`. If it is still running, keep the grant and continue "
+            "with its result.",
+            "---",
+        ]
+    )
+
+
+class WindowReminderClock:
+    """Remind live session holders to release the measurement window.
+
+    The clock has no authority to release a live holder: a process can still
+    be running after its terminal stops producing output, and releasing such
+    a grant would permit an overlapping measurement.  Session exit and PID
+    reaping remain the release mechanisms.  This clock supplies the missing
+    prompt after failed tests leave a live session holding a grant.
+    """
+
+    def __init__(
+        self,
+        manager,
+        window: WindowManager,
+        *,
+        interval: float = REMINDER_INTERVAL,
+        poll: float = REMINDER_POLL,
+    ) -> None:
+        self.manager = manager
+        self.window = window
+        self.interval = interval
+        self.poll = poll
+        self._seen: Dict[str, float] = {}
+        self._task: Optional[asyncio.Task] = None
+
+    def start(self) -> None:
+        if self._task is None:
+            self._task = asyncio.get_running_loop().create_task(self._run())
+
+    async def shutdown(self) -> None:
+        task, self._task = self._task, None
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+
+    async def _run(self) -> None:
+        while True:
+            try:
+                await asyncio.sleep(self.poll)
+                for holder in self.scan(time.monotonic()):
+                    await self._deliver(holder)
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("window reminder clock tick failed")
+
+    def scan(self, now: Optional[float] = None) -> List[dict]:
+        """Return session-held grants whose next 3-minute reminder is due."""
+        stamp = time.monotonic() if now is None else now
+        holders = self.window.status().get("holders") or []
+        live = set()
+        due: List[dict] = []
+        for holder in holders:
+            grant_id = str(holder.get("grant_id") or "")
+            session = holder.get("session")
+            if not grant_id or not session:
+                continue
+            live.add(grant_id)
+            armed_at = self._seen.setdefault(grant_id, stamp)
+            if stamp - armed_at >= self.interval:
+                due.append(holder)
+        for grant_id in list(self._seen):
+            if grant_id not in live:
+                del self._seen[grant_id]
+        return due
+
+    async def _deliver(self, holder: dict) -> None:
+        """Deliver one due reminder; only a successful delivery re-arms it."""
+        session_name = str(holder.get("session") or "")
+        grant_id = str(holder.get("grant_id") or "")
+        if not session_name or not grant_id:
+            return
+        try:
+            session = self.manager.get(session_name)
+        except Exception:
+            return
+        if getattr(session, "exited", False):
+            return
+        try:
+            delivered = await session.deliver(reminder_block(holder))
+        except Exception:
+            log.exception("window reminder delivery to %r failed", session_name)
+            return
+        if delivered:
+            self._seen[grant_id] = time.monotonic()
+            log.info("window release reminder delivered to %r (%s)", session_name, grant_id)

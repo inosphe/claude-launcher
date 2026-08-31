@@ -51,6 +51,27 @@ class _MessageSink:
         self.messages.append((args, kwargs))
 
 
+class _ReminderSession:
+    def __init__(self) -> None:
+        self.exited = False
+        self.delivered = []
+
+    async def deliver(self, text: str) -> bool:
+        self.delivered.append(text)
+        return True
+
+
+class _ReminderManager(_Manager):
+    def __init__(self, session) -> None:
+        super().__init__()
+        self.session = session
+
+    def get(self, name: str):
+        if name != "holder":
+            raise KeyError(name)
+        return self.session
+
+
 def _make(tmp_path, manager=None, caps=(1, 5), cores=32) -> WindowManager:
     return WindowManager(
         manager,
@@ -332,6 +353,42 @@ def test_a_wait_that_times_out_leaves_no_queue_entry(tmp_path):
     asyncio.run(run())
 
 
+def test_window_wait_is_capped_at_thirty_minutes(tmp_path):
+    w = _make(tmp_path)
+    status = w.status()
+    assert window_mod.MAX_WAIT == 30 * 60
+    assert status["max_wait"] == 30 * 60
+
+
+def test_window_holder_reminder_repeats_every_three_minutes(tmp_path):
+    async def run():
+        session = _ReminderSession()
+        manager = _ReminderManager(session)
+        w = _make(tmp_path, manager=manager)
+        granted = await w.acquire("sweep", session="holder", pid=os.getpid())
+        clock = window_mod.WindowReminderClock(manager, w)
+
+        assert clock.scan(now=0) == []
+        assert clock.scan(now=179) == []
+        due = clock.scan(now=180)
+        assert [entry["grant_id"] for entry in due] == [granted["grant_id"]]
+        await clock._deliver(due[0])
+        assert len(session.delivered) == 1
+        assert "repeats every 3 minutes" in session.delivered[0]
+        assert granted["grant_id"] in session.delivered[0]
+        assert "completed or failed" in session.delivered[0]
+
+        # Delivery re-arms only the independent holder clock.  The ordinary
+        # session reminder service is not constructed in this test.
+        clock._seen[granted["grant_id"]] = 180
+        assert clock.scan(now=359) == []
+        assert len(clock.scan(now=360)) == 1
+        assert w.release(granted["grant_id"])
+        assert clock.scan(now=361) == []
+
+    asyncio.run(run())
+
+
 def test_window_api_status_acquire_release_and_cancel(home, tmp_path):
     from aiohttp.test_utils import TestClient, TestServer
 
@@ -356,6 +413,8 @@ def test_window_api_status_acquire_release_and_cancel(home, tmp_path):
             assert (await client.get("/api/window")).status == 401
             status = await (await client.get("/api/window", headers=headers)).json()
             assert status["caps"] == {"sweep": 1, "targeted": 5}
+            assert status["max_wait"] == 30 * 60
+            assert status["reminder_interval"] == 3 * 60
 
             acquired = await (
                 await client.post(

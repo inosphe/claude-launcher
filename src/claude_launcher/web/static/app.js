@@ -9278,6 +9278,8 @@ async function refreshWindow() {
           holders: Array.isArray(data.holders) ? data.holders : [],
           queue: Array.isArray(data.queue) ? data.queue : [],
           caps: data.caps || {},
+          max_wait: data.max_wait,
+          reminder_interval: data.reminder_interval,
           cores: data.cores,
           advisory_n_now: data.advisory_n_now,
         };
@@ -9410,6 +9412,14 @@ function renderWindow() {
   summary.appendChild(windowSummary(
     "Machine cores", Number.isFinite(cores) ? cores : "?", null,
     "reported by the arbiter"));
+  const maxWait = Number(windowCache.max_wait);
+  summary.appendChild(windowSummary(
+    "Maximum queue wait", Number.isFinite(maxWait) ? fmtAge(maxWait) : "?", null,
+    "set with claunch window acquire --wait"));
+  const reminder = Number(windowCache.reminder_interval);
+  summary.appendChild(windowSummary(
+    "Release reminder", Number.isFinite(reminder) ? `every ${fmtAge(reminder)}` : "?", null,
+    "sent to session-held grants"));
   view.appendChild(summary);
 
   const section = (title, rows, empty, queued) => {
