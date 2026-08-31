@@ -145,6 +145,7 @@ def _fake_session(*, bracketed: bool, ready: bool = True):
         _draft_open = False
         paste = session_mod.Session.paste
         deliver = session_mod.Session.deliver
+        _deliver = session_mod.Session._deliver
         send_keys = session_mod.Session.send_keys
         _await_readable = session_mod.Session._await_readable
         await_keyboard_quiet = session_mod.Session.await_keyboard_quiet
@@ -165,6 +166,7 @@ def _fake_session(*, bracketed: bool, ready: bool = True):
             writes.append(data)
 
     s = FakeSession()
+    s._delivery_lock = asyncio.Lock()
     s._started_mono = time.monotonic()  # a session that just came up
     s._input_ready = ready
     if bracketed:
@@ -177,6 +179,40 @@ def test_deliver_sends_the_enter_as_its_own_write(monkeypatch):
     s, writes = _fake_session(bracketed=True)
     assert asyncio.run(s.deliver("cflow: go")) is True
     assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
+
+
+def test_deliver_serializes_each_message_paste_and_enter(monkeypatch):
+    """Concurrent mesh and cflow deliveries cannot interleave their Enter keys."""
+    monkeypatch.setattr(session_mod, "PASTE_ENTER_DELAY", 0.0)
+    s, writes = _fake_session(bracketed=True)
+    first_paste = asyncio.Event()
+    release_first = asyncio.Event()
+
+    async def write_bytes(data: bytes) -> None:
+        writes.append(data)
+        if len(writes) == 1:
+            first_paste.set()
+            await release_first.wait()
+
+    s.write_bytes = write_bytes
+
+    async def run() -> None:
+        first = asyncio.create_task(s.deliver("mesh: briefing"))
+        await asyncio.wait_for(first_paste.wait(), timeout=1)
+        second = asyncio.create_task(s.deliver("cflow: start"))
+        await asyncio.sleep(0)
+        assert writes == [b"\x1b[200~[T]\rmesh: briefing\x1b[201~"]
+        release_first.set()
+        assert await first is True
+        assert await second is True
+
+    asyncio.run(run())
+    assert writes == [
+        b"\x1b[200~[T]\rmesh: briefing\x1b[201~",
+        b"\r",
+        b"\x1b[200~[T]\rcflow: start\x1b[201~",
+        b"\r",
+    ]
 
 
 def test_codex_waits_for_the_paste_repaint_before_submitting(home, monkeypatch):

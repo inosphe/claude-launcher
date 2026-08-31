@@ -10860,7 +10860,11 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     const doc = await cflowPost("/api/cflow/request", {
       cwd, scope, workflow, context: ctx.value.trim(),
     });
-    if (doc && !(doc.nudged_sessions || []).length) {
+    const nudged = doc ? [
+      ...(doc.nudged_sessions || []),
+      ...(doc.nudge_scheduled_sessions || []),
+    ] : [];
+    if (doc && !nudged.length) {
       alert(
         "request recorded, but the session could not be nudged — it will " +
         "still be picked up on the agent's next cflow 'status' call"
@@ -10887,7 +10891,11 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
     const doc = await cflowPost("/api/cflow/start", {
       cwd, scope, workflow, context: ctx.value.trim(),
     });
-    if (doc && !(doc.nudged_sessions || []).length) {
+    const nudged = doc ? [
+      ...(doc.nudged_sessions || []),
+      ...(doc.nudge_scheduled_sessions || []),
+    ] : [];
+    if (doc && !nudged.length) {
       alert(
         "run started, but no live session was nudged — tell the agent " +
         "to continue (it picks the run up via the /cflow protocol)"
