@@ -988,7 +988,10 @@ def _faq_body(body: dict) -> dict:
 
 
 async def h_briefing_faq(request: web.Request) -> web.Response:
-    return web.json_response({"faq": store.briefing_faq()})
+    try:
+        return web.json_response({"faq": store.briefing_faq()})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
 
 
 async def h_briefing_faq_add(request: web.Request) -> web.Response:
@@ -996,10 +999,13 @@ async def h_briefing_faq_add(request: web.Request) -> web.Response:
         row = _faq_body(await _json_body(request))
     except ValueError as exc:
         return json_error(400, str(exc))
-    rows = store.briefing_faq()
-    rows.append(row)
-    saved = store.set_briefing_faq(rows)
-    return web.json_response({"faq": saved, "entry": saved[-1]}, status=201)
+    try:
+        rows = store.briefing_faq()
+        rows.append(row)
+        saved = store.set_briefing_faq(rows)
+        return web.json_response({"faq": saved, "entry": saved[-1]}, status=201)
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
 
 
 async def h_briefing_faq_update(request: web.Request) -> web.Response:
@@ -1008,24 +1014,30 @@ async def h_briefing_faq_update(request: web.Request) -> web.Response:
         incoming = _faq_body(await _json_body(request))
     except ValueError as exc:
         return json_error(400, str(exc))
-    rows = store.briefing_faq()
-    for index, row in enumerate(rows):
-        if row.get("id") == faq_id:
-            incoming["id"] = faq_id
-            rows[index] = incoming
-            saved = store.set_briefing_faq(rows)
-            return web.json_response({"faq": saved, "entry": incoming})
-    return json_error(404, f"no FAQ named {faq_id!r}")
+    try:
+        rows = store.briefing_faq()
+        for index, row in enumerate(rows):
+            if row.get("id") == faq_id:
+                incoming["id"] = faq_id
+                rows[index] = incoming
+                saved = store.set_briefing_faq(rows)
+                return web.json_response({"faq": saved, "entry": incoming})
+        return json_error(404, f"no FAQ named {faq_id!r}")
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
 
 
 async def h_briefing_faq_remove(request: web.Request) -> web.Response:
     faq_id = request.match_info["faq_id"]
-    rows = store.briefing_faq()
-    kept = [row for row in rows if row.get("id") != faq_id]
-    if len(kept) == len(rows):
-        return json_error(404, f"no FAQ named {faq_id!r}")
-    saved = store.set_briefing_faq(kept)
-    return web.json_response({"faq": saved, "removed": faq_id})
+    try:
+        rows = store.briefing_faq()
+        kept = [row for row in rows if row.get("id") != faq_id]
+        if len(kept) == len(rows):
+            return json_error(404, f"no FAQ named {faq_id!r}")
+        saved = store.set_briefing_faq(kept)
+        return web.json_response({"faq": saved, "removed": faq_id})
+    except store.StoreError as exc:
+        return json_error(500, str(exc))
 
 
 async def h_roles(request: web.Request) -> web.Response:

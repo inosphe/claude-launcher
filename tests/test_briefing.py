@@ -829,6 +829,29 @@ def test_briefing_faq_can_be_managed_and_is_persisted(home, tmp_path):
     asyncio.run(run())
 
 
+def test_briefing_faq_reports_an_unreadable_config(home, tmp_path):
+    """FAQ requests preserve the config-read error in their JSON response."""
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            store.path().write_text("{ this: is: not: valid", encoding="utf-8")
+            for method, path, kwargs in (
+                (client.get, "/api/briefing/faq", {}),
+                (client.post, "/api/briefing/faq", {"json": {"question": "Q"}}),
+                (client.put, "/api/briefing/faq/id", {"json": {"question": "Q"}}),
+                (client.delete, "/api/briefing/faq/id", {}),
+            ):
+                resp = await method(path, headers=BEARER, **kwargs)
+                assert resp.status == 500
+                assert "cannot read config file" in (await resp.json())["error"]
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
 def test_briefing_endpoint_unconfigured_unknown_and_raw(home, tmp_path):
     from aiohttp import web as aioweb
 
