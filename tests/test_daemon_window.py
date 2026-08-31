@@ -38,10 +38,22 @@ class _Manager:
         return SimpleNamespace(exited=self.states[name])
 
 
+class _MessageSink:
+    """A mesh-shaped dependency that records any attempted state broadcast."""
+
+    def __init__(self):
+        self.messages = []
+
+    def list(self):
+        return [SimpleNamespace(name="observers")]
+
+    async def send(self, *args, **kwargs):
+        self.messages.append((args, kwargs))
+
+
 def _make(tmp_path, manager=None, caps=(1, 5), cores=32) -> WindowManager:
     return WindowManager(
         manager,
-        None,
         caps=lambda: caps,
         state_path=tmp_path / "window.json",
         cores=cores,
@@ -343,6 +355,35 @@ def test_window_api_status_acquire_and_release(home, tmp_path):
             assert released == {"released": 1}
         finally:
             await client.close()
+            await manager.shutdown_all()
+
+    asyncio.run(run())
+
+
+def test_window_state_changes_do_not_emit_mesh_messages(home, tmp_path):
+    from claude_launcher.daemon.api import build_app
+    from claude_launcher.daemon.manager import SessionManager
+
+    async def run():
+        manager = SessionManager(
+            idle_threshold=0.5, scrollback=100, restore_default=False
+        )
+        mesh = _MessageSink()
+        app = build_app(
+            manager,
+            "secret",
+            started_at=time.monotonic(),
+            mesh=mesh,
+        )
+        try:
+            grant = await app["window"].acquire(
+                "targeted", session="worker", pid=os.getpid()
+            )
+            assert grant["granted"]
+            assert app["window"].release(grant["grant_id"])
+            await asyncio.sleep(0)
+            assert mesh.messages == []
+        finally:
             await manager.shutdown_all()
 
     asyncio.run(run())

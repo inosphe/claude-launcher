@@ -142,22 +142,24 @@ class WindowManager:
 
     ``caps`` returns ``(sweep_cap, targeted_cap)`` and is read on every
     operation, so an operator's edit lands without a restart -- the pattern
-    the cflow reminder keys already use. ``manager`` and ``mesh`` may be None
-    (tests, or a daemon without a mesh): session-liveness reaping and the
-    fyi broadcast simply have nothing to consult then.
+    the cflow reminder keys already use. ``manager`` may be None in tests;
+    session-liveness reaping then has nothing to consult.
+
+    Holder changes are pull-based observability through :meth:`status` and
+    the window API. They are expected high-frequency state transitions, so
+    they do not enter the mesh delivery path, where every delivery is an
+    agent-facing user message.
     """
 
     def __init__(
         self,
         manager=None,
-        mesh=None,
         *,
         caps: Optional[Callable[[], Tuple[int, int]]] = None,
         state_path: Optional[Path] = None,
         cores: Optional[int] = None,
     ) -> None:
         self._manager = manager
-        self._mesh = mesh
         self._caps = caps or self._caps_from_config
         self._state_path = state_path or (paths.daemon_dir() / "window.json")
         self._cores = cores or (os.cpu_count() or 4)
@@ -311,12 +313,9 @@ class WindowManager:
         if cls not in CLASSES:
             return {"granted": False, "error": f"unknown window class {cls!r}"}
         changed = self._reap()
-        advanced = self._process_queue() if changed else []
         if changed:
+            self._process_queue()
             self._save()
-            for granted in advanced:
-                who = granted.get("session") or f"pid {granted.get('pid')}"
-                self._notify(f"window: {granted['cls']} granted to {who}")
         entry = {
             "grant_id": secrets.token_hex(6),
             "cls": cls,
@@ -328,7 +327,6 @@ class WindowManager:
         if not self._queue and self._grantable(cls):
             holder = self._grant(entry)
             self._save()
-            self._notify(f"window: {cls} granted to {session or f'pid {pid}'}")
             return {
                 "granted": True,
                 "grant_id": holder["grant_id"],
@@ -378,12 +376,8 @@ class WindowManager:
         if holder is None:
             return False
         self._holders.remove(holder)
-        granted = self._process_queue()
+        self._process_queue()
         self._save()
-        who = holder.get("session") or f"pid {holder.get('pid')}"
-        self._notify(f"window: {holder['cls']} released by {who}")
-        for entry in granted:
-            self._notify(f"window: {entry['cls']} granted to {entry.get('session') or f'pid ' + str(entry.get('pid'))}")
         return True
 
     def release_session(self, session: str) -> int:
@@ -435,53 +429,5 @@ class WindowManager:
             return
         self._holders = [h for h in self._holders if h.get("session") != name]
         self._queue = [q for q in self._queue if q.get("session") != name]
-        granted = self._process_queue()
+        self._process_queue()
         self._save()
-        self._notify(
-            f"window: {name} exited -- released {len(held)} grant(s), "
-            f"dropped {len(queued)} queue entr(ies)"
-        )
-        for entry in granted:
-            self._notify(
-                f"window: {entry['cls']} granted to "
-                f"{entry.get('session') or f'pid ' + str(entry.get('pid'))}"
-            )
-
-    # ---- the broadcast ------------------------------------------------------------ #
-
-    def _notify(self, text: str) -> None:
-        """A holder change is announced *after* the state moved, as fyi.
-
-        The canon (improv-leader): messages are notices of a state change,
-        never the mechanism. Best-effort: a mesh that refuses (none
-        configured, a mirror disconnected) must not hold a grant hostage.
-        """
-        if self._mesh is None:
-            return
-        try:
-            loop = asyncio.get_running_loop()
-        except RuntimeError:
-            return
-        task = loop.create_task(self._broadcast(text))
-        task.add_done_callback(self._broadcast_failed)
-
-    async def _broadcast(self, text: str) -> None:
-        try:
-            meshes = self._mesh.list()
-        except Exception:
-            return
-        for mesh in meshes:
-            try:
-                await self._mesh.send(
-                    mesh.name, "window", "*", text, external=True, type="fyi"
-                )
-            except Exception as exc:
-                log.debug("window: broadcast to %s failed: %s", mesh.name, exc)
-
-    @staticmethod
-    def _broadcast_failed(task: "asyncio.Task") -> None:
-        if task.cancelled():
-            return
-        exc = task.exception()
-        if exc is not None:
-            log.debug("window: broadcast failed: %s", exc)

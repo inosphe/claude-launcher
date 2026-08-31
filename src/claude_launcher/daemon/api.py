@@ -227,9 +227,7 @@ def build_app(
     # The measurement window: one per daemon, injected for tests. Its
     # session_exited rides the same exit funnel as the board's, for the same
     # reason: a holder that dies must release without a human noticing.
-    window = window if window is not None else window_mod.WindowManager(
-        manager, app["mesh"]
-    )
+    window = window if window is not None else window_mod.WindowManager(manager)
     app["window"] = window
     manager.exit_hooks.append(window.session_exited)
 
