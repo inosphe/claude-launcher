@@ -9,6 +9,7 @@ a real PTY child through the daemon app.
 from __future__ import annotations
 
 import asyncio
+import ctypes
 import sys
 import threading
 import time
@@ -47,6 +48,31 @@ def test_ws_url():
         attach_mod.ws_url("https://host:1/", "a b")
         == "wss://host:1/api/sessions/a b/ws"
     )
+
+
+def test_windows_stdin_reads_vt_utf8_bytes_without_unicode_roundtrip(monkeypatch):
+    """Fast IME commits must reach the PTY byte-for-byte.
+
+    In VT input mode ReadFile exposes UTF-8 directly. A ReadConsoleW roundtrip
+    can lose a commit while the console input buffer is being drained.
+    """
+    class FakeKernel32:
+        def GetStdHandle(self, value):
+            assert value == -10
+            return object()
+
+        def ReadFile(self, handle, buf, size, count, overlapped):
+            payload = "한글入力🙂".encode("utf-8")
+            ctypes.memmove(buf, payload, len(payload))
+            count._obj.value = len(payload)
+            return 1
+
+    monkeypatch.setattr(attach_mod.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", type("Windll", (), {
+        "kernel32": FakeKernel32(),
+    })(), raising=False)
+
+    assert attach_mod._read_stdin_windows() == "한글入力🙂".encode("utf-8")
 
 
 def test_attach_bridge_roundtrip_and_detach(home, tmp_path, monkeypatch):
