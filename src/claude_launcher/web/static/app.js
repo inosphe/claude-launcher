@@ -8484,6 +8484,7 @@ let beadsFocus = "";       // the issue opened in the detail pane, by id
 let beadsDetail = null;    // its /api/beads/<id> payload
 let beadsFilter = "active";  // status filter: active | <status> | all
 let beadsSession = "";     // session filter: "" = everybody
+let beadsPri = null;       // priority filter: null = every priority
 let beadsLayout = "board"; // "board" = status lanes, "tree" = the forest
 
 const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked", "closed"];
@@ -8558,12 +8559,14 @@ function beadsRootOf(id) {
 /* The rows a board shows under the current filters. `active` is the default
    because a board is read for what is still to do; `all` is the audit view.
    The session filter matches the daemon's tags, so "s12" shows every issue
-   the daemon says is s12's — by whichever of the four links. */
-function beadsFilterIssues(issues, filter, session) {
+   the daemon says is s12's — by whichever of the four links. `pri` narrows
+   to one priority; null (and an omitted argument) is every priority. */
+function beadsFilterIssues(issues, filter, session, pri) {
   return (issues || []).filter((i) => {
     if (filter === "active" ? !BEADS_ACTIVE.has(i.status)
         : filter !== "all" && i.status !== filter) return false;
     if (session && !(i.sessions || []).some((s) => s.name === session)) return false;
+    if (pri !== null && pri !== undefined && (i.priority ?? null) !== pri) return false;
     return true;
   });
 }
@@ -8586,6 +8589,14 @@ function beadsStatusBadge(status) {
   return el("span", `badge beads-status ${cls}`, status || "?");
 }
 
+/* P{n} as a badge whose class carries the urgency into the palette. One gray
+   "P2" beside another gray "P3" said nothing at a glance — the number was
+   there and the ranking was not — which is what the user reported as no
+   priority display at all. Row, card and detail pane all draw this one. */
+function beadsPriBadge(priority) {
+  return el("span", `beads-pri p${priority}`, `P${priority}`);
+}
+
 /* One issue, one row. `compact` is the rail's shape (no session column —
    the rail already IS one session). A session tag is a link to that
    session's terminal, carrying why it matched in its title. */
@@ -8598,7 +8609,7 @@ function beadsIssueRow(issue, opts = {}) {
   row.appendChild(id);
   row.appendChild(beadsStatusBadge(issue.status));
   if (issue.priority !== undefined && issue.priority !== null) {
-    row.appendChild(el("span", "beads-pri", `P${issue.priority}`));
+    row.appendChild(beadsPriBadge(issue.priority));
   }
   const text = el("div", "beads-text");
   text.appendChild(el("span", "beads-title", issue.title || "(untitled)"));
@@ -8629,6 +8640,34 @@ function beadsFilterBar() {
     b.type = "button";
     b.addEventListener("click", () => { beadsFilter = f; renderBeads(); });
     bar.appendChild(b);
+  }
+  /* Priority is the second axis over the same rows. The buttons come from
+     the priorities the boards actually carry rather than a fixed 0..4, so a
+     board that only uses two of them offers two buttons — plus the one the
+     reader has picked, which must stay visible (and droppable) even if the
+     last issue carrying it just closed. */
+  const pris = new Set();
+  for (const b of (beadsCache && beadsCache.boards) || []) {
+    for (const i of b.issues || []) {
+      if (i.priority !== undefined && i.priority !== null) pris.add(i.priority);
+    }
+  }
+  if (beadsPri !== null) pris.add(beadsPri);
+  if (pris.size) {
+    const grp = el("div", "seq-tabs beads-pri-filter");
+    const any = el("button", "seq-tab" + (beadsPri === null ? " on" : ""), "any");
+    any.type = "button";
+    any.title = "every priority";
+    any.addEventListener("click", () => { beadsPri = null; renderBeads(); });
+    grp.appendChild(any);
+    for (const p of [...pris].sort((a, b) => a - b)) {
+      const b = el("button", "seq-tab" + (beadsPri === p ? " on" : ""), `P${p}`);
+      b.type = "button";
+      b.title = `only P${p} issues`;
+      b.addEventListener("click", () => { beadsPri = p; renderBeads(); });
+      grp.appendChild(b);
+    }
+    bar.appendChild(grp);
   }
   const sel = document.createElement("select");
   sel.className = "beads-session-pick";
@@ -8773,7 +8812,7 @@ function beadsCard(row) {
   id.title = "open this issue";
   top.appendChild(id);
   if (issue.priority !== undefined && issue.priority !== null) {
-    top.appendChild(el("span", "beads-pri", `P${issue.priority}`));
+    top.appendChild(beadsPriBadge(issue.priority));
   }
   card.appendChild(top);
 
@@ -8864,10 +8903,11 @@ function beadsBoardSection(board) {
   // still be named on its child's card rather than quietly making that child
   // a root.
   const tree = beadsHierarchy(board.issues, board.deps);
-  const shown = beadsFilterIssues(board.issues, beadsFilter, beadsSession);
+  const shown = beadsFilterIssues(board.issues, beadsFilter, beadsSession, beadsPri);
   if (!shown.length) {
     sec.appendChild(el("p", "wf-note",
       `nothing ${beadsFilter === "all" ? "" : beadsFilter + " "}here` +
+      (beadsPri !== null ? ` at P${beadsPri}` : "") +
       (beadsSession ? ` for ${beadsSession}` : "")));
     return sec;
   }
@@ -8949,8 +8989,10 @@ function beadsDetailPane() {
   pane.appendChild(el("h2", "beads-detail-title", i.title || "(untitled)"));
   const meta = el("div", "beads-detail-meta");
   meta.appendChild(beadsStatusBadge(i.status));
+  if (i.priority !== undefined && i.priority !== null) {
+    meta.appendChild(beadsPriBadge(i.priority));
+  }
   const facts = [];
-  if (i.priority !== undefined) facts.push(`P${i.priority}`);
   if (i.issue_type) facts.push(i.issue_type);
   if (i.assignee) facts.push("assignee " + i.assignee);
   if (i.created_by) facts.push("by " + i.created_by);

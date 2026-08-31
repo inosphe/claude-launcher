@@ -100,7 +100,7 @@ new Function(
   + "const BEADS_STATUSES = " + JSON.stringify(["open", "in_ready", "in_progress", "in_review", "blocked", "closed"]) + ";\n"
   + "const BEADS_ACTIVE = new Set([\"open\", \"in_ready\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
   + slice("beadsFilterIssues") + slice("beadsSortIssues")
-  + slice("beadsStatusBadge") + slice("beadsIssueRow")
+  + slice("beadsStatusBadge") + slice("beadsPriBadge") + slice("beadsIssueRow")
   + slice("sessBeads") + slice("sessBeadsCreate")
   + slice("url")
   + slice("sessReports") + slice("sessReportRow")
@@ -138,6 +138,11 @@ check("in_ready is independently filterable", ctx.filter(issues, "in_ready", "")
 check("session filter follows the tags, whichever link",
       ctx.filter(issues, "all", "s1").map((i) => i.id), ["a", "c"]);
 check("session filter + status", ctx.filter(issues, "active", "s1").map((i) => i.id), ["a"]);
+check("priority filter narrows to one rank",
+      ctx.filter(issues, "all", "", 1).map((i) => i.id), ["c", "d", "e"]);
+check("priority filter + status", ctx.filter(issues, "active", "", 1).map((i) => i.id), ["d", "e"]);
+check("null priority is every priority, so older callers change nothing",
+      ctx.filter(issues, "all", "", null).map((i) => i.id), ["a", "b", "c", "d", "e"]);
 
 /* ---- order ------------------------------------------------------------- */
 check("worked first, then priority, then recency",
@@ -148,6 +153,9 @@ const row = ctx.row(issues[1]);
 const id = row.find("beads-id")[0];
 check("id links to the detail route", id.href, "#/beads/b");
 check("status badge", row.find("beads-status")[0].text, "in_progress");
+check("the priority badge carries its rank as a class, so P2 and P3 differ by color",
+      [row.find("beads-pri")[0].text, row.find("beads-pri")[0].classes.has("p2")],
+      ["P2", true]);
 const tag = row.find("beads-sess")[0];
 check("session tag links to the terminal", tag.href, "#/s/s2");
 check("session tag carries state and reason", [tag.classes.has("busy"), tag.title],

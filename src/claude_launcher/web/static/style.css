@@ -1512,7 +1512,16 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
 .sess-beads .beads-row { padding: 5px 0; }
 .beads-id { color: #58a6ff; text-decoration: none; font-family: ui-monospace, monospace; font-size: 12px; white-space: nowrap; }
 .beads-id:hover { text-decoration: underline; }
-.beads-pri { color: #7d8590; font-size: 11px; white-space: nowrap; }
+/* priority as a badge, tinted by rank — the same palette as the card's left
+   edge, so the two readings of urgency agree. p4 and up stay gray: backlog. */
+.beads-pri {
+  font-size: 10px; padding: 1px 5px; border-radius: 3px; white-space: nowrap;
+  background: #21262d; color: #8b949e; font-variant-numeric: tabular-nums;
+}
+.beads-pri.p0 { background: #3d1d20; color: #ff7b72; }
+.beads-pri.p1 { background: #38210f; color: #f0883e; }
+.beads-pri.p2 { background: #2b2113; color: #d29922; }
+.beads-pri.p3 { background: #132b1c; color: #3fb950; }
 .beads-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
 .beads-title { color: #e6edf3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .beads-bits { color: #7d8590; font-size: 11px; overflow-wrap: anywhere; }
