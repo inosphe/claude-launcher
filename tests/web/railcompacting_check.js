@@ -130,13 +130,13 @@ const meshCache = [
   { name: "mesh-a", members: [{ local: true, session: "comp", handle: "c" }] },
 ];
 new Function(
-  "exports", "document", "el", "api", "list", "meshCache",
+  "exports", "document", "el", "api", "list", "meshCache", "sessionGroupByMesh",
   stubs + capLine[0] + "\n"
-  + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags")
+  + slice("byLineage") + slice("sessionMeshGroup") + slice("sessMeshes") + slice("railMeshTags")
   + slice("profileHarnessLabel") + slice("railMetaText") + slice("refreshSessions")
   + `
 Object.assign(exports, { refresh: refreshSessions });`
-)(ctx, document, el, api, list, meshCache);
+)(ctx, document, el, api, list, meshCache, true);
 
 let failures = 0;
 function check(what, got, want) {

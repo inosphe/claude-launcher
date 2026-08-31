@@ -164,16 +164,16 @@ function decorateBriefingRow(li, s) {}
 
 const ctx = {};
 new Function(
-  "exports", "document", "el", "api", "list", "meshCache",
+  "exports", "document", "el", "api", "list", "meshCache", "sessionGroupByMesh",
   stubs + capLine[0] + "\n"
-  + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
+  + slice("byLineage") + slice("sessionMeshGroup") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
   + slice("profileHarnessLabel") + slice("railMetaText")
   + slice("refreshSessions")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,
   setMeshes: (ms) => { meshCache = ms; },
-});`)(ctx, document, el, api, list, []);
+});`)(ctx, document, el, api, list, [], true);
 
 /* ---- the rail, built by the real code ---------------------------------- */
 const member = (session) => ({ session, handle: session, role: "worker",
@@ -195,9 +195,9 @@ ctx.setMeshes([
 (async () => {
   await ctx.refresh();
 
-  const rows = list.kids;
+  const rows = list.kids.filter((r) => r.dataset.name);
   check("every session gets a row", rows.map((r) => r.dataset.name),
-        ["s20", "s21", "s25", "loner", "mesh-reviewer"]);
+        ["loner", "s21", "s20", "s25", "mesh-reviewer"]);
 
   const row = (name) => rows.find((r) => r.dataset.name === name);
   const kidClasses = (r) => r.kids.map((k) => k.className);
@@ -284,9 +284,10 @@ ctx.setMeshes([
       { name: `d${i}`, status: "idle", profile: "nc", parent: `d${i - 1}` }))) };
   ctx.setMeshes([]);
   await ctx.refresh();
-  const deep = list.kids.map((r) => parseInt(r.style.paddingLeft || "0", 10));
+  const deepRows = list.kids.filter((r) => r.dataset.name);
+  const deep = deepRows.map((r) => parseInt(r.style.paddingLeft || "0", 10));
   check("the rail still lists the whole chain",
-        list.kids.map((r) => r.dataset.name).length, 8);
+        deepRows.map((r) => r.dataset.name).length, 8);
   ok("the deepest row still leaves the rail most of its width",
      Math.max(...deep) <= 60, `indents ${deep.join(",")}`);
   ok("the indent stops growing once the nesting is already legible",

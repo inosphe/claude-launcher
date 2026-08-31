@@ -145,9 +145,9 @@ function closeDetail() {}
 
 const ctx = {};
 new Function(
-  "exports", "document", "el", "api", "list", "meshCache",
+  "exports", "document", "el", "api", "list", "meshCache", "sessionGroupByMesh",
   stubs + capLine[0] + "\n"
-  + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
+  + slice("byLineage") + slice("sessionMeshGroup") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
   + slice("shortenPath") + slice("cwdSplit") + slice("cwdShort")
   + slice("cwdLine") + slice("railCwdLine")
   + slice("profileHarnessLabel") + slice("railMetaText") + slice("refreshSessions")
@@ -160,7 +160,7 @@ Object.assign(exports, {
   line: railCwdLine,
   head: sessHead,
   arrange: (o) => { termUp = !!o.termUp; narrow = !!o.narrow; currentName = o.cur || null; },
-});`)(ctx, document, el, api, list, []);
+});`)(ctx, document, el, api, list, [], true);
 
 let failures = 0;
 function check(what, got, want) {
@@ -297,7 +297,7 @@ served = { sessions: [
 
 (async () => {
   await ctx.refresh();
-  const rows = list.kids;
+  const rows = list.kids.filter((r) => r.dataset.name);
   check("every session still gets a row",
         rows.map((r) => r.dataset.name), ["s45", "s84", "bare"]);
   const row = (name) => rows.find((r) => r.dataset.name === name);

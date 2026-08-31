@@ -130,10 +130,10 @@ function $(id) { return list; }
 
 const ctx = {};
 new Function(
-  "exports", "document", "el", "api", "list", "meshCache",
+  "exports", "document", "el", "api", "list", "meshCache", "sessionGroupByMesh",
   stubs + constLine("RAIL_MESH_TAGS") + constLine("CTX_DOMAIN")
   + constLine("SEEN_COLD") + constLine("TYPED_STALE")
-  + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
+  + slice("byLineage") + slice("sessionMeshGroup") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
   + slice("fmtAge") + slice("ctxShort") + slice("ctxAgeOf")
   + slice("ctxKnowable") + slice("ctxSentence") + slice("ctxBreakdown")
   + slice("ctxTooltip") + slice("ctxNoteOnRow") + slice("modelShort")
@@ -148,7 +148,7 @@ Object.assign(exports, {
   line: railSeenLine,
   SEEN_STALE: SEEN_COLD,
   STALE: TYPED_STALE,
-});`)(ctx, document, el, api, list, []);
+});`)(ctx, document, el, api, list, [], true);
 
 let failures = 0;
 function check(what, got, want) {
@@ -372,7 +372,7 @@ served = { sessions: [WATCHED, FORGOTTEN, PLAIN, GONE] };
 (async () => {
   await ctx.refresh();
 
-  const rows = list.kids;
+  const rows = list.kids.filter((r) => r.dataset.name);
   check("every session still gets a row",
         rows.map((r) => r.dataset.name),
         ["watched", "forgotten", "pi", "gone"]);

@@ -97,7 +97,17 @@ option:disabled { color: #6b7280; }
   color: #e6edf3; background: #243247; box-shadow: inset 0 0 0 1px #385273;
 }
 .session-filter-count { float: right; color: #8b949e; font-variant-numeric: tabular-nums; }
+.session-group-toggle {
+  grid-column: 1 / -1; display: flex; align-items: center; gap: 6px;
+  padding: 4px 7px 2px; color: #8b949e; font-size: 11px; cursor: pointer;
+}
+.session-group-toggle input { margin: 0; accent-color: #58a6ff; }
 #session-list { list-style: none; overflow-y: auto; flex: 1; }
+#session-list .session-group-heading {
+  padding: 6px 10px; color: #a5b4c3; background: #161b22;
+  border-bottom: 1px solid #2a2e36; font-size: 11px; font-weight: 600;
+  letter-spacing: .02em; text-transform: none; cursor: default; display: block;
+}
 #session-list > li.session-filtered { display: none; }
 /* The gap and the right padding are tight on purpose: this row carries a
    name, a role, the rooms it is in, its profile and two buttons inside about
