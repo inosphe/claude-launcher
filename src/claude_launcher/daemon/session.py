@@ -1178,8 +1178,21 @@ class Session:
             # by hand ('claunch send-keys ... Enter') where the caller has no
             # way to know the difference.
             await self.write_bytes(head)
-            await asyncio.sleep(PASTE_ENTER_DELAY)
+            entry = harness_registry.get(self.sdef.harness)
+            delay = (
+                entry.paste_enter_delay
+                if entry is not None and entry.paste_enter_delay is not None
+                else PASTE_ENTER_DELAY
+            )
+            await asyncio.sleep(delay)
             await self.write_bytes(submit)
+            if entry is not None and entry.submit_strategy == "screen":
+                # Keep the web "type for this session" path and CLI
+                # send-keys aligned with automated delivery: Codex may make
+                # the first Enter a newline after text, so give it a second
+                # paced Enter to submit the resulting draft.
+                await asyncio.sleep(delay)
+                await self.write_bytes(submit)
             return data
         await self.write_bytes(data)
         return data
@@ -1228,6 +1241,14 @@ class Session:
                 await asyncio.sleep(0.05)
         await asyncio.sleep(delay)
         await self.write_bytes(b"\r")
+        if strategy == "screen" and self.screen.bracketed_paste:
+            # Codex can interpret the first Enter after a pasted delivery as
+            # a newline in its composer. A second, separately paced Enter
+            # submits that draft; on versions that submit on the first one,
+            # the second reaches an empty composer.
+            await asyncio.sleep(delay)
+            await self.write_bytes(b"\r")
+            return data + b"\r\r"
         return data + b"\r"
 
     async def write_bytes(self, data: bytes) -> None:
