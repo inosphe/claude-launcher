@@ -25,7 +25,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 from .. import borrowing, harnesses as harness_registry
 from .. import lineage, profile as profile_mod, runner, store, transcripts
 from .. import config as launcher_config
-from . import mesh_roles
+from . import mesh_roles, pty_backend
 
 log = logging.getLogger("claunch.daemon.harness")
 
@@ -525,9 +525,14 @@ def build_command(
     exactly like any other session.
     """
     prof = profile_mod.require_selector(sdef.profile) if sdef.profile else None
-    base = {
+    # The daemon's own environment, minus the two families of answer a
+    # parent leaves behind that are wrong for a PTY child: the nested-session
+    # markers above, and the "do not colour your output" ones the daemon
+    # inherits when it is started from an agent's tool shell (see
+    # pty_backend.strip_inherited_color_answers).
+    base = pty_backend.strip_inherited_color_answers({
         k: v for k, v in os.environ.items() if k not in _NESTED_SESSION_MARKERS
-    }
+    })
     entry = harness_registry.get(sdef.harness)
     borrow_prof = None
     if sdef.borrow:

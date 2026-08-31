@@ -147,7 +147,9 @@ class ShellPty:
         self._buffered = 0
         self.exited = False
         self.exit_code = None
-        env = dict(os.environ)
+        # Same inheritance the session harness gets, and the same correction:
+        # this shell also draws into a terminal on the other end.
+        env = pty_backend.strip_inherited_color_answers(dict(os.environ))
         if sys.platform != "win32":   # cmd.exe has no termios to service
             env.setdefault("TERM", "xterm-256color")
             env.setdefault("COLORTERM", "truecolor")
