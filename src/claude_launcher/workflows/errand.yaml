@@ -4,8 +4,8 @@
 # 세션의 워크플로다. 지금까지 이런 자식에게는 default_child_cflow(부모의
 # 짝 워크플로 — improv-worker면 14단계)가 붙어 절차가 작업보다 컸고,
 # workflow: '-'로 런을 거절하면 작업이 끝나도 런이 없어 부모가 kill할
-# 때까지 세션이 남았다. errand는 그 사이의 빈 자리다: 스텝이 하나이고,
-# 그 스텝을 지나면 런이 done이 되며, 데몬의 kill-on-end(cflow_kill_on_end,
+# 때까지 세션이 남았다. errand는 그 사이의 빈 자리다: 작업·최종 보고·종료
+# 승인만 거치고, 승인 뒤 런이 done이 되며, 데몬의 kill-on-end(cflow_kill_on_end,
 # 기본 켜짐)가 done을 보는 즉시 종결 기록을 transcript에 내구 기록(WAL)한
 # 뒤 세션을 종료해 슬롯을 돌려준다.
 #
@@ -19,10 +19,10 @@
 # 저장소에 배포되고, 저장소 고유의 검사 명령은 프로젝트 레이어의 몫이다.
 name: errand
 description: >-
-  1회성 단일 작업: 오프닝 태스크(배정된 이슈가 있으면 그 기록도)에 적힌
-  작업 하나를 수행하고, 결과와 근거를 보고에 남기고 부모에게 본다. 스텝은
-  하나뿐이고 리뷰·착지·recur가 없다 — 런이 done이 되면 데몬이 세션을 자동
-  종료한다(kill-on-end). spawn에서 workflow: errand로 지정할 때만 붙는다.
+  1회성 단일 작업: 작업을 수행하고 spawner에게 최종 보고를 보낸 뒤 종료
+  승인을 받는다. 리뷰·착지·recur가 없고, 승인 후 런이 done이 되면 데몬이
+  세션을 자동 종료한다(kill-on-end). spawn에서 workflow: errand로 지정할
+  때만 붙는다.
 start: work
 
 steps:
@@ -44,21 +44,18 @@ steps:
          부모에게 mesh로 본다(`claunch mesh send <mesh> <부모> "..."`).
          조용히 끝나는 것이 이 워크플로의 실패다 — 부모는 네 터미널을
          볼 수 없으므로, 복잡하지 않은 한 줄이라도 닿아야 완료다.
-      3. 진행한다 — next로 런을 end까지 밟아 done으로 만든다.
+      3. 진행한다 — next로 wrapup까지 이동한다.
 
       **세션을 죽이는 명령(claunch kill-session 등)은 실행하지 않는다.**
-      데몬이 done 전이를 보는 즉시 종결 기록을 이 세션의 transcript에
-      내구 기록(append+flush — WAL)한 뒤 세션을 끝낸다 — 종료는 네
-      몫이 아니라 데몬의 몫이고, 이 런의 end가 곧 그 승인이다.
+      데몬은 spawner의 종료 승인 뒤에만 이 런의 done 전이를 보고 종결
+      기록을 이 세션의 transcript에 내구 기록(append+flush — WAL)한 뒤
+      세션을 끝낸다.
 
-      ★ 이 자리의 실패 지점은 보고까지 쓰고 done으로 진행하지 않은 채
-      턴을 끝내는 것이다. 데몬은 done을 기다리므로, 「이제 끝냅니다」를
-      예고하고 턴을 끝내지 말고 보고를 쓴 **같은 턴에서** next로
-      end까지 밟아라 — 예고는 그 턴을 마지막으로 만들어 done이 다음
-      턴으로 밀리고, 런 없이 남은 세션을 부모가 kill해야 하는 옛
-      모양으로 되돌린다. 막혀서 작업을 끝내지 못했으면 막힌 지점과
-      시도한 것을 보고하고 부모에게 본 뒤 같은 순서로 진행한다 —
-      실패한 심부름도 보고가 있으면 끝난 심부름이다.
+      ★ 이 자리의 실패 지점은 보고까지 쓰고 wrapup으로 진행하지 않은
+      채 턴을 끝내는 것이다. 보고를 쓴 같은 턴에서 next로 wrapup까지
+      이동하라. 막혀서 작업을 끝내지 못했으면 막힌 지점과 시도한 것을
+      보고하고 부모에게 본 뒤 같은 순서로 진행한다 — 실패한 심부름도
+      보고가 있으면 wrapup 대상이다.
 
       예외는 하나뿐이다: 이 세션의 사용자가 이 회차 안에서 「닫지 말고
       있어라」를 명시적으로 말했을 때. 그 경우 `claunch keep-alive
@@ -70,4 +67,57 @@ steps:
       근거(커밋 해시·테스트 수치 등 판정의 재료)가 보고에 있으며, 그
       결과가 부모에게 mesh로 나갔다. 막혀서 끝내지 못한 경우는 막힌
       지점과 시도가 보고에 있고 부모에게 나갔다.
+    next: wrapup
+
+  wrapup:
+    title: spawner 최종 보고
+    instructions: |
+      work 스텝의 결과와 근거를 바탕으로 이 세션의 최종 wrapup 보고를
+      작성한다. 보고에는 작업 결과, 커밋·테스트 등 판정 근거, 변경 파일,
+      남은 문제를 포함한다. 같은 최종 요약을 spawner에게 mesh로 보낸다
+      (`claunch mesh send <mesh> <부모> "errand wrapup: ..."`). 부모가
+      읽을 수 있는 것은 이 메시지와 cflow 보고뿐이므로, 메시지 id를 보고에
+      남긴다. spawner가 종료 승인을 내리기 전에는 런을 done으로 만들지
+      않는다 — 다음 end-gate가 그 승인을 기계적으로 받는다.
+    done_when: |
+      최종 wrapup 보고가 기록되었고, 작업 결과·근거·남은 문제가 포함되어
+      있으며, spawner에게 같은 요약이 mesh로 전달되었다(메시지 id가 보고에
+      있다). spawner가 없는 단독 실행이면 그 사실을 보고한다.
+    next: end-gate
+
+  end-gate:
+    title: 세션 종료 허가 (spawner 게이트)
+    ask:
+      prompt: |
+        이 errand 세션이 최종 wrapup 보고를 작성하고 spawner에게 전달했다.
+        승인하면 daemon이 런을 done으로 기록한 뒤 이 세션의 종결 기록을
+        WAL에 남기고 세션을 종료한다. 작업 결과와 근거, 남은 문제를
+        확인한 뒤 종료를 승인하는가?
+      from:
+        - {role: worker, scope: ancestor}
+        - {role: leader, scope: ancestor}
+      otherwise: human
+      timeout: 900
+      on_decline: end-hold
+    instructions: |
+      spawner의 종료 승인이 기록되었다. 승인자와 승인 내용을 wrapup 보고에
+      남기고, 같은 턴에서 next로 end까지 진행한다. daemon이 done 전이를
+      감지해 WAL 종결 기록 후 세션을 종료한다. 세션 종료 명령을 직접
+      실행하지 않는다.
+    done_when: |
+      spawner 또는 승인 대체 주체의 종료 승인이 기록되었고, 승인자와 근거가
+      보고에 있다. 보고를 작성한 같은 턴에서 next로 end까지 진행한다.
+    next: end
+
+  end-hold:
+    title: 세션 종료 보류
+    instructions: |
+      종료 승인이 거절되었다. 세션을 유지해야 하므로
+      `claunch keep-alive $CLAUNCH_SESSION`을 실행하고, spawner의 거절
+      사유와 추가 작업을 확인한다. 추가 작업이 이 회차 범위를 벗어나면
+      handoff 이슈를 만들고 spawner에게 fyi로 전달한다. keep-alive를
+      해제하라는 지시가 올 때까지 세션을 유지한다.
+    done_when: |
+      keep-alive가 설정되었고, 거절 사유와 추가 작업 또는 handoff 이슈가
+      보고되었다.
     next: end
