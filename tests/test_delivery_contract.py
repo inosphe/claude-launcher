@@ -205,7 +205,16 @@ def test_codex_waits_for_the_paste_repaint_before_submitting(home, monkeypatch):
         assert await sending is True
 
     asyncio.run(run())
-    assert writes[-1] == b"\r"
+    assert writes[-2:] == [b"\r", b"\r"]
+
+
+def test_codex_retries_submit_for_the_raw_session_input(home):
+    """The web and CLI send-keys path covers Codex's newline-first Enter."""
+    s, writes = _fake_session(bracketed=True)
+    s.sdef = SessionDef(name="s", harness="codex")
+    asyncio.run(s.send_keys(["message", "Enter"]))
+
+    assert writes == [b"message", b"\r", b"\r"]
 
 
 def test_deliver_reports_failure_instead_of_raising(monkeypatch):
@@ -253,7 +262,7 @@ def test_send_keys_waits_for_a_resuming_codex_to_take_the_keyboard(
         await asyncio.wait_for(sending, timeout=5)
 
     asyncio.run(run())
-    assert writes == [b"hello", b"\r"]
+    assert writes == [b"hello", b"\r", b"\r"]
 
 
 def test_send_keys_keeps_a_bare_control_key_immediate_during_codex_resume(
