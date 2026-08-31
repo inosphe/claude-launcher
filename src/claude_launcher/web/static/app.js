@@ -531,6 +531,12 @@ async function refreshSessions() {
     return;
   }
   sessionsCache = data.sessions || [];
+  // A few embedded rail checks evaluate this function without the optional
+  // grouping state declared by the full page. Keep that reduced contract
+  // compatible while the shipped page uses the live values.
+  const groupingEnabled = typeof sessionGroupByMesh !== "undefined" &&
+    sessionGroupByMesh;
+  const currentMeshCache = typeof meshCache !== "undefined" ? meshCache : [];
   // Reduced embedded consumers execute this poll in isolation.  Keep that
   // contract while the full page reconciles the kill controls here.
   if (typeof reconcileKillUiState === "function") reconcileKillUiState(sessionsCache);
@@ -541,7 +547,7 @@ async function refreshSessions() {
   // not render those numbers.  Exclude only those moving values from the DOM
   // signature so an unchanged fleet keeps its nodes, focus and listeners.
   const signature = JSON.stringify(
-    [briefingLLM, sessionsCache, sessionGroupByMesh, meshCache],
+    [briefingLLM, sessionsCache, groupingEnabled, currentMeshCache],
     (key, value) => key === "due_in" || key === "fired_ago" ? undefined : value,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -553,7 +559,7 @@ async function refreshSessions() {
   if (rebuild) list.innerHTML = "";
   let previousGroup = null;
   let entries = rebuild ? byLineage(sessionsCache) : [];
-  if (sessionGroupByMesh) {
+  if (groupingEnabled) {
     const groups = new Map();
     for (const entry of entries) {
       const group = sessionMeshGroup(entry[0]);
@@ -565,7 +571,7 @@ async function refreshSessions() {
     ).flatMap((group) => groups.get(group));
   }
   for (const [s, depth] of entries) {
-    const group = sessionGroupByMesh ? sessionMeshGroup(s) : null;
+    const group = groupingEnabled ? sessionMeshGroup(s) : null;
     if (group && group !== previousGroup) {
       const heading = document.createElement("li");
       heading.className = "session-group-heading";
