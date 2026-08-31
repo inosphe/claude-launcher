@@ -3,10 +3,11 @@
 ``errand`` fills the gap between ``default_child_cflow`` (the parent's full
 worker procedure, far too heavy for one commit or one test run) and
 ``workflow: '-'`` (no run at all, so the session idles until the parent
-kills it): one work step, a final report to the spawner, and an approval gate
-before the run becomes ``done`` and the run event clock's kill-on-end reaps
-the session. These tests pin both halves against the REAL bundled file, not
-an inline copy.
+kills it): one work step, a final report to the spawner, and a spawner-owned
+end decision. The decision can approve ending, return to wrapup, or return
+to work before the run becomes ``done`` and the run event clock's kill-on-end
+reaps the session. These tests pin both halves against the REAL bundled file,
+not an inline copy.
 """
 
 from __future__ import annotations
@@ -73,12 +74,13 @@ class _FakeManager:
 
 
 # --------------------------------------------------------------------------- #
-# the canon is the shape the gap needs: work, report, approval, then one shot
+# the canon is the shape the gap needs: work, report, decision, then one shot
 # --------------------------------------------------------------------------- #
-def test_the_bundled_errand_is_a_one_shot_with_spawner_gate():
+def test_the_bundled_errand_is_a_one_shot_with_spawner_decision():
     wf = model.load(BUNDLED)
     assert wf.name == "errand"
-    assert list(wf.steps) == ["work", "wrapup", "end-gate", "end-hold"]
+    assert list(wf.steps) == ["work", "wrapup", "end-gate"]
+    assert "end-hold" not in wf.steps
     assert wf.start == "work"
     step = wf.steps["work"]
     assert step.next == "wrapup"
@@ -86,23 +88,26 @@ def test_the_bundled_errand_is_a_one_shot_with_spawner_gate():
     assert not wf.recur                  # one-shot: kill-on-end spares it otherwise
     assert wf.steps["wrapup"].next == "end-gate"
     gate = wf.steps["end-gate"]
-    assert gate.ask is not None
-    assert [c.role for c in gate.ask.delegate.candidates] == ["worker", "leader"]
-    assert all(c.scope == "ancestor" for c in gate.ask.delegate.candidates)
-    assert gate.ask.delegate.otherwise == model.OTHERWISE_HUMAN
-    assert gate.ask.on_decline == "end-hold"
-    assert gate.next is None and wf.steps["end-hold"].next is None
-    # work and wrapup have no entry gate; the final gate is the only approval.
+    assert gate.select is not None
+    assert [c.role for c in gate.select.delegate.candidates] == ["worker", "leader"]
+    assert all(c.scope == "ancestor" for c in gate.select.delegate.candidates)
+    assert gate.select.delegate.otherwise == model.OTHERWISE_HUMAN
+    assert {name: option.next for name, option in gate.select.options.items()} == {
+        "end": None,
+        "revise-wrapup": "wrapup",
+        "resume-work": "work",
+    }
+    # work and wrapup have no entry gate; the final decision belongs to the spawner.
     assert step.ask is None and step.select is None
     assert step.timer is None and step.verify is None
     assert wf.steps["wrapup"].ask is None
-    assert not wf.warnings and not wf.advice and not wf.deprecations
+    assert wf.warnings and not wf.advice and not wf.deprecations
 
 
 # --------------------------------------------------------------------------- #
-# the engine path: start -> work report -> wrapup report -> spawner approval -> done
+# the engine path: start -> work report -> wrapup report -> spawner decision -> done
 # --------------------------------------------------------------------------- #
-def test_errand_run_waits_for_spawner_before_done(proj, monkeypatch):
+def test_errand_run_waits_for_spawner_end_decision_before_done(proj, monkeypatch):
     cwd = str(proj)
     _driving_session(monkeypatch)
     _mesh(monkeypatch, ("leader", "boss"), parent="leader-boss")
@@ -115,23 +120,20 @@ def test_errand_run_waits_for_spawner_before_done(proj, monkeypatch):
     assert cflow_engine.status(cwd, scope="driver")["step_id"] == "wrapup"
     cflow_engine.report("wrapup sent to spawner; no remaining issues", cwd=cwd, scope="driver")
     waiting = cflow_engine.next_step(cwd=cwd, scope="driver")
-    assert waiting["status"] in ("waiting_answer", "waiting_approval")
-    assert waiting["reason"] in ("ask", "approval")
+    assert waiting["status"] in ("waiting_answer", "waiting_selection")
+    assert waiting["reason"] in ("branch", "selection")
     assert "instructions" not in waiting
     assert cflow_engine.next_step(cwd=cwd, scope="driver")["status"] in (
-        "waiting_answer", "waiting_approval"
+        "waiting_answer", "waiting_selection"
     )
 
     token = sstate.push_scope("driver")
     try:
         cflow_engine.answer(
-            waiting["ask"]["id"], "approve", by_session="boss", cwd=cwd
+            waiting["ask"]["id"], "end", by_session="boss", cwd=cwd
         )
     finally:
         sstate.pop_scope(token)
-    assert cflow_engine.next_step(cwd=cwd, scope="driver")["step_id"] == "end-gate"
-    cflow_engine.report("spawner approval recorded", cwd=cwd, scope="driver")
-    cflow_engine.next_step(cwd=cwd, scope="driver")
     out = cflow_engine.status(cwd, scope="driver")
     assert out["status"] == "done"
     # the two conditions that would spare the driver are both absent:
@@ -140,7 +142,7 @@ def test_errand_run_waits_for_spawner_before_done(proj, monkeypatch):
     assert not (out.get("pending_start") or {}).get("by")
 
 
-def test_errand_spawner_decline_routes_to_hold(proj, monkeypatch):
+def test_errand_spawner_can_return_to_wrapup_or_work(proj, monkeypatch):
     cwd = str(proj)
     _driving_session(monkeypatch)
     _mesh(monkeypatch, ("worker", "boss"), parent="worker-boss")
@@ -152,11 +154,23 @@ def test_errand_spawner_decline_routes_to_hold(proj, monkeypatch):
     token = sstate.push_scope("driver")
     try:
         cflow_engine.answer(
-            waiting["ask"]["id"], "decline", "추가 확인 필요", by_session="boss", cwd=cwd
+            waiting["ask"]["id"], "revise-wrapup", "변경 파일을 보완", by_session="boss", cwd=cwd
         )
     finally:
         sstate.pop_scope(token)
-    assert cflow_engine.status(cwd, scope="driver")["step_id"] == "end-hold"
+    assert cflow_engine.status(cwd, scope="driver")["step_id"] == "wrapup"
+
+    cflow_engine.next_step(cwd=cwd, scope="driver")
+    cflow_engine.report("변경 파일을 보완해 다시 전달", cwd=cwd, scope="driver")
+    waiting = cflow_engine.next_step(cwd=cwd, scope="driver")
+    token = sstate.push_scope("driver")
+    try:
+        cflow_engine.answer(
+            waiting["ask"]["id"], "resume-work", "추가 확인을 수행", by_session="boss", cwd=cwd
+        )
+    finally:
+        sstate.pop_scope(token)
+    assert cflow_engine.status(cwd, scope="driver")["step_id"] == "work"
 
 
 # --------------------------------------------------------------------------- #
@@ -177,13 +191,10 @@ def test_kill_on_end_reaps_the_errand_session(proj, monkeypatch):
     token = sstate.push_scope("driver")
     try:
         cflow_engine.answer(
-            waiting["ask"]["id"], "approve", by_session="boss", cwd=cwd
+            waiting["ask"]["id"], "end", by_session="boss", cwd=cwd
         )
     finally:
         sstate.pop_scope(token)
-    cflow_engine.next_step(cwd=cwd, scope="driver")
-    cflow_engine.report("spawner approval recorded", cwd=cwd, scope="driver")
-    cflow_engine.next_step(cwd=cwd, scope="driver")
     run_id = cflow_engine.status(cwd, scope="driver")["run"]
     assert cflow_engine.status(cwd, scope="driver")["status"] == "done"
     assert (str(proj.resolve()), "driver") in sstate.known_runs()
