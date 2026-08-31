@@ -125,6 +125,26 @@ def test_save_leaves_no_scratch_file_behind(config_file):
     assert not list(config_file.parent.glob(f"{config_file.name}.*.tmp"))
 
 
+def test_briefing_faq_supports_multiple_entries_and_legacy_single_entry(home):
+    store.save({
+        "briefing": {"faq": {"question": "기존 질문", "answer": "기존 답변"}}
+    })
+
+    legacy = store.briefing_faq()
+    assert len(legacy) == 1
+    assert legacy[0]["question"] == "기존 질문"
+
+    saved = store.set_briefing_faq([
+        *legacy,
+        {"question": "새 질문", "answer": "새 답변"},
+    ])
+    assert [row["question"] for row in saved] == ["기존 질문", "새 질문"]
+    assert [row["question"] for row in store.briefing_faq()] == [
+        "기존 질문", "새 질문"
+    ]
+    assert all(row["id"] for row in saved)
+
+
 def test_a_save_that_cannot_land_keeps_the_old_document_and_cleans_up(
     config_file, monkeypatch
 ):
