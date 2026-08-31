@@ -1,7 +1,8 @@
 name: improv-worker
 description: >
   자유 진행 워커 — 터미널 사용자(또는 리더 브리핑)가 주는 목표 하나가 한
-  회차다: 목표 수립 -> 작업 -> 테스트(표적 실행, verify) -> 커밋·보고
+  회차다: 목표 수립 -> 일감 확인(배정 이슈가 없으면 보드 탐색과 사용자
+  확정) -> 작업 -> 테스트(표적 실행, verify) -> 커밋·보고
   -> 착지: 기계 확인이 깨끗하면 워커가 스스로 통합 요청, 깨졌을 때만
   상위 세션이 결정(요청 또는 브랜치 동결)
   -> 착지 확인(머지가 git에 있는지 기계가 본다) ->
@@ -84,6 +85,11 @@ steps:
       - 이슈(beads): 생성 task/context에 `issue: <id>`가 있으면(리더가 배정했든
         데몬이 오프닝 task에서 등록했든) `claunch beads show <id> --json`으로
         읽는다 — 그 본문이 목표이고, 같은 일로 이슈를 또 만들지 않는다.
+        읽은 본문이 비었거나 자리표시 절뿐이면(데몬이 등록만 하고 규격은
+        assignee 몫으로 남긴 형태) 새 이슈를 만들지 말고 오프닝 task
+        설명으로 그 본문을 규격(`## 목표 / ## 범위 / ## 완료 증거 기준 /
+        ## 출처`)에 맞춰 채운다 — 배정은 이미 서 있고, 비어 있던 것은
+        내용이다.
         터미널 사용자의 직접 지시면 지금 만든다: `claunch beads create "<제목>"
         --type task --priority 2 --labels user-direct --assignee
         $CLAUNCH_SESSION --description "<규격>"`. 리더가 배정한 이슈가 따로
@@ -94,6 +100,10 @@ steps:
         어느 쪽이든 마지막에 `claunch beads update <id> --status in_progress
         --external-ref <run id>` — 이 전이가 회차의 시작이고, id는 intake
         fyi에 함께 실린다.
+        어느 경로에도 해당하지 않아 이슈가 서지 않았으면(생성 요청이
+        `--no-issue`였다, 또는 id 없는 브리핑이고 터미널 직접 지시도
+        아니다) 여기서 지어내지 않는다 — 그 사실과 사유만 보고에 적고,
+        판정과 처리는 다음 단계(일감 확인)가 맡는다.
         후속 구현 이슈(assignee 없이 만들어진 것 — wrapup의 인수인계 규칙)도
         이 읽기 규칙이 그대로 목표 경로다: 규격의 출처(원회차 id와 HOLD/마감
         코멘트)가 연결이다.
@@ -204,8 +214,124 @@ steps:
     done_when: |
       목표·범위, 브랜치 계획(새 기능이면 새 피처 브랜치), 작업 위치
       판정(부모와 체크아웃 공유 여부 — 공유였다면 새 워크트리로 이동
-      완료), 완료 증거 기준, 이슈 id와 in_progress 전이가 보고에 기록되어
+      완료), 완료 증거 기준, 이슈 id와 in_progress 전이(이슈가 서지
+      않았으면 그 사실과 사유 — 다음 단계가 가른다)가 보고에 기록되어
       있고, 정본 규칙에 닿는 목표라면 리더 fyi까지 나갔다.
+    next: issue-check
+
+  issue-check:
+    title: 일감 확인 (이 회차는 어느 이슈의 것인가)
+    select:
+      # 이 문이 chooser: agent인 이유 — 셋 다 보드와 생성 기록에서 읽을 수
+      # 있는 사실이고, 게으름의 경로가 없다: 일이 적은 쪽(claimed·바로
+      # work)은 이슈가 실제로 서 있어야 성립하고(commit 단계부터 코멘트가
+      # 전부 그 id를 요구하므로 거짓 claimed는 바로 다음 스텝에서 막힌다),
+      # 일이 많은 쪽(unclaimed)만이 탐색과 사용자 대기로 이어진다.
+      chooser: agent
+      require_reason: true
+      prompt: |
+        intake가 끝났다. 착수 전에 이 회차가 어느 일감(beads 이슈)의
+        것인지 확정한다. 판정은 기억이 아니라 기록으로 한다:
+        `claunch beads list --status in_progress --json`에 자기 세션
+        ($CLAUNCH_SESSION)이 assignee인 이슈가 있는가(intake의 전이가
+        실제로 보드에 쓰였는가), 없다면 오프닝에 join 안내(「너는
+        assignee가 아니다」)와 이슈 id가 있는가, 그것도 없다면 생성
+        요청이 명시적으로 이슈를 거절했는가(`--no-issue`, 웹 폼의
+        No issue, 바디 `beads: false` — 오프닝·생성 브리핑에 적혀 있다).
+        무엇을 확인해 무엇이 나왔는지 reason에 적는다.
+        판정이 모호하면 unclaimed를 고른다 — 탐색과 사용자 확정이 한 번
+        더 도는 쪽이, 이슈 없는 회차가 조용히 지나가는 쪽보다 싸다.
+      options:
+        claimed:
+          description: 이슈가 서 있다 — intake의 전이(assignee)거나 join 참가. 그대로 작업으로 간다
+          next: work
+        no-issue-by-request:
+          description: 생성 요청이 명시적으로 이슈를 거절했다(--no-issue) — 그 지시가 이미 사용자의 동의이므로 탐색 없이 작업으로 간다
+          next: work
+        unclaimed:
+          description: 이슈가 없는데 무이슈 지시도 없다 — 보드에서 연관 일감을 탐색하고 사용자 확정을 받는다
+          next: issue-search
+
+  issue-search:
+    title: 연관 일감 탐색 (보드 기록에서)
+    instructions: |
+      이 세션에는 배정된 이슈가 없다. 착수 전에 보드에서 이 목표와 연관된
+      기존 일감을 찾는다 — 보드를 읽는 데에는 허락이 필요 없고, 찾은 것을
+      잡는 결정이 다음 단계의 사용자 몫이다.
+      `claunch beads search "<핵심어>" --json`과 open/in_ready/in_progress
+      목록(`claunch beads list --status open --json` 등)으로 후보를 모으고,
+      후보마다 다음을 보고에 남긴다: id, 제목, 상태, assignee와 그 세션의
+      생존 여부(살아 있는 세션이 붙잡고 있으면 잡기(take)가 아니라
+      참가(join)가 된다 — 데몬 adoption과 같은 판정이다), 그리고 이번
+      목표와 연관된다고 본 근거 한 줄. 후보가 없으면 「후보 없음」을
+      남긴다. 다음 단계에서 결정하는 사용자가 읽는 것이 이 보고다.
+    done_when: |
+      후보 목록(각각 id·제목·상태·assignee·생존 판정·연관 근거) 또는
+      「후보 없음」이 보고에 있다.
+    next: issue-decision
+
+  issue-decision:
+    title: 일감 결정 (사용자 확정)
+    select:
+      # 이 문이 chooser: user인 이유 — 셋 중 둘이 사용자의 것이다: 기존
+      # 일감을 잡는 것은 남이 세운 기록에 이 회차를 귀속시키는 결정이고,
+      # 이슈 없이 진행하는 것은 일감의 정본(beads)에 이 회차가 안 남는
+      # 결정이다. 에이전트의 선택은 제안으로만 기록되고, 확정은 사람의
+      # `claunch cflow select`(또는 대시보드의 옵션 버튼)다. 이 갈래에는
+      # 배정 이슈도 무이슈 지시도 없는 세션만 오므로, 사람을 세우는
+      # 비용은 그 예외 편성에만 든다.
+      # 공용 블록의 「이슈 없이 착수하는 것만은 금지다」와의 관계: 그
+      # 문장은 br 실패(NO-BEAD) 경로가 조용히 무이슈로 흐르는 것을 막는
+      # 것이고, 여기 none은 사람이 저널에 남기는 명시적 동의다 — br가
+      # 실패해 이슈를 못 세운 상황은 none이 아니라 NO-BEAD 경로다.
+      chooser: user
+      require_reason: true
+      prompt: |
+        이 세션에는 배정된 beads 이슈가 없고, 직전 단계 보고에 보드에서
+        찾은 연관 일감 후보(또는 「후보 없음」)가 있다. 이 회차를 어디에
+        귀속할지 확정한다. adopt를 고르면 어느 id인지 reason에 적는다 —
+        에이전트는 제안 시점에 추천 갈래와 근거(adopt면 후보 id)를
+        reason에 적어 두고, 확정을 기다린다.
+        모호하면 create 쪽으로 — 기록이 하나 더 있는 쪽이, 있어야 할
+        기록이 없는 쪽보다 싸다.
+      options:
+        adopt:
+          description: 보고의 후보 하나를 이 회차의 일감으로 잡는다(id는 reason에) — 잡기·전이는 다음 단계가 실행한다
+          next: issue-claim
+        create:
+          description: 오프닝 task 설명에서 새 이슈를 민팅한다 — 규격·전이는 다음 단계가 실행한다
+          next: issue-claim
+        none:
+          description: 이슈 없이 이 회차를 진행한다 — 이 확정이 명시적 동의로 저널에 남고, 회차 기록은 cflow 저널·커밋·회차 보고서에만 남는다
+          next: work
+
+  issue-claim:
+    title: 일감 잡기·민팅
+    instructions: |
+      직전 결정대로 이슈를 세우고 회차를 시작 상태로 만든다.
+      · adopt였으면: 확정된 id를 `claunch beads show <id> --json`으로 다시
+        읽는다. assignee가 비었거나 그 세션이 종료됐으면 `claunch beads
+        update <id> --assignee $CLAUNCH_SESSION`으로 잡고, 살아 있는 세션이
+        붙잡고 있으면 assignee를 손대지 않고 참가만 한다: `claunch beads
+        comments add <id> "JOINED: $CLAUNCH_SESSION — <이번 목표 요지>"` —
+        데몬의 adoption 판정과 같은 규칙이다. 그 이슈의 본문과 이번 목표가
+        정확히 같지 않으면 본문을 덮지 말고 이 회차가 맡는 범위를 코멘트로
+        남긴다.
+      · create였으면: intake의 규격 그대로 만든다 — 제목 한 줄 「무엇을
+        어떻게」, --description은 `## 목표 / ## 범위(포함·제외) / ## 완료
+        증거 기준 / ## 출처(누가·언제·원문)`(원문은 오프닝 task 설명),
+        --labels에는 목표의 실제 출처 하나(터미널 직접 지시면 user-direct,
+        리더 브리핑이면 leader), staged 순서는 description이 먼저
+        --assignee $CLAUNCH_SESSION이 마지막.
+      어느 쪽이든 assignee가 자신이면 마지막에 `claunch beads update <id>
+      --status in_progress --external-ref <run id>` — intake가 말하는
+      회차 시작 전이가 이 자리로 미뤄진 것이다. join이면 상태 전이는 보유
+      세션의 것이므로 하지 않는다.
+      메시에 속해 있으면 목표 요지를 이슈 id와 함께 리더에게 fyi로
+      남긴다(intake에서 미뤄 둔 그 fyi다).
+    done_when: |
+      이슈 id가 확정되어 보고에 있고, assignee가 자신이면 in_progress
+      전이가 함께 기록되어 있다(join이면 JOINED 코멘트와 참가 사실).
     next: work
 
   work:
