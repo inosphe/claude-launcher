@@ -464,7 +464,8 @@ descendant when you add more later.
 
 ## API providers (third-party backends)
 
-A **provider** points a compatible harness at a particular API backend —
+A **provider** identifies an API service and can point a compatible harness at
+a particular API backend —
 Anthropic by default, or a third party such as a GLM endpoint — by supplying a
 bundle of environment variables (an `ANTHROPIC_BASE_URL`, model overrides and
 an auth token). Claude Code consumes that bundle directly. The packaged Pi
@@ -476,7 +477,11 @@ which the launcher reads live at launch. You can edit that file directly, or use
 
 ```yaml
 providers:
+  claude:
+    # Named Anthropic provider; policy metadata is allowed here.
+    allowed_harnesses: [claude]
   fireworks-glm5p2:
+    service: custom
     allowed_harnesses: [claude]  # optional compatibility/security boundary
     env:
       ANTHROPIC_BASE_URL: "https://api.fireworks.ai/inference"
@@ -506,7 +511,8 @@ built-in `default` is plain Anthropic with no overrides — the launcher injects
 the profile's OAuth token as usual. For any other provider the launcher applies its `env` as a
 **low-priority backend default** — above the shell but *below* the profile's own
 `env`, so a per-profile (or template/inherited) value always wins over the
-provider for the same key. The provider carries its own auth, so the launcher
+provider for the same key. The implicit `default` provider and named `claude`
+provider both use Anthropic OAuth. Other providers carry their own auth, so the launcher
 does **not** inject `CLAUDE_CODE_OAUTH_TOKEN` — supply the backend token with
 `claunch set-token PROFILE` (recommended; see *keeping
 backend tokens out of the config file* below) or as a plaintext
@@ -535,6 +541,12 @@ precedence. A non-default provider selected for Pi therefore needs both
 A provider may declare `allowed_harnesses`. When present, selecting that
 provider is only valid for the listed harnesses; `set-provider` refuses an
 atomic config change that would make a profile's current harness illegal.
+
+`service` identifies the provider's account and authentication service; it is
+separate from `allowed_harnesses` and a profile's selected harness. `default`
+and `claude` use `anthropic`; providers without `service` retain the `custom`
+backend behaviour. Future integrations can declare another service, such as
+`openai`, without coupling provider identity to an executable harness.
 
 **Keeping backend tokens out of the config file.** Whenever a **non-default
 provider is active** for the run (selected on the profile, inherited, the

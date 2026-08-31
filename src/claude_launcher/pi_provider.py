@@ -82,7 +82,7 @@ def resolve(profile: Profile, harness) -> Optional[Projection]:
     if harness.provider_adapter != ADAPTER:
         return None
     name = providers.resolve_name(profile)
-    if name == providers.DEFAULT_PROVIDER:
+    if providers.uses_anthropic_oauth(name):
         return None
 
     backend = providers.provider_env(name)

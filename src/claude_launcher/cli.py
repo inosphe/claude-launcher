@@ -361,7 +361,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
         if entry.builtin:
             claude_credential = (
                 lineage.lookup_token(p)
-                if providers.resolve_name(p) == providers.DEFAULT_PROVIDER
+                if providers.uses_anthropic_oauth(providers.resolve_name(p))
                 else lineage.stored_auth_token(p)
             )
             if claude_credential is None:

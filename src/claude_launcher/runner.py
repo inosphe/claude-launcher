@@ -203,7 +203,7 @@ def child_env(
         }
     env.update(profile_env)
     if with_token:
-        if provider != providers.DEFAULT_PROVIDER:
+        if not providers.uses_anthropic_oauth(provider):
             # A provider is overriding the backend: auth comes from the
             # profile's single set-token value (own, inherited, or borrowed),
             # which OVERRIDES any plaintext
@@ -524,7 +524,7 @@ def run(
         name, source = provider, "--provider"
     else:
         name, source = providers.resolve_with_source(auth_source)
-    if name != providers.DEFAULT_PROVIDER:
+    if not providers.uses_anthropic_oauth(name):
         # Tell the user why auth behaves differently on this run: with a
         # provider overriding the backend, the stored profile token (if any) is
         # exported as ANTHROPIC_AUTH_TOKEN instead of the OAuth injection.

@@ -36,8 +36,17 @@ from typing import Dict, Optional, Tuple
 from . import lineage, profile as profile_mod, store
 from .profile import Profile
 
-#: The built-in "no override" provider — plain Anthropic, launcher injects token.
+#: The built-in no-override provider — plain Anthropic, launcher injects token.
 DEFAULT_PROVIDER = "default"
+
+#: Explicit named Anthropic provider. It may carry policy metadata, but its
+#: service identity remains Anthropic.
+CLAUDE_PROVIDER = "claude"
+
+#: Provider services are independent of harness names. They define
+#: authentication and usage-reporting behaviour.
+ANTHROPIC_SERVICE = "anthropic"
+CUSTOM_SERVICE = "custom"
 
 
 class ProviderError(Exception):
@@ -47,7 +56,10 @@ class ProviderError(Exception):
 def registry(doc: Optional[dict] = None) -> Dict[str, Dict[str, str]]:
     """Map of provider name -> env, from the config file plus built-in default."""
     doc = store.load() if doc is None else doc
-    out: Dict[str, Dict[str, str]] = {DEFAULT_PROVIDER: {}}
+    out: Dict[str, Dict[str, str]] = {
+        DEFAULT_PROVIDER: {},
+        CLAUDE_PROVIDER: {},
+    }
     raw = doc.get("providers")
     if isinstance(raw, dict):
         for name, spec in raw.items():
@@ -58,6 +70,31 @@ def registry(doc: Optional[dict] = None) -> Dict[str, Dict[str, str]]:
                 else {}
             )
     return out
+
+
+def service(name: str, doc: Optional[dict] = None) -> str:
+    """Return a provider's service identity.
+
+    ``default`` and the named ``claude`` provider use Anthropic. Other
+    providers may declare ``service: NAME`` in their provider specification;
+    missing metadata retains the historical custom-backend behaviour. Future
+    services, such as OpenAI, therefore extend this axis without being
+    conflated with a harness selection.
+    """
+    if name in (DEFAULT_PROVIDER, CLAUDE_PROVIDER):
+        return ANTHROPIC_SERVICE
+    doc = store.load() if doc is None else doc
+    raw = doc.get("providers")
+    spec = raw.get(name) if isinstance(raw, dict) else None
+    if not isinstance(spec, dict):
+        raise ProviderError(f"unknown provider {name!r} (see 'claunch providers')")
+    value = str(spec.get("service") or CUSTOM_SERVICE).strip()
+    return value or CUSTOM_SERVICE
+
+
+def uses_anthropic_oauth(name: str, doc: Optional[dict] = None) -> bool:
+    """Whether a provider authenticates through the Anthropic OAuth route."""
+    return service(name, doc) == ANTHROPIC_SERVICE
 
 
 def provider_env(name: str, doc: Optional[dict] = None) -> Dict[str, str]:
