@@ -114,6 +114,92 @@ FORCE_DRAFT_SETTLE = float(os.environ.get("CLAUNCH_FORCE_DRAFT_SETTLE") or 0.4)
 log = logging.getLogger(__name__)
 
 
+class _SubmittedLineTracker:
+    """Recover submitted terminal lines from the raw input byte stream.
+
+    The tracker covers the input needed to recognize an explicitly typed
+    Codex ``/new`` before that command reaches the child: ordinary text,
+    erase/clear keys and ANSI escape sequences. Bracketed-paste newlines stay
+    inside the buffered composer content.
+    """
+
+    _MAX_BYTES = 4096
+
+    def __init__(self) -> None:
+        self._line = bytearray()
+        self._escape: Optional[bytearray] = None
+        self._bracketed_paste = False
+        self._overflow = False
+        self._last_was_cr = False
+
+    def _append(self, value: int) -> None:
+        if self._overflow:
+            return
+        if len(self._line) >= self._MAX_BYTES:
+            self._line.clear()
+            self._overflow = True
+            return
+        self._line.append(value)
+
+    def _submit(self) -> Optional[str]:
+        if self._overflow:
+            result = None
+        else:
+            result = self._line.decode("utf-8", errors="replace")
+        self._line.clear()
+        self._overflow = False
+        return result
+
+    def feed(self, data: bytes) -> List[str]:
+        """Return complete lines submitted by ``data`` in wire order."""
+        submitted: List[str] = []
+        for byte in data:
+            if self._escape is not None:
+                # ESC + Enter is the TUI's multiline spelling.  It changes
+                # the composer content and does not submit it.
+                if not self._escape and byte in (0x0D, 0x0A):
+                    self._append(0x0A)
+                    self._escape = None
+                    self._last_was_cr = False
+                    continue
+                self._escape.append(byte)
+                if len(self._escape) == 1 and byte not in (0x5B, 0x4F):
+                    self._escape = None  # Alt-key chord
+                    continue
+                if len(self._escape) > 1 and 0x40 <= byte <= 0x7E:
+                    sequence = bytes(self._escape)
+                    if sequence == b"[200~":
+                        self._bracketed_paste = True
+                    elif sequence == b"[201~":
+                        self._bracketed_paste = False
+                    self._escape = None
+                continue
+
+            if byte == 0x1B:
+                self._escape = bytearray()
+                self._last_was_cr = False
+            elif byte in (0x0D, 0x0A):
+                if self._bracketed_paste:
+                    self._append(0x0A)
+                elif not (byte == 0x0A and self._last_was_cr):
+                    line = self._submit()
+                    if line is not None:
+                        submitted.append(line)
+                self._last_was_cr = byte == 0x0D
+            elif byte in (0x03, 0x15):  # C-c / C-u clear the composer
+                self._line.clear()
+                self._overflow = False
+                self._last_was_cr = False
+            elif byte in (0x08, 0x7F):  # Backspace
+                if self._line and not self._overflow:
+                    self._line.pop()
+                self._last_was_cr = False
+            elif byte >= 0x20:
+                self._append(byte)
+                self._last_was_cr = False
+        return submitted
+
+
 def draft_state_from_bytes(data: bytes) -> Optional[bool]:
     """What ``data`` — keystrokes a human just sent — did to their composer.
 
@@ -344,6 +430,15 @@ class Session:
         #: :mod:`claude_launcher.daemon.beads`). Synchronous: a hook that has
         #: work to do schedules it.
         self.on_exit: Optional[Callable[["Session"], None]] = None
+        #: Called before a complete terminal line reaches the child.  The
+        #: manager uses the one launcher-relevant command, Codex ``/new``, to
+        #: snapshot rollout ownership before Codex creates the replacement
+        #: conversation. Other submitted lines are intentionally ignored by
+        #: the manager.
+        self.on_command_submitted: Optional[
+            Callable[["Session", str], None]
+        ] = None
+        self._submitted_lines = _SubmittedLineTracker()
 
         session_dir = paths.session_dir(sdef.name)
         session_dir.mkdir(parents=True, exist_ok=True)
@@ -847,6 +942,10 @@ class Session:
         Both are terminal-only: ``send-keys`` types a line and its Enter
         together, and holding *itself* behind its own text would deadlock.
         """
+        on_command = getattr(self, "on_command_submitted", None)
+        if data and on_command is not None:
+            for line in self._submitted_lines.feed(data):
+                on_command(self, line)
         now = time.monotonic()
         self._last_human_input = now
         if not at_terminal:
@@ -1047,7 +1146,7 @@ class Session:
                 )
             if self.exited:
                 raise SessionGone(f"session {self.sdef.name!r} has exited")
-        self.note_human_input()
+        self.note_human_input(data=data)
         head, submit = keys_mod.split_submit(data)
         if submit and self.screen.bracketed_paste:
             # Text and its submitting CR in one write is the same trap
