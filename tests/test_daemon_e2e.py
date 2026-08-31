@@ -1654,6 +1654,8 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
                 headers=bearer,
             )
             assert resp.status == 200
+            assert (await resp.json())["nudged_sessions"] == ["n1"]
+            await _wait_screen(worker, "echo:cflow: run archived")
             resp = await client.post(
                 "/api/cflow/start",
                 json={"cwd": str(gated), "scope": "n1", "workflow": "tiny"},

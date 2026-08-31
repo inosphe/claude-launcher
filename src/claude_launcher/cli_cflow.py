@@ -653,6 +653,7 @@ def _cmd_archive(args: argparse.Namespace) -> int:
     if payload.get("was") not in ("done", "aborted"):
         print("note: the run was still active; it was aborted before archiving")
     print("the slot is free — a new run can be started here")
+    _report_unblock("archived", engine.NUDGE_ARCHIVED, scope, cwd)
     return 0
 
 

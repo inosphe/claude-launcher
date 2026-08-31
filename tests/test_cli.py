@@ -89,7 +89,36 @@ def test_install_codex_profile_targets_codex_home(home, capsys):
     assert not (pdir / "skills").exists()
     config_text = (codex_home / "config.toml").read_text(encoding="utf-8")
     assert "[mcp_servers.claunch]" in config_text
+    assert 'env_vars = ["CLAUNCH_SESSION"]' in config_text
     assert "restart active agent sessions" in out
+
+
+def test_cflow_archive_nudges_the_session_that_owned_the_run(
+    home, tmp_path, monkeypatch, capsys
+):
+    from claude_launcher import cli_cflow
+    from claude_launcher.cflow import engine as cflow_engine
+
+    workflows = tmp_path / ".claunch" / "workflows"
+    workflows.mkdir(parents=True)
+    (workflows / "tiny.yaml").write_text(
+        "name: tiny\nsteps:\n  one:\n    instructions: do one\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CLAUNCH_SESSION", "s9")
+    cflow_engine.start("tiny")
+
+    sent = []
+    monkeypatch.setattr(
+        cli_cflow,
+        "_nudge_via_daemon",
+        lambda message, scope, cwd: sent.append((message, scope, cwd)) or [scope],
+    )
+
+    assert run("cflow", "archive") == 0
+    assert sent == [(cflow_engine.NUDGE_ARCHIVED, "s9", None)]
+    assert "nudged session(s): s9" in capsys.readouterr().out
 
 
 def test_install_all_routes_each_profile_to_its_harness_home(home, capsys):

@@ -162,6 +162,10 @@ def _codex_mcp_lines(home: Path) -> List[str]:
         f"[mcp_servers.{MCP_NAME}]\n"
         f"command = {json.dumps(server['command'])}\n"
         f"args = {json.dumps(server.get('args', []))}\n"
+        # Codex passes explicitly allow-listed parent variables to stdio MCP
+        # processes.  The session id keeps CLI and MCP calls on the same
+        # cflow/mesh scope.
+        f"env_vars = {json.dumps([cflow_state.SESSION_ENV])}\n"
     )
     text = text.rstrip()
     path.parent.mkdir(parents=True, exist_ok=True)

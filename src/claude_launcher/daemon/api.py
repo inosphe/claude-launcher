@@ -1863,6 +1863,9 @@ async def h_cflow_archive(request: web.Request) -> web.Response:
         return err
     cwd, scope, _ = resolved
     payload = cflow_engine.archive(by="web", cwd=cwd, scope=scope)
+    payload["nudged_sessions"] = await _nudge_sessions(
+        request.app["manager"], cwd, scope, cflow_engine.NUDGE_ARCHIVED
+    )
     return web.json_response(payload)
 
 

@@ -114,6 +114,7 @@ NUDGE_APPROVED = "cflow: approved - continue per the /cflow protocol"
 NUDGE_SELECTED = "cflow: selection confirmed - continue per the /cflow protocol"
 NUDGE_ANSWERED = "cflow: your request was answered - continue per the /cflow protocol"
 NUDGE_CONTINUE = "cflow: continue per the /cflow protocol"
+NUDGE_ARCHIVED = "cflow: run archived - the slot is free for a new workflow"
 NUDGE_STARTED = (
     "cflow: a new workflow run was started - continue per the /cflow protocol"
 )
