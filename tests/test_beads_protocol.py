@@ -125,6 +125,53 @@ def test_the_worker_creates_its_own_issue_and_claims_it(layer):
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_worker_settles_its_issue_before_work_begins(layer):
+    """A round reaches ``work`` only through an issue verdict.
+
+    ``intake`` alone used to carry the issue rules, and a session that
+    arrived with no assignment (no daemon issue, no ``--no-issue`` order)
+    slid into work with nothing on the board. The check phase pins the
+    three verdicts and who owns each: facts are the agent's (does an issue
+    stand? did the creation request refuse one?), while adopting somebody
+    else's record and proceeding with no record at all are a person's —
+    ``chooser: user`` records the agent's pick as a proposal only, so the
+    ``none`` option confirmed by a person IS the explicit consent the
+    round journals.
+    """
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    wf = model.load(path)
+    assert wf.steps["intake"].next == "issue-check"
+    check = wf.steps["issue-check"].select
+    assert check.chooser == "agent"                  # three readable facts
+    assert check.options["claimed"].next == "work"
+    assert check.options["no-issue-by-request"].next == "work"
+    assert check.options["unclaimed"].next == "issue-search"
+    # the search files the candidates the deciding person reads
+    assert wf.steps["issue-search"].next == "issue-decision"
+    assert "search" in wf.steps["issue-search"].instructions
+    decision = wf.steps["issue-decision"].select
+    assert decision.chooser == "user", (
+        f"{layer}: adopting a record or proceeding without one is a "
+        "person's call — an agent chooser would let the round consent "
+        "to itself"
+    )
+    assert decision.options["adopt"].next == "issue-claim"
+    assert decision.options["create"].next == "issue-claim"
+    assert decision.options["none"].next == "work"
+    claim = wf.steps["issue-claim"]
+    assert claim.next == "work"
+    assert "--status in_progress" in claim.instructions
+    assert "JOINED" in claim.instructions            # a live holder is joined, not taken
+    assert "in_progress" in claim.done_when
+    # an assigned-but-empty issue is filled from the opening task in intake,
+    # where the issue is first read — not minted a second time
+    assert "자리표시" in wf.steps["intake"].instructions
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
 def test_the_worker_closes_only_its_own_landed_issue(layer):
     """The assignee closes its own issue; the leader still owns the JSONL.
 
