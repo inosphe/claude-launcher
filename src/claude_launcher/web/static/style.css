@@ -108,6 +108,10 @@ option:disabled { color: #6b7280; }
   border-bottom: 1px solid #2a2e36; font-size: 11px; font-weight: 600;
   letter-spacing: .02em; text-transform: none; cursor: default; display: block;
 }
+#session-list .session-group-heading.session-group-level-1 {
+  padding-left: 20px; color: #8b949e; background: #131820;
+  font-size: 10px;
+}
 #session-list > li.session-filtered { display: none; }
 /* The gap and the right padding are tight on purpose: this row carries a
    name, a role, the rooms it is in, its profile and two buttons inside about
