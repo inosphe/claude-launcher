@@ -146,7 +146,7 @@ new Function(
    slice("flowNeedsHuman"),
    slice("flowState"), slice("flowMetrics"), slice("flowPipShape"),
    slice("flowTrackSvg"), slice("svg"), slice("askWho"),
-   slice("answerFellToUs"), slice("wfActions"),
+   slice("answerFellToUs"), slice("answerBranchOptions"), slice("wfActions"),
    slice("reminderControl"), slice("pendingBanner"),
    slice("sessRunFoldFor"), slice("stopSessRun"), slice("refreshSessRun"),
    slice("renderSessRun"), slice("sessRunTrack")].join("\n") +
