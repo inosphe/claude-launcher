@@ -54,18 +54,19 @@ def _register_py_harness():
         lineage.set_harness(profile.create("py"), "py")
 
 
-def _screen_text(session) -> str:
+async def _screen_text(session) -> str:
+    await session.screen_synced()
     return "\n".join(session.capture())
 
 
 async def _wait_screen(session, needle: str, timeout: float = 15.0) -> None:
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
-        if needle in _screen_text(session):
+        if needle in await _screen_text(session):
             return
         await asyncio.sleep(0.1)
     raise AssertionError(
-        f"{needle!r} never appeared on screen; got:\n{_screen_text(session)}"
+        f"{needle!r} never appeared on screen; got:\n{await _screen_text(session)}"
     )
 
 
