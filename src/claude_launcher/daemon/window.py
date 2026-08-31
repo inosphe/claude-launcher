@@ -385,11 +385,22 @@ class WindowManager:
         ids = [h["grant_id"] for h in self._holders if h.get("session") == session]
         return sum(1 for gid in ids if self.release(gid))
 
-    def cancel(self, session: str) -> int:
-        """Drop this session's queue entries (a waiter giving up)."""
+    def cancel(self, grant_id: str) -> bool:
+        """Remove one waiting request.  A holder cannot be cancelled here."""
+        entry = next((q for q in self._queue if q["grant_id"] == grant_id), None)
+        if entry is None:
+            return False
+        self._queue.remove(entry)
+        self._granted_events.pop(grant_id, None)
+        self._save()
+        return True
+
+    def cancel_session(self, session: str) -> int:
+        """Drop every waiting request from this session (a waiter giving up)."""
         entries = [q for q in self._queue if q.get("session") == session]
         for entry in entries:
             self._queue.remove(entry)
+            self._granted_events.pop(entry["grant_id"], None)
         if entries:
             self._save()
         return len(entries)

@@ -22,10 +22,10 @@ reinstalled yet.
 
 from __future__ import annotations
 
-from . import mcp_rpc, mesh_mcp
+from . import mcp_rpc, mesh_mcp, window_mcp
 from .cflow import mcp as cflow_mcp
 
-SERVER = mcp_rpc.merge("claunch", [cflow_mcp.SERVER, mesh_mcp.SERVER])
+SERVER = mcp_rpc.merge("claunch", [cflow_mcp.SERVER, mesh_mcp.SERVER, window_mcp.SERVER])
 
 #: The merged tool list, for callers that want to report what is offered
 #: without speaking JSON-RPC (the installer's summary line, tests).

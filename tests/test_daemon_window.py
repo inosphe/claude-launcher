@@ -286,6 +286,30 @@ def test_release_by_session_and_by_grant_id(tmp_path):
     asyncio.run(run())
 
 
+def test_cancel_by_waiting_id_or_session_leaves_holders_untouched(tmp_path):
+    async def run():
+        w = _make(tmp_path)
+        holder = await w.acquire("sweep", session="holder", pid=os.getpid())
+        first = asyncio.create_task(
+            w.acquire("sweep", session="waiter", pid=os.getpid(), wait=5)
+        )
+        second = asyncio.create_task(
+            w.acquire("sweep", session="waiter", pid=os.getpid(), wait=5)
+        )
+        await asyncio.sleep(0.05)
+        queued = w.status()["queue"]
+        assert w.cancel(queued[0]["grant_id"])
+        assert w.cancel_session("waiter") == 1
+        assert not w.cancel(queued[0]["grant_id"])
+        assert [h["grant_id"] for h in w.status()["holders"]] == [holder["grant_id"]]
+        for task in (first, second):
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(run())
+
+
 def test_an_unknown_class_is_refused(tmp_path):
     async def run():
         w = _make(tmp_path)
@@ -308,7 +332,7 @@ def test_a_wait_that_times_out_leaves_no_queue_entry(tmp_path):
     asyncio.run(run())
 
 
-def test_window_api_status_acquire_and_release(home, tmp_path):
+def test_window_api_status_acquire_release_and_cancel(home, tmp_path):
     from aiohttp.test_utils import TestClient, TestServer
 
     from claude_launcher.daemon.api import build_app
@@ -353,6 +377,25 @@ def test_window_api_status_acquire_and_release(home, tmp_path):
                 )
             ).json()
             assert released == {"released": 1}
+
+            held = await app["window"].acquire("sweep", session="holder", pid=os.getpid())
+            waiting = asyncio.create_task(
+                app["window"].acquire("sweep", session="waiter", pid=os.getpid(), wait=5)
+            )
+            await asyncio.sleep(0.05)
+            queued = app["window"].status()["queue"][0]
+            cancelled = await (
+                await client.post(
+                    "/api/window/cancel", json={"grant_id": queued["grant_id"]}, headers=headers
+                )
+            ).json()
+            assert cancelled == {"cancelled": 1}
+            assert [h["grant_id"] for h in app["window"].status()["holders"]] == [
+                held["grant_id"]
+            ]
+            waiting.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiting
         finally:
             await client.close()
             await manager.shutdown_all()

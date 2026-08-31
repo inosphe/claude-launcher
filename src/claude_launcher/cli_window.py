@@ -128,6 +128,31 @@ def _cmd_release(args) -> int:
     return 1
 
 
+def _cmd_cancel(args) -> int:
+    client = _client()
+    if client is None:
+        return 2
+    body = {}
+    if args.grant_id:
+        body["grant_id"] = args.grant_id
+    else:
+        body["session"] = args.session or os.environ.get("CLAUNCH_SESSION")
+    if not body.get("session") and not body.get("grant_id"):
+        print(
+            "cancel wants --grant-id, or a session ($CLAUNCH_SESSION is unset "
+            "and --session was not given)",
+            file=sys.stderr,
+        )
+        return 2
+    result = client.post("/api/window/cancel", body)
+    cancelled = result.get("cancelled", 0)
+    if cancelled:
+        print(f"cancelled: {cancelled}")
+        return 0
+    print("nothing to cancel (no such waiting request)", file=sys.stderr)
+    return 1
+
+
 def register(sub) -> None:
     p_window = sub.add_parser(
         "window",
@@ -172,3 +197,9 @@ def register(sub) -> None:
                                       "this session's)")
     p.add_argument("--session", help="whose grants (default: $CLAUNCH_SESSION)")
     p.set_defaults(func=_cmd_release)
+
+    p = wsub.add_parser("cancel", help="withdraw a waiting request")
+    p.add_argument("--grant-id", help="the waiting request to withdraw (default: "
+                                      "all of this session's)")
+    p.add_argument("--session", help="whose waiting requests (default: $CLAUNCH_SESSION)")
+    p.set_defaults(func=_cmd_cancel)

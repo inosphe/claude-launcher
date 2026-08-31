@@ -247,6 +247,7 @@ def build_app(
     r.add_get("/api/window", h_window_status)
     r.add_post("/api/window/acquire", h_window_acquire)
     r.add_post("/api/window/release", h_window_release)
+    r.add_post("/api/window/cancel", h_window_cancel)
     r.add_post("/api/auth/session", h_auth_session)
     r.add_get("/api/daemon", h_daemon_info)
     r.add_post("/api/daemon/shutdown", h_daemon_shutdown)
@@ -548,6 +549,22 @@ async def h_window_release(request: web.Request) -> web.Response:
         return web.json_response({"released": window.release_session(str(session))})
     return web.json_response(
         {"released": 0, "error": "release wants a grant_id or a session"},
+        status=400,
+    )
+
+
+async def h_window_cancel(request: web.Request) -> web.Response:
+    """Withdraw a waiting request without releasing any held grant."""
+    body = await _json_body(request)
+    window = request.app["window"]
+    grant_id = body.get("grant_id")
+    if grant_id:
+        return web.json_response({"cancelled": 1 if window.cancel(str(grant_id)) else 0})
+    session = body.get("session")
+    if session:
+        return web.json_response({"cancelled": window.cancel_session(str(session))})
+    return web.json_response(
+        {"cancelled": 0, "error": "cancel wants a grant_id or a session"},
         status=400,
     )
 
