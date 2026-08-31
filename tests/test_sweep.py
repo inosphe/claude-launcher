@@ -1204,6 +1204,131 @@ def test_a_lost_stream_is_said_rather_than_left_as_an_empty_summary(
     assert "streams: " in err and "could not be read back" in err
 
 
+# --------------------------------------------------------------------------- #
+# A run that never became a verdict does not overwrite the one that stands
+# (claunch-hnjy).
+#
+# The receipt's name is the sha, so a second run at the same commit rewrites
+# the first one's file. That is right when both runs judged something -- the
+# newer verdict is the verdict. It is wrong when the second run never got a
+# verdict to file: on 2026-08-31 a sweep of ``70e9505a`` finished 1 failed /
+# 2963 passed / 1 skipped, a re-run at the same tip died in pytest's basetemp
+# cleanup (``PermissionError: [WinError 32]``) before collection, and the
+# ``counts {}`` receipt it filed anyway landed on top of the only full
+# judgement that tree ever had. The output file went with it.
+#
+# So the rule the cases below pin: a run that parsed no counts never
+# overwrites a receipt that has them. It is filed beside it instead, under
+# ``{sha}.invalid.json``, and the standing verdict is left exactly as it was.
+# --------------------------------------------------------------------------- #
+
+#: A run that never became a verdict: the suite died before it could print a
+#: summary line, so there is nothing for ``parse_counts`` to read. Shaped on
+#: the real one -- pytest emptying its basetemp, exit 3, no counts.
+NEVER_STARTED = (
+    f'"{sys.executable}" -c "'
+    "print('INTERNALERROR> PermissionError: [WinError 32] The process cannot "
+    "access the file because it is being used by another process'); "
+    'raise SystemExit(3)"'
+)
+
+
+def test_a_run_with_no_counts_does_not_overwrite_the_verdict_that_stands(
+    repo, receipts, capsys
+):
+    """The incident, reproduced: red verdict first, broken run second.
+
+    What is lost when this goes wrong is not a file but the judgement -- the
+    gate reads the receipt, so an empty one in the verdict's place is the
+    same state as no sweep at all. Both halves have to survive: the receipt
+    and the parked output it names.
+    """
+    assert _run(repo, receipts, "--command", RED_TRACEBACK) == 1
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    verdict = sweep.receipt_path(repo, tip, receipts)
+    parked = sweep.output_path(repo, tip, receipts)
+    before, parked_before = (
+        verdict.read_text(encoding="utf-8"),
+        parked.read_text(encoding="utf-8"),
+    )
+
+    assert _run(repo, receipts, "--command", NEVER_STARTED) == 1
+    assert verdict.read_text(encoding="utf-8") == before, (
+        "a run that parsed no counts overwrote the verdict that stood"
+    )
+    assert parked.read_text(encoding="utf-8") == parked_before
+
+    aside = sweep.receipts_dir(repo, receipts) / f"{tip}.invalid.json"
+    assert aside.is_file(), "the broken run left no account of itself"
+    filed = json.loads(aside.read_text(encoding="utf-8"))
+    assert filed["counts"] == {}
+    assert filed["exit_code"] == 3
+    assert f"{tip}.json" in filed["not_a_verdict"]
+
+    capsys.readouterr()
+    assert _check(repo, receipts) == 1
+    err = capsys.readouterr().err
+    assert "test_x.py::test_borrow_lends" in err, "the standing verdict is gone"
+    assert "not a {sha}.json" not in err, (
+        "the aside file tripped the hand-written-receipt warning; run writes "
+        "it, so the scan has to pass over it in silence"
+    )
+
+
+def test_a_run_with_no_counts_does_not_undo_a_green_verdict(repo, receipts):
+    """The same rule from the other side, and the more expensive one.
+
+    A broken run's receipt carries ``exit_code`` from the process that died,
+    and ``is_green`` reads ``counts`` -- so an empty receipt whose command
+    happened to exit 0 would pass as green over a tree nobody swept, while an
+    empty one that exited 3 turns a real green red. Diverting the file leaves
+    neither reading available.
+    """
+    assert _run(repo, receipts, "--command", GREEN) == 0
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+
+    assert _run(repo, receipts, "--command", NEVER_STARTED) == 1
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+    assert receipt["counts"] == {"passed": 12, "skipped": 1}
+    assert _check(repo, receipts) == 0
+
+
+def test_a_run_with_no_counts_is_still_recorded_when_nothing_stands(repo, receipts):
+    """The rule is about overwriting, not about refusing to write.
+
+    With no receipt at the sha there is no judgement to protect, and the
+    broken run is the only account of what happened there. It keeps the
+    standard name, so ``check`` reads it and reports the state
+    (test_a_lost_stream_is_said_rather_than_left_as_an_empty_summary depends
+    on that path).
+    """
+    assert _run(repo, receipts, "--command", NEVER_STARTED) == 1
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+
+    receipt = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+    assert receipt["counts"] == {}
+    assert "not_a_verdict" not in receipt
+    assert not (sweep.receipts_dir(repo, receipts) / f"{tip}.invalid.json").exists()
+
+
+def test_one_broken_run_replaces_another(repo, receipts):
+    """What is protected is a verdict, and an empty receipt is not one.
+
+    Two runs that both died leave one file, the newer -- otherwise the
+    directory collects a copy per attempt and the rule stops being about
+    verdicts at all.
+    """
+    assert _run(repo, receipts, "--command", NEVER_STARTED) == 1
+    tip = _git(repo, "rev-parse", "HEAD").strip()
+    first = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+
+    assert _run(repo, receipts, "--command", NEVER_STARTED) == 1
+    second = json.loads(sweep.receipt_path(repo, tip, receipts).read_text("utf-8"))
+
+    assert second["started_at"] > first["started_at"]
+    assert not (sweep.receipts_dir(repo, receipts) / f"{tip}.invalid.json").exists()
+
+
 def test_git_output_is_read_as_utf8_not_as_the_locale(repo, receipts):
     """``_git`` decodes git, and git writes utf-8.
 
