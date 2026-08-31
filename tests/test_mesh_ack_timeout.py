@@ -477,8 +477,25 @@ def test_the_heartbeat_finally_has_a_condition_under_which_it_gives_up(
         assert not mesh.pending("worker_b")
         await mgr.get("b1").wait_for("idle", timeout=20.0, threshold=0.5)
 
-        # It chases while the debt stands.
+        # The delivery worker runs this same policy tick on its own clock
+        # (``_POLL``), so once the member is idle with the debt standing it
+        # chases without being asked -- and its dispatches land in ``fired``
+        # indistinguishable from the ones below. How many it gets in before
+        # this line is a function of how loaded the machine is, which is not
+        # something a test may assert on. Stop the workers: from here the
+        # only ticks are the ones written out below.
+        await mm.shutdown()
+
+        # Normalise what that worker left behind -- one chase under load,
+        # none when the machine was quiet -- so the measured tick starts
+        # from the same place either way.
         mesh.activity.setdefault("worker_b", {"anchor": 0.0})["hb_next"] = 0.0
+        await mesh_policy.tick(mm, mesh)
+
+        # It chases while the debt stands, and keeps chasing: the nudge is
+        # re-armed after each one, so a forced-due tick fires again.
+        fired.clear()
+        mesh.activity["worker_b"]["hb_next"] = 0.0
         await mesh_policy.tick(mm, mesh)
         assert fired == ["heartbeat"], "the heartbeat never armed"
 
