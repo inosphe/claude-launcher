@@ -264,9 +264,7 @@ def test_delivery_goes_to_the_scope_session_in_the_same_cwd(proj):
 
 
 def test_only_a_working_session_is_reminded(proj):
-    """The reminder steers an agent mid-work off-protocol drift; a session
-    that is idle (turn over), suspended or wedged hears nothing. The debt is
-    held — not dropped — and lands the moment the session works again."""
+    """A reminder held during an idle turn starts a fresh interval on resume."""
     cwd = str(proj)
     cflow_engine.start("linear", cwd=cwd, scope="w1")
     sess = _FakeSession("w1", cwd)
@@ -283,7 +281,15 @@ def test_only_a_working_session_is_reminded(proj):
     assert due                                   # held, so still due next poll
     sess.status_value = "busy"                   # the agent starts working
     asyncio.run(clock._deliver(*due[0]))
-    assert len(sess.delivered) == 1              # the held reminder lands
+    assert sess.delivered == []                  # resume does not replay it
+
+    # The next reminder is measured from the resumed turn, not from the old
+    # due time while the session was idle.
+    assert clock.scan(time.monotonic() + 100) == []
+    resumed_due = clock.scan(time.monotonic() + 601)
+    assert resumed_due
+    asyncio.run(clock._deliver(*resumed_due[0]))
+    assert len(sess.delivered) == 1
 
 
 def test_skip_lets_one_reminder_go_by_and_keeps_the_clock(proj):
