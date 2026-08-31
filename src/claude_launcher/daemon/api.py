@@ -23,7 +23,15 @@ from typing import Dict, List, Optional, Set, Tuple
 from aiohttp import web
 
 from .. import __version__, borrowing, harness_policy, harnesses as harness_registry
-from .. import lineage, profile as profile_mod, providers, quickjob, reports as reports_mod
+from .. import (
+    credentials,
+    lineage,
+    profile as profile_mod,
+    providers,
+    quickjob,
+    reports as reports_mod,
+    usage,
+)
 from .. import session_commits
 from .. import spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
@@ -250,6 +258,7 @@ def build_app(
     r.add_post("/api/daemon/restart-request/approve", h_restart_request_approve)
     r.add_post("/api/daemon/restart-request/reject", h_restart_request_reject)
     r.add_get("/api/profiles", h_profiles)
+    r.add_get("/api/usage", h_usage)
     r.add_get("/api/borrow-options", h_borrow_options)
     r.add_get("/api/roles", h_roles)
     r.add_get("/api/workspaces", h_workspaces)
@@ -761,6 +770,44 @@ async def h_profiles(request: web.Request) -> web.Response:
             "profile_selectors": selectors,
             "profile_options": profile_options,
             "profile_details": items,
+        }
+    )
+
+
+async def h_usage(request: web.Request) -> web.Response:
+    """Return subscription usage for a profile selector.
+
+    Usage providers perform network and subprocess I/O.  Run the existing CLI
+    implementation in a worker thread so one slow account endpoint cannot
+    block the daemon's event loop (or the session rail polling it).
+    """
+    selector = str(request.query.get("profile") or "").strip()
+    if not selector:
+        return json_error(400, "profile is required")
+    try:
+        selected = usage.resolve_target(profile_mod.require_selector(selector))
+        report = await asyncio.to_thread(usage.fetch, selected)
+    except (
+        profile_mod.ProfileError,
+        usage.UsageError,
+        credentials.CredentialsError,
+    ) as exc:
+        return json_error(400, str(exc))
+    return web.json_response(
+        {
+            "profile": selected.selector,
+            "source": report.source,
+            "windows": [
+                {
+                    "name": item.name,
+                    "utilization": item.utilization,
+                    "resets_at": item.resets_at,
+                    "used_dollars": item.used_dollars,
+                    "limit_dollars": item.limit_dollars,
+                    "status": item.status,
+                }
+                for item in report.windows
+            ],
         }
     )
 
