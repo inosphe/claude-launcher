@@ -90,7 +90,7 @@ const ctx = {};
 new Function(
   "exports", "$", "document", "location", "cflowCache",
   [wfGlyphTable(), slice("wfDotClass"), slice("wfMarkState"), slice("wfMark"), slice("askWho"),
-   slice("answerFellToUs"), slice("sessCflowRun"),
+   slice("answerFellToUs"), slice("answerBranchOptions"), slice("sessCflowRun"),
    slice("sessCflowGated"), slice("sessCflowLabel"), slice("fmtOpensAt"),
    slice("applyCflowBadges")].join("\n") + `
 exports.apply = applyCflowBadges;
@@ -236,6 +236,16 @@ ctx.setRuns(answerRow(undefined));
 ctx.apply();
 check("no ask at all reads the same way (a forced goto leaves this)",
       badgeText(rows.s19), "ship · ⚑ asked of nobody — approve to continue");
+
+ctx.setRuns([{
+  scope: "s19", cwd: "F:/repo", status: "waiting_answer", workflow: "ship",
+  step_id: "landing-review", reason: "branch", sessions: ["s19"],
+  options: [{ name: "request" }, { name: "hold" }],
+  user_door: { command: "claunch cflow select <request|hold>" },
+}]);
+ctx.apply();
+check("a branch put to nobody names the owed selection",
+      badgeText(rows.s19), "ship · ⚑ asked of nobody — choose request|hold");
 
 /* ---- a paced hold is nobody's move, not a peer's ----------------------- */
 /* `waiting_window` shares wf-delegated with an ask sitting on a peer, because

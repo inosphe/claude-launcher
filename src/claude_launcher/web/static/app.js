@@ -929,9 +929,13 @@ function sessCflowLabel(r) {
     return r.reason === "loop_limit" ? "loop limit — approve to continue"
          : r.reason === "declined" ? "declined — decide"
          : "approval needed";
-  if (r.status === "waiting_answer")
-    return answerFellToUs(r) ? "asked of nobody — approve to continue"
-                             : `with ${askWho(r.ask)}`;
+  if (r.status === "waiting_answer") {
+    if (!answerFellToUs(r)) return `with ${askWho(r.ask)}`;
+    const opts = answerBranchOptions(r);
+    return opts === null
+      ? "asked of nobody — approve to continue"
+      : `asked of nobody — choose ${opts.map((o) => o.name || o).join("|") || "an option"}`;
+  }
   if (r.status === "report_required") return "report required";
   // "held → 19:52", the short form s107 draws on the diagram and the flow
   // card. One state, one wording, wherever a reader meets it.
@@ -2527,6 +2531,21 @@ function answerFellToUs(r) {
   return !r.ask || !((r.ask.asked || []).length);
 }
 
+/* Options for a delegated branch, in both engine payload shapes. A delivered
+   ask owns an `ask.options` snapshot. When responder selection reached
+   nobody, the branch remains at the top level (`reason`, `options`,
+   `user_door`) and there is no ask object. Null means approval; an empty
+   array still means branch, and must never grow an Approve button. */
+function answerBranchOptions(r) {
+  if (!r || r.status !== "waiting_answer") return null;
+  if (r.ask && r.ask.kind === "branch") return r.ask.options || [];
+  if (r.reason === "branch" ||
+      ((r.user_door || {}).command || "").includes("cflow select")) {
+    return r.options || [];
+  }
+  return null;
+}
+
 function shortenPath(p) {
   const parts = (p || "").split(/[\\/]+/).filter(Boolean);
   return parts.length > 2 ? "…/" + parts.slice(-2).join("/") : p;
@@ -2878,10 +2897,17 @@ async function refreshCflow() {
 
     if (r.status === "waiting_answer") {
       if (answerFellToUs(r)) {
-        // Nobody holds this one, so the rail names the press that clears
-        // it — the same hint a gate gets, because that is what it is.
-        li.appendChild(cflowLine("put to nobody — it is yours to approve"));
-        li.appendChild(cflowHint("claunch cflow approve"));
+        // Nobody holds this one, so name the matching human control: branch
+        // options use select, while approval questions use approve.
+        const opts = answerBranchOptions(r);
+        if (opts !== null) {
+          const names = opts.map((o) => o.name || o).join("|") || "option";
+          li.appendChild(cflowLine(`put to nobody — choose ${names}`));
+          li.appendChild(cflowHint(`claunch cflow select <${names}>`));
+        } else {
+          li.appendChild(cflowLine("put to nobody — it is yours to approve"));
+          li.appendChild(cflowHint("claunch cflow approve"));
+        }
       } else {
         li.appendChild(cflowLine(`waiting on ${askWho(r.ask)} to decide`));
         if (r.ask && r.ask.deadline) {
@@ -10032,34 +10058,48 @@ function wfActions(data, opts = {}) {
     msgs.appendChild(el("p", "wf-warning",
       "this was put to nobody — no agent is going to answer it. Only you " +
       "can let the run continue."));
-    const btn = el("button", "wf-btn approve", "Approve gate");
-    btn.addEventListener("click", () => {
-      if (run.ask && run.ask.kind === "branch") {
-        // Same reason as below: a branch needs an option, not an approval.
-        alert("Use 'claunch cflow select <option>' to pick the branch.");
-        return;
+    const branchOpts = answerBranchOptions(run);
+    if (branchOpts !== null) {
+      for (const o of branchOpts) {
+        const btn = el("button", "wf-btn option", o.name);
+        btn.title = o.description || "";
+        btn.addEventListener("click", () => {
+          if (!confirm(
+            `Answer '${run.step_id}' with '${o.name}' yourself?\n\n` +
+            "It was put to nobody, so nothing else will."
+          )) return;
+          cflowAction("/api/cflow/select", {
+            cwd: data.cwd, scope: data.scope, option: o.name,
+          }, after);
+        });
+        main.appendChild(btn);
       }
-      if (confirm(
-        `Answer '${run.step_id}' yourself?\n\nIt was put to nobody, so ` +
-        "nothing else will."
-      )) {
-        cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
-      }
-    });
-    main.appendChild(btn);
+    } else {
+      const btn = el("button", "wf-btn approve", "Approve gate");
+      btn.addEventListener("click", () => {
+        if (confirm(
+          `Answer '${run.step_id}' yourself?\n\nIt was put to nobody, so ` +
+          "nothing else will."
+        )) {
+          cflowAction("/api/cflow/approve", { cwd: data.cwd, scope: data.scope }, after);
+        }
+      });
+      main.appendChild(btn);
+    }
   } else if (run.status === "waiting_answer") {
     msgs.appendChild(el("p", "wf-gate", run.ask ? run.ask.prompt : "waiting for a decision"));
     msgs.appendChild(el("p", "wf-note",
       "this is with another agent; you do not have to do anything. Take it " +
       "over only if it is stuck — your answer lands over theirs, and they " +
       "are told the question is closed."));
-    const branch = run.ask && run.ask.kind === "branch";
+    const branchOpts = answerBranchOptions(run);
+    const branch = branchOpts !== null;
     // A branch needs an option, not an approval. This used to say so in an
     // alert and send the reader to the CLI — a dead end on the one screen
     // that had every part of the question already in hand. The takeover is
     // the same press as any other selection; only the confirm differs,
     // because this one is taken away from somebody.
-    const opts = branch ? (run.ask.options || []) : [null];
+    const opts = branch ? branchOpts : [null];
     for (const o of opts) {
       const btn = el("button", "wf-btn" + (o ? " option" : ""),
         o ? o.name : "Decide it myself");

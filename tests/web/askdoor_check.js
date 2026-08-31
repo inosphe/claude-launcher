@@ -107,6 +107,24 @@ const BRANCH = {
   },
 };
 
+/* Exact status shape when responder selection reached nobody: the branch
+   remains at the top level and there is no ask object. */
+const FALLEN_BRANCH = {
+  cwd: "C:/repo",
+  scope: "s109",
+  sessions: ["s109"],
+  run: {
+    status: "waiting_answer",
+    step_id: "landing-review",
+    reason: "branch",
+    options: [
+      { name: "request", description: "queue it for integration" },
+      { name: "hold", description: "freeze the branch" },
+    ],
+    user_door: { command: "claunch cflow select <request|hold>" },
+  },
+};
+
 /* ---- a delegated BRANCH: one press per option, all of them real -------- */
 {
   const box = wfActions(BRANCH, {});
@@ -129,6 +147,25 @@ const BRANCH = {
   ok(texts(box).includes("your answer lands over theirs"),
      "the panel says whose answer wins");
   ok(texts(box).includes("request or hold?"), "the question is shown");
+}
+
+/* ---- a branch put to NOBODY: top-level options, never Approve --------- */
+{
+  posted.length = 0;
+  const box = wfActions(FALLEN_BRANCH, {});
+  const opts = buttons(box).filter((b) => b.cls.includes("option"));
+  ok(opts.map((b) => b.text).join(",") === "request,hold",
+     "a fallen branch draws its top-level options");
+  ok(!buttons(box).some((b) => b.cls.includes("approve")),
+     "a fallen branch does not draw an Approve gate");
+
+  opts.forEach((b) => (b.handlers.click || []).forEach((fn) => fn()));
+  ok(posted.length === 2 && posted.every((p) => p.url === "/api/cflow/select"),
+     "a fallen branch settles through select");
+  ok(posted.map((p) => p.body.option).join(",") === "request,hold",
+     "a fallen branch sends the selected top-level option");
+  ok(!posted.some((p) => p.url === "/api/cflow/approve"),
+     "a fallen branch never calls approve");
 }
 
 /* ---- a delegated APPROVAL: unchanged, one press ----------------------- */
