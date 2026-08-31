@@ -124,6 +124,7 @@ function openTrace() {}
 function stopMeshPoll() {}
 function stopFlowPoll() {}
 function closeWorkspaces() {}
+function stopWindowPoll() {}
 function stopBeadsPoll() {}
 function stopReportsPoll() {}
 function closeTranscript() {}
@@ -131,6 +132,7 @@ function openWorkflow() {}
 function openMesh() {}
 function openFlowTopology() {}
 function openWorkspaces() {}
+function openWindowPage() {}
 function openReports() {}
 function openHome() {}
 /* The mesh handle a row/head wears when it differs from the session name

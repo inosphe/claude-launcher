@@ -561,7 +561,7 @@ option:disabled { color: #6b7280; }
 #rail-nav a.active { color: #d8dbe0; border-top-color: #58a6ff; }
 
 /* ---- the pages that live in #main ---- */
-#home-view, #new-view, #meshes-view, #flows-view, #beads-view {
+#home-view, #new-view, #meshes-view, #flows-view, #window-view, #beads-view {
   flex: 1; overflow-y: auto; padding: 18px 26px; min-height: 0;
 }
 .page-head { display: flex; align-items: center; gap: 12px; margin-bottom: 14px; }
@@ -3106,6 +3106,84 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
    mobile bar instead of floating over the session it is reporting on. */
 @media (max-width: 700px) {
   #notices { top: 8px; right: 8px; left: 8px; width: auto; }
+}
+
+/* ------------------------------------------------------------------ */
+/* the measurement Window page: active grants and their FIFO queue    */
+/* ------------------------------------------------------------------ */
+.window-summary {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
+  gap: 10px; max-width: 980px; margin: 14px 0 18px;
+}
+.window-stat {
+  display: flex; flex-direction: column; gap: 3px; padding: 11px 13px;
+  background: #1b1e24; border: 1px solid #2a2e36; border-radius: 7px;
+}
+.window-stat-title {
+  color: #8b949e; font-size: 11px; text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.window-stat-value {
+  color: #e6edf3; font-size: 20px; line-height: 1.15;
+  font-variant-numeric: tabular-nums;
+}
+.window-stat-detail { color: #7d8590; font-size: 11px; }
+.window-section {
+  max-width: 980px; margin: 0 0 16px; background: #16191f;
+  border: 1px solid #22262d; border-radius: 8px; overflow: hidden;
+}
+.window-section-head {
+  display: flex; align-items: baseline; gap: 8px; padding: 8px 11px;
+  background: #1b1e24; border-bottom: 1px solid #22262d;
+}
+.window-section-head h3 {
+  color: #c6cdd5; font-size: 12px; text-transform: uppercase;
+  letter-spacing: .04em;
+}
+.window-count {
+  padding: 1px 7px; color: #8b949e; background: #272c33;
+  border-radius: 9px; font-size: 10px; font-variant-numeric: tabular-nums;
+}
+.window-section > .wf-note { margin: 0; padding: 12px; }
+.window-row {
+  display: grid;
+  grid-template-columns: 45px 72px minmax(90px, 140px) minmax(150px, 1fr) 70px;
+  gap: 10px; align-items: baseline; padding: 8px 11px;
+  border-top: 1px solid #22262d; font-size: 12px;
+}
+.window-section-head + .window-row { border-top: none; }
+.window-row:hover { background: #1b2027; }
+.window-rank, .window-age {
+  color: #7d8590; font-size: 11px; font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.window-class {
+  width: fit-content; padding: 1px 7px; border-radius: 9px;
+  color: #79c0ff; background: #172947; font-size: 10px;
+  text-transform: uppercase;
+}
+.window-row.sweep .window-class { color: #d2a8ff; background: #2b1d4d; }
+.window-owner {
+  color: #c6cdd5; font-family: ui-monospace, monospace; text-decoration: none;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
+.window-label {
+  color: #9da5b0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.window-age { text-align: right; }
+.window-footnote {
+  max-width: 980px; color: #6e7681; font-size: 11px; margin-top: -4px;
+}
+@media (max-width: 700px) {
+  .window-row {
+    grid-template-columns: 40px 68px minmax(80px, 1fr) 58px;
+    gap: 7px; padding: 8px;
+  }
+  .window-label {
+    grid-column: 2 / -1; white-space: normal; overflow-wrap: anywhere;
+  }
+  .window-age { text-align: right; }
 }
 
 /* ------------------------------------------------------------------ */

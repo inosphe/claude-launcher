@@ -7010,6 +7010,7 @@ function mobileTitle() {
     case "new": return "new session";
     case "meshes": return "mesh";
     case "flows": return "workflows";
+    case "window": return "measurement window";
     case "settings": return "settings";
     case "reports": return "reports";
     case "mesh": return `mesh · ${meshName}`;
@@ -7131,6 +7132,7 @@ const VIEWS = {
   new: "new-view",
   meshes: "meshes-view",
   flows: "flows-view",
+  window: "window-view",
   cli: "cli-view",
   beads: "beads-view",
   reports: "reports-view",
@@ -7509,6 +7511,7 @@ $("detail-split").addEventListener("dblclick", () => {
  *   #/mesh/<name>       one mesh
  *   #/mesh/<name>/flows ...and where each of its agents is in its workflow
  *   #/flows             cflow runs
+ *   #/window            measurement grants and their FIFO queue
  *   #/wf/<scope|cwd>    one run
  *   #/msg/<name>        what that session has said and been told
  *   #/msg/<name>/<mesh> ...in the mesh named, rather than its first
@@ -7552,6 +7555,7 @@ function parseHash(h) {
   }
   if (parts[0] === "new") return { page: "new" };
   if (parts[0] === "flows") return { page: "flows" };
+  if (parts[0] === "window") return { page: "window" };
   // One page, one shell: nothing else about the CLI tab is addressable, so
   // anything past "#/cli" is still the same terminal.
   if (parts[0] === "cli") return { page: "cli" };
@@ -7571,6 +7575,7 @@ function route() {
   if (r.page !== "mesh") stopMeshPoll();
   if (r.page !== "flow") stopFlowPoll();
   if (r.page !== "settings") closeWorkspaces();
+  if (r.page !== "window") stopWindowPoll();
   if (r.page !== "beads") stopBeadsPoll();
   if (r.page !== "reports") stopReportsPoll();
   if (r.page !== "log") closeTranscript();
@@ -7604,6 +7609,7 @@ function route() {
     case "meshes": showView("meshes"); refreshMeshList(); break;
     case "new": showView("new"); refreshWorkflowChoices(); break;
     case "flows": showView("flows"); refreshCflow(); break;
+    case "window": openWindowPage(); break;
     case "cli": openCli(); break;
     case "settings": openSettings(); break;
     case "beads": openBeads(r.id); break;
@@ -9168,6 +9174,165 @@ function sessCommits(data) {
     box.appendChild(row);
   }
   return box;
+}
+
+/* ------------------------------------------------------------------ */
+/* measurement window (#/window) — grants and the FIFO queue           */
+/* ------------------------------------------------------------------ */
+/* This is deliberately a reading surface. A grant belongs to the process
+   that acquired it, so releasing one from an unrelated browser tab would
+   let tests overlap while the original process was still running. The page
+   therefore draws the arbiter's existing GET /api/window answer and offers
+   no mutation controls. */
+let windowCache = null;
+let windowError = "";
+let windowTimer = null;
+let windowPageOpen = false;
+
+function openWindowPage() {
+  windowPageOpen = true;
+  showView("window");
+  renderWindow();
+  refreshWindow();
+  if (!windowTimer) windowTimer = setInterval(refreshWindow, 2000);
+}
+
+function stopWindowPoll() {
+  if (windowTimer) { clearInterval(windowTimer); windowTimer = null; }
+  windowPageOpen = false;
+}
+
+async function refreshWindow() {
+  if (!windowPageOpen) return;
+  try {
+    const resp = await api("/api/window");
+    if (resp.status === 404) {
+      windowError = "this daemon predates the Window page — 'claunch " +
+        "daemon restart' to pick up this version";
+      windowCache = windowCache || { holders: [], queue: [], caps: {} };
+    } else {
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) windowError = data.error || `HTTP ${resp.status}`;
+      else {
+        windowCache = {
+          holders: Array.isArray(data.holders) ? data.holders : [],
+          queue: Array.isArray(data.queue) ? data.queue : [],
+          caps: data.caps || {},
+          cores: data.cores,
+          advisory_n_now: data.advisory_n_now,
+        };
+        windowError = "";
+      }
+    }
+  } catch { return; }   // api() owns auth and connection recovery
+  if (windowPageOpen) renderWindow();
+}
+
+function windowOwner(entry) {
+  if (entry && entry.session) return String(entry.session);
+  const pid = Number(entry && entry.pid);
+  return Number.isFinite(pid) && pid > 0 ? `pid ${pid}` : "unknown owner";
+}
+
+function windowAge(entry, now = Date.now()) {
+  const stamp = entry && (entry.acquired_at || entry.enqueued_at);
+  const at = Date.parse(stamp || "");
+  if (!Number.isFinite(at)) return "age unknown";
+  return `${fmtAge(Math.max(0, (now - at) / 1000))} ago`;
+}
+
+function windowEntry(entry, position = null) {
+  const row = el("div", "window-row " + (entry.cls || "unknown"));
+  row.appendChild(el(
+    "span", "window-rank", position === null ? "held" : `#${position}`));
+  row.appendChild(el("span", "window-class", entry.cls || "unknown class"));
+  const owner = el("span", "window-owner", windowOwner(entry));
+  if (entry.session) {
+    const live = (sessionsCache || []).find((s) => s.name === entry.session);
+    if (live) {
+      const link = el("a", "window-owner", String(entry.session));
+      link.href = `#/s/${encodeURIComponent(entry.session)}`;
+      row.appendChild(link);
+    } else row.appendChild(owner);
+  } else row.appendChild(owner);
+  row.appendChild(el("span", "window-label", entry.label || "no label"));
+  const age = el("span", "window-age", windowAge(entry));
+  age.title = entry.acquired_at || entry.enqueued_at || "timestamp unavailable";
+  row.appendChild(age);
+  return row;
+}
+
+function windowSummary(title, used, cap, detail) {
+  const card = el("div", "window-stat");
+  card.appendChild(el("span", "window-stat-title", title));
+  card.appendChild(el("strong", "window-stat-value",
+    cap === null ? String(used) : `${used} / ${cap}`));
+  card.appendChild(el("span", "window-stat-detail", detail));
+  return card;
+}
+
+function renderWindow() {
+  const view = $("window-view");
+  view.innerHTML = "";
+  const head = el("div", "wf-head");
+  head.appendChild(el("h2", null, "Measurement window"));
+  const back = el("button", "wf-btn clear", "Back");
+  back.addEventListener("click", () => { location.hash = "#"; });
+  head.appendChild(back);
+  view.appendChild(head);
+  view.appendChild(el("p", "wf-note",
+    "Test grants currently held by this daemon and the FIFO queue waiting " +
+    "behind them. This page is read-only; the process that acquired a grant " +
+    "is responsible for releasing it."));
+  if (windowError) view.appendChild(el("p", "wf-warning", windowError));
+  if (!windowCache) {
+    if (!windowError) view.appendChild(el("p", "wf-note", "loading…"));
+    return;
+  }
+
+  const holders = windowCache.holders || [];
+  const queue = windowCache.queue || [];
+  const caps = windowCache.caps || {};
+  const held = (cls) => holders.filter((e) => e.cls === cls).length;
+  const waiting = (cls) => queue.filter((e) => e.cls === cls).length;
+  const cap = (cls) => caps[cls] !== null && caps[cls] !== undefined &&
+    Number.isFinite(Number(caps[cls])) ? Number(caps[cls]) : null;
+  const summary = el("div", "window-summary");
+  summary.appendChild(windowSummary(
+    "Targeted", held("targeted"), cap("targeted"),
+    `${plural(waiting("targeted"), "waiting")}`));
+  summary.appendChild(windowSummary(
+    "Sweep", held("sweep"), cap("sweep"),
+    `${plural(waiting("sweep"), "waiting")}`));
+  const advisory = windowCache.advisory_n_now === null ||
+    windowCache.advisory_n_now === undefined
+    ? null : Number(windowCache.advisory_n_now);
+  summary.appendChild(windowSummary(
+    "Recommended workers", Number.isFinite(advisory) ? advisory : "?", null,
+    "pytest -n for the next grant"));
+  const cores = windowCache.cores === null || windowCache.cores === undefined
+    ? null : Number(windowCache.cores);
+  summary.appendChild(windowSummary(
+    "Machine cores", Number.isFinite(cores) ? cores : "?", null,
+    "reported by the arbiter"));
+  view.appendChild(summary);
+
+  const section = (title, rows, empty, queued) => {
+    const box = el("section", "window-section");
+    const boxHead = el("div", "window-section-head");
+    boxHead.appendChild(el("h3", null, title));
+    boxHead.appendChild(el("span", "window-count", String(rows.length)));
+    box.appendChild(boxHead);
+    if (!rows.length) box.appendChild(el("p", "wf-note", empty));
+    rows.forEach((entry, i) => box.appendChild(
+      windowEntry(entry, queued ? i + 1 : null)));
+    return box;
+  };
+  view.appendChild(section("Holders", holders, "no grants are held", false));
+  view.appendChild(section("Queue", queue, "nothing is waiting", true));
+  view.appendChild(el("p", "window-footnote",
+    "Entries are the arbiter's recorded state. Process liveness is checked " +
+    "when a new acquisition is decided."));
 }
 
 /* ------------------------------------------------------------------ */
