@@ -100,7 +100,7 @@ steps:
         from:
           - {role: worker, scope: ancestor}
           - {role: leader, scope: ancestor}
-        otherwise: human
+        otherwise: self:end
         timeout: 900
       options:
         end:

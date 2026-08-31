@@ -91,7 +91,8 @@ def test_the_bundled_errand_is_a_one_shot_with_spawner_decision():
     assert gate.select is not None
     assert [c.role for c in gate.select.delegate.candidates] == ["worker", "leader"]
     assert all(c.scope == "ancestor" for c in gate.select.delegate.candidates)
-    assert gate.select.delegate.otherwise == model.OTHERWISE_HUMAN
+    assert gate.select.delegate.otherwise == model.OTHERWISE_SELF
+    assert gate.select.delegate.default_option == "end"
     assert {name: option.next for name, option in gate.select.options.items()} == {
         "end": None,
         "revise-wrapup": "wrapup",
