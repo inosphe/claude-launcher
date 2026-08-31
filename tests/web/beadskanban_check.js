@@ -101,8 +101,8 @@ const ctx = {};
 new Function(
   "exports", "document", "el",
   stubs
-  + "const BEADS_STATUSES = " + JSON.stringify(["open", "in_progress", "in_review", "blocked", "closed"]) + ";\n"
-  + "const BEADS_ACTIVE = new Set([\"open\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
+  + "const BEADS_STATUSES = " + JSON.stringify(["open", "in_ready", "in_progress", "in_review", "blocked", "closed"]) + ";\n"
+  + "const BEADS_ACTIVE = new Set([\"open\", \"in_ready\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
   + slice("beadsFilterIssues") + slice("beadsSortIssues") + slice("beadsStatusBadge")
   + slice("beadsHierarchy") + slice("beadsLaneRows") + slice("beadsCard")
   + slice("beadsLanes") + slice("beadsLane") + slice("beadsBoardSection")
@@ -131,6 +131,7 @@ const FAMILY = [
   { id: "kid-b", status: "open", priority: 2, updated_at: "2026-01-04" },
   { id: "grand", status: "open", priority: 1, updated_at: "2026-01-03" },
   { id: "lone", status: "open", priority: 4, updated_at: "2026-01-02" },
+  { id: "triaged", status: "in_ready", priority: 2, updated_at: "2026-01-06" },
 ];
 const EDGES = [
   { from: "kid-a", to: "epic", type: "parent-child" },
@@ -145,7 +146,7 @@ check("children hang off the parent", [...(t.kids.get("epic") || [])].sort(),
       ["kid-a", "kid-b"]);
 check("a root has no parent", t.parent.has("epic"), false);
 check("forest order is depth-first, each level in the list's own order",
-      t.order, ["epic", "kid-a", "kid-b", "grand", "lone"]);
+      t.order, ["triaged", "epic", "kid-a", "kid-b", "grand", "lone"]);
 
 check("`blocks` is a relation between peers and never nests",
       ctx.tree(FAMILY, [{ from: "kid-a", to: "epic", type: "blocks" }])
@@ -174,12 +175,12 @@ const CYCLE = ctx.tree(FAMILY, [
 ]);
 check("a cycle nests nothing and loses nobody",
       [CYCLE.parent.has("kid-a"), CYCLE.parent.has("kid-b"),
-       CYCLE.order.length], [false, false, 5]);
+       CYCLE.order.length], [false, false, 6]);
 
 check("no edges at all is a flat forest of every issue",
-      ctx.tree(FAMILY, []).order.length, 5);
+      ctx.tree(FAMILY, []).order.length, 6);
 check("a payload from a daemon that predates the edge read does not break it",
-      ctx.tree(FAMILY, undefined).order.length, 5);
+      ctx.tree(FAMILY, undefined).order.length, 6);
 
 /* ---- a lane's rows ----------------------------------------------------- */
 t = ctx.tree(FAMILY, EDGES);
@@ -274,12 +275,14 @@ check("indent is a class, and capped",
       ["ind1", "ind2", "ind4", "ind4"]);
 
 /* ---- which lanes ------------------------------------------------------- */
-check("active is the four that are still work",
-      ctx.lanes("active"), ["open", "in_progress", "in_review", "blocked"]);
+check("active includes the triaged work",
+      ctx.lanes("active"), ["open", "in_ready", "in_progress", "in_review", "blocked"]);
 check("all adds closed", ctx.lanes("all"),
-      ["open", "in_progress", "in_review", "blocked", "closed"]);
+      ["open", "in_ready", "in_progress", "in_review", "blocked", "closed"]);
 check("one status is a board of one lane, not four with three empty",
       ctx.lanes("blocked"), ["blocked"]);
+check("in_ready is a board of one lane",
+      ctx.lanes("in_ready"), ["in_ready"]);
 
 const lane = ctx.lane("open", ctx.rows(FAMILY.filter((i) => i.status === "open"), t));
 check("a lane is headed by its status and its count",
@@ -296,10 +299,10 @@ ctx.setView({ filter: "active", session: "", layout: "board", focus: "" });
 let sec = ctx.section(BOARD);
 check("the board draws one lane per active status",
       sec.find("beads-lane").map((l) => l.find("beads-lane-name")[0].text),
-      ["open", "in_progress", "in_review", "blocked"]);
+      ["open", "in_ready", "in_progress", "in_review", "blocked"]);
 check("every issue lands in the lane its status names",
       sec.find("beads-lane").map((l) => l.find("beads-card").length),
-      [4, 1, 0, 0]);
+      [4, 1, 1, 0, 0]);
 
 /* The filter hides `epic`, but `kid-a` and `kid-b` are still its children --
    the hierarchy is a fact about the board, not about the view. */
@@ -316,10 +319,10 @@ ctx.setView({ filter: "active", session: "s9" });
 sec = ctx.section(BOARD);
 check("the session filter narrows the cards, not the lanes",
       [sec.find("beads-lane").length, sec.find("beads-card").length,
-       sec.find("beads-id")[0].text], [4, 1, "kid-a"]);
+       sec.find("beads-id")[0].text], [5, 1, "kid-a"]);
 check("and the one card left keeps its lane",
       sec.find("beads-lane").map((l) => l.find("beads-card").length),
-      [0, 1, 0, 0]);
+      [0, 0, 1, 0, 0]);
 
 ctx.setView({ filter: "active", session: "" });
 check("a board that could not be read says why instead of drawing lanes",
@@ -339,11 +342,11 @@ ctx.setView({ filter: "active", layout: "tree" });
 sec = ctx.section(BOARD);
 check("the tree layout has no lanes", sec.find("beads-lane").length, 0);
 check("it is the whole visible board in forest order",
-      sec.find("beads-card-title").length, 5);
+      sec.find("beads-card-title").length, 6);
 check("and the nesting there is the real depth, since every status is present",
       sec.find("beads-card").map((c) =>
         [...c.classes].filter((k) => k.startsWith("ind"))[0] || "ind0"),
-      ["ind0", "ind1", "ind1", "ind2", "ind0"]);
+      ["ind0", "ind0", "ind1", "ind1", "ind2", "ind0"]);
 
 /* A board from a daemon that predates the edge read: no `deps` key at all.
    The lanes must still draw -- flat, which is what a board with no edges
@@ -351,7 +354,7 @@ check("and the nesting there is the real depth, since every status is present",
 ctx.setView({ filter: "active", layout: "board" });
 check("an older payload with no deps draws a flat board rather than nothing",
       ctx.section({ root: "/repo", issues: FAMILY, sessions: [] })
-        .find("beads-card").length, 5);
+        .find("beads-card").length, 6);
 
 if (failures) process.exit(1);
 console.log("beadskanban_check ok");

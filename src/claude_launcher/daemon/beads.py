@@ -77,7 +77,7 @@ from .session import STATUS_BUSY, STATUS_IDLE, Session
 log = logging.getLogger("claude_launcher.daemon.beads")
 
 #: Issue statuses that mean "somebody still means to do this".
-ACTIVE_STATUSES = ("open", "in_progress", "in_review", "blocked")
+ACTIVE_STATUSES = ("open", "in_ready", "in_progress", "in_review", "blocked")
 
 #: The label every issue the daemon mints carries, so the sweep can tell its
 #: own placeholder from an issue an agent or a human wrote.
@@ -202,7 +202,13 @@ def match(
 
 
 def _status_rank(status: Optional[str]) -> int:
-    order = {"in_progress": 0, "in_review": 1, "blocked": 2, "open": 3}
+    order = {
+        "in_progress": 0,
+        "in_review": 1,
+        "blocked": 2,
+        "in_ready": 3,
+        "open": 4,
+    }
     return order.get(status or "", 9)
 
 
@@ -471,8 +477,8 @@ def sweep_plan(
     back to ``open`` with a comment naming the exit (the leader's own orphan
     rule, done at the moment it becomes true instead of at the next board
     check); the daemon's own placeholder, still ``open`` and never taken up,
-    is closed. ``in_review`` and ``blocked`` are somebody else's turn and are
-    left as they are.
+    is closed. ``in_ready`` keeps its completed triage, while ``in_review``
+    and ``blocked`` are somebody else's turn; all three are left as they are.
     """
     plan: List[List[str]] = []
     code = "unknown" if exit_code is None else str(exit_code)
@@ -1044,15 +1050,15 @@ class Board:
             view["error"] = str(exc)
             return view
         running = self._running(manager)
-        open_rows = [r for r in rows if r.get("status") in ACTIVE_STATUSES]
-        open_rows.sort(
+        active_rows = [r for r in rows if r.get("status") in ACTIVE_STATUSES]
+        active_rows.sort(
             key=lambda r: (
                 _status_rank(r.get("status")),
                 int(r.get("priority") or 9),
                 -_ts(r.get("updated_at")),
             )
         )
-        for raw in open_rows:
+        for raw in active_rows:
             verdict = adoption(raw, session="", running=running)
             view["issues"].append({
                 "id": raw.get("id"),

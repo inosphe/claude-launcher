@@ -97,8 +97,8 @@ const ctx = {};
 new Function(
   "exports", "document", "el",
   stubs
-  + "const BEADS_STATUSES = " + JSON.stringify(["open", "in_progress", "in_review", "blocked", "closed"]) + ";\n"
-  + "const BEADS_ACTIVE = new Set([\"open\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
+  + "const BEADS_STATUSES = " + JSON.stringify(["open", "in_ready", "in_progress", "in_review", "blocked", "closed"]) + ";\n"
+  + "const BEADS_ACTIVE = new Set([\"open\", \"in_ready\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
   + slice("beadsFilterIssues") + slice("beadsSortIssues")
   + slice("beadsStatusBadge") + slice("beadsIssueRow")
   + slice("sessBeads") + slice("sessBeadsCreate")
@@ -129,17 +129,19 @@ const issues = [
   { id: "b", status: "in_progress", priority: 2, updated_at: "2026-01-02", sessions: [{ name: "s2", via: ["link"], status: "busy" }] },
   { id: "c", status: "closed", priority: 1, updated_at: "2026-01-03", sessions: [{ name: "s1", via: ["created_by"], status: "idle" }] },
   { id: "d", status: "in_progress", priority: 1, updated_at: "2026-01-04", sessions: [] },
+  { id: "e", status: "in_ready", priority: 1, updated_at: "2026-01-05", sessions: [] },
 ];
-check("active hides closed", ctx.filter(issues, "active", "").map((i) => i.id), ["a", "b", "d"]);
-check("all shows everything", ctx.filter(issues, "all", "").map((i) => i.id), ["a", "b", "c", "d"]);
+check("active hides closed", ctx.filter(issues, "active", "").map((i) => i.id), ["a", "b", "d", "e"]);
+check("all shows everything", ctx.filter(issues, "all", "").map((i) => i.id), ["a", "b", "c", "d", "e"]);
 check("one status", ctx.filter(issues, "closed", "").map((i) => i.id), ["c"]);
+check("in_ready is independently filterable", ctx.filter(issues, "in_ready", "").map((i) => i.id), ["e"]);
 check("session filter follows the tags, whichever link",
       ctx.filter(issues, "all", "s1").map((i) => i.id), ["a", "c"]);
 check("session filter + status", ctx.filter(issues, "active", "s1").map((i) => i.id), ["a"]);
 
 /* ---- order ------------------------------------------------------------- */
 check("worked first, then priority, then recency",
-      ctx.sort(issues).map((i) => i.id), ["d", "b", "a", "c"]);
+      ctx.sort(issues).map((i) => i.id), ["d", "b", "e", "a", "c"]);
 
 /* ---- a row ------------------------------------------------------------- */
 const row = ctx.row(issues[1]);

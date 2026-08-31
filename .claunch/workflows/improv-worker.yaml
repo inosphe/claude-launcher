@@ -131,7 +131,7 @@ steps:
       그 상대에게만은 묶음을 메시지로 보낸다.
       정본 규칙(파서·직렬화·포맷 같은 공용 규약, 판정식, 기준선)은 이슈가
       아니지만 되짚어 읽히므로 보드에 산다: `--type doc` 이슈 하나를 세우고
-      (assignee 없음 — ready에서 빠진다) 갱신을 갈래로 나눠 쌓는다:
+      (assignee 없음 — `in_ready`로 전이하지 않는다) 갱신을 갈래로 나눠 쌓는다:
       **규범 내용(규약·정의·판정식)은 본문에 두고, 고칠 때 본문을 고친다.**
       코멘트에는 그 판정이 어떻게 서고 어떻게 정정됐는지의 이력을 쌓는다.
       doc에서만 앞 갈래가 뒤집히는 이유는 용도다 — 참조하러 온 사람은 본문
@@ -146,20 +146,24 @@ steps:
       만든다. 조회는 --json.
       이슈가 없을 때 만드는 자 = 그 일을 사람에게서 처음 받은 세션, 또는
       발견한 세션이다 — 리더가 아니다. 만들기 전에 `claunch beads search
-      "<핵심어>" --json`과 open/in_progress/in_review 목록으로 중복을 본다;
+      "<핵심어>" --json`과 open/in_ready/in_progress/in_review 목록으로 중복을 본다;
       있으면 create 대신 comments add. 규격: 제목 한 줄「무엇을 어떻게」,
       --description은 `## 목표 / ## 범위(포함·제외) / ## 완료 증거 기준 /
       ## 출처(누가·언제·원문)`, --labels에 출처 하나(user | user-direct |
       leader | handoff | found | review). 우선순위: P1 사용자가 보고한
       라이브 데몬·UI 고장과 master 빨강 / P2 사용자 지시·리더 배정(기본) /
       P3 인수인계·발견·후속·후보 / P4 아이디어. type은 task 기본, bug는
-      회귀·결함, epic은 스택 부모, doc은 참조 전용(ready에서 빼고 배정하지
+      회귀·결함, epic은 스택 부모, doc은 참조 전용(`in_ready`로 전이하지 않고 배정하지
       않는다). staged 순서: description이 먼저, --assignee가 마지막.
-      상태 전이의 주인: open→in_progress는 assignee 워커(intake 끝,
-      --external-ref에 run id) / in_progress→in_review는 assignee 워커
+      상태 전이의 주인: open→in_ready는 리더(규격·우선순위 검토 완료) /
+      open 또는 in_ready→in_progress는 assignee 워커(intake 끝,
+      --external-ref에 run id; 터미널 사용자 직접 지시는 open에서 시작할 수 있음) /
+      in_ready→open은 리더(규격·우선순위 재검토 필요) /
+      in_progress→in_review는 assignee 워커
       (landing request) / in_review→in_progress는 리더(rebase·재측정 재요청) /
       in_review→closed는 assignee 세션이다 — 누가 배정했든 그 이슈를 끝까지
-      관리하는 것은 assignee다. 닫는 자리는 wrapup 하나, 닫을 자격은 landed가
+      관리하는 것은 assignee다. assignee 세션이 종료돼도 in_ready는 검토 결과를 유지하고,
+      다음 adoption이 종료된 assignee를 교체한다. 닫는 자리는 wrapup 하나, 닫을 자격은 landed가
       git으로 증명한 머지 커밋 해시다(`claunch beads close <id> --reason
       "merged <머지 해시>"`; 중간 워커는 자기 --parent 자식을 같은 방식으로
       닫는다). 리더가 닫는 것은 둘뿐이다: assignee가 비었거나 그 세션이

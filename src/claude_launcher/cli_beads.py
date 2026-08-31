@@ -72,15 +72,16 @@ class BeadsError(Exception):
 
 
 #: The statuses this repository's own protocol names. The improv
-#: workflows are where they are declared — an issue opens, an assignee
-#: takes it to ``in_progress``, a landing request moves it to
-#: ``in_review``, a gate parks it at ``blocked``, and ``br close`` ends it
-#: at ``closed`` — and every value the tracked board carries is one of
-#: them (``.beads/issues.jsonl``). Those two are the source; a test in
+#: workflows are where they are declared — an issue opens, leader triage
+#: moves it to ``in_ready``, an assignee takes it to ``in_progress``, a
+#: landing request moves it to ``in_review``, a gate parks it at ``blocked``,
+#: and ``br close`` ends it at ``closed`` — and every value the tracked board
+#: carries is one of them (``.beads/issues.jsonl``). Those two are the source; a test in
 #: ``tests/test_cli_beads.py`` reads both and fails if either grows a
 #: value this tuple does not have, so the list cannot go stale quietly.
 PROTOCOL_STATUSES = (
     "open",
+    "in_ready",
     "in_progress",
     "in_review",
     "blocked",

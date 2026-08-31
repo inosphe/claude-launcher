@@ -79,6 +79,17 @@ def test_the_open_pool_criteria_section_is_part_of_the_shared_block():
     assert "재배정이 먼저" in block                 # reassignment before closing
 
 
+def test_the_shared_block_defines_the_in_ready_transition_owners():
+    """The new lane has explicit owners and an exit rule for every path."""
+    block = _block(_bundled("improv-worker"))
+    flat = " ".join(block.split())
+    assert "open→in_ready는 리더" in flat
+    assert "open 또는 in_ready→in_progress는 assignee 워커" in flat
+    assert "in_ready→open은 리더" in flat
+    assert "in_ready는 검토 결과를 유지" in flat
+    assert "doc은 참조 전용(`in_ready`로 전이하지 않고 배정하지 않는다)" in flat
+
+
 def test_the_block_sits_in_every_intake():
     """The block is read where a round begins, in each workflow."""
     for name in ("improv-worker", "improv-leader", "improv-mid"):
@@ -326,6 +337,22 @@ def test_the_leader_reads_the_queue_from_the_board_and_pulls_selectively(layer):
     # and the table is the board's: the journal cross-check in `integrate` no
     # longer claims mesh fyi is what builds it
     assert "표는 mesh fyi로만 쌓이므로" not in whole
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_leader_moves_triaged_work_into_in_ready_before_assignment(layer):
+    path = (
+        _bundled("improv-leader") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-leader.yaml"
+    )
+    wf = model.load(path)
+    intake = _flat(wf.steps["intake"].instructions)
+    standby = _flat(wf.steps["standby"].instructions)
+    assert "--status in_ready --status in_progress --status in_review" in intake
+    assert "update <id> --status in_ready" in standby
+    assert standby.index("update <id> --status in_ready") < standby.index(
+        "update <id> --assignee <세션>"
+    )
 
 
 def test_the_mid_worker_keeps_the_stack_table_on_the_board():
