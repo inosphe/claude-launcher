@@ -62,6 +62,39 @@ class HarnessConfigError(Exception):
     """Raised for an unreadable harness declaration."""
 
 
+@dataclass(frozen=True)
+class BtwCapability:
+    """A harness-native ephemeral side-conversation command.
+
+    claunch passes this command through its terminal transport. The harness
+    owns the side conversation and its presentation; this declaration gives
+    launch surfaces the supported command and its observable constraints.
+    """
+
+    command: str
+    aliases: List[str] = field(default_factory=list)
+    minimum_version: str = ""
+    requires_started_conversation: bool = False
+    available_while_busy: bool = False
+    context: str = ""
+    history: str = ""
+    tool_access: str = ""
+    response_mode: str = ""
+
+    def to_dict(self) -> dict:
+        return {
+            "command": self.command,
+            "aliases": list(self.aliases),
+            "minimum_version": self.minimum_version,
+            "requires_started_conversation": self.requires_started_conversation,
+            "available_while_busy": self.available_while_busy,
+            "context": self.context,
+            "history": self.history,
+            "tool_access": self.tool_access,
+            "response_mode": self.response_mode,
+        }
+
+
 # The source of the packaged harness/auth contract is a real package resource,
 # so changing or adding a harness does not require editing runner logic.
 DEFAULT_RESOURCE = "harnesses.yaml"
@@ -92,6 +125,9 @@ class Harness:
     #: ``{effort}`` are replaced at launch, keeping harness syntax declarative.
     model_args: List[str] = field(default_factory=list)
     effort_args: List[str] = field(default_factory=list)
+    #: Harness-native ``/btw`` capability and its interaction limits. None
+    #: means claunch has no declaration for a side-conversation command.
+    btw: Optional[BtwCapability] = None
     #: Arguments appended only when claunch restores an existing session.
     restore_args: List[str] = field(default_factory=list)
     #: Environment overrides layered under the session's own ``--env``.
@@ -245,6 +281,7 @@ class Harness:
             "efforts": list(self.efforts),
             "model_args": list(self.model_args),
             "effort_args": list(self.effort_args),
+            "btw": self.btw.to_dict() if self.btw else None,
             "restore_args": list(self.restore_args),
             "description": self.description,
             "builtin": self.builtin,
@@ -286,6 +323,8 @@ def _as_list(value, what: str) -> List[str]:
 
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HARNESS_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+_SLASH_COMMAND_RE = re.compile(r"^/[a-z][a-z0-9-]*$")
+_VERSION_RE = re.compile(r"^\d+(?:\.\d+){1,2}(?:[-+][A-Za-z0-9.-]+)?$")
 
 
 def _env_names(value, what: str) -> List[str]:
@@ -294,6 +333,80 @@ def _env_names(value, what: str) -> List[str]:
         if not _ENV_NAME_RE.fullmatch(name):
             raise HarnessConfigError(f"{what} contains invalid env name {name!r}")
     return names
+
+
+def _bool(value, what: str) -> bool:
+    if isinstance(value, bool):
+        return value
+    raise HarnessConfigError(f"{what} must be true or false, got {value!r}")
+
+
+def _btw_capability(name: str, value) -> Optional[BtwCapability]:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise HarnessConfigError(
+            f"harness {name!r} btw must be a mapping, got {value!r}"
+        )
+    command = value.get("command")
+    if not isinstance(command, str) or not _SLASH_COMMAND_RE.fullmatch(command):
+        raise HarnessConfigError(
+            f"harness {name!r} btw command must be a slash command, got "
+            f"{command!r}"
+        )
+    raw_aliases = value.get("aliases", [])
+    if not isinstance(raw_aliases, list) or not all(
+        isinstance(alias, str) and _SLASH_COMMAND_RE.fullmatch(alias)
+        for alias in raw_aliases
+    ):
+        raise HarnessConfigError(
+            f"harness {name!r} btw aliases must be a list of slash commands"
+        )
+    aliases = list(raw_aliases)
+    if command in aliases or len(set(aliases)) != len(aliases):
+        raise HarnessConfigError(
+            f"harness {name!r} btw aliases must be unique and exclude "
+            "the primary command"
+        )
+    minimum_version = value.get("minimum_version")
+    if (
+        not isinstance(minimum_version, str)
+        or not _VERSION_RE.fullmatch(minimum_version)
+    ):
+        raise HarnessConfigError(
+            f"harness {name!r} btw minimum_version must be a version string, "
+            f"got {minimum_version!r}"
+        )
+    enums = {
+        "context": {"current-conversation", "reference-parent"},
+        "history": {"ephemeral"},
+        "tool_access": {"none", "restricted"},
+        "response_mode": {"single-response", "conversation"},
+    }
+    parsed = {}
+    for field_name, allowed in enums.items():
+        field_value = value.get(field_name)
+        if field_value not in allowed:
+            expected = ", ".join(sorted(allowed))
+            raise HarnessConfigError(
+                f"harness {name!r} btw {field_name} must be one of "
+                f"{expected}, got {field_value!r}"
+            )
+        parsed[field_name] = field_value
+    return BtwCapability(
+        command=command,
+        aliases=aliases,
+        minimum_version=minimum_version,
+        requires_started_conversation=_bool(
+            value.get("requires_started_conversation"),
+            f"harness {name!r} btw requires_started_conversation",
+        ),
+        available_while_busy=_bool(
+            value.get("available_while_busy"),
+            f"harness {name!r} btw available_while_busy",
+        ),
+        **parsed,
+    )
 
 
 def _parse_entry(name: str, body) -> Harness:
@@ -385,6 +498,7 @@ def _parse_entry(name: str, body) -> Harness:
         efforts=_as_list(body.get("efforts"), f"harness {name!r} efforts"),
         model_args=_as_list(body.get("model_args"), f"harness {name!r} model_args"),
         effort_args=_as_list(body.get("effort_args"), f"harness {name!r} effort_args"),
+        btw=_btw_capability(name, body.get("btw")),
         restore_args=_as_list(
             body.get("restore_args"), f"harness {name!r} restore_args"
         ),

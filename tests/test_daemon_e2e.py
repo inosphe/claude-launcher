@@ -1946,6 +1946,17 @@ def test_api_harnesses_report_declared_and_installed_separately(home, tmp_path):
             assert by_name["pi"]["available"] is False
             assert by_name["pi"]["program"] == "no-such-program-xyz"
             assert by_name["claude"]["builtin"] is True
+            assert by_name["claude"]["btw"] == {
+                "command": "/btw",
+                "aliases": [],
+                "minimum_version": "2.1.73",
+                "requires_started_conversation": False,
+                "available_while_busy": True,
+                "context": "current-conversation",
+                "history": "ephemeral",
+                "tool_access": "none",
+                "response_mode": "single-response",
+            }
 
             # ...and a harness that is declared but not installed is refused
             # with a message that says so, not a spawn failure
