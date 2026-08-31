@@ -1297,6 +1297,11 @@ def test_mcp_initialize_and_tools():
         # decisions other sessions' runs are waiting on it for
         "asks", "answer",
     }
+    select_tool = next(t for t in resp["result"]["tools"]
+                       if t["name"] == "select")
+    description = select_tool["description"]
+    assert "agent's legitimate, intended execution path" in description
+    assert "'claunch cflow select' is the human-facing CLI" in description
     # still no approve, by design: `answer` decides somebody ELSE's run, and
     # a tool that could unblock this one would put the gate back in the hands
     # of the agent it is a gate on. `request_child_goto` is no way around it
