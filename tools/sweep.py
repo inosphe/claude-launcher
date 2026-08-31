@@ -394,6 +394,43 @@ def output_path(repo: Path, commit: str, override: Optional[Path] = None) -> Pat
 #: direction this file refuses to trade (see ``NON_CODE_ENTRIES``).
 _RECEIPT_NAME_RE = re.compile(r"^[0-9a-f]{40}\.json$")
 
+#: The one other name ``run`` files under: the record of an attempt that
+#: parsed no counts and therefore refused to overwrite the verdict standing at
+#: ``{sha}.json`` (``claunch-hnjy``). It is written by ``run``, so
+#: :func:`_newest_green` passes over it in silence instead of reporting it as
+#: a hand-written receipt, and it can never be reused as one -- a run that
+#: produced no counts judged nothing.
+_INVALID_NAME_RE = re.compile(r"^[0-9a-f]{40}\.invalid\.json$")
+
+
+def invalid_run_path(repo: Path, commit: str, override: Optional[Path] = None) -> Path:
+    """Where a run that produced no counts is filed when a verdict stands."""
+    return receipts_dir(repo, override) / f"{commit}.invalid.json"
+
+
+def invalid_output_path(
+    repo: Path, commit: str, override: Optional[Path] = None
+) -> Path:
+    """The companion output for :func:`invalid_run_path`, kept out of the
+    ``*.json`` glob for the same reason :func:`output_path` is."""
+    return receipts_dir(repo, override) / f"{commit}.invalid.output.txt"
+
+
+def standing_verdict(path: Path) -> Optional[dict]:
+    """The receipt already filed at `path`, if it is a judgement to protect.
+
+    Three states are *not*: no file, a file that cannot be parsed (which
+    ``_newest_green`` already refuses to treat as a decision), and a receipt
+    whose ``counts`` are empty. Those are what a new run may replace.
+    """
+    try:
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(receipt, dict) or not (receipt.get("counts") or {}):
+        return None
+    return receipt
+
 
 def is_green(receipt: dict) -> bool:
     """A receipt that judged a clean tree and found nothing wrong."""
@@ -429,6 +466,11 @@ def _newest_green(repo: Path, override: Optional[Path], matches) -> Optional[tup
         return None
     best = None
     for path in sorted(directory.glob("*.json")):
+        if _INVALID_NAME_RE.match(path.name) is not None:
+            # ``run``'s own file, and never a verdict: it exists precisely
+            # because that attempt had none to file. The warning below is
+            # about receipts nobody earned, so it must not fire on this one.
+            continue
         if _RECEIPT_NAME_RE.match(path.name) is None:
             print(
                 f"WARNING: {path} is not a {{sha}}.json receipt, the one name "
@@ -683,6 +725,50 @@ def cmd_run(args) -> int:
         )
         print(f"WARNING: {receipt['stream_error']}", file=sys.stderr)
     dest = receipt_path(repo, commit, args.receipts)
+    saved = output_path(repo, commit, args.receipts)
+
+    # A receipt is named after the commit alone, so a second run at the same
+    # tip rewrites the first one's file. That is right while both runs judged
+    # something -- the newer verdict is the verdict. It is wrong when this run
+    # never got a judgement to file, and the difference cost a real one
+    # (``claunch-hnjy``, 2026-08-31): a sweep of ``70e9505a`` finished 1 failed
+    # / 2963 passed / 1 skipped, a re-run at that same tip died inside pytest's
+    # basetemp cleanup with ``PermissionError: [WinError 32]`` before
+    # collection, and the ``counts {}`` receipt it filed anyway landed on top
+    # of the only full judgement that tree ever had. The output file went with
+    # it.
+    #
+    # What that costs is not the file. ``cmd_check`` stands on the receipt, so
+    # an empty one in a verdict's place reads afterwards as "no sweep ran
+    # here" -- the green and the red are lost the same way, and the round pays
+    # for the suite again to learn what it already knew. It also runs the other
+    # direction: ``is_green`` reads ``counts``, so an empty receipt whose
+    # process happened to exit 0 would answer as green for every commit
+    # sharing the tree.
+    #
+    # So a run that parsed no counts never overwrites one that has them. It is
+    # filed beside instead rather than dropped: "this tree measures X" and
+    # "this attempt could not measure it" are two facts, and the second is the
+    # one the next person needs in order not to repeat the attempt.
+    standing = None if counts else standing_verdict(dest)
+    if standing is not None:
+        stood = ", ".join(
+            f"{v} {k}" for k, v in sorted((standing.get("counts") or {}).items())
+        )
+        receipt["not_a_verdict"] = (
+            f"this run parsed no counts, so the suite produced no judgement to "
+            f"file; {dest.name} ({stood}, exit {standing.get('exit_code')}) is "
+            f"the verdict that stands at this commit and was left untouched"
+        )
+        dest = invalid_run_path(repo, commit, args.receipts)
+        saved = invalid_output_path(repo, commit, args.receipts)
+        print(
+            f"WARNING: this run produced no counts, so it is not a verdict "
+            f"about {commit[:12]}; it is filed as {dest.name} and the receipt "
+            f"already there ({stood}) is left as it was.",
+            file=sys.stderr,
+        )
+
     dest.parent.mkdir(parents=True, exist_ok=True)
 
     # The suite output is already in hand and, until now, was dropped at
@@ -702,7 +788,6 @@ def cmd_run(args) -> int:
     # so it is not kept; and a green run *deletes* what an earlier red run at
     # this same sha left, because the pair is rewritten together and a stale
     # red output beside a green receipt reads as this sweep's.
-    saved = output_path(repo, commit, args.receipts)
     if is_green(receipt):
         try:
             saved.unlink(missing_ok=True)
