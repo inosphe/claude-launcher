@@ -41,7 +41,7 @@ from claude_launcher import store
 from claude_launcher.daemon import mesh_policy
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
-from claude_launcher.daemon.mesh import MeshBusy, MeshManager, utcnow
+from claude_launcher.daemon.mesh import Member, MeshBusy, MeshManager
 
 CHILD = (
     "import sys\n"
@@ -125,6 +125,53 @@ def test_the_section_ships_on_because_the_gate_it_releases_does():
     # it: an old file must not silently keep the wall.
     old = mesh_policy.load_policy({"backpressure": {"inbox_max": 3}})
     assert old["ack_timeout"] == mesh_policy.default_policy()["ack_timeout"]
+
+
+def test_sender_gets_four_durable_response_nudges_then_no_more(tmp_path):
+    """A delivered request notifies its sender at five-minute intervals.
+
+    The receipt is written before a restart, and deterministic notification
+    ids keep a repeated clock pass from appending the same notice twice.
+    """
+    async def run():
+        mm = MeshManager(_manager(), root=tmp_path / "mesh")
+        mesh = mm.create("team")
+        mesh.members = {
+            "lead": Member("lead", "s1"),
+            "worker": Member("worker", "s2"),
+        }
+        mm._persist_def(mesh)
+        mm.set_policy("team", {"backpressure": {"inbox_max": 0}})
+        sent = await mm.send("team", "lead", "worker", "please check", type="ask")
+        original = next(m for m in mesh.messages if m["id"] == sent["id"])
+        mm._watch_delivered_responses(mesh, "worker", [original])
+        watch = next(iter(mesh.response_watches.values()))
+        watch["delivered_at"] = (
+            datetime.now(timezone.utc) - timedelta(minutes=25)
+        ).isoformat(timespec="seconds")
+        mm._persist_cursors(mesh)
+
+        restarted = MeshManager(_manager(), root=tmp_path / "mesh")
+        restarted.load_all()
+        loaded = restarted.get("team")
+        for n in range(1, 5):
+            restarted._response_watch_tick(loaded)
+            watch = next(iter(loaded.response_watches.values()))
+            watch["delivered_at"] = (
+                datetime.now(timezone.utc) - timedelta(minutes=5 * (n + 1))
+            ).isoformat(timespec="seconds")
+        assert [m["id"] for m in loaded.messages if m["from"] == "policy"] == [
+            f"response-nudge-{sent['id']}-worker-{n}" for n in range(1, 5)
+        ]
+        restarted._response_watch_tick(loaded)
+        assert len([m for m in loaded.messages if m["from"] == "policy"]) == 4
+
+        await restarted.send(
+            "team", "worker", "lead", "taking it", type="ack", reply_to=sent["id"]
+        )
+        assert not loaded.response_watches
+
+    asyncio.run(run())
 
 
 # --------------------------------------------------------------------- #
