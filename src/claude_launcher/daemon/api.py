@@ -28,7 +28,7 @@ from .. import session_commits
 from .. import spawn as spawn_mod, store, workspaces
 from .. import worktree as worktree_mod
 from . import beads as beads_mod
-from . import briefing, cflow_clock, clipty, ctxsize, onboard, rebrief
+from . import briefing, cflow_clock, clipty, ctxsize, onboard, rebrief, session_input
 from . import transcript_view
 from . import window as window_mod
 from ..cli_beads import BeadsError
@@ -366,6 +366,7 @@ def build_app(
     r.add_post("/api/sessions/archive", h_sessions_archive_all)
     r.add_get("/api/sessions/{name}", h_session_get)
     r.add_get("/api/sessions/{name}/meta", h_session_meta)
+    r.add_get("/api/sessions/{name}/input-journal", h_session_input_journal)
     r.add_get("/api/sessions/{name}/briefing", h_session_briefing)
     r.add_get("/api/sessions/{name}/queued", h_session_queued)
     r.add_post("/api/sessions/{name}/queued/flush", h_session_queued_flush)
@@ -4152,10 +4153,47 @@ async def h_session_keys(request: web.Request) -> web.Response:
     force = body.get("force", False)
     if not isinstance(force, bool):
         return json_error(400, "'force' must be a boolean")
-    data = await session.send_keys(
-        keys, literal=bool(body.get("literal")), force=force
-    )
+    request_id = body.get("input_id")
+    audit_text = keys[0] if request_id and len(keys) == 2 and keys[1] == "Enter" else None
+    if request_id is not None:
+        if not isinstance(request_id, str) or not request_id.strip():
+            return json_error(400, "'input_id' must be a non-empty string")
+        if audit_text is None:
+            return json_error(400, "'input_id' requires [text, 'Enter'] keys")
+        prior = session_input.latest(session.sdef.name, request_id)
+        if prior and prior.get("status") == "sent":
+            return web.json_response({"ok": True, "bytes": 0, "duplicate": True})
+        session_input.write(session.sdef.name, "input_accepted",
+                            request_id=request_id, text=audit_text,
+                            status="accepted", pid=session.pid)
+    try:
+        data = await session.send_keys(
+            keys, literal=bool(body.get("literal")), force=force
+        )
+    except Exception:
+        if request_id and audit_text is not None:
+            session_input.write(session.sdef.name, "input_failed",
+                                request_id=request_id, text=audit_text,
+                                status="failed", pid=session.pid)
+        raise
+    if request_id and audit_text is not None:
+        session_input.write(session.sdef.name, "input_sent",
+                            request_id=request_id, text=audit_text,
+                            status="sent", pid=session.pid)
     return web.json_response({"ok": True, "bytes": len(data)})
+
+
+async def h_session_input_journal(request: web.Request) -> web.Response:
+    """Recent durable submissions made through the session-line control."""
+    session = _session(request)
+    try:
+        limit = int(request.query.get("limit", "50"))
+    except ValueError:
+        return json_error(400, "'limit' must be an integer")
+    return web.json_response({
+        "session": session.sdef.name,
+        "entries": session_input.read(session.sdef.name, limit=limit),
+    })
 
 
 async def h_session_deliver(request: web.Request) -> web.Response:

@@ -4589,6 +4589,7 @@ $("term-resume").addEventListener("click", async () => {
   const btn = $("term-resume");
   btn.disabled = true;
   try {
+    const inputId = `input-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const resp = await api(
       `/api/sessions/${encodeURIComponent(name)}/respawn`, { method: "POST" }
     );
@@ -4998,6 +4999,7 @@ async function sendKeyLine(field, btn, note) {
   field.disabled = true;
   btn.disabled = true;
   try {
+    const inputId = `input-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const resp = await api(
       `/api/sessions/${encodeURIComponent(currentName)}/keys`,
       { method: "POST",
@@ -5005,7 +5007,8 @@ async function sendKeyLine(field, btn, note) {
         // This is an explicit operator action. The daemon uses the short
         // forced grace and submits an existing draft first, so a busy
         // session does not turn a deliberate send into a 30s wait/409.
-        body: JSON.stringify({ keys: [text, "Enter"], force: true }) }
+        body: JSON.stringify({ keys: [text, "Enter"], force: true,
+                              input_id: inputId }) }
     );
     const doc = await resp.json().catch(() => ({}));
     if (resp.ok) {
@@ -12033,6 +12036,7 @@ function renderSession(data) {
   // what the session has made of the job, and comparing the two is only
   // possible with the original in front of you.
   view.appendChild(sessTask(s));
+  view.appendChild(sessInputJournal(s.name || sessName));
 
   // What this session is DOING, next to the facts above: the llm summary,
   // fetched on first open and repainted by the 2s poll, with the card's own
@@ -12105,6 +12109,34 @@ function renderSession(data) {
   view.appendChild(sessReborrow(data));
   view.appendChild(sessPerms(data));
   view.appendChild(sessMigrate(data));
+}
+
+/* Durable history for the native session-line control.  This is separate
+   from the PTY transcript: the latter cannot prove which request was sent,
+   retried, or rejected during a daemon/session replacement. */
+function sessInputJournal(name) {
+  const box = el("details", "sess-input-journal");
+  box.appendChild(el("summary", null, "Session input journal"));
+  box.appendChild(el("p", "wf-note", "loading…"));
+  api(`/api/sessions/${encodeURIComponent(name)}/input-journal?limit=20`)
+    .then(async (resp) => {
+      const doc = await resp.json().catch(() => ({}));
+      box.innerHTML = "";
+      box.appendChild(el("summary", null,
+        `Session input journal (${(doc.entries || []).length})`));
+      if (!resp.ok || !(doc.entries || []).length) {
+        box.appendChild(el("p", resp.ok ? "no submitted lines" :
+          (doc.error || "journal unavailable"), "wf-note"));
+        return;
+      }
+      for (const entry of (doc.entries || []).slice().reverse()) {
+        const row = el("div", "wf-journal-line mono");
+        row.textContent = `${(entry.at || "").replace("T", " ")}  ` +
+          `${entry.status || entry.event || "?"}  ${entry.text || ""}`;
+        box.appendChild(row);
+      }
+    }).catch(() => {});
+  return box;
 }
 
 /* ---- restart this session on another answer to "whose token" ----
