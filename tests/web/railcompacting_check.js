@@ -94,6 +94,7 @@ const api = async () => ({ ok: true, json: async () => served });
    subjects and stubbed here; the rest are the same no-ops the other rail
    harnesses carry (railcwd_check.js). */
 const stubs = `
+function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null;
 function railHeld() { return false; }

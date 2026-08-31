@@ -139,12 +139,18 @@ async function doAuth() {
    one invisible. This mirrors _by_lineage in cli_sessions.py — the CLI has
    printed the tree since sessions could have parents, and the two listings
    disagreeing about who is whose would be worse than either being wrong. */
-function byLineage(sessions) {
+function byLineage(sessions, visibleSessions = sessions) {
   const byName = new Map(sessions.map((s) => [s.name, s]));
+  // A filtered rail can hide an archived parent while retaining its live
+  // child.  Build edges only through records visible in that rail so the
+  // child is promoted to a root (or to its nearest visible ancestor), rather
+  // than retaining indentation from an invisible record.
+  const visibleNames = new Set(visibleSessions.map((s) => s.name));
   const kids = new Map();
   const roots = [];
   for (const s of sessions) {
-    if (s.parent && s.parent !== s.name && byName.has(s.parent)) {
+    if (s.parent && s.parent !== s.name && byName.has(s.parent) &&
+        visibleNames.has(s.name) && visibleNames.has(s.parent)) {
       if (!kids.has(s.parent)) kids.set(s.parent, []);
       kids.get(s.parent).push(s);
     } else {
@@ -552,7 +558,9 @@ async function refreshSessions() {
   if (rebuild) list._sessionsSignature = signature;
   if (rebuild) list.innerHTML = "";
   let previousGroup = null;
-  let entries = rebuild ? byLineage(sessionsCache) : [];
+  const visibleSessions = sessionsCache.filter(sessionMatchesFilter);
+  let entries = rebuild
+    ? byLineage(sessionsCache, visibleSessions) : [];
   if (sessionGroupByMesh) {
     const groups = new Map();
     for (const entry of entries) {

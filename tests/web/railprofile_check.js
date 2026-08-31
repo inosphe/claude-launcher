@@ -101,6 +101,7 @@ const api = async () => ({ ok: true, json: async () => served });
    is their own harnesses'); the rest are the same no-ops the other rail
    harnesses carry. */
 const stubs = `
+function sessionMatchesFilter() { return true; }
 let sessionsCache = [], currentName = null, currentPage = "home";
 let attachedPid = null, linkState = "down", sessName = null;
 function railHeld() { return false; }
