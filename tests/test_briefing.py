@@ -599,7 +599,7 @@ async def _serve(mgr):
     return client
 
 
-def test_briefing_endpoint_contract_cache_and_refresh(home, tmp_path):
+def test_briefing_endpoint_contract_cache_and_refresh(home, tmp_path, monkeypatch):
     from aiohttp import web as aioweb
 
     _register_py_harness()
@@ -638,6 +638,30 @@ def test_briefing_endpoint_contract_cache_and_refresh(home, tmp_path):
                 _jl(type="user", message={"role": "user", "content": "please build it"})
                 + "\n",
                 encoding="utf-8",
+            )
+
+            # The cache key carries this session's live state -- status,
+            # last_input_at, last_output_at (bd9f2e02) -- and a session that
+            # has only just started moves through that state on its own: the
+            # harness child's first output flips status from 'starting' to
+            # 'busy'/'idle' and fills last_output_at.  A second request that
+            # lands after that arrival then misses a cache the first request
+            # correctly filled, and the endpoint is right both times.
+            # Measured here: with no delay between the two GETs the key held;
+            # with 0.6s or 1.5s injected it differed on exactly those two
+            # fields, and the assertion below failed 5/5.  What this test
+            # pins is that an UNCHANGED key is served from cache, so the live
+            # block is stated as a premise rather than raced against the
+            # child's first paint.
+            monkeypatch.setattr(
+                briefing,
+                "gather_live",
+                lambda session: {
+                    "status": "idle",
+                    "running": True,
+                    "last_input_at": None,
+                    "last_output_at": None,
+                },
             )
 
             resp = await client.get("/api/sessions/s1/briefing", headers=BEARER)
