@@ -3005,6 +3005,11 @@ async def h_sessions_create(request: web.Request) -> web.Response:
     # session definition receives no harness-specific second copy.
     definition = dict(body)
     definition.pop("role", None)
+    # ``issue_text`` belongs to the newly minted board record.  It is needed
+    # below while beads creates that record, but must not enter the temporary
+    # session-definition copy (or a future SessionDef field could retain the
+    # specification in the daemon's restart record).
+    definition.pop("issue_text", None)
     try:
         sdef = SessionDef.from_dict(definition)
     except (KeyError, ValueError, TypeError) as exc:
