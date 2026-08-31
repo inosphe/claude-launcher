@@ -88,11 +88,13 @@ const stubs = `
 let beadsFocus = "";
 let beadsFilter = "active";
 let beadsSession = "";
+let beadsPri = null;
 let beadsLayout = "board";
 function setView(o) {
   if (o.focus !== undefined) beadsFocus = o.focus;
   if (o.filter !== undefined) beadsFilter = o.filter;
   if (o.session !== undefined) beadsSession = o.session;
+  if (o.pri !== undefined) beadsPri = o.pri;
   if (o.layout !== undefined) beadsLayout = o.layout;
 }
 `;
@@ -104,6 +106,7 @@ new Function(
   + "const BEADS_STATUSES = " + JSON.stringify(["open", "in_ready", "in_progress", "in_review", "blocked", "closed"]) + ";\n"
   + "const BEADS_ACTIVE = new Set([\"open\", \"in_ready\", \"in_progress\", \"in_review\", \"blocked\"]);\n"
   + slice("beadsFilterIssues") + slice("beadsSortIssues") + slice("beadsStatusBadge")
+  + slice("beadsPriBadge")
   + slice("beadsHierarchy") + slice("beadsLaneRows") + slice("beadsCard")
   + slice("beadsLanes") + slice("beadsLane") + slice("beadsBoardSection")
   + `
@@ -222,6 +225,8 @@ check("so does the title, which is the bigger target",
       card.find("beads-card-title")[0].href, "#/beads/kid-a");
 check("priority is on the card and on its left edge",
       [card.find("beads-pri")[0].text, card.classes.has("pri1")], ["P1", true]);
+check("and the badge itself is ranked, so its color can follow",
+      card.find("beads-pri")[0].classes.has("p1"), true);
 const up = card.find("beads-rel-up")[0];
 check("a parent in another lane is named and links up",
       [up.text, up.href], ["↰ epic", "#/beads/epic"]);
@@ -323,6 +328,17 @@ check("the session filter narrows the cards, not the lanes",
 check("and the one card left keeps its lane",
       sec.find("beads-lane").map((l) => l.find("beads-card").length),
       [0, 0, 1, 0, 0]);
+
+/* Priority is the second axis over the same lanes: epic, kid-a and grand are
+   the board's P1 work, and lone is its only P4. */
+ctx.setView({ filter: "active", session: "", pri: 1 });
+sec = ctx.section(BOARD);
+check("the priority filter narrows the cards, not the lanes",
+      [sec.find("beads-lane").length, sec.find("beads-card").length], [5, 3]);
+ctx.setView({ pri: 0 });
+check("a priority that leaves nothing names itself in the note",
+      ctx.section(BOARD).find("wf-note")[1].text, "nothing active here at P0");
+ctx.setView({ pri: null });
 
 ctx.setView({ filter: "active", session: "" });
 check("a board that could not be read says why instead of drawing lanes",
