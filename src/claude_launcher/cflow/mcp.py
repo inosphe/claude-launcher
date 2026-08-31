@@ -140,9 +140,11 @@ TOOLS = [
     {
         "name": "select",
         "description": (
-            "Choose an option at a decision point. When the step's chooser is "
-            "'user' this records a proposal only — a human confirms via "
-            "'claunch cflow select'."
+            "Choose an option at a decision point. For chooser 'agent', "
+            "calling this MCP tool is the agent's legitimate, intended "
+            "execution path; 'claunch cflow select' is the human-facing CLI. "
+            "For chooser 'user', this tool records a proposal only, which a "
+            "human confirms via the CLI."
         ),
         "inputSchema": {
             "type": "object",
