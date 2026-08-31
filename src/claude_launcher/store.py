@@ -31,7 +31,7 @@ Schema::
       plugins: [<plugin@marketplace>, ...]
       settings: {<settings.json key>: <value>, ...}
     briefing:
-      faq: [{id: <id>, question: <text>, answer: <text>, enabled: true}, ...]
+      faq: [{id: <id>, question: <text>, answer: <optional reference>, enabled: true}, ...]
     workspaces:                 # machine-local; see :mod:`workspaces`
       <name>: <absolute path>
 
@@ -383,7 +383,7 @@ def briefing_faq(doc: Optional[dict] = None) -> List[dict]:
             continue
         question = str(row.get("question") or "").strip()
         answer = str(row.get("answer") or "").strip()
-        if question and answer:
+        if question:
             out.append({
                 "id": str(row.get("id") or f"faq-{index + 1}"),
                 "question": question,
@@ -401,7 +401,7 @@ def set_briefing_faq(rows: List[dict]) -> List[dict]:
             continue
         question = str(row.get("question") or "").strip()
         answer = str(row.get("answer") or "").strip()
-        if not question or not answer:
+        if not question:
             continue
         clean.append({
             "id": str(row.get("id") or uuid.uuid4()),

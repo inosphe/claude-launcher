@@ -349,7 +349,8 @@ def build_prompt(
         '{"goal": "작업 목표 1~2문장", "now": "지금 하는 일 1~2문장",'
         ' "state": "working|blocked|waiting|idle|done|unknown",'
         ' "progress": "진행 정도 한 문장",'
-        ' "one-line-job-description": "이 세션이 맡은 일을 한 줄로"}',
+        ' "one-line-job-description": "이 세션이 맡은 일을 한 줄로",'
+        ' "faq": [{"question": "사용자 FAQ 질문", "answer": "현재 세션 자료에 근거한 답변"}]}',
         "opening task 안에 포함된 과거 요약 문구는 현재 상태의 근거로",
         "사용하지 않는다. live 상태와 최신 로그를 우선한다. 자료에 없는",
         "내용은 지어내지 않는다. 판단 근거가 없으면 state는",
@@ -376,10 +377,8 @@ def build_prompt(
     if faq:
         lines += ["", "[사용자 FAQ — 요약 시 참고]"]
         for row in faq[:50]:
-            lines.append(
-                f"질문: {_clip(str(row.get('question') or ''), 1000)} / "
-                f"답변: {_clip(str(row.get('answer') or ''), 5000)}"
-            )
+            lines.append(f"질문: {_clip(str(row.get('question') or ''), 1000)}")
+        lines.append("각 질문에 대해 현재 세션 자료에 근거한 답변을 faq 배열에 작성한다. 자료에 없으면 모른다고 명시한다.")
     if cflow_info:
         lines += ["", "[cflow 런]"]
         lines.append(
@@ -509,7 +508,7 @@ def parse_briefing(text: str) -> Optional[dict]:
         if not isinstance(data, dict):
             continue
         state = str(data.get("state") or "unknown").strip().lower()
-        return {
+        result = {
             "goal": str(data.get("goal") or "").strip(),
             "now": str(data.get("now") or "").strip(),
             "state": state if state in _STATES else "unknown",
@@ -518,6 +517,19 @@ def parse_briefing(text: str) -> Optional[dict]:
                 data.get("one-line-job-description") or ""
             ).strip(),
         }
+        # FAQ answers are optional for older providers, but preserve the
+        # generated question/answer pairs when present so the web card can
+        # display them.
+        if isinstance(data.get("faq"), list):
+            result["faq"] = [
+                {
+                    "question": str(item.get("question") or "").strip(),
+                    "answer": str(item.get("answer") or "").strip(),
+                }
+                for item in data["faq"]
+                if isinstance(item, dict) and str(item.get("question") or "").strip()
+            ]
+        return result
     return None
 
 
