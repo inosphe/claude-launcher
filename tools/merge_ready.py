@@ -112,6 +112,17 @@ same script is the worker's alignment gate, run from the worker's own
 worktree, and a worker's worktree is dirty because it is working -- on by
 default it would answer ``4`` for every worker doing its job.
 
+That intersection is the whole answer for the working tree and only half of
+it for the index, which is the gap board ``claunch-tsh7`` measured: the gate
+answered ``0`` for ``s390-codex-enter`` and ``git merge`` refused, naming two
+files the branch does not touch and another session had **staged**. A
+``--no-ff`` merge -- the only kind this repository lands with -- requires the
+entire index to match ``HEAD`` before it begins, so a staged entry refuses
+whatever path it sits on, while the same edit left unstaged goes through.
+Both measured on git 2.48.1; :func:`_dirty` carries the cases. So ``4`` fires
+on either, and the report keeps the two apart, because a reader told that a
+file blocks the merge will go looking for it in the merge's diff.
+
 Exit codes -- ``0`` ready, ``1`` re-measure, ``2`` could not tell, ``3``
 rebase, ``4`` dirty checkout. Separate codes rather than one because
 ``awaits.probe`` compares **exit codes only** and deliberately ignores output
@@ -168,11 +179,13 @@ CANNOT_TELL = 2
 REBASE = 3
 
 #: The branch side is ready and the merge still cannot start, because the
-#: working tree it would run in is dirty on a file the merge writes. A fifth
-#: code rather than folding into ``1`` or ``3`` for the reason the other four
-#: are separate: ``awaits.probe`` compares exit codes and ignores output, and
-#: the remedy here is neither a rebase nor a re-measurement -- nothing the
-#: branch's owner can do fixes it. Only reachable with ``--checkout``.
+#: working tree it would run in refuses it: dirty on a file the merge writes,
+#: or holding any staged entry at all (a ``--no-ff`` merge needs the whole
+#: index to match ``HEAD`` -- see :func:`_dirty`). A fifth code rather than
+#: folding into ``1`` or ``3`` for the reason the other four are separate:
+#: ``awaits.probe`` compares exit codes and ignores output, and the remedy
+#: here is neither a rebase nor a re-measurement -- nothing the branch's owner
+#: can do fixes it. Only reachable with ``--checkout``.
 DIRTY_CHECKOUT = 4
 
 #: The target a branch integrates into when nothing says otherwise. A nested
@@ -475,25 +488,55 @@ def _worktrees(repo: Path) -> Optional[List[Tuple[Path, Optional[str], str]]]:
     return found
 
 
-def _dirty(checkout: Path) -> Tuple[Optional[set], int]:
-    """Paths this checkout is not clean on, and how many entries went unread.
+#: Index-column codes in ``git status --porcelain`` that mean "this path is
+#: not what ``HEAD`` says it is". Everything else in that column is ``' '``
+#: (index matches HEAD), ``'?'`` (untracked) or ``'!'`` (ignored). ``U`` is in
+#: here too: an unmerged entry is an index git will not begin a merge on
+#: either, it just refuses with a different sentence.
+STAGED_CODES = "MADRCTU"
+
+
+def _dirty(checkout: Path) -> Tuple[Optional[set], Optional[set], int]:
+    """Paths this checkout is not clean on, which of them are staged, and how
+    many entries went unread.
 
     ``-z`` rather than plain ``--porcelain``: porcelain v1 quotes and escapes
     any path it cannot print raw, so the plain form hands back a spelling that
     does not match what ``git diff --name-only`` returns for the same file --
     an intersection computed across the two would silently miss it.
 
-    The second number is why this returns a pair. The board's output
-    convention (``claunch-peyn``, rule 4) is that a gate says how much it
-    could not read: an unparsed status entry is a file this check is blind
-    to, and dropping it quietly is how a check ends up green about a tree it
-    did not finish reading.
+    **The staged set is separate because git treats it differently.** The
+    first set answers a per-path question -- is this file, the one the merge
+    writes, dirty. The index does not work that way: a ``--no-ff`` merge
+    requires the *whole* index to match ``HEAD`` before it will start, so a
+    staged entry blocks whatever path it is on. Measured on git 2.48.1 in a
+    scratch repository, one file the merge never writes:
+
+    * modified in the working tree only -> the merge runs
+    * the same modification staged -> ``error: Your local changes to the
+      following files would be overwritten by merge``, exit 2, naming that
+      file
+    * staged and then the working tree put back to ``HEAD`` (status ``MM``
+      turned to ``M``+clean content) -> still refused; git compares the
+      index, not the content, which is the same reason
+      :func:`_merge_updates` compares path sets
+
+    The exception, and it does not apply here: a *fast-forward* merge checks
+    only the paths it updates, so the staged unrelated file goes through. This
+    repository lands with ``--no-ff`` every time (``improv-leader`` and
+    ``improv-mid`` both require it), so the strict rule is the one that holds.
+
+    The last number is the board's output convention (``claunch-peyn``, rule
+    4): a gate says how much it could not read. An unparsed status entry is a
+    file this check is blind to, and dropping it quietly is how a check ends
+    up green about a tree it did not finish reading.
     """
     proc = _git(checkout, "status", "--porcelain", "-z")
     if proc.returncode != 0:
-        return None, 0
+        return None, None, 0
     fields = proc.stdout.split("\0")
     paths: set = set()
+    staged: set = set()
     unread = 0
     i = 0
     while i < len(fields):
@@ -504,16 +547,23 @@ def _dirty(checkout: Path) -> Tuple[Optional[set], int]:
         if len(entry) < 4 or entry[2] != " ":
             unread += 1
             continue
-        paths.add(entry[3:])
+        path = entry[3:]
+        paths.add(path)
+        if entry[0] in STAGED_CODES:
+            staged.add(path)
         if entry[0] in "RC" or entry[1] in "RC":
             # A rename or copy carries its source as the next NUL-separated
             # field. Both ends matter: the merge can be blocked by either.
             if i < len(fields) and fields[i]:
                 paths.add(fields[i])
+                if entry[0] in STAGED_CODES:
+                    # A staged rename holds both ends in the index -- the old
+                    # name deleted, the new one added -- so both refuse.
+                    staged.add(fields[i])
                 i += 1
             else:
                 unread += 1
-    return paths, unread
+    return paths, staged, unread
 
 
 def _merge_updates(repo: Path, base: str, tip: str) -> Tuple[Optional[set], str]:
@@ -616,9 +666,15 @@ def _checkout_check(
                 return CANNOT_TELL, out, err
             updates, how = _merge_updates(repo, target_tip, tip)
             if updates is not None and not updates:
+                # Measured: with the branch already an ancestor, git answers
+                # "Already up to date." and exits 0 without reading the index
+                # at all, so even a staged entry does not make a tree refuse
+                # this one. Said as "this merge does not run" rather than "no
+                # tree can refuse it", because the second sentence is the one
+                # that stops being true the moment the merge is a real merge.
                 out.append(
-                    f"checkout: this merge writes 0 files, so no working "
-                    f"tree can refuse it -- and none of {len(trees)} "
+                    f"checkout: this merge writes 0 files, so it does not run "
+                    f"in any working tree -- and none of {len(trees)} "
                     f"worktree(s) has {target} checked out [{how}]"
                 )
                 return READY, out, err
@@ -654,14 +710,15 @@ def _checkout_check(
             f"{where} ({how})"
         )
         return CANNOT_TELL, out, err
-    dirty, unread = _dirty(where)
+    dirty, staged, unread = _dirty(where)
     if dirty is None:
         err.append(f"cannot tell: git status failed in {where}")
         return CANNOT_TELL, out, err
 
     stamp = (
         f"{where} (on {on}, {head_sha[:12]}) -- {len(updates)} file(s) the "
-        f"merge writes, {len(dirty)} dirty entry(ies) in that tree [{how}]"
+        f"merge writes, {len(dirty)} dirty entry(ies) in that tree "
+        f"({len(staged)} staged) [{how}]"
     )
     if not _same_branch(on, target):
         # Answered anyway, because the intersection below IS the true answer
@@ -669,13 +726,40 @@ def _checkout_check(
         # quoted as an answer about the target.
         stamp += f"; note: that tree is on {on}, not the target {target}"
 
+    # Two blockers with the same remedy and different reasons, kept apart in
+    # the report. ``blocked`` is a per-path fact -- this file is dirty AND the
+    # merge writes it. ``elsewhere`` is not per-path at all: those entries are
+    # in the index, and the index has to match HEAD everywhere before a
+    # ``--no-ff`` merge will start, so they refuse regardless of what the
+    # merge touches. Folding them into one list would tell the reader that a
+    # file the merge never writes is one the merge writes -- and that is the
+    # first thing they would go and check.
     blocked = sorted(updates & dirty)
-    if blocked:
-        out.append(f"dirty checkout: {len(blocked)} of {len(updates)} -- {stamp}")
-        for path in blocked[:BLOCKED_LISTED]:
-            out.append(f"    {path}")
-        if len(blocked) > BLOCKED_LISTED:
-            out.append(f"    ... and {len(blocked) - BLOCKED_LISTED} more, not listed")
+    elsewhere = sorted(staged - updates)
+    if blocked or elsewhere:
+        if blocked:
+            out.append(f"dirty checkout: {len(blocked)} of {len(updates)} -- {stamp}")
+            for path in blocked[:BLOCKED_LISTED]:
+                out.append(f"    {path}")
+            if len(blocked) > BLOCKED_LISTED:
+                out.append(
+                    f"    ... and {len(blocked) - BLOCKED_LISTED} more, not listed"
+                )
+        else:
+            out.append(f"dirty checkout: 0 of {len(updates)} -- {stamp}")
+        if elsewhere:
+            out.append(
+                f"  and {len(elsewhere)} staged entry(ies) the merge does not "
+                f"write, which refuse it all the same -- a --no-ff merge "
+                f"needs the whole index to match HEAD:"
+            )
+            for path in elsewhere[:BLOCKED_LISTED]:
+                out.append(f"    {path} (staged)")
+            if len(elsewhere) > BLOCKED_LISTED:
+                out.append(
+                    f"    ... and {len(elsewhere) - BLOCKED_LISTED} more, "
+                    f"not listed"
+                )
         out.append(
             f"  git merge {branch} is refused there before it starts: "
             f'"Your local changes to the following files would be '

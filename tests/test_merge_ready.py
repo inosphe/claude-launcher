@@ -212,6 +212,11 @@ def checkout_tree(repo):
     """The worktree on ``tree-target``, handed back clean after each test."""
     where = repo.parent / "tree-checkout"
     yield where
+    # ``reset`` first, and it is not belt-and-braces: a test that staged
+    # something leaves the index ahead of HEAD, and ``checkout -- .`` restores
+    # the working tree *from the index*, so it would hand the next test the
+    # staged content back as if it were clean.
+    _git(where, "reset", "-q")
     _git(where, "checkout", "-q", "--", ".")
     _git(where, "clean", "-qfd")
 
@@ -811,6 +816,83 @@ def test_a_dirty_file_the_merge_never_touches_is_not_in_the_way(
     # "nothing blocked" cannot be confused with "nothing was looked at"
     assert "0 of 2 blocked" in out
     assert "1 dirty entry" in out
+
+
+def test_a_staged_change_to_an_untouched_file_stops_the_merge_all_the_same(
+    repo, checkout_tree, capsys
+):
+    """The index is not a per-path question, and the intersection missed that.
+
+    Measured on git 2.48.1, the same tree and the same file, twice:
+
+    * ``untouched.py`` modified in the working tree -> the merge runs
+      (the test above)
+    * ``untouched.py`` modified **and staged** -> ``error: Your local changes
+      to the following files would be overwritten by merge``, exit 2
+
+    ``untouched.py`` is not in the merge's path set either time, so the
+    intersection this check was built on answers ``0 of 2 blocked`` for both
+    -- and the second one is a merge that cannot start. Board
+    ``claunch-tsh7``: the gate answered ``0`` for ``s390-codex-enter`` while
+    another session had two unrelated files staged in the shared checkout,
+    and ``git merge`` refused on exactly those two.
+
+    A ``--no-ff`` merge is what this repository lands with (``improv-leader``
+    and ``improv-mid`` both spell it out), and it requires the whole index to
+    match ``HEAD`` before it will begin. So a staged entry blocks whatever
+    path it sits on.
+    """
+    _write(checkout_tree, "untouched.py", "y = LOCAL\n")
+    _git(checkout_tree, "add", "untouched.py")
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert code == merge_ready.DIRTY_CHECKOUT, out
+    assert "untouched.py" in out
+    # and it says *why* this one blocks, because the reader who goes looking
+    # for untouched.py in the merge's diff will not find it there
+    assert "staged" in out
+    # the branch side really was ready -- same as the positive control above
+    assert "ready: aligned" in out
+
+
+def test_a_staged_entry_is_reported_apart_from_the_files_the_merge_writes(
+    repo, checkout_tree, capsys
+):
+    """Two blockers, two reasons, and the report keeps them apart.
+
+    ``written.py`` is in the merge's path set and ``untouched.py`` is not.
+    Both stop the merge and the remedies are identical, but a report that
+    merged them into one list would tell the reader that ``untouched.py`` is
+    a file this merge writes -- which is the fact they would go and check.
+    """
+    _write(checkout_tree, "written.py", "x = LOCAL\n")
+    _write(checkout_tree, "untouched.py", "y = LOCAL\n")
+    _git(checkout_tree, "add", "untouched.py")
+    code, out = _verdict(
+        repo,
+        capsys,
+        "--branch",
+        "tree-aligned",
+        "--target",
+        "tree-target",
+        "--checkout",
+        str(checkout_tree),
+    )
+    assert code == merge_ready.DIRTY_CHECKOUT, out
+    assert "written.py" in out
+    assert "untouched.py" in out
+    # the merge writes two files and exactly one of them is dirty; the staged
+    # entry is counted on its own line rather than folded into that ratio
+    assert "1 of 2" in out
+    assert "1 staged" in out
 
 
 def test_the_workers_own_dirty_worktree_does_not_change_the_verdict(
