@@ -595,6 +595,9 @@ class Mesh:
         #: and not the member's reply. Persisted next to the cursors, since
         #: it is per-member delivery state of exactly that kind.
         self.dismissed: Dict[str, set] = {}
+        #: Reply-expecting deliveries without a threaded ack/reply.  This is
+        #: a delivery receipt, so it persists with cursors across restarts.
+        self.response_watches: Dict[str, dict] = {}
         #: Outstanding invite tickets (authority only; pre-approval for a
         #: join request): token -> minted-at ISO timestamp. TTL-checked at
         #: redemption (MeshManager.invite_ttl).
@@ -2185,6 +2188,13 @@ class MeshManager:
         # write-offs made against whoever wore it last — the same reason the
         # member edges below are pruned.
         mesh.dismissed.pop(handle, None)
+        # A reply receipt belongs to this member instance as well.  A reused
+        # handle must not inherit a request or sender notification from the
+        # session that previously held it.
+        mesh.response_watches = {
+            key: watch for key, watch in mesh.response_watches.items()
+            if watch.get("from") != handle and watch.get("to") != handle
+        }
         # Edges naming a departed member go with it: handles are reusable, so
         # a rejoining name would otherwise inherit the isolation imposed on
         # whoever wore it last — a member that mysteriously cannot reach
@@ -2429,6 +2439,7 @@ class MeshManager:
         mesh.seen_ids.add(msg["id"])
         mesh.last_append = time.monotonic()
         self._append_log(mesh, msg)
+        self._settle_response_watch(mesh, msg)
         now = time.monotonic()
         if member is not None and self._is_local(mesh, member):
             mesh.activity.setdefault(member.handle, {"anchor": now})[
@@ -5852,6 +5863,10 @@ class MeshManager:
                             "mesh %r: grant flush failed", mesh.name
                         )
                 try:
+                    self._response_watch_tick(mesh)
+                except Exception:  # noqa: BLE001 -- sender notices must not stall delivery
+                    log.exception("mesh %r: response watch tick failed", mesh.name)
+                try:
                     await mesh_policy.tick(self, mesh)
                 except Exception:  # noqa: BLE001 — a policy bug must not stall delivery
                     log.exception("mesh %r: policy tick failed", mesh.name)
@@ -6012,6 +6027,7 @@ class MeshManager:
         ahead.update(m.get("id") for m in mesh.provisional)
         mesh.delivered_ids[member.handle] = delivered & ahead
         mesh._first_pending.pop(member.handle, None)
+        self._watch_delivered_responses(mesh, member.handle, pending)
         now = time.monotonic()
         st = mesh.activity.setdefault(member.handle, {"anchor": now})
         st["last_delivered"] = now
@@ -6182,12 +6198,18 @@ class MeshManager:
                         for k, v in (raw.get("dismissed") or {}).items()
                         if v
                     }
+                    mesh.response_watches = {
+                        str(k): dict(v)
+                        for k, v in (raw.get("response_watches") or {}).items()
+                        if isinstance(v, dict)
+                    }
                 else:  # phase-1 format: a flat {handle: index} map
                     mesh.cursors = {str(k): int(v) for k, v in raw.items()}
             except (ValueError, TypeError):
                 mesh.cursors = {}
                 mesh.link_cursors = {}
                 mesh.dismissed = {}
+                mesh.response_watches = {}
         outbox_path = d / "outbox.jsonl"
         if mesh.primary and outbox_path.is_file():
             for line in outbox_path.read_text(encoding="utf-8").splitlines():
@@ -6259,6 +6281,8 @@ class MeshManager:
             dismissed = {h: sorted(ids) for h, ids in mesh.dismissed.items() if ids}
             if dismissed:
                 doc["dismissed"] = dismissed
+            if mesh.response_watches:
+                doc["response_watches"] = mesh.response_watches
             (self._mesh_dir(mesh.name) / "cursors.json").write_text(
                 json.dumps(doc, indent=2),
                 encoding="utf-8",
@@ -6287,6 +6311,81 @@ class MeshManager:
                 fh.write(json.dumps(msg, ensure_ascii=False) + "\n")
         except OSError as exc:
             log.warning("mesh %r: cannot append log: %s", mesh.name, exc)
+
+    @staticmethod
+    def _response_watch_key(msg_id: str, recipient: str) -> str:
+        return f"{msg_id}|{recipient}"
+
+    def _watch_delivered_responses(
+        self, mesh: Mesh, recipient: str, messages: List[dict]
+    ) -> None:
+        """Persist one response watch per delivered reply-expecting message."""
+        changed = False
+        delivered_at = utcnow()
+        for msg in messages:
+            msg_id = str(msg.get("id") or "")
+            sender = str(msg.get("from") or "")
+            if (
+                not msg_id or sender not in mesh.members or sender == recipient
+                or not expects_reply(msg_type_for(msg, recipient))
+            ):
+                continue
+            key = self._response_watch_key(msg_id, recipient)
+            if key not in mesh.response_watches:
+                mesh.response_watches[key] = {
+                    "id": msg_id, "from": sender, "to": recipient,
+                    "delivered_at": delivered_at, "notices": 0,
+                }
+                changed = True
+        if changed:
+            self._persist_cursors(mesh)
+
+    def _settle_response_watch(self, mesh: Mesh, reply: dict) -> None:
+        """Clear a watch when its recipient sends a threaded ack or reply."""
+        replied_to = str(reply.get("reply_to") or "")
+        sender = str(reply.get("from") or "")
+        if not replied_to or not sender:
+            return
+        key = self._response_watch_key(replied_to, sender)
+        if key in mesh.response_watches:
+            del mesh.response_watches[key]
+            self._persist_cursors(mesh)
+
+    def _response_watch_tick(self, mesh: Mesh) -> None:
+        """Nudge each sender after 5, 10, 15, and 20 minutes at most once."""
+        now = datetime.now(timezone.utc)
+        changed = False
+        for watch in list(mesh.response_watches.values()):
+            try:
+                notices = int(watch.get("notices") or 0)
+            except (TypeError, ValueError):
+                notices = 0
+            if notices >= 4:
+                continue
+            age = _age_secs(watch.get("delivered_at"), now)
+            if age is None or age < 300.0 * (notices + 1):
+                continue
+            sender = str(watch.get("from") or "")
+            recipient = str(watch.get("to") or "")
+            msg_id = str(watch.get("id") or "")
+            if not sender or sender not in mesh.members or not recipient or not msg_id:
+                continue
+            notice_id = f"response-nudge-{msg_id}-{recipient}-{notices + 1}"
+            if notice_id not in mesh.seen_ids:
+                body = (
+                    f"no ack/reply from {recipient} for message {msg_id} after "
+                    f"{5 * (notices + 1)} minutes. Decide whether to request it again."
+                )
+                try:
+                    self._send_core(mesh, mesh_policy.POLICY_SENDER, sender, body,
+                                    external=True, type="fyi", msg_id=notice_id)
+                except MeshError as exc:
+                    log.debug("mesh %r: response nudge failed: %s", mesh.name, exc)
+                    continue
+            watch["notices"] = notices + 1
+            changed = True
+        if changed:
+            self._persist_cursors(mesh)
 
 
 # --------------------------------------------------------------------------- #
@@ -6339,7 +6438,8 @@ def format_delivery(mesh_name: str, handle: str, msgs: List[dict]) -> str:
             "mesh messages delivered to your terminal — reply with: "
             f'claunch mesh send {mesh_name} <handle|*> "..."'
             " — if this puts work on you, answer NOW with a brief --type ack "
-            "and send the outcome when it is done; silence reads as not received"
+            "and --reply-to the message id, then send the outcome when it is done; "
+            "silence reads as not received"
             if needs_reply
             else "fyi/ack only — no reply expected; drain and continue"
         ),
