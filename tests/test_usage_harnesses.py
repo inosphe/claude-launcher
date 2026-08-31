@@ -366,7 +366,6 @@ def test_claude_usage_refuses_a_third_party_provider(home):
 def test_claude_provider_uses_anthropic_usage_api(home, monkeypatch):
     p = profile.create("work")
     providers.set_profile_selection(p, "claude")
-    credentials.save_token(p, "oauth-token")
     reached = {}
 
     def fake_usage(url, token):
@@ -374,6 +373,12 @@ def test_claude_provider_uses_anthropic_usage_api(home, monkeypatch):
         return {"five_hour": {"utilization": 0.25}}
 
     monkeypatch.setattr(usage, "_oauth_usage", fake_usage)
+    # The oauth-usage branch runs only for a profile-scoped token; a
+    # ``save_token`` secret is a setup-token and is reported unscoped, which
+    # would fall through to a live ``_ratelimit_headers`` call.
+    monkeypatch.setattr(
+        usage.lineage, "resolve_token", lambda prof: ("oauth-token", True)
+    )
 
     report = usage.fetch(profile.require_selector("work:claude"))
 
