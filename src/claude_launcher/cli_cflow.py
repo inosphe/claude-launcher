@@ -166,7 +166,8 @@ def _cmd_show(args: argparse.Namespace) -> int:
             f"default_child_cflow: {wf.default_child_cflow} — a child spawned "
             f"by a session driving this workflow starts on that one"
         )
-    for s in wf.steps.values():
+    def step_line(s):
+        """Return the stable, single-step part of the tree display."""
         flags = []
         if s.gate:
             flags.append("gate")
@@ -202,15 +203,56 @@ def _cmd_show(args: argparse.Namespace) -> int:
             chooser = s.select.chooser
             if s.select.delegate:
                 chooser = s.select.delegate.describe()
-            print(f"- {s.id} [select, chooser={chooser}]{suffix}")
-            for name, opt in s.select.options.items():
-                # A paced option: the agent's take of it is held until this
-                # long has passed since the last one (see model "Cadence").
-                pace = f"  [at most every {opt.interval:g}s]" if opt.interval else ""
-                print(f"    {name}: {opt.description}  -> {opt.next or 'end'}{pace}")
+            return f"{s.id} [select, chooser={chooser}]{suffix}"
         else:
             title = f": {s.title}" if s.title else ""
-            print(f"- {s.id}{title}{suffix}  -> {s.next or 'end'}")
+            return f"{s.id}{title}{suffix}  -> {s.next or 'end'}"
+
+    # A flat list made a branch look like a backward arrow: readers had to
+    # scan the whole workflow to discover which option reached which step.
+    # Render the reachable graph as a rooted tree instead.  A workflow is a
+    # graph, so a merge or a cycle is printed as a reference after its first
+    # occurrence; this keeps the output finite while preserving the edge.
+    seen = set()
+
+    def children(s):
+        if s.select:
+            return [(name, opt.next) for name, opt in s.select.options.items()]
+        return [(None, s.next)]
+
+    def render(step_id, prefix="", branch="", edge=None):
+        if not step_id or step_id not in wf.steps:
+            return
+        s = wf.steps[step_id]
+        connector = branch
+        edge_text = f"{edge}: " if edge else ""
+        if step_id in seen:
+            print(f"{prefix}{connector}{edge_text}↪ {step_id} (위에서 표시됨)")
+            return
+        seen.add(step_id)
+        label = step_line(s)
+        print(f"{prefix}{connector}{edge_text}{label}")
+        outgoing = children(s)
+        # Option descriptions belong to the edge, so they remain adjacent to
+        # the branch they describe instead of becoming detached list items.
+        if s.select:
+            outgoing = [
+                (f"{name}: {opt.description}"
+                 + (f"  [at most every {opt.interval:g}s]" if opt.interval else ""),
+                 opt.next)
+                for name, opt in s.select.options.items()
+            ]
+        for i, (edge_label, target) in enumerate(outgoing):
+            last = i == len(outgoing) - 1
+            render(target, prefix + ("│  " if not last else "   "),
+                   "└─ " if last else "├─ ", edge_label)
+
+    render(wf.start)
+    # Keep malformed/disconnected steps visible after the rooted tree. The
+    # parser accepts unreachable nodes for authoring diagnostics.
+    for step_id in wf.steps:
+        if step_id not in seen:
+            render(step_id)
     for warning in wf.warnings:
         print(f"warning: {warning}")
     # Advice to whoever is WRITING this file, which is why it lives here and
