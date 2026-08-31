@@ -14314,6 +14314,16 @@ function spawnConnectNow(ui, handles) {
   );
 }
 
+/* A local mesh member must also be a live, unarchived session before it can
+   be offered to a new child. Remote members have no local session record, so
+   their owning daemon remains the authority for their lifecycle. */
+function connectCandidate(member) {
+  if (!member || !member.handle) return false;
+  if (member.local === false) return true;
+  const session = sessionsCache.find((s) => s.name === member.session);
+  return !session || (session.status !== "exited" && !session.archived_at);
+}
+
 function buildSpawnForm(parentName, seed) {
   seed = seed || {};
   const rec = spawnRecall();
@@ -15070,7 +15080,7 @@ async function refreshSpawnConnect(st) {
   } catch { info = null; }
   if (spawnModal !== st) return;
   const handles = spawnConnectNow(ui,
-    (info && info.members || []).map((m) => m.handle).filter(Boolean));
+    (info && info.members || []).filter(connectCandidate).map((m) => m.handle));
   ui.connectHandles = handles;
   if (!handles.length) return;   // the row stays hidden; the join is enough
   row.appendChild(el("span", "sess-spawn-label", "Connect"));

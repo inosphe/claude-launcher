@@ -574,6 +574,24 @@ def test_the_mesh_reveals_the_handle_and_the_roster():
     assert wiz.value("connect") == ["lead", "api"]
 
 
+def test_daemon_sources_exclude_dead_local_members_from_connect_picker():
+    """The CLI wizard must not offer sessions that cannot receive messages."""
+    sources = wizard.DaemonSources(client=object())
+    sources._cache["sessions"] = [
+        {"name": "live", "status": "idle"},
+        {"name": "killed", "status": "exited"},
+        {"name": "archived", "status": "exited", "archived_at": "now"},
+    ]
+    sources._cache["meshes"] = [{"name": "team", "members": [
+        {"handle": "live", "session": "live", "local": True},
+        {"handle": "killed", "session": "killed", "local": True},
+        {"handle": "archived", "session": "archived", "local": True},
+        {"handle": "remote", "session": "remote", "local": False},
+    ]}]
+
+    assert sources.members("team") == ["live", "remote"]
+
+
 def test_workflows_follow_the_directory():
     sources = FakeSources(workflows={"/srv/api": ["ship-it"]})
     wiz = wizard.Wizard(sources, cwd="/work/repo")
