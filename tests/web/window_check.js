@@ -72,6 +72,7 @@ let windowCache = null;
 let windowError = "";
 let windowTimer = null;
 let windowPageOpen = false;
+let windowCancelBusy = new Set();
 let sessionsCache = [{ name: "s1", status: "busy" }];
 function $() { return view; }
 function showView(name) { shown.push(name); }
@@ -154,6 +155,8 @@ const snapshot = {
 
   check("one row is drawn for every holder and waiter",
         withClass("window-row").length === 4, withClass("window-row").length);
+  check("queued requests have cancellation controls",
+        withClass("window-cancel").length === 2, withClass("window-cancel").length);
   check("holder and FIFO positions are explicit",
         view.words().includes("held") && view.words().includes("#1") &&
         view.words().includes("#2"), view.words());
