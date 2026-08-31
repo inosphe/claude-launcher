@@ -101,6 +101,11 @@ def sessions_json() -> Path:
     return daemon_dir() / "sessions.json"
 
 
+def briefings_json() -> Path:
+    """Persisted LLM briefing cache, retained across daemon restarts."""
+    return daemon_dir() / "briefings.json"
+
+
 def session_dir(name: str) -> Path:
     """Per-session directory holding its raw output log and metadata."""
     return daemon_dir() / "sessions" / name

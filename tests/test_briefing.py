@@ -341,6 +341,25 @@ def test_digest_serves_the_cached_one_line_only(home):
     assert briefing.digest("s3") is None
 
 
+def test_briefing_cache_survives_daemon_restart(home):
+    key = ("s1", (123, 456), "work", "busy", None, None, (("faq", "Q", "A", True),))
+    result = {
+        "session": "s1", "generated_at": "2026-01-01T00:00:00+00:00",
+        "cached": False, "source": {"jsonl": True, "cflow": False},
+        "briefing": {
+            "goal": "목표", "now": "진행", "state": "working",
+            "progress": "50%", "one-line-job-description": "작업",
+        }, "raw": None,
+    }
+    briefing._cache["s1"] = (key, result)
+    briefing._persist_cache()
+
+    # A new daemon process starts with an empty in-memory cache.
+    briefing._cache.clear()
+    briefing._loaded_cache_path = None
+    assert briefing.digest("s1") == {"one_line": "작업", "state": "working"}
+
+
 def test_parse_briefing_bad_state_and_garbage():
     parsed = briefing.parse_briefing('{"goal": "g", "state": "SHRUGGING"}')
     assert parsed["state"] == "unknown" and parsed["now"] == ""

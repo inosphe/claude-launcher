@@ -13,10 +13,10 @@ is authoritative). An empty ``api_key`` means the feature is off — the key is
 typed in by the user and must never be committed or logged; it leaves this
 module only as the ``Authorization`` header of the LLM call itself.
 
-Results are cached in memory per session, keyed by what would change the
-answer: the transcript file's (mtime, size) and the cflow step. ``refresh``
-bypasses the cache; a daemon restart empties it, which is fine — the next
-request regenerates.
+Results are cached per session, keyed by what would change the answer: the
+transcript file's (mtime, size) and the cflow step. The cache is persisted in
+the daemon instance directory so a daemon restart keeps the last briefing;
+``refresh`` bypasses it.
 """
 
 from __future__ import annotations
@@ -31,14 +31,14 @@ from typing import Dict, List, NamedTuple, Optional, Tuple
 
 import aiohttp
 
-from .. import harnesses as harness_registry
+from .. import atomic, harnesses as harness_registry
 from .. import profile as profile_mod, store, transcripts
 from ..cflow import engine as cflow_engine, state as cflow_state
 from ..cflow.engine import CflowError
 from ..cflow.model import WorkflowError
 from ..cflow.state import LockBusy, StateError
 from ..profile import ProfileError
-from . import codex_sessions
+from . import codex_sessions, paths
 
 #: Defaults for the ``llm`` config block. ``max_tokens`` bounds the *whole*
 #: completion, and on a reasoning model the reasoning tokens are billed to it
@@ -525,8 +525,57 @@ def parse_briefing(text: str) -> Optional[dict]:
 # composition and cache
 # --------------------------------------------------------------------------- #
 #: session name -> (cache key, last result). The key is everything that would
-#: change the answer; the daemon is one process, so a dict is the whole cache.
+#: change the answer; the dict is mirrored to the daemon instance directory.
 _cache: Dict[str, Tuple[tuple, dict]] = {}
+_loaded_cache_path: Optional[Path] = None
+
+
+def _restore_cache() -> None:
+    """Load durable briefings once for the active daemon instance."""
+    global _loaded_cache_path
+    path = paths.briefings_json()
+    if _loaded_cache_path == path:
+        return
+    _loaded_cache_path = path
+    try:
+        data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+    except (OSError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    for name, row in data.items():
+        if not isinstance(row, dict) or not isinstance(row.get("key"), list):
+            continue
+        result = row.get("result")
+        if isinstance(result, dict):
+            _cache[str(name)] = (_tupleize(row["key"]), result)
+
+
+def _tupleize(value):
+    if isinstance(value, list):
+        return tuple(_tupleize(item) for item in value)
+    return value
+
+
+def _persist_cache() -> None:
+    path = paths.briefings_json()
+    data = {
+        name: {"key": _jsonable(key), "result": result}
+        for name, (key, result) in _cache.items()
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with atomic.scratch(path) as tmp:
+            tmp.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            atomic.replace(tmp, path)
+    except OSError:
+        pass
+
+
+def _jsonable(value):
+    if isinstance(value, tuple):
+        return [_jsonable(item) for item in value]
+    return value
 
 
 def _now_iso() -> str:
@@ -552,6 +601,7 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
     """
     sdef = session.sdef
     name = sdef.name
+    _restore_cache()
     live_info = gather_live(session)
     faq = gather_faq()
     cflow_info = gather_cflow(sdef.cwd or "", name)
@@ -603,6 +653,7 @@ async def compose(session, cfg: dict, *, refresh: bool = False) -> dict:
         "raw": None if parsed is not None else answer.text,
     }
     _cache[name] = (cache_key, result)
+    _persist_cache()
     return result
 
 
@@ -613,10 +664,11 @@ def digest(name: str) -> Optional[dict]:
     one-line without opening the card — and without an LLM call. Reading the
     cache is what makes the one-line survive a browser refresh without
     regeneration: the browser loses its in-memory copy, the daemon does not,
-    and the list poll pours the digest straight back. ``None`` when nothing
-    has been composed for this session since the daemon started (the row then
-    falls back to the recorded opening task).
+    and the list poll pours the digest straight back. ``None`` when no
+    briefing has been composed for this session (the row then falls back to
+    the recorded opening task).
     """
+    _restore_cache()
     hit = _cache.get(name)
     if hit is None:
         return None
