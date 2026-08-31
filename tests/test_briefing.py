@@ -237,6 +237,9 @@ def test_build_prompt_carries_all_signals():
         "[데몬 실시간 상태]",
         "상태: busy",
         "opening task 안에 포함된 과거 요약 문구",
+        "모든 필드 값은 자료의 언어와",
+        "자연스럽고 정확한 한국어",
+        "변경하면 안 되는 기술적 값은 원문을 유지한다",
     ):
         assert needle in prompt
 
