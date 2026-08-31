@@ -697,6 +697,104 @@ def test_briefing_endpoint_contract_cache_and_refresh(home, tmp_path, monkeypatc
     asyncio.run(run())
 
 
+def test_briefing_cache_is_invalidated_when_the_live_state_moves(
+    home, tmp_path, monkeypatch
+):
+    """A change in the session's live state forces a fresh briefing.
+
+    This pins the reason ``bd9f2e02`` put ``status``, ``last_input_at`` and
+    ``last_output_at`` into the cache key: a briefing describes a session
+    that is running right now, so a cached one goes stale the moment that
+    state moves. Take any of the three back out of the key and this test
+    goes red on that field — which is what stops the next reader from
+    dropping them to make a cache hit easier to assert.
+
+    The state is stated (a stubbed :func:`briefing.gather_live`) rather than
+    driven through a real harness, because the values are the input under
+    test here and a live child moves them on its own schedule.
+    """
+    from aiohttp import web as aioweb
+
+    _register_py_harness()
+    hits = []
+    answer = {
+        "goal": "목표", "now": "작업 중", "state": "working", "progress": "70%",
+        "one-line-job-description": "브리핑 백엔드",
+    }
+
+    async def handler(request):
+        hits.append(await request.json())
+        return aioweb.json_response(_llm_answer(json.dumps(answer, ensure_ascii=False)))
+
+    base = {
+        "status": "busy",
+        "running": True,
+        "last_input_at": "2026-01-01T00:00:00+00:00",
+        "last_output_at": "2026-01-01T00:00:01+00:00",
+    }
+
+    live = dict(base)
+
+    def pin(**changes):
+        # changes ACCUMULATE, so every step below moves exactly one field
+        # away from the state the previous request was served on. Restating
+        # the whole dict each time would move two at once and let a key that
+        # had dropped one of the fields still look correct.
+        live.update(changes)
+        state = dict(live)
+        monkeypatch.setattr(briefing, "gather_live", lambda session: dict(state))
+
+    async def run():
+        llm = await _start_llm(handler)
+        _set_llm(str(llm.make_url("/v1/chat/completions")))
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+
+        async def get():
+            resp = await client.get("/api/sessions/s1/briefing", headers=BEARER)
+            assert resp.status == 200
+            return await resp.json()
+
+        try:
+            cwd = str(tmp_path / "work")
+            (tmp_path / "work").mkdir()
+            mgr.create(
+                SessionDef(
+                    name="s1", harness="py", cwd=cwd,
+                    conversation_id="cafe0000-0000-0000-0000-000000000002",
+                    task="브리핑 백엔드 구현",
+                )
+            )
+
+            pin()
+            assert (await get())["cached"] is False and len(hits) == 1
+            # the same state twice: the key holds, so no second call
+            pin()
+            assert (await get())["cached"] is True and len(hits) == 1
+
+            # each of the three live fields invalidates on its own
+            pin(last_output_at="2026-01-01T00:00:09+00:00")
+            assert (await get())["cached"] is False and len(hits) == 2
+            pin(status="idle")
+            assert (await get())["cached"] is False and len(hits) == 3
+            pin(last_input_at="2026-01-01T00:00:08+00:00")
+            assert (await get())["cached"] is False and len(hits) == 4
+
+            # back to the original state: the cache holds ONE entry per
+            # session (``_cache[name] = (key, result)``), so the entry now
+            # carries the last state and the original one is a miss too
+            pin(**base)
+            assert (await get())["cached"] is False and len(hits) == 5
+
+            await mgr.shutdown_all()
+        finally:
+            await client.close()
+            await llm.close()
+
+    asyncio.run(run())
+
+
+
 def test_briefing_faq_can_be_managed_and_is_persisted(home, tmp_path):
     async def run():
         mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
