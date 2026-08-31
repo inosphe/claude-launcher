@@ -12036,10 +12036,7 @@ function renderSession(data) {
   // what the session has made of the job, and comparing the two is only
   // possible with the original in front of you.
   view.appendChild(sessTask(s));
-  // Older focused render harnesses do not load the detail-only journal
-  // helper; keep their isolated session rendering valid.
-  if (typeof sessInputJournal === "function")
-    view.appendChild(sessInputJournal(s.name || sessName));
+  view.appendChild(sessInputJournal(s.name || sessName));
 
   // What this session is DOING, next to the facts above: the llm summary,
   // fetched on first open and repainted by the 2s poll, with the card's own

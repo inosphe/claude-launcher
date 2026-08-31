@@ -107,6 +107,7 @@ function rolePanels() { return []; }
 function sessBeads() { return el("div", "sess-beads"); }
 function sessCommits() { return el("div", "sess-commits"); }
 function sessTask() { return el("div", "sess-task"); }
+function sessInputJournal() { return el("div", "sess-input-journal"); }
 /* The mesh handle a row/head wears when it differs from the session name
    (sesshandle_check's subject); here it is only a call that has to
    resolve. */
