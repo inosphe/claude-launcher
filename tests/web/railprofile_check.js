@@ -132,16 +132,16 @@ function $(id) { return list; }
 
 const ctx = {};
 new Function(
-  "exports", "document", "el", "api", "list", "meshCache",
+  "exports", "document", "el", "api", "list", "meshCache", "sessionGroupByMesh",
   stubs + capLine[0] + "\n"
-  + slice("byLineage") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
+  + slice("byLineage") + slice("sessionMeshGroup") + slice("sessMeshes") + slice("railMeshTags") + slice("sessHandles") + slice("handleTag")
   + slice("profileHarnessLabel") + slice("railMetaText")
   + slice("refreshSessions")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,
   text: railMetaText,
-});`)(ctx, document, el, api, list, []);
+});`)(ctx, document, el, api, list, [], true);
 
 let failures = 0;
 function check(what, got, want) {
@@ -209,7 +209,7 @@ served = { sessions: [
 
 (async () => {
   await ctx.refresh();
-  const rows = list.kids;
+  const rows = list.kids.filter((r) => r.dataset.name);
   const row = (name) => rows.find((r) => r.dataset.name === name);
   const metaOf = (name) =>
     descendants(row(name)).find((k) => k.classes.has("meta"));

@@ -139,11 +139,11 @@ function $(id) { return list; }
 
 const ctx = {};
 new Function(
-  "exports", "document", "el", "api", "list", "setTimeout",
+  "exports", "document", "el", "api", "list", "setTimeout", "meshCache", "sessionGroupByMesh",
   stubs
   + holdMs[0] + "\n" + heldUntil[0] + "\n" + pending[0] + "\n"
   + slice("railHeld") + slice("holdRail") + slice("releaseRail")
-  + slice("byLineage") + slice("profileHarnessLabel")
+  + slice("byLineage") + slice("sessionMeshGroup") + slice("profileHarnessLabel")
   + slice("railMetaText")
   + slice("refreshSessions")
   + `
@@ -158,7 +158,7 @@ Object.assign(exports, {
      back rather than sleeping RAIL_HOLD_MS in a test. */
   expire: () => { railHeldUntil = Date.now() - 1; },
   deadline: RAIL_HOLD_MS,
-});`)(ctx, document, el, api, list, setTimeout);
+});`)(ctx, document, el, api, list, setTimeout, [], true);
 
 let failures = 0;
 function check(what, got, want) {
@@ -168,7 +168,8 @@ function check(what, got, want) {
     failures++;
   }
 }
-const names = () => list.kids.map((li) => li.dataset.name);
+const rows = () => list.kids.filter((li) => li.dataset.name);
+const names = () => rows().map((li) => li.dataset.name);
 const glyph = (li) => li.kids.find((k) => k.classes.has("sess-brief-rowref"));
 const tick = () => new Promise((r) => setTimeout(r, 0));
 
@@ -183,16 +184,16 @@ const TWO = [
   /* ---- an unchanged ordinary poll preserves the rows ------------------ */
   await ctx.refresh();
   check("a poll draws the rows", names(), ["s1", "s2"]);
-  const first = [...list.kids];
+  const first = [...rows()];
   check("...each carrying the row's own glyph",
-        list.kids.map((li) => !!glyph(li)), [true, true]);
+        rows().map((li) => !!glyph(li)), [true, true]);
   await ctx.refresh();
   check("an unchanged unheld poll keeps every row object",
-        list.kids.map((li, i) => li === first[i]), [true, true]);
+        rows().map((li, i) => li === first[i]), [true, true]);
 
   /* ---- a press freezes the teardown, and only the teardown ------------ */
-  const before = [...list.kids];
-  const pressed = glyph(list.kids[1]);
+  const before = [...rows()];
+  const pressed = glyph(rows()[1]);
   ctx.hold();
   check("a pointer down on the rail holds it", ctx.held(), true);
   /* The list changes underneath — a session appears — and the poll still
@@ -203,9 +204,9 @@ const TWO = [
   };
   await ctx.refresh();
   check("a poll mid-press leaves the rows exactly where they were",
-        list.kids.map((li, i) => li === before[i]), [true, true]);
+        rows().map((li, i) => li === before[i]), [true, true]);
   check("...the very node under the finger included",
-        glyph(list.kids[1]) === pressed, true);
+        glyph(rows()[1]) === pressed, true);
   check("...so the rail has not yet grown the new row", names(), ["s1", "s2"]);
   check("...but the poll's data was taken all the same",
         ctx.cache().map((s) => s.name), ["s1", "s2", "s3"]);
@@ -233,13 +234,13 @@ const TWO = [
   check("...so the next poll draws normally again", names(), ["s1"]);
 
   /* ---- a failed poll leaves the page as it was ------------------------ */
-  const kept = [...list.kids];
+  const kept = [...rows()];
   const cached = ctx.cache().map((s) => s.name);
   ok = false;
   served = { error: "no" };
   await ctx.refresh();
   check("an error response is not 'this daemon has no sessions'",
-        list.kids.map((li, i) => li === kept[i]), [true]);
+        rows().map((li, i) => li === kept[i]), [true]);
   check("...and the cache forgetDeadSessions judges by is untouched",
         ctx.cache().map((s) => s.name), cached);
   ok = true;
