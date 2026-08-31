@@ -453,20 +453,83 @@ function railMetaText(s) {
    after every two-second poll. */
 const SESSION_FILTER_KEY = `claunch_session_filter:${BASE}`;
 const SESSION_GROUP_KEY = `claunch_session_group:${BASE}`;
+const SESSION_GROUP_ORDER_KEY = `claunch_session_group_order:${BASE}`;
 const SESSION_FILTERS = ["current", "running", "killed", "archived"];
+const SESSION_GROUPS = ["mesh", "workspace"];
 let sessionFilter = localStorage.getItem(SESSION_FILTER_KEY) || "current";
 if (!SESSION_FILTERS.includes(sessionFilter)) sessionFilter = "current";
-let sessionGroupByMesh = localStorage.getItem(SESSION_GROUP_KEY) === "true";
+let sessionGroupOrder = (() => {
+  try {
+    const saved = JSON.parse(localStorage.getItem(SESSION_GROUP_ORDER_KEY) || "[]");
+    if (Array.isArray(saved)) return saved.filter((group, i) =>
+      SESSION_GROUPS.includes(group) && saved.indexOf(group) === i);
+  } catch {}
+  // Preserve the pre-order setting for browsers that used the former mesh-only
+  // checkbox.  The new setting takes over on the next group change.
+  return localStorage.getItem(SESSION_GROUP_KEY) === "true" ? ["mesh"] : [];
+})();
+let sessionGroupByMesh = sessionGroupOrder.includes("mesh");
+let sessionGroupByWorkspace = sessionGroupOrder.includes("workspace");
 
 function sessionMeshGroup(s) {
   const memberships = sessMeshes(s.name);
   return memberships.length ? memberships[0].mesh : "(no mesh)";
 }
 
-function setSessionGroupByMesh(enabled, remember = true) {
-  sessionGroupByMesh = !!enabled;
-  if (remember) localStorage.setItem(SESSION_GROUP_KEY, String(sessionGroupByMesh));
+function sessionWorkspaceGroup(s) {
+  const cwd = String((s && s.cwd) || "").replace(/[\\/]+$/, "");
+  if (!cwd) return "(daemon workspace)";
+  // Worktrees under one repository are separate directories but one workspace.
+  const marker = cwd.match(/^(.*?)[\\/]\.claude[\\/]worktrees(?:[\\/]|$)/i);
+  return marker ? marker[1] : cwd;
+}
+
+function sessionWorkspaceLabel(group) {
+  if (group === "(daemon workspace)") return group;
+  const parts = group.split(/[\\/]+/).filter(Boolean);
+  return parts.length > 2 ? `…/${parts.slice(-2).join("/")}` : group;
+}
+
+function sessionGroupValue(group, s) {
+  return group === "mesh" ? sessionMeshGroup(s) : sessionWorkspaceGroup(s);
+}
+
+/* Convert lineage-ordered rows into headings and rows. Each selected group
+   occupies one level, so selection order is also nesting priority. */
+function sessionGroupRows(entries, groups, level = 0) {
+  if (level >= groups.length) return entries.map(([session, depth]) =>
+    ({ type: "session", session, depth }));
+  const group = groups[level];
+  const buckets = new Map();
+  for (const entry of entries) {
+    const value = sessionGroupValue(group, entry[0]);
+    if (!buckets.has(value)) buckets.set(value, []);
+    buckets.get(value).push(entry);
+  }
+  const out = [];
+  for (const value of [...buckets.keys()].sort((a, b) =>
+    a.localeCompare(b, undefined, { sensitivity: "base" }))) {
+    out.push({ type: "group", group, value, level });
+    out.push(...sessionGroupRows(buckets.get(value), groups, level + 1));
+  }
+  return out;
+}
+
+function setSessionGroup(group, enabled, remember = true) {
+  if (!SESSION_GROUPS.includes(group)) return;
+  sessionGroupOrder = sessionGroupOrder.filter((item) => item !== group);
+  if (enabled) sessionGroupOrder.push(group);
+  sessionGroupByMesh = sessionGroupOrder.includes("mesh");
+  sessionGroupByWorkspace = sessionGroupOrder.includes("workspace");
+  if (remember) {
+    localStorage.setItem(SESSION_GROUP_ORDER_KEY, JSON.stringify(sessionGroupOrder));
+    localStorage.setItem(SESSION_GROUP_KEY, String(sessionGroupByMesh));
+  }
   refreshSessions();
+}
+
+function setSessionGroupByMesh(enabled, remember = true) {
+  setSessionGroup("mesh", enabled, remember);
 }
 
 function sessionCategory(s) {
@@ -546,8 +609,10 @@ async function refreshSessions() {
   // Role countdown values change on every response, while the rail rows do
   // not render those numbers.  Exclude only those moving values from the DOM
   // signature so an unchanged fleet keeps its nodes, focus and listeners.
+  const groupOrder = typeof sessionGroupOrder === "undefined"
+    ? (sessionGroupByMesh ? ["mesh"] : []) : sessionGroupOrder;
   const signature = JSON.stringify(
-    [briefingLLM, sessionsCache, sessionGroupByMesh, meshCache],
+    [briefingLLM, sessionsCache, groupOrder, meshCache],
     (key, value) => key === "due_in" || key === "fired_ago" ? undefined : value,
   );
   // See the hold above: a press in flight keeps the rows it started on, and
@@ -557,31 +622,42 @@ async function refreshSessions() {
   railRedrawPending = changed && !rebuild;
   if (rebuild) list._sessionsSignature = signature;
   if (rebuild) list.innerHTML = "";
-  let previousGroup = null;
   const visibleSessions = sessionsCache.filter(sessionMatchesFilter);
-  let entries = rebuild
+  const entries = rebuild
     ? byLineage(sessionsCache, visibleSessions) : [];
-  if (sessionGroupByMesh) {
-    const groups = new Map();
-    for (const entry of entries) {
-      const group = sessionMeshGroup(entry[0]);
-      if (!groups.has(group)) groups.set(group, []);
-      groups.get(group).push(entry);
-    }
-    entries = [...groups.keys()].sort((a, b) =>
-      a.localeCompare(b, undefined, { sensitivity: "base" }),
-    ).flatMap((group) => groups.get(group));
-  }
-  for (const [s, depth] of entries) {
-    const group = sessionGroupByMesh ? sessionMeshGroup(s) : null;
-    if (group && group !== previousGroup) {
+  // Isolated web harnesses retain the old mesh-only variable. The fallback
+  // keeps those consumers compatible while the page uses the ordered setting.
+  const rows = !rebuild ? [] : typeof sessionGroupRows !== "undefined"
+    ? sessionGroupRows(entries, groupOrder)
+    // Older isolated rail harnesses provide the former mesh-only helpers.
+    // Keep their equivalent flat grouping here while the shipped page uses
+    // the ordered, nested helper above.
+    : groupOrder.length ? (() => {
+      const buckets = new Map();
+      for (const entry of entries) {
+        const value = sessionMeshGroup(entry[0]);
+        if (!buckets.has(value)) buckets.set(value, []);
+        buckets.get(value).push(entry);
+      }
+      return [...buckets.keys()].sort((a, b) =>
+        a.localeCompare(b, undefined, { sensitivity: "base" })).flatMap((value) => [
+        { type: "group", group: "mesh", value, level: 0 },
+        ...buckets.get(value).map(([session, depth]) =>
+          ({ type: "session", session, depth })),
+      ]);
+    })() : entries.map(([session, depth]) => ({ type: "session", session, depth }));
+  for (const row of rows) {
+    if (row.type === "group") {
       const heading = document.createElement("li");
-      heading.className = "session-group-heading";
-      heading.textContent = group;
-      heading.title = `mesh group ${group}`;
+      heading.className = `session-group-heading session-group-level-${row.level}`;
+      const label = row.group === "workspace"
+        ? sessionWorkspaceLabel(row.value) : row.value;
+      heading.textContent = `${row.group} · ${label}`;
+      heading.title = `${row.group} group ${row.value}`;
       list.appendChild(heading);
-      previousGroup = group;
+      continue;
     }
+    const { session: s, depth } = row;
     const li = document.createElement("li");
     li.dataset.name = s.name;
     if (s.name === currentName) li.classList.add("active");
@@ -4646,6 +4722,12 @@ if (meshGroupToggle) {
   meshGroupToggle.checked = sessionGroupByMesh;
   meshGroupToggle.addEventListener("change", () =>
     setSessionGroupByMesh(meshGroupToggle.checked));
+}
+const workspaceGroupToggle = $("session-group-workspace");
+if (workspaceGroupToggle) {
+  workspaceGroupToggle.checked = sessionGroupByWorkspace;
+  workspaceGroupToggle.addEventListener("change", () =>
+    setSessionGroup("workspace", workspaceGroupToggle.checked));
 }
 
 /* The rail polls, but a poll is a tick behind at best: a session spawned from

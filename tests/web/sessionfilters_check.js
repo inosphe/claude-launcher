@@ -53,16 +53,23 @@ const document = {
 };
 const ctx = {};
 new Function("exports", "BASE", "localStorage", "sessionsCache", "$", "document",
+  "sessMeshes", "refreshSessions",
   src.slice(a, b) +
   "\nexports.category = sessionCategory;" +
   "\nexports.matches = sessionMatchesFilter;" +
   "\nexports.counts = sessionFilterCounts;" +
   "\nexports.sync = syncSessionFilters;" +
   "\nexports.set = setSessionFilter;" +
+  "\nexports.setGroup = setSessionGroup;" +
+  "\nexports.groupRows = sessionGroupRows;" +
+  "\nexports.workspace = sessionWorkspaceGroup;" +
   "\nexports.current = () => sessionFilter;")(
     ctx, "/t/local/", localStorage, sessions,
     (id) => id === "session-list" ? list : buttons[id.replace("session-filter-", "")],
-    document
+    document,
+    (name) => name === "alpha" ? [{ mesh: "mesh-a" }] :
+      name === "beta" ? [{ mesh: "mesh-b" }] : [],
+    () => {}
   );
 
 let failures = 0;
@@ -100,6 +107,28 @@ ctx.set("current");
 check("current restores the working fleet",
       rows.map((row) => row.classes.has("session-filtered")), [false, false, true]);
 
+const grouped = ctx.groupRows([
+  [{ name: "alpha", cwd: "F:/works/repo/.claude/worktrees/a" }, 0],
+  [{ name: "beta", cwd: "F:/works/repo/.claude/worktrees/b" }, 0],
+  [{ name: "solo", cwd: "F:/other" }, 0],
+], ["mesh", "workspace"]);
+check("workspace collapses worktrees of one repository",
+      [ctx.workspace({ cwd: "F:/works/repo/.claude/worktrees/a" }),
+       ctx.workspace({ cwd: "F:/works/repo/.claude/worktrees/b" })],
+      ["F:/works/repo", "F:/works/repo"]);
+check("first selected group is the outer nesting level",
+      grouped.filter((row) => row.type === "group").map((row) =>
+        `${row.level}:${row.group}:${row.value}`),
+      ["0:mesh:(no mesh)", "1:workspace:F:/other", "0:mesh:mesh-a",
+       "1:workspace:F:/works/repo", "0:mesh:mesh-b", "1:workspace:F:/works/repo"]);
+ctx.setGroup("workspace", true);
+ctx.setGroup("mesh", true);
+check("group priority follows checkbox activation order",
+      writes.slice(-2), [
+        ["claunch_session_group_order:/t/local/", "[\"workspace\",\"mesh\"]"],
+        ["claunch_session_group:/t/local/", "true"],
+      ]);
+
 check("the shipped page contains all four state controls",
       ["current", "running", "killed", "archived"].every((name) =>
         html.includes(`id="session-filter-${name}"`)), true);
@@ -108,9 +137,15 @@ check("filtered rows leave the layout",
 check("the shipped page contains the mesh grouping checkbox",
       html.includes('id="session-group-mesh"') &&
       html.includes("Group by mesh"), true);
+check("the shipped page contains the workspace grouping checkbox",
+      html.includes('id="session-group-workspace"') &&
+      html.includes("Group by workspace"), true);
 check("mesh grouping persists and rebuilds the rail",
       src.includes("const SESSION_GROUP_KEY") &&
+      src.includes("const SESSION_GROUP_ORDER_KEY") &&
       src.includes("sessionGroupByMesh") &&
+      src.includes("sessionGroupByWorkspace") &&
+      src.includes("sessionGroupRows") &&
       src.includes("session-group-heading") &&
       src.includes("setSessionGroupByMesh"), true);
 check("mesh group headings have dedicated styling",
