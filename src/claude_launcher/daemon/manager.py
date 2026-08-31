@@ -14,6 +14,8 @@ remove/clear calls are the exceptional paths that permanently drop it.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import logging
 import os
@@ -85,6 +87,11 @@ class SessionManager:
             str, Tuple[Session, Path, str, Set[str]]
         ] = {}
         self._next_codex_claim_retry = 0.0
+        #: A Codex TUI keeps one process alive across ``/new`` while changing
+        #: the rollout UUID.  Each watcher is armed from that exact terminal
+        #: command, with a pre-command snapshot, so concurrent Codex sessions
+        #: in the same cwd cannot be confused by a cwd-wide "latest" lookup.
+        self._codex_switch_tasks: Dict[str, asyncio.Task] = {}
 
     # ------------------------------------------------------------------ #
     # lifecycle
@@ -141,8 +148,96 @@ class SessionManager:
             delivery_hold=delivery_hold,
         )
         session.on_exit = self._session_exited
+        session.on_command_submitted = self._session_command_submitted
         self._sessions[name] = session
         return session
+
+    def _session_command_submitted(self, session: Session, command: str) -> None:
+        """Track the replacement rollout created by Codex ``/new``."""
+        words = command.split()
+        if not words or words[0] != "/new" or session.sdef.harness != "codex":
+            return
+        if self._sessions.get(session.sdef.name) is not session:
+            return
+        try:
+            prof = profile_mod.require_selector(session.sdef.profile or "")
+            entry = harness_registry.get("codex")
+            if entry is None:
+                return
+            codex_home = entry.profile_home(prof.config_dir)
+            known = codex_sessions.snapshot(codex_home)
+        except Exception:
+            log.exception(
+                "could not snapshot Codex rollouts before /new in session %r",
+                session.sdef.name,
+            )
+            return
+
+        previous = self._codex_switch_tasks.pop(session.sdef.name, None)
+        if previous is not None:
+            previous.cancel()
+        task = asyncio.create_task(
+            self._claim_codex_switch(
+                session,
+                codex_home,
+                session.sdef.cwd,
+                known,
+                session.sdef.conversation_id,
+            )
+        )
+        self._codex_switch_tasks[session.sdef.name] = task
+        task.add_done_callback(
+            functools.partial(self._codex_switch_finished, session.sdef.name)
+        )
+
+    def _codex_switch_finished(self, name: str, task: asyncio.Task) -> None:
+        """Forget a completed watcher without deleting a newer replacement."""
+        if self._codex_switch_tasks.get(name) is task:
+            self._codex_switch_tasks.pop(name, None)
+
+    async def _claim_codex_switch(
+        self,
+        session: Session,
+        codex_home: Path,
+        cwd: str,
+        known: Set[str],
+        previous_id: Optional[str],
+    ) -> None:
+        """Wait off-loop for ``/new`` to write its rollout, then persist it."""
+        try:
+            claim = functools.partial(
+                codex_sessions.claim_new,
+                codex_home,
+                cwd,
+                known,
+                timeout=3.0,
+            )
+            conversation_id = await asyncio.get_running_loop().run_in_executor(
+                None, claim
+            )
+        except asyncio.CancelledError:
+            return
+        except Exception:
+            log.exception(
+                "could not discover Codex /new conversation id for session %r",
+                session.sdef.name,
+            )
+            return
+        if not conversation_id:
+            log.warning(
+                "could not discover Codex /new conversation id for session %r",
+                session.sdef.name,
+            )
+            return
+        current = self._sessions.get(session.sdef.name)
+        if current is not session or session.sdef.conversation_id != previous_id:
+            return
+        session.sdef = replace(session.sdef, conversation_id=conversation_id)
+        self.persist()
+        log.info(
+            "updated Codex conversation id after /new in session %r",
+            session.sdef.name,
+        )
 
     def _session_exited(self, session: Session) -> None:
         """Fan a session's exit out to :attr:`exit_hooks` — unless the daemon
@@ -1119,6 +1214,11 @@ class SessionManager:
 
     async def shutdown_all(self) -> None:
         self.shutting_down = True  # these exits are the daemon's, not the sessions'
+        # A restart immediately after /new must not persist the superseded
+        # UUID while its short filesystem watcher is still in flight.
+        pending = list(self._codex_switch_tasks.values())
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
         self.persist()  # record which sessions were alive, for restore
         for session in list(self._sessions.values()):
             await session.shutdown()

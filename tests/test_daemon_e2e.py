@@ -193,6 +193,53 @@ def test_codex_conversation_id_is_retried_after_a_slow_rollout(
     asyncio.run(run())
 
 
+def test_codex_new_replaces_and_persists_the_conversation_id(
+    home, tmp_path, monkeypatch
+):
+    store.update(lambda doc: doc.update({"harnesses": {"codex": {
+        "command": [sys.executable, "-u", "-c", CHILD],
+        "home_env": "CODEX_HOME",
+        "restore_args": ["resume", "--last"],
+    }}}))
+    lineage.set_harness(profile.create("codex"), "codex")
+    snapshots = [{"older"}, {"older", "codex-thread-1"}]
+    claims = ["codex-thread-1", "codex-thread-2"]
+    seen = []
+
+    def snapshot(_home):
+        return snapshots.pop(0)
+
+    def claim(_home, cwd, known, *, timeout=2.0, poll=0.02):
+        seen.append((set(known), timeout))
+        return claims.pop(0)
+
+    monkeypatch.setattr(codex_sessions, "snapshot", snapshot)
+    monkeypatch.setattr(codex_sessions, "claim_new", claim)
+
+    async def run():
+        mgr = _manager()
+        session = mgr.create(SessionDef(
+            name="cx", profile="codex", cwd=str(tmp_path)
+        ))
+        assert session.sdef.conversation_id == "codex-thread-1"
+
+        await session.send_keys(["/new", "Enter"])
+        # Shutdown can begin before the background filesystem claim gets its
+        # first event-loop turn. It waits for the replacement ID before the
+        # restore definition is persisted.
+        await mgr.shutdown_all()
+
+        assert session.sdef.conversation_id == "codex-thread-2"
+        entries = json.loads(paths.sessions_json().read_text(encoding="utf-8"))
+        assert entries[0]["def"]["conversation_id"] == "codex-thread-2"
+        assert seen == [
+            ({"older"}, 2.0),
+            ({"older", "codex-thread-1"}, 3.0),
+        ]
+
+    asyncio.run(run())
+
+
 def test_pending_codex_claim_is_scanned_once_per_retry_window(
     home, tmp_path, monkeypatch
 ):

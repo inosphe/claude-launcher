@@ -109,6 +109,20 @@ def test_draft_state_is_read_from_the_keystrokes(data, expected):
     assert session_mod.draft_state_from_bytes(data) is expected
 
 
+def test_submitted_line_tracker_handles_split_input_editing_and_paste():
+    tracker = session_mod._SubmittedLineTracker()
+
+    assert tracker.feed(b"/nex\x7fw") == []
+    assert tracker.feed(b"\r") == ["/new"]
+    assert tracker.feed(b"/new named chat\r") == ["/new named chat"]
+    # A newline inside bracketed paste remains composer content. Only the
+    # separate Enter after the end marker submits the multiline value.
+    assert tracker.feed(b"\x1b[200~/new\nnot-a-command\x1b[201~") == []
+    assert tracker.feed(b"\r") == ["/new\nnot-a-command"]
+    # CRLF is one submission, not an empty second line.
+    assert tracker.feed(b"next\r\n") == ["next"]
+
+
 def test_a_thinking_pause_does_not_open_the_terminal_to_a_delivery(monkeypatch):
     """The first of the two holes, exactly as reported: type, pause longer
     than the stopwatch, and the line is still sitting there unsent."""
