@@ -43,6 +43,7 @@ RAW_WRITERS = {"paste", "send_keys", "write_bytes"}
 #: reason it is not a message sender.
 RAW_WRITER_ALLOWLIST = {
     ("daemon/session.py", "deliver"): "the one message sender",
+    ("daemon/session.py", "_deliver"): "the sender implementation under its delivery lock",
     ("daemon/session.py", "paste"): "implements the paste + delayed-CR rule",
     ("daemon/session.py", "send_keys"): "implements the raw keystroke path",
     ("daemon/api.py", "h_session_keys"): "raw keyboard passthrough over HTTP",
