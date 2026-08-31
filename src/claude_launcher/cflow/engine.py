@@ -2805,7 +2805,7 @@ def _next_step_impl(*, cwd: Optional[str] = None) -> dict:
     # case that needs saying — a red gate stops the run by itself, while a
     # green one from somebody else's tree is read as proof and is not.
     isolation = checkout.check(cwd=cwd)
-    result = _run_verify(step, cwd)
+    result = _run_verify(step, cwd, scope=verify_scope(cwd))
 
     with state_mod.run_lock(cwd):
         workflow, state = _load(cwd)
@@ -2865,8 +2865,52 @@ def _next_step_impl(*, cwd: Optional[str] = None) -> dict:
         return payload
 
 
-def _run_verify(step: Step, cwd: Optional[str]) -> Optional[dict]:
-    """Run the step's verify command; None on success, failure details otherwise."""
+def verify_scope(cwd: Optional[str]) -> str:
+    """Whose session a verify command runs as, given where the run lives.
+
+    A gate under ``tools/`` asks a question about a session -- "did MY branch
+    land", "is MY report filed" -- and finds the session by reading
+    ``CLAUNCH_SESSION``. The run's own scope IS that name whenever it has one,
+    so this returns it and :func:`_run_verify` writes it in rather than
+    letting the caller's environment supply it. Two callers, two reasons:
+
+    * the in-session MCP server, where the ambient value already equals the
+      scope, so writing it in changes nothing and closes the door on it ever
+      *not* being equal;
+    * anything else that advances a run -- the same door
+      :func:`probe_env` shut for the daemon's probes (``claunch-04ru``).
+
+    The fallback is the case that actually failed. A run's scope is taken from
+    the ambient ``CLAUNCH_SESSION`` at ``start`` (:func:`.state.current_scope`),
+    so a run started by a process that had none is keyed to
+    :data:`.state.DEFAULT_SCOPE` and holds no identity to hand on. Measured
+    (issue ``claunch-d7qp``): a worker's ``improv-worker`` round drove
+    ``run-881710ab`` out of ``.cflow/runs/default/`` in its own worktree, and
+    ``wrapup``'s ``tools/report_check.py`` answered ``exit 2 -- error: no
+    session`` because the environment it inherited had none either. The same
+    shape is in two other worktrees on this machine (sessions s305 and s362,
+    three failures), and s362's round was blocked until a person moved it.
+
+    So the identity comes from the daemon instead: exactly one live managed
+    session standing in this directory is that session's checkout, and a gate
+    run there is about its round (:func:`.checkout.occupant`, which declines
+    to guess when it is not exactly one). Nothing is invented -- when the
+    daemon cannot say, the answer is empty and :func:`probe_env` removes the
+    variable, which is precisely the state the failing run was already in.
+    """
+    scope = state_mod.current_scope()
+    if scope and scope != state_mod.DEFAULT_SCOPE:
+        return scope
+    return checkout.occupant(cwd)
+
+
+def _run_verify(step: Step, cwd: Optional[str], *, scope: str) -> Optional[dict]:
+    """Run the step's verify command; None on success, failure details otherwise.
+
+    ``scope`` has no default for the same reason :func:`run_probe`'s has none:
+    a default is a door for somebody else's environment to walk back through,
+    and it would do it silently. See :func:`verify_scope`.
+    """
     verify = step.verify
     try:
         completed = subprocess.run(
@@ -2878,6 +2922,7 @@ def _run_verify(step: Step, cwd: Optional[str]) -> Optional[dict]:
             encoding="utf-8",
             errors="replace",
             timeout=verify.timeout,
+            env=probe_env(scope),
         )
     except subprocess.TimeoutExpired:
         return {"exit_code": None, "output": f"timed out after {int(verify.timeout)}s"}

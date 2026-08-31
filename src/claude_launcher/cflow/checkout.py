@@ -116,6 +116,64 @@ def inspect(*, session: str, cwd: Optional[str] = None) -> Occupancy:
     return Occupancy(run_cwd, session_cwd=session_cwd, peers=tuple(sorted(peers)))
 
 
+def occupant(cwd: Optional[str] = None) -> str:
+    """The one live managed session whose own directory IS this one, or "".
+
+    The reverse of :func:`inspect`: that asks "where does this named session
+    stand", this asks "who stands here". It exists because a run does not
+    always carry a name to ask with. A run's scope comes from the ambient
+    ``CLAUNCH_SESSION`` of whatever started it (:func:`.state.current_scope`),
+    so a run started by a process that did not have it is keyed to
+    :data:`.state.DEFAULT_SCOPE` -- a real, drivable run with no session
+    identity anywhere in it. Measured (issue ``claunch-d7qp``): three worker
+    rounds drove a run out of ``.cflow/runs/default/`` inside their own
+    worktree, and their ``wrapup`` gate (``tools/report_check.py``, which
+    resolves "whose report" the same way) answered ``exit 2``, ``error: no
+    session``, three times in a row. The round could not be closed by any
+    flag the agent could pass; a person moved the run by hand.
+
+    The daemon holds the fact the run is missing, and it is not a guess: it
+    records each managed session's directory, and a session standing in this
+    exact directory is the session whose round a gate here is about.
+
+    **One, or none.** Two sessions standing in the same checkout make the
+    question ambiguous, and this returns "" rather than picking -- the same
+    refusal ``claunch report``'s own last-resort lookup makes
+    (``cli_report._run_scope``: "More than one run here is ambiguity, so it is
+    declined rather than guessed"). An exited session is nobody, so it never
+    answers.
+
+    Best-effort, like everything else in this module: no daemon, no answer or
+    an unreadable one all return "", which leaves the caller exactly where it
+    was before this existed.
+    """
+    here = state_mod.resolve_cwd(cwd)
+    client = daemon_client.connect()
+    if client is None:
+        return ""
+    try:
+        doc = client.get("/api/sessions", timeout=CALL_TIMEOUT) or {}
+    except daemon_client.DaemonClientError:
+        return ""
+    rows = doc.get("sessions") if isinstance(doc, dict) else doc
+    if not isinstance(rows, list):
+        return ""
+    found: List[str] = []
+    for row in rows:
+        if not isinstance(row, dict) or _exited(row):
+            continue
+        name, raw = str(row.get("name") or ""), row.get("cwd")
+        if not name or not raw:
+            continue
+        try:
+            where = state_mod.resolve_cwd(str(raw))
+        except OSError:
+            continue
+        if where == here:
+            found.append(name)
+    return found[0] if len(found) == 1 else ""
+
+
 def _exited(row: dict) -> bool:
     if row.get("exited") or row.get("exited_at"):
         return True
@@ -179,12 +237,18 @@ def own_checkout(
     paragraph gave only the first and was read as covering both, which is how
     the defect below stood in the code with a docstring saying it could not.
 
-    * A verify INHERITS it. ``_run_verify`` passes no ``env=``, so the
-      subprocess takes the environment of whoever called
-      :func:`..engine.next_step`, and the only production caller is the
-      in-session MCP server (``cflow/mcp.py``). Measured in a worker session:
-      a verify command printing ``CLAUNCH_SESSION`` printed that session's own
-      name.
+    * A verify is GIVEN it too, now. It used to INHERIT it: ``_run_verify``
+      passed no ``env=``, so the subprocess took the environment of whoever
+      called :func:`..engine.next_step` -- the in-session MCP server, where
+      the ambient name is the session's own and the answer was right. It was
+      right only while that held, and it did not always: a server started
+      without ``CLAUNCH_SESSION`` keys its run to
+      :data:`.state.DEFAULT_SCOPE` and hands the gate an environment with no
+      session in it at all, which is ``exit 2, no session`` for every gate
+      that asks whose round this is (issue ``claunch-d7qp``, measured in
+      three worktrees). So the environment is now built from the run's own
+      scope, falling back to the session the daemon says stands in this
+      checkout (:func:`..engine.verify_scope`, :func:`occupant`).
     * A probe is GIVEN it. The daemon's clock does not run a verify; it runs
       :func:`..engine.run_probe`, a different function in a different process
       -- and that process holds one ``CLAUNCH_SESSION``, the terminal's that
@@ -195,6 +259,12 @@ def own_checkout(
       ``claunch-04ru``). Noting that a probe is not a verify and stopping
       there is what this paragraph used to do: the distinction was right and
       the conclusion drawn from it was not.
+
+    Both now go through :func:`..engine.probe_env`, which is the point --
+    they were two subprocesses taking their session identity from whatever
+    environment happened to be around them, and they failed in the two
+    different directions that allows (the probe got somebody else's name, the
+    verify got none).
 
     ``explicit`` is a directory the caller was given outright (a gate's
     ``--repo``). It wins without consulting anything, so a test or a hand-run

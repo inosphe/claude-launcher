@@ -1255,7 +1255,7 @@ def test_verify_result_is_discarded_when_the_run_moved(flow_dir, monkeypatch):
     engine.start("verified")
     engine.report("built it")
 
-    def moving_verify(step, cwd):
+    def moving_verify(step, cwd, *, scope):
         # a human archives the run and starts another while the build runs
         engine.archive(by="user")
         engine.start("linear")
