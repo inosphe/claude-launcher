@@ -1493,6 +1493,7 @@ body.term-split #terminal { flex: var(--split-term, 0.6) 1 0; min-height: 80px; 
   color: #e6edf3; border: 1px solid #30363d; border-radius: 6px; font-size: 13px;
 }
 .beads-filters { align-items: center; margin-bottom: 12px; }
+.beads-page-tabs { margin-bottom: 12px; }
 .beads-session-pick {
   margin-left: auto; padding: 4px 8px; background: #0d1117; color: #e6edf3;
   border: 1px solid #30363d; border-radius: 6px; font-size: 12px;
@@ -3199,7 +3200,7 @@ a.window-owner:hover { color: #79c0ff; text-decoration: underline; }
 }
 
 /* ------------------------------------------------------------------ */
-/* the Reports page: every round report on this machine               */
+/* the Reports tab in the Beads page: every round report on this machine */
 /* ------------------------------------------------------------------ */
 /* Its own prefix, deliberately. The page borrows the dashboard's shared
    parts (.wf-head, .wf-note, .seq-tab) and owns its own table, so a change

@@ -95,6 +95,7 @@ let reportsState = "all", reportsSession = "", reportsIssue = "", reportsOldest 
 const shown = [];
 function showView(n) { shown.push(n); }
 function $() { return view; }
+function renderBeads() { renderReports(); }
 async function api(p) {
   fetched.push(p);
   return { ok: answer.ok, status: answer.status, json: async () => answer.body };
@@ -321,8 +322,7 @@ check("before the first answer the page says it is loading",
 /* ---- the fetch and the poll -------------------------------------------- */
 ctx.setAnswer({ ok: true, status: 200, body: { reports: ROWS } });
 ctx.open();
-check("opening the page shows it and asks for the index once",
-      [ctx.shown[ctx.shown.length - 1], fetched], ["reports", ["/api/reports"]]);
+check("opening the tab asks for the index once", fetched, ["/api/reports"]);
 check("and arms one poll, slow enough for a thing written once a round",
       timers, [30000]);
 ctx.open();
