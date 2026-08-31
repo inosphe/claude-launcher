@@ -86,6 +86,12 @@ class Harness:
     #: value is handed to the harness as ``--model=<value>``; profile/provider
     #: env remains responsible for resolving aliases to backend model ids.
     models: List[str] = field(default_factory=list)
+    #: Closed reasoning-effort choices exposed by session creation forms.
+    efforts: List[str] = field(default_factory=list)
+    #: Optional templates for native model/effort selection. ``{model}`` and
+    #: ``{effort}`` are replaced at launch, keeping harness syntax declarative.
+    model_args: List[str] = field(default_factory=list)
+    effort_args: List[str] = field(default_factory=list)
     #: Arguments appended only when claunch restores an existing session.
     restore_args: List[str] = field(default_factory=list)
     #: Environment overrides layered under the session's own ``--env``.
@@ -236,6 +242,9 @@ class Harness:
             "command": list(self.command),
             "args": list(self.args),
             "models": list(self.models),
+            "efforts": list(self.efforts),
+            "model_args": list(self.model_args),
+            "effort_args": list(self.effort_args),
             "restore_args": list(self.restore_args),
             "description": self.description,
             "builtin": self.builtin,
@@ -373,6 +382,9 @@ def _parse_entry(name: str, body) -> Harness:
         command=command,
         args=_as_list(body.get("args"), f"harness {name!r} args"),
         models=_as_list(body.get("models"), f"harness {name!r} models"),
+        efforts=_as_list(body.get("efforts"), f"harness {name!r} efforts"),
+        model_args=_as_list(body.get("model_args"), f"harness {name!r} model_args"),
+        effort_args=_as_list(body.get("effort_args"), f"harness {name!r} effort_args"),
         restore_args=_as_list(
             body.get("restore_args"), f"harness {name!r} restore_args"
         ),

@@ -1661,6 +1661,7 @@ class Wizard(Form):
         self._preset_borrow: str = get("borrow") or ""
         self._models_for: Optional[str] = None
         self._preset_model: str = get("model") or ""
+        self._preset_effort: str = get("effort") or ""
 
         profile_defs = self.sources.profile_options() or [
             {"value": p, "label": p}
@@ -1691,6 +1692,11 @@ class Wizard(Form):
         model = ChoiceField(
             key="model", label="Model",
             hint="model alias handed to the selected harness at launch",
+            options=[Option("(harness default)", "")],
+        )
+        effort = ChoiceField(
+            key="effort", label="Reasoning effort",
+            hint="reasoning effort handed to the selected harness at launch",
             options=[Option("(harness default)", "")],
         )
 
@@ -1880,7 +1886,7 @@ class Wizard(Form):
         )
 
         return [
-            name, profile, model, borrow, null, directory,
+            name, profile, model, effort, borrow, null, directory,
             *worktree_fields(""), role,
             resume, fork, skip_permissions, codex_yolo, codex_sandbox,
             args_field, mesh, handle, connect, workflow, context, task,
@@ -1979,6 +1985,14 @@ class Wizard(Form):
             model.select(keep)
             self._preset_model = ""
         self.field("model").hidden = not bool(capabilities.get("models"))
+        effort = self.field("effort")
+        effort.options = [Option("(harness default)", "")] + [
+            Option(str(value), str(value)) for value in capabilities.get("efforts") or []
+        ]
+        effort.hidden = not bool(capabilities.get("efforts"))
+        if self._preset_effort:
+            effort.select(self._preset_effort)
+            self._preset_effort = ""
         borrow_allowed = bool(detail.get("borrow_allowed", claude))
         self._sync_borrow_options(
             self.value("profile") or "",
@@ -2097,6 +2111,7 @@ class Wizard(Form):
         args.model = (
             None if self.field("model").hidden else self.value("model") or None
         )
+        args.effort = None if self.field("effort").hidden else self.value("effort") or None
         detail = self.sources.profile_harness(self.value("profile") or "")
         claude = detail.get("harness") == "claude"
         borrow_allowed = bool(detail.get("borrow_allowed", claude))
@@ -2391,6 +2406,7 @@ class SpawnWizard(Form):
         self._preset_profile: str = get("profile") or ""
         self._preset_borrow: str = get("borrow") or ""
         self._preset_model: Optional[str] = get("model", None)
+        self._preset_effort: Optional[str] = get("effort", None)
         self._borrow_for: Optional[str] = None
         #: The same flag, kept rather than consumed: `_preset_profile` is
         #: spent seeding the row on the first rebuild, and after that
@@ -2417,6 +2433,15 @@ class SpawnWizard(Form):
         model = ChoiceField(
             key="model", label="Model",
             hint="model alias for the child (spawn.allow_args decides whether it may change)",
+            options=[Option("(harness default)", "")],
+        )
+        self._typed_effort: Optional[str] = (
+            None if d is None or wizard_recall.typed(d, "effort") is None
+            else str(wizard_recall.typed(d, "effort"))
+        )
+        effort = ChoiceField(
+            key="effort", label="Reasoning effort",
+            hint="reasoning effort for the child (spawn.allow_args decides whether it may change)",
             options=[Option("(harness default)", "")],
         )
         borrow = ChoiceField(
@@ -2547,7 +2572,7 @@ class SpawnWizard(Form):
         )
         attach.select(bool(get("attach")))
         return [
-            parent, over_limit, name, profile, model, borrow, null, fork,
+            parent, over_limit, name, profile, model, effort, borrow, null, fork,
             workspace,
             *worktree_fields(""), codex_yolo, codex_sandbox, args_field,
             mesh, handle, role, connect, workflow, context, task,
@@ -2674,6 +2699,7 @@ class SpawnWizard(Form):
         model_for = (
             parent, effective_selector, child_harness,
             str(parent_info.get("model") or ""),
+            str(parent_info.get("effort") or ""),
         )
         if model_for != self._model_for:
             self._model_for = model_for
@@ -2704,6 +2730,17 @@ class SpawnWizard(Form):
             )
         else:
             model_f.disabled_note = ""
+        effort_f = self.field("effort")
+        effort_f.options = [Option("(harness default)", "")] + [
+            Option(str(value), str(value)) for value in capabilities.get("efforts") or []
+        ]
+        inherited_effort = str(parent_info.get("effort") or "") if child_harness == parent_info.get("harness") else ""
+        wanted_effort = self._preset_effort if self._preset_effort is not None else inherited_effort
+        effort_f.select(wanted_effort)
+        self._preset_effort = None
+        effort_f.hidden = not bool(capabilities.get("efforts"))
+        effort_f.disabled = not effort_f.hidden and "args" not in may
+        effort_f.disabled_note = "spawn policy does not allow changing effort" if effort_f.disabled else ""
         mode_for = (parent, effective_selector, child_harness)
         if mode_for != self._codex_mode_for:
             self._codex_mode_for = mode_for
@@ -3078,6 +3115,15 @@ class SpawnWizard(Form):
             args.model = (
                 None if selected_model == self._model_original else selected_model
             )
+        effort_f = self.field("effort")
+        selected_effort = str(effort_f.value or "")
+        inherited_effort = str(self._session(args.parent).get("effort") or "")
+        if effort_f.hidden:
+            args.effort = None
+        elif effort_f.disabled:
+            args.effort = self._typed_effort
+        else:
+            args.effort = None if selected_effort == inherited_effort else selected_effort
         # Read through the disable, like the other form: a borrow picked and
         # then greyed out (harness flipped, null said yes) must not travel.
         args.borrow = (

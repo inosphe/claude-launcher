@@ -85,6 +85,7 @@ class SessionDef:
     #: an arbitrary argv string.  Profile/provider env may still resolve the
     #: selected alias to a backend-specific model id.
     model: Optional[str] = None
+    effort: Optional[str] = None
     env: Dict[str, str] = field(default_factory=dict)
     restore: bool = True
     cols: int = 120
@@ -172,6 +173,7 @@ class SessionDef:
             "cwd": self.cwd,
             "args": list(self.args),
             "model": self.model,
+            "effort": self.effort,
             "env": dict(self.env),
             "restore": self.restore,
             "cols": self.cols,
@@ -203,6 +205,7 @@ class SessionDef:
             cwd=str(data.get("cwd") or ""),
             args=tuple(str(a) for a in data.get("args") or ()),
             model=str(data.get("model") or "").strip() or None,
+            effort=str(data.get("effort") or "").strip() or None,
             env={str(k): str(v) for k, v in (data.get("env") or {}).items()},
             restore=bool(data.get("restore", True)),
             cols=int(data.get("cols") or 120),
@@ -321,6 +324,14 @@ def normalize(sdef: SessionDef, *, restoring: bool = False) -> SessionDef:
             raise HarnessError(
                 "the extra args already select a model; drop their --model/-m "
                 "flag, or drop the session model choice"
+            )
+    if sdef.effort:
+        if not entry.efforts:
+            raise HarnessError(f"harness {sdef.harness!r} does not declare selectable efforts")
+        if sdef.effort not in entry.efforts:
+            raise HarnessError(
+                f"unknown effort {sdef.effort!r} for harness {sdef.harness!r} "
+                f"(known: {', '.join(entry.efforts)})"
             )
     if sdef.null_token and sdef.borrow:
         # Both answer the same question (whose credential) and the pair is
@@ -625,8 +636,16 @@ def build_command(
             arg for arg in entry.args
             if not (manages_mode and arg in entry.mode_conflict_args)
         ]
-        model_args = [f"--model={sdef.model}"] if sdef.model else []
-        runtime_args = [*base_args, *model_args, *sdef.args]
+        def selection_args(template, value):
+            if not value:
+                return []
+            return [str(arg).replace("{model}", str(sdef.model or ""))
+                    .replace("{effort}", str(sdef.effort or "")) for arg in template]
+        model_args = selection_args(entry.model_args, sdef.model)
+        if not model_args and sdef.model:
+            model_args = [f"--model={sdef.model}"]
+        effort_args = selection_args(entry.effort_args, sdef.effort)
+        runtime_args = [*base_args, *model_args, *effort_args, *sdef.args]
         if prof is not None:
             try:
                 runtime_args = runner.harness_launch_args(

@@ -3018,6 +3018,14 @@ function syncNewModelOptions(f, harnessName, capabilities, parent = null) {
   }
   const row = $("new-model-row");
   if (row) row.classList.toggle("hidden", !choices.length);
+  if (f.effort) {
+    const efforts = (capabilities.efforts || []).map(String);
+    f.effort.innerHTML = "";
+    f.effort.appendChild(new Option("(harness default)", ""));
+    for (const value of efforts) f.effort.appendChild(new Option(value, value));
+    const effortRow = $("new-effort-row");
+    if (effortRow) effortRow.classList.toggle("hidden", !efforts.length);
+  }
 }
 
 /* ---- Codex's harness-specific runtime panel ----------------------------
@@ -3807,7 +3815,7 @@ $("new-session").addEventListener("input", () => {
    spawn modal. A form that offers what it cannot send teaches the policy
    wrong; one that withholds what the policy opened teaches it just as
    wrong, and lies to the person who set 'allow_profile: true'. */
-const SPAWN_INHERITS = ["profile", "harness", "model", "borrow", "null_token", "cwd",
+const SPAWN_INHERITS = ["profile", "harness", "model", "effort", "borrow", "null_token", "cwd",
                         "args", "resume", "fork", "skip_permissions", "codex_yolo",
                         "codex_sandbox"];
 
@@ -3825,7 +3833,7 @@ const SPAWN_INHERITS = ["profile", "harness", "model", "borrow", "null_token", "
    held to the same partition by tests/web/newform_check.js: the fold's rows
    plus these must be exactly SPAWN_INHERITS, so promoting a row means moving
    it, never copying it. */
-const RUNTIME_PROMOTED = ["profile", "harness", "model"];
+const RUNTIME_PROMOTED = ["profile", "harness", "model", "effort"];
 
 /* The picked parent's spawn capabilities, and which parent they are about:
    one report per parent, kept until the pick moves. */
@@ -4133,6 +4141,10 @@ function spawnChildFields(f, body) {
     // and returns the child to the selected harness's default.
     body.model = f.model.value;
   }
+  if (f.effort && !f.effort.disabled &&
+      f.effort.value !== String((spawnParent() || {}).effort || "")) {
+    body.effort = f.effort.value;
+  }
   const selector = newProfileSelector(f);
   const harnessName = newProfileHarnessName(f, selector);
   const capabilities = (typeof harnessDetails !== "undefined"
@@ -4246,6 +4258,7 @@ $("new-session").addEventListener("submit", async (e) => {
     args: f.args.value.trim() ? f.args.value.trim().split(/\s+/) : [],
   };
   if (!parent && f.model && f.model.value) body.model = f.model.value;
+  if (!parent && f.effort && f.effort.value) body.effort = f.effort.value;
   if (!parent) {
     const selector = newProfileSelector(f);
     const harnessName = newProfileHarnessName(f, selector) || "claude";
@@ -13486,6 +13499,13 @@ function syncSpawnModel(ui, childHarness, capabilities, may) {
         "(spawn.allow_args)"
       : "";
   }
+  if (ui.effort) {
+    const efforts = (capabilities.efforts || []).map(String);
+    const parentEffort = childHarness === parent.harness ? String(parent.effort || "") : "";
+    fillSpawnSelect(ui.effort, efforts.map((value) => [value, value]), "(harness default)", parentEffort);
+    ui.effort.hidden = !efforts.length;
+    ui.effort.disabled = !may.includes("args");
+  }
 }
 
 /* The wizard's _sync: every dependency between rows, re-derived on every
@@ -13729,6 +13749,9 @@ function spawnPayload(ui) {
   if (ui.model && !ui.model.disabled &&
       ui.model.value !== String(ui._modelOriginal || "")) {
     body.model = ui.model.value;
+  }
+  if (ui.effort && !ui.effort.disabled && ui.effort.value !== String((ui.parentSess || {}).effort || "")) {
+    body.effort = ui.effort.value;
   }
   const typedArgs = !ui.args.disabled && (ui.args.value || "").trim()
     ? ui.args.value.trim().split(/\s+/) : [];
@@ -14114,6 +14137,10 @@ function buildSpawnForm(parentName, seed) {
   );
   ui.modelRow.hidden = true;
   box.appendChild(ui.modelRow);
+  ui.effort = document.createElement("select");
+  ui.effortRow = spawnRow("Reasoning effort", ui.effort, null);
+  ui.effortRow.hidden = true;
+  box.appendChild(ui.effortRow);
   ui.borrow = document.createElement("select");
   box.appendChild(spawnRow("Borrow", ui.borrow, (ui.borrowNote = el("span", "sess-spawn-note"))));
   ui.nullTok = null; ui.nullNote = null;
