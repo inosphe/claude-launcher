@@ -24,7 +24,7 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import lineage, profile, store
+from claude_launcher import lineage, paths, profile, store
 from claude_launcher.daemon import beads as beads_mod
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
@@ -1056,6 +1056,17 @@ def test_issue_text_files_the_spec_and_sends_the_session_to_read_it(
             doc = await resp.json()
             assert resp.status == 201, doc
             assert br.issues[doc["beads"]["issue"]]["title"] == "Wire the picker"
+
+            # The issue text is consumed only to write the board record.  A
+            # session definition is persisted for restart/rebriefing, so it
+            # must retain the issue id and opening task without duplicating
+            # the specification outside the board.
+            mgr.persist()
+            saved = paths.sessions_json().read_text(encoding="utf-8")
+            assert "Rail must answer the board" not in saved
+            assert "every row, one call" not in saved
+            assert "Wire the picker" not in saved
+            assert doc["beads"]["issue"] in saved
             await mgr.shutdown_all()
         finally:
             onboard.arrange = real
