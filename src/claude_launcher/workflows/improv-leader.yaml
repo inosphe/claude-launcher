@@ -482,13 +482,19 @@ steps:
       않는다. 손으로 재지 않는다 — 워커의 정렬 단계 게이트가 부르는 것과
       **같은 스크립트**를 후보마다 부른다. 같은 명령이어야 워커가 통과시킨
       것을 여기서 되돌리는 일이 안 생긴다:
-        uv run --no-sync python tools/merge_ready.py --branch <branch> --target master --checkout
+        uv run --no-sync python tools/merge_ready.py --branch <branch> --target master --checkout --allow-target-advance
       종료 코드가 판정이다:
       - 0 ready — 통합 후보다(대상이 이미 그 브랜치에 들어 있거나, 프리뷰
         머지 위 재측정이 끝나 있다)
       - 3 rebase — 미리 병합이 텍스트로 충돌한다. 재정렬 말고는 길이 없다.
-      - 1 re-measure — 대상은 움직였지만 병합은 깨끗하다. 브랜치는 합쳐지고,
-        낡은 것은 증거다: 워커의 표적 수치는 움직이기 전 base에서 쟀다.
+      - 1 re-measure — 대상은 움직였지만 병합은 깨끗하고, 이전 프리뷰가
+        없거나 프리뷰→착지 diff의 파일 목록·stable patch-id가 대상 이동분과
+        다르다. 프리뷰 체인이 있으며 두 대조가 같으면 대상 이동은 정상이고
+        0 ready로 통과한다.
+        대상·후보 변경 파일은 반드시 각 merge-base에서 `git diff --name-only
+        <merge-base>..<tip>`으로 읽는다. 양방향 `target..<branch>`는 후보가
+        만진 파일 목록이 아니다. 전체 스윕 실패가 있으면 실패 테스트가 import
+        하는 모듈과 파일 교집합을 먼저 보고, 겹치면 함수 단위까지 확인한다.
       - 2 cannot tell — 판정 불가. 「아니다」로 읽지 말고 무엇이 안 읽혔는지
         먼저 본다.
       - 4 dirty checkout — 브랜치 쪽은 준비됐는데 **머지가 일어날 워킹
@@ -594,7 +600,7 @@ steps:
         후보는 배치 안에서 낡는다** — preflight의 판정은 배치 시작 시점의
         것이다. 그래서 각 머지 직전에 그 후보에 대해 게이트를 한 번 더
         부른다: `uv run --no-sync python tools/merge_ready.py --branch
-        <branch> --target master --checkout`. 3(충돌)이면 그 브랜치는
+        <branch> --target master --checkout --allow-target-advance`. 3(충돌)이면 그 브랜치는
         머지하지 않고 preflight의 재요청 규칙으로 되돌린다 — 충돌 트리를
         master에 강제로 얹지 않는다. 1(재측정)이면 남은 후보를 먼저
         머지하고 이 브랜치는 재측정 요청으로 되돌린다.
