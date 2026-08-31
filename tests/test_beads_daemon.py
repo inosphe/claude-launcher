@@ -24,8 +24,9 @@ from pathlib import Path
 
 import pytest
 
-from claude_launcher import lineage, paths, profile, store
+from claude_launcher import lineage, profile, store
 from claude_launcher.daemon import beads as beads_mod
+from claude_launcher.daemon import paths
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager

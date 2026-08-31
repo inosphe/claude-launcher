@@ -748,6 +748,13 @@ def test_a_reminder_that_was_never_typed_does_not_spend_the_restatement(proj):
     sess.status_value = "busy"
     due = clock.scan(time.monotonic() + 700)
     asyncio.run(clock._deliver(*due[0]))
+    assert sess.delivered == []                     # resume re-arms, not replays
+
+    # The re-armed interval elapses while the session keeps working. The
+    # first reminder actually typed is still the full form: the held one was
+    # never delivered, so it spent nothing.
+    later = clock.scan(time.monotonic() + 700 + 601)
+    asyncio.run(clock._deliver(*later[0]))
     assert "do one" in sess.delivered[0]            # still the full form
 
 
