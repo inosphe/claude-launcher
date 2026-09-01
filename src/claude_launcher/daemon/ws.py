@@ -88,6 +88,7 @@ import asyncio
 import dataclasses
 import json
 import logging
+import re
 from typing import Optional
 
 from aiohttp import WSMsgType, web
@@ -95,6 +96,27 @@ from aiohttp import WSMsgType, web
 from .session import Session, SessionGone
 
 log = logging.getLogger("claunch.daemon.ws")
+
+
+# xterm.js answers OSC 10/11 foreground/background-colour queries through its
+# ordinary ``onData`` event. Codex treats those answers as keyboard input:
+# the ESC bytes become Escape keypresses and the remaining payload lands in
+# its composer. Keep the filter narrow to the complete replies xterm emits
+# for Codex, not general terminal control traffic such as cursor or device
+# reports.
+_CODEX_OSC_COLOR_RESPONSE = re.compile(
+    rb"^(?:\x1b](?:10|11);rgb:[0-9A-Fa-f]{1,4}/[0-9A-Fa-f]{1,4}/[0-9A-Fa-f]{1,4}\x1b\\)+$"
+)
+
+
+def _is_codex_osc_color_response(harness: str, data: bytes) -> bool:
+    """Whether ``data`` is an automatic xterm colour reply for Codex.
+
+    The reply is a terminal-emulator response rather than a person typing.
+    It must therefore neither enter the PTY nor update the terminal draft
+    state used to hold automated deliveries.
+    """
+    return harness == "codex" and bool(_CODEX_OSC_COLOR_RESPONSE.fullmatch(data))
 
 
 @dataclasses.dataclass
@@ -245,6 +267,8 @@ async def terminal_ws(request: web.Request) -> web.WebSocketResponse:
                     # what they typed is still sitting in the composer
                     # unsent, and only these bytes can say (Session.
                     # note_human_input / draft_state_from_bytes).
+                    if _is_codex_osc_color_response(session.sdef.harness, msg.data):
+                        continue
                     session.note_human_input(at_terminal=True, data=msg.data)
                     try:
                         await session.write_bytes(msg.data)
