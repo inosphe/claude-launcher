@@ -125,6 +125,9 @@ _GATED_FIELDS = (
     # A model becomes a harness argv flag at launch, so the same policy that
     # permits arbitrary args governs this closed, named override too.
     ("model", "allow_args"),
+    # Reasoning effort is emitted as a harness argv/config argument alongside
+    # the model, so it has the same override policy and inheritance rules.
+    ("effort", "allow_args"),
     ("env", "allow_env"),
     # Last on purpose: it is cut from whatever directory the fields above
     # settled on, so a worktree of a workspace is a worktree of that
@@ -369,6 +372,7 @@ def check(
         "cwd": parent.get("cwd") or "",
         "args": list(parent.get("args") or ()),
         "model": parent.get("model") or None,
+        "effort": parent.get("effort") or None,
         "env": dict(parent.get("env") or {}),
         # Auth travels with the profile: a child of a session that borrows
         # (or runs tokenless) authenticates the way its parent does, or it
@@ -400,10 +404,10 @@ def check(
 
     for key, gate in _GATED_FIELDS:
         value = request.get(key)
-        # ``model: ""`` is an explicit request to return a child to the
-        # harness default.  It must remain distinguishable from an omitted
-        # model, which inherits the parent's selection.
-        if key == "model":
+        # An empty model or effort explicitly returns a child to the harness
+        # default. It must remain distinguishable from an omitted value,
+        # which inherits the parent's selection.
+        if key in ("model", "effort"):
             if key not in request or value is None:
                 continue
         elif value in (None, "", [], {}) or value is False:
@@ -419,8 +423,8 @@ def check(
             )
         if key == "args":
             child["args"] = [str(a) for a in value]
-        elif key == "model":
-            child["model"] = str(value).strip() or None
+        elif key in ("model", "effort"):
+            child[key] = str(value).strip() or None
         elif key == "borrow":
             child["borrow"] = str(value)
             # An explicit borrow replaces inherited tokenlessness — unless
@@ -465,6 +469,8 @@ def check(
                 child["args"] = []
             if "model" not in request:
                 child["model"] = None
+            if "effort" not in request:
+                child["effort"] = None
             if not request.get("borrow"):
                 child["borrow"] = None
             if not request.get("null_token"):
