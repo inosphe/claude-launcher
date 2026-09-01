@@ -8793,6 +8793,9 @@ let beadsOpen = false;
 let beadsTimer = null;
 let beadsCache = null;     // the last /api/beads payload
 let beadsError = "";
+let beadsLoading = false;  // one incremental page request at a time
+let beadsMore = true;      // whether the stream has another page
+let beadsNextOffset = 0;   // shared page offset, supplied by the daemon
 let beadsFocus = "";       // the issue opened in the detail pane, by id
 let beadsDetail = null;    // its /api/beads/<id> payload
 let beadsFilter = "active";  // status filter: active | <status> | all
@@ -8806,6 +8809,8 @@ let beadsDragging = "";    // the issue id a Queues card drag is carrying
 
 const BEADS_STATUSES = ["open", "in_ready", "in_progress", "in_review", "blocked", "closed"];
 const BEADS_ACTIVE = new Set(["open", "in_ready", "in_progress", "in_review", "blocked"]);
+const BEADS_STREAM_PAGE = 48;
+const BEADS_STREAM_NEAR_END = 280;
 
 function openBeads(id, section) {
   beadsSection = section === "reports" ? "reports"
@@ -8821,8 +8826,8 @@ function openBeads(id, section) {
     stopReportsPoll();
     beadsOpen = true;
     renderBeads();
-    refreshBeads();
-    if (!beadsTimer) beadsTimer = setInterval(refreshBeads, 5000);
+    restartBeadsStream();
+    if (!beadsTimer) beadsTimer = setInterval(refreshBeads, 15000);
   }
 }
 
@@ -8834,44 +8839,101 @@ function stopBeadsPoll() {
 async function refreshBeads() {
   if (!beadsOpen) return;
   if (beadsSection === "queues") { await refreshQueues(); return; }
-  // The focused issue's own fetch goes out *with* the listing, not after it.
-  // The two answer different questions and the detail is the small one, but
-  // it was queued behind three quarters of a megabyte of board it does not
-  // read — so the page a reader opened to see one issue waited for every
-  // issue first. The root comes from the previous listing, which is where it
-  // came from anyway; on the very first draw there is none yet and the
-  // request goes without it, exactly as the sequential version's would have
-  // on its first pass.
-  const detailWanted = beadsFocus;
-  let detailPromise = null;
-  if (detailWanted) {
-    const root = beadsRootOf(detailWanted);
-    const q = root ? `?cwd=${encodeURIComponent(root)}` : "";
-    detailPromise = api(`/api/beads/${encodeURIComponent(detailWanted)}${q}`)
-      .then(async (resp) => {
-        const data = await resp.json().catch(() => ({}));
-        return resp.ok ? data : { error: data.error || `HTTP ${resp.status}` };
-      })
-      .catch(() => null);   // keep the last detail
-  }
-  try {
-    const resp = await api("/api/beads");
-    if (resp.status === 404) {
-      beadsError = "this daemon predates the Beads page — 'claunch daemon " +
-        "restart' to pick up this version";
-    } else {
-      const data = await resp.json().catch(() => ({}));
-      if (!resp.ok) beadsError = data.error || `HTTP ${resp.status}`;
-      else { beadsCache = data; beadsError = data.error || ""; }
+  // A refresh only replaces the first page.  It keeps a reader's already
+  // loaded scroll window and avoids repeatedly serializing a large board.
+  await loadBeadsPage({ refresh: true });
+}
+
+function restartBeadsStream() {
+  beadsCache = null;
+  beadsError = "";
+  beadsMore = true;
+  beadsNextOffset = 0;
+  renderBeads();
+  loadBeadsPage({ reset: true });
+}
+
+function mergeBeadsPage(data, replaceFirst) {
+  if (!beadsCache || !replaceFirst) {
+    if (!beadsCache) {
+      beadsCache = data;
+      return;
     }
-  } catch { return; }   // auth overlay is up, or the daemon is away
-  if (detailPromise) {
-    const data = await detailPromise;
-    // Only if the reader has not walked to another issue meanwhile: this
-    // request was fired against the focus of the poll that started it.
-    if (data && beadsFocus === detailWanted) beadsDetail = data;
   }
-  if (beadsOpen) renderBeads();
+  const oldByRoot = new Map((beadsCache.boards || []).map((b) => [b.root, b]));
+  for (const incoming of data.boards || []) {
+    const old = oldByRoot.get(incoming.root);
+    if (!old) {
+      (beadsCache.boards ||= []).push(incoming);
+      continue;
+    }
+    old.sessions = incoming.sessions || old.sessions;
+    old.error = incoming.error;
+    old.has_more = incoming.has_more;
+    const rows = new Map((old.issues || []).map((i) => [i.id, i]));
+    for (const issue of incoming.issues || []) rows.set(issue.id, issue);
+    old.issues = [...rows.values()];
+    const edges = new Map((old.deps || []).map((d) => [`${d.from}\u0000${d.to}\u0000${d.type}`, d]));
+    for (const edge of incoming.deps || []) {
+      edges.set(`${edge.from}\u0000${edge.to}\u0000${edge.type}`, edge);
+    }
+    old.deps = [...edges.values()];
+  }
+  beadsCache.available = data.available;
+  beadsCache.error = data.error || "";
+}
+
+async function refreshBeadsDetail() {
+  const detailWanted = beadsFocus;
+  if (!detailWanted) return;
+  const root = beadsRootOf(detailWanted);
+  const q = root ? `?cwd=${encodeURIComponent(root)}` : "";
+  try {
+    const resp = await api(`/api/beads/${encodeURIComponent(detailWanted)}${q}`);
+    const data = await resp.json().catch(() => ({}));
+    if (beadsFocus === detailWanted) {
+      beadsDetail = resp.ok ? data : { error: data.error || `HTTP ${resp.status}` };
+    }
+  } catch { /* preserve the last detail while the connection is unavailable */ }
+}
+
+async function loadBeadsPage(opts = {}) {
+  const reset = !!opts.reset;
+  const refresh = !!opts.refresh;
+  if (!beadsOpen || beadsSection !== "board" || beadsLoading) return;
+  if (!reset && !refresh && !beadsMore) return;
+  const offset = refresh ? 0 : beadsNextOffset;
+  beadsLoading = true;
+  try {
+    const q = new URLSearchParams({ offset: String(offset), limit: String(BEADS_STREAM_PAGE) });
+    if (beadsPri !== null) q.set("priority", String(beadsPri));
+    const resp = await api(`/api/beads/stream?${q}`);
+    if (resp.status === 404) {
+      beadsError = "this daemon predates incremental Beads loading — restart the daemon";
+      return;
+    }
+    const data = await resp.json().catch(() => ({}));
+    if (!resp.ok) { beadsError = data.error || `HTTP ${resp.status}`; return; }
+    if (reset) beadsCache = null;
+    mergeBeadsPage(data, refresh);
+    beadsError = data.error || "";
+    beadsMore = !!data.has_more;
+    beadsNextOffset = data.next_offset === null || data.next_offset === undefined
+      ? offset : data.next_offset;
+    await refreshBeadsDetail();
+  } catch { return; }   // auth overlay is up, or the daemon is away
+  finally {
+    beadsLoading = false;
+    if (beadsOpen && beadsSection === "board") renderBeads();
+  }
+}
+
+function onBeadsCanvasScroll() {
+  const canvas = $("beads-canvas");
+  if (!canvas || beadsLoading || !beadsMore) return;
+  if (canvas.scrollHeight - canvas.scrollTop - canvas.clientHeight < BEADS_STREAM_NEAR_END) {
+    loadBeadsPage();
+  }
 }
 
 /* The board an issue id belongs to, from the last listing. */
@@ -8967,34 +9029,22 @@ function beadsFilterBar() {
     b.addEventListener("click", () => { beadsFilter = f; renderBeads(); });
     bar.appendChild(b);
   }
-  /* Priority is the second axis over the same rows. The buttons come from
-     the priorities the boards actually carry rather than a fixed 0..4, so a
-     board that only uses two of them offers two buttons — plus the one the
-     reader has picked, which must stay visible (and droppable) even if the
-     last issue carrying it just closed. */
-  const pris = new Set();
-  for (const b of (beadsCache && beadsCache.boards) || []) {
-    for (const i of b.issues || []) {
-      if (i.priority !== undefined && i.priority !== null) pris.add(i.priority);
-    }
+  // The fixed priority set is visible before its first page lands and maps
+  // directly to a backend query.  It bounds both transfer and card creation
+  // for a large board; All restores the complete incremental stream.
+  const grp = el("div", "seq-tabs beads-pri-filter");
+  for (const [priority, label] of [[null, "All"], [0, "P0"], [1, "P1"], [2, "P2"], [3, "P3"], [4, "P4"]]) {
+    const b = el("button", "seq-tab" + (beadsPri === priority ? " on" : ""), label);
+    b.type = "button";
+    b.title = priority === null ? "every priority" : `only ${label} issues`;
+    b.addEventListener("click", () => {
+      if (beadsPri === priority) return;
+      beadsPri = priority;
+      restartBeadsStream();
+    });
+    grp.appendChild(b);
   }
-  if (beadsPri !== null) pris.add(beadsPri);
-  if (pris.size) {
-    const grp = el("div", "seq-tabs beads-pri-filter");
-    const any = el("button", "seq-tab" + (beadsPri === null ? " on" : ""), "any");
-    any.type = "button";
-    any.title = "every priority";
-    any.addEventListener("click", () => { beadsPri = null; renderBeads(); });
-    grp.appendChild(any);
-    for (const p of [...pris].sort((a, b) => a - b)) {
-      const b = el("button", "seq-tab" + (beadsPri === p ? " on" : ""), `P${p}`);
-      b.type = "button";
-      b.title = `only P${p} issues`;
-      b.addEventListener("click", () => { beadsPri = p; renderBeads(); });
-      grp.appendChild(b);
-    }
-    bar.appendChild(grp);
-  }
+  bar.appendChild(grp);
   const sel = document.createElement("select");
   sel.className = "beads-session-pick";
   sel.title = "only the issues the daemon ties to this session";
@@ -9358,6 +9408,8 @@ function beadsDetailPane() {
 function renderBeads() {
   const view = $("beads-view");
   if (formInUse(view)) return;
+  const previousCanvas = view.querySelector("#beads-canvas");
+  const previousCanvasTop = previousCanvas ? previousCanvas.scrollTop : 0;
   view.innerHTML = "";
   const head = el("div", "wf-head");
   head.appendChild(el("h2", null, "Beads"));
@@ -9382,23 +9434,31 @@ function renderBeads() {
     "creation, winds a session down before a kill, and returns what it " +
     "was working on to open when it exits."));
   if (beadsError) view.appendChild(el("p", "wf-warning", beadsError));
+  view.appendChild(beadsFilterBar());
   if (!beadsCache) {
-    if (!beadsError) view.appendChild(el("p", "wf-note", "loading…"));
+    if (!beadsError) view.appendChild(el("p", "wf-note", "loading the first page…"));
     return;
   }
-  view.appendChild(beadsFilterBar());
   const body = el("div", "beads-body" + (beadsFocus ? " split" : ""));
   const list = el("div", "beads-list");
+  const canvas = el("div", "beads-canvas");
+  canvas.id = "beads-canvas";
+  canvas.addEventListener("scroll", onBeadsCanvasScroll);
   const boards = beadsCache.boards || [];
   if (!boards.length) {
-    list.appendChild(el("p", "wf-note",
+    canvas.appendChild(el("p", "wf-note",
       "no board: none of the sessions' directories is a repository with a " +
       ".beads/ — 'claunch beads init --prefix <name>' at its root starts one"));
   }
-  for (const b of boards) list.appendChild(beadsBoardSection(b));
+  for (const b of boards) canvas.appendChild(beadsBoardSection(b));
+  if (beadsLoading) canvas.appendChild(el("p", "wf-note beads-stream-note", "loading more issues…"));
+  else if (beadsMore) canvas.appendChild(el("p", "wf-note beads-stream-note", "scroll for more issues"));
+  else canvas.appendChild(el("p", "wf-note beads-stream-note", "end of board"));
+  list.appendChild(canvas);
   body.appendChild(list);
   if (beadsFocus) body.appendChild(beadsDetailPane());
   view.appendChild(body);
+  if (previousCanvasTop) requestAnimationFrame(() => { canvas.scrollTop = previousCanvasTop; });
 }
 
 function beadsPageTabs() {
