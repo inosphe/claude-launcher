@@ -125,8 +125,8 @@ def test_the_worker_creates_its_own_issue_and_claims_it(layer):
 
 
 @pytest.mark.parametrize("layer", ["bundled", "project"])
-def test_the_worker_settles_its_issue_before_work_begins(layer):
-    """A round reaches ``work`` only through an issue verdict.
+def test_the_worker_settles_its_issue_before_branch_setup(layer):
+    """A round reaches ``branch-setup`` only through an issue verdict.
 
     ``intake`` alone used to carry the issue rules, and a session that
     arrived with no assignment (no daemon issue, no ``--no-issue`` order)
@@ -146,8 +146,8 @@ def test_the_worker_settles_its_issue_before_work_begins(layer):
     assert wf.steps["intake"].next == "issue-check"
     check = wf.steps["issue-check"].select
     assert check.chooser == "agent"                  # three readable facts
-    assert check.options["claimed"].next == "work"
-    assert check.options["no-issue-by-request"].next == "work"
+    assert check.options["claimed"].next == "branch-setup"
+    assert check.options["no-issue-by-request"].next == "branch-setup"
     assert check.options["unclaimed"].next == "issue-search"
     # the search files the candidates the deciding person reads
     assert wf.steps["issue-search"].next == "issue-decision"
@@ -160,12 +160,13 @@ def test_the_worker_settles_its_issue_before_work_begins(layer):
     )
     assert decision.options["adopt"].next == "issue-claim"
     assert decision.options["create"].next == "issue-claim"
-    assert decision.options["none"].next == "work"
+    assert decision.options["none"].next == "branch-setup"
     claim = wf.steps["issue-claim"]
-    assert claim.next == "work"
+    assert claim.next == "branch-setup"
     assert "--status in_progress" in claim.instructions
     assert "JOINED" in claim.instructions            # a live holder is joined, not taken
     assert "in_progress" in claim.done_when
+    assert wf.steps["branch-setup"].next == "work"
     # an assigned-but-empty issue is filled from the opening task in intake,
     # where the issue is first read — not minted a second time
     assert "자리표시" in wf.steps["intake"].instructions
