@@ -775,6 +775,44 @@ def test_cflow_nudge_goes_through_deliver(home, tmp_path, monkeypatch):
     assert writes == [b"\x1b[200~[T]\rcflow: go\x1b[201~", b"\r"]
 
 
+def test_scheduled_cflow_start_nudge_is_forced(home, tmp_path):
+    """An explicit Start action must not disappear behind an open draft."""
+    from pathlib import Path
+
+    from claude_launcher.daemon import api as api_mod
+
+    cwd = str(Path(tmp_path).resolve())
+    deliveries = []
+
+    class FakeSession:
+        exited = False
+        sdef = SessionDef(name="n1", cwd=cwd)
+
+        async def deliver(self, text, *, force=False):
+            deliveries.append((text, force))
+            return True
+
+    session = FakeSession()
+
+    class FakeManager:
+        def list(self):
+            return [session]
+
+        def get(self, name):
+            assert name == "n1"
+            return session
+
+    async def run():
+        app = {"manager": FakeManager(), "cflow_nudge_tasks": set()}
+        assert api_mod._schedule_cflow_nudges(
+            app, cwd, "n1", "cflow: start", force=True
+        ) == ["n1"]
+        await asyncio.gather(*set(app["cflow_nudge_tasks"]))
+
+    asyncio.run(run())
+    assert deliveries == [("cflow: start", True)]
+
+
 def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):
     """A session's own page: its definition, its mesh memberships, and the
     cflow slot it owns — plus the two ways to create a run in that slot."""
@@ -887,6 +925,23 @@ def test_api_session_meta_and_workflow_request(home, tmp_path, monkeypatch):
             assert doc["nudge_scheduled_sessions"] == ["s1"]
             resp = await client.get("/api/sessions/s1/meta", headers=bearer)
             assert (await resp.json())["cflow"]["status"] == "step"
+
+            # Archive must return without waiting for terminal delivery, and
+            # the immediately following Ask path still reaches the session.
+            resp = await client.post(
+                "/api/cflow/archive",
+                json={"cwd": str(tmp_path), "scope": "s1"}, headers=bearer,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["nudge_scheduled_sessions"] == ["s1"]
+            resp = await client.post(
+                "/api/cflow/request",
+                json={"cwd": str(tmp_path), "scope": "s1", "workflow": "demo"},
+                headers=bearer,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["nudge_scheduled_sessions"] == ["s1"]
+            await _wait_screen(session, "a start of workflow 'demo' was requested")
         finally:
             await mgr.shutdown_all()
             await client.close()
@@ -1666,7 +1721,7 @@ def test_api_cflow_actions(home, tmp_path, monkeypatch):
                 headers=bearer,
             )
             assert resp.status == 200
-            assert (await resp.json())["nudged_sessions"] == ["n1"]
+            assert (await resp.json())["nudge_scheduled_sessions"] == ["n1"]
             await _wait_screen(worker, "echo:cflow: run archived")
             resp = await client.post(
                 "/api/cflow/start",

@@ -11896,6 +11896,8 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
       `The request is recorded and the session is nudged; its agent reads ` +
       `the request and runs the start itself.`
     )) return;
+    ask.disabled = true;
+    ask.textContent = "Requesting…";
     const doc = await cflowPost("/api/cflow/request", {
       cwd, scope, workflow, context: ctx.value.trim(),
     });
@@ -11903,11 +11905,21 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
       ...(doc.nudged_sessions || []),
       ...(doc.nudge_scheduled_sessions || []),
     ] : [];
-    if (doc && !nudged.length) {
-      alert(
-        "request recorded, but the session could not be nudged — it will " +
-        "still be picked up on the agent's next cflow 'status' call"
+    if (doc && nudged.length) {
+      notify(
+        "Workflow start requested",
+        `The request was recorded; delivery to session ${nudged.join(", ")} is scheduled.`,
+        { key: `cflow-start-${scope}|${cwd}` }
       );
+    } else if (doc) {
+      notify(
+        "Workflow start requested",
+        "The request was recorded, but no live session could receive it.",
+        { key: `cflow-start-${scope}|${cwd}`, kind: "warn" }
+      );
+    } else {
+      ask.disabled = false;
+      ask.textContent = "Ask the agent to start";
     }
     if (doc && after) after();
   });
@@ -11927,6 +11939,8 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
           "waits for an agent to pick it up.\n\n") +
       "Continue?"
     )) return;
+    direct.disabled = true;
+    direct.textContent = "Starting…";
     const doc = await cflowPost("/api/cflow/start", {
       cwd, scope, workflow, context: ctx.value.trim(),
     });
@@ -11934,11 +11948,21 @@ async function buildStartPanel(box, { cwd, scope, sessions, stillHere, after }) 
       ...(doc.nudged_sessions || []),
       ...(doc.nudge_scheduled_sessions || []),
     ] : [];
-    if (doc && !nudged.length) {
-      alert(
-        "run started, but no live session was nudged — tell the agent " +
-        "to continue (it picks the run up via the /cflow protocol)"
+    if (doc && nudged.length) {
+      notify(
+        "Workflow started",
+        `The run was created; delivery to session ${nudged.join(", ")} is scheduled.`,
+        { key: `cflow-start-${scope}|${cwd}` }
       );
+    } else if (doc) {
+      notify(
+        "Workflow started",
+        "The run was created, but no live session could receive it.",
+        { key: `cflow-start-${scope}|${cwd}`, kind: "warn" }
+      );
+    } else {
+      direct.disabled = false;
+      direct.textContent = "Start directly";
     }
     if (doc && after) after();
   });
