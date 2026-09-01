@@ -59,11 +59,25 @@ function node(tag) {
   const n = {
     tag, kids: [], text: "", classes: new Set(), dataset: {}, style: {},
     title: "", type: "",
-    appendChild(c) { n.kids.push(c); return c; },
+    appendChild(c) { n.kids.push(c); c.parentNode = n; return c; },
     append(...cs) { cs.forEach((c) => n.appendChild(c)); },
     addEventListener() {},
-    querySelector() { return null; },
-    querySelectorAll() { return []; },
+    /* Just enough selector for the in-place seen refresh: the rows by their
+       data-name, and one class within a row. */
+    querySelector(sel) {
+      const cls = sel.startsWith(".") ? sel.slice(1) : null;
+      return descendants(n).find((k) => cls && k.classes.has(cls)) || null;
+    },
+    querySelectorAll(sel) {
+      if (sel !== "li[data-name]") return [];
+      return descendants(n).filter((k) => k.tag === "li" && k.dataset.name);
+    },
+    replaceWith(other) {
+      const p = n.parentNode;
+      if (!p) return;
+      p.kids[p.kids.indexOf(n)] = other;
+      other.parentNode = p;
+    },
     get textContent() { return n.text; },
     set textContent(v) { n.text = String(v); },
     get className() { return [...n.classes].join(" "); },
@@ -142,6 +156,7 @@ new Function(
   + slice("cwdLine") + slice("railCwdLine") + slice("ctxRailLine")
   + slice("seenAgo") + slice("seenPair") + slice("railSeenLine")
   + slice("profileHarnessLabel") + slice("railMetaText") + slice("refreshSessions")
+  + slice("refreshRailSeen")
   + `
 Object.assign(exports, {
   refresh: refreshSessions,
@@ -449,6 +464,31 @@ served = { sessions: [WATCHED, FORGOTTEN, PLAIN, GONE] };
         descendants(kids[headIdx]).some((k) => k.classes.has("rail-seen")),
         false);
   check("the ⓘ is still on the row", infoIdx >= 0, true);
+
+  /* ---------------------------------------------------------------- */
+  /* the stamps moving is not a reason to rebuild the rail             */
+  /* ---------------------------------------------------------------- */
+  /* Every poll on a working machine brings new stamps (a running session
+     paints, somebody looks in), and each used to tear the whole list down
+     for one seen line. The rows must survive such a poll as the same
+     objects -- listeners, open cards and focus with them -- while the line
+     itself still moves on. */
+  const before = list.kids.slice();
+  served = { sessions: [
+    { ...WATCHED, viewers: 0, last_visited_at: ago(600), last_activity_at: ago(120) },
+    FORGOTTEN, PLAIN, GONE,
+  ] };
+  await ctx.refresh();
+  check("a poll that only moved the stamps keeps the rows it had",
+        list.kids.length === before.length
+          && list.kids.every((k, i) => k === before[i]), true);
+  check("...and the seen line on the kept row reads the new stamps",
+        readOff("watched"), { seen: "10m", typed: "10m", moved: "2m" });
+  /* Anything else changing still rebuilds, exactly as before. */
+  served = { sessions: [{ ...WATCHED, status: "idle" }, FORGOTTEN, PLAIN, GONE] };
+  await ctx.refresh();
+  check("a change the row draws still rebuilds it",
+        list.kids.some((k, i) => k === before[i]), false);
 
   if (failures) {
     console.error(`${failures} check(s) failed`);

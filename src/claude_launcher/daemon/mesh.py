@@ -5739,7 +5739,13 @@ class MeshManager:
             if h in mesh.members and p in mesh.members
         }
 
-    def mesh_info(self, mesh: Mesh, *, session: str = "") -> dict:
+    def mesh_info(self, mesh: Mesh, *, session: str = "", links: bool = True) -> dict:
+        """The mesh as a dashboard sees it.
+
+        ``links=False`` leaves ``member_links`` out — the pairwise member
+        graph is quadratic in members and only the per-mesh views draw it;
+        the list poll that feeds the sidebar does not.
+        """
         members = []
         lineage = self._local_lineage(mesh)
         for handle in sorted(mesh.members):
@@ -5853,7 +5859,7 @@ class MeshManager:
             # The member graph, one layer up from `links`: who may message
             # whom. Every pair is listed with its state — see
             # Mesh.member_edge_table on why the cut set alone is not enough.
-            "member_links": mesh.member_edge_table(),
+            "member_links": mesh.member_edge_table() if links else None,
             "requests": requests,
             "policy": mesh.policy,
             # A summary only — the stance prose is fetched on demand from
