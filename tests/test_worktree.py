@@ -586,14 +586,16 @@ def test_new_session_without_a_worktree_uses_the_directory_itself(
     assert body["cwd"] == str(repo)
 
 
-def test_new_session_model_reaches_the_daemon(repo, fake_daemon, monkeypatch):
+def test_new_session_model_and_effort_reach_the_daemon(repo, fake_daemon, monkeypatch):
     monkeypatch.chdir(repo)
     monkeypatch.setattr(worktree, "interactive", lambda: False)
     assert cli.main([
         "new-session", "--profile", "work", "--model", "opus",
+        "--effort", "high",
     ]) == 0
     _, body = fake_daemon.posted
     assert body["model"] == "opus"
+    assert body["effort"] == "high"
 
 
 def test_new_session_worktree_is_cut_from_the_c_flag_not_the_shell(

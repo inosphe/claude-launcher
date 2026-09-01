@@ -25,6 +25,7 @@ PARENT = {
     "cwd": "/tmp/project",
     "args": ["--flag"],
     "env": {"A": "1"},
+    "effort": None,
 }
 
 
@@ -58,6 +59,7 @@ def test_child_inherits_everything_that_decides_what_runs():
         "cwd": "/tmp/project",
         "args": ["--flag"],
         "model": None,
+        "effort": None,
         "env": {"A": "1"},
         "borrow": None,
         "null_token": False,
@@ -65,20 +67,21 @@ def test_child_inherits_everything_that_decides_what_runs():
 
 
 @pytest.mark.parametrize(
-    "field, value",
+    "field, value, gate",
     [
-        ("profile", "other"),
-        ("cwd", "/tmp/elsewhere"),
-        ("args", ["--yolo"]),
-        ("env", {"TOKEN": "x"}),
+        ("profile", "other", "profile"),
+        ("cwd", "/tmp/elsewhere", "cwd"),
+        ("args", ["--yolo"], "args"),
+        ("effort", "high", "args"),
+        ("env", {"TOKEN": "x"}, "env"),
     ],
 )
-def test_gated_fields_are_refused_by_default(field, value):
+def test_gated_fields_are_refused_by_default(field, value, gate):
     with pytest.raises(spawn.SpawnDenied) as exc:
         spawn.check(_policy(), {field: value}, parent=PARENT, depth=0, children=0)
     # The message has to name the key that would allow it: an agent that is
     # told only "denied" will retry the same call.
-    assert f"spawn.allow_{field}" in str(exc.value)
+    assert f"spawn.allow_{gate}" in str(exc.value)
 
 
 def test_an_unlocked_field_is_taken_from_the_request():
@@ -112,6 +115,30 @@ def test_model_inherits_and_uses_the_args_policy_for_override_and_clear():
     assert changed["model"] == "terra"
     assert cleared["model"] is None
     assert "model" in spawn.capabilities(policy, depth=0, children=0)["may_choose"]
+
+
+def test_effort_inherits_and_uses_the_args_policy_for_override_and_clear():
+    parent = {**PARENT, "effort": "medium"}
+    inherited = spawn.check(
+        _policy(), {}, parent=parent, depth=0, children=0
+    )
+    assert inherited["effort"] == "medium"
+
+    with pytest.raises(spawn.SpawnDenied, match="spawn.allow_args"):
+        spawn.check(
+            _policy(), {"effort": "high"}, parent=parent, depth=0, children=0
+        )
+
+    policy = _policy(allow_args=True)
+    changed = spawn.check(
+        policy, {"effort": "high"}, parent=parent, depth=0, children=0
+    )
+    cleared = spawn.check(
+        policy, {"effort": ""}, parent=parent, depth=0, children=0
+    )
+    assert changed["effort"] == "high"
+    assert cleared["effort"] is None
+    assert "effort" in spawn.capabilities(policy, depth=0, children=0)["may_choose"]
 
 
 def test_env_is_merged_over_the_parents_not_replaced():
@@ -162,18 +189,23 @@ def test_a_child_authenticates_the_way_its_parent_does():
     assert child["borrow"] == "lender"
 
 
-def test_a_harness_swap_drops_the_inherited_auth_with_the_args():
+def test_a_harness_swap_drops_the_inherited_runtime_and_auth_settings():
     """An OAuth harness cannot inherit a shared-token arrangement over a
     field nobody in the request named."""
     codex = profile.create("codex-profile")
     lineage.set_harness(codex, "codex")
     policy = _policy(allow_profile=True)
-    parent = {**PARENT, "borrow": "lender", "null_token": False}
+    parent = {
+        **PARENT, "borrow": "lender", "null_token": False,
+        "model": "opus", "effort": "high",
+    }
     child = spawn.check(
         policy, {"profile": "codex-profile"}, parent=parent, depth=0, children=0
     )
     assert child["borrow"] is None
     assert child["null_token"] is False
+    assert child["model"] is None
+    assert child["effort"] is None
 
 
 def test_an_explicit_api_key_profile_and_base_borrow_travel_together():

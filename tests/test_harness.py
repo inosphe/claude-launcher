@@ -167,6 +167,21 @@ def test_declared_non_claude_model_is_inserted_before_free_args(home, tmp_path):
     assert argv[-2:] == ["--model=terra", "--verbose"]
 
 
+def test_selected_codex_model_and_effort_become_codex_config(home, tmp_path):
+    work = profile.create("work")
+    lineage.set_harness(work, "codex")
+    sdef = harness.normalize(
+        SessionDef(
+            name="x", profile="work", cwd=str(tmp_path),
+            model="terra", effort="xhigh",
+        )
+    )
+
+    argv, _, _ = harness.build_command(sdef)
+    assert "model=gpt-5.6-terra" in argv
+    assert "model_reasoning_effort=xhigh" in argv
+
+
 def test_model_must_be_declared_and_not_repeated_in_free_args(home, tmp_path):
     profile.create("work")
     with pytest.raises(HarnessError, match="unknown model"):

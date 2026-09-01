@@ -28,7 +28,7 @@ harnesses:
   codex:
     command: codex
     models: [luna, terra, sol]
-    efforts: [low, medium, high]
+    efforts: [none, low, medium, high, xhigh, max]
     model_args: [-c, "model=gpt-5.6-{model}"]
     effort_args: [-c, "model_reasoning_effort={effort}"]
     btw:
