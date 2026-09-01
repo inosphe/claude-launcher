@@ -347,18 +347,24 @@ option:disabled { color: #6b7280; }
 }
 .rail-status-check {
   max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  padding: 1px 5px; border-radius: 8px; font-size: 10px; line-height: 16px;
-  background: #191d24; color: #7d8590;
+  padding: 1px 6px; border: 1px solid #30363d; border-radius: 8px; font-size: 10px; line-height: 16px;
+  background: #191d24; color: #c9d1d9;
 }
-.rail-status-check.check-yes, .sess-brief-v.check-yes { color: #3fb950; }
-.rail-status-check.check-no, .sess-brief-v.check-no { color: #f85149; }
-.rail-status-check.check-unknown, .sess-brief-v.check-unknown { color: #d29922; }
+.rail-status-check.check-yes { color: #3fb950; border-color: #1f6f3f; background: #10251a; }
+.rail-status-check.check-no { color: #ff7b72; border-color: #8b3030; background: #2d1719; }
+.rail-status-check.check-unknown { color: #d29922; border-color: #6b4f14; background: #2b230f; }
 .sess-status-check-rowref {
   flex: none; order: 0; background: none; border: none; color: #8b949e;
   font-size: 10px; line-height: 1; padding: 2px 4px; cursor: pointer;
 }
 .sess-status-check-rowref:hover:not(:disabled) { color: #58a6ff; }
 .sess-status-check-rowref:disabled { opacity: 0.55; cursor: wait; }
+.sess-status-check-rowref.requesting, .sess-brief-check-refresh.requesting {
+  color: #58a6ff; animation: spin 0.7s linear infinite; cursor: wait;
+}
+.sess-status-check-rowref.waiting, .sess-brief-check-refresh.waiting { color: #d29922; }
+.sess-status-check-rowref.updated, .sess-brief-check-refresh.updated { color: #3fb950; }
+.sess-status-check-rowref.failed, .sess-brief-check-refresh.failed { color: #f85149; }
 /* The row's ⟳: refresh the summary without opening it. Same glyph family
    as the card's. Sits at the end of the name line, before the ▸ toggle. */
 #session-list .sess-brief-rowref {
@@ -594,6 +600,14 @@ option:disabled { color: #6b7280; }
   min-width: 0; white-space: pre-wrap; overflow-wrap: anywhere;
   line-height: 1.45;
 }
+.sess-brief-check { align-items: center; }
+.status-check-icon {
+  flex: none; width: 18px; height: 18px; border-radius: 50%; display: inline-grid;
+  place-items: center; font-weight: 700; font-size: 12px; line-height: 1;
+}
+.status-check-icon.check-yes { color: #3fb950; background: #10251a; }
+.status-check-icon.check-no { color: #ff7b72; background: #2d1719; }
+.status-check-icon.check-unknown { color: #d29922; background: #2b230f; }
 .sess-brief-raw {
   white-space: pre-wrap; overflow-wrap: anywhere; max-height: 180px;
   overflow-y: auto; font-family: SFMono-Regular, Consolas, monospace;

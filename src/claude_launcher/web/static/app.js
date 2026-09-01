@@ -2474,6 +2474,51 @@ function statusCheckText(check) {
   return check.answer === "yes" ? "yes" : check.answer === "no" ? "no" : "unknown";
 }
 
+function statusCheckIcon(check) {
+  return check.answer === "yes" ? "✓" : check.answer === "no" ? "×" : "•";
+}
+
+function statusCheckName(check) {
+  return String(check.name || check.question || "status check");
+}
+
+function statusCheckRefreshState(name) {
+  const state = statusCheckRefreshes.get(name);
+  if (!state || state.phase !== "waiting") return state?.phase || "";
+  const checks = sessionStatusChecks(name);
+  if (checks.length && checks.every((check) =>
+    check.reported_at && state.reports[check.id] !== check.reported_at
+  )) {
+    state.phase = "updated";
+  }
+  return state.phase;
+}
+
+function paintStatusCheckRefresh(button, name, baseClass) {
+  const state = statusCheckRefreshState(name);
+  button.className = `${baseClass}${state ? ` ${state}` : ""}`;
+  button.disabled = state === "requesting";
+  if (state === "requesting") {
+    button.textContent = "checking…";
+    button.title = "requesting current status checks";
+  } else if (state === "waiting") {
+    button.textContent = "checks · waiting";
+    button.title = "request delivered; waiting for the agent report";
+  } else if (state === "updated") {
+    button.textContent = "checks ✓";
+    button.title = "the agent reported updated status checks";
+  } else if (state === "unavailable") {
+    button.textContent = "checks";
+    button.title = "no enabled status checks";
+  } else if (state === "failed") {
+    button.textContent = "checks !";
+    button.title = "status-check refresh failed — click to retry";
+  } else {
+    button.textContent = "checks ⟳";
+    button.title = "ask the agent to report current status checks";
+  }
+}
+
 function appendStatusChecks(card, name) {
   const checks = sessionStatusChecks(name);
   if (!checks.length) return;
@@ -2481,33 +2526,34 @@ function appendStatusChecks(card, name) {
   card.appendChild(heading);
   for (const check of checks) {
     const row = el("div", "sess-brief-row sess-brief-check");
-    const answer = el("span", `sess-brief-v check-${statusCheckText(check)}`, statusCheckText(check));
-    if (check.reported_at) {
-      const at = new Date(check.reported_at);
-      if (!isNaN(at)) answer.title = `agent reported ${at.toLocaleString()}`;
-    }
-    row.append(el("span", "sess-brief-k", String(check.question)), answer);
+    const answer = el("span", `status-check-icon check-${statusCheckText(check)}`,
+      statusCheckIcon(check));
+    answer.title = String(check.question || "");
+    answer.ariaLabel = `${statusCheckName(check)}: ${statusCheckText(check)}`;
+    row.append(answer, el("span", "sess-brief-v", statusCheckName(check)));
     card.appendChild(row);
   }
 }
 
 async function requestStatusChecksRefresh(name, button) {
-  if (button) button.disabled = true;
+  const reports = Object.fromEntries(sessionStatusChecks(name).map((check) =>
+    [check.id, check.reported_at || ""]
+  ));
+  statusCheckRefreshes.set(name, { phase: "requesting", reports });
+  if (button) paintStatusCheckRefresh(button, name, button.dataset.statusCheckBase);
   try {
     const resp = await api(`/api/sessions/${encodeURIComponent(name)}/status-checks/refresh`, {
       method: "POST",
     });
     const body = await resp.json().catch(() => ({}));
     if (!resp.ok) throw new Error(body.error || `HTTP ${resp.status}`);
-    if (button) button.title = body.delivered
-      ? "request delivered; waiting for the agent report"
-      : "no enabled status checks";
+    statusCheckRefreshes.get(name).phase = body.delivered ? "waiting" : "unavailable";
     await refreshSessions();
   } catch (err) {
-    if (button) button.title = `status-check refresh failed: ${String(err)}`;
-  } finally {
-    if (button) button.disabled = false;
+    statusCheckRefreshes.get(name).phase = "failed";
+    if (button) button.title = `status-check refresh failed: ${String(err)} — click to retry`;
   }
+  if (button) paintStatusCheckRefresh(button, name, button.dataset.statusCheckBase);
 }
 
 async function fetchBriefing(name, refresh) {
@@ -2585,14 +2631,17 @@ function renderBriefingCard(name, entry) {
     fetchBriefing(name, true);
   });
   head.appendChild(refresh);
-  const checksRefresh = el("button", "sess-brief-check-refresh", "checks ⟳");
-  checksRefresh.type = "button";
-  checksRefresh.title = "ask the agent to report current status checks";
-  checksRefresh.addEventListener("click", (e) => {
-    e.stopPropagation();
-    requestStatusChecksRefresh(name, checksRefresh);
-  });
-  head.appendChild(checksRefresh);
+  if (sessionStatusChecks(name).length) {
+    const checksRefresh = el("button", "sess-brief-check-refresh");
+    checksRefresh.type = "button";
+    checksRefresh.dataset.statusCheckBase = "sess-brief-check-refresh";
+    paintStatusCheckRefresh(checksRefresh, name, checksRefresh.dataset.statusCheckBase);
+    checksRefresh.addEventListener("click", (e) => {
+      e.stopPropagation();
+      requestStatusChecksRefresh(name, checksRefresh);
+    });
+    head.appendChild(checksRefresh);
+  }
   card.appendChild(head);
 
   if (loading && !data) {
@@ -2762,21 +2811,24 @@ function decorateBriefingRow(li, s) {
     checks.innerHTML = "";
     for (const check of reported) {
       const answer = statusCheckText(check);
-      const chip = el("span", `rail-status-check check-${answer}`, `${answer === "yes" ? "✓" : answer === "no" ? "✕" : "?"} ${check.question}`);
-      chip.title = `${check.question}: ${answer}${check.reported_at ? ` (agent: ${check.reported_at})` : ""}`;
+      const chip = el("span", `rail-status-check check-${answer}`,
+        `${statusCheckIcon(check)} ${statusCheckName(check)}`);
+      chip.title = String(check.question || "");
+      chip.ariaLabel = `${statusCheckName(check)}: ${answer}`;
       checks.appendChild(chip);
     }
     let statusRefresh = li.querySelector(".sess-status-check-rowref");
     if (!statusRefresh) {
-      statusRefresh = el("button", "sess-status-check-rowref", "✓⟳");
+      statusRefresh = el("button", "sess-status-check-rowref");
       statusRefresh.type = "button";
+      statusRefresh.dataset.statusCheckBase = "sess-status-check-rowref";
       statusRefresh.addEventListener("click", (e) => {
         e.stopPropagation();
         requestStatusChecksRefresh(s.name, statusRefresh);
       });
       li.appendChild(statusRefresh);
     }
-    statusRefresh.title = "ask the agent to report current status checks";
+    paintStatusCheckRefresh(statusRefresh, s.name, statusRefresh.dataset.statusCheckBase);
   } else if (checks) {
     checks.remove();
     li.querySelector(".sess-status-check-rowref")?.remove();
@@ -8954,8 +9006,12 @@ let promptPresetDraft = { name: "", text: "" };
 let promptPresetEdit = null;
 let statusCheckCache = [];
 let statusCheckError = "";
-let statusCheckDraft = { question: "" };
+let statusCheckDraft = { name: "", question: "" };
 let statusCheckEdit = null;
+// A delivery is immediate, but the agent reports on a later MCP turn.  Keep
+// that interval visible across session-list polls instead of making it look
+// like an unresponsive click.
+const statusCheckRefreshes = new Map();
 
 function openWorkspaces() {
   wsOpen = true;
@@ -10649,15 +10705,19 @@ function statusCheckCard() {
   card.appendChild(el("h3", null, "Status checks"));
   card.appendChild(el(
     "p", "wf-note",
-    "Y/N questions that agents report directly through MCP. Values remain per session."
+    "Named Y/N checks that agents report directly through MCP. Values remain per session."
   ));
   const form = el("form", "status-check-add");
+  const name = document.createElement("input");
+  name.placeholder = "Name, for example: Tests";
+  name.value = statusCheckDraft.name;
+  name.addEventListener("input", () => { statusCheckDraft.name = name.value; });
   const q = document.createElement("input");
-  q.placeholder = "Question, for example: Tests passed?";
+  q.placeholder = "Question for the agent, for example: Did the tests pass?";
   q.value = statusCheckDraft.question;
   q.addEventListener("input", () => { statusCheckDraft.question = q.value; });
   const add = el("button", "wf-btn approve", "Add check");
-  form.append(q, add);
+  form.append(name, q, add);
   form.addEventListener("submit", async (e) => {
     e.preventDefault();
     try {
@@ -10668,7 +10728,7 @@ function statusCheckCard() {
       const data = await resp.json().catch(() => ({}));
       if (!resp.ok) throw new Error(data.error || `HTTP ${resp.status}`);
       statusCheckCache = data.checks || [];
-      statusCheckDraft = { question: "" };
+      statusCheckDraft = { name: "", question: "" };
       statusCheckError = "";
     } catch (err) { statusCheckError = String(err); }
     renderWorkspaces();
@@ -10679,14 +10739,17 @@ function statusCheckCard() {
   for (const row of statusCheckCache) {
     const item = el("div", "status-check-row");
     if (statusCheckEdit === row.id) {
+      const en = document.createElement("input"); en.value = statusCheckName(row);
       const eq = document.createElement("input"); eq.value = row.question;
       const save = el("button", "wf-btn approve", "Save"); save.type = "button";
-      save.addEventListener("click", () => statusCheckSave(row, { question: eq.value }));
+      save.addEventListener("click", () => statusCheckSave(row, { name: en.value, question: eq.value }));
       const cancel = el("button", "wf-btn clear", "Cancel"); cancel.type = "button";
       cancel.addEventListener("click", () => { statusCheckEdit = null; renderWorkspaces(); });
-      item.append(eq, save, cancel); list.appendChild(item); continue;
+      item.append(en, eq, save, cancel); list.appendChild(item); continue;
     }
-    item.appendChild(el("div", "status-check-text", row.question));
+    const text = el("div", "status-check-text", statusCheckName(row));
+    text.title = String(row.question || "");
+    item.appendChild(text);
     const edit = el("button", "wf-btn clear", "Edit"); edit.type = "button";
     edit.addEventListener("click", () => { statusCheckEdit = row.id; renderWorkspaces(); });
     const toggle = el("button", "wf-btn clear", row.enabled === false ? "Enable" : "Disable");
