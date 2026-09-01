@@ -176,6 +176,24 @@ steps:
           정리 대상이며 재배정이 먼저다: 배정 후보·우선순위·최근 갱신
           가운데 하나라도 있으면 재배정하고, 셋 다 없으면 닫는다(사유에
           판정 근거, 재발하면 리더만이 reopen한다).
+      ── 큐(queue)·배치(batch) 규칙 ──
+      세션의 큐는 보드에서 assignee가 그 세션인 활성 이슈(open·in_ready·
+      in_progress·in_review)다 — 세션 레코드에 따로 적지 않고 보드 하나가
+      정본이다. 순서는 priority 오름차순, 같으면 created_at 순. 읽는 명령은
+      `claunch beads list --assignee <세션> --status open --status in_ready
+      --status in_progress --limit 0 --json`. 배정(assignee 쓰기)은 리더·
+      운영자의 것이다 — 대시보드 Beads 페이지의 Queues 탭에서 카드를 세션
+      행으로 끌면 데몬이 `update <id> --assignee <세션>` 하나를 대신 치고
+      `QUEUED`/`UNQUEUED` 코멘트를 남긴다; 상태(status)는 손대지 않는다.
+      한 세션의 큐는 브랜치 하나 위에서 배치로 처리된다: 일감마다
+      in_progress 전이 → 작업·테스트·커밋 → 다음 일감, 큐가 비면(또는 배치
+      상한 5개에 닿으면) 배치의 이슈 전부를 in_review로 올려 착지 요청은 한
+      번이다. 마커는 이슈마다 `LANDING REQUEST @ <tip>`이고 주 이슈(오프닝의
+      `issue: <id>`)의 마커 뒤에 `batch: <id,...>`가 붙으며 증거 묶음은 그 주
+      이슈 코멘트 하나에 있다. 리더는 같은 tip의 행들을 후보 하나로 심사해
+      한 번 머지하고, 닫는 것은 assignee가 이슈마다 `merged <해시>`로 한다.
+      착수하지 않은 큐 일감은 회차 마감 때 `update <id> --assignee ""`와
+      `UNQUEUED: <세션> landed without it` 코멘트로 풀에 되돌린다.
       br가 실패하면(잠금·바이너리 없음) --lock-timeout 5000으로 한 번 더,
       그래도 안 되면 mesh fyi 첫 줄에 `NO-BEAD:` + 위 규격 그대로 — 리더가
       다음 관제 대기에서 대신 만들고 id를 답한다. 이슈 없이 착수하는

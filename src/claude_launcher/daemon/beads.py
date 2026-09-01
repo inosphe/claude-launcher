@@ -46,6 +46,14 @@ the board and a session's life meet and no agent is in a position to act:
    took up is closed. A daemon *restart* is not an exit and sweeps nothing —
    those sessions come back with the same names and the same work.
 
+4. **Queues.** A session's queue is the board's own answer -- the active
+   issues assigned to it, in the order the worker takes them -- and is never
+   stored beside the session (:func:`queue_of`). The Queues tab of the Beads
+   page draws every session's queue as a swimlane and lets the operator drag
+   an issue between lanes; that drag is the one write the dashboard makes
+   (:meth:`Board.assign`): ``br update --assignee`` plus a ``QUEUED`` /
+   ``UNQUEUED`` comment, never a status change.
+
 The matching rule between a session and issues is deliberately loose and
 explained per issue (``via``): the recorded link (the session's ``issue``
 field), ``assignee``, ``created_by`` (writes are stamped ``--actor
@@ -117,6 +125,11 @@ DEPS_SCAN_LIMIT = 200
 REACT_WINDOW = 20.0
 DEFAULT_GRACE = 120.0
 DEFAULT_TITLE_LIMIT = 100
+
+#: The actor a dashboard write is stamped with. Not a session: the Queues
+#: page moves an assignment on the operator's behalf, and a comment signed by
+#: the session it was moved TO would read as that session claiming the work.
+DASHBOARD_ACTOR = "dashboard"
 
 Runner = Callable[[List[str], str], Awaitable[Tuple[int, str, str]]]
 
@@ -228,6 +241,66 @@ def issue_title(task: str, limit: int = DEFAULT_TITLE_LIMIT) -> str:
         if line:
             return line if len(line) <= limit else line[: limit - 1] + "…"
     return ""
+
+
+def queue_of(issues: Sequence[dict], name: str) -> List[dict]:
+    """Session ``name``'s queue: the active issues the board assigns to it,
+    in the order the worker takes them -- priority ascending, then oldest
+    first.
+
+    The queue is not stored anywhere: it IS this reading of the board
+    (``assignee == name`` over :data:`ACTIVE_STATUSES`), which is what the
+    improv workflows' shared queue rule tells a worker to run as ``claunch
+    beads list --assignee <session> ...``. Keeping it a function of the
+    listing is what keeps the dashboard and the worker reading one queue.
+    Pure; ``blocked`` rides along so a row on the Queues page can show it in
+    its own column, but the worker's own read leaves it out.
+    """
+    mine = [
+        i for i in issues
+        if i.get("assignee") == name and i.get("status") in ACTIVE_STATUSES
+    ]
+    mine.sort(key=_queue_rank)
+    return [dict(i) for i in mine]
+
+
+def _queue_rank(issue: dict) -> Tuple[int, float, str]:
+    try:
+        pri = int(issue.get("priority") if issue.get("priority") is not None else 9)
+    except (TypeError, ValueError):
+        pri = 9
+    return (pri, _ts(issue.get("created_at")), str(issue.get("id") or ""))
+
+
+def queue_summary(queue: Sequence[dict]) -> dict:
+    """The row head's numbers for one queue: what is waiting to be taken
+    (``open``/``in_ready``), being worked, awaiting a landing (``in_review``)
+    and blocked -- plus ``next``, the id the worker's ``queue-next`` step
+    would pick."""
+    waiting = [i for i in queue if i.get("status") in ("open", "in_ready")]
+    return {
+        "total": len(queue),
+        "waiting": len(waiting),
+        "working": sum(1 for i in queue if i.get("status") == "in_progress"),
+        "review": sum(1 for i in queue if i.get("status") == "in_review"),
+        "blocked": sum(1 for i in queue if i.get("status") == "blocked"),
+        "next": waiting[0].get("id") if waiting else None,
+    }
+
+
+def assign_note(issue_id: str, target: str, was: str) -> str:
+    """The comment a dashboard assignment leaves on the issue, so the board
+    says who moved it and from where -- the same ``QUEUED``/``UNQUEUED``
+    markers the workflows' queue rule names, which is what a reader greps
+    for."""
+    if target:
+        tail = f" (was {was})" if was else ""
+        return f"QUEUED by {DASHBOARD_ACTOR}: assigned to {target}{tail}"
+    return f"UNQUEUED by {DASHBOARD_ACTOR}: taken off {was or 'nobody'}"
+
+
+class AssignRefused(cli_beads.BeadsError):
+    """A dashboard assignment that would move work off a session mid-round."""
 
 
 def compose_description(
@@ -787,21 +860,12 @@ class Board:
             view["winddown"] = wd
         return view
 
-    async def fleet_view(self, sessions: Sequence, extra_roots: Sequence[str] = ()) -> dict:
-        """Every board the fleet touches, each issue tagged with the sessions
-        it belongs to — for the Beads page."""
-        result = {"available": self.available(), "boards": []}
-        if not result["available"]:
-            result["error"] = f"'{cli_beads.BINARY}' is not installed on the daemon machine"
-            return result
-        # Resolve every directory's board first, all at once. root_for shells
-        # out to `git rev-parse` for a cwd it has not seen, and the fleet is
-        # spread over one worktree per session -- awaited one at a time that
-        # was seventeen sequential process spawns before the page could draw
-        # anything, which is most of the ~9s this endpoint cost on a daemon
-        # that had not been asked yet. They are independent questions, so they
-        # are asked together; the answers are memoised, so this is a one-time
-        # cost per directory either way and every later poll skips it.
+    async def _group_by_root(
+        self, sessions: Sequence, extra_roots: Sequence[str] = ()
+    ) -> Tuple[Dict[str, List], List[Path]]:
+        """The fleet by board: ``{root: [sessions]}`` and the roots in first-seen
+        order (``extra_roots`` last, sessionless). Shared by the two fleet-wide
+        views so they cannot disagree about which board a session is on."""
         await self._resolve_roots(
             [s.sdef.cwd for s in sessions] + list(extra_roots)
         )
@@ -827,6 +891,24 @@ class Board:
             if self.has_board(root) and str(root) not in by_root:
                 by_root[str(root)] = []
                 order.append(root)
+        return by_root, order
+
+    async def fleet_view(self, sessions: Sequence, extra_roots: Sequence[str] = ()) -> dict:
+        """Every board the fleet touches, each issue tagged with the sessions
+        it belongs to — for the Beads page."""
+        result = {"available": self.available(), "boards": []}
+        if not result["available"]:
+            result["error"] = f"'{cli_beads.BINARY}' is not installed on the daemon machine"
+            return result
+        # Resolve every directory's board first, all at once. root_for shells
+        # out to `git rev-parse` for a cwd it has not seen, and the fleet is
+        # spread over one worktree per session -- awaited one at a time that
+        # was seventeen sequential process spawns before the page could draw
+        # anything, which is most of the ~9s this endpoint cost on a daemon
+        # that had not been asked yet. They are independent questions, so they
+        # are asked together; the answers are memoised, so this is a one-time
+        # cost per directory either way and every later poll skips it.
+        by_root, order = await self._group_by_root(sessions, extra_roots)
         for root in order:
             entry: dict = {
                 "root": str(root), "issues": [], "deps": [], "sessions": [],
@@ -861,6 +943,134 @@ class Board:
                 entry["deps"] = []
             result["boards"].append(entry)
         return result
+
+    async def queues_view(
+        self,
+        sessions: Sequence,
+        extra_roots: Sequence[str] = (),
+        *,
+        cflow_for: Optional[Callable[[str, str], Optional[dict]]] = None,
+    ) -> dict:
+        """Every board's queues -- the Queues tab: one lane per session (and
+        per assignee the daemon does not know), each carrying the issues the
+        board assigns to it in the order the worker takes them, plus the
+        unassigned pool the operator drags from.
+
+        The lanes are sessions first, in the daemon's order, then any other
+        assignee an active issue names (a human, a session on another
+        machine) -- a card that could not be dragged back to a lane the page
+        does not draw would be stuck. An exited session with nothing assigned
+        draws no lane; one that still holds issues does, so what it left
+        behind can be moved. ``cflow_for(name, cwd)`` is the run summary a
+        lane head shows beside the session's status (``None`` for none).
+        """
+        result = {
+            "available": self.available(),
+            "statuses": list(ACTIVE_STATUSES),
+            "boards": [],
+        }
+        if not result["available"]:
+            result["error"] = f"'{cli_beads.BINARY}' is not installed on the daemon machine"
+            return result
+        by_root, order = await self._group_by_root(sessions, extra_roots)
+        for root in order:
+            entry: dict = {"root": str(root), "lanes": [], "unassigned": [], "error": None}
+            members = by_root[str(root)]
+            try:
+                rows = await self.issues(root)
+            except cli_beads.BeadsError as exc:
+                entry["error"] = str(exc)
+                result["boards"].append(entry)
+                continue
+            active = [r for r in rows if r.get("status") in ACTIVE_STATUSES]
+            names: List[str] = []
+            for s in members:
+                if s.sdef.name not in names:
+                    names.append(s.sdef.name)
+            others = sorted({
+                str(r.get("assignee")) for r in active
+                if r.get("assignee") and str(r.get("assignee")) not in names
+            })
+            by_name = {s.sdef.name: s for s in members}
+            for name in names + others:
+                s = by_name.get(name)
+                queue = queue_of(active, name)
+                if s is not None and s.status() == "exited" and not queue:
+                    continue
+                lane: dict = {
+                    "session": name,
+                    "known": s is not None,
+                    "status": s.status() if s is not None else None,
+                    "issue": s.sdef.issue if s is not None else None,
+                    "cflow": None,
+                    "issues": queue,
+                    "summary": queue_summary(queue),
+                }
+                if s is not None and cflow_for is not None:
+                    try:
+                        lane["cflow"] = cflow_for(name, s.sdef.cwd or "")
+                    except Exception as exc:  # a run state that cannot be read
+                        log.debug("beads: no cflow summary for %r: %s", name, exc)
+                entry["lanes"].append(lane)
+            pool = [r for r in active if not r.get("assignee")]
+            pool.sort(key=_queue_rank)
+            entry["unassigned"] = [dict(r) for r in pool]
+            result["boards"].append(entry)
+        return result
+
+    async def assign(
+        self,
+        root: Path,
+        issue_id: str,
+        session: Optional[str],
+        *,
+        manager=None,
+        force: bool = False,
+    ) -> dict:
+        """The Queues page's one write: move ``issue_id`` onto ``session``'s
+        queue (or off every queue, with ``None``/``""``).
+
+        Exactly ``br update <id> --assignee <session>`` plus a ``QUEUED``/
+        ``UNQUEUED`` comment -- what the leader types by hand today. The status
+        is never touched: taking an issue up (``in_progress``), asking for a
+        landing (``in_review``) and closing stay the assignee's, as the
+        workflows' shared block says.
+
+        One refusal, the same rule :func:`adoption` applies at creation: an
+        issue that is ``in_progress`` under a session that is RUNNING is not
+        moved. That session has a branch with the work on it, and an
+        assignment that walked away from it would leave the commit with no
+        issue to close against. ``force`` overrides it for the operator who
+        knows better; the refusal names the holder so they can decide.
+        """
+        target = str(session or "").strip()
+        self._cache.pop(str(root), None)
+        rows = await self.issues(root)
+        current = next((r for r in rows if r.get("id") == issue_id), None)
+        if current is None:
+            raise cli_beads.BeadsError(f"no issue {issue_id!r} on {root}")
+        was = str(current.get("assignee") or "").strip()
+        if was == target:
+            return {"issue": issue_id, "assignee": target, "was": was, "changed": False}
+        if (
+            was
+            and current.get("status") == "in_progress"
+            and self._running(manager)(was) is True
+            and not force
+        ):
+            raise AssignRefused(
+                f"{issue_id} is in_progress under {was}, which is still running "
+                f"-- its branch carries that work. Let {was} finish or hand it "
+                "over on the board, or send force to move it anyway"
+            )
+        await self.br(
+            root, ["update", issue_id, "--assignee", target], actor=DASHBOARD_ACTOR
+        )
+        await self.br(
+            root, ["comments", "add", issue_id, assign_note(issue_id, target, was)],
+            actor=DASHBOARD_ACTOR,
+        )
+        return {"issue": issue_id, "assignee": target, "was": was, "changed": True}
 
     # ---- creation ------------------------------------------------------- #
     @staticmethod

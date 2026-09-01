@@ -128,16 +128,16 @@ function check(what, got, want) {
 
 /* ---- the merged page -------------------------------------------------- */
 let tabs = ctx.tabs();
-check("the combined page names both readings", tabs.kids.map((n) => n.text),
-      ["Board", "Reports"]);
-check("the reports reading has its Beads route", tabs.kids.map((n) => n.href),
-      ["#/beads", "#/beads/reports"]);
+check("the combined page names all three readings", tabs.kids.map((n) => n.text),
+      ["Board", "Queues", "Reports"]);
+check("each reading has its Beads route", tabs.kids.map((n) => n.href),
+      ["#/beads", "#/beads/queues", "#/beads/reports"]);
 check("the board reading starts selected", tabs.kids.map((n) => n.classes.has("on")),
-      [true, false]);
+      [true, false, false]);
 ctx.setSection("reports");
 tabs = ctx.tabs();
 check("the reports reading becomes selected", tabs.kids.map((n) => n.classes.has("on")),
-      [false, true]);
+      [false, false, true]);
 
 /* ---- filters ---------------------------------------------------------- */
 const issues = [

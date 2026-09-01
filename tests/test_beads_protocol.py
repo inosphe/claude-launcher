@@ -446,3 +446,107 @@ def test_the_packaged_stances_know_a_record_has_a_home():
     rs = mesh_roles.resolve()
     assert "board" in rs.get("leader").stance
     assert "board" in rs.get("worker").stance
+
+
+# --------------------------------------------------------------------------- #
+# queues and batches: many issues per session, one landing per branch
+# --------------------------------------------------------------------------- #
+def test_the_shared_block_defines_the_queue_and_the_batch():
+    """A session's queue is a reading of the board (assignee), the dashboard
+    writes only that, and a queue lands as one batch: every role reads the
+    same paragraph, so the leader's table and the worker's transitions agree
+    on what a batch row is."""
+    block = _block(_bundled("improv-worker"))
+    flat = " ".join(block.split())
+    assert "── 큐(queue)·배치(batch) 규칙 ──" in block
+    assert "assignee가 그 세션인 활성 이슈" in flat
+    assert "--assignee <세션> --status open --status in_ready --status in_progress --limit 0 --json" in flat
+    assert "priority 오름차순" in flat
+    assert "`QUEUED`/`UNQUEUED` 코멘트" in flat
+    assert "상태(status)는 손대지 않는다" in flat        # the dashboard writes no status
+    assert "착지 요청은 한 번이다" in flat
+    assert "`batch: <id,...>`" in flat
+    assert "assignee가 이슈마다 `merged <해시>`로 한다" in flat
+    assert "UNQUEUED: <세션> landed without it" in flat
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_worker_loops_over_its_queue_before_it_lands(layer):
+    """commit -> queue-next -> (item-intake -> work ...)* -> landing.
+
+    The loop is closed by a select whose material is the board (one listing),
+    whose ``next`` branch requires an issue to transition, and whose
+    ``drained`` branch is the whole landing procedure -- there is no lazy
+    exit. The batch cap is counted here and the ambiguous case drains."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    wf = model.load(path)
+    assert wf.steps["commit"].next == "queue-next"
+    gate = wf.steps["queue-next"]
+    assert gate.select is not None and gate.select.chooser == "agent"
+    assert gate.select.require_reason is True
+    assert {k: o.next for k, o in gate.select.options.items()} == {
+        "next": "item-intake", "drained": "landing",
+    }
+    prompt = " ".join(gate.select.prompt.split())
+    assert "--assignee $CLAUNCH_SESSION --status open --status in_ready --limit 0 --json" in prompt
+    assert "5개" in prompt                          # the batch cap
+    assert "모호하면 drained다" in prompt             # the tie-break
+    item = wf.steps["item-intake"]
+    assert item.next == "work"
+    text = " ".join(item.instructions.split())
+    assert "--status in_progress --external-ref <run id>" in text
+    assert "새 브랜치를 만들지 않고" in text            # one branch per batch
+    # intake reads the queue but transitions only the primary issue
+    intake = " ".join(wf.steps["intake"].instructions.split())
+    assert "--assignee $CLAUNCH_SESSION --status open --status in_ready --status in_progress --limit 0 --json" in intake
+    assert "전이하는 것은 주 이슈 하나다" in intake
+    assert "큐의 나머지 일감" in " ".join(wf.steps["intake"].done_when.split())
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_worker_lands_a_batch_once_and_settles_every_issue(layer):
+    """One nudge per batch, every issue to in_review, a COMMIT comment on the
+    issue the commit belongs to, and at wrapup a close per landed issue and a
+    return-to-pool for what was queued but never taken up."""
+    path = (
+        _bundled("improv-worker") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-worker.yaml"
+    )
+    wf = model.load(path)
+    commit = " ".join(wf.steps["commit"].instructions.split())
+    assert "그 커밋이 속한 일감의 이슈" in commit
+    assert "큐에 일감이 남아 있으면 이 nudge는 보내지 않는다" in commit
+    req = " ".join(wf.steps["integration-request"].instructions.split())
+    assert "── 배치 회차(이 브랜치에 실린 일감이 둘 이상) ──" in req
+    assert "실린 이슈 **전부**를 in_review로 전이한다" in req
+    assert "`LANDING REQUEST @ <tip> batch: <id1,id2,...>`" in req
+    assert "`LANDING REQUEST @ <tip> (batch of <주 이슈 id>)`" in req
+    assert "배치면 실린 이슈 전부" in " ".join(wf.steps["integration-request"].done_when.split())
+    # landing is a select: its text is the prompt, not instructions
+    landing = " ".join((wf.steps["landing"].select.prompt or "").split())
+    assert "배치 회차면 실린 이슈마다 본다" in landing   # a brake on any issue escalates
+    wrapup = " ".join(wf.steps["wrapup"].instructions.split())
+    assert "배치 회차면 **실린 이슈마다** 같은 사유로 닫는다" in wrapup
+    assert '--assignee ""' in wrapup
+    assert "UNQUEUED: $CLAUNCH_SESSION landed without it" in wrapup
+    assert "배치 회차면 주 이슈 id 하나로 한 장" in wrapup   # one report per landing
+
+
+@pytest.mark.parametrize("layer", ["bundled", "project"])
+def test_the_leader_reads_a_batch_as_one_candidate(layer):
+    """N in_review rows at one tip are one branch: reviewed once, merged
+    once, and closed by the assignee per issue -- never by the leader."""
+    path = (
+        _bundled("improv-leader") if layer == "bundled"
+        else PROJECT_OVERRIDES / "improv-leader.yaml"
+    )
+    text = " ".join(path.read_text(encoding="utf-8").split())
+    assert "**배치 행**" in text
+    assert "**브랜치 하나 = 후보 하나**" in text
+    assert "행 수로 후보 수를 세지 않고" in text
+    assert "리더가 대신 닫지 않는다" in text
+    assert "--no-ff 한 번으로 머지하고" in text
+    assert "실린 이슈 id를 전부 적는다" in text
