@@ -15919,6 +15919,9 @@ let meshPollTimer = null;
 let meshCache = [];       // sidebar list payload
 let meshListRendered = null;
 let meshInviteCodes = {}; // mesh -> last minted invite code (survives rerenders)
+const MESH_MESSAGE_PAGE_SIZE = 25;
+let meshMessageFilter = "current";
+let meshMessageOffset = 0;
 
 /* Relay connectivity is surfaced permanently in the header: mesh can only
    span machines while the uplink is registered, so the state must never be
@@ -16131,6 +16134,8 @@ function stopMeshPoll() {
 async function openMesh(name) {
   if (meshPollTimer) clearInterval(meshPollTimer);
   meshName = name;
+  meshMessageFilter = "current";
+  meshMessageOffset = 0;
   missingMeshShown = "";   // a different route deserves a fresh verdict
   rolesEditor = "";        // never carry one mesh's open editor into another
   showView("mesh");
@@ -16148,11 +16153,16 @@ async function refreshMeshView(force = false) {
   // below would discard. A poll-driven refresh stands down until it closes;
   // an explicit one (a save, a cancel) still goes through.
   if (rolesEditor && !force) return;
-  let info, history, owed;
+  let info, history, historyPage, owed;
   try {
+    const historyQuery = new URLSearchParams({
+      limit: String(MESH_MESSAGE_PAGE_SIZE),
+      offset: String(meshMessageOffset),
+      filter: meshMessageFilter,
+    });
     const [r1, r2, r3] = await Promise.all([
       api(`/api/mesh/${encodeURIComponent(meshName)}`),
-      api(`/api/mesh/${encodeURIComponent(meshName)}/messages?limit=100`),
+      api(`/api/mesh/${encodeURIComponent(meshName)}/messages?${historyQuery}`),
       api(`/api/mesh/${encodeURIComponent(meshName)}/owed`),
     ]);
     info = await r1.json();
@@ -16160,7 +16170,9 @@ async function refreshMeshView(force = false) {
       renderMissingMesh(meshName, info.error || "cannot load mesh");
       return;
     }
-    history = r2.ok ? (await r2.json()).messages || [] : [];
+    const historyDoc = r2.ok ? await r2.json() : {};
+    history = historyDoc.messages || [];
+    historyPage = historyDoc.page || null;
     // A daemon too old to know the route still renders everything else.
     owed = r3.ok ? await r3.json() : null;
     missingMeshShown = "";  // it loaded, so arm the panel again
@@ -16168,7 +16180,7 @@ async function refreshMeshView(force = false) {
     return;
   }
   renderRelayBadge(info.relay);
-  renderMesh(info, history, force, owed);
+  renderMesh(info, history, force, owed, historyPage);
 }
 
 /* A mesh route can outlive its mesh: a bookmark or a shared link naming a
@@ -17329,7 +17341,7 @@ function formInUse(root) {
     ["INPUT", "TEXTAREA", "SELECT"].includes(document.activeElement.tagName);
 }
 
-function renderMesh(info, history, force, owed) {
+function renderMesh(info, history, force, owed, historyPage) {
   const view = $("mesh-view");
   if (!force && formInUse(view)) return; // don't wipe in-progress input
   // ...nor yank the node out from under a drag, or race an in-flight edit
@@ -17709,10 +17721,37 @@ function renderMesh(info, history, force, owed) {
   send.append(row, text, sendBtn);
   view.appendChild(send);
 
-  // message log (latest last, like a chat)
+  view.appendChild(renderMeshMessageLog(info, history, historyPage));
+}
+
+function renderMeshMessageLog(info, history, page) {
+  // Message pages remain chronological (oldest first) although pagination is
+  // anchored at the newest message.  This preserves the chat reading order.
   const logBox = el("div", "mesh-log");
-  logBox.appendChild(el("h3", null, `Messages (${info.messages})`));
-  if (!history.length) logBox.appendChild(el("p", "wf-note", "no messages yet"));
+  const counts = (page && page.counts) || { all: info.messages || 0 };
+  logBox.appendChild(el("h3", null, `Messages (${counts.all || 0})`));
+  const tabs = el("div", "mesh-message-tabs");
+  for (const [filter, label] of [
+    ["current", "Current"], ["all", "All"], ["archived", "Archived"],
+  ]) {
+    const count = counts[filter] || 0;
+    const tab = el(
+      "button", "mesh-message-filter" + (meshMessageFilter === filter ? " on" : ""),
+      `${label} (${count})`
+    );
+    tab.type = "button";
+    tab.addEventListener("click", () => {
+      if (meshMessageFilter === filter) return;
+      meshMessageFilter = filter;
+      meshMessageOffset = 0;
+      refreshMeshView(true);
+    });
+    tabs.appendChild(tab);
+  }
+  logBox.appendChild(tabs);
+  if (!history.length) {
+    logBox.appendChild(el("p", "wf-note", "no messages in this filter"));
+  }
   for (const m of history) {
     const line = el("div", "mesh-msg");
     const meta = el("div", "mesh-msg-meta");
@@ -17733,7 +17772,32 @@ function renderMesh(info, history, force, owed) {
     line.appendChild(el("div", "mesh-msg-body", m.body || ""));
     logBox.appendChild(line);
   }
-  view.appendChild(logBox);
+  const total = page ? page.total : history.length;
+  const offset = page ? page.offset : 0;
+  if (total) {
+    const first = total - offset - history.length + 1;
+    const last = total - offset;
+    const pager = el("div", "mesh-message-pager");
+    const newer = el("button", "wf-btn option", "Newer");
+    newer.type = "button";
+    newer.disabled = !(page ? page.has_newer : false);
+    newer.addEventListener("click", () => {
+      meshMessageOffset = Math.max(0, meshMessageOffset - MESH_MESSAGE_PAGE_SIZE);
+      refreshMeshView(true);
+    });
+    pager.appendChild(newer);
+    pager.appendChild(el("span", "mesh-message-range", `Showing ${first}–${last} of ${total}`));
+    const older = el("button", "wf-btn option", "Older");
+    older.type = "button";
+    older.disabled = !(page ? page.has_older : false);
+    older.addEventListener("click", () => {
+      meshMessageOffset += MESH_MESSAGE_PAGE_SIZE;
+      refreshMeshView(true);
+    });
+    pager.appendChild(older);
+    logBox.appendChild(pager);
+  }
+  return logBox;
 }
 
 function fmtAge(secs) {

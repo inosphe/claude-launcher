@@ -2263,6 +2263,16 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
   font-family: inherit;
 }
 .mesh-log { max-width: 760px; margin-top: 16px; }
+.mesh-message-tabs, .mesh-message-pager {
+  display: flex; align-items: center; gap: 6px; margin: 0 0 10px;
+}
+.mesh-message-filter {
+  border: 1px solid #30363d; border-radius: 999px; background: #161b22;
+  color: #8b949e; cursor: pointer; font: inherit; font-size: 12px; padding: 4px 9px;
+}
+.mesh-message-filter.on { background: #1f6feb; border-color: #58a6ff; color: #fff; }
+.mesh-message-pager { justify-content: space-between; margin-top: 10px; margin-bottom: 0; }
+.mesh-message-range { color: #7d8590; font-size: 12px; }
 .mesh-msg {
   background: #1b1e24; border: 1px solid #2a2e36; border-radius: 8px;
   padding: 8px 12px; margin-bottom: 8px;

@@ -2777,6 +2777,84 @@ class MeshManager:
             for i, m in enumerate(mesh.messages[start:])
         ]
 
+    def history_annotated_page(
+        self,
+        name: str,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        message_filter: str = "all",
+    ) -> dict:
+        """A bounded, annotated history page for the dashboard.
+
+        ``offset`` counts backwards from the newest matching message.  The
+        returned messages retain their chronological order, which keeps the
+        mesh log chat-like while allowing its default view to avoid building
+        a large historical DOM.
+
+        ``current`` and ``archived`` are based on the current status of local
+        session members.  A remote member is current here because its daemon
+        owns the corresponding session record.
+        """
+        mesh = self.get(name)
+        if message_filter not in {"all", "current", "archived"}:
+            raise MeshError(f"unknown message filter {message_filter!r}")
+
+        archived_handles = set()
+        for handle, member in mesh.members.items():
+            if not self._is_local(mesh, member):
+                continue
+            try:
+                if self.manager.get(member.session).archived_at:
+                    archived_handles.add(handle)
+            except ManagerError:
+                continue
+
+        def is_archived(message: dict) -> bool:
+            # A broadcast names every current member.  Direct messages name
+            # their sender and recipients when those names are members; an
+            # external sender alone is insufficient to make a message old.
+            handles = []
+            sender = message.get("from")
+            if sender in mesh.members:
+                handles.append(sender)
+            recipients = message.get("to")
+            if recipients == "*":
+                handles.extend(mesh.members)
+            elif isinstance(recipients, list):
+                handles.extend(h for h in recipients if h in mesh.members)
+            elif recipients in mesh.members:
+                handles.append(recipients)
+            return bool(handles) and all(h in archived_handles for h in handles)
+
+        rows = []
+        counts = {"all": len(mesh.messages), "current": 0, "archived": 0}
+        for index, message in enumerate(mesh.messages):
+            category = "archived" if is_archived(message) else "current"
+            counts[category] += 1
+            if message_filter == "all" or message_filter == category:
+                rows.append((index, message))
+
+        total = len(rows)
+        end = max(0, total - offset)
+        start = max(0, end - limit) if limit else end
+        page = rows[start:end]
+        return {
+            "messages": [
+                {**message, **mesh.delivery_of(message, index)}
+                for index, message in page
+            ],
+            "page": {
+                "filter": message_filter,
+                "limit": limit,
+                "offset": offset,
+                "total": total,
+                "counts": counts,
+                "has_newer": offset > 0,
+                "has_older": start > 0,
+            },
+        }
+
     # ------------------------------------------------------------------ #
     # policy config
     # ------------------------------------------------------------------ #

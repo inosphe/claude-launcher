@@ -1115,6 +1115,52 @@ def test_history_says_where_each_message_got_to(home, tmp_path):
     asyncio.run(run())
 
 
+def test_history_page_filters_archived_members(home, tmp_path):
+    """The dashboard can keep inactive mesh conversations off its first page."""
+    _register_py_harness()
+
+    async def run():
+        mgr = _manager()
+        mm = MeshManager(mgr)
+        try:
+            mm.create("paged")
+            for name, handle in (("old", "old_handle"), ("live", "live_handle")):
+                mgr.create(SessionDef(name=name, harness="py", cwd=str(tmp_path)))
+                await mm.join("paged", name, handle=handle)
+
+            await mm.send("paged", "operator", "old_handle", "archived", external=True)
+            await mm.send("paged", "operator", "live_handle", "current-1", external=True)
+            await mm.send("paged", "operator", "live_handle", "current-2", external=True)
+            await mgr.get("old").shutdown()
+            mgr.archive("old")
+
+            archived = mm.history_annotated_page(
+                "paged", limit=25, message_filter="archived"
+            )
+            assert [m["body"] for m in archived["messages"]] == ["archived"]
+            assert archived["page"] == {
+                "filter": "archived", "limit": 25, "offset": 0,
+                "total": 1, "counts": {"all": 3, "current": 2, "archived": 1},
+                "has_newer": False, "has_older": False,
+            }
+
+            current = mm.history_annotated_page(
+                "paged", limit=1, message_filter="current"
+            )
+            assert [m["body"] for m in current["messages"]] == ["current-2"]
+            assert current["page"]["total"] == 2
+            assert current["page"]["has_older"] is True
+            older = mm.history_annotated_page(
+                "paged", limit=1, offset=1, message_filter="current"
+            )
+            assert [m["body"] for m in older["messages"]] == ["current-1"]
+            assert older["page"]["has_newer"] is True
+        finally:
+            await mgr.shutdown_all()
+
+    asyncio.run(run())
+
+
 def test_dismiss_writes_off_unanswered_mail(home, tmp_path):
     """The operator's closure: the one that is not a reply.
 

@@ -2494,14 +2494,25 @@ async def h_mesh_send(request: web.Request) -> web.Response:
 async def h_mesh_history(request: web.Request) -> web.Response:
     try:
         limit = int(request.query.get("limit", 50))
+        offset = int(request.query.get("offset", 0))
     except ValueError:
-        return json_error(400, "limit must be an integer")
+        return json_error(400, "limit and offset must be integers")
+    if limit < 0 or offset < 0:
+        return json_error(400, "limit and offset must be zero or greater")
+    message_filter = request.query.get("filter", "all")
+    if message_filter not in {"all", "current", "archived"}:
+        return json_error(400, "filter must be all, current, or archived")
     # Annotated: each message carries who it resolves to *now*, and which of
     # those have actually had it typed in. The sequence view is drawn from
     # this — an arrow that has left but not landed is a different fact from
     # one that landed, and the log alone cannot tell them apart.
-    messages = _mesh_mgr(request).history_annotated(request.match_info["mesh"], limit)
-    return web.json_response({"messages": messages})
+    page = _mesh_mgr(request).history_annotated_page(
+        request.match_info["mesh"],
+        limit=limit,
+        offset=offset,
+        message_filter=message_filter,
+    )
+    return web.json_response(page)
 
 
 async def h_mesh_owed(request: web.Request) -> web.Response:
