@@ -517,23 +517,28 @@ def test_the_configured_timeout_reaches_the_gate_deadline(home, monkeypatch):
     import asyncio
     from datetime import datetime
 
+    from claude_launcher import store
     from claude_launcher.daemon import __main__ as daemon_main
     from claude_launcher.daemon import runtime_state
     from claude_launcher.daemon_client import DaemonClient, DaemonClientError
 
     monkeypatch.setattr(daemon_main, "_start_uplink", lambda port: (None, None))
 
-    cfg = {
+    # _serve indexes the config strictly (cfg["..."], no defaults), so a cfg
+    # built by hand has to carry every key it reads -- and that list grows
+    # with the daemon (the goto gate's timeout, then the focus scheduling
+    # knobs each broke this test on arrival). Start from the packaged
+    # defaults and override only what this test is about.
+    cfg = dict(store.DAEMON_DEFAULTS)
+    cfg.update({
         "host": "127.0.0.1",
         "port": 0,  # ephemeral: never collides with a live daemon
         "idle_threshold": 2.0,
         "scrollback_lines": 200,
         "restore": False,
         "restart_approval_timeout": 7,
-        # _serve wires both approval gates by strict indexing; a hand-built
-        # cfg must carry the goto gate's timeout too.
         "goto_approval_timeout": 7,
-    }
+    })
     bound: dict = {}
 
     async def run():

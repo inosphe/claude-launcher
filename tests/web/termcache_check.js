@@ -67,6 +67,7 @@ function slice(name) {
 }
 const keepAliveSrc = cutFrom("const TERM_CACHE_MAX = 3;", "attach");
 const openSocketSrc = slice("openSocket");
+const focusSrc = slice("setTerminalFocus");
 
 /* ---- stub world -------------------------------------------------------- */
 function node() {
@@ -177,6 +178,12 @@ function linkDown() {}
 function sendInput() {}
 function watchComposer() {}   // the typing marks belong to typing_check.js
 function handleWheel() {}
+/* Whether a person is looking at the session, told to the daemon per socket.
+   The real setTerminalFocus is sliced in below (it is what suspendActive
+   calls when it parks a terminal, and the fake socket records the frame);
+   the sync that reads the document is stubbed, as it is reconnect_check's
+   subject and the document here has no focus to report. */
+function syncTerminalFocus() {}
 `;
 
   /* NB: the live state must be read through getters on the returned object,
@@ -185,7 +192,7 @@ function handleWheel() {}
   const api = new Function(
     "__record", "$", "document", "Terminal", "FitAddon", "WebSocket",
     "handleFrame", "url", "location", "fontSize",
-    stubs + keepAliveSrc + "\n" + openSocketSrc + "\n"
+    stubs + focusSrc + "\n" + keepAliveSrc + "\n" + openSocketSrc + "\n"
     + `
 return {
   attach, suspendActive, dropKept,
@@ -245,6 +252,12 @@ return {
   check("its socket is still open", aSock.readyState === 1, aSock.readyState);
   check("its element is hidden", aTerm.element.style.display === "none",
         aTerm.element.style.display);
+  // The socket stays up, so the daemon would go on ranking `a` as watched
+  // unless told otherwise: parking is the moment nobody is looking at it.
+  check("and the daemon is told nobody is looking at it any more",
+        aSock.sent.length === 1
+        && aSock.sent[0] === JSON.stringify({ type: "focus", focused: false }),
+        aSock.sent);
 
   const before = w.sockets.length;
   w.api.attach("a");

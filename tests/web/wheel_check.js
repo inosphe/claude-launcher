@@ -179,6 +179,11 @@ function build(opts) {
                       pid: 4242, boot_id: "b1",
                       alt: !!o.alt, mouse: !!o.mouse });
              await settle();
+             // Opening the socket already sent one control — the focus
+             // report (syncTerminalFocus in onopen, reconnect_check's
+             // subject). The checks below count what the WHEEL sends, so
+             // the handshake's traffic is cleared out of the way first.
+             s.sent.length = 0;
              return s;
            } };
 }
