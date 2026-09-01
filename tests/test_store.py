@@ -162,3 +162,22 @@ def test_a_save_that_cannot_land_keeps_the_old_document_and_cleans_up(
 
     assert store.load()["llm"]["endpoint"] == "e1"
     assert not list(config_file.parent.glob(f"{config_file.name}.*.tmp"))
+
+
+def test_load_parses_once_per_text_and_hands_out_copies(config_file):
+    """The parse is skipped while the file's text is unchanged, and it is the
+    TEXT that decides -- a rewrite of the same size lands within the same
+    timestamp on a coarse filesystem, so a stat-keyed cache could serve the
+    old document. Each call still hands back its own copy: ``update`` mutates
+    what ``load`` returns, and that must not edit the cached parse."""
+    store.save({"profiles": {"a": {"env": {"X": "1"}}}})
+    first = store.load()
+    first["profiles"]["a"]["env"]["X"] = "mutated"
+    assert store.load()["profiles"]["a"]["env"] == {"X": "1"}
+    # Same length, different content, written straight past ``save``.
+    text = config_file.read_text(encoding="utf-8")
+    config_file.write_text(text.replace("X: '1'", "X: '2'"), encoding="utf-8")
+    assert store.load()["profiles"]["a"]["env"] == {"X": "2"}
+    config_file.write_text("- not a mapping\n", encoding="utf-8")
+    with pytest.raises(store.StoreError):
+        store.load()
