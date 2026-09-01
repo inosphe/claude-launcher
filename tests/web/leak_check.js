@@ -343,6 +343,7 @@ const document = {
   body: docRoot,
   documentElement: makeEl("html"),
   hidden: false,
+  hasFocus: () => true,
   title: "",
   cookie: "",
   createElement: (t) => makeEl(t),

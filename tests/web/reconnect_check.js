@@ -170,8 +170,15 @@ function build(opts) {
     () => false, // terminalOnScreen: with hasFocus below, resize frames adopt
   );
 
+  // What the page TYPED into a socket: keystrokes go out as bytes, and
+  // everything that is a string is a control frame (focus, scroll) the link
+  // sends on its own account. The checks about leaking input across sockets
+  // are about the bytes, so a new control frame must not count against them.
+  const typed = (s) => s.sent.filter((m) => typeof m !== "string");
+  const controls = (s) => s.sent.filter((m) => typeof m === "string").map((m) => JSON.parse(m));
+
   return { api, nodes, sockets, health, apiCalls, term, written, statuses,
-           winOn, now, pending, fire, settle,
+           winOn, now, pending, fire, settle, typed, controls,
            // the ordinary starting point: attached, socket open, frames flowing
            live: async (pid) => {
              api.openSocket("s7");
@@ -196,6 +203,38 @@ function build(opts) {
              await settle();
              return s;
            } };
+}
+
+/* --- every socket that opens says whether it is being looked at -------- */
+{
+  // The daemon ranks a session's output by whether a person is watching it
+  // (its `focus` frame), and it learns that per socket: a reconnected socket
+  // is a new one to the daemon, so the report has to go out again on open,
+  // before anything typed while the link was down is replayed. The document
+  // stubbed above says unfocused, so that is what every socket must hear.
+  const w = build();
+  (async () => {
+    const s = await w.live();
+    check("the open handshake reports focus first",
+          JSON.stringify(w.controls(s)[0]) === '{"type":"focus","focused":false}',
+          s.sent);
+    check("and only once", w.controls(s).length === 1, s.sent);
+    s.dropped();
+    w.api.sendInput("ls\r");
+    await w.fire();
+    const back = w.sockets[1];
+    back.opened();
+    check("the socket that replaced it is told again, before the replay",
+          typeof back.sent[0] === "string"
+          && JSON.parse(back.sent[0]).type === "focus",
+          back.sent);
+    back.text({ type: "init", cols: 80, rows: 24, status: "idle", pid: 4242,
+                boot_id: "b1" });
+    await w.settle();
+    check("and the replay still follows it",
+          w.typed(back).length === 1 && Buffer.from(w.typed(back)[0]).toString() === "ls\r",
+          back.sent);
+  })();
 }
 
 /* --- a dropped socket goes and gets another one ------------------------ */
@@ -350,7 +389,7 @@ function build(opts) {
           w.api.state === "live", w.api.state);
     w.api.sendInput("hello");
     check("and still takes what is typed at it",
-          s.sent.length === 1, s.sent);
+          w.typed(s).length === 1, s.sent);
     s.dropped();
     check("and its close is still an outage worth retrying",
           w.api.state === "reconnecting" && w.pending() === 1, w.api.state);
@@ -414,8 +453,9 @@ check("the parked copy reads the same flag",
                 boot_id: "b1" });
     await w.settle();
     check("and replayed once the same child answers again",
-          back.sent.length === 1 && Buffer.from(back.sent[0]).toString() === "git status\r",
-          back.sent.map((b) => Buffer.from(b).toString()));
+          w.typed(back).length === 1
+          && Buffer.from(w.typed(back)[0]).toString() === "git status\r",
+          w.typed(back).map((b) => Buffer.from(b).toString()));
     check("the queue is spent", w.api.queued.length === 0, w.api.queued);
   })();
 }
@@ -435,7 +475,7 @@ check("the parked copy reads the same flag",
                 boot_id: "b2" });
     await w.settle();
     check("half a command is not typed into whatever answered next",
-          back.sent.length === 0, back.sent);
+          w.typed(back).length === 0, back.sent);
     check("and the terminal says where it went",
           w.written.some((t) => t.includes("discarded")), w.written);
     check("the link follows the new child all the same", w.api.pid === 5150,
