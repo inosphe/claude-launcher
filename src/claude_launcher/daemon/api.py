@@ -450,6 +450,7 @@ def build_app(
     # Before "/api/beads/{id}": a literal segment registered after the
     # pattern would be read as an issue called "queues".
     r.add_get("/api/beads/queues", h_beads_queues)
+    r.add_get("/api/beads/stream", h_beads_stream)
     r.add_get("/api/beads/{id}", h_beads_issue)
     r.add_post("/api/beads/{id}/assign", h_beads_assign)
     r.add_get("/api/sessions/{name}/beads", h_session_beads)
@@ -4754,6 +4755,33 @@ async def h_beads_fleet(request: web.Request) -> web.Response:
     if cwd:
         extra.insert(0, cwd)
     view = await request.app["beads"].fleet_view(list(manager.list()), extra)
+    return web.json_response(view)
+
+
+async def h_beads_stream(request: web.Request) -> web.Response:
+    """One bounded Beads page for the fixed-height board viewport."""
+    try:
+        offset = int(request.query.get("offset", "0"))
+        limit = int(request.query.get("limit", "50"))
+    except ValueError:
+        return json_error(400, "offset and limit must be integers")
+    if offset < 0 or not 1 <= limit <= 200:
+        return json_error(400, "offset must be non-negative and limit must be 1..200")
+    raw_priority = request.query.get("priority")
+    try:
+        priority = int(raw_priority) if raw_priority is not None else None
+    except ValueError:
+        return json_error(400, "priority must be an integer")
+    if priority is not None and not 0 <= priority <= 9:
+        return json_error(400, "priority must be 0..9")
+    manager: SessionManager = request.app["manager"]
+    extra = [os.getcwd()]
+    cwd = request.query.get("cwd")
+    if cwd:
+        extra.insert(0, cwd)
+    view = await request.app["beads"].stream_view(
+        list(manager.list()), extra, offset=offset, limit=limit, priority=priority,
+    )
     return web.json_response(view)
 
 

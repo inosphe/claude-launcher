@@ -104,7 +104,16 @@ class FakeBr:
             args.remove("--json")
         cmd, rest = args[0], args[1:]
         if cmd == "list":
-            return 0, json.dumps({"issues": list(self.issues.values())}), ""
+            opts = _opts(rest)
+            rows = list(self.issues.values())
+            if "--priority" in opts:
+                rows = [r for r in rows if r.get("priority") == int(opts["--priority"])]
+            offset = int(opts.get("--offset", 0))
+            limit = int(opts.get("--limit", 0))
+            rows = rows[offset:]
+            if limit:
+                rows = rows[:limit]
+            return 0, json.dumps({"issues": rows}), ""
         if cmd == "show":
             i = self.issues.get(rest[0])
             return (0, json.dumps([i]), "") if i else (1, "", f"no issue {rest[0]}")
@@ -769,6 +778,61 @@ def test_the_fleet_view_carries_the_edges_beside_the_issues(repo):
         ]
         # one `dep list` for the one issue that has any, however many it has
         assert sum(1 for c in br.calls if "dep" in c) == 1
+
+    asyncio.run(run())
+
+
+def test_stream_view_reads_a_bounded_priority_page(repo):
+    """The incremental board endpoint asks ``br`` for one extra row, so it
+    can return a continuation marker without serializing the whole board."""
+    br = FakeBr()
+    for n in range(5):
+        br.add(id=f"p1-{n}", priority=1, title=f"P1 {n}")
+    br.add(id="p2", priority=2, title="P2")
+    board = _board(br, repo)
+
+    async def run():
+        view = await board.stream_view([], extra_roots=[str(repo)], limit=2, priority=1)
+        entry = view["boards"][0]
+        assert [i["id"] for i in entry["issues"]] == ["p1-0", "p1-1"]
+        assert entry["has_more"] is True
+        assert view["has_more"] is True and view["next_offset"] == 2
+        listing = next(c for c in br.calls if "list" in c)
+        assert "--limit" in listing and listing[listing.index("--limit") + 1] == "3"
+        assert "--priority" in listing and listing[listing.index("--priority") + 1] == "1"
+
+        tail = await board.stream_view(
+            [], extra_roots=[str(repo)], offset=4, limit=2, priority=1,
+        )
+        assert [i["id"] for i in tail["boards"][0]["issues"]] == ["p1-4"]
+        assert tail["has_more"] is False and tail["next_offset"] is None
+
+    asyncio.run(run())
+
+
+def test_stream_route_validates_and_returns_the_continuation(home, tmp_path, repo):
+    br = FakeBr()
+    br.add(id="a", priority=1)
+    br.add(id="b", priority=1)
+    board = _board(br, repo)
+
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        mm = MeshManager(mgr, root=tmp_path / "mesh")
+        client = await _serve(mgr, mm, board)
+        try:
+            resp = await client.get(
+                f"/api/beads/stream?cwd={repo}&limit=1&priority=1", headers=BEARER,
+            )
+            doc = await resp.json()
+            assert resp.status == 200, doc
+            entry = next(b for b in doc["boards"] if b["root"] == str(repo))
+            assert [i["id"] for i in entry["issues"]] == ["a"]
+            assert doc["has_more"] is True and doc["next_offset"] == 1
+            bad = await client.get("/api/beads/stream?limit=zero", headers=BEARER)
+            assert bad.status == 400
+        finally:
+            await client.close()
 
     asyncio.run(run())
 
