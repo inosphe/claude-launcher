@@ -77,3 +77,20 @@ def test_other_controls_do_not_mark_the_keyboard():
     s = _Session()
     _control(s, {"type": "ping"})
     assert s.marks == 0
+
+
+def test_codex_osc_colour_answers_are_not_keyboard_input():
+    """xterm.js emits OSC 10/11 answers through the same event as keys.
+
+    Codex consumes the ESC characters as Escape keys and otherwise leaves the
+    response text in its composer, so the terminal bridge must discard only
+    these complete automatic answers.
+    """
+    foreground = b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"
+    background = b"\x1b]11;rgb:1414/1616/1a1a\x1b\\"
+
+    assert ws_mod._is_codex_osc_color_response("codex", foreground)
+    assert ws_mod._is_codex_osc_color_response("codex", foreground + background)
+    assert not ws_mod._is_codex_osc_color_response("claude", foreground)
+    assert not ws_mod._is_codex_osc_color_response("codex", b"\x1b[<35;10;5M")
+    assert not ws_mod._is_codex_osc_color_response("codex", b"]10;rgb:ffff/ffff/ffff\\")
