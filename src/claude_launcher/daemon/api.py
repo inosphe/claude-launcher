@@ -1892,17 +1892,25 @@ async def _nudge_sessions(
     return nudged
 
 
-def _schedule_start_nudges(
-    app: web.Application, cwd: str, scope: str, message: str
+def _schedule_cflow_nudges(
+    app: web.Application,
+    cwd: str,
+    scope: str,
+    message: str,
+    *,
+    force: bool = False,
 ) -> list:
-    """Keep a new run's nudge attached while its session finishes starting.
+    """Schedule a cflow nudge without holding the dashboard request open.
 
     A session is already the run's driver once its canonical ``cwd`` and its
-    name match the slot.  ``Session.deliver`` then owns the readiness wait,
-    which can take long enough that holding the HTTP request makes the start
-    panel look disconnected.  Returning the matching names distinguishes
-    that pending delivery from a default or stale slot, where no session is
-    available to receive it at all.
+    name match the slot. ``Session.deliver`` owns readiness and input-safety
+    waits, which can otherwise make an Archive or Start button appear not to
+    have acted. ``force`` is reserved for an operator's explicit cflow
+    action: it keeps the message whole by submitting an existing draft first,
+    then delivers the requested transition promptly.
+
+    Returning matching names distinguishes a pending delivery from a default
+    or stale slot, where no session is available to receive it at all.
     """
     manager: SessionManager = app["manager"]
     scheduled = []
@@ -1912,22 +1920,21 @@ def _schedule_start_nudges(
             session = manager.get(name)
         except Exception:  # noqa: BLE001 — raced with a removal
             continue
-        task = asyncio.create_task(_deliver_start_nudge(session, message))
+        task = asyncio.create_task(_deliver_cflow_nudge(session, message, force=force))
         tasks.add(task)
         task.add_done_callback(tasks.discard)
         scheduled.append(name)
     return scheduled
 
 
-async def _deliver_start_nudge(session, message: str) -> None:
-    """Deliver a creation-window nudge after the session becomes readable.
+async def _deliver_cflow_nudge(session, message: str, *, force: bool = False) -> None:
+    """Deliver a cflow nudge after the session becomes readable.
 
-    ``Session.deliver`` owns the readiness wait and refuses unsafe input, such
-    as a human draft.  A second attempt after an I/O error could duplicate a
-    partially written message, so a refused nudge remains available through
-    the run's normal ``cflow status`` recovery path.
+    ``Session.deliver`` owns the readiness wait. A second attempt after an
+    I/O error could duplicate a partially written message, so this path is
+    intentionally single-delivery.
     """
-    await session.deliver(message)
+    await session.deliver(message, force=force)
 
 
 def _startable_workflows(cwd: str) -> list:
@@ -2004,8 +2011,8 @@ async def h_cflow_request(request: web.Request) -> web.Response:
         workflow, context=context, by="web", cwd=cwd, scope=scope
     )
     name = (payload.get("request") or {}).get("workflow") or workflow
-    payload["nudge_scheduled_sessions"] = _schedule_start_nudges(
-        request.app, cwd, scope, cflow_engine.nudge_for_request(name)
+    payload["nudge_scheduled_sessions"] = _schedule_cflow_nudges(
+        request.app, cwd, scope, cflow_engine.nudge_for_request(name), force=True
     )
     return web.json_response(payload)
 
@@ -2040,8 +2047,8 @@ async def h_cflow_start(request: web.Request) -> web.Response:
         return json_error(400, "'workflow' required in the JSON body")
     context = str(body.get("context") or "") or None
     payload = cflow_engine.start(workflow, context=context, cwd=cwd, scope=scope)
-    payload["nudge_scheduled_sessions"] = _schedule_start_nudges(
-        request.app, cwd, scope, cflow_engine.NUDGE_STARTED
+    payload["nudge_scheduled_sessions"] = _schedule_cflow_nudges(
+        request.app, cwd, scope, cflow_engine.NUDGE_STARTED, force=True
     )
     return web.json_response(payload)
 
@@ -2087,8 +2094,8 @@ async def h_cflow_skip(request: web.Request) -> web.Response:
         cwd=cwd, scope=scope,
     )
     name = (payload.get("request") or {}).get("name") or source
-    payload["nudged_sessions"] = await _nudge_sessions(
-        request.app["manager"], cwd, scope, cflow_engine.nudge_for_request(name)
+    payload["nudge_scheduled_sessions"] = _schedule_cflow_nudges(
+        request.app, cwd, scope, cflow_engine.nudge_for_request(name), force=True
     )
     return web.json_response(payload)
 
@@ -2101,8 +2108,8 @@ async def h_cflow_archive(request: web.Request) -> web.Response:
         return err
     cwd, scope, _ = resolved
     payload = cflow_engine.archive(by="web", cwd=cwd, scope=scope)
-    payload["nudged_sessions"] = await _nudge_sessions(
-        request.app["manager"], cwd, scope, cflow_engine.NUDGE_ARCHIVED
+    payload["nudge_scheduled_sessions"] = _schedule_cflow_nudges(
+        request.app, cwd, scope, cflow_engine.NUDGE_ARCHIVED, force=True
     )
     return web.json_response(payload)
 
