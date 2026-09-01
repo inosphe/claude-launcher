@@ -18,7 +18,7 @@ import time
 import pytest
 
 from claude_launcher import harnesses, profile, store, transcripts
-from claude_launcher.daemon import briefing, paths
+from claude_launcher.daemon import briefing, paths, prompt_presets
 from claude_launcher.daemon.api import build_app
 from claude_launcher.daemon.harness import SessionDef
 from claude_launcher.daemon.manager import SessionManager
@@ -868,6 +868,44 @@ def test_briefing_faq_imports_the_legacy_global_setting(home):
     assert json.loads(paths.briefing_faq_json().read_text(encoding="utf-8")) == {
         "faq": entries
     }
+
+
+def test_prompt_presets_can_be_managed_and_are_daemon_local(home):
+    async def run():
+        mgr = SessionManager(idle_threshold=0.5, scrollback=200, restore_default=True)
+        client = await _serve(mgr)
+        try:
+            resp = await client.post(
+                "/api/prompt-presets",
+                json={"name": "Review", "text": "Please review this change."},
+                headers=BEARER,
+            )
+            assert resp.status == 201
+            row = (await resp.json())["preset"]
+            assert row["name"] == "Review" and row["enabled"] is True
+
+            resp = await client.get("/api/prompt-presets", headers=BEARER)
+            assert (await resp.json())["presets"] == [row]
+
+            resp = await client.put(
+                f"/api/prompt-presets/{row['id']}",
+                json={**row, "text": "Please review the latest change.", "enabled": False},
+                headers=BEARER,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["preset"]["enabled"] is False
+            assert prompt_presets.entries()[0]["text"] == "Please review the latest change."
+
+            resp = await client.delete(
+                f"/api/prompt-presets/{row['id']}", headers=BEARER,
+            )
+            assert resp.status == 200
+            assert (await resp.json())["presets"] == []
+        finally:
+            await mgr.shutdown_all()
+            await client.close()
+
+    asyncio.run(run())
 
 
 def test_briefing_endpoint_unconfigured_unknown_and_raw(home, tmp_path):

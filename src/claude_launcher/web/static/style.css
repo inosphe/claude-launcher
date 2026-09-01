@@ -1094,6 +1094,14 @@ a.cflow-scope:hover { background: #1d3559; text-decoration: underline; }
   flex: none; display: flex; align-items: center; gap: 8px; min-width: 0;
   padding: 8px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
 }
+#term-preset-buttons {
+  flex: none; display: flex; gap: 6px; overflow-x: auto; min-width: 0;
+  padding: 6px 12px; background: #1b1e24; border-top: 1px solid #2a2e36;
+}
+.term-preset-button {
+  flex: none; max-width: 220px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap;
+}
 #term-input-field {
   flex: 1; min-width: 0; padding: 5px 10px; font-size: 13px; line-height: 1.5;
   color: #d8dbe0; background: #14161a; border: 1px solid #30363d;
@@ -2659,6 +2667,20 @@ a.wf-btn { display: inline-block; text-decoration: none; line-height: 1.5; }
 .faq-text strong { color: #e6edf3; }
 .faq-text p { margin: 5px 0 0; color: #9da5b0; white-space: pre-wrap; }
 .faq-row .wf-btn { flex: none; }
+.prompt-preset-settings { margin: 14px 0; padding: 12px 16px; background: #1b1e24;
+  border: 1px solid #30363d; border-radius: 6px; }
+.prompt-preset-settings h3 { font-size: 12px; text-transform: uppercase; color: #7d8590; margin-bottom: 10px; }
+.prompt-preset-add { display: flex; flex-direction: column; gap: 8px; }
+.prompt-preset-add textarea, .prompt-preset-add input { width: 100%; box-sizing: border-box; }
+.prompt-preset-add .wf-btn { align-self: flex-start; }
+.prompt-preset-text input, .prompt-preset-text textarea { display: block; width: 100%; box-sizing: border-box;
+  margin-bottom: 6px; }
+.prompt-preset-row { display: flex; align-items: flex-start; gap: 10px; padding: 10px 0;
+  border-top: 1px solid #2a2e36; }
+.prompt-preset-text { flex: 1; min-width: 0; }
+.prompt-preset-text strong { color: #e6edf3; }
+.prompt-preset-text p { margin: 5px 0 0; color: #9da5b0; white-space: pre-wrap; }
+.prompt-preset-row .wf-btn { flex: none; }
 .ws-add, .ws-list {
   margin: 14px 0; padding: 12px 16px; background: #1b1e24;
   border: 1px solid #2a2e36; border-radius: 8px; max-width: 760px;
